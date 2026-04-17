@@ -10,7 +10,7 @@
 | **标题** | OpenCode Android Client 技术方案 |
 | **状态** | Accepted (Implemented) |
 | **创建日期** | 2026-02 |
-| **最后更新** | 2026-03-14b |
+| **最后更新** | 2026-04-16 |
 | **PRD 引用** | [PRD.md](PRD.md) |
 
 ---
@@ -757,7 +757,23 @@ message.info.resolvedModel?.let { model ->
 **影响范围**：
 - `ChatMessageContent.kt`：`MessageRow` 函数内新增条件渲染
 
-### 5.9 Chat 自动跟随策略
+### 5.9 Session List 副标题（对齐 iOS）
+
+**背景**：iOS 的 `SessionRowView` 在标题下方显示相对时间（"5 min ago"）和状态标签（Running/Retrying/Idle）。Android 的 `SwipeRevealRow` 只显示标题，用户无法快速判断 session 的活跃程度。
+
+**实现**：
+
+- `SessionList.kt` 新增 `formatRelativeTime(updatedMs)` 使用 `DateUtils.getRelativeTimeSpanString` 做本地化相对时间格式化
+- 新增 `sessionStatusLabel(status)` 和 `sessionStatusColor(status)` 将 `SessionStatus` 映射为显示文本和颜色
+- `SwipeRevealRow` 新增 `updatedTime: Long?` 和 `status: SessionStatus?` 参数，标题下方增加 `Column > Row` 副标题行
+- 时间使用 `bodySmall` + `onSurfaceVariant`，状态标签使用 `bodySmall` + `FontWeight.Medium` + 对应主题色
+
+**数据来源**：`session.time.updated`（毫秒时间戳）和 `sessionStatuses`（SSE 实时推送），均为已有数据，无需额外 API 请求。
+
+**影响范围**：
+- `SessionList.kt`：唯一改动文件
+
+### 5.10 Chat 自动跟随策略
 
 - Chat 列表使用 `reverseLayout = true`，底部为索引 0
 - 当列表当前停留在底部时，新消息、tool call、streaming delta 到来后自动滚动到索引 0，适合 monitor session

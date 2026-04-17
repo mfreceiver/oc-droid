@@ -1,5 +1,10 @@
 # OpenCode Android 客户端工作日志
 
+## 2026-04-16
+
+- Session list 增加副标题：在标题下方显示相对时间（如 "5 min ago"）和 session 状态标签（Running/Retrying/Idle），对齐 iOS 客户端行为。使用 `DateUtils.getRelativeTimeSpanString` 做本地化相对时间格式化。数据复用已有的 `session.time.updated` 和 `sessionStatuses`，无需额外 API 请求。
+- 新增 3 个 `SessionListInstrumentedTest`：验证有 `time.updated` 的 session 显示相对时间副标题，有 busy/idle 状态的 session 显示对应状态标签。
+
 ## 2026-03-30
 
 - 模型预设里的 GLM 选项从 `GLM-5.1` / `glm-5.1` 切换回 `GLM-5-turbo` / `glm-5-turbo`，保持 iOS 与 Android selector 一致。
