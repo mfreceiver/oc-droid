@@ -44,7 +44,7 @@ data class AppState(
     val isLoadingMessages: Boolean = false,
     val agents: List<AgentInfo> = emptyList(),
     val selectedAgentName: String = "build",
-    val selectedModelIndex: Int = 0,
+    val selectedModelIndex: Int = 1,
     val providers: ProvidersResponse? = null,
     val pendingPermissions: List<PermissionRequest> = emptyList(),
     val pendingQuestions: List<QuestionRequest> = emptyList(),
@@ -133,7 +133,7 @@ data class AppState(
     data class SettingsState(
         val error: String? = null,
         val themeMode: ThemeMode = ThemeMode.SYSTEM,
-        val selectedModelIndex: Int = 0,
+        val selectedModelIndex: Int = 1,
         val selectedAgentName: String = "build",
         val availableModels: List<ModelOption> = ModelPresets.list,
         val contextUsage: ContextUsage? = null,

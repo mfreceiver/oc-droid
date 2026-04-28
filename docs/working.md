@@ -1,5 +1,10 @@
 # OpenCode Android 客户端工作日志
 
+## 2026-04-28
+
+- 默认模型切换到 GPT：将运行时默认模型索引从 DeepSeek fallback 改为 GPT 预设，新安装和未保存过模型选择的 session 默认发送 `openai/gpt-5.5`。
+- GPT 预设升级：`ModelPresets.list` 中的 `GPT-5.4` / `gpt-5.4` 更新为 `GPT-5.5` / `gpt-5.5`，并同步更新 AppState 测试。
+
 ## 2026-04-23
 
 - Model 列表更新：删除 Opus 4.6 和 Sonnet 4.6，添加 DeepSeek (`deepseek/deepseek-v4-pro`)。`ModelPresets.list`、`ModelOption.shortName`、对应测试同步更新。对齐 iOS 客户端改动。

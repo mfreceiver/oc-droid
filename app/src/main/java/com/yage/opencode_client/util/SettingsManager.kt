@@ -43,7 +43,7 @@ class SettingsManager @Inject constructor(
         set(value) = encryptedPrefs.edit().putString(KEY_SESSION_ID, value).apply()
 
     var selectedModelIndex: Int
-        get() = encryptedPrefs.getInt(KEY_MODEL_INDEX, 4)
+        get() = encryptedPrefs.getInt(KEY_MODEL_INDEX, 1)
         set(value) = encryptedPrefs.edit().putInt(KEY_MODEL_INDEX, value).apply()
 
     var selectedAgentName: String?

@@ -27,7 +27,7 @@ class AppStateTest {
         assertFalse(state.isLoadingMessages)
         assertTrue(state.agents.isEmpty())
         assertEquals("build", state.selectedAgentName)
-        assertEquals(0, state.selectedModelIndex)
+        assertEquals(1, state.selectedModelIndex)
         assertNull(state.providers)
         assertTrue(state.pendingPermissions.isEmpty())
         assertEquals("", state.inputText)
@@ -162,8 +162,9 @@ class AppStateTest {
         assertEquals("GLM-5-turbo", models[0].displayName)
         assertEquals("zai-coding-plan", models[0].providerId)
         assertEquals("glm-5-turbo", models[0].modelId)
-        assertEquals("GPT-5.4", models[1].displayName)
+        assertEquals("GPT-5.5", models[1].displayName)
         assertEquals("openai", models[1].providerId)
+        assertEquals("gpt-5.5", models[1].modelId)
     }
 
     @Test
