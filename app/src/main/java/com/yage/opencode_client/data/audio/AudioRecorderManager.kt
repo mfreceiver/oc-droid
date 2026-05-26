@@ -1,6 +1,8 @@
 package com.yage.opencode_client.data.audio
 
 import android.content.Context
+import android.media.AudioFormat
+import android.media.AudioRecord
 import android.media.MediaCodec
 import android.media.MediaExtractor
 import android.media.MediaFormat
@@ -8,6 +10,10 @@ import android.media.MediaRecorder
 import android.util.Log
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
 import java.nio.ByteBuffer
@@ -24,10 +30,17 @@ class AudioRecorderManager @Inject constructor(
     @ApplicationContext private val context: Context
 ) {
     private var recorder: MediaRecorder? = null
+    private var audioRecord: AudioRecord? = null
+    private var realtimeCaptureJob: Job? = null
     private var currentFile: File? = null
+    private val realtimeScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
     val isRecording: Boolean
-        get() = recorder != null
+        get() = recorder != null || audioRecord != null
+
+    fun createRealtimeAudioCache(): RealtimeSpeechAudioCache {
+        return RealtimeSpeechAudioCache(context.cacheDir)
+    }
 
     fun start() {
         if (isRecording) {
@@ -81,6 +94,75 @@ class AudioRecorderManager @Inject constructor(
             activeRecorder.release()
             recorder = null
             currentFile = null
+        }
+    }
+
+    fun startRealtimeCapture(
+        cache: RealtimeSpeechAudioCache = RealtimeSpeechAudioCache(context.cacheDir),
+        onChunk: suspend (ByteArray) -> Unit,
+        onError: (Throwable) -> Unit
+    ): RealtimeSpeechAudioCache {
+        if (isRecording) {
+            throw IllegalStateException("Recorder is already running")
+        }
+
+        val minBufferSize = AudioRecord.getMinBufferSize(
+            AudioRecorderConfig.targetPcmSampleRate,
+            AudioFormat.CHANNEL_IN_MONO,
+            AudioRecorderConfig.targetPcmEncoding
+        )
+        if (minBufferSize <= 0) {
+            throw IllegalStateException("AudioRecord min buffer size is invalid: $minBufferSize")
+        }
+
+        val readBufferSize = max(minBufferSize, AudioRecorderConfig.pcmReadBufferSizeBytes)
+        val recorder = AudioRecord(
+            MediaRecorder.AudioSource.MIC,
+            AudioRecorderConfig.targetPcmSampleRate,
+            AudioFormat.CHANNEL_IN_MONO,
+            AudioRecorderConfig.targetPcmEncoding,
+            readBufferSize * 2
+        )
+        if (recorder.state != AudioRecord.STATE_INITIALIZED) {
+            recorder.release()
+            throw IllegalStateException("AudioRecord failed to initialize")
+        }
+
+        audioRecord = recorder
+        recorder.startRecording()
+        realtimeCaptureJob = realtimeScope.launch {
+            val buffer = ByteArray(readBufferSize)
+            try {
+                while (audioRecord === recorder) {
+                    val bytesRead = recorder.read(buffer, 0, buffer.size)
+                    when {
+                        bytesRead > 0 -> onChunk(buffer.copyOf(bytesRead))
+                        bytesRead == 0 -> Unit
+                        else -> throw IllegalStateException("AudioRecord read failed: $bytesRead")
+                    }
+                }
+            } catch (error: Throwable) {
+                if (audioRecord === recorder) {
+                    onError(error)
+                }
+            }
+        }
+        Log.d(TAG, "Realtime PCM capture started: sampleRate=${AudioRecorderConfig.targetPcmSampleRate}, buffer=$readBufferSize")
+        return cache
+    }
+
+    fun stopRealtimeCapture() {
+        val recorder = audioRecord ?: return
+        audioRecord = null
+        realtimeCaptureJob?.cancel()
+        realtimeCaptureJob = null
+        try {
+            recorder.stop()
+        } catch (error: Exception) {
+            Log.w(TAG, "Failed to stop realtime PCM capture: ${error.message}")
+        } finally {
+            recorder.release()
+            Log.d(TAG, "Realtime PCM capture stopped")
         }
     }
 
