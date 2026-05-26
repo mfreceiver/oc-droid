@@ -10,7 +10,7 @@
 | **标题** | OpenCode Android Client 技术方案 |
 | **状态** | Accepted (Implemented) |
 | **创建日期** | 2026-02 |
-| **最后更新** | 2026-04-16 |
+| **最后更新** | 2026-05-25 |
 | **PRD 引用** | [PRD.md](PRD.md) |
 
 ---
@@ -233,10 +233,25 @@ class SSEClient(
 
 ### 3.4 语音转写链路
 
-- 录音端使用 `AudioRecorderManager`：`MediaRecorder` 先录制 M4A，停止后解码为 PCM 24kHz mono
-- 转写端使用 `AIBuildersAudioClient`：先 `POST /v1/audio/realtime/sessions` 创建会话，再通过 WebSocket 发送 PCM chunk 并接收 partial / final transcript
+- 录音端使用 `AudioRecorderManager.startRealtimeCapture()`：`AudioRecord` 直接采集 PCM16 mono 24kHz chunk，点击麦克风后立即开始写入本地 cache，不等待网络 session 创建完成
+- 本地缓存使用 `RealtimeSpeechAudioCache`：每次录音创建一个临时 `.pcm` 文件，`append()` 追加 chunk，`readChunk(offset, maxBytes)` 支持从任意 offset 读取，stop/cancel 后删除
+- 转写端使用 `RealtimeSpeechStreamer`：每个 chunk 先 append cache，再在 session 可用时发送；首次 session ready 后从 cache offset 0 replay，保证建连前录到的音频也进入 WebSocket
+- session 创建由 `AIBuildersAudioClient.startRealtimeSession()` 完成：先 `POST /v1/audio/realtime/sessions`，再连接返回的 `ws_url`，等待 `session_ready` 后返回可发送 binary PCM 的 session wrapper。日志只能记录 redacted WebSocket URL，不能输出 ticket query string
+- 恢复策略与 iOS 对齐：发送 chunk、heartbeat 或 commit 失败时，streamer 取消旧 session，创建新 session，从 cache offset 0 replay 全部 PCM，然后继续 live send。每次断线都从头 replay，优先保证语音不丢失
+- stop 流程：停止 `AudioRecord` capture，停止 heartbeat，等待正在进行的 recovery 完成，发送 `{ "type": "commit" }`，接收 `transcript_delta` / `transcript_completed`，发送 `{ "type": "stop" }`，等待 `session_stopped` 后清理 cache
 - 输入框合并策略使用 `mergedSpeechInput(prefix, transcript)`：保留原输入，在转写结果前后只做必要空格拼接
 - 连接测试使用 AI Builder API，成功状态按 `baseURL + token` 的签名缓存，避免每次进入页面都强制重测
+
+关键常量：
+
+| 常量 | 值 | 说明 |
+|------|----|------|
+| `AudioRecorderConfig.targetPcmSampleRate` | `24_000` | AI Builder realtime 输入采样率 |
+| `AudioRecorderConfig.targetPcmChannelCount` | `1` | mono |
+| `AudioRecorderConfig.targetPcmBytesPerSample` | `2` | PCM16 |
+| `AudioTranscriptionConfig.sendChunkSizeBytes` | `240_000` | live send chunk 上限 |
+| `AudioTranscriptionConfig.realtimeReplayChunkSizeBytes` | `240_000` | recovery replay chunk 上限 |
+| `AudioTranscriptionConfig.realtimeHeartbeatIntervalSeconds` | `12` | heartbeat 间隔 |
 
 ---
 
