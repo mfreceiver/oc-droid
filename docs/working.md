@@ -1,5 +1,14 @@
 # OpenCode Android 客户端工作日志
 
+## 2026-05-25
+
+- 对齐 iOS 最终 realtime speech 方案：Android 语音输入从停止后 M4A 解码上传，改为点击麦克风后立即使用 `AudioRecord` 采集 PCM16 mono 24kHz chunk。
+- 新增 `RealtimeSpeechAudioCache`，每个 chunk 先写入临时 `.pcm` cache；新增 `RealtimeSpeechStreamer`，负责首次 session attach replay、heartbeat、send/commit 失败恢复，以及 stop 前等待 recovery 完成。
+- `AIBuildersAudioClient` 新增 live realtime session path：创建 session 后连接 WebSocket、等待 `session_ready`、发送 binary PCM、commit/stop 收 transcript；WebSocket ticket query string 在日志中 redacted。
+- `MainViewModel` 的录音流程改为立即开始本地 PCM capture，后台异步创建 AI Builder session 并从 cache offset 0 replay；停止录音时停止 capture 和 heartbeat，再 commit/stop 更新输入框。
+- 测试补充 PCM cache append/read/remove、realtime 常量、WebSocket URL redaction。
+- 验证：先修复本轮开始前已有的 `DataUriImageTransformer.kt` 注解拼写错误（`@Composableg` → `@Composable`），随后 `./gradlew testDebugUnitTest` 与 `./gradlew koverHtmlReport` 均通过。覆盖率报告位于 `app/build/reports/kover/html/index.html`。
+
 ## 2026-05-03
 
 - 模型预设里的 GLM 选项从 `GLM-5-turbo` / `glm-5-turbo` 更新为 `GLM-5.1` / `glm-5.1`，对齐 iOS 客户端。
