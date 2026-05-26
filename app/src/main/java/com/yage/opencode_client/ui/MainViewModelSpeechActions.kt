@@ -3,6 +3,7 @@ package com.yage.opencode_client.ui
 import android.util.Log
 import com.yage.opencode_client.data.audio.AIBuildersAudioClient
 import com.yage.opencode_client.data.audio.AudioRecorderManager
+import com.yage.opencode_client.data.audio.RealtimeSpeechStreamer
 import com.yage.opencode_client.util.SettingsManager
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -86,6 +87,47 @@ internal fun launchSpeechTranscription(
                     speechError = errorMessageOrFallback(error, "Transcription failed")
                 )
             }
+        }
+    }
+}
+
+internal fun launchRealtimeSpeechStop(
+    scope: CoroutineScope,
+    state: MutableStateFlow<AppState>,
+    streamer: RealtimeSpeechStreamer,
+    existingInput: String,
+    tag: String,
+    onFinished: () -> Unit
+) {
+    scope.launch {
+        try {
+            val transcript = streamer.commitAndStop { partial ->
+                state.update { it.copy(inputText = mergedSpeechInput(existingInput, partial)) }
+            }
+            val cleaned = transcript.trim()
+            Log.d(tag, "Realtime transcription success: chars=${cleaned.length}")
+            state.update {
+                it.copy(
+                    inputText = mergedSpeechInput(existingInput, cleaned),
+                    isTranscribing = false
+                )
+            }
+            streamer.cleanupCache()
+        } catch (error: Exception) {
+            Log.e(tag, "Realtime speech processing failed", error)
+            state.update {
+                it.copy(
+                    inputText = speechFailureInput(
+                        existingInput = existingInput,
+                        currentInput = it.inputText
+                    ),
+                    isTranscribing = false,
+                    speechError = errorMessageOrFallback(error, "Transcription failed")
+                )
+            }
+            streamer.cleanupCache()
+        } finally {
+            onFinished()
         }
     }
 }

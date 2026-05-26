@@ -483,9 +483,9 @@ class MainViewModelTest {
     }
 
     @Test
-    fun `toggleRecording handles missing file when stopping recording`() = runTest {
+    fun `toggleRecording handles missing realtime session when stopping recording`() = runTest {
         every { settingsManager.aiBuilderToken } returns "token"
-        every { audioRecorderManager.stop() } returns null
+        every { audioRecorderManager.stopRealtimeCapture() } just runs
         val viewModel = createViewModel()
         updateState(viewModel) { it.copy(isRecording = true, aiBuilderConnectionOK = true, inputText = "draft") }
 
@@ -493,7 +493,7 @@ class MainViewModelTest {
 
         assertFalse(viewModel.state.value.isRecording)
         assertFalse(viewModel.state.value.isTranscribing)
-        assertEquals("Recording failed: no file", viewModel.state.value.speechError)
+        assertEquals("Recording failed: realtime session missing", viewModel.state.value.speechError)
         assertEquals("draft", viewModel.state.value.inputText)
     }
 

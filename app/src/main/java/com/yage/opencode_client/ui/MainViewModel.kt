@@ -3,15 +3,20 @@ package com.yage.opencode_client.ui
 import android.util.Log
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.yage.opencode_client.data.audio.AIBuildersAudioClient
 import com.yage.opencode_client.data.audio.AudioRecorderManager
+import com.yage.opencode_client.data.audio.AudioTranscriptionConfig
+import com.yage.opencode_client.data.audio.RealtimeSpeechStreamer
 import com.yage.opencode_client.data.model.*
 import com.yage.opencode_client.data.repository.OpenCodeRepository
 import com.yage.opencode_client.util.SettingsManager
 import com.yage.opencode_client.util.ThemeMode
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.runBlocking
 import javax.inject.Inject
 
 data class ConnectionFormSettings(
@@ -259,6 +264,9 @@ class MainViewModel @Inject constructor(
 
     private var sseJob: Job? = null
     private var pollJob: Job? = null
+    private var speechHeartbeatJob: Job? = null
+    private var realtimeSpeechStreamer: RealtimeSpeechStreamer? = null
+    private var speechExistingInput: String = ""
     private var lastHealthCheckTime = 0L
 
     init {
@@ -317,22 +325,25 @@ class MainViewModel @Inject constructor(
             return
         }
         if (currentState.isRecording) {
-            val file = audioRecorderManager.stop()
+            val streamer = realtimeSpeechStreamer
+            audioRecorderManager.stopRealtimeCapture()
             _state.update { it.copy(isRecording = false, isTranscribing = true) }
-            if (file == null) {
-                Log.e(TAG, "Recording stop returned null file")
-                _state.update { it.copy(isTranscribing = false, speechError = "Recording failed: no file") }
+            if (streamer == null) {
+                Log.e(TAG, "Realtime speech streamer is missing on stop")
+                _state.update { it.copy(isTranscribing = false, speechError = "Recording failed: realtime session missing") }
                 return
             }
-            launchSpeechTranscription(
+            launchRealtimeSpeechStop(
                 scope = viewModelScope,
                 state = _state,
-                audioRecorderManager = audioRecorderManager,
-                config = speechConfig,
-                recordingFile = file,
-                existingInput = currentState.inputText,
+                streamer = streamer,
+                existingInput = speechExistingInput,
                 tag = TAG
-            )
+            ) {
+                realtimeSpeechStreamer = null
+                speechHeartbeatJob?.cancel()
+                speechHeartbeatJob = null
+            }
         } else {
             if (speechConfig.token.isEmpty()) {
                 Log.w(TAG, "Speech start blocked: missing AI Builder token")
@@ -349,11 +360,52 @@ class MainViewModel @Inject constructor(
                 return
             }
             try {
-                audioRecorderManager.start()
-                Log.d(TAG, "Recording started")
+                val cache = audioRecorderManager.createRealtimeAudioCache()
+                val streamer = RealtimeSpeechStreamer(cache = cache) {
+                    AIBuildersAudioClient.startRealtimeSession(
+                        baseURL = speechConfig.baseURL,
+                        token = speechConfig.token,
+                        language = null,
+                        prompt = speechConfig.prompt.ifEmpty { null },
+                        terms = speechConfig.terminology.ifEmpty { null }
+                    )
+                }
+                realtimeSpeechStreamer = streamer
+                speechExistingInput = currentState.inputText
+                audioRecorderManager.startRealtimeCapture(
+                    cache = cache,
+                    onChunk = { chunk -> streamer.appendAudioChunk(chunk) },
+                    onError = { error ->
+                        Log.e(TAG, "Realtime PCM capture failed", error)
+                        viewModelScope.launch {
+                            streamer.cancel()
+                            realtimeSpeechStreamer = null
+                            speechHeartbeatJob?.cancel()
+                            speechHeartbeatJob = null
+                            _state.update {
+                                it.copy(
+                                    isRecording = false,
+                                    isTranscribing = false,
+                                    speechError = errorMessageOrFallback(error, "Recording failed")
+                                )
+                            }
+                        }
+                    }
+                )
+                viewModelScope.launch { streamer.connectInitialSession() }
+                speechHeartbeatJob?.cancel()
+                speechHeartbeatJob = viewModelScope.launch {
+                    while (true) {
+                        delay(AudioTranscriptionConfig.realtimeHeartbeatIntervalSeconds * 1000L)
+                        streamer.heartbeat()
+                    }
+                }
+                Log.d(TAG, "Realtime recording started")
                 _state.update { it.copy(isRecording = true) }
             } catch (e: Exception) {
                 Log.e(TAG, "Failed to start recording", e)
+                realtimeSpeechStreamer?.cleanupCache()
+                realtimeSpeechStreamer = null
                 _state.update { it.copy(speechError = "Failed to start recording: ${errorMessageOrFallback(e, "unknown error")}") }
             }
         }
@@ -629,9 +681,12 @@ class MainViewModel @Inject constructor(
     }
 
     override fun onCleared() {
-        super.onCleared()
         sseJob?.cancel()
         pollJob?.cancel()
+        speechHeartbeatJob?.cancel()
+        audioRecorderManager.stopRealtimeCapture()
+        runBlocking { realtimeSpeechStreamer?.cancel() }
+        super.onCleared()
     }
 
     private companion object {
