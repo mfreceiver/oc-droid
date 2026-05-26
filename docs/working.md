@@ -8,6 +8,7 @@
 - `MainViewModel` 的录音流程改为立即开始本地 PCM capture，后台异步创建 AI Builder session 并从 cache offset 0 replay；停止录音时停止 capture 和 heartbeat，再 commit/stop 更新输入框。
 - 测试补充 PCM cache append/read/remove、realtime 常量、WebSocket URL redaction。
 - 验证：先修复本轮开始前已有的 `DataUriImageTransformer.kt` 注解拼写错误（`@Composableg` → `@Composable`），随后 `./gradlew testDebugUnitTest` 与 `./gradlew koverHtmlReport` 均通过。覆盖率报告位于 `app/build/reports/kover/html/index.html`。
+- Android 真机验证通过后合并 PR #36，并准备 GitHub Release `v0.1.20260526`：`versionCode` 升至 8，`versionName` 升至 `0.1.20260526`。
 
 ## 2026-05-03
 
