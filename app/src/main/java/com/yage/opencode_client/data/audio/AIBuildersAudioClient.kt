@@ -3,6 +3,9 @@ package com.yage.opencode_client.data.audio
 import android.util.Log
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import org.json.JSONObject
@@ -87,7 +90,7 @@ object AIBuildersAudioClient {
             Log.d(TAG, "Realtime session created: ${session.sessionId}")
 
             val websocketURL = realtimeWebSocketURL(normalizedBase, session.wsUrl)
-            Log.d(TAG, "Realtime websocket URL: $websocketURL")
+            Log.d(TAG, "Realtime websocket URL: ${redactedRealtimeWebSocketLogURL(websocketURL)}")
 
             streamPCMOverWebSocket(
                 client = client,
@@ -159,7 +162,54 @@ object AIBuildersAudioClient {
             .connectTimeout(AudioTranscriptionConfig.connectTimeoutSeconds, TimeUnit.SECONDS)
             .readTimeout(AudioTranscriptionConfig.readTimeoutSeconds, TimeUnit.SECONDS)
             .writeTimeout(AudioTranscriptionConfig.writeTimeoutSeconds, TimeUnit.SECONDS)
+            .pingInterval(AudioTranscriptionConfig.realtimeHeartbeatIntervalSeconds, TimeUnit.SECONDS)
             .build()
+    }
+
+    internal suspend fun startRealtimeSession(
+        baseURL: String,
+        token: String,
+        language: String? = null,
+        prompt: String? = null,
+        terms: String? = null
+    ): RealtimeSpeechSession = withContext(Dispatchers.IO) {
+        val client = buildHttpClient()
+        val normalizedBase = normalizedBaseURL(baseURL)
+        val cleanedToken = sanitizeBearerToken(token)
+        if (cleanedToken.isEmpty()) {
+            throw IOException("AI Builder token is empty")
+        }
+
+        val session = createRealtimeSession(
+            client = client,
+            baseURL = normalizedBase,
+            token = cleanedToken,
+            language = language,
+            prompt = prompt,
+            terms = terms
+        )
+        val websocketURL = realtimeWebSocketURL(normalizedBase, session.wsUrl)
+        Log.d(TAG, "Realtime live websocket connecting: ${redactedRealtimeWebSocketLogURL(websocketURL)}")
+        openRealtimeWebSocketSession(
+            client = client,
+            websocketURL = websocketURL,
+            sessionId = session.sessionId
+        )
+    }
+
+    fun redactedRealtimeWebSocketLogURL(url: String): String {
+        return runCatching {
+            val uri = URI(url)
+            URI(
+                uri.scheme,
+                uri.userInfo,
+                uri.host,
+                uri.port,
+                uri.path,
+                if (uri.query == null) null else "ticket=redacted",
+                uri.fragment
+            ).toString()
+        }.getOrElse { "<invalid-websocket-url>" }
     }
 
     private fun createRealtimeSession(
@@ -351,5 +401,146 @@ object AIBuildersAudioClient {
             webSocket.cancel()
             throw error
         }
+    }
+
+    private suspend fun openRealtimeWebSocketSession(
+        client: OkHttpClient,
+        websocketURL: String,
+        sessionId: String
+    ): RealtimeSpeechSession {
+        val readySignal = CompletableDeferred<Unit>()
+        val events = Channel<RealtimeSocketEvent>(Channel.UNLIMITED)
+        val closed = AtomicBoolean(false)
+
+        val listener = object : WebSocketListener() {
+            override fun onMessage(webSocket: WebSocket, text: String) {
+                try {
+                    val event = RealtimeSocketEvent(JSONObject(text))
+                    if (event.type == "session_ready") {
+                        if (!readySignal.isCompleted) readySignal.complete(Unit)
+                    } else {
+                        events.trySend(event)
+                    }
+                } catch (error: Exception) {
+                    if (!readySignal.isCompleted) readySignal.completeExceptionally(error)
+                    events.close(error)
+                }
+            }
+
+            override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
+                if (!readySignal.isCompleted) readySignal.completeExceptionally(t)
+                events.close(t)
+                closed.set(true)
+            }
+
+            override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
+                closed.set(true)
+                events.close()
+            }
+        }
+
+        val request = Request.Builder().url(websocketURL).build()
+        val webSocket = client.newWebSocket(request, listener)
+        try {
+            readySignal.await()
+            Log.d(TAG, "Realtime live session ready: $sessionId")
+            return AIBuildersRealtimeSession(
+                sessionId = sessionId,
+                webSocket = webSocket,
+                events = events,
+                closed = closed
+            )
+        } catch (error: Exception) {
+            webSocket.cancel()
+            throw error
+        }
+    }
+}
+
+private data class RealtimeSocketEvent(
+    val type: String,
+    val text: String?,
+    val code: String?,
+    val message: String?
+) {
+    constructor(json: JSONObject) : this(
+        type = json.optString("type"),
+        text = json.optString("text").ifEmpty { null },
+        code = json.optString("code").ifEmpty { null },
+        message = json.optString("message").ifEmpty { null }
+    )
+}
+
+private class AIBuildersRealtimeSession(
+    override val sessionId: String,
+    private val webSocket: WebSocket,
+    private val events: Channel<RealtimeSocketEvent>,
+    private val closed: AtomicBoolean
+) : RealtimeSpeechSession {
+    private val sendMutex = Mutex()
+    private val committed = AtomicBoolean(false)
+
+    override suspend fun sendAudioChunk(chunk: ByteArray) {
+        if (chunk.isEmpty() || committed.get() || closed.get()) return
+        sendMutex.withLock {
+            if (!webSocket.send(chunk.toByteString())) {
+                throw IOException("Failed to send audio chunk")
+            }
+        }
+    }
+
+    override suspend fun heartbeat() {
+        if (closed.get()) {
+            throw IOException("Realtime speech connection is closed")
+        }
+    }
+
+    override suspend fun commitAndStop(onPartialTranscript: ((String) -> Unit)?): String {
+        committed.set(true)
+        sendMutex.withLock {
+            if (!webSocket.send(AudioTranscriptionConfig.realtimeCommitMessage)) {
+                throw IOException("Failed to send commit event")
+            }
+        }
+
+        var finalTranscript = ""
+        val partialAccumulator = StringBuilder()
+        for (event in events) {
+            when (event.type) {
+                "transcript_delta" -> {
+                    val delta = event.text.orEmpty()
+                    if (delta.isNotEmpty()) {
+                        partialAccumulator.append(delta)
+                        onPartialTranscript?.invoke(partialAccumulator.toString())
+                    }
+                }
+
+                "transcript_completed" -> {
+                    finalTranscript = event.text.orEmpty().trim()
+                    sendMutex.withLock {
+                        if (!webSocket.send(AudioTranscriptionConfig.realtimeStopMessage)) {
+                            throw IOException("Failed to send stop event")
+                        }
+                    }
+                }
+
+                "session_stopped" -> {
+                    closed.set(true)
+                    webSocket.close(1000, "done")
+                    return finalTranscript.ifEmpty { partialAccumulator.toString().trim() }
+                }
+
+                "error" -> {
+                    throw IOException(event.message ?: event.code ?: "Unknown websocket error")
+                }
+            }
+        }
+        throw IOException("Realtime speech session closed before completion")
+    }
+
+    override fun cancel() {
+        closed.set(true)
+        events.close()
+        webSocket.cancel()
     }
 }

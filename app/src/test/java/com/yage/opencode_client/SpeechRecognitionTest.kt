@@ -4,13 +4,19 @@ import com.yage.opencode_client.data.audio.AIBuildersAudioClient
 import com.yage.opencode_client.data.audio.AudioRecorderConfig
 import com.yage.opencode_client.data.audio.AudioResampler
 import com.yage.opencode_client.data.audio.AudioTranscriptionConfig
+import com.yage.opencode_client.data.audio.RealtimeSpeechAudioCache
 import com.yage.opencode_client.ui.AppState
 import com.yage.opencode_client.ui.mergedSpeechInput
 import com.yage.opencode_client.ui.speechFailureInput
 import org.junit.Assert.*
+import org.junit.Rule
 import org.junit.Test
+import org.junit.rules.TemporaryFolder
 
 class SpeechRecognitionTest {
+
+    @get:Rule
+    val temporaryFolder = TemporaryFolder()
 
     // ─── AIBuildersAudioClient.normalizedBaseURL ─────────────────────
 
@@ -54,11 +60,55 @@ class SpeechRecognitionTest {
     @Test
     fun `audio transcription constants stay aligned with recorder pipeline`() {
         assertEquals(24_000, AudioRecorderConfig.targetPcmSampleRate)
+        assertEquals(1, AudioRecorderConfig.targetPcmChannelCount)
+        assertEquals(2, AudioRecorderConfig.targetPcmBytesPerSample)
+        assertEquals(2, AudioRecorderConfig.targetPcmEncoding)
         assertEquals(44_100, AudioRecorderConfig.outputSampleRate)
         assertEquals(1, AudioRecorderConfig.outputChannelCount)
         assertEquals(64_000, AudioRecorderConfig.outputBitRate)
         assertEquals(240_000, AudioTranscriptionConfig.sendChunkSizeBytes)
+        assertEquals(240_000, AudioTranscriptionConfig.realtimeReplayChunkSizeBytes)
+        assertEquals(12L, AudioTranscriptionConfig.realtimeHeartbeatIntervalSeconds)
         assertEquals(1_200, AudioTranscriptionConfig.silenceDurationMs)
+        assertEquals("{\"type\":\"commit\"}", AudioTranscriptionConfig.realtimeCommitMessage)
+        assertEquals("{\"type\":\"stop\"}", AudioTranscriptionConfig.realtimeStopMessage)
+    }
+
+    @Test
+    fun `realtime audio cache appends and reads by offset`() {
+        val cache = RealtimeSpeechAudioCache(temporaryFolder.newFolder())
+
+        cache.append(byteArrayOf(1, 2, 3))
+        cache.append(byteArrayOf(4, 5))
+
+        assertEquals(5, cache.byteCount)
+        assertArrayEquals(byteArrayOf(1, 2), cache.readChunk(offset = 0, maxBytes = 2))
+        assertArrayEquals(byteArrayOf(3, 4, 5), cache.readChunk(offset = 2, maxBytes = 10))
+        assertArrayEquals(ByteArray(0), cache.readChunk(offset = 5, maxBytes = 10))
+    }
+
+    @Test
+    fun `realtime audio cache ignores empty appends and removes file`() {
+        val cache = RealtimeSpeechAudioCache(temporaryFolder.newFolder())
+        val file = cache.file
+
+        cache.append(ByteArray(0))
+        assertEquals(0, cache.byteCount)
+        assertTrue(file.exists())
+
+        cache.append(byteArrayOf(9, 8, 7))
+        cache.remove()
+
+        assertEquals(0, cache.byteCount)
+        assertFalse(file.exists())
+    }
+
+    @Test
+    fun `redactedRealtimeWebSocketLogURL removes ticket query`() {
+        val result = AIBuildersAudioClient.redactedRealtimeWebSocketLogURL(
+            "wss://api.example.com/v1/audio/realtime/ws/session?ticket=secret&other=value"
+        )
+        assertEquals("wss://api.example.com/v1/audio/realtime/ws/session?ticket=redacted", result)
     }
 
     // ─── AIBuildersAudioClient.buildAPIURL ────────────────────────────
