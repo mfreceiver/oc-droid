@@ -23,6 +23,7 @@ import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.Mic
+import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
@@ -55,13 +56,17 @@ internal fun ChatInputBar(
     isBusy: Boolean,
     isRecording: Boolean,
     isTranscribing: Boolean,
+    hasPreservedSpeechAudio: Boolean,
+    isRetryingSpeech: Boolean,
     isSpeechConfigured: Boolean,
     onTextChange: (String) -> Unit,
     onSend: () -> Unit,
     onAbort: () -> Unit,
+    onAbortSpeech: () -> Unit,
+    onRetrySpeech: () -> Unit,
     onToggleRecording: () -> Unit
 ) {
-    val canSend = text.isNotBlank() && !isTranscribing
+    val canSend = text.isNotBlank() && !isTranscribing && !isRecording && !isRetryingSpeech
 
     // Matches iOS exactly: one horizontal row, bottom-aligned, sitting on a
     // single rounded composer background. Mic on the far left, the text field in
@@ -81,26 +86,16 @@ internal fun ChatInputBar(
                 .padding(horizontal = 8.dp, vertical = 6.dp),
             verticalAlignment = Alignment.Bottom
         ) {
-            // Mic — far left, borderless, bottom-aligned.
-            IconButton(
-                onClick = onToggleRecording,
-                enabled = !isTranscribing,
-                modifier = Modifier.size(40.dp)
-            ) {
-                if (isTranscribing) {
-                    CircularProgressIndicator(modifier = Modifier.size(20.dp), strokeWidth = 2.dp)
-                } else {
-                    Icon(
-                        Icons.Default.Mic,
-                        contentDescription = "Speech",
-                        tint = when {
-                            isRecording -> StopRed
-                            isSpeechConfigured -> MaterialTheme.colorScheme.onSurfaceVariant
-                            else -> MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.45f)
-                        }
-                    )
-                }
-            }
+            ChatSpeechActions(
+                isRecording = isRecording,
+                isTranscribing = isTranscribing,
+                isRetryingSpeech = isRetryingSpeech,
+                hasPreservedSpeechAudio = hasPreservedSpeechAudio,
+                isSpeechConfigured = isSpeechConfigured,
+                onToggleRecording = onToggleRecording,
+                onAbortSpeech = onAbortSpeech,
+                onRetrySpeech = onRetrySpeech,
+            )
 
             // Text field — the middle, ~3 lines tall at rest, growing to ~6.
             // TopStart so text begins at the top of the multi-line box.
@@ -131,7 +126,7 @@ internal fun ChatInputBar(
                 )
             }
 
-            // Send/stop — far right, bottom-aligned. Send on top, stop below.
+            // Send/stop — far right, bottom-aligned. Transient stop appears above send.
             ChatInputActions(
                 isBusy = isBusy,
                 canSend = canSend,
@@ -143,31 +138,77 @@ internal fun ChatInputBar(
 }
 
 @Composable
+private fun ChatSpeechActions(
+    isRecording: Boolean,
+    isTranscribing: Boolean,
+    isRetryingSpeech: Boolean,
+    hasPreservedSpeechAudio: Boolean,
+    isSpeechConfigured: Boolean,
+    onToggleRecording: () -> Unit,
+    onAbortSpeech: () -> Unit,
+    onRetrySpeech: () -> Unit,
+) {
+    Column(
+        verticalArrangement = Arrangement.spacedBy(8.dp),
+        horizontalAlignment = Alignment.CenterHorizontally
+    ) {
+        when {
+            isTranscribing -> ChatPrimaryActionButton(
+                onClick = onAbortSpeech,
+                enabled = true,
+                containerColor = StopRed,
+                contentColor = Color.White,
+                dimWhenDisabled = false,
+                icon = Icons.Default.Stop,
+                contentDescription = "Stop speech recognition"
+            )
+            hasPreservedSpeechAudio -> ChatPrimaryActionButton(
+                onClick = onRetrySpeech,
+                enabled = !isRetryingSpeech,
+                containerColor = MaterialTheme.colorScheme.primary,
+                contentColor = Color.White,
+                dimWhenDisabled = true,
+                icon = Icons.Default.Refresh,
+                contentDescription = "Retry speech recognition"
+            )
+        }
+
+        IconButton(
+            onClick = onToggleRecording,
+            enabled = !isTranscribing && !isRetryingSpeech,
+            modifier = Modifier.size(40.dp)
+        ) {
+            if (isTranscribing || isRetryingSpeech) {
+                CircularProgressIndicator(modifier = Modifier.size(20.dp), strokeWidth = 2.dp)
+            } else {
+                Icon(
+                    Icons.Default.Mic,
+                    contentDescription = "Speech",
+                    tint = when {
+                        isRecording -> StopRed
+                        isSpeechConfigured -> MaterialTheme.colorScheme.onSurfaceVariant
+                        else -> MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.45f)
+                    }
+                )
+            }
+        }
+    }
+}
+
+@Composable
 private fun ChatInputActions(
     isBusy: Boolean,
     canSend: Boolean,
     onAbort: () -> Unit,
     onSend: () -> Unit
 ) {
-    // Matches iOS exactly: Send is ALWAYS present on top — you can fire a new
-    // message WHILE the assistant is working, no abort-first required. Stop is an
-    // ADDITIONAL control that appears only while busy and stacks BELOW send (a
-    // vertical column, never side-by-side). Send blue, stop red.
+    // Matches iOS: send is ALWAYS present and keeps the bottom slot. Stop is a
+    // transient control that appears above it, so the send target never moves.
     Column(
         verticalArrangement = Arrangement.spacedBy(8.dp),
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
-        // SEND: always present, solid electric-blue rounded-square, on top
-        ChatPrimaryActionButton(
-            onClick = onSend,
-            enabled = canSend,
-            containerColor = MaterialTheme.colorScheme.primary,
-            contentColor = Color.White,
-            dimWhenDisabled = true,
-            icon = Icons.AutoMirrored.Filled.Send,
-            contentDescription = "Send"
-        )
-        // STOP: only when busy, solid red rounded-square stacked below send
+        // STOP: only when busy, solid red rounded-square stacked above send.
         if (isBusy) {
             ChatPrimaryActionButton(
                 onClick = onAbort,
@@ -179,6 +220,17 @@ private fun ChatInputActions(
                 contentDescription = "Stop"
             )
         }
+
+        // SEND: always present, solid electric-blue rounded-square, bottom slot.
+        ChatPrimaryActionButton(
+            onClick = onSend,
+            enabled = canSend,
+            containerColor = MaterialTheme.colorScheme.primary,
+            contentColor = Color.White,
+            dimWhenDisabled = true,
+            icon = Icons.AutoMirrored.Filled.Send,
+            contentDescription = "Send"
+        )
     }
 }
 

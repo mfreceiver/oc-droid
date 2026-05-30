@@ -239,6 +239,7 @@ class SSEClient(
 - session 创建由 `AIBuildersAudioClient.startRealtimeSession()` 完成：先 `POST /v1/audio/realtime/sessions`，再连接返回的 `ws_url`，等待 `session_ready` 后返回可发送 binary PCM 的 session wrapper。日志只能记录 redacted WebSocket URL，不能输出 ticket query string
 - 恢复策略与 iOS 对齐：发送 chunk、heartbeat 或 commit 失败时，streamer 取消旧 session，创建新 session，从 cache offset 0 replay 全部 PCM，然后继续 live send。每次断线都从头 replay，优先保证语音不丢失
 - stop 流程：停止 `AudioRecord` capture，停止 heartbeat，等待正在进行的 recovery 完成，发送 `{ "type": "commit" }`，接收 `transcript_delta` / `transcript_completed`，发送 `{ "type": "stop" }`，等待 `session_stopped` 后清理 cache
+- abort/retry 流程：录音或转写中，左侧辅助 stop 调用 VoiceFlowKit `abortPreservingAudio()`，立即释放 `isRecording/isTranscribing` UI 门控并保留 Kit 内部 PCM cache；按钮随后变为 retry，调用 `VoiceFlowClient.transcribe(preservedAudio)` 重新识别上一段 PCM，成功后清理 preserved audio
 - 输入框合并策略使用 `mergedSpeechInput(prefix, transcript)`：保留原输入，在转写结果前后只做必要空格拼接
 - 连接测试使用 AI Builder API，成功状态按 `baseURL + token` 的签名缓存，避免每次进入页面都强制重测
 
@@ -841,7 +842,7 @@ class CredentialManager(context: Context) {
 ### 6.2 语音权限与输入行为
 
 - `RECORD_AUDIO` 采用运行时权限请求，未授权时在 Chat 页直接提示
-- 录音中允许继续发送当前已输入文本，避免语音输入阻塞文字输入流
+- 录音中允许继续发送当前已输入文本，避免语音输入阻塞文字输入流；WebSocket 卡住时可先 abort 释放发送门控，再按需 retry 上一段 preserved audio
 - 转写中保留 loading 态，不允许重复点麦克风，避免并发转写状态冲突
 
 ### 6.3 SSH 密钥管理（可选）

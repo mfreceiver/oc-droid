@@ -2,6 +2,7 @@
 
 ## 2026-05-30
 
+- VoiceFlowKit dependency 更新到 merged revision `cc49c8fa272846852970f8df938766af6e7576ea`，使用 preserved audio retry facade。Chat input 左侧新增语音辅助按钮：录音/转写中显示 stop，调用 `abortPreservingAudio()` 立即释放 UI；保留音频后显示 retry，调用 `transcribe(preservedAudio)` 重识别上一段 PCM。`cancel()` 语义保持不变，只有显式 abort 路径保留音频。
 - 工具卡渲染重做，同步 iOS 最新工具卡/对话/文件夹/todo 设计。全部落在 `ui/chat/ChatMessageContent.kt`，分类逻辑已先期抽到 `ui/chat/ToolCardClassifier.kt`（纯逻辑、可单测，对应 iOS `ToolCardClassifier.swift`）。
 - 说话区分：assistant 回复顶部加 "OpenCode" 文字标题（`primary` 电蓝 + SemiBold，`testTag("assistant.header")`）；用户蓝左竖条、assistant 末尾模型小字保持不动。
 - 工具卡两形态：`MessageRow` 攒连续 tool/patch run 后用 `ToolCardClassifier.split(run)` 拆成 fileParts + otherParts。fileParts 渲染成新 `FileCard`（doc 图标 + monospace basename + chevron），用 `chunked(2)+Row` 手动两列网格（Android 不能在 LazyColumn 嵌 LazyVGrid）；otherParts 合并成 `ToolCallsRow`（"N tool calls" 可展开行，展开复用 `ToolCard` 主体）。

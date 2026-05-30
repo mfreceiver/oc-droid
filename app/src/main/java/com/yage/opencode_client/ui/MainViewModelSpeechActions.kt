@@ -43,6 +43,7 @@ internal fun launchRealtimeSpeechStop(
     session: VoiceFlowSession,
     existingInput: String,
     tag: String,
+    shouldApply: () -> Boolean = { true },
     onFinished: () -> Unit,
 ) {
     scope.launch {
@@ -51,6 +52,7 @@ internal fun launchRealtimeSpeechStop(
                 state.update { it.copy(inputText = mergedSpeechInput(existingInput, partial)) }
             }
             val cleaned = transcript.trim()
+            if (!shouldApply()) return@launch
             Log.d(tag, "Realtime transcription success: chars=${cleaned.length}")
             state.update {
                 it.copy(
@@ -59,6 +61,7 @@ internal fun launchRealtimeSpeechStop(
                 )
             }
         } catch (error: Exception) {
+            if (!shouldApply()) return@launch
             Log.e(tag, "Realtime speech processing failed", error)
             state.update {
                 it.copy(
@@ -71,7 +74,7 @@ internal fun launchRealtimeSpeechStop(
                 )
             }
         } finally {
-            onFinished()
+            if (shouldApply()) onFinished()
         }
     }
 }
