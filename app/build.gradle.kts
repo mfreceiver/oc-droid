@@ -78,7 +78,7 @@ dependencies {
     
     // VoiceFlowKit: realtime speech transcription pipeline, consumed remotely from
     // grapeot/voiceflow-android via JitPack (com.github.<user>:<repo>:<tag>).
-    implementation("com.github.grapeot:voiceflow-android:0.1.0")
+    implementation("com.github.grapeot:voiceflow-android:cc49c8fa272846852970f8df938766af6e7576ea")
 
     implementation(libs.okhttp)
     implementation(libs.okhttp.logging)

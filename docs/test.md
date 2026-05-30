@@ -2,6 +2,12 @@
 
 ## 2026-05-25 realtime speech recovery
 
+### 2026-05-30 speech abort/retry
+
+- VoiceFlowKit dependency is pinned to merged revision `cc49c8fa272846852970f8df938766af6e7576ea`, which exposes preserved audio retry APIs.
+- Chat input bar now has a left-side speech auxiliary button: stop during recording/transcribing, retry after abort when preserved audio exists.
+- Unit/build validation must compile `VoiceFlowPreservedAudio` usage and preserve existing `speechFailureInput` behavior; instrumented ChatInputBar coverage should include the new callback parameters.
+
 本轮目标验证 Android 语音输入的新 realtime recovery path：点击麦克风后立即采集 PCM16 mono 24kHz，写入本地 `.pcm` cache，WebSocket session ready 后从 cache offset 0 replay；send、heartbeat 或 commit 失败时新建 session 并重新 replay cache。
 
 已补充的单元测试覆盖：

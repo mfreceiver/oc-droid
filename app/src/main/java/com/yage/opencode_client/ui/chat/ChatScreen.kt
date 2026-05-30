@@ -132,10 +132,14 @@ fun ChatScreen(
                 isBusy = state.isCurrentSessionBusy,
                 isRecording = state.isRecording,
                 isTranscribing = state.isTranscribing,
+                hasPreservedSpeechAudio = state.hasPreservedSpeechAudio,
+                isRetryingSpeech = state.isRetryingSpeech,
                 isSpeechConfigured = state.aiBuilderConnectionOK && aiBuilderToken.isNotEmpty(),
                 onTextChange = viewModel::setInputText,
                 onSend = { viewModel.sendMessage() },
                 onAbort = { viewModel.abortSession() },
+                onAbortSpeech = { viewModel.abortSpeechRecognition() },
+                onRetrySpeech = { viewModel.retryPreservedSpeechAudio() },
                 onToggleRecording = {
                     if (state.isRecording) {
                         viewModel.toggleRecording()

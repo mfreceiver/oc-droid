@@ -23,6 +23,7 @@ import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.Mic
+import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
@@ -55,13 +56,17 @@ internal fun ChatInputBar(
     isBusy: Boolean,
     isRecording: Boolean,
     isTranscribing: Boolean,
+    hasPreservedSpeechAudio: Boolean,
+    isRetryingSpeech: Boolean,
     isSpeechConfigured: Boolean,
     onTextChange: (String) -> Unit,
     onSend: () -> Unit,
     onAbort: () -> Unit,
+    onAbortSpeech: () -> Unit,
+    onRetrySpeech: () -> Unit,
     onToggleRecording: () -> Unit
 ) {
-    val canSend = text.isNotBlank() && !isTranscribing
+    val canSend = text.isNotBlank() && !isTranscribing && !isRecording && !isRetryingSpeech
 
     // Matches iOS exactly: one horizontal row, bottom-aligned, sitting on a
     // single rounded composer background. Mic on the far left, the text field in
@@ -81,26 +86,16 @@ internal fun ChatInputBar(
                 .padding(horizontal = 8.dp, vertical = 6.dp),
             verticalAlignment = Alignment.Bottom
         ) {
-            // Mic — far left, borderless, bottom-aligned.
-            IconButton(
-                onClick = onToggleRecording,
-                enabled = !isTranscribing,
-                modifier = Modifier.size(40.dp)
-            ) {
-                if (isTranscribing) {
-                    CircularProgressIndicator(modifier = Modifier.size(20.dp), strokeWidth = 2.dp)
-                } else {
-                    Icon(
-                        Icons.Default.Mic,
-                        contentDescription = "Speech",
-                        tint = when {
-                            isRecording -> StopRed
-                            isSpeechConfigured -> MaterialTheme.colorScheme.onSurfaceVariant
-                            else -> MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.45f)
-                        }
-                    )
-                }
-            }
+            ChatSpeechActions(
+                isRecording = isRecording,
+                isTranscribing = isTranscribing,
+                isRetryingSpeech = isRetryingSpeech,
+                hasPreservedSpeechAudio = hasPreservedSpeechAudio,
+                isSpeechConfigured = isSpeechConfigured,
+                onToggleRecording = onToggleRecording,
+                onAbortSpeech = onAbortSpeech,
+                onRetrySpeech = onRetrySpeech,
+            )
 
             // Text field — the middle, ~3 lines tall at rest, growing to ~6.
             // TopStart so text begins at the top of the multi-line box.
@@ -137,6 +132,64 @@ internal fun ChatInputBar(
                 canSend = canSend,
                 onAbort = onAbort,
                 onSend = onSend
+            )
+        }
+    }
+}
+
+@Composable
+private fun ChatSpeechActions(
+    isRecording: Boolean,
+    isTranscribing: Boolean,
+    isRetryingSpeech: Boolean,
+    hasPreservedSpeechAudio: Boolean,
+    isSpeechConfigured: Boolean,
+    onToggleRecording: () -> Unit,
+    onAbortSpeech: () -> Unit,
+    onRetrySpeech: () -> Unit,
+) {
+    Column(
+        verticalArrangement = Arrangement.spacedBy(8.dp),
+        horizontalAlignment = Alignment.CenterHorizontally
+    ) {
+        IconButton(
+            onClick = onToggleRecording,
+            enabled = !isTranscribing && !isRetryingSpeech,
+            modifier = Modifier.size(40.dp)
+        ) {
+            if (isTranscribing || isRetryingSpeech) {
+                CircularProgressIndicator(modifier = Modifier.size(20.dp), strokeWidth = 2.dp)
+            } else {
+                Icon(
+                    Icons.Default.Mic,
+                    contentDescription = "Speech",
+                    tint = when {
+                        isRecording -> StopRed
+                        isSpeechConfigured -> MaterialTheme.colorScheme.onSurfaceVariant
+                        else -> MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.45f)
+                    }
+                )
+            }
+        }
+
+        when {
+            isRecording || isTranscribing -> ChatPrimaryActionButton(
+                onClick = onAbortSpeech,
+                enabled = true,
+                containerColor = StopRed,
+                contentColor = Color.White,
+                dimWhenDisabled = false,
+                icon = Icons.Default.Stop,
+                contentDescription = "Stop speech recognition"
+            )
+            hasPreservedSpeechAudio -> ChatPrimaryActionButton(
+                onClick = onRetrySpeech,
+                enabled = !isRetryingSpeech,
+                containerColor = MaterialTheme.colorScheme.primary,
+                contentColor = Color.White,
+                dimWhenDisabled = true,
+                icon = Icons.Default.Refresh,
+                contentDescription = "Retry speech recognition"
             )
         }
     }

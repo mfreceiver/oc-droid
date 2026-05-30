@@ -25,10 +25,14 @@ class ChatInputBarInstrumentedTest {
                     isBusy = true,
                     isRecording = false,
                     isTranscribing = false,
+                    hasPreservedSpeechAudio = false,
+                    isRetryingSpeech = false,
                     isSpeechConfigured = true,
                     onTextChange = {},
                     onSend = {},
                     onAbort = {},
+                    onAbortSpeech = {},
+                    onRetrySpeech = {},
                     onToggleRecording = {}
                 )
             }
@@ -51,10 +55,14 @@ class ChatInputBarInstrumentedTest {
                     isBusy = false,
                     isRecording = false,
                     isTranscribing = false,
+                    hasPreservedSpeechAudio = false,
+                    isRetryingSpeech = false,
                     isSpeechConfigured = true,
                     onTextChange = {},
                     onSend = { sendClicks++ },
                     onAbort = {},
+                    onAbortSpeech = {},
+                    onRetrySpeech = {},
                     onToggleRecording = { speechClicks++ }
                 )
             }

@@ -10,6 +10,7 @@ import com.yage.opencode_client.util.ThemeMode
 import com.yage.voiceflowkit.VoiceFlowClient
 import com.yage.voiceflowkit.VoiceFlowConfig
 import com.yage.voiceflowkit.VoiceFlowMicrophone
+import com.yage.voiceflowkit.VoiceFlowPreservedAudio
 import com.yage.voiceflowkit.VoiceFlowSession
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.Job
@@ -62,6 +63,8 @@ data class AppState(
     val streamingReasoningPart: Part? = null,
     val isRecording: Boolean = false,
     val isTranscribing: Boolean = false,
+    val hasPreservedSpeechAudio: Boolean = false,
+    val isRetryingSpeech: Boolean = false,
     val speechError: String? = null,
     val aiBuilderConnectionOK: Boolean = false,
     val aiBuilderConnectionError: String? = null,
@@ -125,6 +128,8 @@ data class AppState(
     data class SpeechState(
         val isRecording: Boolean = false,
         val isTranscribing: Boolean = false,
+        val hasPreservedSpeechAudio: Boolean = false,
+        val isRetryingSpeech: Boolean = false,
         val speechError: String? = null,
         val isTestingAIBuilderConnection: Boolean = false,
         val aiBuilderConnectionOK: Boolean = false,
@@ -183,6 +188,8 @@ data class AppState(
         get() = SpeechState(
             isRecording = isRecording,
             isTranscribing = isTranscribing,
+            hasPreservedSpeechAudio = hasPreservedSpeechAudio,
+            isRetryingSpeech = isRetryingSpeech,
             speechError = speechError,
             isTestingAIBuilderConnection = isTestingAIBuilderConnection,
             aiBuilderConnectionOK = aiBuilderConnectionOK,
@@ -268,6 +275,8 @@ class MainViewModel @Inject constructor(
     private var speechHeartbeatJob: Job? = null
     private var speechSession: VoiceFlowSession? = null
     private var speechExistingInput: String = ""
+    private var preservedSpeechAudio: VoiceFlowPreservedAudio? = null
+    private var preservedSpeechExistingInput: String = ""
     private var lastHealthCheckTime = 0L
 
     init {
@@ -342,7 +351,8 @@ class MainViewModel @Inject constructor(
                 state = _state,
                 session = session,
                 existingInput = speechExistingInput,
-                tag = TAG
+                tag = TAG,
+                shouldApply = { speechSession === session },
             ) {
                 speechSession = null
             }
@@ -374,6 +384,7 @@ class MainViewModel @Inject constructor(
                             terms = speechConfig.terms,
                         )
                     )
+                    clearPreservedSpeechAudio()
                     val session = voiceFlowClient.startSession()
                     speechSession = session
 
@@ -412,6 +423,65 @@ class MainViewModel @Inject constructor(
 
     fun clearSpeechError() {
         _state.update { it.copy(speechError = null) }
+    }
+
+    fun abortSpeechRecognition() {
+        val session = speechSession ?: return
+        val prefix = speechExistingInput
+        speechHeartbeatJob?.cancel()
+        speechHeartbeatJob = null
+        speechSession = null
+        _state.update { it.copy(isRecording = false, isTranscribing = false) }
+        viewModelScope.launch {
+            runCatching { microphone.stop() }
+            try {
+                val preserved = session.abortPreservingAudio()
+                clearPreservedSpeechAudio()
+                if (preserved != null) {
+                    preservedSpeechAudio = preserved
+                    preservedSpeechExistingInput = prefix
+                    _state.update { it.copy(hasPreservedSpeechAudio = true) }
+                }
+            } catch (error: Exception) {
+                Log.e(TAG, "Failed to abort speech recognition", error)
+                _state.update { it.copy(speechError = errorMessageOrFallback(error, "Failed to abort speech recognition")) }
+            }
+        }
+    }
+
+    fun retryPreservedSpeechAudio() {
+        val preserved = preservedSpeechAudio ?: return
+        val prefix = preservedSpeechExistingInput
+        _state.update { it.copy(isRetryingSpeech = true) }
+        viewModelScope.launch {
+            try {
+                val result = voiceFlowClient.transcribe(preserved) { partial ->
+                    _state.update { it.copy(inputText = mergedSpeechInput(prefix, partial)) }
+                }
+                _state.update {
+                    it.copy(
+                        inputText = mergedSpeechInput(prefix, result.text),
+                        isRetryingSpeech = false,
+                    )
+                }
+                clearPreservedSpeechAudio()
+            } catch (error: Exception) {
+                Log.e(TAG, "Failed to retry preserved speech audio", error)
+                _state.update {
+                    it.copy(
+                        isRetryingSpeech = false,
+                        speechError = errorMessageOrFallback(error, "Transcription failed"),
+                    )
+                }
+            }
+        }
+    }
+
+    private fun clearPreservedSpeechAudio() {
+        preservedSpeechAudio?.let { voiceFlowClient.discardPreservedAudio(it) }
+        preservedSpeechAudio = null
+        preservedSpeechExistingInput = ""
+        _state.update { it.copy(hasPreservedSpeechAudio = false) }
     }
 
     fun setSpeechError(message: String) {

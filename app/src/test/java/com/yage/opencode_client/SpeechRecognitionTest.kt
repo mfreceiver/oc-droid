@@ -79,6 +79,8 @@ class SpeechRecognitionTest {
         val state = AppState()
         assertFalse(state.isRecording)
         assertFalse(state.isTranscribing)
+        assertFalse(state.hasPreservedSpeechAudio)
+        assertFalse(state.isRetryingSpeech)
         assertNull(state.speechError)
         assertFalse(state.aiBuilderConnectionOK)
         assertNull(state.aiBuilderConnectionError)
@@ -90,6 +92,8 @@ class SpeechRecognitionTest {
         val state = AppState(
             isRecording = true,
             isTranscribing = true,
+            hasPreservedSpeechAudio = true,
+            isRetryingSpeech = true,
             speechError = "mic failed",
             aiBuilderConnectionOK = true,
             aiBuilderConnectionError = "timeout",
@@ -97,6 +101,8 @@ class SpeechRecognitionTest {
         )
         assertTrue(state.isRecording)
         assertTrue(state.isTranscribing)
+        assertTrue(state.hasPreservedSpeechAudio)
+        assertTrue(state.isRetryingSpeech)
         assertEquals("mic failed", state.speechError)
         assertTrue(state.aiBuilderConnectionOK)
         assertEquals("timeout", state.aiBuilderConnectionError)
