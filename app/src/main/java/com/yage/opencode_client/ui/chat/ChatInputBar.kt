@@ -173,7 +173,7 @@ private fun ChatSpeechActions(
         }
 
         when {
-            isRecording || isTranscribing -> ChatPrimaryActionButton(
+            isTranscribing -> ChatPrimaryActionButton(
                 onClick = onAbortSpeech,
                 enabled = true,
                 containerColor = StopRed,
