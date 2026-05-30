@@ -126,7 +126,7 @@ internal fun ChatInputBar(
                 )
             }
 
-            // Send/stop — far right, bottom-aligned. Send on top, stop below.
+            // Send/stop — far right, bottom-aligned. Transient stop appears above send.
             ChatInputActions(
                 isBusy = isBusy,
                 canSend = canSend,
@@ -152,26 +152,6 @@ private fun ChatSpeechActions(
         verticalArrangement = Arrangement.spacedBy(8.dp),
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
-        IconButton(
-            onClick = onToggleRecording,
-            enabled = !isTranscribing && !isRetryingSpeech,
-            modifier = Modifier.size(40.dp)
-        ) {
-            if (isTranscribing || isRetryingSpeech) {
-                CircularProgressIndicator(modifier = Modifier.size(20.dp), strokeWidth = 2.dp)
-            } else {
-                Icon(
-                    Icons.Default.Mic,
-                    contentDescription = "Speech",
-                    tint = when {
-                        isRecording -> StopRed
-                        isSpeechConfigured -> MaterialTheme.colorScheme.onSurfaceVariant
-                        else -> MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.45f)
-                    }
-                )
-            }
-        }
-
         when {
             isTranscribing -> ChatPrimaryActionButton(
                 onClick = onAbortSpeech,
@@ -192,6 +172,26 @@ private fun ChatSpeechActions(
                 contentDescription = "Retry speech recognition"
             )
         }
+
+        IconButton(
+            onClick = onToggleRecording,
+            enabled = !isTranscribing && !isRetryingSpeech,
+            modifier = Modifier.size(40.dp)
+        ) {
+            if (isTranscribing || isRetryingSpeech) {
+                CircularProgressIndicator(modifier = Modifier.size(20.dp), strokeWidth = 2.dp)
+            } else {
+                Icon(
+                    Icons.Default.Mic,
+                    contentDescription = "Speech",
+                    tint = when {
+                        isRecording -> StopRed
+                        isSpeechConfigured -> MaterialTheme.colorScheme.onSurfaceVariant
+                        else -> MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.45f)
+                    }
+                )
+            }
+        }
     }
 }
 
@@ -202,25 +202,13 @@ private fun ChatInputActions(
     onAbort: () -> Unit,
     onSend: () -> Unit
 ) {
-    // Matches iOS exactly: Send is ALWAYS present on top — you can fire a new
-    // message WHILE the assistant is working, no abort-first required. Stop is an
-    // ADDITIONAL control that appears only while busy and stacks BELOW send (a
-    // vertical column, never side-by-side). Send blue, stop red.
+    // Matches iOS: send is ALWAYS present and keeps the bottom slot. Stop is a
+    // transient control that appears above it, so the send target never moves.
     Column(
         verticalArrangement = Arrangement.spacedBy(8.dp),
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
-        // SEND: always present, solid electric-blue rounded-square, on top
-        ChatPrimaryActionButton(
-            onClick = onSend,
-            enabled = canSend,
-            containerColor = MaterialTheme.colorScheme.primary,
-            contentColor = Color.White,
-            dimWhenDisabled = true,
-            icon = Icons.AutoMirrored.Filled.Send,
-            contentDescription = "Send"
-        )
-        // STOP: only when busy, solid red rounded-square stacked below send
+        // STOP: only when busy, solid red rounded-square stacked above send.
         if (isBusy) {
             ChatPrimaryActionButton(
                 onClick = onAbort,
@@ -232,6 +220,17 @@ private fun ChatInputActions(
                 contentDescription = "Stop"
             )
         }
+
+        // SEND: always present, solid electric-blue rounded-square, bottom slot.
+        ChatPrimaryActionButton(
+            onClick = onSend,
+            enabled = canSend,
+            containerColor = MaterialTheme.colorScheme.primary,
+            contentColor = Color.White,
+            dimWhenDisabled = true,
+            icon = Icons.AutoMirrored.Filled.Send,
+            contentDescription = "Send"
+        )
     }
 }
 

@@ -12,6 +12,7 @@
 4. **语义靠形态和位置，不靠颜色堆叠。** 用**卡片形态**区分功能类别，颜色只在极少数可交互处点缀。
 5. **颜色不建立层级，字号和留白建立层级。**
 6. **无边框优先。** 信息类容器去描边、只留极淡底色；只有"请你操作"的卡片才用一条左侧色条作功能信号。
+7. **稳定按钮不换位。** 用户会靠肌肉记忆点击 composer 的发送和麦克风。发送按钮和麦克风按钮永远占据各自竖排的底部槽位；stop / retry 这类临时按钮只能出现在它们上方，不能把主按钮顶到别的位置。
 
 ## 色板与 Material 映射
 
@@ -66,9 +67,10 @@ Quiet Tech 的 token 定义在 `ui/theme/Color.kt`，并在 `ui/theme/Theme.kt` 
 ## Composer（`ChatInputBar`）
 
 - 单个圆角 pill（20dp），底色 `surfaceVariant`，从近黑背景上浮起。用 pill 内的无边框 `BasicTextField`（无可见描边/indicator）。
-- 布局与 iOS `ChatTabView` **完全相同**：单行 `Row(verticalAlignment = Bottom)`，从左到右 **mic 图标**（框内左、无描边、`onSurfaceVariant` 灰；录音红 `StopRed`；转写中转圈）→ **文本框**（`weight(1f)`，无独立背景，共享 pill 底，`TopStart` 对齐）→ 右侧**主操作竖排 Column**。图标与文字同在一个 pill 内、底部对齐——iOS 本就如此。
+- 布局与 iOS `ChatTabView` **完全相同**：单行 `Row(verticalAlignment = Bottom)`，从左到右 **语音竖排 Column**（底部固定 mic，临时 stop/retry 只在 mic 上方）→ **文本框**（`weight(1f)`，无独立背景，共享 pill 底，`TopStart` 对齐）→ 右侧**主操作竖排 Column**（底部固定 send，临时 stop 只在 send 上方）。图标与文字同在一个 pill 内、底部对齐——iOS 本就如此。
 - **文本框约三行高**：`heightIn(min = 66.dp, max = 132.dp)`（≈3 行起、≈6 行封顶后内部滚动）。
-- **send 始终存在**——实底电蓝（`colorScheme.primary` = `#3B82F6`）圆角方块（36dp，12dp 圆角）+ 白色箭头；`!canSend` 时 alpha 降到 0.35。**stop 仅 busy 时出现**，作为**额外**的实底红方块（`StopRed #E5484D`）**堆叠在 send 下方**（不是替换 send、不是并排）。这对齐 iOS：send 在上 / stop 在下，运行中也能直接发新消息，不必先终止。
+- **send 始终存在**——实底电蓝（`colorScheme.primary` = `#3B82F6`）圆角方块（36dp，12dp 圆角）+ 白色箭头；`!canSend` 时 alpha 降到 0.35。send 始终占据右侧竖排的**底部槽位**。**stop 仅 busy 时出现**，作为**额外**的实底红方块（`StopRed #E5484D`）**堆叠在 send 上方**（不是替换 send、不是并排）。这样运行中也能直接发新消息，且发送按钮不会因 stop 出现而换位。
+- **mic 始终占据左侧竖排底部槽位**。录音中只显示红色 mic，点击它走正常结束录音并进入转写；转写中 mic 转圈，强制 abort stop 出现在 mic 上方；显式 abort 后 retry 也出现在 mic 上方。任何临时语音按钮都不能改变 mic 的位置。
 - `canSend = text.isNotBlank() && !isTranscribing`。
 
 ## Toolbar（`ChatTopBar`）
