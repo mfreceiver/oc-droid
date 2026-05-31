@@ -44,6 +44,7 @@ internal fun launchRealtimeSpeechStop(
     existingInput: String,
     tag: String,
     shouldApply: () -> Boolean = { true },
+    terminateSession: suspend (VoiceFlowSession) -> Unit,
     onFinished: () -> Unit,
 ) {
     scope.launch {
@@ -74,6 +75,7 @@ internal fun launchRealtimeSpeechStop(
                 )
             }
         } finally {
+            terminateSession(session)
             if (shouldApply()) onFinished()
         }
     }
