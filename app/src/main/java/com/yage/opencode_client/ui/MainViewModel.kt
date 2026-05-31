@@ -353,6 +353,7 @@ class MainViewModel @Inject constructor(
                 existingInput = speechExistingInput,
                 tag = TAG,
                 shouldApply = { speechSession === session },
+                terminateSession = ::terminateSpeechSession,
             ) {
                 speechSession = null
             }
@@ -406,7 +407,9 @@ class MainViewModel @Inject constructor(
                 } catch (e: Exception) {
                     Log.e(TAG, "Failed to start recording", e)
                     runCatching { microphone.stop() }
-                    speechSession?.let { runCatching { it.cancel() } }
+                    speechSession?.let { session ->
+                        runCatching { terminateSpeechSession(session) }
+                    }
                     speechSession = null
                     speechHeartbeatJob?.cancel()
                     speechHeartbeatJob = null
@@ -417,6 +420,28 @@ class MainViewModel @Inject constructor(
                         )
                     }
                 }
+            }
+        }
+    }
+
+    private suspend fun terminateSpeechSession(session: VoiceFlowSession) {
+        try {
+            session.abortPreservingAudio()?.let { voiceFlowClient.discardPreservedAudio(it) }
+        } catch (error: Exception) {
+            Log.e(TAG, "Failed to terminate speech session", error)
+        }
+    }
+
+    fun stopSpeechForBackground() {
+        val session = speechSession
+        speechHeartbeatJob?.cancel()
+        speechHeartbeatJob = null
+        speechSession = null
+        _state.update { it.copy(isRecording = false, isTranscribing = false) }
+        viewModelScope.launch {
+            runCatching { microphone.stop() }
+            if (session != null) {
+                terminateSpeechSession(session)
             }
         }
     }
@@ -754,7 +779,7 @@ class MainViewModel @Inject constructor(
         pollJob?.cancel()
         speechHeartbeatJob?.cancel()
         microphone.discard()
-        runBlocking { speechSession?.cancel() }
+        runBlocking { speechSession?.let { terminateSpeechSession(it) } }
         speechSession = null
         super.onCleared()
     }
