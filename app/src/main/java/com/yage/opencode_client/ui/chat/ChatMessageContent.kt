@@ -740,6 +740,8 @@ private fun ToolCard(
     val firstFile = filePaths.firstOrNull()
     val displayName = if (toolName == "apply_patch") "patch" else toolName
 
+    val isReadOnlyTool = setOf("read", "read_file", "grep", "glob", "list", "webfetch", "task", "todoread").contains(toolName)
+
     Card(
         modifier = modifier.padding(vertical = 4.dp),
         shape = RoundedCornerShape(12.dp),
@@ -755,7 +757,7 @@ private fun ToolCard(
                             Icons.Default.Build,
                             contentDescription = null,
                             modifier = Modifier.size(16.dp),
-                            tint = MaterialTheme.colorScheme.primary
+                            tint = if (isReadOnlyTool) MaterialTheme.colorScheme.onSurfaceVariant else MaterialTheme.colorScheme.primary
                         )
                     }
                     Spacer(modifier = Modifier.width(8.dp))
