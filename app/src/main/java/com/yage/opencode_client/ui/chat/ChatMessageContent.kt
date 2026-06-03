@@ -362,6 +362,9 @@ private fun FileCard(
         ?: "file"
 
     val isDirectoryRead = ToolCardClassifier.isDirectoryRead(part)
+    val isReadOnlyFileTool = part.tool?.lowercase()?.let { tool ->
+        ToolCardClassifier.readToolPrefixes.any { tool.startsWith(it) }
+    } == true
     var showFolderSheet by remember { mutableStateOf(false) }
 
     val tag = if (isDirectoryRead) "toolcard.folder.$basename" else "toolcard.file.$basename"
@@ -390,7 +393,7 @@ private fun FileCard(
                 imageVector = if (isDirectoryRead) Icons.Default.Folder else Icons.Default.Description,
                 contentDescription = null,
                 modifier = Modifier.size(16.dp),
-                tint = MaterialTheme.colorScheme.primary
+                tint = if (isReadOnlyFileTool) MaterialTheme.colorScheme.onSurfaceVariant else MaterialTheme.colorScheme.primary
             )
             Spacer(modifier = Modifier.width(8.dp))
             Text(
@@ -740,6 +743,9 @@ private fun ToolCard(
     val firstFile = filePaths.firstOrNull()
     val displayName = if (toolName == "apply_patch") "patch" else toolName
 
+    val isReadOnlyTool = listOf("read_file", "read", "grep", "glob", "list", "webfetch", "task", "todoread")
+        .any { toolName.startsWith(it) }
+
     Card(
         modifier = modifier.padding(vertical = 4.dp),
         shape = RoundedCornerShape(12.dp),
@@ -755,7 +761,7 @@ private fun ToolCard(
                             Icons.Default.Build,
                             contentDescription = null,
                             modifier = Modifier.size(16.dp),
-                            tint = MaterialTheme.colorScheme.primary
+                            tint = if (isReadOnlyTool) MaterialTheme.colorScheme.onSurfaceVariant else MaterialTheme.colorScheme.primary
                         )
                     }
                     Spacer(modifier = Modifier.width(8.dp))
@@ -803,7 +809,7 @@ private fun ToolCard(
                             Text(
                                 "Todo updated · $completed/${todos.size}",
                                 style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.outline
+                                color = MaterialTheme.colorScheme.primary
                             )
                         }
                     } else {

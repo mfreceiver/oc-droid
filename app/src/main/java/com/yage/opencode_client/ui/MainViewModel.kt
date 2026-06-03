@@ -239,27 +239,60 @@ data class AppState(
 
     private val providerModelsIndex: Map<String, ProviderModel>
         get() = providers?.providers?.flatMap { provider ->
-            provider.models.map { (_, model) ->
-                "${provider.id}/${model.id}" to model
+            provider.models.flatMap { (modelKey, model) ->
+                listOfNotNull(
+                    "${provider.id}/$modelKey" to model,
+                    model.id.takeIf { it.isNotEmpty() }?.let { "${provider.id}/$it" to model },
+                    model.resolvedProviderId?.let { resolvedProvider ->
+                        model.id.takeIf { it.isNotEmpty() }?.let { modelId -> "$resolvedProvider/$modelId" to model }
+                    }
+                )
             }
         }?.toMap() ?: emptyMap()
 
     val contextUsage: ContextUsage?
         get() {
-            val lastAssistant = messages.lastOrNull { it.info.isAssistant && it.info.tokens != null }
-                ?: return null
-            val tokens = lastAssistant.info.tokens ?: return null
-            val total = tokens.total ?: return null
-            val model = lastAssistant.info.resolvedModel ?: return null
+            val lastAssistant = messages.lastOrNull { it.info.isAssistant && tokenTotal(it.info.tokens) != null }
+                ?: return logContextUsageUnavailable("no assistant message with usable tokens; messages=${messages.size}")
+            val tokens = lastAssistant.info.tokens
+                ?: return logContextUsageUnavailable("latest assistant has no tokens; messages=${messages.size}")
+            val total = tokenTotal(tokens)
+                ?: return logContextUsageUnavailable("assistant tokens have no usable totals; tokens=$tokens")
+            val model = lastAssistant.info.resolvedModel
+                ?: return logContextUsageUnavailable("assistant message has no resolved model; message=${lastAssistant.info.id}")
             val key = "${model.providerId}/${model.modelId}"
-            val limit = providerModelsIndex[key]?.limit?.context ?: return null
-            if (limit <= 0) return null
+            val index = providerModelsIndex
+            val providerModel = index[key] ?: index.entries
+                .filter { it.key.substringAfter('/') == model.modelId }
+                .takeIf { it.size == 1 }
+                ?.first()
+                ?.value
+            val limit = providerModel?.limit?.context
+                ?: return logContextUsageUnavailable("no context limit for $key; providerModelKeys=${index.keys.take(12)}")
+            if (limit <= 0) return logContextUsageUnavailable("non-positive context limit for $key: $limit")
             return ContextUsage(
                 percentage = (total.toFloat() / limit.toFloat()).coerceIn(0f, 1f),
                 totalTokens = total,
                 contextLimit = limit
             )
         }
+
+    private fun logContextUsageUnavailable(reason: String): ContextUsage? {
+        runCatching { Log.d("AppState", "contextUsage unavailable: $reason") }
+        return null
+    }
+
+    private fun tokenTotal(tokens: Message.TokenInfo?): Int? {
+        if (tokens == null) return null
+        tokens.total?.takeIf { it > 0 }?.let { return it }
+        return listOfNotNull(
+            tokens.input,
+            tokens.output,
+            tokens.reasoning,
+            tokens.cache?.read,
+            tokens.cache?.write
+        ).sum().takeIf { it > 0 }
+    }
 }
 
 @HiltViewModel

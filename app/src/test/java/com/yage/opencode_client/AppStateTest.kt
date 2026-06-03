@@ -306,6 +306,35 @@ class AppStateTest {
     }
 
     @Test
+    fun `contextUsage matches provider model map key when provider model id differs`() {
+        val message = MessageWithParts(
+            info = Message(
+                id = "msg-1",
+                role = "assistant",
+                model = Message.ModelInfo(providerId = "ollama-cloud", modelId = "deepseek-v4-pro"),
+                tokens = Message.TokenInfo(total = 64000)
+            )
+        )
+        val providers = ProvidersResponse(
+            providers = listOf(
+                ConfigProvider(
+                    id = "ollama-cloud",
+                    models = mapOf(
+                        "deepseek-v4-pro" to ProviderModel(
+                            id = "deepseek-v4-pro:latest",
+                            limit = ProviderModelLimit(context = 128000)
+                        )
+                    )
+                )
+            )
+        )
+        val usage = AppState(messages = listOf(message), providers = providers).contextUsage
+
+        assertNotNull(usage)
+        assertEquals(0.5f, usage!!.percentage, 0.001f)
+    }
+
+    @Test
     fun `contextUsage clamps percentage to 1f`() {
         val state = makeContextUsageState(totalTokens = 200000, contextLimit = 128000)
         val usage = state.contextUsage
@@ -353,6 +382,53 @@ class AppStateTest {
             providers = providers
         )
         val usage = state.contextUsage
+
+        assertNotNull(usage)
+        assertEquals(90000, usage!!.totalTokens)
+    }
+
+    @Test
+    fun `contextUsage skips latest assistant when tokens are empty`() {
+        val usableAssistant = MessageWithParts(
+            info = Message(
+                id = "msg-1",
+                role = "assistant",
+                model = Message.ModelInfo("openai", "gpt-4"),
+                tokens = Message.TokenInfo(total = 90000)
+            )
+        )
+        val emptyTokenAssistant = MessageWithParts(
+            info = Message(
+                id = "msg-2",
+                role = "assistant",
+                model = Message.ModelInfo("openai", "gpt-4"),
+                tokens = Message.TokenInfo(
+                    total = null,
+                    input = 0,
+                    output = 0,
+                    reasoning = 0,
+                    cache = Message.TokenInfo.CacheInfo(read = 0, write = 0)
+                )
+            )
+        )
+        val providers = ProvidersResponse(
+            providers = listOf(
+                ConfigProvider(
+                    id = "openai",
+                    models = mapOf(
+                        "gpt-4" to ProviderModel(
+                            id = "gpt-4",
+                            limit = ProviderModelLimit(context = 128000)
+                        )
+                    )
+                )
+            )
+        )
+
+        val usage = AppState(
+            messages = listOf(usableAssistant, emptyTokenAssistant),
+            providers = providers
+        ).contextUsage
 
         assertNotNull(usage)
         assertEquals(90000, usage!!.totalTokens)

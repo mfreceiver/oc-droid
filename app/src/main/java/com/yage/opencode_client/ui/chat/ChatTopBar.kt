@@ -172,6 +172,7 @@ internal fun ChatTopBar(
                             )
                         }
                     }
+
                 }
 
                 Spacer(modifier = Modifier.weight(1f))
@@ -268,15 +269,13 @@ internal fun ChatTopBar(
                                 Text(
                                     todoBadge,
                                     style = MaterialTheme.typography.labelSmall,
-                                    color = MaterialTheme.colorScheme.outline
+                                    color = MaterialTheme.colorScheme.primary
                                 )
                             }
                         }
                     }
 
-                    state.contextUsage?.let { usage ->
-                        ContextUsageRing(usage = usage)
-                    }
+                    ContextUsageRing(usage = state.contextUsage)
 
                     if (state.showSettingsButton) {
                         IconButton(
@@ -393,12 +392,16 @@ internal fun ChatTopBar(
 }
 
 @Composable
-internal fun ContextUsageRing(usage: AppState.ContextUsage) {
+internal fun ContextUsageRing(usage: AppState.ContextUsage?) {
     val ringColor = when {
+        usage == null -> MaterialTheme.colorScheme.onSurfaceVariant
         usage.percentage >= 0.9f -> MaterialTheme.colorScheme.error
         usage.percentage >= 0.7f -> BrandGold
         else -> MaterialTheme.colorScheme.primary
     }
+    val trackColor = MaterialTheme.colorScheme.onSurfaceVariant.copy(
+        alpha = if (usage == null) 0.55f else 0.25f
+    )
 
     Box(
         modifier = Modifier.size(ChatUiTuning.contextRingOuterSize),
@@ -407,15 +410,17 @@ internal fun ContextUsageRing(usage: AppState.ContextUsage) {
         CircularProgressIndicator(
             progress = { 1f },
             modifier = Modifier.size(ChatUiTuning.contextRingInnerSize),
-            color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.25f),
+            color = trackColor,
             strokeWidth = 3.dp
         )
-        CircularProgressIndicator(
-            progress = { usage.percentage },
-            modifier = Modifier.size(ChatUiTuning.contextRingInnerSize),
-            color = ringColor,
-            strokeWidth = 3.dp
-        )
+        if (usage != null) {
+            CircularProgressIndicator(
+                progress = { usage.percentage },
+                modifier = Modifier.size(ChatUiTuning.contextRingInnerSize),
+                color = ringColor,
+                strokeWidth = 3.dp
+            )
+        }
     }
 }
 
