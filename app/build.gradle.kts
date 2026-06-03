@@ -36,6 +36,13 @@ android {
         testInstrumentationRunnerArguments["openCodeServerUrl"] = env["OPENCODE_SERVER_URL"] ?: ""
         testInstrumentationRunnerArguments["openCodeUsername"] = env["OPENCODE_USERNAME"] ?: ""
         testInstrumentationRunnerArguments["openCodePassword"] = env["OPENCODE_PASSWORD"] ?: ""
+        // Agent used by integration-UI tests when they send a prompt. Pick one the
+        // server can actually run (GET /agent lists them). Optionally override the
+        // model (provider + id) so a runnable agent uses a fast/cheap model — e.g.
+        // build + deepseek/deepseek-v4-flash — instead of the agent's default.
+        testInstrumentationRunnerArguments["openCodeAgent"] = env["OPENCODE_AGENT"] ?: ""
+        testInstrumentationRunnerArguments["openCodeModelProvider"] = env["OPENCODE_MODEL_PROVIDER"] ?: ""
+        testInstrumentationRunnerArguments["openCodeModelId"] = env["OPENCODE_MODEL_ID"] ?: ""
         testInstrumentationRunnerArguments["aiBuilderBaseUrl"] = env["AI_BUILDER_BASE_URL"] ?: ""
         testInstrumentationRunnerArguments["aiBuilderToken"] = env["AI_BUILDER_TOKEN"] ?: ""
     }
