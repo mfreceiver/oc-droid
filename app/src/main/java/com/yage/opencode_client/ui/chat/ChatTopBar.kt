@@ -65,8 +65,6 @@ internal data class ChatTopBarState(
     val isLoadingMoreSessions: Boolean,
     val isRefreshingSessions: Boolean = false,
     val expandedSessionIds: Set<String> = emptySet(),
-    val agents: List<AgentInfo>,
-    val selectedAgent: String,
     val availableModels: List<AppState.ModelOption>,
     val selectedModelIndex: Int,
     val contextUsage: AppState.ContextUsage?,
@@ -83,7 +81,6 @@ internal data class ChatTopBarActions(
     val onLoadMoreSessions: () -> Unit,
     val onRefreshSessions: () -> Unit = {},
     val onToggleSessionExpanded: (String) -> Unit = {},
-    val onSelectAgent: (String) -> Unit,
     val onSelectModel: (Int) -> Unit,
     val onNavigateToSettings: () -> Unit = {},
     val onRenameSession: (String) -> Unit = {}
@@ -98,7 +95,6 @@ internal fun ChatTopBar(
 ) {
     val currentSession = state.sessions.find { it.id == state.currentSessionId }
     var showSessionSheet by remember { mutableStateOf(false) }
-    var showAgentMenu by remember { mutableStateOf(false) }
     var showModelMenu by remember { mutableStateOf(false) }
     var showRenameDialog by remember { mutableStateOf(false) }
     var showTodoDialog by remember { mutableStateOf(false) }
@@ -243,66 +239,6 @@ internal fun ChatTopBar(
                                     onClick = {
                                         actions.onSelectModel(index)
                                         showModelMenu = false
-                                    }
-                                )
-                            }
-                        }
-                    }
-
-                    Box(modifier = Modifier.weight(1f, fill = false)) {
-                        Surface(
-                            onClick = { showAgentMenu = true },
-                            shape = RoundedCornerShape(50),
-                            color = MaterialTheme.colorScheme.surfaceVariant
-                        ) {
-                            Row(
-                                verticalAlignment = Alignment.CenterVertically,
-                                modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp)
-                            ) {
-                                Text(
-                                    text = state.selectedAgent,
-                                    style = MaterialTheme.typography.labelSmall,
-                                    fontWeight = FontWeight.SemiBold,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                    maxLines = 1
-                                )
-                                Icon(
-                                    Icons.Default.KeyboardArrowDown,
-                                    contentDescription = "Switch agent",
-                                    modifier = Modifier.size(14.dp),
-                                    tint = MaterialTheme.colorScheme.onSurfaceVariant
-                                )
-                            }
-                        }
-                        DropdownMenu(
-                            expanded = showAgentMenu,
-                            onDismissRequest = { showAgentMenu = false }
-                        ) {
-                            if (state.agents.isEmpty()) {
-                                DropdownMenuItem(
-                                    text = {
-                                        Text(
-                                            "No agents",
-                                            color = MaterialTheme.colorScheme.outline
-                                        )
-                                    },
-                                    onClick = { }
-                                )
-                            }
-                            state.agents.forEach { agent ->
-                                DropdownMenuItem(
-                                    text = {
-                                        Text(
-                                            agent.name,
-                                            color = if (agent.name == state.selectedAgent)
-                                                MaterialTheme.colorScheme.primary
-                                            else
-                                                MaterialTheme.colorScheme.onSurface
-                                        )
-                                    },
-                                    onClick = {
-                                        actions.onSelectAgent(agent.name)
-                                        showAgentMenu = false
                                     }
                                 )
                             }
