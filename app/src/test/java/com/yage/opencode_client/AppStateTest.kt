@@ -388,6 +388,53 @@ class AppStateTest {
     }
 
     @Test
+    fun `contextUsage skips latest assistant when tokens are empty`() {
+        val usableAssistant = MessageWithParts(
+            info = Message(
+                id = "msg-1",
+                role = "assistant",
+                model = Message.ModelInfo("openai", "gpt-4"),
+                tokens = Message.TokenInfo(total = 90000)
+            )
+        )
+        val emptyTokenAssistant = MessageWithParts(
+            info = Message(
+                id = "msg-2",
+                role = "assistant",
+                model = Message.ModelInfo("openai", "gpt-4"),
+                tokens = Message.TokenInfo(
+                    total = null,
+                    input = 0,
+                    output = 0,
+                    reasoning = 0,
+                    cache = Message.TokenInfo.CacheInfo(read = 0, write = 0)
+                )
+            )
+        )
+        val providers = ProvidersResponse(
+            providers = listOf(
+                ConfigProvider(
+                    id = "openai",
+                    models = mapOf(
+                        "gpt-4" to ProviderModel(
+                            id = "gpt-4",
+                            limit = ProviderModelLimit(context = 128000)
+                        )
+                    )
+                )
+            )
+        )
+
+        val usage = AppState(
+            messages = listOf(usableAssistant, emptyTokenAssistant),
+            providers = providers
+        ).contextUsage
+
+        assertNotNull(usage)
+        assertEquals(90000, usage!!.totalTokens)
+    }
+
+    @Test
     fun `contextUsage near thresholds`() {
         val lowUsage = makeContextUsageState(totalTokens = 60000, contextLimit = 128000)
         assertTrue(lowUsage.contextUsage!!.percentage < 0.7f)
