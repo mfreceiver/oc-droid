@@ -9,6 +9,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -16,6 +17,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Chat
+import androidx.compose.material.icons.filled.Checklist
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.List
@@ -47,9 +49,9 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
-import com.yage.opencode_client.data.model.AgentInfo
 import com.yage.opencode_client.data.model.Session
 import com.yage.opencode_client.data.model.SessionStatus
+import com.yage.opencode_client.data.model.TodoItem
 import com.yage.opencode_client.ui.AppState
 import com.yage.opencode_client.ui.session.SessionList
 import com.yage.opencode_client.ui.theme.BrandGold
@@ -62,11 +64,10 @@ internal data class ChatTopBarState(
     val isLoadingMoreSessions: Boolean,
     val isRefreshingSessions: Boolean = false,
     val expandedSessionIds: Set<String> = emptySet(),
-    val agents: List<AgentInfo>,
-    val selectedAgent: String,
     val availableModels: List<AppState.ModelOption>,
     val selectedModelIndex: Int,
     val contextUsage: AppState.ContextUsage?,
+    val sessionTodos: List<TodoItem> = emptyList(),
     val showSettingsButton: Boolean = true,
     val showNewSessionInTopBar: Boolean = true,
     val showSessionListInTopBar: Boolean = true
@@ -79,7 +80,6 @@ internal data class ChatTopBarActions(
     val onLoadMoreSessions: () -> Unit,
     val onRefreshSessions: () -> Unit = {},
     val onToggleSessionExpanded: (String) -> Unit = {},
-    val onSelectAgent: (String) -> Unit,
     val onSelectModel: (Int) -> Unit,
     val onNavigateToSettings: () -> Unit = {},
     val onRenameSession: (String) -> Unit = {}
@@ -94,9 +94,9 @@ internal fun ChatTopBar(
 ) {
     val currentSession = state.sessions.find { it.id == state.currentSessionId }
     var showSessionSheet by remember { mutableStateOf(false) }
-    var showAgentMenu by remember { mutableStateOf(false) }
     var showModelMenu by remember { mutableStateOf(false) }
     var showRenameDialog by remember { mutableStateOf(false) }
+    var showTodoDialog by remember { mutableStateOf(false) }
 
     LaunchedEffect(showSessionSheet) {
         if (showSessionSheet) actions.onRefreshSessions()
@@ -244,61 +244,31 @@ internal fun ChatTopBar(
                         }
                     }
 
-                    Box(modifier = Modifier.weight(1f, fill = false)) {
-                        Surface(
-                            onClick = { showAgentMenu = true },
-                            shape = RoundedCornerShape(50),
-                            color = MaterialTheme.colorScheme.surfaceVariant
+                    val todoList = state.sessionTodos
+                    val todoBadge = if (todoList.isNotEmpty()) {
+                        "${todoList.count { it.isCompleted }}/${todoList.size}"
+                    } else ""
+                    Surface(
+                        onClick = { showTodoDialog = true },
+                        shape = RoundedCornerShape(50),
+                        color = Color.Transparent
+                    ) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp)
                         ) {
-                            Row(
-                                verticalAlignment = Alignment.CenterVertically,
-                                modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp)
-                            ) {
+                            Icon(
+                                Icons.Default.Checklist,
+                                contentDescription = if (todoBadge.isEmpty()) "Todo" else "Todo $todoBadge",
+                                modifier = Modifier.size(16.dp),
+                                tint = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                            if (todoBadge.isNotEmpty()) {
+                                Spacer(modifier = Modifier.width(4.dp))
                                 Text(
-                                    text = state.selectedAgent,
+                                    todoBadge,
                                     style = MaterialTheme.typography.labelSmall,
-                                    fontWeight = FontWeight.SemiBold,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                    maxLines = 1
-                                )
-                                Icon(
-                                    Icons.Default.KeyboardArrowDown,
-                                    contentDescription = "Switch agent",
-                                    modifier = Modifier.size(14.dp),
-                                    tint = MaterialTheme.colorScheme.onSurfaceVariant
-                                )
-                            }
-                        }
-                        DropdownMenu(
-                            expanded = showAgentMenu,
-                            onDismissRequest = { showAgentMenu = false }
-                        ) {
-                            if (state.agents.isEmpty()) {
-                                DropdownMenuItem(
-                                    text = {
-                                        Text(
-                                            "No agents",
-                                            color = MaterialTheme.colorScheme.outline
-                                        )
-                                    },
-                                    onClick = { }
-                                )
-                            }
-                            state.agents.forEach { agent ->
-                                DropdownMenuItem(
-                                    text = {
-                                        Text(
-                                            agent.name,
-                                            color = if (agent.name == state.selectedAgent)
-                                                MaterialTheme.colorScheme.primary
-                                            else
-                                                MaterialTheme.colorScheme.onSurface
-                                        )
-                                    },
-                                    onClick = {
-                                        actions.onSelectAgent(agent.name)
-                                        showAgentMenu = false
-                                    }
+                                    color = MaterialTheme.colorScheme.outline
                                 )
                             }
                         }
@@ -398,6 +368,24 @@ internal fun ChatTopBar(
             dismissButton = {
                 TextButton(onClick = { showRenameDialog = false }) {
                     Text("Cancel")
+                }
+            }
+        )
+    }
+
+    if (showTodoDialog) {
+        AlertDialog(
+            onDismissRequest = { showTodoDialog = false },
+            title = { Text("Todo") },
+            text = {
+                TodoListPanel(
+                    todos = state.sessionTodos,
+                    modifier = Modifier.heightIn(max = 400.dp)
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = { showTodoDialog = false }) {
+                    Text("Done")
                 }
             }
         )

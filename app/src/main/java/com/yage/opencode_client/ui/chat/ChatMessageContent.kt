@@ -795,11 +795,16 @@ private fun ToolCard(
                         )
                     }
 
-                    // todowrite shows only its todos; input/output are hidden (matches iOS).
+                    // todowrite shows a compact badge; full list is in the toolbar panel (matches iOS).
                     if (isTodoWrite) {
                         if (todos.isNotEmpty()) {
                             Spacer(modifier = Modifier.size(8.dp))
-                            TodoListInline(todos)
+                            val completed = todos.count { it.isCompleted }
+                            Text(
+                                "Todo updated · $completed/${todos.size}",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.outline
+                            )
                         }
                     } else {
                         if (todos.isNotEmpty()) {

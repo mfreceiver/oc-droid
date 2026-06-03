@@ -77,11 +77,10 @@ fun ChatScreen(
                 isLoadingMoreSessions = state.isLoadingMoreSessions,
                 isRefreshingSessions = state.isRefreshingSessions,
                 expandedSessionIds = state.expandedSessionIds,
-                agents = state.visibleAgents,
-                selectedAgent = state.selectedAgentName,
                 availableModels = state.availableModels,
                 selectedModelIndex = state.selectedModelIndex,
                 contextUsage = cachedContextUsage,
+                sessionTodos = state.sessionTodos[state.currentSessionId ?: ""] ?: emptyList(),
                 showSettingsButton = showSettingsButton,
                 showNewSessionInTopBar = showNewSessionInTopBar,
                 showSessionListInTopBar = showSessionListInTopBar
@@ -93,7 +92,6 @@ fun ChatScreen(
                 onLoadMoreSessions = viewModel::loadMoreSessions,
                 onRefreshSessions = viewModel::loadSessions,
                 onToggleSessionExpanded = viewModel::toggleSessionExpanded,
-                onSelectAgent = viewModel::selectAgent,
                 onSelectModel = viewModel::selectModel,
                 onNavigateToSettings = onNavigateToSettings,
                 onRenameSession = { title ->

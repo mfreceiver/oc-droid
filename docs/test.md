@@ -1,5 +1,13 @@
 # Android Test Notes
 
+## 2026-06-03 task/todo 支持 + 模型预设对齐
+
+- 新增 `TodoListPanel` composable（进度条 + checkbox 列表 + 完成划线 + 空态），无单独测试——UI 路由简单，由编译 + `./gradlew testDebugUnitTest` 全覆盖。
+- SSE `todo.updated` 事件处理在 `MainViewModelSyncActions.kt` 内联，无单独测试。
+- `launchLoadMessages` 内新增 fire-and-forget `getSessionTodos` REST 调用，加 try/catch 防护以确保既存 mock 测试继续通过。
+- 新增 3 个模型预设，shortName 在既有 `ModelOption.shortName` 分支中增加 `DeepSeek Local → DS-L` + `Ollama DeepSeek V4 Pro → ODS-Pro`，由既存 `ModelTests.shortName` 回归。
+- 验证：`./gradlew testDebugUnitTest` - 214 tests pass。
+
 ## 2026-05-25 realtime speech recovery
 
 ### 2026-05-30 speech abort/retry

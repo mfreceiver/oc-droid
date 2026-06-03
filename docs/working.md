@@ -1,5 +1,18 @@
 # OpenCode Android 客户端工作日志
 
+## 2026-06-03
+
+- 模型预设对齐 iOS，新增三个：`Ollama DeepSeek V4 Pro`（ollama-cloud/deepseek-v4-pro，shortName ODS-Pro）、`MiniMax M3`（ollama-cloud/minimax-m3）、`DeepSeek Local`（ds4/deepseek-v4-flash，shortName DS-L）。
+- Task/Todo 列表支持：
+  - `AppState` 新增 `sessionTodos: Map<String, List<TodoItem>>`，SSE `todo.updated` 事件实时更新。
+  - session 切换时在 `launchLoadMessages` 内 fire-and-forget 加载 `GET /session/{id}/todo`（对齐 iOS）。
+  - Toolbar 右侧新增 Checklist 图标按钮，始终可见；无 todo 时仅显示图标，有 todo 时显示完成数。
+  - 点击弹出 `AlertDialog` → `TodoListPanel` composable（进度条 + checkbox 列表 + 完成划线 + 空态）。
+  - `ChatMessageContent` 中 `todowrite` ToolCard 改为紧凑徽章 `"Todo updated · X/Y"`，替代之前的行内 TodoListInline。
+- 新增文件 `ui/chat/TodoListPanel.kt`。
+- 修改文件：`MainViewModel.kt`、`ModelPresets.kt`、`MainViewModelSyncActions.kt`、`MainViewModelSessionActions.kt`、`ChatTopBar.kt`、`ChatScreen.kt`、`ChatMessageContent.kt`。
+- 验证：`./gradlew testDebugUnitTest` - 214 tests pass。
+
 ## 2026-05-30
 
 - VoiceFlowKit dependency 更新到 merged revision `cc49c8fa272846852970f8df938766af6e7576ea`，使用 preserved audio retry facade。Chat input 左侧新增语音辅助按钮：录音/转写中显示 stop，调用 `abortPreservingAudio()` 立即释放 UI；保留音频后显示 retry，调用 `transcribe(preservedAudio)` 重识别上一段 PCM。`cancel()` 语义保持不变，只有显式 abort 路径保留音频。

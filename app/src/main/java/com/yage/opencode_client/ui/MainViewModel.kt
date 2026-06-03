@@ -68,12 +68,14 @@ data class AppState(
     val speechError: String? = null,
     val aiBuilderConnectionOK: Boolean = false,
     val aiBuilderConnectionError: String? = null,
-    val isTestingAIBuilderConnection: Boolean = false
+    val isTestingAIBuilderConnection: Boolean = false,
+    val sessionTodos: Map<String, List<TodoItem>> = emptyMap()
 ) {
     data class ModelOption(val displayName: String, val providerId: String, val modelId: String) {
         val shortName: String
             get() = when {
                 displayName == "DeepSeek V4 Flash" -> "DS-Flash"
+                displayName == "DeepSeek Local" -> "DS-L"
                 displayName == "DeepSeek V4 Pro" -> "DS-Pro"
                 displayName == "Ollama DeepSeek V4 Pro" -> "ODS-Pro"
                 "Haiku" in displayName -> "Haiku"
