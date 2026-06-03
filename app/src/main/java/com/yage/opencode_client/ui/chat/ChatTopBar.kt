@@ -314,19 +314,19 @@ internal fun ChatTopBar(
                     }
 
                     val todoList = state.sessionTodos
-                    if (todoList.isNotEmpty()) {
-                        val completed = todoList.count { it.isCompleted }
-                        IconButton(
-                            onClick = { showTodoDialog = true },
-                            modifier = Modifier.size(36.dp)
-                        ) {
-                            Icon(
-                                Icons.Default.Checklist,
-                                contentDescription = "Todo $completed/${todoList.size}",
-                                modifier = Modifier.size(20.dp),
-                                tint = MaterialTheme.colorScheme.onSurfaceVariant
-                            )
-                        }
+                    val todoBadge = if (todoList.isNotEmpty()) {
+                        "${todoList.count { it.isCompleted }}/${todoList.size}"
+                    } else ""
+                    IconButton(
+                        onClick = { showTodoDialog = true },
+                        modifier = Modifier.size(36.dp)
+                    ) {
+                        Icon(
+                            Icons.Default.Checklist,
+                            contentDescription = if (todoBadge.isEmpty()) "Todo" else "Todo $todoBadge",
+                            modifier = Modifier.size(20.dp),
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
                     }
 
                     if (state.showSettingsButton) {
