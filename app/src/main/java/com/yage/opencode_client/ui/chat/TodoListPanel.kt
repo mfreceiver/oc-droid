@@ -71,7 +71,7 @@ fun TodoListPanel(
                 Text(
                     "$completed/$total completed",
                     style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.outline,
+                    color = MaterialTheme.colorScheme.primary,
                     modifier = Modifier.padding(bottom = 12.dp)
                 )
             }
