@@ -1,6 +1,7 @@
 package com.yage.opencode_client.ui
 
 import com.yage.opencode_client.data.model.SSEEvent
+import com.yage.opencode_client.data.model.TodoItem
 import com.yage.opencode_client.data.repository.OpenCodeRepository
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
@@ -10,6 +11,7 @@ import kotlinx.coroutines.flow.catch
 import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlinx.serialization.json.*
 
 internal fun launchBusyPolling(
     scope: CoroutineScope,
@@ -155,6 +157,16 @@ internal fun handleIncomingSseEvent(
                     )
                 }
             }
+        }
+        "todo.updated" -> {
+            val sessionId = event.payload.getString("sessionID") ?: return
+            val todosArray = event.payload.properties?.get("todos") as? kotlinx.serialization.json.JsonArray ?: return
+            val todos = try {
+                Json.decodeFromJsonElement<List<TodoItem>>(todosArray)
+            } catch (_: Exception) {
+                return
+            }
+            state.update { it.copy(sessionTodos = it.sessionTodos + (sessionId to todos)) }
         }
     }
 }

@@ -9,6 +9,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -16,6 +17,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Chat
+import androidx.compose.material.icons.filled.Checklist
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.List
@@ -50,6 +52,7 @@ import androidx.compose.ui.unit.dp
 import com.yage.opencode_client.data.model.AgentInfo
 import com.yage.opencode_client.data.model.Session
 import com.yage.opencode_client.data.model.SessionStatus
+import com.yage.opencode_client.data.model.TodoItem
 import com.yage.opencode_client.ui.AppState
 import com.yage.opencode_client.ui.session.SessionList
 import com.yage.opencode_client.ui.theme.BrandGold
@@ -67,6 +70,7 @@ internal data class ChatTopBarState(
     val availableModels: List<AppState.ModelOption>,
     val selectedModelIndex: Int,
     val contextUsage: AppState.ContextUsage?,
+    val sessionTodos: List<TodoItem> = emptyList(),
     val showSettingsButton: Boolean = true,
     val showNewSessionInTopBar: Boolean = true,
     val showSessionListInTopBar: Boolean = true
@@ -97,6 +101,7 @@ internal fun ChatTopBar(
     var showAgentMenu by remember { mutableStateOf(false) }
     var showModelMenu by remember { mutableStateOf(false) }
     var showRenameDialog by remember { mutableStateOf(false) }
+    var showTodoDialog by remember { mutableStateOf(false) }
 
     LaunchedEffect(showSessionSheet) {
         if (showSessionSheet) actions.onRefreshSessions()
@@ -308,6 +313,22 @@ internal fun ChatTopBar(
                         ContextUsageRing(usage = usage)
                     }
 
+                    val todoList = state.sessionTodos
+                    if (todoList.isNotEmpty()) {
+                        val completed = todoList.count { it.isCompleted }
+                        IconButton(
+                            onClick = { showTodoDialog = true },
+                            modifier = Modifier.size(36.dp)
+                        ) {
+                            Icon(
+                                Icons.Default.Checklist,
+                                contentDescription = "Todo $completed/${todoList.size}",
+                                modifier = Modifier.size(20.dp),
+                                tint = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                    }
+
                     if (state.showSettingsButton) {
                         IconButton(
                             onClick = actions.onNavigateToSettings,
@@ -398,6 +419,24 @@ internal fun ChatTopBar(
             dismissButton = {
                 TextButton(onClick = { showRenameDialog = false }) {
                     Text("Cancel")
+                }
+            }
+        )
+    }
+
+    if (showTodoDialog) {
+        AlertDialog(
+            onDismissRequest = { showTodoDialog = false },
+            title = { Text("Todo") },
+            text = {
+                TodoListPanel(
+                    todos = state.sessionTodos,
+                    modifier = Modifier.heightIn(max = 400.dp)
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = { showTodoDialog = false }) {
+                    Text("Done")
                 }
             }
         )
