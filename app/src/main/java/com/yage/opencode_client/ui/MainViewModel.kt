@@ -86,7 +86,19 @@ data class AppState(
             }
     }
 
-    data class ContextUsage(val percentage: Float, val totalTokens: Int, val contextLimit: Int)
+    data class ContextUsage(
+        val percentage: Float,
+        val totalTokens: Int,
+        val contextLimit: Int,
+        val providerId: String? = null,
+        val modelId: String? = null,
+        val inputTokens: Int? = null,
+        val outputTokens: Int? = null,
+        val reasoningTokens: Int? = null,
+        val cachedReadTokens: Int? = null,
+        val cachedWriteTokens: Int? = null,
+        val cost: Double? = null
+    )
 
     data class ConnectionState(
         val isConnected: Boolean = false,
@@ -273,7 +285,15 @@ data class AppState(
             return ContextUsage(
                 percentage = (total.toFloat() / limit.toFloat()).coerceIn(0f, 1f),
                 totalTokens = total,
-                contextLimit = limit
+                contextLimit = limit,
+                providerId = model.providerId,
+                modelId = model.modelId,
+                inputTokens = tokens.input,
+                outputTokens = tokens.output,
+                reasoningTokens = tokens.reasoning,
+                cachedReadTokens = tokens.cache?.read,
+                cachedWriteTokens = tokens.cache?.write,
+                cost = lastAssistant.info.cost
             )
         }
 
@@ -662,6 +682,7 @@ class MainViewModel @Inject constructor(
             agent = agent,
             model = model,
             onRefreshMessages = ::loadMessagesWithRetry,
+            onRefreshSessions = ::loadSessions,
             onSuccess = { settingsManager.setDraftText(sessionId, "") }
         )
     }
@@ -805,6 +826,7 @@ class MainViewModel @Inject constructor(
             state = _state,
             event = event,
             onRefreshMessages = ::loadMessagesWithRetry,
+            onRefreshSessions = ::loadSessions,
             onLoadPendingPermissions = ::loadPendingPermissions,
             onNonFatalIssue = { message -> reportNonFatalIssue(TAG, message) }
         )

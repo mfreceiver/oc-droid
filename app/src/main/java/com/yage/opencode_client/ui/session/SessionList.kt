@@ -217,6 +217,14 @@ fun SessionList(
         flattenVisibleTree(tree, expandedSessionIds)
     }
     val listState = rememberLazyListState()
+    var wasRefreshing by remember { mutableStateOf(false) }
+
+    LaunchedEffect(isRefreshingSessions) {
+        if (wasRefreshing && !isRefreshingSessions && visibleRows.isNotEmpty()) {
+            listState.animateScrollToItem(0)
+        }
+        wasRefreshing = isRefreshingSessions
+    }
 
     LaunchedEffect(listState, visibleRows.size, hasMoreSessions, isLoadingMoreSessions) {
         snapshotFlow { listState.layoutInfo.visibleItemsInfo.lastOrNull()?.index }

@@ -386,6 +386,7 @@ internal fun launchSendMessage(
     agent: String,
     model: Message.ModelInfo?,
     onRefreshMessages: (String, Boolean) -> Unit,
+    onRefreshSessions: () -> Unit,
     onSuccess: (() -> Unit)? = null
 ) {
     scope.launch {
@@ -399,9 +400,11 @@ internal fun launchSendMessage(
                     )
                 }
                 onSuccess?.invoke()
+                onRefreshSessions()
                 onRefreshMessages(sessionId, true)
                 launch {
                     delay(MainViewModelTimings.messageRefreshDelayMs)
+                    onRefreshSessions()
                     onRefreshMessages(sessionId, false)
                 }
             }
