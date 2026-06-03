@@ -91,6 +91,7 @@ internal fun handleIncomingSseEvent(
                             streamingReasoningPart = null
                         )
                     }
+                    onRefreshSessions()
                     onRefreshMessages(statusEvent.sessionId, false)
                 }
             } else {
@@ -99,8 +100,20 @@ internal fun handleIncomingSseEvent(
         }
         "message.created" -> {
             val sessionId = event.payload.getString("sessionID")
-            if (sessionId != null && sessionId == state.value.currentSessionId) {
-                onRefreshMessages(sessionId, true)
+            if (sessionId != null) {
+                onRefreshSessions()
+                if (sessionId == state.value.currentSessionId) {
+                    onRefreshMessages(sessionId, true)
+                }
+            }
+        }
+        "message.updated" -> {
+            val sessionId = event.payload.getString("sessionID")
+            if (sessionId != null) {
+                onRefreshSessions()
+                if (sessionId == state.value.currentSessionId) {
+                    onRefreshMessages(sessionId, false)
+                }
             }
         }
         "message.part.updated" -> {

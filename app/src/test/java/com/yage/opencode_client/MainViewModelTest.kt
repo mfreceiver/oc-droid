@@ -362,6 +362,75 @@ class MainViewModelTest {
     }
 
     @Test
+    fun `message created SSE refreshes session list for incoming assistant activity`() = runTest {
+        val refreshedSessions = listOf(
+            com.yage.opencode_client.data.model.Session(
+                id = "session-2",
+                directory = "/tmp/project",
+                title = "New Activity",
+                time = com.yage.opencode_client.data.model.Session.TimeInfo(updated = 2_000)
+            ),
+            com.yage.opencode_client.data.model.Session(
+                id = "session-1",
+                directory = "/tmp/project",
+                title = "Current",
+                time = com.yage.opencode_client.data.model.Session.TimeInfo(updated = 1_000)
+            )
+        )
+        coEvery { repository.getSessions(100) } returns Result.success(refreshedSessions)
+
+        val viewModel = createViewModel()
+        updateState(viewModel) {
+            it.copy(
+                currentSessionId = "session-1",
+                sessions = listOf(refreshedSessions[1], refreshedSessions[0])
+            )
+        }
+
+        handleSse(
+            viewModel,
+            SSEEvent(
+                payload = SSEPayload(
+                    type = "message.created",
+                    properties = buildJsonObject {
+                        put("sessionID", JsonPrimitive("session-2"))
+                    }
+                )
+            )
+        )
+        advanceUntilIdle()
+
+        coVerify { repository.getSessions(100) }
+        assertEquals("session-2", viewModel.state.value.sessions.first().id)
+    }
+
+    @Test
+    fun `message updated SSE refreshes current messages and sessions`() = runTest {
+        coEvery { repository.getSessions(100) } returns Result.success(
+            listOf(com.yage.opencode_client.data.model.Session(id = "session-1", directory = "/tmp/project"))
+        )
+
+        val viewModel = createViewModel()
+        updateState(viewModel) { it.copy(currentSessionId = "session-1") }
+
+        handleSse(
+            viewModel,
+            SSEEvent(
+                payload = SSEPayload(
+                    type = "message.updated",
+                    properties = buildJsonObject {
+                        put("sessionID", JsonPrimitive("session-1"))
+                    }
+                )
+            )
+        )
+        advanceUntilIdle()
+
+        coVerify { repository.getSessions(100) }
+        coVerify { repository.getMessages("session-1", 30) }
+    }
+
+    @Test
     fun `loadSessions requests current limit and tracks hasMore`() = runTest {
         val sessions = (1..100).map { index ->
             com.yage.opencode_client.data.model.Session(id = "session-$index", directory = "/tmp/$index")
@@ -752,6 +821,9 @@ class MainViewModelTest {
     fun `handleSSEEvent idle status clears streaming state and refreshes messages`() = runTest {
         val messages = listOf(MessageWithParts(info = Message(id = "a1", role = "assistant")))
         coEvery { repository.getMessages("session-1", 30) } returns Result.success(messages)
+        coEvery { repository.getSessions(100) } returns Result.success(
+            listOf(com.yage.opencode_client.data.model.Session(id = "session-1", directory = "/tmp/project"))
+        )
         val viewModel = createViewModel()
         updateState(viewModel) {
             it.copy(
@@ -1075,6 +1147,9 @@ class MainViewModelTest {
     fun `handleSSEEvent message created refreshes messages for current session`() = runTest {
         val messages = listOf(MessageWithParts(info = Message(id = "m1", role = "assistant")))
         coEvery { repository.getMessages("session-1", 30) } returns Result.success(messages)
+        coEvery { repository.getSessions(100) } returns Result.success(
+            listOf(com.yage.opencode_client.data.model.Session(id = "session-1", directory = "/tmp/project"))
+        )
 
         val viewModel = createViewModel()
         updateState(viewModel) { it.copy(currentSessionId = "session-1") }
