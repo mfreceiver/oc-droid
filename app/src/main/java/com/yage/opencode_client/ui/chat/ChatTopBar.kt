@@ -4,6 +4,7 @@ import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
@@ -55,6 +56,7 @@ import com.yage.opencode_client.data.model.TodoItem
 import com.yage.opencode_client.ui.AppState
 import com.yage.opencode_client.ui.session.SessionList
 import com.yage.opencode_client.ui.theme.BrandGold
+import java.util.Locale
 
 internal data class ChatTopBarState(
     val sessions: List<Session>,
@@ -97,6 +99,7 @@ internal fun ChatTopBar(
     var showModelMenu by remember { mutableStateOf(false) }
     var showRenameDialog by remember { mutableStateOf(false) }
     var showTodoDialog by remember { mutableStateOf(false) }
+    var showContextDialog by remember { mutableStateOf(false) }
 
     LaunchedEffect(showSessionSheet) {
         if (showSessionSheet) actions.onRefreshSessions()
@@ -275,7 +278,13 @@ internal fun ChatTopBar(
                         }
                     }
 
-                    ContextUsageRing(usage = state.contextUsage)
+                    Surface(
+                        onClick = { showContextDialog = true },
+                        shape = RoundedCornerShape(50),
+                        color = Color.Transparent
+                    ) {
+                        ContextUsageRing(usage = state.contextUsage)
+                    }
 
                     if (state.showSettingsButton) {
                         IconButton(
@@ -389,7 +398,99 @@ internal fun ChatTopBar(
             }
         )
     }
+
+    if (showContextDialog) {
+        ContextUsageDialog(
+            usage = state.contextUsage,
+            onDismiss = { showContextDialog = false }
+        )
+    }
 }
+
+@Composable
+private fun ContextUsageDialog(
+    usage: AppState.ContextUsage?,
+    onDismiss: () -> Unit
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Context") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                if (usage == null) {
+                    Text(
+                        "No usage data",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                } else {
+                    ContextUsageSection("Model") {
+                        ContextUsageRow("Provider", usage.providerId ?: "Unknown")
+                        ContextUsageRow("Model", usage.modelId ?: "Unknown")
+                        ContextUsageRow("Context limit", formatCount(usage.contextLimit))
+                    }
+                    ContextUsageSection("Tokens") {
+                        ContextUsageRow("Total", formatCount(usage.totalTokens))
+                        ContextUsageRow("Input", formatOptionalCount(usage.inputTokens))
+                        ContextUsageRow("Output", formatOptionalCount(usage.outputTokens))
+                        ContextUsageRow("Reasoning", formatOptionalCount(usage.reasoningTokens))
+                        ContextUsageRow("Cached read", formatOptionalCount(usage.cachedReadTokens))
+                        ContextUsageRow("Cached write", formatOptionalCount(usage.cachedWriteTokens))
+                    }
+                    ContextUsageSection("Cost") {
+                        ContextUsageRow("Cost", usage.cost?.let { "$" + String.format(Locale.US, "%.4f", it) } ?: "No cost data")
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = onDismiss) {
+                Text("Done")
+            }
+        }
+    )
+}
+
+@Composable
+private fun ContextUsageSection(
+    title: String,
+    content: @Composable ColumnScope.() -> Unit
+) {
+    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+        Text(
+            title,
+            style = MaterialTheme.typography.labelMedium,
+            fontWeight = FontWeight.SemiBold,
+            color = MaterialTheme.colorScheme.primary
+        )
+        content()
+    }
+}
+
+@Composable
+private fun ContextUsageRow(label: String, value: String) {
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.Top
+    ) {
+        Text(
+            label,
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+        Text(
+            value,
+            style = MaterialTheme.typography.bodySmall,
+            fontWeight = FontWeight.Medium,
+            modifier = Modifier.padding(start = 16.dp)
+        )
+    }
+}
+
+private fun formatCount(value: Int): String = String.format(Locale.US, "%,d", value)
+
+private fun formatOptionalCount(value: Int?): String = value?.let(::formatCount) ?: "-"
 
 @Composable
 internal fun ContextUsageRing(usage: AppState.ContextUsage?) {

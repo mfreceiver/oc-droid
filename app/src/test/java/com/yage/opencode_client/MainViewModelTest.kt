@@ -106,6 +106,7 @@ class MainViewModelTest {
         every { settingsManager.setAgentForSession(any(), any()) } just runs
 
         every { repository.connectSSE() } returns emptyFlow()
+        coEvery { repository.getSessions(any()) } returns Result.success(emptyList())
         coEvery { repository.getSessionStatus() } returns Result.success(emptyMap())
         coEvery { repository.getMessages(any(), any()) } returns Result.success(emptyList())
         coEvery { repository.getPendingPermissions() } returns Result.success(emptyList())
@@ -162,6 +163,9 @@ class MainViewModelTest {
     @Test
     fun `sendMessage success clears input and uses selected preset model`() = runTest {
         coEvery { repository.sendMessage(any(), any(), any(), any()) } returns Result.success(Unit)
+        coEvery { repository.getSessions(100) } returns Result.success(
+            listOf(com.yage.opencode_client.data.model.Session(id = "session-1", directory = "/tmp/project"))
+        )
 
         val viewModel = createViewModel()
         viewModel.selectSession("session-1")
@@ -184,6 +188,25 @@ class MainViewModelTest {
         }
         assertEquals("", viewModel.state.value.inputText)
         assertNull(viewModel.state.value.error)
+    }
+
+    @Test
+    fun `sendMessage success refreshes sessions`() = runTest {
+        coEvery { repository.sendMessage(any(), any(), any(), any()) } returns Result.success(Unit)
+        coEvery { repository.getSessions(100) } returns Result.success(
+            listOf(com.yage.opencode_client.data.model.Session(id = "session-1", directory = "/tmp/project", title = "Updated"))
+        )
+
+        val viewModel = createViewModel()
+        viewModel.selectSession("session-1")
+        advanceUntilIdle()
+        viewModel.setInputText("hello")
+
+        viewModel.sendMessage()
+        advanceUntilIdle()
+
+        coVerify(atLeast = 1) { repository.getSessions(100) }
+        assertEquals("Updated", viewModel.state.value.sessions.single().title)
     }
 
     @Test
@@ -293,6 +316,49 @@ class MainViewModelTest {
         assertEquals(1, sessions.size)
         assertEquals("session-1", sessions.single().id)
         assertEquals("Server Title", sessions.single().title)
+    }
+
+    @Test
+    fun `session updated SSE refreshes session list from server`() = runTest {
+        val updatedSessions = listOf(
+            com.yage.opencode_client.data.model.Session(
+                id = "session-1",
+                directory = "/tmp/project",
+                title = "Server Refreshed"
+            )
+        )
+        coEvery { repository.getSessions(100) } returns Result.success(updatedSessions)
+
+        val viewModel = createViewModel()
+        updateState(viewModel) {
+            it.copy(
+                currentSessionId = "session-1",
+                sessions = listOf(com.yage.opencode_client.data.model.Session(id = "session-1", directory = "/tmp/project", title = "Old"))
+            )
+        }
+
+        handleSse(
+            viewModel,
+            SSEEvent(
+                payload = SSEPayload(
+                    type = "session.updated",
+                    properties = buildJsonObject {
+                        put(
+                            "session",
+                            buildJsonObject {
+                                put("id", JsonPrimitive("session-1"))
+                                put("directory", JsonPrimitive("/tmp/project"))
+                                put("title", JsonPrimitive("SSE Only"))
+                            }
+                        )
+                    }
+                )
+            )
+        )
+        advanceUntilIdle()
+
+        coVerify { repository.getSessions(100) }
+        assertEquals("Server Refreshed", viewModel.state.value.sessions.single().title)
     }
 
     @Test

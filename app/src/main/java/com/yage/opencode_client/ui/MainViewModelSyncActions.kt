@@ -53,6 +53,7 @@ internal fun handleIncomingSseEvent(
     state: MutableStateFlow<AppState>,
     event: SSEEvent,
     onRefreshMessages: (String, Boolean) -> Unit,
+    onRefreshSessions: () -> Unit,
     onLoadPendingPermissions: () -> Unit,
     onNonFatalIssue: (String) -> Unit
 ) {
@@ -61,6 +62,7 @@ internal fun handleIncomingSseEvent(
             val created = parseSessionCreatedEvent(event)
             if (created != null) {
                 state.update { it.copy(sessions = upsertSession(it.sessions, created.session)) }
+                onRefreshSessions()
             } else {
                 onNonFatalIssue("Ignoring invalid session.created payload")
             }
@@ -69,6 +71,7 @@ internal fun handleIncomingSseEvent(
             val updated = parseSessionUpdatedEvent(event)
             if (updated != null) {
                 state.update { it.copy(sessions = upsertSession(it.sessions, updated)) }
+                onRefreshSessions()
             } else {
                 onNonFatalIssue("Ignoring invalid session.updated payload")
             }
