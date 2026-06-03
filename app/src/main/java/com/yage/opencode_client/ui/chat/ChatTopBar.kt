@@ -309,10 +309,6 @@ internal fun ChatTopBar(
                         }
                     }
 
-                    state.contextUsage?.let { usage ->
-                        ContextUsageRing(usage = usage)
-                    }
-
                     val todoList = state.sessionTodos
                     val todoBadge = if (todoList.isNotEmpty()) {
                         "${todoList.count { it.isCompleted }}/${todoList.size}"
@@ -327,6 +323,10 @@ internal fun ChatTopBar(
                             modifier = Modifier.size(20.dp),
                             tint = MaterialTheme.colorScheme.onSurfaceVariant
                         )
+                    }
+
+                    state.contextUsage?.let { usage ->
+                        ContextUsageRing(usage = usage)
                     }
 
                     if (state.showSettingsButton) {
