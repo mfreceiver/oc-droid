@@ -75,6 +75,7 @@ data class AppState(
         val shortName: String
             get() = when {
                 displayName == "DeepSeek V4 Flash" -> "DS-Flash"
+                displayName == "DeepSeek Local" -> "DS-L"
                 displayName == "DeepSeek V4 Pro" -> "DS-Pro"
                 displayName == "Ollama DeepSeek V4 Pro" -> "ODS-Pro"
                 "Haiku" in displayName -> "Haiku"
