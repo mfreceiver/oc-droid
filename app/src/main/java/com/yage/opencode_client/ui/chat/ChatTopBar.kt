@@ -313,16 +313,30 @@ internal fun ChatTopBar(
                     val todoBadge = if (todoList.isNotEmpty()) {
                         "${todoList.count { it.isCompleted }}/${todoList.size}"
                     } else ""
-                    IconButton(
+                    Surface(
                         onClick = { showTodoDialog = true },
-                        modifier = Modifier.size(36.dp)
+                        shape = RoundedCornerShape(50),
+                        color = Color.Transparent
                     ) {
-                        Icon(
-                            Icons.Default.Checklist,
-                            contentDescription = if (todoBadge.isEmpty()) "Todo" else "Todo $todoBadge",
-                            modifier = Modifier.size(20.dp),
-                            tint = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp)
+                        ) {
+                            Icon(
+                                Icons.Default.Checklist,
+                                contentDescription = if (todoBadge.isEmpty()) "Todo" else "Todo $todoBadge",
+                                modifier = Modifier.size(16.dp),
+                                tint = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                            if (todoBadge.isNotEmpty()) {
+                                Spacer(modifier = Modifier.width(4.dp))
+                                Text(
+                                    todoBadge,
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.outline
+                                )
+                            }
+                        }
                     }
 
                     state.contextUsage?.let { usage ->
