@@ -75,6 +75,7 @@ data class AppState(
             get() = when {
                 displayName == "DeepSeek V4 Flash" -> "DS-Flash"
                 displayName == "DeepSeek V4 Pro" -> "DS-Pro"
+                displayName == "Ollama DeepSeek V4 Pro" -> "ODS-Pro"
                 "Haiku" in displayName -> "Haiku"
                 "Gemini" in displayName -> "Gemini"
                 "GPT" in displayName -> "GPT"
