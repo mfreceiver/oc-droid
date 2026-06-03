@@ -83,6 +83,39 @@ internal fun upsertSession(sessions: List<Session>, session: Session): List<Sess
     return listOf(session) + sessions.filter { it.id != session.id }
 }
 
+internal fun bumpSessionUpdated(sessions: List<Session>, sessionId: String, updated: Long): List<Session> {
+    return sessions.map { session ->
+        if (session.id == sessionId) {
+            session.copy(time = session.time.withUpdatedAtLeast(updated))
+        } else {
+            session
+        }
+    }
+}
+
+internal fun mergeRefreshedSessionsPreservingLocalActivity(
+    refreshed: List<Session>,
+    local: List<Session>
+): List<Session> {
+    val localById = local.associateBy { it.id }
+    return refreshed.map { remote ->
+        val localUpdated = localById[remote.id]?.time?.updated
+        val remoteUpdated = remote.time?.updated
+        if (localUpdated != null && (remoteUpdated == null || localUpdated > remoteUpdated)) {
+            remote.copy(time = remote.time.withUpdatedAtLeast(localUpdated))
+        } else {
+            remote
+        }
+    }
+}
+
+private fun Session.TimeInfo?.withUpdatedAtLeast(updated: Long): Session.TimeInfo {
+    val currentUpdated = this?.updated
+    return (this ?: Session.TimeInfo()).copy(
+        updated = if (currentUpdated == null || updated > currentUpdated) updated else currentUpdated
+    )
+}
+
 internal fun nextSessionFetchLimit(current: Int, pageSize: Int = MainViewModelTimings.sessionPageSize): Int {
     return maxOf(current, pageSize) + maxOf(pageSize, 1)
 }

@@ -15,6 +15,7 @@ import com.yage.opencode_client.data.repository.OpenCodeRepository
 import com.yage.opencode_client.ui.AppState
 import com.yage.opencode_client.ui.MainViewModel
 import com.yage.opencode_client.ui.ModelPresets
+import com.yage.opencode_client.ui.session.buildSessionTree
 import com.yage.opencode_client.util.SettingsManager
 import com.yage.opencode_client.util.ThemeMode
 import com.yage.voiceflowkit.VoiceFlowClient
@@ -207,6 +208,38 @@ class MainViewModelTest {
 
         coVerify(atLeast = 1) { repository.getSessions(100) }
         assertEquals("Updated", viewModel.state.value.sessions.single().title)
+    }
+
+    @Test
+    fun `sendMessage bumps current session above stale refreshed ordering`() = runTest {
+        val current = com.yage.opencode_client.data.model.Session(
+            id = "session-1",
+            directory = "/tmp/project",
+            title = "Current",
+            time = com.yage.opencode_client.data.model.Session.TimeInfo(updated = 1_000)
+        )
+        val previousTop = com.yage.opencode_client.data.model.Session(
+            id = "session-2",
+            directory = "/tmp/project",
+            title = "Previous Top",
+            time = com.yage.opencode_client.data.model.Session.TimeInfo(updated = 2_000)
+        )
+        coEvery { repository.sendMessage(any(), any(), any(), any()) } returns Result.success(Unit)
+        coEvery { repository.getSessions(100) } returns Result.success(listOf(previousTop, current))
+
+        val viewModel = createViewModel()
+        updateState(viewModel) {
+            it.copy(
+                currentSessionId = "session-1",
+                sessions = listOf(previousTop, current),
+                inputText = "hello"
+            )
+        }
+
+        viewModel.sendMessage()
+        advanceUntilIdle()
+
+        assertEquals("session-1", buildSessionTree(viewModel.state.value.sessions).first().session.id)
     }
 
     @Test

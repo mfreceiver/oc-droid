@@ -347,7 +347,7 @@ private fun PartView(
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun FileCard(
+internal fun FileCard(
     part: Part,
     onFileClick: (String) -> Unit,
     modifier: Modifier = Modifier.fillMaxWidth()
@@ -367,7 +367,21 @@ private fun FileCard(
     } == true
     var showFolderSheet by remember { mutableStateOf(false) }
 
-    val tag = if (isDirectoryRead) "toolcard.folder.$basename" else "toolcard.file.$basename"
+    // testTag encodes the read/write nature of the card so the semantics tree can
+    // distinguish them. A directory listing is always a read. For files, the tool
+    // prefix decides: readToolPrefixes -> read, otherwise write/edit/patch -> write.
+    // Layers 2-4 (component / integration-UI / LLM-driven) all rely on this; the icon
+    // color alone is invisible to the semantics tree.
+    val tag = when {
+        isDirectoryRead -> "toolcard.folder.$basename"
+        isReadOnlyFileTool -> "toolcard.read.$basename"
+        else -> "toolcard.write.$basename"
+    }
+    val iconDescription = when {
+        isDirectoryRead -> "Read directory $basename"
+        isReadOnlyFileTool -> "Read file $basename"
+        else -> "Write file $basename"
+    }
 
     Surface(
         color = MaterialTheme.colorScheme.surfaceVariant,
@@ -391,7 +405,7 @@ private fun FileCard(
         ) {
             Icon(
                 imageVector = if (isDirectoryRead) Icons.Default.Folder else Icons.Default.Description,
-                contentDescription = null,
+                contentDescription = iconDescription,
                 modifier = Modifier.size(16.dp),
                 tint = if (isReadOnlyFileTool) MaterialTheme.colorScheme.onSurfaceVariant else MaterialTheme.colorScheme.primary
             )

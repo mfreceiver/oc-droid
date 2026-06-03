@@ -30,23 +30,25 @@ internal fun launchLoadSessions(
         repository.getSessions(limit)
             .onSuccess { sessions ->
                 state.update {
+                    val mergedSessions = mergeRefreshedSessionsPreservingLocalActivity(sessions, it.sessions)
                     it.copy(
-                        sessions = sessions,
-                        hasMoreSessions = sessions.size >= limit,
+                        sessions = mergedSessions,
+                        hasMoreSessions = mergedSessions.size >= limit,
                         isLoadingMoreSessions = false,
                         isRefreshingSessions = false
                     )
                 }
                 val currentId = state.value.currentSessionId
-                val hasCurrentSession = currentId != null && sessions.any { it.id == currentId }
+                val refreshedSessions = state.value.sessions
+                val hasCurrentSession = currentId != null && refreshedSessions.any { it.id == currentId }
                 when {
-                    currentId == null && sessions.isNotEmpty() -> onSelectSession(sessions.first().id)
+                    currentId == null && refreshedSessions.isNotEmpty() -> onSelectSession(refreshedSessions.first().id)
                     hasCurrentSession -> {
                         onLoadSessionStatus()
                         onLoadMessages(currentId!!)
                     }
-                    sessions.isNotEmpty() -> {
-                        onSelectSession(sessions.first().id)
+                    refreshedSessions.isNotEmpty() -> {
+                        onSelectSession(refreshedSessions.first().id)
                     }
                     else -> {
                         state.update { it.copy(currentSessionId = null, messages = emptyList()) }
@@ -91,19 +93,21 @@ internal fun launchLoadMoreSessions(
                     return@onSuccess
                 }
                 state.update {
+                    val mergedSessions = mergeRefreshedSessionsPreservingLocalActivity(sessions, it.sessions)
                     it.copy(
-                        sessions = sessions,
+                        sessions = mergedSessions,
                         loadedSessionLimit = nextLimit,
-                        hasMoreSessions = sessions.size >= nextLimit,
+                        hasMoreSessions = mergedSessions.size >= nextLimit,
                         isLoadingMoreSessions = false
                     )
                 }
                 val currentId = state.value.currentSessionId
-                val hasCurrentSession = currentId != null && sessions.any { it.id == currentId }
+                val refreshedSessions = state.value.sessions
+                val hasCurrentSession = currentId != null && refreshedSessions.any { it.id == currentId }
                 when {
-                    currentId == null && sessions.isNotEmpty() -> onSelectSession(sessions.first().id)
+                    currentId == null && refreshedSessions.isNotEmpty() -> onSelectSession(refreshedSessions.first().id)
                     hasCurrentSession -> Unit
-                    sessions.isNotEmpty() -> onSelectSession(sessions.first().id)
+                    refreshedSessions.isNotEmpty() -> onSelectSession(refreshedSessions.first().id)
                     else -> state.update { it.copy(currentSessionId = null, messages = emptyList()) }
                 }
             }
@@ -396,6 +400,7 @@ internal fun launchSendMessage(
                     it.copy(
                         inputText = "",
                         error = null,
+                        sessions = bumpSessionUpdated(it.sessions, sessionId, System.currentTimeMillis()),
                         sessionStatuses = it.sessionStatuses + (sessionId to com.yage.opencode_client.data.model.SessionStatus(type = "busy"))
                     )
                 }
