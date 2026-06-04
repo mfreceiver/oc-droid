@@ -87,6 +87,30 @@ class Driver:
         self.adb.clear_data()
         return {"ok": True, "serial": self.adb.serial, "action": "clear-data"}
 
+    def inject_credentials(self, url: str, username: str, password: str,
+                           screenshot=None) -> dict:
+        """Debug-only fast path: launch MainActivity with the connection
+        credentials as Intent string extras, so the app's debug-gated injection
+        configures the server (persists to EncryptedSharedPreferences + connects)
+        without us driving the Settings UI at all.
+
+        This sidesteps `configure-server`: no tab switch, no field typing, no
+        Test Connection tap (which could hang). The values are passed as `am
+        start --es <key> <value>` argv elements (see Adb.launch / parsing
+        .am_start_extra_args), so a password containing '@' or spaces is
+        delivered verbatim. Returns the post-launch UI tree like other mutating
+        commands.
+        """
+        self.adb.launch(string_extras={
+            "test_server_url": url,
+            "test_username": username,
+            "test_password": password,
+        })
+        # The debug injection runs configureServer (persist + repository
+        # connect) at launch; give it a moment to render before observing.
+        self.adb.sleep(1)
+        return self._observe(screenshot=screenshot)
+
     def scroll_to_text(self, label: str, screenshot=None) -> dict:
         found = self._scroll_until(label)
         result = self._observe(screenshot=screenshot)

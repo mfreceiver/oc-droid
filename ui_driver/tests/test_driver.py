@@ -62,8 +62,8 @@ class FakeAdb:
         self.calls.append(("wait_for_foreground", component))
         return True
 
-    def launch(self):
-        self.calls.append(("launch",))
+    def launch(self, string_extras=None):
+        self.calls.append(("launch", string_extras))
 
     def clear_data(self):
         self.calls.append(("clear-data",))
@@ -145,7 +145,7 @@ def test_launch_waits_for_foreground():
     adb = FakeAdb([_load("settings_screen.xml")])
     d = Driver(adb)
     out = d.launch()
-    assert ("launch",) in adb.calls
+    assert ("launch", None) in adb.calls
     assert out["ok"] is True
 
 
@@ -316,6 +316,20 @@ def test_scroll_finds_label_below_first_pass():
     swipes = [c for c in adb.calls if c[0] == "swipe"]
     # Only downward swipes (finger drags from larger y to smaller y).
     assert all(s[2] >= s[4] for s in swipes)
+
+
+def test_inject_credentials_launches_with_string_extras():
+    adb = FakeAdb([_load("settings_screen.xml")])
+    d = Driver(adb)
+    out = d.inject_credentials("http://h:9", "alice", "p@ss w:rd")
+    # The launch carried exactly the three test_* string extras, untouched.
+    launch_calls = [c for c in adb.calls if c[0] == "launch"]
+    assert launch_calls == [("launch", {
+        "test_server_url": "http://h:9",
+        "test_username": "alice",
+        "test_password": "p@ss w:rd",
+    })]
+    assert out["ok"] is True
 
 
 def test_clear_data_does_not_dump():

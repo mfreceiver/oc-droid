@@ -7,7 +7,7 @@ import androidx.activity.enableEdgeToEdge
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.*
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Chat
+import androidx.compose.material.icons.automirrored.filled.Chat
 import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.outlined.ChatBubbleOutline
@@ -23,7 +23,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.statusBars
 import androidx.compose.foundation.layout.windowInsetsPadding
-import androidx.compose.ui.platform.LocalLifecycleOwner
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.repeatOnLifecycle
 import androidx.compose.ui.unit.dp
@@ -55,7 +55,7 @@ sealed class Screen(
     object Chat : Screen(
         "chat",
         "Chat",
-        Icons.Default.Chat,
+        Icons.AutoMirrored.Filled.Chat,
         Icons.Outlined.ChatBubbleOutline
     )
 
@@ -76,6 +76,13 @@ sealed class Screen(
 
 val screens = listOf(Screen.Chat, Screen.Files, Screen.Settings)
 
+// Debug-only Intent extra keys for injecting connection credentials at launch,
+// so automated UI tests can connect to a server without driving the Settings UI.
+// Read only when BuildConfig.DEBUG is true (see onCreate).
+private const val EXTRA_TEST_SERVER_URL = "test_server_url"
+private const val EXTRA_TEST_USERNAME = "test_username"
+private const val EXTRA_TEST_PASSWORD = "test_password"
+
 @OptIn(ExperimentalMaterial3WindowSizeClassApi::class)
 @AndroidEntryPoint
 class MainActivity : ComponentActivity() {
@@ -86,6 +93,21 @@ class MainActivity : ComponentActivity() {
             val viewModel: MainViewModel = hiltViewModel()
             val lifecycleOwner = LocalLifecycleOwner.current
             LaunchedEffect(lifecycleOwner) {
+                // Debug-only credential injection: if the launch Intent carries
+                // test credentials (passed via `am start --es test_server_url ...`),
+                // configure the server before testing the connection so automated
+                // tests skip the Settings UI entirely. Gated hard on BuildConfig.DEBUG
+                // so this path is dead code in release builds.
+                if (BuildConfig.DEBUG) {
+                    val testUrl = intent?.getStringExtra(EXTRA_TEST_SERVER_URL)
+                    if (!testUrl.isNullOrEmpty()) {
+                        viewModel.configureServer(
+                            url = testUrl,
+                            username = intent?.getStringExtra(EXTRA_TEST_USERNAME),
+                            password = intent?.getStringExtra(EXTRA_TEST_PASSWORD)
+                        )
+                    }
+                }
                 lifecycleOwner.lifecycle.repeatOnLifecycle(Lifecycle.State.STARTED) {
                     viewModel.testConnection()
                 }
