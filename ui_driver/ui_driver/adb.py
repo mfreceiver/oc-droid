@@ -221,14 +221,23 @@ class Adb:
         for _ in range(repeats):
             self.keyevent("KEYCODE_DEL")
 
-    def launch(self) -> None:
+    def launch(self, string_extras: Optional[dict] = None) -> None:
         """Cold-start MainActivity, then settle.
 
         `am start` returns before the activity is actually on top, so we poll
         the foreground activity until MainActivity is resumed (or ~5s elapses)
         before returning. Without this, an immediate dump can catch the launcher
-        or the previous screen."""
-        self.shell(["am", "start", "-n", f"{self.PACKAGE}/{self.ACTIVITY}"])
+        or the previous screen.
+
+        `string_extras` is an optional {key: value} mapping turned into
+        `--es key value` pairs. Each key/value is passed to `self.shell` as a
+        separate argv element, so subprocess hands them to adb verbatim (no
+        device-shell word-splitting) — values containing spaces, '@', etc. are
+        delivered intact. `am start` is the only mutating launch path, so we
+        keep the wait-for-foreground here rather than re-implementing it.
+        """
+        self.shell(["am", "start", "-n", f"{self.PACKAGE}/{self.ACTIVITY}",
+                    *parsing.am_start_extra_args(string_extras or {})])
         self.wait_for_foreground()
 
     def clear_data(self) -> None:

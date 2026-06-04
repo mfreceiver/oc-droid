@@ -205,6 +205,24 @@ def escape_input_text(text: str) -> str:
     return out
 
 
+def am_start_extra_args(string_extras: dict) -> list[str]:
+    """Build the `--es key value` argv tail for `am start` string extras.
+
+    Returns a flat argv list, e.g. {"a": "1", "b": "x y"} ->
+    ["--es", "a", "1", "--es", "b", "x y"]. Each key and value is its own argv
+    element, so subprocess passes them to adb literally — there is NO device
+    shell to word-split them, so values with spaces, '@', ':', '/', etc. (e.g. a
+    password like 'p@ss w:rd' or a URL) survive verbatim. We deliberately do not
+    quote/escape here: adding shell quoting would be wrong, because these are
+    exec argv elements, not a shell string. Order follows dict insertion order
+    so callers (and tests) get a deterministic argv.
+    """
+    args: list[str] = []
+    for key, value in string_extras.items():
+        args += ["--es", key, value]
+    return args
+
+
 # ---- Action-sequence step planning (pure) --------------------------------
 # These functions return the ordered list of abstract steps a high-level
 # command performs. Returning data (not doing IO) lets us unit-test that the

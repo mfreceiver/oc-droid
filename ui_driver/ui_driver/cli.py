@@ -72,6 +72,14 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--password", required=True)
     _add_screenshot(p)
 
+    p = sub.add_parser("inject-credentials",
+                       help="debug-only: launch app with credentials as Intent "
+                            "extras (persists + connects, skips Settings UI)")
+    p.add_argument("--url", required=True)
+    p.add_argument("--username", required=True)
+    p.add_argument("--password", required=True)
+    _add_screenshot(p)
+
     p = sub.add_parser("send-prompt", help="type prompt into chat input and Send")
     p.add_argument("text")
     _add_screenshot(p)
@@ -106,6 +114,9 @@ def _dispatch(args: argparse.Namespace, driver: Driver) -> dict:
     if cmd == "configure-server":
         return driver.configure_server(args.url, args.username, args.password,
                                        screenshot=args.screenshot)
+    if cmd == "inject-credentials":
+        return driver.inject_credentials(args.url, args.username, args.password,
+                                         screenshot=args.screenshot)
     if cmd == "send-prompt":
         return driver.send_prompt(args.text, screenshot=args.screenshot)
     if cmd == "select-model":
@@ -124,9 +135,14 @@ def main(argv=None) -> int:
         json.dump(e.to_dict(), sys.stdout, indent=2)
         sys.stdout.write("\n")
         return 2
+    # Normalize `ok` to a real boolean before serializing. Callers check the
+    # `ok` field; a missing key (or an accidental None) must read as a concrete
+    # true/false in the JSON, never null — otherwise a boolean check on the
+    # caller side mis-judges a failed command as ambiguous/passing.
+    result["ok"] = bool(result.get("ok", True))
     json.dump(result, sys.stdout, indent=2, ensure_ascii=False)
     sys.stdout.write("\n")
-    return 0 if result.get("ok", True) else 1
+    return 0 if result["ok"] else 1
 
 
 if __name__ == "__main__":

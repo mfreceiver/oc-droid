@@ -47,13 +47,13 @@
 - **`connectedDebugAndroidTest` 跑完会卸载 app。** gradle 的 instrumented test 跑完会把 app 和 test APK 都卸掉。之后 `clear-data`/`launch` 会失败（`pm clear` 返回 "Failed"）或停在 launcher 桌面。症状：`tree` 返回的 package 是 `nexuslauncher`、texts 里全是 Gmail/Photos/YouTube。解决：先 `./gradlew assembleDebug` 再 `adb -s emulator-5554 install -r -g <apk>` 重装，再驱动。
 - **`launch` 后 activity 需要时间到前台。** CLI 的 `launch` 已内置等待（轮询 topResumedActivity），但若你直接用 `am start`，立刻 dump 可能抓到上一个界面。
 - **不要无条件按 BACK 收键盘。** app 在根界面、没有键盘弹起时按 BACK 会直接退出 app 到 launcher。CLI 的高层命令已经做了 conditional dismiss（只在 `mInputShown=true` 时按 BACK）；agent 自己拼原子命令时也要注意这点。
-- **用 CLI / prompt_async 发的 session，服务器往往不生成 title。** 这些 session 标题一直是 "New session - <时间戳>"，服务器侧就没生成过真标题（title agent 没被触发）。所以**不要用 session 标题是否更新来判断 CLI 发消息成功了**；判断成功要看消息/tool call 是否出现在对话里。这条对测「标题刷新」类行为尤其关键：得走 app 真实 send 路径、足够长的对话才可能触发 title agent。
+- **判断发消息成功看对话内容，不看 session 标题。** 服务器的 title agent 只在走 app 真实 send 路径、且对话足够长时才触发；用很短的 read 任务、或纯 CLI/prompt_async 发的 session，标题可能一直停在 "New session - <时间戳>"。所以判断发送成功要看消息/tool call 是否出现在对话里，不要用标题是否更新来判断。（注：标题最终会由服务器异步生成，触发后通过 SSE `session.updated` 推送。）
 
-- **Test Connection 会卡死（app 侧 bug）。** 在同一个 app session 里反复点 Test Connection（或反复跑 configure-server），它会进入无限转圈状态，既不出 "Connected" 也不报错，之后怎么配都连不上（`connected: False`），即使 host 上 server 健康、URL 填对、网络通。解法：`am force-stop` + `pm clear` + 重启 app，干净状态下**只配一次**。相关修复见社区 PR #34（cancel-and-restart 替代 cooldown）。配 server 失败时先怀疑这个，别反复重试 configure-server（越重试越卡）。
+- **send-prompt / type-text 不支持中文等非 ASCII。** 它们底层走 `adb shell input text`，对 CJK/非 ASCII 会直接 NPE（`Attempt to get length of null array`），文字一个都进不去。当前只能发英文 prompt。要发中文得另想办法（装 ADBKeyboard 走 broadcast intent 等），暂未支持。测试 prompt 用英文写。
 
-- **emulator → host 连接偶尔会断。** 现象同上（`connected: False` 但 host 4097 health 200）。`10.0.2.2` 是标准宿主机别名，断了可尝试 cold-boot emulator 或 `adb reverse tcp:4097 tcp:4097` + 改用 `localhost:4097`。注意这和上一条的 Test-Connection 卡死表现一样，需要分辨：先确认 emulator 能不能 ping 通 host，再判断是网络还是 app 卡死。
+- **configure-server 连不上 / Test Connection 卡死时，重启 emulator 往往直接解决。** 现象：configure-server 返回 `connected: False`，但 host 上 server 健康（`global/health` 200）、URL 也填对了。两种成因长得一样：app 的 Test Connection 进入无限转圈（在同一个 app session 里反复点 Test Connection / 反复跑 configure-server 容易触发，相关 app 侧修复见社区 PR #34），或 emulator→host 网络栈坏了（`10.0.2.2` 是标准宿主机别名）。**最快也最可靠的解法是 kill 掉 emulator 硬重启**（`adb -s <serial> emu kill`，或直接关掉 emulator 进程，再 `emulator -avd <name>` 重启）；重启后第一次 configure-server 通常立刻 `connected: True`。轻一点的尝试：`am force-stop` + `pm clear` + 重启 app 后只配一次，或 `adb reverse tcp:4097 tcp:4097` + 改用 `localhost:4097`。核心原则：**别在同一个 app session 里反复重试 configure-server**（越重试越卡），失败一次就重启 emulator。
 
-- **send-prompt 的可靠性来自「发后验证」。** 早期 send-prompt 会打了字但 Send 点击不生效（dump UI tree 时键盘弹起会扰动 IME，紧接着的 tap 落空）。现在的实现先收键盘再定位 Send、发送后 poll 输入框确认文字离开、不行就重试。这条逻辑有单测覆盖；若真机上仍遇到没发出去，先确认是不是上面两条（Test Connection 卡死 / 网络断）导致根本没进到可发送状态。
+- **send-prompt 的可靠性来自「发后验证」。** 早期 send-prompt 会打了字但 Send 点击不生效（dump UI tree 时键盘弹起会扰动 IME，紧接着的 tap 落空）。现在的实现先收键盘再定位 Send、发送后 poll 输入框确认文字离开、不行就重试。这条逻辑有单测覆盖；若真机上仍遇到没发出去，先确认是不是上一条（连接卡死）导致根本没进到可发送状态。
 
 ## 验收标准
 

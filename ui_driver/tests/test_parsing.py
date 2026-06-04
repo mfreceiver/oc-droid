@@ -306,3 +306,28 @@ def test_parse_top_activity_launcher():
 
 def test_parse_top_activity_absent():
     assert parsing.parse_top_activity("nothing here") is None
+
+
+def test_am_start_extra_args_basic_pairs():
+    args = parsing.am_start_extra_args({"a": "1", "b": "2"})
+    # Flat argv, dict order preserved, each key/value its own element.
+    assert args == ["--es", "a", "1", "--es", "b", "2"]
+
+
+def test_am_start_extra_args_preserves_special_chars_unescaped():
+    # Values are exec argv elements, not a shell string: '@', spaces, ':', '/'
+    # must pass through verbatim (no quoting/escaping added).
+    args = parsing.am_start_extra_args({
+        "test_server_url": "http://host:9090",
+        "test_username": "alice",
+        "test_password": "p@ss w:rd/x",
+    })
+    assert args == [
+        "--es", "test_server_url", "http://host:9090",
+        "--es", "test_username", "alice",
+        "--es", "test_password", "p@ss w:rd/x",
+    ]
+
+
+def test_am_start_extra_args_empty():
+    assert parsing.am_start_extra_args({}) == []

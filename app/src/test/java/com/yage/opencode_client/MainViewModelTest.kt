@@ -395,6 +395,69 @@ class MainViewModelTest {
     }
 
     @Test
+    fun `session updated SSE title survives a stale concurrent refresh`() = runTest {
+        // The server's session.updated event carries the generated title with a fresh timestamp,
+        // but the full refresh it triggers returns a stale snapshot (placeholder title, older
+        // timestamp). The freshly received title must remain visible (Chat header reads it from
+        // state.sessions) rather than being clobbered by the stale refresh.
+        coEvery { repository.getSessions(100) } returns Result.success(
+            listOf(
+                com.yage.opencode_client.data.model.Session(
+                    id = "session-1",
+                    directory = "/tmp/project",
+                    title = "New session - 1700000000",
+                    time = com.yage.opencode_client.data.model.Session.TimeInfo(updated = 1_000)
+                )
+            )
+        )
+
+        val viewModel = createViewModel()
+        updateState(viewModel) {
+            it.copy(
+                currentSessionId = "session-1",
+                sessions = listOf(
+                    com.yage.opencode_client.data.model.Session(
+                        id = "session-1",
+                        directory = "/tmp/project",
+                        title = "New session - 1700000000",
+                        time = com.yage.opencode_client.data.model.Session.TimeInfo(updated = 1_000)
+                    )
+                )
+            )
+        }
+
+        handleSse(
+            viewModel,
+            SSEEvent(
+                payload = SSEPayload(
+                    type = "session.updated",
+                    properties = buildJsonObject {
+                        put(
+                            "info",
+                            buildJsonObject {
+                                put("id", JsonPrimitive("session-1"))
+                                put("directory", JsonPrimitive("/tmp/project"))
+                                put("title", JsonPrimitive("Pythagorean theorem: history, proof, engineering"))
+                                put(
+                                    "time",
+                                    buildJsonObject { put("updated", JsonPrimitive(2_000)) }
+                                )
+                            }
+                        )
+                    }
+                )
+            )
+        )
+        advanceUntilIdle()
+
+        coVerify { repository.getSessions(100) }
+        assertEquals(
+            "Pythagorean theorem: history, proof, engineering",
+            viewModel.state.value.sessions.single { it.id == "session-1" }.title
+        )
+    }
+
+    @Test
     fun `message created SSE refreshes session list for incoming assistant activity`() = runTest {
         val refreshedSessions = listOf(
             com.yage.opencode_client.data.model.Session(

@@ -99,10 +99,19 @@ internal fun mergeRefreshedSessionsPreservingLocalActivity(
 ): List<Session> {
     val localById = local.associateBy { it.id }
     return refreshed.map { remote ->
-        val localUpdated = localById[remote.id]?.time?.updated
+        val localSession = localById[remote.id]
+        val localUpdated = localSession?.time?.updated
         val remoteUpdated = remote.time?.updated
         if (localUpdated != null && (remoteUpdated == null || localUpdated > remoteUpdated)) {
-            remote.copy(time = remote.time.withUpdatedAtLeast(localUpdated))
+            // The local copy is strictly newer than this refresh response (e.g. it was just
+            // upserted from a session.updated SSE event that carries the server-authoritative
+            // title). A concurrently-issued full refresh can return a stale snapshot that
+            // predates the title generation, so prefer the local title here to avoid clobbering
+            // it. The full refresh remains authoritative whenever it is at least as fresh.
+            remote.copy(
+                title = localSession.title ?: remote.title,
+                time = remote.time.withUpdatedAtLeast(localUpdated)
+            )
         } else {
             remote
         }
