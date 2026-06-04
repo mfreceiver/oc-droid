@@ -27,7 +27,7 @@ import androidx.compose.material.icons.filled.Description
 import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.MoreVert
-import androidx.compose.material.icons.filled.OpenInNew
+import androidx.compose.material.icons.automirrored.filled.OpenInNew
 import androidx.compose.material.icons.filled.Psychology
 import androidx.compose.material.icons.filled.RadioButtonUnchecked
 import androidx.compose.material.icons.filled.CheckCircle
@@ -788,7 +788,7 @@ private fun ToolCard(
                     if (firstFile != null) {
                         IconButton(onClick = { onFileClick(firstFile) }, modifier = Modifier.size(28.dp)) {
                             Icon(
-                                Icons.Default.OpenInNew,
+                                Icons.AutoMirrored.Filled.OpenInNew,
                                 contentDescription = "Show in Files",
                                 modifier = Modifier.size(18.dp),
                                 tint = MaterialTheme.colorScheme.primary
@@ -864,7 +864,7 @@ private fun ToolCard(
                                 )
                                 IconButton(onClick = { onFileClick(path) }, modifier = Modifier.size(28.dp)) {
                                     Icon(
-                                        Icons.Default.OpenInNew,
+                                        Icons.AutoMirrored.Filled.OpenInNew,
                                         contentDescription = "Show in Files",
                                         modifier = Modifier.size(18.dp),
                                         tint = MaterialTheme.colorScheme.primary
@@ -918,7 +918,7 @@ private fun PatchCard(
                         )
                         IconButton(onClick = { onFileClick(path) }, modifier = Modifier.size(28.dp)) {
                             Icon(
-                                Icons.Default.OpenInNew,
+                                Icons.AutoMirrored.Filled.OpenInNew,
                                 contentDescription = "Show in Files",
                                 modifier = Modifier.size(18.dp),
                                 tint = MaterialTheme.colorScheme.primary
