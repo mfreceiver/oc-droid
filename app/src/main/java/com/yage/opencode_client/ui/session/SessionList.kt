@@ -10,6 +10,7 @@ import androidx.compose.foundation.gestures.DraggableAnchors
 import androidx.compose.foundation.gestures.Orientation
 import androidx.compose.foundation.gestures.anchoredDraggable
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxScope
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -209,7 +210,7 @@ private fun SwipeRevealRow(
 }
 
 @Composable
-private fun SwipeActionBackground(
+private fun BoxScope.SwipeActionBackground(
     isArchived: Boolean,
     backgroundColor: Color,
     onArchive: () -> Unit,
@@ -218,7 +219,7 @@ private fun SwipeActionBackground(
 ) {
     Row(
         modifier = Modifier
-            .fillMaxSize()
+            .matchParentSize()
             .background(backgroundColor),
         verticalAlignment = Alignment.CenterVertically
     ) {
