@@ -90,7 +90,11 @@ class OpenCodeRepository @Inject constructor() {
     }
 
     suspend fun updateSession(sessionId: String, title: String): Result<Session> = runCatching {
-        api.updateSession(sessionId, UpdateSessionRequest(title))
+        api.updateSession(sessionId, UpdateSessionRequest(title = title))
+    }
+
+    suspend fun updateSessionArchived(sessionId: String, archived: Long): Result<Session> = runCatching {
+        api.updateSession(sessionId, UpdateSessionRequest(time = UpdateSessionTimeRequest(archived = archived)))
     }
 
     suspend fun deleteSession(sessionId: String): Result<Unit> = runCatching {

@@ -345,6 +345,42 @@ internal fun launchUpdateSessionTitle(
     }
 }
 
+internal fun launchSetSessionArchived(
+    scope: CoroutineScope,
+    repository: OpenCodeRepository,
+    state: MutableStateFlow<AppState>,
+    sessionId: String,
+    archived: Boolean
+) {
+    scope.launch {
+        val archivedValue = if (archived) System.currentTimeMillis() else -1L
+        val ids = sessionSubtreeIds(state.value.sessions, sessionId, parentFirst = !archived)
+        for (id in ids) {
+            repository.updateSessionArchived(id, archivedValue)
+                .onSuccess { updated ->
+                    state.update { current ->
+                        current.copy(sessions = current.sessions.map { session -> if (session.id == id) updated else session })
+                    }
+                }
+                .onFailure { error ->
+                    state.update {
+                        it.copy(error = "Failed to ${if (archived) "archive" else "restore"} session: ${errorMessageOrFallback(error, "unknown error")}")
+                    }
+                    return@launch
+                }
+        }
+    }
+}
+
+private fun sessionSubtreeIds(sessions: List<com.yage.opencode_client.data.model.Session>, rootId: String, parentFirst: Boolean): List<String> {
+    val childrenByParent = sessions.groupBy { it.parentId }
+    fun collect(id: String): List<String> {
+        val children = childrenByParent[id].orEmpty().flatMap { collect(it.id) }
+        return if (parentFirst) listOf(id) + children else children + id
+    }
+    return collect(rootId)
+}
+
 internal fun launchDeleteSession(
     scope: CoroutineScope,
     repository: OpenCodeRepository,

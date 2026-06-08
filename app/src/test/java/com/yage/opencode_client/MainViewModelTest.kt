@@ -7,6 +7,7 @@ import com.yage.opencode_client.data.model.Part
 import com.yage.opencode_client.data.model.PermissionRequest
 import com.yage.opencode_client.data.model.PermissionResponse
 import com.yage.opencode_client.data.model.QuestionRequest
+import com.yage.opencode_client.data.model.Session
 import com.yage.opencode_client.data.model.SessionStatus
 import com.yage.opencode_client.data.model.SSEEvent
 import com.yage.opencode_client.data.model.SSEPayload
@@ -22,6 +23,7 @@ import com.yage.voiceflowkit.VoiceFlowClient
 import com.yage.voiceflowkit.VoiceFlowMicrophone
 import io.mockk.coEvery
 import io.mockk.coVerify
+import io.mockk.coVerifyOrder
 import io.mockk.every
 import io.mockk.just
 import io.mockk.mockk
@@ -660,6 +662,63 @@ class MainViewModelTest {
 
         coVerify(exactly = 1) { repository.getSessions(200) }
         assertEquals(200, viewModel.state.value.loadedSessionLimit)
+    }
+
+    @Test
+    fun `archiveSession archives subtree children before parent`() = runTest {
+        val parent = Session(id = "parent", directory = "/tmp/project")
+        val child = Session(id = "child", directory = "/tmp/project", parentId = "parent")
+        coEvery { repository.updateSessionArchived("child", any()) } returns Result.success(
+            child.copy(time = Session.TimeInfo(archived = 1_000))
+        )
+        coEvery { repository.updateSessionArchived("parent", any()) } returns Result.success(
+            parent.copy(time = Session.TimeInfo(archived = 1_000))
+        )
+
+        val viewModel = createViewModel()
+        updateState(viewModel) { it.copy(sessions = listOf(parent, child)) }
+
+        viewModel.archiveSession("parent")
+        advanceUntilIdle()
+
+        coVerifyOrder {
+            repository.updateSessionArchived("child", any())
+            repository.updateSessionArchived("parent", any())
+        }
+        assertTrue(viewModel.state.value.sessions.all { it.isArchived })
+    }
+
+    @Test
+    fun `restoreSession restores subtree parent before children`() = runTest {
+        val parent = Session(
+            id = "parent",
+            directory = "/tmp/project",
+            time = Session.TimeInfo(archived = 1_000)
+        )
+        val child = Session(
+            id = "child",
+            directory = "/tmp/project",
+            parentId = "parent",
+            time = Session.TimeInfo(archived = 1_000)
+        )
+        coEvery { repository.updateSessionArchived("parent", -1L) } returns Result.success(
+            parent.copy(time = Session.TimeInfo(archived = -1))
+        )
+        coEvery { repository.updateSessionArchived("child", -1L) } returns Result.success(
+            child.copy(time = Session.TimeInfo(archived = -1))
+        )
+
+        val viewModel = createViewModel()
+        updateState(viewModel) { it.copy(sessions = listOf(parent, child)) }
+
+        viewModel.restoreSession("parent")
+        advanceUntilIdle()
+
+        coVerifyOrder {
+            repository.updateSessionArchived("parent", -1L)
+            repository.updateSessionArchived("child", -1L)
+        }
+        assertFalse(viewModel.state.value.sessions.any { it.isArchived })
     }
 
     @Test

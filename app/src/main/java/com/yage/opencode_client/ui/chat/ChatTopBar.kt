@@ -79,6 +79,8 @@ internal data class ChatTopBarActions(
     val onSelectSession: (String) -> Unit,
     val onCreateSession: () -> Unit,
     val onDeleteSession: (String) -> Unit,
+    val onArchiveSession: (String) -> Unit = {},
+    val onRestoreSession: (String) -> Unit = {},
     val onLoadMoreSessions: () -> Unit,
     val onRefreshSessions: () -> Unit = {},
     val onToggleSessionExpanded: (String) -> Unit = {},
@@ -333,6 +335,8 @@ internal fun ChatTopBar(
                         actions.onDeleteSession(it)
                         showSessionSheet = false
                     },
+                    onArchiveSession = actions.onArchiveSession,
+                    onRestoreSession = actions.onRestoreSession,
                     onLoadMoreSessions = actions.onLoadMoreSessions,
                     onRefreshSessions = actions.onRefreshSessions,
                     onToggleSessionExpanded = actions.onToggleSessionExpanded,

@@ -185,6 +185,25 @@ class OpenCodeRepositoryTest {
     }
 
     @Test
+    fun `updateSessionArchived sends archived time body`() = runBlocking {
+        val session = Session(
+            id = "session-1",
+            directory = "/project",
+            time = Session.TimeInfo(archived = 1234)
+        )
+        server.enqueue(jsonResponse(json.encodeToString(session)))
+
+        val result = repository.updateSessionArchived("session-1", 1234)
+
+        assertTrue(result.isSuccess)
+        assertTrue(result.getOrThrow().isArchived)
+        val request = server.takeRequest()
+        assertEquals("PATCH", request.method)
+        assertEquals("/session/session-1", request.path)
+        assertEquals("{\"time\":{\"archived\":1234}}", request.body.readUtf8())
+    }
+
+    @Test
     fun `deleteSession returns success and sends delete request`() = runBlocking {
         server.enqueue(MockResponse().setResponseCode(204))
 

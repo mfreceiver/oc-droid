@@ -247,6 +247,8 @@ private fun TabletLayout(viewModel: MainViewModel) {
                     onSelectSession = { viewModel.selectSession(it) },
                     onCreateSession = { viewModel.createSession() },
                     onDeleteSession = { viewModel.deleteSession(it) },
+                    onArchiveSession = { viewModel.archiveSession(it) },
+                    onRestoreSession = { viewModel.restoreSession(it) },
                     onLoadMoreSessions = { viewModel.loadMoreSessions() },
                     onRefreshSessions = { viewModel.loadSessions() },
                     onToggleSessionExpanded = { viewModel.toggleSessionExpanded(it) },

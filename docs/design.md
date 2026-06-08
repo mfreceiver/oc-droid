@@ -82,9 +82,13 @@ Quiet Tech 的 token 定义在 `ui/theme/Color.kt`，并在 `ui/theme/Theme.kt` 
 
 ## Session 列表（`SessionList` / `SwipeRevealRow`）
 
+- Session List 按 **Active / Archived** 两个分区展示。Active 是当前工作集；Archived 是同屏折叠抽屉，不跳到 Settings 或另一个页面。
 - **选中行**：3dp 电蓝左色条 baked 进 12dp 圆角的选中底（`primary.copy(alpha = 0.08f)`），整体 clip 在圆角内——色条不会戳出圆角、不与展开 chevron / 缩进冲突。
 - 未选中行透明（去掉交替条纹底，取更干净的 Quiet Tech 观感）。
-- 保留：swipe 删除、展开折叠、depth 缩进、busy 标题色、状态文字。
+- Active 行 leading swipe 为 Archive；Archived 行 leading swipe 为 Restore；trailing swipe 始终为 Delete。所有 action 使用图标在上、文字在下的克制按钮语言。
+- Archived rows 仍可点击查看，但标题和状态使用弱一级中性色，不画当前选中 accent，避免读起来像当前工作项。
+- Session 分页使用顶部全局 `Load older` action，不再用底部自动 sentinel；这样 Archived 默认折叠时不会为了不可见历史自动连续分页，也不会把加载更多误读成 Archived 专属动作。
+- 保留：展开折叠、depth 缩进、busy 标题色、状态文字。
 
 ## Settings（`SettingsSections`）
 
