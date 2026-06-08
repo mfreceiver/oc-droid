@@ -10,6 +10,7 @@ import androidx.compose.foundation.gestures.DraggableAnchors
 import androidx.compose.foundation.gestures.Orientation
 import androidx.compose.foundation.gestures.anchoredDraggable
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxScope
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -62,6 +63,7 @@ import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import com.yage.opencode_client.data.model.Session
 import com.yage.opencode_client.data.model.SessionStatus
+import com.yage.opencode_client.ui.theme.StopRed
 import kotlin.math.roundToInt
 
 private enum class SwipeAnchor { Leading, Center, Trailing }
@@ -209,7 +211,7 @@ private fun SwipeRevealRow(
 }
 
 @Composable
-private fun SwipeActionBackground(
+private fun BoxScope.SwipeActionBackground(
     isArchived: Boolean,
     backgroundColor: Color,
     onArchive: () -> Unit,
@@ -218,7 +220,7 @@ private fun SwipeActionBackground(
 ) {
     Row(
         modifier = Modifier
-            .fillMaxSize()
+            .matchParentSize()
             .background(backgroundColor),
         verticalAlignment = Alignment.CenterVertically
     ) {
@@ -254,9 +256,9 @@ private fun SwipeActionBackground(
                 Icon(
                     Icons.Default.Delete,
                     contentDescription = "Delete session",
-                    tint = MaterialTheme.colorScheme.primary,
+                    tint = StopRed,
                 )
-                Text("Delete", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.primary)
+                Text("Delete", style = MaterialTheme.typography.labelSmall, color = StopRed)
             }
         }
     }
