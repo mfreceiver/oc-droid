@@ -106,7 +106,13 @@ data class CreateSessionRequest(
 
 @kotlinx.serialization.Serializable
 data class UpdateSessionRequest(
-    val title: String
+    val title: String? = null,
+    val time: UpdateSessionTimeRequest? = null
+)
+
+@kotlinx.serialization.Serializable
+data class UpdateSessionTimeRequest(
+    val archived: Long? = null
 )
 
 @kotlinx.serialization.Serializable

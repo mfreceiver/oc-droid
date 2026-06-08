@@ -89,6 +89,8 @@ fun ChatScreen(
                 onSelectSession = viewModel::selectSession,
                 onCreateSession = viewModel::createSession,
                 onDeleteSession = viewModel::deleteSession,
+                onArchiveSession = viewModel::archiveSession,
+                onRestoreSession = viewModel::restoreSession,
                 onLoadMoreSessions = viewModel::loadMoreSessions,
                 onRefreshSessions = viewModel::loadSessions,
                 onToggleSessionExpanded = viewModel::toggleSessionExpanded,

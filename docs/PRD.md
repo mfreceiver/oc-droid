@@ -114,7 +114,7 @@ Android Client 提供以下核心能力：
 
 #### Chat Tab
 
-- **Session 管理**：列出所有 Session，创建/切换/重命名，标题通过 SSE 实时更新 ✅
+- **Session 管理**：列出所有 Session，创建/切换/重命名，标题通过 SSE 实时更新；Session List 分 Active / Archived 两个分区，支持 Archive / Restore / Delete swipe actions，archive/restore 对 subtree 递归生效 ✅
 - **消息发送**：支持多行输入，busy 时服务端排队 ✅
 - **消息渲染** ✅：
   - 用户消息：灰色背景 ✅

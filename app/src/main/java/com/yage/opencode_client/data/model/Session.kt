@@ -20,6 +20,9 @@ data class Session(
     /** Display name for UI: title, or last path segment of directory, or id */
     val displayName: String
         get() = title ?: directory.split("/").filter { it.isNotEmpty() }.lastOrNull() ?: id
+
+    val isArchived: Boolean get() = (time?.archived ?: 0L) > 0L
+
     @Serializable
     data class TimeInfo(
         val created: Long? = null,
