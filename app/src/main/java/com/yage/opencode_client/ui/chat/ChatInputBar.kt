@@ -107,6 +107,14 @@ internal fun ChatInputBar(
                 .fillMaxWidth()
                 .padding(horizontal = 12.dp, vertical = 8.dp)
         ) {
+            if (composerStatus != null) {
+                QuietComposerStatus(
+                    status = composerStatus,
+                    isBusy = isBusy,
+                    onAbort = onAbort,
+                )
+            }
+
             VoiceRail(
                 isRecording = isRecording,
                 isTranscribing = isTranscribing,
@@ -164,13 +172,6 @@ internal fun ChatInputBar(
                 )
             }
 
-            if (composerStatus != null) {
-                QuietComposerStatus(
-                    status = composerStatus,
-                    isBusy = isBusy,
-                    onAbort = onAbort,
-                )
-            }
         }
     }
 }
@@ -246,7 +247,6 @@ private fun VoiceRail(
             ) {
                 Text("Discard audio", color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
-            isRecording -> Unit
             else -> Text(
                 text = if (isSpeechConfigured) railTitle else "Configure speech",
                 style = MaterialTheme.typography.labelMedium,
@@ -342,16 +342,20 @@ private fun VoiceRailWaveform(
     }
 
     Canvas(modifier = modifier) {
-        val barCount = bars.size
         val gap = 4.dp.toPx()
         val barWidth = 3.dp.toPx()
+        val barCount = minOf(
+            bars.size,
+            ((size.width + gap) / (barWidth + gap)).toInt().coerceAtLeast(1)
+        )
         val totalWidth = barCount * barWidth + (barCount - 1) * gap
         val startX = ((size.width - totalWidth) / 2f).coerceAtLeast(0f)
         val centerY = size.height / 2f
+        val firstBarIndex = bars.size - barCount
 
         repeat(barCount) { index ->
             val raw = when (mode) {
-                WaveformMode.Active -> bars[index]
+                WaveformMode.Active -> bars[firstBarIndex + index]
                 WaveformMode.Generating -> 0.15f + 0.55f * ((sin(index * 0.45f + phase) + 1f) / 2f)
                 WaveformMode.Idle -> 0.08f + 0.05f * ((sin(index * PI.toFloat() / 5f) + 1f) / 2f)
             }
@@ -379,7 +383,7 @@ private fun VoiceTransportButton(
     val interaction = remember { MutableInteractionSource() }
     Box(
         modifier = Modifier
-            .size(40.dp)
+            .size(32.dp)
             .clip(CircleShape)
             .background(containerColor.copy(alpha = if (enabled) 1f else 0.35f))
             .clickable(
@@ -398,7 +402,7 @@ private fun VoiceTransportButton(
             icon,
             contentDescription = null,
             tint = Color.White,
-            modifier = Modifier.size(21.dp)
+            modifier = Modifier.size(18.dp)
         )
     }
 }
