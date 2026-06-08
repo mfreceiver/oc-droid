@@ -23,3 +23,8 @@ export PATH="$PATH:$HOME/Library/Android/sdk/platform-tools"
 - Unit tests: `./gradlew testDebugUnitTest`
 - Coverage report: `./gradlew koverHtmlReport` → `app/build/reports/kover/html/index.html`
 - Integration tests: `./gradlew connectedDebugAndroidTest` (requires .env with OPENCODE_* credentials)
+
+## Device Safety
+
+- Do not run `connectedDebugAndroidTest`, install, or launch debug builds on a physical Android phone unless explicitly asked. Physical devices may contain the user's active app settings and credentials; installing test builds can overwrite them.
+- For UI/instrumented tests, use an emulator only. If both emulator and physical devices are connected, target the emulator explicitly with `ANDROID_SERIAL=<emulator-id>` or an equivalent Gradle/adb device selection.

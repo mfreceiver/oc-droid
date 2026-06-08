@@ -65,6 +65,7 @@ data class AppState(
     val isTranscribing: Boolean = false,
     val hasPreservedSpeechAudio: Boolean = false,
     val isRetryingSpeech: Boolean = false,
+    val speechAudioLevel: Float = 0f,
     val speechError: String? = null,
     val aiBuilderConnectionOK: Boolean = false,
     val aiBuilderConnectionError: String? = null,
@@ -329,6 +330,7 @@ class MainViewModel @Inject constructor(
     private var sseJob: Job? = null
     private var pollJob: Job? = null
     private var speechHeartbeatJob: Job? = null
+    private var speechAudioLevelJob: Job? = null
     private var speechSession: VoiceFlowSession? = null
     private var speechExistingInput: String = ""
     private var preservedSpeechAudio: VoiceFlowPreservedAudio? = null
@@ -394,6 +396,7 @@ class MainViewModel @Inject constructor(
             val session = speechSession
             // Stop PCM capture first so no further chunks race the commit.
             viewModelScope.launch { microphone.stop() }
+            stopSpeechAudioLevelConsumer()
             speechHeartbeatJob?.cancel()
             speechHeartbeatJob = null
             _state.update { it.copy(isRecording = false, isTranscribing = true) }
@@ -444,6 +447,7 @@ class MainViewModel @Inject constructor(
                     clearPreservedSpeechAudio()
                     val session = voiceFlowClient.startSession()
                     speechSession = session
+                    startSpeechAudioLevelConsumer()
 
                     // Stream PCM16/24kHz/mono chunks from the mic into the session. The
                     // library owns cache replay + WS recovery internally.
@@ -463,6 +467,7 @@ class MainViewModel @Inject constructor(
                 } catch (e: Exception) {
                     Log.e(TAG, "Failed to start recording", e)
                     runCatching { microphone.stop() }
+                    stopSpeechAudioLevelConsumer()
                     speechSession?.let { session ->
                         runCatching { terminateSpeechSession(session) }
                     }
@@ -492,8 +497,9 @@ class MainViewModel @Inject constructor(
         val session = speechSession
         speechHeartbeatJob?.cancel()
         speechHeartbeatJob = null
+        stopSpeechAudioLevelConsumer()
         speechSession = null
-        _state.update { it.copy(isRecording = false, isTranscribing = false) }
+        _state.update { it.copy(isRecording = false, isTranscribing = false, speechAudioLevel = 0f) }
         viewModelScope.launch {
             runCatching { microphone.stop() }
             if (session != null) {
@@ -511,8 +517,9 @@ class MainViewModel @Inject constructor(
         val prefix = speechExistingInput
         speechHeartbeatJob?.cancel()
         speechHeartbeatJob = null
+        stopSpeechAudioLevelConsumer()
         speechSession = null
-        _state.update { it.copy(isRecording = false, isTranscribing = false) }
+        _state.update { it.copy(isRecording = false, isTranscribing = false, speechAudioLevel = 0f) }
         viewModelScope.launch {
             runCatching { microphone.stop() }
             try {
@@ -563,6 +570,26 @@ class MainViewModel @Inject constructor(
         preservedSpeechAudio = null
         preservedSpeechExistingInput = ""
         _state.update { it.copy(hasPreservedSpeechAudio = false) }
+    }
+
+    fun discardPreservedSpeechAudio() {
+        clearPreservedSpeechAudio()
+    }
+
+    private fun startSpeechAudioLevelConsumer() {
+        speechAudioLevelJob?.cancel()
+        _state.update { it.copy(speechAudioLevel = 0f) }
+        speechAudioLevelJob = viewModelScope.launch {
+            microphone.audioLevel.collect { level ->
+                _state.update { it.copy(speechAudioLevel = level.coerceIn(0f, 1f)) }
+            }
+        }
+    }
+
+    private fun stopSpeechAudioLevelConsumer() {
+        speechAudioLevelJob?.cancel()
+        speechAudioLevelJob = null
+        _state.update { it.copy(speechAudioLevel = 0f) }
     }
 
     fun setSpeechError(message: String) {
