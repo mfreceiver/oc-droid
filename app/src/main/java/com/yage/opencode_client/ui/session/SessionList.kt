@@ -63,6 +63,7 @@ import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import com.yage.opencode_client.data.model.Session
 import com.yage.opencode_client.data.model.SessionStatus
+import com.yage.opencode_client.ui.theme.StopRed
 import kotlin.math.roundToInt
 
 private enum class SwipeAnchor { Leading, Center, Trailing }
@@ -255,9 +256,9 @@ private fun BoxScope.SwipeActionBackground(
                 Icon(
                     Icons.Default.Delete,
                     contentDescription = "Delete session",
-                    tint = MaterialTheme.colorScheme.primary,
+                    tint = StopRed,
                 )
-                Text("Delete", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.primary)
+                Text("Delete", style = MaterialTheme.typography.labelSmall, color = StopRed)
             }
         }
     }
