@@ -130,7 +130,7 @@ Android Client 提供以下核心能力：
 - **Context Usage**：环形进度显示上下文占用（绿/橙/红三色），AI 回答中也始终可见 ✅
 - **权限审批**：手动批准/拒绝 permission 请求 ✅
 - **Abort**：中止当前任务 ✅
-- **语音输入**：通过 VoiceFlowKit realtime session 录制 PCM16 mono 24kHz 音频，partial transcript 实时回填输入框；Kit 内部写入本地 PCM cache，WebSocket 断线或发送失败时自动新建 session 并从 cache offset 0 replay；录音/转写卡住时可通过左侧辅助 stop 保留已录 PCM，随后 retry 重新识别，可在录音中继续发送已有文本 ✅
+- **语音输入**：底部 composer 采用 `voice rail + text review field`。Voice rail 承载录音 transport、真实 mic-level waveform、转写等待恢复和 preserved-audio retry；text review field 承载转写审阅、轻量修正、fallback typing 和固定 send。Agent running 降为 quiet status row，`Interrupt agent` 放在 overflow menu。通过 VoiceFlowKit realtime session 录制 PCM16 mono 24kHz 音频；Kit 内部写入本地 PCM cache，WebSocket 断线或发送失败时自动新建 session 并从 cache offset 0 replay；转写卡住时 `Stop transcription wait` 保留已录 PCM，随后 `Retry this segment` 重新识别同一段，或 `Discard audio` 退出恢复状态 ✅
 
 #### Chat Toolbar 布局（Phase 5 对齐 iOS）
 
@@ -235,7 +235,7 @@ iOS 在每条 assistant 消息旁显示回复该消息的模型名称（如 `ant
 | 网络协议 | HTTP REST + SSE（Server-Sent Events） |
 | 安全 | HTTPS 默认；HTTP 仅允许 localhost 与 Tailscale (*.ts.net)，局域网 IP 需 HTTPS |
 | 无本地 AI | 不引入本地推理、文件系统操作、shell 能力 |
-| 语音音频 | 麦克风音频以 PCM16 mono 24kHz 进入 VoiceFlowKit realtime session；本地 cache 只存临时 `.pcm`，停止或取消后清理；显式 abort 会保留 cache 供 retry 后再清理 |
+| 语音音频 | 麦克风音频以 PCM16 mono 24kHz 进入 VoiceFlowKit realtime session；本地 cache 只存临时 `.pcm`，停止或取消后清理；显式 abort 会保留 cache 供 retry 后再清理；`VoiceFlowMicrophone.audioLevel` 驱动 voice rail waveform |
 
 ---
 

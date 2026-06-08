@@ -1,5 +1,12 @@
 # OpenCode Android 客户端工作日志
 
+## 2026-06-08
+
+- 对齐 iOS PR #84/#86/#87，实现 F3 voice rail composer：`ChatInputBar` 从旧单 pill 横排改为上方 voice rail + 下方 text review field。Voice rail 包含 transport、真实 `VoiceFlowMicrophone.audioLevel` waveform、转写等待 `Stop transcription wait`、preserved-audio `Retry this segment` 和 `Discard audio`。
+- Agent running 从右侧红色 stop 主按钮降为 composer 附近 quiet status row；`Interrupt agent` 放入 overflow menu，和语音 stop-wait / retry 语义分离。send 固定在 text review field 右侧，busy 时仍可发送排队，transcribing/retrying 时禁用。
+- `MainViewModel` 新增 `speechAudioLevel` state 并在录音生命周期内收集 microphone audio level；preserved audio discard 暴露为明确 action。
+- 更新 `ChatInputBarInstrumentedTest` 覆盖 busy quiet status、transcribing + agent running、preserved-audio retry/discard 三个关键状态。
+
 ## 2026-06-03
 
 - 模型预设对齐 iOS，新增三个：`Ollama DeepSeek V4 Pro`（ollama-cloud/deepseek-v4-pro，shortName ODS-Pro）、`MiniMax M3`（ollama-cloud/minimax-m3）、`DeepSeek Local`（ds4/deepseek-v4-flash，shortName DS-L）。

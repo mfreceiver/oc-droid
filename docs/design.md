@@ -66,12 +66,13 @@ Quiet Tech 的 token 定义在 `ui/theme/Color.kt`，并在 `ui/theme/Theme.kt` 
 
 ## Composer（`ChatInputBar`）
 
-- 单个圆角 pill（20dp），底色 `surfaceVariant`，从近黑背景上浮起。用 pill 内的无边框 `BasicTextField`（无可见描边/indicator）。
-- 布局与 iOS `ChatTabView` **完全相同**：单行 `Row(verticalAlignment = Bottom)`，从左到右 **语音竖排 Column**（底部固定 mic，临时 stop/retry 只在 mic 上方）→ **文本框**（`weight(1f)`，无独立背景，共享 pill 底，`TopStart` 对齐）→ 右侧**主操作竖排 Column**（底部固定 send，临时 stop 只在 send 上方）。图标与文字同在一个 pill 内、底部对齐——iOS 本就如此。
-- **文本框约三行高**：`heightIn(min = 66.dp, max = 132.dp)`（≈3 行起、≈6 行封顶后内部滚动）。
-- **send 始终存在**——实底电蓝（`colorScheme.primary` = `#3B82F6`）圆角方块（36dp，12dp 圆角）+ 白色箭头；`!canSend` 时 alpha 降到 0.35。send 始终占据右侧竖排的**底部槽位**。**stop 仅 busy 时出现**，作为**额外**的实底红方块（`StopRed #E5484D`）**堆叠在 send 上方**（不是替换 send、不是并排）。这样运行中也能直接发新消息，且发送按钮不会因 stop 出现而换位。
-- **mic 始终占据左侧竖排底部槽位**。录音中只显示红色 mic，点击它走正常结束录音并进入转写；转写中 mic 转圈，强制 abort stop 出现在 mic 上方；显式 abort 后 retry 也出现在 mic 上方。任何临时语音按钮都不能改变 mic 的位置。
-- `canSend = text.isNotBlank() && !isTranscribing`。
+- F3 后与 iOS 一致采用 **voice rail + text review field** 两行结构，而不是把 mic 塞在单个输入 pill 内。语音是手机 steer 的主输入模态；文本框承担转写审阅、轻量修正和 fallback typing。
+- **Voice rail** 位于文本框上方：左侧 transport、中央 waveform/status、右侧轻量恢复动作。录音中 waveform 消费 `VoiceFlowMicrophone.audioLevel` 的真实 0..1 smoothed mic level；转写和 retry 中显示 generating waveform。
+- 左侧 transport：空闲为 `Tap to speak` mic；录音中变 stop，点击是正常结束采集并进入转写；preserved-audio 状态变 `Retry this segment`，点击重新识别同一段已保存 PCM。转写中 transport disabled，避免把等待恢复误读为重新录音。
+- 右侧轻量动作：转写等待显示 `Stop transcription wait`，调用 `abortPreservingAudio()` 并保留音频；preserved-audio 状态显示 `Discard audio`，用于放弃缓存并退出恢复状态。retry 是唯一主恢复动作，discard 是退出动作，不能出现两个 retry 入口。
+- **Text review field**：下方单个圆角 pill，底色 `surfaceVariant`，无边框 `BasicTextField`，`heightIn(min = 66.dp, max = 132.dp)`。语音转写和 retry partial transcript 写入文本框，用户可审阅和修正；普通打字保持系统默认编辑行为。
+- **send 始终存在**：实底电蓝 36dp 圆角方块固定在 text review field 右侧。session busy 时仍可发送，因为服务端 `prompt_async` 支持排队；speech transcribing/retrying 时禁用，避免发送半成品转写。
+- **agent interrupt 降权**：agent running 用 composer 附近 quiet status row 表达，例如 `Agent running · Transcribing`。`Interrupt agent` 放入 `⋯` overflow menu，作为低频 escape hatch，不再占据主输入区红色 stop 按钮，也不和语音 stop-wait 共用同一 glyph。
 
 ## Toolbar（`ChatTopBar`）
 

@@ -6,6 +6,7 @@ import androidx.compose.ui.test.assertIsEnabled
 import androidx.compose.ui.test.assertIsNotEnabled
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onNodeWithContentDescription
+import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import com.yage.opencode_client.ui.chat.ChatInputBar
 import org.junit.Assert.assertEquals
@@ -17,7 +18,7 @@ class ChatInputBarInstrumentedTest {
     val composeRule = createComposeRule()
 
     @Test
-    fun busyInputShowsStopAndKeepsSendEnabled() {
+    fun busyInputShowsQuietStatusAndKeepsSendEnabled() {
         composeRule.setContent {
             MaterialTheme {
                 ChatInputBar(
@@ -27,20 +28,23 @@ class ChatInputBarInstrumentedTest {
                     isTranscribing = false,
                     hasPreservedSpeechAudio = false,
                     isRetryingSpeech = false,
+                    speechAudioLevel = 0f,
                     isSpeechConfigured = true,
                     onTextChange = {},
                     onSend = {},
                     onAbort = {},
                     onAbortSpeech = {},
                     onRetrySpeech = {},
+                    onDiscardSpeech = {},
                     onToggleRecording = {}
                 )
             }
         }
 
-        composeRule.onNodeWithContentDescription("Stop").assertIsDisplayed()
+        composeRule.onNodeWithText("Agent running").assertIsDisplayed()
+        composeRule.onNodeWithContentDescription("Interrupt agent").assertIsDisplayed()
         composeRule.onNodeWithContentDescription("Send").assertIsEnabled()
-        composeRule.onNodeWithContentDescription("Speech").assertIsEnabled()
+        composeRule.onNodeWithContentDescription("Tap to speak").assertIsEnabled()
     }
 
     @Test
@@ -57,21 +61,81 @@ class ChatInputBarInstrumentedTest {
                     isTranscribing = false,
                     hasPreservedSpeechAudio = false,
                     isRetryingSpeech = false,
+                    speechAudioLevel = 0f,
                     isSpeechConfigured = true,
                     onTextChange = {},
                     onSend = { sendClicks++ },
                     onAbort = {},
                     onAbortSpeech = {},
                     onRetrySpeech = {},
+                    onDiscardSpeech = {},
                     onToggleRecording = { speechClicks++ }
                 )
             }
         }
 
         composeRule.onNodeWithContentDescription("Send").assertIsEnabled().performClick()
-        composeRule.onNodeWithContentDescription("Speech").assertIsEnabled().performClick()
+        composeRule.onNodeWithContentDescription("Tap to speak").assertIsEnabled().performClick()
 
         assertEquals(1, sendClicks)
         assertEquals(1, speechClicks)
+    }
+
+    @Test
+    fun transcribingShowsStopWaitAndAgentMenuSeparately() {
+        composeRule.setContent {
+            MaterialTheme {
+                ChatInputBar(
+                    text = "partial transcript",
+                    isBusy = true,
+                    isRecording = false,
+                    isTranscribing = true,
+                    hasPreservedSpeechAudio = false,
+                    isRetryingSpeech = false,
+                    speechAudioLevel = 0f,
+                    isSpeechConfigured = true,
+                    onTextChange = {},
+                    onSend = {},
+                    onAbort = {},
+                    onAbortSpeech = {},
+                    onRetrySpeech = {},
+                    onDiscardSpeech = {},
+                    onToggleRecording = {}
+                )
+            }
+        }
+
+        composeRule.onNodeWithText("Agent running · Transcribing").assertIsDisplayed()
+        composeRule.onNodeWithText("Stop transcription wait").assertIsDisplayed()
+        composeRule.onNodeWithContentDescription("Interrupt agent").assertIsDisplayed()
+        composeRule.onNodeWithContentDescription("Send").assertIsNotEnabled()
+    }
+
+    @Test
+    fun preservedAudioShowsRetryAndDiscardActions() {
+        composeRule.setContent {
+            MaterialTheme {
+                ChatInputBar(
+                    text = "",
+                    isBusy = false,
+                    isRecording = false,
+                    isTranscribing = false,
+                    hasPreservedSpeechAudio = true,
+                    isRetryingSpeech = false,
+                    speechAudioLevel = 0f,
+                    isSpeechConfigured = true,
+                    onTextChange = {},
+                    onSend = {},
+                    onAbort = {},
+                    onAbortSpeech = {},
+                    onRetrySpeech = {},
+                    onDiscardSpeech = {},
+                    onToggleRecording = {}
+                )
+            }
+        }
+
+        composeRule.onNodeWithContentDescription("Retry this segment").assertIsEnabled()
+        composeRule.onNodeWithText("Discard audio").assertIsDisplayed()
     }
 }

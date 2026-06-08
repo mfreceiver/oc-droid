@@ -1,5 +1,6 @@
 package com.yage.opencode_client.ui.chat
 
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
@@ -22,10 +23,13 @@ import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Send
+import androidx.compose.material.icons.filled.Circle
 import androidx.compose.material.icons.filled.Mic
+import androidx.compose.material.icons.filled.MoreHoriz
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Stop
-import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LocalTextStyle
@@ -34,12 +38,21 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateListOf
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.geometry.CornerRadius
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.role
@@ -49,6 +62,9 @@ import androidx.compose.ui.unit.dp
 import com.yage.opencode_client.data.model.PermissionRequest
 import com.yage.opencode_client.data.model.PermissionResponse
 import com.yage.opencode_client.ui.theme.StopRed
+import kotlinx.coroutines.delay
+import kotlin.math.PI
+import kotlin.math.sin
 
 @Composable
 internal fun ChatInputBar(
@@ -58,179 +74,297 @@ internal fun ChatInputBar(
     isTranscribing: Boolean,
     hasPreservedSpeechAudio: Boolean,
     isRetryingSpeech: Boolean,
+    speechAudioLevel: Float,
     isSpeechConfigured: Boolean,
     onTextChange: (String) -> Unit,
     onSend: () -> Unit,
     onAbort: () -> Unit,
     onAbortSpeech: () -> Unit,
     onRetrySpeech: () -> Unit,
+    onDiscardSpeech: () -> Unit,
     onToggleRecording: () -> Unit
 ) {
-    val canSend = text.isNotBlank() && !isTranscribing && !isRecording && !isRetryingSpeech
+    val canSend = text.isNotBlank() && !isTranscribing && !isRetryingSpeech
+    val voiceStatus = when {
+        isRecording -> "Listening"
+        isTranscribing -> "Transcribing"
+        isRetryingSpeech -> "Retry this segment"
+        hasPreservedSpeechAudio -> "Preserved audio"
+        else -> null
+    }
+    val composerStatus = listOfNotNull(
+        if (isBusy) "Agent running" else null,
+        voiceStatus
+    ).joinToString(" · ").takeIf { it.isNotEmpty() }
 
-    // Matches iOS exactly: one horizontal row, bottom-aligned, sitting on a
-    // single rounded composer background. Mic on the far left, the text field in
-    // the middle (weight 1f, no background of its own — it shares the composer's
-    // fill), and the send/stop column on the far right. The whole thing is one
-    // pill; the icons live inside it alongside the text, just like iOS.
     Surface(
         modifier = Modifier.fillMaxWidth().imePadding(),
         color = MaterialTheme.colorScheme.surface
     ) {
-        Row(
+        Column(
             modifier = Modifier
                 .fillMaxWidth()
                 .padding(horizontal = 12.dp, vertical = 8.dp)
-                .clip(RoundedCornerShape(20.dp))
-                .background(MaterialTheme.colorScheme.surfaceVariant)
-                .padding(horizontal = 8.dp, vertical = 6.dp),
-            verticalAlignment = Alignment.Bottom
         ) {
-            ChatSpeechActions(
+            VoiceRail(
                 isRecording = isRecording,
                 isTranscribing = isTranscribing,
                 isRetryingSpeech = isRetryingSpeech,
                 hasPreservedSpeechAudio = hasPreservedSpeechAudio,
+                audioLevel = speechAudioLevel,
                 isSpeechConfigured = isSpeechConfigured,
                 onToggleRecording = onToggleRecording,
                 onAbortSpeech = onAbortSpeech,
                 onRetrySpeech = onRetrySpeech,
+                onDiscardSpeech = onDiscardSpeech,
             )
 
-            // Text field — the middle, ~3 lines tall at rest, growing to ~6.
-            // TopStart so text begins at the top of the multi-line box.
-            Box(
+            Row(
                 modifier = Modifier
-                    .weight(1f)
-                    .padding(horizontal = 6.dp, vertical = 8.dp),
-                contentAlignment = Alignment.TopStart
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(20.dp))
+                    .background(MaterialTheme.colorScheme.surfaceVariant)
+                    .padding(horizontal = 12.dp, vertical = 8.dp),
+                verticalAlignment = Alignment.Bottom
             ) {
-                if (text.isEmpty()) {
-                    Text(
-                        "Type a message...",
-                        style = MaterialTheme.typography.bodyLarge,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f)
+                Box(
+                    modifier = Modifier
+                        .weight(1f)
+                        .padding(end = 10.dp, top = 4.dp, bottom = 4.dp),
+                    contentAlignment = Alignment.TopStart
+                ) {
+                    if (text.isEmpty()) {
+                        Text(
+                            if (isRecording) "Transcription will appear here..." else "Type a message...",
+                            style = MaterialTheme.typography.bodyLarge,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f)
+                        )
+                    }
+                    BasicTextField(
+                        value = text,
+                        onValueChange = onTextChange,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .heightIn(min = 66.dp, max = 132.dp),
+                        textStyle = LocalTextStyle.current.copy(color = MaterialTheme.colorScheme.onSurface),
+                        cursorBrush = SolidColor(MaterialTheme.colorScheme.primary),
+                        maxLines = 6
                     )
                 }
-                BasicTextField(
-                    value = text,
-                    onValueChange = onTextChange,
-                    modifier = Modifier
-                        // ~3 lines tall at rest (3 × ~22dp line height), growing
-                        // up to ~6 lines before it starts scrolling internally.
-                        .fillMaxWidth()
-                        .heightIn(min = 66.dp, max = 132.dp),
-                    textStyle = LocalTextStyle.current.copy(color = MaterialTheme.colorScheme.onSurface),
-                    cursorBrush = SolidColor(MaterialTheme.colorScheme.primary),
-                    maxLines = 6
+
+                ChatPrimaryActionButton(
+                    onClick = onSend,
+                    enabled = canSend,
+                    containerColor = MaterialTheme.colorScheme.primary,
+                    contentColor = Color.White,
+                    dimWhenDisabled = true,
+                    icon = Icons.AutoMirrored.Filled.Send,
+                    contentDescription = "Send"
                 )
             }
 
-            // Send/stop — far right, bottom-aligned. Transient stop appears above send.
-            ChatInputActions(
-                isBusy = isBusy,
-                canSend = canSend,
-                onAbort = onAbort,
-                onSend = onSend
-            )
+            if (composerStatus != null) {
+                QuietComposerStatus(
+                    status = composerStatus,
+                    isBusy = isBusy,
+                    onAbort = onAbort,
+                )
+            }
         }
     }
 }
 
 @Composable
-private fun ChatSpeechActions(
+private fun VoiceRail(
     isRecording: Boolean,
     isTranscribing: Boolean,
     isRetryingSpeech: Boolean,
     hasPreservedSpeechAudio: Boolean,
+    audioLevel: Float,
     isSpeechConfigured: Boolean,
     onToggleRecording: () -> Unit,
     onAbortSpeech: () -> Unit,
     onRetrySpeech: () -> Unit,
+    onDiscardSpeech: () -> Unit,
 ) {
-    Column(
-        verticalArrangement = Arrangement.spacedBy(8.dp),
-        horizontalAlignment = Alignment.CenterHorizontally
+    val railTitle = when {
+        isRecording -> "Listening"
+        isTranscribing -> "Transcribing"
+        isRetryingSpeech -> "Retry this segment"
+        hasPreservedSpeechAudio -> "Preserved audio"
+        else -> "Tap to speak"
+    }
+    val mode = when {
+        isRecording -> WaveformMode.Active
+        isTranscribing || isRetryingSpeech -> WaveformMode.Generating
+        else -> WaveformMode.Idle
+    }
+    val accent = MaterialTheme.colorScheme.primary
+    val railColor = if (mode == WaveformMode.Idle) {
+        MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f)
+    } else {
+        accent
+    }
+
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 4.dp, vertical = 8.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(10.dp)
     ) {
+        ChatPrimaryActionButton(
+            onClick = if (hasPreservedSpeechAudio) onRetrySpeech else onToggleRecording,
+            enabled = !isTranscribing && !isRetryingSpeech,
+            containerColor = (if (isRecording) StopRed else accent).copy(alpha = 0.14f),
+            contentColor = if (isRecording) StopRed else accent,
+            dimWhenDisabled = true,
+            icon = when {
+                isRecording -> Icons.Default.Stop
+                hasPreservedSpeechAudio -> Icons.Default.Refresh
+                else -> Icons.Default.Mic
+            },
+            contentDescription = if (hasPreservedSpeechAudio) "Retry this segment" else railTitle,
+        )
+
+        VoiceRailWaveform(
+            mode = mode,
+            color = railColor,
+            level = speechLevelForMode(mode, audioLevel),
+            modifier = Modifier
+                .weight(1f)
+                .height(24.dp)
+                .semantics { contentDescription = "Speech waveform" }
+        )
+
         when {
-            isTranscribing -> ChatPrimaryActionButton(
-                onClick = onAbortSpeech,
-                enabled = true,
-                containerColor = StopRed,
-                contentColor = Color.White,
-                dimWhenDisabled = false,
-                icon = Icons.Default.Stop,
-                contentDescription = "Stop speech recognition"
-            )
-            hasPreservedSpeechAudio -> ChatPrimaryActionButton(
-                onClick = onRetrySpeech,
+            isTranscribing -> TextButton(onClick = onAbortSpeech) {
+                Text("Stop transcription wait", color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+            hasPreservedSpeechAudio -> TextButton(
+                onClick = onDiscardSpeech,
                 enabled = !isRetryingSpeech,
-                containerColor = MaterialTheme.colorScheme.primary,
-                contentColor = Color.White,
-                dimWhenDisabled = true,
-                icon = Icons.Default.Refresh,
-                contentDescription = "Retry speech recognition"
+            ) {
+                Text("Discard audio", color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+            else -> Text(
+                text = if (isSpeechConfigured) railTitle else "Configure speech",
+                style = MaterialTheme.typography.labelMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 1,
             )
         }
+    }
+}
 
-        IconButton(
-            onClick = onToggleRecording,
-            enabled = !isTranscribing && !isRetryingSpeech,
-            modifier = Modifier.size(40.dp)
-        ) {
-            if (isTranscribing || isRetryingSpeech) {
-                CircularProgressIndicator(modifier = Modifier.size(20.dp), strokeWidth = 2.dp)
-            } else {
-                Icon(
-                    Icons.Default.Mic,
-                    contentDescription = "Speech",
-                    tint = when {
-                        isRecording -> StopRed
-                        isSpeechConfigured -> MaterialTheme.colorScheme.onSurfaceVariant
-                        else -> MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.45f)
-                    }
-                )
+private fun speechLevelForMode(mode: WaveformMode, audioLevel: Float): Float = when (mode) {
+    WaveformMode.Active -> audioLevel
+    WaveformMode.Generating -> 0.2f
+    WaveformMode.Idle -> 0.04f
+}
+
+@Composable
+private fun QuietComposerStatus(
+    status: String,
+    isBusy: Boolean,
+    onAbort: () -> Unit,
+) {
+    var menuExpanded by remember { mutableStateOf(false) }
+
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 4.dp, vertical = 6.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        if (isBusy) {
+            Icon(
+                Icons.Default.Circle,
+                contentDescription = null,
+                tint = MaterialTheme.colorScheme.tertiary,
+                modifier = Modifier.size(8.dp)
+            )
+            Spacer(modifier = Modifier.width(8.dp))
+        }
+        Text(
+            text = status,
+            style = MaterialTheme.typography.labelMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            maxLines = 1,
+            modifier = Modifier.weight(1f)
+        )
+        if (isBusy) {
+            Box {
+                IconButton(onClick = { menuExpanded = true }, modifier = Modifier.size(32.dp)) {
+                    Icon(
+                        Icons.Default.MoreHoriz,
+                        contentDescription = "Interrupt agent",
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                DropdownMenu(expanded = menuExpanded, onDismissRequest = { menuExpanded = false }) {
+                    DropdownMenuItem(
+                        text = { Text("Interrupt agent") },
+                        leadingIcon = { Icon(Icons.Default.Stop, contentDescription = null, tint = StopRed) },
+                        onClick = {
+                            menuExpanded = false
+                            onAbort()
+                        }
+                    )
+                }
             }
         }
     }
 }
 
+private enum class WaveformMode { Idle, Active, Generating }
+
 @Composable
-private fun ChatInputActions(
-    isBusy: Boolean,
-    canSend: Boolean,
-    onAbort: () -> Unit,
-    onSend: () -> Unit
+private fun VoiceRailWaveform(
+    mode: WaveformMode,
+    color: Color,
+    level: Float,
+    modifier: Modifier = Modifier,
 ) {
-    // Matches iOS: send is ALWAYS present and keeps the bottom slot. Stop is a
-    // transient control that appears above it, so the send target never moves.
-    Column(
-        verticalArrangement = Arrangement.spacedBy(8.dp),
-        horizontalAlignment = Alignment.CenterHorizontally
-    ) {
-        // STOP: only when busy, solid red rounded-square stacked above send.
-        if (isBusy) {
-            ChatPrimaryActionButton(
-                onClick = onAbort,
-                enabled = true,
-                containerColor = StopRed,
-                contentColor = Color.White,
-                dimWhenDisabled = false,
-                icon = Icons.Default.Stop,
-                contentDescription = "Stop"
+    val bars = remember { mutableStateListOf<Float>().apply { repeat(40) { add(0.04f) } } }
+    var phase by remember { mutableStateOf(0f) }
+
+    LaunchedEffect(mode, level) {
+        while (mode != WaveformMode.Idle) {
+            if (mode == WaveformMode.Active) {
+                bars.removeAt(0)
+                bars.add(level.coerceIn(0.04f, 1f))
+            } else {
+                phase += 0.22f
+            }
+            delay(33)
+        }
+    }
+
+    Canvas(modifier = modifier) {
+        val barCount = bars.size
+        val gap = 4.dp.toPx()
+        val barWidth = 3.dp.toPx()
+        val totalWidth = barCount * barWidth + (barCount - 1) * gap
+        val startX = ((size.width - totalWidth) / 2f).coerceAtLeast(0f)
+        val centerY = size.height / 2f
+
+        repeat(barCount) { index ->
+            val raw = when (mode) {
+                WaveformMode.Active -> bars[index]
+                WaveformMode.Generating -> 0.15f + 0.55f * ((sin(index * 0.45f + phase) + 1f) / 2f)
+                WaveformMode.Idle -> 0.08f + 0.05f * ((sin(index * PI.toFloat() / 5f) + 1f) / 2f)
+            }
+            val height = (2.dp.toPx() + raw.coerceIn(0f, 1f) * (size.height - 2.dp.toPx()))
+                .coerceAtLeast(2.dp.toPx())
+            val left = startX + index * (barWidth + gap)
+            drawRoundRect(
+                color = color.copy(alpha = if (mode == WaveformMode.Idle) 0.55f else 1f),
+                topLeft = Offset(left, centerY - height / 2f),
+                size = Size(barWidth, height),
+                cornerRadius = CornerRadius(barWidth / 2f, barWidth / 2f)
             )
         }
-
-        // SEND: always present, solid electric-blue rounded-square, bottom slot.
-        ChatPrimaryActionButton(
-            onClick = onSend,
-            enabled = canSend,
-            containerColor = MaterialTheme.colorScheme.primary,
-            contentColor = Color.White,
-            dimWhenDisabled = true,
-            icon = Icons.AutoMirrored.Filled.Send,
-            contentDescription = "Send"
-        )
     }
 }
 
@@ -241,14 +375,10 @@ private fun ChatPrimaryActionButton(
     containerColor: Color,
     contentColor: Color,
     dimWhenDisabled: Boolean,
-    icon: androidx.compose.ui.graphics.vector.ImageVector,
+    icon: ImageVector,
     contentDescription: String
 ) {
     val effectiveAlpha = if (!enabled && dimWhenDisabled) 0.35f else 1f
-    // A single solid rounded square that IS the button — no nested IconButton,
-    // whose 48dp touch target used to overflow this box and overlap the field.
-    // The contentDescription + clickable/enabled semantics live on the SAME node
-    // (the Box) so tests can find it by description and assert its enabled state.
     val interaction = remember { MutableInteractionSource() }
     Box(
         modifier = Modifier
@@ -288,7 +418,6 @@ internal fun ChatPermissionCard(
         tonalElevation = 1.dp
     ) {
         Row(modifier = Modifier.fillMaxWidth().height(IntrinsicSize.Min)) {
-            // 3pt electric-blue left bar
             Box(
                 modifier = Modifier
                     .width(3.dp)
