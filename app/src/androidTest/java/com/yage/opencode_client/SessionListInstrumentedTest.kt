@@ -48,7 +48,7 @@ class SessionListInstrumentedTest {
     }
 
     @Test
-    fun sessionListRequestsMoreFromExplicitLoadMoreRow() {
+    fun sessionListRequestsMoreFromGlobalLoadOlderAction() {
         val sessions = (1..40).map { index ->
             Session(
                 id = "session-$index",
@@ -72,10 +72,7 @@ class SessionListInstrumentedTest {
             }
         }
 
-        composeRule.onNodeWithTag("session_list")
-            .performScrollToNode(hasText("Load more sessions"))
-
-        composeRule.onNodeWithText("Load more sessions").performClick()
+        composeRule.onNodeWithText("Load older").performClick()
         composeRule.waitUntil(timeoutMillis = 5_000) { loadMoreCalls.get() > 0 }
     }
 

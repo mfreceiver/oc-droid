@@ -315,6 +315,11 @@ fun SessionList(
             ) {
                 Text("Sessions", style = MaterialTheme.typography.titleSmall)
                 Spacer(modifier = Modifier.weight(1f))
+                if (isLoadingMoreSessions) {
+                    CircularProgressIndicator(modifier = Modifier.size(18.dp), strokeWidth = 2.dp)
+                } else if (hasMoreSessions) {
+                    TextButton(onClick = onLoadMoreSessions) { Text("Load older") }
+                }
                 TextButton(onClick = onCreateSession) { Text("New") }
                 if (onOpenSettings != null) {
                     IconButton(onClick = onOpenSettings) {
@@ -388,28 +393,6 @@ fun SessionList(
                         onToggleSessionExpanded = onToggleSessionExpanded,
                         showDivider = index < archivedRows.size - 1,
                     )
-                }
-
-                if (isLoadingMoreSessions) {
-                    item(key = "load_more_progress") {
-                        Box(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .padding(12.dp),
-                            contentAlignment = Alignment.Center
-                        ) {
-                            CircularProgressIndicator(modifier = Modifier.size(20.dp), strokeWidth = 2.dp)
-                        }
-                    }
-                } else if (hasMoreSessions) {
-                    item(key = "load_more_sessions") {
-                        TextButton(
-                            onClick = onLoadMoreSessions,
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .padding(12.dp)
-                        ) { Text("Load more sessions") }
-                    }
                 }
             }
         }

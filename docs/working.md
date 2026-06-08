@@ -8,8 +8,8 @@
 - 更新 `ChatInputBarInstrumentedTest` 覆盖 busy quiet status、transcribing + agent running、preserved-audio retry/discard 三个关键状态。
 - 对齐 iOS PR #85，实现 Session Archive workflow：`SessionList` 分 Active / Archived 两个分区，Archived 默认折叠；Active leading swipe 为 Archive，Archived leading swipe 为 Restore，trailing swipe 保持 Delete。
 - `PATCH /session/{id}` request body 扩展为可写 `time.archived`；Archive 写当前毫秒时间戳，Restore 写 `-1`。Archive subtree 按 children-first，Restore subtree 按 parent-first，避免父子 session 在分区间短暂游离。
-- Session 分页从滚到底自动触发改为显式 `Load more sessions` 行，避免 Archived 默认折叠时为不可见历史连续分页。直接打开 archived session 并发送消息时会先 restore 当前 session，再发送。
-- 补充 `OpenCodeRepositoryTest`、`MainViewModelTest`、`SessionListInstrumentedTest` 覆盖 archived PATCH body、递归顺序、Active/Archived 分区和显式 load-more。
+- Session 分页从滚到底自动触发改为顶部全局 `Load older` action，避免 Archived 默认折叠时为不可见历史连续分页，也避免把加载更多误读成 Archived 专属动作。直接打开 archived session 并发送消息时会先 restore 当前 session，再发送。
+- 补充 `OpenCodeRepositoryTest`、`MainViewModelTest`、`SessionListInstrumentedTest` 覆盖 archived PATCH body、递归顺序、Active/Archived 分区和全局 load-older。
 
 ## 2026-06-03
 

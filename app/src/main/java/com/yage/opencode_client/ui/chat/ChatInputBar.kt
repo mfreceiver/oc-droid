@@ -319,6 +319,8 @@ private fun QuietComposerStatus(
 
 private enum class WaveformMode { Idle, Active, Generating }
 
+private const val WAVEFORM_TICK_MS = 66L
+
 @Composable
 private fun VoiceRailWaveform(
     mode: WaveformMode,
@@ -337,7 +339,7 @@ private fun VoiceRailWaveform(
             } else {
                 phase += 0.22f
             }
-            delay(33)
+            delay(WAVEFORM_TICK_MS)
         }
     }
 
