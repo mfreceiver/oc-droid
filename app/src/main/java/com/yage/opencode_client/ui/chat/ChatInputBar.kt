@@ -18,6 +18,7 @@ import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.selection.SelectionContainer
@@ -213,12 +214,10 @@ private fun VoiceRail(
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(10.dp)
     ) {
-        ChatPrimaryActionButton(
+        VoiceTransportButton(
             onClick = if (hasPreservedSpeechAudio) onRetrySpeech else onToggleRecording,
             enabled = !isTranscribing && !isRetryingSpeech,
-            containerColor = (if (isRecording) StopRed else accent).copy(alpha = 0.14f),
-            contentColor = if (isRecording) StopRed else accent,
-            dimWhenDisabled = true,
+            containerColor = if (isRecording) StopRed else accent,
             icon = when {
                 isRecording -> Icons.Default.Stop
                 hasPreservedSpeechAudio -> Icons.Default.Refresh
@@ -247,6 +246,7 @@ private fun VoiceRail(
             ) {
                 Text("Discard audio", color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
+            isRecording -> Unit
             else -> Text(
                 text = if (isSpeechConfigured) railTitle else "Configure speech",
                 style = MaterialTheme.typography.labelMedium,
@@ -365,6 +365,41 @@ private fun VoiceRailWaveform(
                 cornerRadius = CornerRadius(barWidth / 2f, barWidth / 2f)
             )
         }
+    }
+}
+
+@Composable
+private fun VoiceTransportButton(
+    onClick: () -> Unit,
+    enabled: Boolean,
+    containerColor: Color,
+    icon: ImageVector,
+    contentDescription: String,
+) {
+    val interaction = remember { MutableInteractionSource() }
+    Box(
+        modifier = Modifier
+            .size(40.dp)
+            .clip(CircleShape)
+            .background(containerColor.copy(alpha = if (enabled) 1f else 0.35f))
+            .clickable(
+                enabled = enabled,
+                interactionSource = interaction,
+                indication = null,
+                onClick = onClick
+            )
+            .semantics {
+                this.contentDescription = contentDescription
+                this.role = Role.Button
+            },
+        contentAlignment = Alignment.Center
+    ) {
+        Icon(
+            icon,
+            contentDescription = null,
+            tint = Color.White,
+            modifier = Modifier.size(21.dp)
+        )
     }
 }
 
