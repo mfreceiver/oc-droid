@@ -157,4 +157,56 @@ class FilesViewModelTest {
         assertNull(viewModel.state.value.selectedFileContent)
         assertTrue(viewModel.state.value.error == null)
     }
+
+    @Test
+    fun `refreshPreview reloads selected file content`() = runTest {
+        coEvery { repository.getFileTree(null) } returns Result.success(emptyList())
+        coEvery { repository.getFileContent("src/Main.kt") } returnsMany listOf(
+            Result.success(FileContent(type = "text", content = "before")),
+            Result.success(FileContent(type = "text", content = "after"))
+        )
+
+        val viewModel = FilesViewModel(repository)
+        advanceUntilIdle()
+
+        viewModel.selectFile(FileNode(name = "Main.kt", path = "src/Main.kt", type = "file"))
+        advanceUntilIdle()
+        assertEquals("before", viewModel.state.value.selectedFileContent?.content)
+
+        viewModel.refreshPreview(sessionDirectory = null)
+        advanceUntilIdle()
+
+        assertEquals("src/Main.kt", viewModel.state.value.selectedFilePath)
+        assertEquals("after", viewModel.state.value.selectedFileContent?.content)
+        assertEquals(false, viewModel.state.value.isPreviewRefreshing)
+        coVerify(exactly = 2) { repository.getFileContent("src/Main.kt") }
+    }
+
+    @Test
+    fun `refreshPreview reloads directory preview using relative session path`() = runTest {
+        val initialTree = listOf(FileNode(name = "Old.kt", path = "src/Old.kt", type = "file"))
+        val refreshedTree = listOf(FileNode(name = "New.kt", path = "src/New.kt", type = "file"))
+        coEvery { repository.getFileTree(null) } returns Result.success(emptyList())
+        coEvery { repository.getFileContent("src") } returns Result.success(FileContent(type = "text", content = ""))
+        coEvery { repository.getFileTree("src") } returnsMany listOf(
+            Result.success(initialTree),
+            Result.success(refreshedTree)
+        )
+
+        val viewModel = FilesViewModel(repository)
+        advanceUntilIdle()
+
+        viewModel.syncPathToShow("workspace/src", "workspace")
+        advanceUntilIdle()
+        assertEquals("Directory:\nsrc/Old.kt", viewModel.state.value.selectedFileContent?.content)
+
+        viewModel.refreshPreview(sessionDirectory = "workspace")
+        advanceUntilIdle()
+
+        assertEquals("workspace/src", viewModel.state.value.selectedFilePath)
+        assertEquals("Directory:\nsrc/New.kt", viewModel.state.value.selectedFileContent?.content)
+        assertEquals(false, viewModel.state.value.isPreviewRefreshing)
+        coVerify(exactly = 2) { repository.getFileContent("src") }
+        coVerify(exactly = 2) { repository.getFileTree("src") }
+    }
 }

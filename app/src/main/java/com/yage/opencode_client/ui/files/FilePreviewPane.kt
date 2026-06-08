@@ -18,6 +18,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Share
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
@@ -62,6 +63,8 @@ internal fun FilePreviewPane(
     fileContent: FileContent,
     repository: OpenCodeRepository,
     sessionDirectory: String? = null,
+    isRefreshing: Boolean = false,
+    onRefresh: () -> Unit = {},
     onClose: () -> Unit
 ) {
     val context = LocalContext.current
@@ -82,6 +85,9 @@ internal fun FilePreviewPane(
                 }
             },
             actions = {
+                IconButton(onClick = onRefresh, enabled = !isRefreshing) {
+                    Icon(Icons.Default.Refresh, contentDescription = "Refresh")
+                }
                 if (imagePayload != null) {
                     IconButton(onClick = { shareImage(context, path, imagePayload.bytes) }) {
                         Icon(Icons.Default.Share, contentDescription = "Share")
