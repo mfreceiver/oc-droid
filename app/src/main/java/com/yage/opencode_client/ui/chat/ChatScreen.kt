@@ -24,6 +24,9 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.compose.LocalLifecycleOwner
+import com.yage.opencode_client.data.model.MessageWithParts
+import com.yage.opencode_client.data.model.Part
+import com.yage.opencode_client.data.model.SessionStatus
 import com.yage.opencode_client.ui.MainViewModel
 import com.yage.opencode_client.ui.sanitizeBearerToken
 
@@ -54,6 +57,22 @@ fun ChatScreen(
     // Cache last non-null contextUsage so the ring stays visible during streaming
     var cachedContextUsage by remember { mutableStateOf(state.contextUsage) }
     state.contextUsage?.let { cachedContextUsage = it }
+    val currentSessionIsRunning = state.currentSessionStatus?.let { it.isBusy || it.isRetry } == true
+    val currentActivity = remember(
+        state.currentSessionId,
+        state.currentSessionStatus,
+        state.messages,
+        state.streamingReasoningPart,
+        state.streamingPartTexts,
+    ) {
+        currentSessionActivity(
+            sessionId = state.currentSessionId,
+            status = state.currentSessionStatus,
+            messages = state.messages,
+            streamingReasoningPart = state.streamingReasoningPart,
+            streamingPartTexts = state.streamingPartTexts,
+        )
+    }
 
     DisposableEffect(lifecycleOwner, viewModel) {
         val observer = LifecycleEventObserver { _, event ->
@@ -146,13 +165,15 @@ fun ChatScreen(
         if (state.currentSessionId != null) {
             ChatInputBar(
                 text = state.inputText,
-                isBusy = state.isCurrentSessionBusy,
+                isBusy = currentSessionIsRunning,
                 isRecording = state.isRecording,
                 isTranscribing = state.isTranscribing,
                 hasPreservedSpeechAudio = state.hasPreservedSpeechAudio,
                 isRetryingSpeech = state.isRetryingSpeech,
                 speechAudioLevel = state.speechAudioLevel,
                 isSpeechConfigured = state.aiBuilderConnectionOK && aiBuilderToken.isNotEmpty(),
+                agentActivityText = currentActivity?.text,
+                agentStartedAtMillis = currentActivity?.startedAtMillis,
                 onTextChange = viewModel::setInputText,
                 onSend = { viewModel.sendMessage() },
                 onAbort = { viewModel.abortSession() },
@@ -210,4 +231,82 @@ fun ChatScreen(
                 )
             }
     }
+}
+
+private data class CurrentSessionActivity(
+    val text: String,
+    val startedAtMillis: Long?,
+)
+
+private fun currentSessionActivity(
+    sessionId: String?,
+    status: SessionStatus?,
+    messages: List<MessageWithParts>,
+    streamingReasoningPart: Part?,
+    streamingPartTexts: Map<String, String>,
+): CurrentSessionActivity? {
+    val sid = sessionId ?: return null
+    val startedAt = messages.lastOrNull { it.info.sessionId == sid && it.info.isUser }?.info?.time?.created
+    val text = bestSessionActivityText(sid, status, messages, streamingReasoningPart, streamingPartTexts)
+    return CurrentSessionActivity(text = text, startedAtMillis = startedAt)
+}
+
+private fun bestSessionActivityText(
+    sessionId: String,
+    status: SessionStatus?,
+    messages: List<MessageWithParts>,
+    streamingReasoningPart: Part?,
+    streamingPartTexts: Map<String, String>,
+): String {
+    status?.message?.trim()?.takeIf { it.isNotEmpty() }?.let { return it }
+
+    messages.asReversed().forEach { message ->
+        if (message.info.sessionId != sessionId) return@forEach
+        message.parts.asReversed().firstOrNull { it.isTool && it.stateDisplay == "running" }
+            ?.let { part -> formatStatusFromPart(part)?.let { return it } }
+    }
+
+    if (streamingReasoningPart?.sessionId == sessionId) {
+        val key = "${streamingReasoningPart.messageId}:${streamingReasoningPart.id}"
+        return formatThinkingFromReasoningText(streamingPartTexts[key].orEmpty())
+    }
+
+    messages.asReversed().forEach { message ->
+        if (message.info.sessionId != sessionId) return@forEach
+        message.parts.asReversed().firstOrNull()?.let { part ->
+            formatStatusFromPart(part)?.let { return it }
+        }
+    }
+
+    return status?.takeIf { it.isRetry }?.let { "Retrying" } ?: "Thinking"
+}
+
+private fun formatStatusFromPart(part: Part): String? {
+    if (part.isTool) {
+        val base = when (part.tool) {
+            "task" -> "Delegating"
+            "todowrite", "todoread" -> "Planning"
+            "read" -> "Gathering context"
+            "list", "grep", "glob" -> "Searching codebase"
+            "webfetch" -> "Searching web"
+            "edit", "write" -> "Making edits"
+            "bash" -> "Running commands"
+            else -> null
+        }
+        val topic = (part.toolReason ?: part.toolInputSummary)?.trim()?.takeIf { it.isNotEmpty() }
+        return when {
+            base != null && topic != null -> "$base - $topic"
+            base != null -> base
+            else -> null
+        }
+    }
+
+    if (part.isReasoning) return formatThinkingFromReasoningText(part.text.orEmpty())
+    if (part.isText) return "Gathering thoughts"
+    return null
+}
+
+private fun formatThinkingFromReasoningText(text: String): String {
+    val topic = Regex("^\\*\\*([^*]+)\\*\\*").find(text.trim())?.groupValues?.getOrNull(1)?.trim()
+    return if (!topic.isNullOrEmpty()) "Thinking - $topic" else "Thinking"
 }
