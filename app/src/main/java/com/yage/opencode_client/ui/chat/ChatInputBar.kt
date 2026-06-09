@@ -77,6 +77,8 @@ internal fun ChatInputBar(
     isRetryingSpeech: Boolean,
     speechAudioLevel: Float,
     isSpeechConfigured: Boolean,
+    agentActivityText: String?,
+    agentStartedAtMillis: Long?,
     onTextChange: (String) -> Unit,
     onSend: () -> Unit,
     onAbort: () -> Unit,
@@ -94,7 +96,7 @@ internal fun ChatInputBar(
         else -> null
     }
     val composerStatus = listOfNotNull(
-        if (isBusy) "Agent running" else null,
+        if (isBusy) agentActivityText ?: "Agent running" else null,
         voiceStatus
     ).joinToString(" · ").takeIf { it.isNotEmpty() }
 
@@ -111,6 +113,7 @@ internal fun ChatInputBar(
                 QuietComposerStatus(
                     status = composerStatus,
                     isBusy = isBusy,
+                    startedAtMillis = if (isBusy) agentStartedAtMillis else null,
                     onAbort = onAbort,
                 )
             }
@@ -267,9 +270,18 @@ private fun speechLevelForMode(mode: WaveformMode, audioLevel: Float): Float = w
 private fun QuietComposerStatus(
     status: String,
     isBusy: Boolean,
+    startedAtMillis: Long?,
     onAbort: () -> Unit,
 ) {
     var menuExpanded by remember { mutableStateOf(false) }
+    var nowMillis by remember(startedAtMillis) { mutableStateOf(System.currentTimeMillis()) }
+
+    LaunchedEffect(isBusy, startedAtMillis) {
+        while (isBusy && startedAtMillis != null) {
+            nowMillis = System.currentTimeMillis()
+            delay(1_000)
+        }
+    }
 
     Row(
         modifier = Modifier
@@ -293,6 +305,15 @@ private fun QuietComposerStatus(
             maxLines = 1,
             modifier = Modifier.weight(1f)
         )
+        if (isBusy && startedAtMillis != null) {
+            Text(
+                text = formatElapsed(nowMillis - startedAtMillis),
+                style = MaterialTheme.typography.labelMedium,
+                fontFamily = FontFamily.Monospace,
+                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f),
+            )
+            Spacer(modifier = Modifier.width(8.dp))
+        }
         if (isBusy) {
             Box {
                 IconButton(onClick = { menuExpanded = true }, modifier = Modifier.size(32.dp)) {
@@ -315,6 +336,11 @@ private fun QuietComposerStatus(
             }
         }
     }
+}
+
+private fun formatElapsed(elapsedMillis: Long): String {
+    val seconds = (elapsedMillis.coerceAtLeast(0L) / 1_000L).toInt()
+    return "%d:%02d".format(seconds / 60, seconds % 60)
 }
 
 private enum class WaveformMode { Idle, Active, Generating }
