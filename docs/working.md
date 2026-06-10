@@ -1,5 +1,10 @@
 # OpenCode Android 客户端工作日志
 
+## 2026-06-10
+
+- 模型列表中将 `MiniMax M3`（`ollama-cloud/minimax-m3`）替换为 `Ollama Kimi K2.6`（`ollama-cloud/kimi-k2.6:cloud`）。Model ID 取自 Ollama 官方 `kimi-k2.6` library 页面，cloud tag 为 `kimi-k2.6:cloud`。
+- `ModelOption.shortName` 新增 `Ollama Kimi K2.6 -> Kimi`，对齐 iOS model chip 显示。
+
 ## 2026-06-08
 
 - 对齐 iOS PR #84/#86/#87，实现 F3 voice rail composer：`ChatInputBar` 从旧单 pill 横排改为上方 voice rail + 下方 text review field。Voice rail 包含 transport、真实 `VoiceFlowMicrophone.audioLevel` waveform、转写等待 `Stop transcription wait`、preserved-audio `Retry this segment` 和 `Discard audio`。
