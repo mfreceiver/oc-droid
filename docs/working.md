@@ -17,6 +17,8 @@
 5. 已新增 Android 专属设计文档：`docs/Android_Markdown_Web_Preview_PRD.md` 和 `docs/Android_Markdown_Web_Preview_RFC.md`。
 6. 已更新 `.gitignore`，忽略 `docs/ios_markdown_preview_fixtures/`。这个目录只用于把 iOS 的 Markdown Preview PRD/RFC 复制进 Android repo 手工渲染，不提交。
 7. 已实现 tablet Sessions pane collapse：`MainActivity.TabletLayout` 使用 `rememberSaveable` 保存 `sessionsPaneCollapsed`，折叠时左栏不渲染，Files/Chat 各占 50%；`SessionList` header 增加 `Hide sessions`，Files pane 左上角增加 `Show sessions` 恢复入口。
+8. 已实现 Android Markdown Web Preview MVP：新增 `app/src/main/assets/web_preview/` 本地 shell；`FilePreviewPane` 增加 `Web Preview` / `Native Preview` / `Markdown Source` 三态，默认 Web；新增 `MarkdownWebPreviewPane`，复用 `MarkdownImageResolver` 生成 data URI，WebView 加载 `file:///android_asset/web_preview/preview.html` 并通过 JSON payload 注入 Markdown。
+9. 已补低层测试：`MarkdownImageResolverTest` 增加 query/fragment stripping case；`SessionListInstrumentedTest` 增加 collapse callback component test。当前环境没有 emulator，`connectedDebugAndroidTest` 未运行。
 
 ### 关键调研结论
 
@@ -70,10 +72,16 @@ Android 当前基线：`MainActivity.TabletLayout` 固定三栏，左栏 `Sessio
 - [x] 复制 iOS Markdown Preview PRD/RFC 到 ignored fixture 目录。
 - [x] 提交文档计划 checkpoint：`a772863 docs: plan Android markdown web preview parity`。
 - [x] 实现 tablet Sessions pane collapse，验证 `./gradlew assembleDebug` 与 `./gradlew testDebugUnitTest` 均通过。
-- [ ] 实现 Web Preview resource shell。
-- [ ] 接入 Files mode menu 和 WebView renderer。
-- [ ] 补 unit / component tests。
-- [ ] 跑完整验证并开 PR。
+- [x] 实现 Web Preview resource shell。
+- [x] 接入 Files mode menu 和 WebView renderer。
+- [x] 补 unit test；component test 已加但未运行，因为当前 `adb devices` 无 emulator。
+- [ ] 跑 connected/component 验证并开 PR。
+
+### 当前验证状态
+
+- `./gradlew testDebugUnitTest`：通过。
+- `./gradlew assembleDebug`：通过。
+- `adb devices`：无连接设备；按项目安全规则未在物理 Android 手机上安装或运行 connected tests。
 
 ### 提交节奏
 

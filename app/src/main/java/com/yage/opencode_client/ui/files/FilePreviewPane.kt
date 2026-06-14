@@ -18,8 +18,11 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Share
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
@@ -56,6 +59,12 @@ import java.io.File
 import kotlin.math.max
 import kotlin.math.min
 
+private enum class MarkdownPreviewMode(val label: String) {
+    Web("Web Preview"),
+    Native("Native Preview"),
+    Source("Markdown Source")
+}
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 internal fun FilePreviewPane(
@@ -75,6 +84,8 @@ internal fun FilePreviewPane(
     val imagePayload = remember(path, content) {
         if (previewKind == FilePreviewUtils.PreviewContentKind.IMAGE) decodeImagePayload(content) else null
     }
+    var markdownPreviewMode by remember(path) { mutableStateOf(MarkdownPreviewMode.Web) }
+    var modeMenuExpanded by remember { mutableStateOf(false) }
 
     Column(modifier = Modifier.fillMaxSize()) {
         TopAppBar(
@@ -85,6 +96,27 @@ internal fun FilePreviewPane(
                 }
             },
             actions = {
+                if (previewKind == FilePreviewUtils.PreviewContentKind.MARKDOWN) {
+                    Box {
+                        IconButton(onClick = { modeMenuExpanded = true }) {
+                            Icon(Icons.Default.MoreVert, contentDescription = "Preview mode")
+                        }
+                        DropdownMenu(
+                            expanded = modeMenuExpanded,
+                            onDismissRequest = { modeMenuExpanded = false }
+                        ) {
+                            MarkdownPreviewMode.entries.forEach { mode ->
+                                DropdownMenuItem(
+                                    text = { Text(mode.label) },
+                                    onClick = {
+                                        markdownPreviewMode = mode
+                                        modeMenuExpanded = false
+                                    }
+                                )
+                            }
+                        }
+                    }
+                }
                 IconButton(onClick = onRefresh, enabled = !isRefreshing) {
                     Icon(Icons.Default.Refresh, contentDescription = "Refresh")
                 }
@@ -100,12 +132,23 @@ internal fun FilePreviewPane(
 
         when {
             imagePayload != null -> ImageViewer(bitmap = imagePayload.bitmap)
-            previewKind == FilePreviewUtils.PreviewContentKind.MARKDOWN -> PreviewMarkdown(
-                content = content,
-                filePath = path,
-                repository = repository,
-                sessionDirectory = sessionDirectory
-            )
+            previewKind == FilePreviewUtils.PreviewContentKind.MARKDOWN -> when (markdownPreviewMode) {
+                MarkdownPreviewMode.Web -> MarkdownWebPreviewPane(
+                    content = content,
+                    filePath = path,
+                    repository = repository,
+                    sessionDirectory = sessionDirectory,
+                    onOpenNative = { markdownPreviewMode = MarkdownPreviewMode.Native },
+                    onOpenSource = { markdownPreviewMode = MarkdownPreviewMode.Source }
+                )
+                MarkdownPreviewMode.Native -> PreviewMarkdown(
+                    content = content,
+                    filePath = path,
+                    repository = repository,
+                    sessionDirectory = sessionDirectory
+                )
+                MarkdownPreviewMode.Source -> PreviewPlainText(content = content)
+            }
             previewKind == FilePreviewUtils.PreviewContentKind.BINARY -> PreviewBinaryFallback()
             else -> PreviewPlainText(content = content)
         }
