@@ -20,6 +20,7 @@
 8. 已实现 Android Markdown Web Preview MVP：新增 `app/src/main/assets/web_preview/` 本地 shell；`FilePreviewPane` 增加 `Web Preview` / `Native Preview` / `Markdown Source` 三态，默认 Web；新增 `MarkdownWebPreviewPane`，复用 `MarkdownImageResolver` 生成 data URI，WebView 加载 `file:///android_asset/web_preview/preview.html` 并通过 JSON payload 注入 Markdown。
 9. 已补低层测试：`MarkdownImageResolverTest` 增加 query/fragment stripping case；`SessionListInstrumentedTest` 增加 collapse callback component test。
 10. 已修复既有 androidTest 编译漂移：`ChatInputBarInstrumentedTest` 补齐 `agentActivityText` / `agentStartedAtMillis` 参数。
+11. 已修复 Web Preview 切文件黑屏：之前切文件时 `ResolvedMarkdownWebPreview` 先把 `resolvedContent` 置空，Compose 临时移除 WebView；新文件的 WebView shell 加载到 JS ready 前显示空深色页，视觉像全黑闪一下。现在先立即渲染当前 Markdown 文本，再异步补 data URI 图片，切文件不会进入 blank WebView 状态。
 
 ### 关键调研结论
 
@@ -84,6 +85,7 @@ Android 当前基线：`MainActivity.TabletLayout` 固定三栏，左栏 `Sessio
 - `./gradlew testDebugUnitTest`：通过。
 - `./gradlew assembleDebug`：通过。
 - `ANDROID_SERIAL=emulator-5554 ./gradlew connectedDebugAndroidTest`：通过，25 tests，2 skipped（AI Builder live credential 类），0 failed。
+- 切文件黑屏修复后重复执行以上三条验证，均通过；connected test 明确指定 `ANDROID_SERIAL=emulator-5554`，避免安装到已连接真机。
 
 ### 提交节奏
 

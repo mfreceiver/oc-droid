@@ -8,12 +8,10 @@ import android.webkit.WebResourceRequest
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material3.Button
-import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
@@ -78,14 +76,13 @@ private fun ResolvedMarkdownWebPreview(
     onOpenNative: () -> Unit,
     onOpenSource: () -> Unit
 ) {
-    var resolvedContent by remember(content, filePath) { mutableStateOf<String?>(null) }
+    var resolvedContent by remember(content, filePath) { mutableStateOf(content) }
     var error by remember(content, filePath) { mutableStateOf<String?>(null) }
     val resolverMarkdownPath = remember(filePath, sessionDirectory) {
         resolveRelativePreviewPath(filePath, sessionDirectory)
     }
 
     LaunchedEffect(content, resolverMarkdownPath, sessionDirectory, repository) {
-        resolvedContent = null
         error = null
         resolvedContent = try {
             MarkdownImageResolver.resolveImages(
@@ -100,20 +97,15 @@ private fun ResolvedMarkdownWebPreview(
         }
     }
 
-    when {
-        resolvedContent == null && error == null -> Box(
-            modifier = Modifier.fillMaxSize(),
-            contentAlignment = Alignment.Center
-        ) {
-            CircularProgressIndicator()
-        }
-        error != null && resolvedContent == null -> WebPreviewError(
+    if (error != null && resolvedContent.isBlank()) {
+        WebPreviewError(
             message = error ?: "Web Preview failed",
             onOpenNative = onOpenNative,
             onOpenSource = onOpenSource
         )
-        else -> MarkdownWebView(
-            markdown = resolvedContent ?: content,
+    } else {
+        MarkdownWebView(
+            markdown = resolvedContent,
             onRenderError = { error = it },
             onOpenNative = onOpenNative,
             onOpenSource = onOpenSource
