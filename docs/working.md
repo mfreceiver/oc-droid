@@ -21,6 +21,7 @@
 9. 已补低层测试：`MarkdownImageResolverTest` 增加 query/fragment stripping case；`SessionListInstrumentedTest` 增加 collapse callback component test。
 10. 已修复既有 androidTest 编译漂移：`ChatInputBarInstrumentedTest` 补齐 `agentActivityText` / `agentStartedAtMillis` 参数。
 11. 已修复 Web Preview 切文件黑屏：之前切文件时 `ResolvedMarkdownWebPreview` 先把 `resolvedContent` 置空，Compose 临时移除 WebView；新文件的 WebView shell 加载到 JS ready 前显示空深色页，视觉像全黑闪一下。现在先立即渲染当前 Markdown 文本，再异步补 data URI 图片，切文件不会进入 blank WebView 状态。
+12. 已修复 `.md` 一直黑屏的更底层问题：WebView 通过 `file:///android_asset/web_preview/preview.html` 加载 shell，必须允许 file asset 子资源读取，否则相邻的 `preview.js` / `markdown-it.min.js` / `purify.min.js` / `preview.css` 可能不加载，只剩黑色 HTML 背景。现在 `allowFileAccess=true` 仅用于 app asset shell；workspace 文件仍不走 WebView file URL，图片继续预解析成 data URI。`renderMarkdown()` 也增加了 renderer-ready 重试，避免注入早于 JS ready。
 
 ### 关键调研结论
 
@@ -86,6 +87,7 @@ Android 当前基线：`MainActivity.TabletLayout` 固定三栏，左栏 `Sessio
 - `./gradlew assembleDebug`：通过。
 - `ANDROID_SERIAL=emulator-5554 ./gradlew connectedDebugAndroidTest`：通过，25 tests，2 skipped（AI Builder live credential 类），0 failed。
 - 切文件黑屏修复后重复执行以上三条验证，均通过；connected test 明确指定 `ANDROID_SERIAL=emulator-5554`，避免安装到已连接真机。
+- `.md` shell asset 加载修复后再次执行以上三条验证，均通过。
 
 ### 提交节奏
 

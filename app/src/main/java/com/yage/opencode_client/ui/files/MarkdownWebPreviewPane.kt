@@ -129,7 +129,9 @@ private fun MarkdownWebView(
         factory = { ctx ->
             WebView(ctx).apply {
                 settings.javaScriptEnabled = true
-                settings.allowFileAccess = false
+                // Required for file:///android_asset preview.html to load sibling JS/CSS assets.
+                // Workspace files still never go through WebView file URLs; images are pre-resolved to data URIs.
+                settings.allowFileAccess = true
                 settings.allowContentAccess = false
                 settings.domStorageEnabled = false
                 addJavascriptInterface(
@@ -189,7 +191,20 @@ private fun WebView.renderMarkdown(markdown: String, theme: String) {
         .put("markdown", markdown)
         .put("theme", theme)
         .toString()
-    evaluateJavascript("window.renderMarkdown($payload);", null)
+    evaluateJavascript(
+        """
+        (function renderWhenReady(attempt) {
+          if (typeof window.renderMarkdown === 'function') {
+            window.renderMarkdown($payload);
+          } else if (attempt < 40) {
+            setTimeout(function () { renderWhenReady(attempt + 1); }, 50);
+          } else if (document && document.body) {
+            document.body.innerHTML = '<pre style="padding:16px;color:#ffd7d7;background:#5a1f1f">Markdown Web Preview failed to load renderer assets.</pre>';
+          }
+        })(0);
+        """.trimIndent(),
+        null
+    )
 }
 
 @Composable
