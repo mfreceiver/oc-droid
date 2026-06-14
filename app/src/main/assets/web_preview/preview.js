@@ -224,6 +224,8 @@
 
       wrapTables(content);
 
+      postToBridge({ type: "rendered" });
+
       if (!bridgeInstalled) {
         installClickBridge(content);
         bridgeInstalled = true;
@@ -241,4 +243,5 @@
   }
 
   window.renderMarkdown = renderMarkdown;
+  postToBridge({ type: "ready" });
 })();
