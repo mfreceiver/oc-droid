@@ -8,6 +8,7 @@ import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.*
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Chat
+import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.outlined.ChatBubbleOutline
@@ -18,6 +19,7 @@ import androidx.compose.material3.windowsizeclass.ExperimentalMaterial3WindowSiz
 import androidx.compose.material3.windowsizeclass.WindowWidthSizeClass
 import androidx.compose.material3.windowsizeclass.calculateWindowSizeClass
 import androidx.compose.runtime.*
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.foundation.layout.WindowInsets
@@ -216,53 +218,59 @@ private fun PhoneLayout(viewModel: MainViewModel) {
 @Composable
 private fun TabletLayout(viewModel: MainViewModel) {
     var selectedTab by remember { mutableIntStateOf(0) }
+    var sessionsPaneCollapsed by rememberSaveable { mutableStateOf(false) }
     val onOpenSettings: () -> Unit = { selectedTab = 1 }
     val state by viewModel.state.collectAsStateWithLifecycle()
+    val filesWeight = if (sessionsPaneCollapsed) 0.5f else 0.375f
+    val chatWeight = if (sessionsPaneCollapsed) 0.5f else 0.375f
 
         Row(
             modifier = Modifier
                 .fillMaxSize()
                 .windowInsetsPadding(WindowInsets.statusBars)
         ) {
-        // Left panel: Session list or Settings — 25% (no tabs on tablet)
-        Column(
-            modifier = Modifier
-                .weight(0.25f)
-                .fillMaxHeight()
-        ) {
-            if (selectedTab == 1) {
-                SettingsScreen(
-                    viewModel = viewModel,
-                    onBack = { selectedTab = 0 }
-                )
-            } else {
-                SessionList(
-                    sessions = state.sessions,
-                    currentSessionId = state.currentSessionId,
-                    sessionStatuses = state.sessionStatuses,
-                    hasMoreSessions = state.hasMoreSessions,
-                    isLoadingMoreSessions = state.isLoadingMoreSessions,
-                    isRefreshingSessions = state.isRefreshingSessions,
-                    expandedSessionIds = state.expandedSessionIds,
-                    onSelectSession = { viewModel.selectSession(it) },
-                    onCreateSession = { viewModel.createSession() },
-                    onDeleteSession = { viewModel.deleteSession(it) },
-                    onArchiveSession = { viewModel.archiveSession(it) },
-                    onRestoreSession = { viewModel.restoreSession(it) },
-                    onLoadMoreSessions = { viewModel.loadMoreSessions() },
-                    onRefreshSessions = { viewModel.loadSessions() },
-                    onToggleSessionExpanded = { viewModel.toggleSessionExpanded(it) },
-                    onOpenSettings = { selectedTab = 1 }
-                )
+        // Left panel: Session list or Settings — 25% when expanded.
+        if (!sessionsPaneCollapsed) {
+            Column(
+                modifier = Modifier
+                    .weight(0.25f)
+                    .fillMaxHeight()
+            ) {
+                if (selectedTab == 1) {
+                    SettingsScreen(
+                        viewModel = viewModel,
+                        onBack = { selectedTab = 0 }
+                    )
+                } else {
+                    SessionList(
+                        sessions = state.sessions,
+                        currentSessionId = state.currentSessionId,
+                        sessionStatuses = state.sessionStatuses,
+                        hasMoreSessions = state.hasMoreSessions,
+                        isLoadingMoreSessions = state.isLoadingMoreSessions,
+                        isRefreshingSessions = state.isRefreshingSessions,
+                        expandedSessionIds = state.expandedSessionIds,
+                        onSelectSession = { viewModel.selectSession(it) },
+                        onCreateSession = { viewModel.createSession() },
+                        onDeleteSession = { viewModel.deleteSession(it) },
+                        onArchiveSession = { viewModel.archiveSession(it) },
+                        onRestoreSession = { viewModel.restoreSession(it) },
+                        onLoadMoreSessions = { viewModel.loadMoreSessions() },
+                        onRefreshSessions = { viewModel.loadSessions() },
+                        onToggleSessionExpanded = { viewModel.toggleSessionExpanded(it) },
+                        onOpenSettings = { selectedTab = 1 },
+                        onCollapseSessions = { sessionsPaneCollapsed = true }
+                    )
+                }
             }
+
+            VerticalDivider()
         }
 
-        VerticalDivider()
-
-        // Middle panel: FilesScreen (file preview) — 37.5%
+        // Middle panel: FilesScreen (file preview) — 37.5%, or 50% when Sessions is collapsed.
         Column(
             modifier = Modifier
-                .weight(0.375f)
+                .weight(filesWeight)
                 .fillMaxHeight()
         ) {
             MaterialTheme(
@@ -270,22 +278,41 @@ private fun TabletLayout(viewModel: MainViewModel) {
                 typography = compactTypography(MaterialTheme.typography)
             ) {
                 val filesViewModel: FilesViewModel = hiltViewModel()
-                FilesScreen(
-                    viewModel = filesViewModel,
-                    pathToShow = state.filePathToShowInFiles,
-                    sessionDirectory = state.currentSession?.directory,
-                    onCloseFile = { viewModel.clearFileToShow() },
-                    onFileClick = { }
-                )
+                Box(modifier = Modifier.fillMaxSize()) {
+                    FilesScreen(
+                        viewModel = filesViewModel,
+                        pathToShow = state.filePathToShowInFiles,
+                        sessionDirectory = state.currentSession?.directory,
+                        onCloseFile = { viewModel.clearFileToShow() },
+                        onFileClick = { }
+                    )
+                    if (sessionsPaneCollapsed) {
+                        Surface(
+                            modifier = Modifier
+                                .align(Alignment.TopStart)
+                                .padding(4.dp),
+                            shape = MaterialTheme.shapes.small,
+                            color = MaterialTheme.colorScheme.surface.copy(alpha = 0.92f),
+                            tonalElevation = 3.dp
+                        ) {
+                            IconButton(onClick = { sessionsPaneCollapsed = false }) {
+                                Icon(
+                                    Icons.AutoMirrored.Filled.KeyboardArrowRight,
+                                    contentDescription = "Show sessions"
+                                )
+                            }
+                        }
+                    }
+                }
             }
         }
 
         VerticalDivider()
 
-        // Right panel: Chat — 37.5%
+        // Right panel: Chat — 37.5%, or 50% when Sessions is collapsed.
         Column(
             modifier = Modifier
-                .weight(0.375f)
+                .weight(chatWeight)
                 .fillMaxHeight()
         ) {
             MaterialTheme(

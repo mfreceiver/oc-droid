@@ -16,6 +16,7 @@
 4. 已更新主文档：`docs/PRD.md` 和 `docs/RFC.md` 增加 Phase 7、Web Preview、tablet Sessions pane collapse。
 5. 已新增 Android 专属设计文档：`docs/Android_Markdown_Web_Preview_PRD.md` 和 `docs/Android_Markdown_Web_Preview_RFC.md`。
 6. 已更新 `.gitignore`，忽略 `docs/ios_markdown_preview_fixtures/`。这个目录只用于把 iOS 的 Markdown Preview PRD/RFC 复制进 Android repo 手工渲染，不提交。
+7. 已实现 tablet Sessions pane collapse：`MainActivity.TabletLayout` 使用 `rememberSaveable` 保存 `sessionsPaneCollapsed`，折叠时左栏不渲染，Files/Chat 各占 50%；`SessionList` header 增加 `Hide sessions`，Files pane 左上角增加 `Show sessions` 恢复入口。
 
 ### 关键调研结论
 
@@ -66,9 +67,9 @@ Android 当前基线：`MainActivity.TabletLayout` 固定三栏，左栏 `Sessio
 
 ### 当前待处理
 
-- [ ] 复制 iOS Markdown Preview PRD/RFC 到 ignored fixture 目录。
-- [ ] 提交文档计划 checkpoint。
-- [ ] 实现 tablet Sessions pane collapse。
+- [x] 复制 iOS Markdown Preview PRD/RFC 到 ignored fixture 目录。
+- [x] 提交文档计划 checkpoint：`a772863 docs: plan Android markdown web preview parity`。
+- [x] 实现 tablet Sessions pane collapse，验证 `./gradlew assembleDebug` 与 `./gradlew testDebugUnitTest` 均通过。
 - [ ] 实现 Web Preview resource shell。
 - [ ] 接入 Files mode menu 和 WebView renderer。
 - [ ] 补 unit / component tests。
