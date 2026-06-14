@@ -8,9 +8,9 @@
 |------|------|
 | **RFC 编号** | RFC-001 |
 | **标题** | OpenCode Android Client 技术方案 |
-| **状态** | Accepted (Implemented) |
+| **状态** | Accepted + Phase 7 Draft |
 | **创建日期** | 2026-02 |
-| **最后更新** | 2026-05-25 |
+| **最后更新** | 2026-06-14 |
 | **PRD 引用** | [PRD.md](PRD.md) |
 
 ---
@@ -64,6 +64,7 @@
 | 序列化 | Kotlinx Serialization | Kotlin 原生，性能好 |
 | 依赖注入 | Hilt | 官方推荐，Dagger 封装 |
 | Markdown | multiplatform-markdown-renderer-m3 | 已落地，Compose 兼容性好 |
+| Markdown Web Preview | Android WebView + bundled markdown-it + DOMPurify | Phase 7 对齐 iOS PR #94，承载 HTML-in-Markdown / CSS cards / inline SVG |
 | SSH（可选） | Apache Mina SSHD 或 JSch | 成熟，支持端口转发 |
 | 安全存储 | EncryptedSharedPreferences + Keystore | Android 官方方案 |
 
@@ -805,6 +806,35 @@ message.info.resolvedModel?.let { model ->
 - 图片预览默认 fit-to-screen，支持双击缩放、拖动平移、系统分享
 - Android 分享通过 `FileProvider + ACTION_SEND` 实现，对外仅暴露 cache 中的临时文件 URI
 
+### 5.10 Phase 7 Markdown Web Preview（对齐 iOS PR #94）
+
+详细方案见 [Android_Markdown_Web_Preview_RFC.md](Android_Markdown_Web_Preview_RFC.md)。主 RFC 只记录集成边界：
+
+1. `FilePreviewPane` 对 Markdown 文件提供 `Web Preview`、`Native Preview`、`Markdown Source` 三态。
+2. 默认模式为 `Web Preview`；Native Compose Markdown renderer 保留为回退路径。
+3. WebView 只加载 app assets 里的 renderer shell，不从网络加载 JS，不直接读取 workspace 文件。
+4. 相对图片复用 `MarkdownImageResolver.resolveImages(...)` 转 data URI，保证 Web / Native / Chat 的路径语义一致。
+5. WebView navigation 默认拦截；外链交给系统，workspace 相对链接回 Files。
+6. 大文件先显示确认 gate，避免直接注入超大 Markdown。
+
+### 5.11 Phase 7 Tablet Sessions Pane 折叠（对齐 iOS PR #95）
+
+当前 `MainActivity.TabletLayout` 是固定三栏：Sessions/Settings 25%，Files 37.5%，Chat 37.5%。Phase 7 增加一个 transient UI state：
+
+```kotlin
+var sessionsPaneCollapsed by rememberSaveable { mutableStateOf(false) }
+```
+
+展开状态保持现有权重。折叠状态不渲染左侧 Sessions/Settings pane，Files 与 Chat 各占 `0.5f`。折叠按钮放在左侧 Sessions pane 顶部；展开按钮放在 Files pane 顶部左侧，避免用户折叠后失去恢复入口。
+
+实现边界：
+
+1. 只作用于 `WindowWidthSizeClass.Expanded`。
+2. 不改变手机 `PhoneLayout` 的底部 Tab、Chat session sheet 或 edge gesture。
+3. 不复用 `expandedSessionIds`，避免 pane collapse 与 session tree row expansion 混淆。
+4. 第一版不持久化到 settings；`rememberSaveable` 足够覆盖旋转和配置变化。
+5. 需要给 hide/show 按钮稳定 content description：`Hide sessions` / `Show sessions`，供 accessibility 与 UI test 使用。
+
 ---
 
 ## 6. 安全设计
@@ -934,6 +964,7 @@ app/
 | 3 | 文件树、Markdown / 图片预览、Diff、平板布局 | 已完成 |
 | 5 | UX 对齐 iOS：Chat toolbar 重排（§5.4）、Session Rename UI、草稿持久化（§4.3）、Model/Agent per-session（§4.4） | ✅ 完成 |
 | 5b | 消息历史分页修复（§5.5）、Model/Agent Capsule 文本化（§5.6）、平板 toolbar 适配（§5.7）、消息模型标注（§5.8） | 1-2 天 |
+| 7 | Markdown Web Preview（§5.10）、Tablet Sessions pane 折叠（§5.11） | 2-4 天 |
 | 4 | SSH Tunnel（可选） | 1 周 |
 
 ---
@@ -946,6 +977,8 @@ app/
 | SSE 兼容性 | 使用成熟的 OkHttp SSE 库 |
 | 平板适配复杂度 | 先完成手机版，平板作为 Phase 3 |
 | SSH 库稳定性 | 充分测试，提供降级方案（公网 HTTPS） |
+| WebView 安全面扩大 | 本地固定 JS、DOMPurify allowlist、禁 workspace file access、禁任意 navigation |
+| Web Preview 大文档性能 | oversize gate、Native/Source 回退，后续再引入 asset loader / custom scheme 优化大图 |
 
 ---
 

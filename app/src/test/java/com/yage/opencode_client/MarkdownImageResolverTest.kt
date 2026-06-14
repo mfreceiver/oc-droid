@@ -57,6 +57,17 @@ class MarkdownImageResolverTest {
     }
 
     @Test
+    fun `normalizeImagePath strips query and fragment for web preview image references`() {
+        val resolved = MarkdownImageResolver.normalizeImagePath(
+            rawUrl = "../assets/chart.svg?cache=1#figure-a",
+            markdownFilePath = "/workspace/docs/reports/status.md",
+            workspaceDirectory = "/workspace"
+        )
+
+        assertEquals("docs/assets/chart.svg", resolved)
+    }
+
+    @Test
     fun `resolveImages replaces relative image markdown with data uri`() = runTest {
         val markdown = "Look here ![alt](./output/screenshot.png)"
 

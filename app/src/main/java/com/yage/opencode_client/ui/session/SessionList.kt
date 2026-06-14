@@ -28,6 +28,7 @@ import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.KeyboardArrowLeft
 import androidx.compose.material.icons.filled.Archive
 import androidx.compose.material.icons.filled.ChevronRight
 import androidx.compose.material.icons.filled.Delete
@@ -282,7 +283,8 @@ fun SessionList(
     onToggleSessionExpanded: (String) -> Unit = {},
     onLoadMoreSessions: () -> Unit = {},
     onRefreshSessions: () -> Unit = {},
-    onOpenSettings: (() -> Unit)? = null
+    onOpenSettings: (() -> Unit)? = null,
+    onCollapseSessions: (() -> Unit)? = null
 ) {
     val activeSessions = remember(sessions) { sessions.filter { !it.isArchived } }
     val archivedSessions = remember(sessions) { sessions.filter { it.isArchived } }
@@ -326,6 +328,11 @@ fun SessionList(
                 if (onOpenSettings != null) {
                     IconButton(onClick = onOpenSettings) {
                         Icon(Icons.Default.Settings, contentDescription = "Settings")
+                    }
+                }
+                if (onCollapseSessions != null) {
+                    IconButton(onClick = onCollapseSessions) {
+                        Icon(Icons.AutoMirrored.Filled.KeyboardArrowLeft, contentDescription = "Hide sessions")
                     }
                 }
             }

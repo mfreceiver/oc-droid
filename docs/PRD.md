@@ -7,9 +7,9 @@
 | 字段 | 值 |
 |------|------|
 | **产品名称** | OpenCode Android Client |
-| **状态** | v1.2 (UX Parity Phase 5b) |
+| **状态** | v1.3 (iOS PR #94/#95 parity planning) |
 | **创建日期** | 2026-02 |
-| **最后更新** | 2026-05-25 |
+| **最后更新** | 2026-06-14 |
 | **参考** | iOS Client PRD |
 
 ---
@@ -76,6 +76,7 @@ Android Client 提供以下核心能力：
 | 文件卡片预览 | 在 Chat 流中点击 tool/patch 卡片跳转文件预览，确认 AI 的改动 |
 | Session 管理 | 查看、创建、切换、重命名、删除、Fork Session，追踪多线任务 |
 | 权限审批 | 手动批准或拒绝 AI 请求的 shell 操作等权限 |
+| Markdown Web Preview | Files 中用 WebView 渲染 HTML-in-Markdown、CSS 卡片、inline SVG 和复杂 visual 报告 |
 
 ---
 
@@ -205,7 +206,7 @@ iOS 在每条 assistant 消息旁显示回复该消息的模型名称（如 `ant
 > Files Tab 是兜底入口——主工作流中文件访问通过 Chat 窗口的 tool/patch 卡片跳转完成。
 
 - **文件树**：递归展示工作目录，支持 git 状态颜色标记 ✅
-- **文件预览**：文本文件等宽字体显示，Markdown 文件渲染 ✅
+- **文件预览**：文本文件等宽字体显示，Markdown 文件支持 Native / Web / Source 三态预览。Web Preview 对齐 iOS PR #94，使用本地 WebView shell 渲染 HTML-in-Markdown、CSS 卡片、inline SVG、`<details>`、宽表和 workspace 相对图片。默认打开 Web Preview，失败或大文件时可退回 Native / Source。🔲 Phase 7
 - **图片预览**：图片默认 fit-to-screen，支持双击放大、拖动平移、系统分享 ✅
 - **Session 变更**：🔲 暂不实现
 
@@ -221,9 +222,15 @@ iOS 在每条 assistant 消息旁显示回复该消息的模型名称（如 `ant
 
 - **手机**：底部 Tab 导航（Chat / Files / Settings） ✅
 - **平板**：三栏布局（WindowSizeClass.Expanded） ✅
-  - 左：Workspace（Files / Settings 切换）
+  - 左：Sessions / Settings，Phase 7 对齐 iOS PR #95 支持 Sessions pane 折叠与展开 🔲
   - 中：文件预览
   - 右：Chat
+
+#### Phase 7：Markdown Web Preview 与平板 Sessions 折叠（对齐 iOS PR #94/#95）
+
+本阶段补齐两个 iOS 已落地能力。第一，Files 中的 Markdown 预览从单一路径升级为 Native / Web / Source 三态。Web Preview 负责承载 AI internal writing 里已经开始使用的 HTML/CSS 卡片、inline SVG、深浅色语义变量和折叠审计层；Native Preview 保留为稳定回退；Source 用于调试和大文件安全查看。详细产品边界见 [Android_Markdown_Web_Preview_PRD.md](Android_Markdown_Web_Preview_PRD.md)。
+
+第二，平板三栏布局的左侧 Sessions pane 支持折叠。展开时保持当前 25% / 37.5% / 37.5% 三栏；折叠时左栏不渲染，Files 与 Chat 平分宽度；Files 顶栏左侧显示展开按钮。这个能力只作用于 tablet / expanded width，不改变手机底部 Tab 和 session sheet 逻辑。
 
 ---
 
@@ -287,6 +294,8 @@ iOS 在每条 assistant 消息旁显示回复该消息的模型名称（如 `ant
 | 消息历史分页 | pull-to-refresh | Phase 5b 修复 | 当前 Android 滚动检测方向反转 |
 | 消息模型标注 | caption 显示 provider/model | ✅ Phase 5b 完成 | 消息行顶部显示 provider/model |
 | Fork Session | 消息节点 fork | ✅ Phase 5b 完成 | API + DropdownMenu 已实现 |
+| Markdown Web Preview | Files 默认 Web Preview，Native/Source 回退 | 🔲 Phase 7 | 对齐 iOS PR #94，Android 使用本地 WebView + bundled JS/CSS |
+| Tablet Sessions pane collapse | 左侧 Sessions pane 可折叠 | 🔲 Phase 7 | 对齐 iOS PR #95，只影响 expanded width 三栏布局 |
 
 ---
 
@@ -300,6 +309,7 @@ iOS 在每条 assistant 消息旁显示回复该消息的模型名称（如 `ant
 | 5 | UX 对齐 iOS：Chat toolbar 重排、Session Rename UI、草稿持久化、Model/Agent per-session 记忆 | ✅ 完成 (2026-03-14) |
 | 5b | 消息历史分页修复、Model/Agent 文本化 Capsule、平板 toolbar 适配、消息模型标注 | 🔲 进行中 |
 | 6 | 语音输入 realtime recovery：立即 PCM capture、本地 cache、session attach/replay、断线恢复 | ✅ 完成 (2026-05-25) |
+| 7 | Markdown Web Preview、Native/Web/Source 三态、平板 Sessions pane 折叠 | 🔲 规划中 (2026-06-14) |
 | 4 | SSH Tunnel、Session 变更文件列表 | 🔲 未来可选 |
 
 ---

@@ -24,6 +24,8 @@ class ChatInputBarInstrumentedTest {
                 ChatInputBar(
                     text = "hello",
                     isBusy = true,
+                    agentActivityText = null,
+                    agentStartedAtMillis = null,
                     isRecording = false,
                     isTranscribing = false,
                     hasPreservedSpeechAudio = false,
@@ -57,6 +59,8 @@ class ChatInputBarInstrumentedTest {
                 ChatInputBar(
                     text = "hello",
                     isBusy = false,
+                    agentActivityText = null,
+                    agentStartedAtMillis = null,
                     isRecording = false,
                     isTranscribing = false,
                     hasPreservedSpeechAudio = false,
@@ -88,6 +92,8 @@ class ChatInputBarInstrumentedTest {
                 ChatInputBar(
                     text = "partial transcript",
                     isBusy = true,
+                    agentActivityText = null,
+                    agentStartedAtMillis = null,
                     isRecording = false,
                     isTranscribing = true,
                     hasPreservedSpeechAudio = false,
@@ -118,6 +124,8 @@ class ChatInputBarInstrumentedTest {
                 ChatInputBar(
                     text = "",
                     isBusy = false,
+                    agentActivityText = null,
+                    agentStartedAtMillis = null,
                     isRecording = false,
                     isTranscribing = false,
                     hasPreservedSpeechAudio = true,
