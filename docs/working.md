@@ -22,7 +22,8 @@
 10. 已修复既有 androidTest 编译漂移：`ChatInputBarInstrumentedTest` 补齐 `agentActivityText` / `agentStartedAtMillis` 参数。
 11. 已修复 Web Preview 切文件黑屏：之前切文件时 `ResolvedMarkdownWebPreview` 先把 `resolvedContent` 置空，Compose 临时移除 WebView；新文件的 WebView shell 加载到 JS ready 前显示空深色页，视觉像全黑闪一下。现在先立即渲染当前 Markdown 文本，再异步补 data URI 图片，切文件不会进入 blank WebView 状态。
 12. 已修复 `.md` 一直黑屏的更底层问题：WebView 通过 `file:///android_asset/web_preview/preview.html` 加载 shell，必须允许 file asset 子资源读取，否则相邻的 `preview.js` / `markdown-it.min.js` / `purify.min.js` / `preview.css` 可能不加载，只剩黑色 HTML 背景。现在 `allowFileAccess=true` 仅用于 app asset shell；workspace 文件仍不走 WebView file URL，图片继续预解析成 data URI。`renderMarkdown()` 也增加了 renderer-ready 重试，避免注入早于 JS ready。
-13. 真机反馈 Web Preview 首次打开仍有黑色首帧。当前诊断分两层：第一，WebView 先显示空的深色 `preview.html` shell，随后 `preview.js` 才完成 renderer 初始化和 Markdown 注入；第二，WebView 创建时的硬件合成层可能抢到窗口首帧，导致整个 Activity 黑闪，而不只是 Markdown pane 变黑。默认模式保持 Web Preview；修复方式是在 JS 发出 `rendered` bridge 事件前，用 Compose Native Markdown 覆盖 WebView，同时把 WebView 设为透明、`alpha=0`，并使用 software layer 避免硬件合成黑帧。bridge 回调统一切回 main thread 更新 Compose state。
+13. 真机反馈 Web Preview 首次打开仍有黑色首帧。当前诊断分两层：第一，WebView 先显示空的深色 `preview.html` shell，随后 `preview.js` 才完成 renderer 初始化和 Markdown 注入；第二，WebView 创建时的硬件合成层可能抢到窗口首帧，导致整个 Activity 黑闪，而不只是 Markdown pane 变黑。默认模式保持 Web Preview；修复方式是在 JS 发出 `rendered` bridge 事件前，用 Compose Native Markdown 覆盖 WebView，并用 `onPageCommitVisible` + `postVisualStateCallback` 控制 WebView 可见时机。bridge 回调统一切回 main thread 更新 Compose state。
+14. 用户进一步确认黑闪只发生在进程内第一次切到 Markdown，之后不再闪。这个现象基本指向 WebView/Chromium 首次初始化，而不是每次 Markdown render。已在 `OpenCodeApp` 启动后预热一个不 attach 到窗口的 `about:blank` WebView，把首次初始化从用户点击 MD 的交互路径挪走。此前尝试过的 `LAYER_TYPE_SOFTWARE` 已撤回；Chromium 官方不建议对 WebView 使用 software layer，它也可能放大全窗口合成黑闪。
 
 ### 关键调研结论
 
@@ -81,7 +82,7 @@ Android 当前基线：`MainActivity.TabletLayout` 固定三栏，左栏 `Sessio
 - [x] 补 unit/component tests。
 - [x] 跑 connected/component 验证。
 - [x] 开 PR：`https://github.com/grapeot/opencode_android_client/pull/61`。
-- [x] 修复 Web Preview 首次打开黑色首帧：WebView 后台加载，Native Markdown overlay 持续到 JS 发出 `rendered`；WebView 渲染完成前透明且不参与硬件合成，避免整屏黑闪。
+- [x] 修复 Web Preview 首次打开黑色首帧：WebView 后台加载，Native Markdown overlay 持续到 JS 发出 `rendered`；WebView 使用 visual-state callback 后显示，并在 app 启动后预热 Chromium/WebView 首次初始化。
 
 ### 当前验证状态
 
@@ -90,7 +91,7 @@ Android 当前基线：`MainActivity.TabletLayout` 固定三栏，左栏 `Sessio
 - `ANDROID_SERIAL=emulator-5554 ./gradlew connectedDebugAndroidTest`：通过，25 tests，2 skipped（AI Builder live credential 类），0 failed。
 - 切文件黑屏修复后重复执行以上三条验证，均通过；connected test 明确指定 `ANDROID_SERIAL=emulator-5554`，避免安装到已连接真机。
 - `.md` shell asset 加载修复后再次执行以上三条验证，均通过。
-- Web Preview 首次打开黑色首帧修复后重复执行以上三条验证，均通过。默认 Markdown mode 保持 Web Preview；Native Preview 作为 Web renderer 完成前的临时覆盖层和菜单中的手动 fallback。
+- Web Preview 首次打开黑色首帧修复后重复执行以上三条验证，均通过。默认 Markdown mode 保持 Web Preview；Native Preview 作为 Web renderer 完成前的临时覆盖层和菜单中的手动 fallback。用户确认黑闪只在第一次切 MD 出现后，新增 app 启动后 WebView warm-up，并再次验证 `./gradlew testDebugUnitTest assembleDebug` 与 `ANDROID_SERIAL=emulator-5554 ./gradlew connectedDebugAndroidTest` 通过。
 
 ### 提交节奏
 

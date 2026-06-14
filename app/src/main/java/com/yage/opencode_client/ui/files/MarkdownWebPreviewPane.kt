@@ -2,11 +2,11 @@ package com.yage.opencode_client.ui.files
 
 import android.annotation.SuppressLint
 import android.content.Intent
-import android.graphics.Color
 import android.net.Uri
 import android.os.Handler
 import android.os.Looper
-import android.view.View
+import android.os.SystemClock
+import android.util.Log
 import android.webkit.JavascriptInterface
 import android.webkit.WebResourceRequest
 import android.webkit.WebView
@@ -34,10 +34,12 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.graphics.luminance
+import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import com.mikepenz.markdown.m3.Markdown
+import com.yage.opencode_client.BuildConfig
 import com.yage.opencode_client.data.repository.OpenCodeRepository
 import com.yage.opencode_client.ui.theme.markdownTypographyCompact
 import com.yage.opencode_client.ui.util.DataUriImageTransformer
@@ -46,6 +48,7 @@ import org.json.JSONObject
 
 private const val webPreviewMaxTotalLength = 60_000
 private const val webPreviewMaxLineLength = 5_000
+private const val webPreviewLogTag = "MarkdownWebPreview"
 
 @Composable
 internal fun MarkdownWebPreviewPane(
@@ -136,9 +139,11 @@ private fun MarkdownWebView(
 ) {
     val context = LocalContext.current
     val theme = if (MaterialTheme.colorScheme.background.luminance() < 0.5f) "dark" else "light"
+    val webViewBackground = MaterialTheme.colorScheme.background.toArgb()
     var webContentReady by remember { mutableStateOf(false) }
 
     LaunchedEffect(markdown, theme) {
+        webPreviewLog("content changed length=${markdown.length} theme=$theme")
         webContentReady = false
     }
 
@@ -148,11 +153,12 @@ private fun MarkdownWebView(
                 .fillMaxSize()
                 .alpha(if (webContentReady) 1f else 0f),
             factory = { ctx ->
+                webPreviewLog("factory start")
                 WebView(ctx).apply {
-                    setBackgroundColor(Color.TRANSPARENT)
-                    // Avoid a hardware-composited black first frame before the asset shell renders.
-                    setLayerType(View.LAYER_TYPE_SOFTWARE, null)
+                    webPreviewLog("webview constructed")
+                    setBackgroundColor(webViewBackground)
                     settings.javaScriptEnabled = true
+                    settings.offscreenPreRaster = true
                     // Required for file:///android_asset preview.html to load sibling JS/CSS assets.
                     // Workspace files still never go through WebView file URLs; images are pre-resolved to data URIs.
                     settings.allowFileAccess = true
@@ -160,7 +166,10 @@ private fun MarkdownWebView(
                     settings.domStorageEnabled = false
                     addJavascriptInterface(
                         AndroidPreviewBridge(
-                            onRendered = { webContentReady = true },
+                            onRendered = {
+                                webPreviewLog("js rendered")
+                                webContentReady = true
+                            },
                             onError = onRenderError,
                             onExternalLink = { url ->
                                 val intent = Intent(Intent.ACTION_VIEW, Uri.parse(url))
@@ -171,7 +180,21 @@ private fun MarkdownWebView(
                     )
                     webViewClient = object : WebViewClient() {
                         override fun onPageFinished(view: WebView, url: String?) {
+                            webPreviewLog("onPageFinished url=$url")
                             view.renderMarkdown(markdown, theme)
+                        }
+
+                        override fun onPageCommitVisible(view: WebView, url: String?) {
+                            webPreviewLog("onPageCommitVisible url=$url")
+                            view.postVisualStateCallback(
+                                System.nanoTime(),
+                                object : WebView.VisualStateCallback() {
+                                    override fun onComplete(requestId: Long) {
+                                        webPreviewLog("visual state complete requestId=$requestId")
+                                        webContentReady = true
+                                    }
+                                }
+                            )
                         }
 
                         override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest): Boolean {
@@ -183,10 +206,13 @@ private fun MarkdownWebView(
                             return true
                         }
                     }
+                    webPreviewLog("loadUrl preview.html")
                     loadUrl("file:///android_asset/web_preview/preview.html")
                 }
             },
             update = { webView ->
+                webPreviewLog("update render length=${markdown.length} theme=$theme ready=$webContentReady")
+                webView.setBackgroundColor(webViewBackground)
                 webView.renderMarkdown(markdown, theme)
             }
         )
@@ -221,6 +247,7 @@ private class AndroidPreviewBridge(
 }
 
 private fun WebView.renderMarkdown(markdown: String, theme: String) {
+    webPreviewLog("renderMarkdown requested length=${markdown.length} theme=$theme")
     val payload = JSONObject()
         .put("markdown", markdown)
         .put("theme", theme)
@@ -239,6 +266,12 @@ private fun WebView.renderMarkdown(markdown: String, theme: String) {
         """.trimIndent(),
         null
     )
+}
+
+private fun webPreviewLog(message: String) {
+    if (BuildConfig.DEBUG) {
+        Log.d(webPreviewLogTag, "${SystemClock.uptimeMillis()} $message")
+    }
 }
 
 @Composable
