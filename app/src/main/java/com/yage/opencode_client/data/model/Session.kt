@@ -15,7 +15,8 @@ data class Session(
     val version: String? = null,
     val time: TimeInfo? = null,
     val share: ShareInfo? = null,
-    val summary: SummaryInfo? = null
+    val summary: SummaryInfo? = null,
+    val revert: RevertInfo? = null
 ) {
     /** Display name for UI: title, or last path segment of directory, or id */
     val displayName: String
@@ -40,6 +41,14 @@ data class Session(
         val additions: Int? = null,
         val deletions: Int? = null,
         val files: Int? = null
+    )
+
+    @Serializable
+    data class RevertInfo(
+        @SerialName("messageID") val messageId: String,
+        @SerialName("partID") val partId: String? = null,
+        val snapshot: String? = null,
+        val diff: String? = null
     )
 }
 

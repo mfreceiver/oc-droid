@@ -112,10 +112,24 @@ class OpenCodeRepository @Inject constructor() {
         sessionId: String,
         text: String,
         agent: String = "build",
-        model: Message.ModelInfo? = null
+        model: Message.ModelInfo? = null,
+        attachments: List<ComposerImageAttachment> = emptyList()
     ): Result<Unit> = runCatching {
+        val parts = buildList {
+            if (text.isNotBlank()) add(PromptRequest.PartInput(type = "text", text = text))
+            attachments.forEach { attachment ->
+                add(
+                    PromptRequest.PartInput(
+                        type = "file",
+                        mime = attachment.mime,
+                        filename = attachment.filename,
+                        url = attachment.dataUrl
+                    )
+                )
+            }
+        }
         val request = PromptRequest(
-            parts = listOf(PromptRequest.PartInput(text = text)),
+            parts = parts,
             agent = agent,
             model = model?.let { PromptRequest.ModelInput(it.providerId, it.modelId) }
         )
@@ -132,6 +146,10 @@ class OpenCodeRepository @Inject constructor() {
 
     suspend fun forkSession(sessionId: String, messageId: String? = null): Result<Session> = runCatching {
         api.forkSession(sessionId, ForkSessionRequest(messageId))
+    }
+
+    suspend fun revertSession(sessionId: String, messageId: String, partId: String? = null): Result<Session> = runCatching {
+        api.revertSession(sessionId, RevertSessionRequest(messageId, partId))
     }
 
     suspend fun getPendingPermissions(): Result<List<PermissionRequest>> = runCatching {

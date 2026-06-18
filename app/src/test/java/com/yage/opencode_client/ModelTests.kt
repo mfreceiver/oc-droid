@@ -1,6 +1,7 @@
 package com.yage.opencode_client
 
 import com.yage.opencode_client.data.model.*
+import com.yage.opencode_client.data.api.PromptRequest
 import com.yage.opencode_client.ui.AppState
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
@@ -15,6 +16,7 @@ class ModelTests {
         ignoreUnknownKeys = true
         isLenient = true
         coerceInputValues = true
+        encodeDefaults = true
     }
 
     @Test
@@ -38,6 +40,29 @@ class ModelTests {
         assertEquals(session.id, decoded.id)
         assertEquals(session.directory, decoded.directory)
         assertEquals(session.title, decoded.title)
+    }
+
+    @Test
+    fun `Session decodes revert metadata`() {
+        val decoded = json.decodeFromString<Session>(
+            """
+            {
+              "id": "s1",
+              "directory": "/tmp/project",
+              "revert": {
+                "messageID": "msg-2",
+                "partID": "part-1",
+                "snapshot": "snap",
+                "diff": "diff"
+              }
+            }
+            """.trimIndent()
+        )
+
+        assertEquals("msg-2", decoded.revert?.messageId)
+        assertEquals("part-1", decoded.revert?.partId)
+        assertEquals("snap", decoded.revert?.snapshot)
+        assertEquals("diff", decoded.revert?.diff)
     }
 
     @Test
@@ -116,6 +141,50 @@ class ModelTests {
         
         val patchPart = Part(id = "p4", type = "patch")
         assertTrue(patchPart.isPatch)
+    }
+
+    @Test
+    fun `Part decodes image file attachments`() {
+        val part = json.decodeFromString<Part>(
+            """
+            {
+              "id": "p-file",
+              "type": "file",
+              "mime": "image/jpeg",
+              "filename": "photo.jpg",
+              "url": "data:image/jpeg;base64,abc123",
+              "source": "attachment"
+            }
+            """.trimIndent()
+        )
+
+        assertTrue(part.isFile)
+        assertTrue(part.isImageAttachment)
+        assertEquals("photo.jpg", part.filename)
+        assertEquals("data:image/jpeg;base64,abc123", part.url)
+    }
+
+    @Test
+    fun `PromptRequest serializes mixed text and image file parts`() {
+        val request = PromptRequest(
+            parts = listOf(
+                PromptRequest.PartInput(type = "text", text = "describe this"),
+                PromptRequest.PartInput(
+                    type = "file",
+                    mime = "image/jpeg",
+                    filename = "photo.jpg",
+                    url = "data:image/jpeg;base64,abc123"
+                )
+            ),
+            agent = "build"
+        )
+
+        val encoded = json.encodeToString(request)
+
+        assertTrue(encoded.contains("\"type\":\"text\""))
+        assertTrue(encoded.contains("\"type\":\"file\""))
+        assertTrue(encoded.contains("\"mime\":\"image/jpeg\""))
+        assertTrue(encoded.contains("\"url\":\"data:image/jpeg;base64,abc123\""))
     }
 
     @Test
