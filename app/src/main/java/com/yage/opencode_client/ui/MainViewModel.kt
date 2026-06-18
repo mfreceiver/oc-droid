@@ -71,6 +71,7 @@ data class AppState(
     val aiBuilderConnectionError: String? = null,
     val isTestingAIBuilderConnection: Boolean = false,
     val sessionTodos: Map<String, List<TodoItem>> = emptyMap(),
+    val sendingSessionIds: Set<String> = emptySet(),
     val imageAttachments: List<ComposerImageAttachment> = emptyList()
 ) {
     data class ModelOption(val displayName: String, val providerId: String, val modelId: String) {
@@ -712,9 +713,12 @@ class MainViewModel @Inject constructor(
 
     fun sendMessage() {
         val sessionId = _state.value.currentSessionId ?: return
+        if (_state.value.sendingSessionIds.contains(sessionId)) return
         val text = _state.value.inputText.trim()
         val attachments = _state.value.imageAttachments
         if (text.isEmpty() && attachments.isEmpty()) return
+
+        _state.update { state -> state.copy(sendingSessionIds = state.sendingSessionIds + sessionId) }
 
         val agent = _state.value.selectedAgentName
         val model = buildSelectedModel(_state.value)
@@ -735,6 +739,9 @@ class MainViewModel @Inject constructor(
                 onSuccess = {
                     settingsManager.setDraftText(sessionId, "")
                     _state.update { it.copy(imageAttachments = emptyList()) }
+                },
+                onComplete = {
+                    _state.update { state -> state.copy(sendingSessionIds = state.sendingSessionIds - sessionId) }
                 }
             )
         }

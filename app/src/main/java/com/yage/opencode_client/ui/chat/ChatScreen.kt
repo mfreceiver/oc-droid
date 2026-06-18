@@ -67,7 +67,8 @@ fun ChatScreen(
     // Cache last non-null contextUsage so the ring stays visible during streaming
     var cachedContextUsage by remember { mutableStateOf(state.contextUsage) }
     state.contextUsage?.let { cachedContextUsage = it }
-    val currentSessionIsRunning = state.currentSessionStatus?.let { it.isBusy || it.isRetry } == true
+    val currentSessionIsRunning = state.currentSessionStatus?.let { it.isBusy || it.isRetry } == true ||
+        state.currentSessionId?.let { it in state.sendingSessionIds } == true
     val currentActivity = remember(
         state.currentSessionId,
         state.currentSessionStatus,

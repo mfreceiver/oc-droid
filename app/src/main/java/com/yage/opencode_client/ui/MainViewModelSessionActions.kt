@@ -429,7 +429,8 @@ internal fun launchSendMessage(
     model: Message.ModelInfo?,
     onRefreshMessages: (String, Boolean) -> Unit,
     onRefreshSessions: () -> Unit,
-    onSuccess: (() -> Unit)? = null
+    onSuccess: (() -> Unit)? = null,
+    onComplete: (() -> Unit)? = null
 ) {
     scope.launch {
         repository.sendMessage(sessionId, text, agent, model, attachments = attachments)
@@ -454,5 +455,6 @@ internal fun launchSendMessage(
             .onFailure { error ->
                 state.update { it.copy(error = errorMessageOrFallback(error, "Failed to send message")) }
             }
+        onComplete?.invoke()
     }
 }
