@@ -48,6 +48,12 @@ interface OpenCodeApi {
         @Body body: ForkSessionRequest
     ): Session
 
+    @POST("session/{id}/revert")
+    suspend fun revertSession(
+        @Path("id") sessionId: String,
+        @Body body: RevertSessionRequest
+    ): Session
+
     @POST("session/{id}/permissions/{permissionId}")
     suspend fun respondPermission(
         @Path("id") sessionId: String,
@@ -124,7 +130,10 @@ data class PromptRequest(
     @kotlinx.serialization.Serializable
     data class PartInput(
         val type: String = "text",
-        val text: String
+        val text: String? = null,
+        val mime: String? = null,
+        val filename: String? = null,
+        val url: String? = null
     )
 
     @kotlinx.serialization.Serializable
@@ -147,4 +156,10 @@ data class QuestionReplyRequest(
 @kotlinx.serialization.Serializable
 data class ForkSessionRequest(
     @kotlinx.serialization.SerialName("messageID") val messageId: String? = null
+)
+
+@kotlinx.serialization.Serializable
+data class RevertSessionRequest(
+    @kotlinx.serialization.SerialName("messageID") val messageId: String,
+    @kotlinx.serialization.SerialName("partID") val partId: String? = null
 )

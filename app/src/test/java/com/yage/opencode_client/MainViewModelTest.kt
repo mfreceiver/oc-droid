@@ -32,6 +32,7 @@ import io.mockk.runs
 import io.mockk.unmockkAll
 import io.mockk.verify
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.emptyFlow
 import kotlinx.coroutines.test.advanceTimeBy
@@ -191,6 +192,27 @@ class MainViewModelTest {
         }
         assertEquals("", viewModel.state.value.inputText)
         assertNull(viewModel.state.value.error)
+    }
+
+    @Test
+    fun `sendMessage ignores duplicate sends while request is in flight`() = runTest {
+        coEvery { repository.sendMessage(any(), any(), any(), any(), any()) } coAnswers {
+            delay(100)
+            Result.success(Unit)
+        }
+
+        val viewModel = createViewModel()
+        viewModel.selectSession("session-1")
+        advanceUntilIdle()
+        viewModel.setInputText("hello")
+
+        viewModel.sendMessage()
+        viewModel.sendMessage()
+
+        advanceUntilIdle()
+
+        coVerify(exactly = 1) { repository.sendMessage(any(), any(), any(), any(), any()) }
+        assertFalse(viewModel.state.value.sendingSessionIds.contains("session-1"))
     }
 
     @Test

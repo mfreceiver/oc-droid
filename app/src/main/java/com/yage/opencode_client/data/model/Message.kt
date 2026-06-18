@@ -84,6 +84,32 @@ data class MessageWithParts(
     val parts: List<Part> = emptyList()
 )
 
+data class ComposerImageAttachment(
+    val id: String,
+    val filename: String,
+    val mime: String,
+    val dataUrl: String,
+    val thumbnailData: ByteArray,
+    val byteSize: Int
+) {
+    override fun equals(other: Any?): Boolean {
+        if (this === other) return true
+        if (other !is ComposerImageAttachment) return false
+        return id == other.id && filename == other.filename && mime == other.mime &&
+            dataUrl == other.dataUrl && thumbnailData.contentEquals(other.thumbnailData) && byteSize == other.byteSize
+    }
+
+    override fun hashCode(): Int {
+        var result = id.hashCode()
+        result = 31 * result + filename.hashCode()
+        result = 31 * result + mime.hashCode()
+        result = 31 * result + dataUrl.hashCode()
+        result = 31 * result + thumbnailData.contentHashCode()
+        result = 31 * result + byteSize
+        return result
+    }
+}
+
 @Serializable
 data class Part(
     val id: String,
@@ -95,12 +121,18 @@ data class Part(
     @SerialName("callID") val callId: String? = null,
     val state: PartState? = null,
     val metadata: PartMetadata? = null,
-    @Serializable(with = PartFilesSerializer::class) val files: List<FileChange>? = null
+    @Serializable(with = PartFilesSerializer::class) val files: List<FileChange>? = null,
+    val mime: String? = null,
+    val filename: String? = null,
+    val url: String? = null,
+    val source: String? = null
 ) {
     val isText: Boolean get() = type == "text"
     val isReasoning: Boolean get() = type == "reasoning"
     val isTool: Boolean get() = type == "tool"
     val isPatch: Boolean get() = type == "patch"
+    val isFile: Boolean get() = type == "file"
+    val isImageAttachment: Boolean get() = isFile && mime?.startsWith("image/") == true
     val isStepStart: Boolean get() = type == "step-start"
     val isStepFinish: Boolean get() = type == "step-finish"
 

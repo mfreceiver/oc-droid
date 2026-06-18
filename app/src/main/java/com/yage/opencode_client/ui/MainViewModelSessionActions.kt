@@ -1,5 +1,6 @@
 package com.yage.opencode_client.ui
 
+import com.yage.opencode_client.data.model.ComposerImageAttachment
 import com.yage.opencode_client.data.model.Message
 import com.yage.opencode_client.data.repository.OpenCodeRepository
 import com.yage.opencode_client.util.SettingsManager
@@ -423,14 +424,16 @@ internal fun launchSendMessage(
     state: MutableStateFlow<AppState>,
     sessionId: String,
     text: String,
+    attachments: List<ComposerImageAttachment> = emptyList(),
     agent: String,
     model: Message.ModelInfo?,
     onRefreshMessages: (String, Boolean) -> Unit,
     onRefreshSessions: () -> Unit,
-    onSuccess: (() -> Unit)? = null
+    onSuccess: (() -> Unit)? = null,
+    onComplete: (() -> Unit)? = null
 ) {
     scope.launch {
-        repository.sendMessage(sessionId, text, agent, model)
+        repository.sendMessage(sessionId, text, agent, model, attachments = attachments)
             .onSuccess {
                 state.update {
                     it.copy(
@@ -452,5 +455,6 @@ internal fun launchSendMessage(
             .onFailure { error ->
                 state.update { it.copy(error = errorMessageOrFallback(error, "Failed to send message")) }
             }
+        onComplete?.invoke()
     }
 }

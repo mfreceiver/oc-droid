@@ -15,6 +15,7 @@ import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
@@ -29,6 +30,7 @@ import com.yage.opencode_client.data.model.Part
 import com.yage.opencode_client.data.model.SessionStatus
 import com.yage.opencode_client.ui.MainViewModel
 import com.yage.opencode_client.ui.sanitizeBearerToken
+import kotlinx.coroutines.launch
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -43,6 +45,7 @@ fun ChatScreen(
     val state by viewModel.state.collectAsStateWithLifecycle()
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
+    val scope = rememberCoroutineScope()
     val aiBuilderToken = sanitizeBearerToken(viewModel.getAIBuilderSettings().token)
     val audioPermissionLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.RequestPermission()
@@ -53,22 +56,30 @@ fun ChatScreen(
             viewModel.setSpeechError("Microphone permission denied. Please allow microphone access in system settings.")
         }
     }
+    val imagePickerLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.GetMultipleContents()
+    ) { uris ->
+        scope.launch {
+            viewModel.addImageAttachments(loadImageAttachments(context, uris))
+        }
+    }
 
     // Cache last non-null contextUsage so the ring stays visible during streaming
     var cachedContextUsage by remember { mutableStateOf(state.contextUsage) }
     state.contextUsage?.let { cachedContextUsage = it }
-    val currentSessionIsRunning = state.currentSessionStatus?.let { it.isBusy || it.isRetry } == true
+    val currentSessionIsRunning = state.currentSessionStatus?.let { it.isBusy || it.isRetry } == true ||
+        state.currentSessionId?.let { it in state.sendingSessionIds } == true
     val currentActivity = remember(
         state.currentSessionId,
         state.currentSessionStatus,
-        state.messages,
+            state.visibleMessages,
         state.streamingReasoningPart,
         state.streamingPartTexts,
     ) {
         currentSessionActivity(
             sessionId = state.currentSessionId,
             status = state.currentSessionStatus,
-            messages = state.messages,
+            messages = state.visibleMessages,
             streamingReasoningPart = state.streamingReasoningPart,
             streamingPartTexts = state.streamingPartTexts,
         )
@@ -131,7 +142,7 @@ fun ChatScreen(
                 )
             } else {
                 ChatMessageList(
-                    messages = state.messages,
+                    messages = state.visibleMessages,
                     streamingPartTexts = state.streamingPartTexts,
                     streamingReasoningPart = state.streamingReasoningPart,
                     isLoading = state.isLoadingMessages,
@@ -144,7 +155,8 @@ fun ChatScreen(
                         state.currentSessionId?.let { sessionId ->
                             viewModel.forkSession(sessionId, messageId)
                         }
-                    }
+                    },
+                    onEditFromMessage = viewModel::editFromMessage
                 )
             }
 
@@ -174,8 +186,11 @@ fun ChatScreen(
                 isSpeechConfigured = state.aiBuilderConnectionOK && aiBuilderToken.isNotEmpty(),
                 agentActivityText = currentActivity?.text,
                 agentStartedAtMillis = currentActivity?.startedAtMillis,
+                imageAttachments = state.imageAttachments,
                 onTextChange = viewModel::setInputText,
                 onSend = { viewModel.sendMessage() },
+                onAddImages = { imagePickerLauncher.launch("image/*") },
+                onRemoveImage = viewModel::removeImageAttachment,
                 onAbort = { viewModel.abortSession() },
                 onAbortSpeech = { viewModel.abortSpeechRecognition() },
                 onRetrySpeech = { viewModel.retryPreservedSpeechAudio() },

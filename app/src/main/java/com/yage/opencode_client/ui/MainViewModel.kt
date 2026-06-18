@@ -70,7 +70,9 @@ data class AppState(
     val aiBuilderConnectionOK: Boolean = false,
     val aiBuilderConnectionError: String? = null,
     val isTestingAIBuilderConnection: Boolean = false,
-    val sessionTodos: Map<String, List<TodoItem>> = emptyMap()
+    val sessionTodos: Map<String, List<TodoItem>> = emptyMap(),
+    val sendingSessionIds: Set<String> = emptySet(),
+    val imageAttachments: List<ComposerImageAttachment> = emptyList()
 ) {
     data class ModelOption(val displayName: String, val providerId: String, val modelId: String) {
         val shortName: String
@@ -139,7 +141,8 @@ data class AppState(
         val streamingPartTexts: Map<String, String> = emptyMap(),
         val streamingReasoningPart: Part? = null,
         val isLoadingMessages: Boolean = false,
-        val inputText: String = ""
+        val inputText: String = "",
+        val imageAttachments: List<ComposerImageAttachment> = emptyList()
     )
 
     data class SpeechState(
@@ -194,12 +197,19 @@ data class AppState(
 
     val chatState: ChatState
         get() = ChatState(
-            messages = messages,
+            messages = visibleMessages,
             streamingPartTexts = streamingPartTexts,
             streamingReasoningPart = streamingReasoningPart,
             isLoadingMessages = isLoadingMessages,
-            inputText = inputText
+            inputText = inputText,
+            imageAttachments = imageAttachments
         )
+
+    val visibleMessages: List<MessageWithParts>
+        get() {
+            val revertMessageId = currentSession?.revert?.messageId ?: return messages
+            return messages.filter { message -> message.info.id < revertMessageId }
+        }
 
     val speechState: SpeechState
         get() = SpeechState(
@@ -703,8 +713,12 @@ class MainViewModel @Inject constructor(
 
     fun sendMessage() {
         val sessionId = _state.value.currentSessionId ?: return
+        if (_state.value.sendingSessionIds.contains(sessionId)) return
         val text = _state.value.inputText.trim()
-        if (text.isEmpty()) return
+        val attachments = _state.value.imageAttachments
+        if (text.isEmpty() && attachments.isEmpty()) return
+
+        _state.update { state -> state.copy(sendingSessionIds = state.sendingSessionIds + sessionId) }
 
         val agent = _state.value.selectedAgentName
         val model = buildSelectedModel(_state.value)
@@ -717,11 +731,18 @@ class MainViewModel @Inject constructor(
                 state = _state,
                 sessionId = sessionId,
                 text = text,
+                attachments = attachments,
                 agent = agent,
                 model = model,
                 onRefreshMessages = ::loadMessagesWithRetry,
                 onRefreshSessions = ::loadSessions,
-                onSuccess = { settingsManager.setDraftText(sessionId, "") }
+                onSuccess = {
+                    settingsManager.setDraftText(sessionId, "")
+                    _state.update { it.copy(imageAttachments = emptyList()) }
+                },
+                onComplete = {
+                    _state.update { state -> state.copy(sendingSessionIds = state.sendingSessionIds - sessionId) }
+                }
             )
         }
 
@@ -757,6 +778,46 @@ class MainViewModel @Inject constructor(
     fun setInputText(text: String) {
         _state.update { it.copy(inputText = text) }
         _state.value.currentSessionId?.let { settingsManager.setDraftText(it, text) }
+    }
+
+    fun addImageAttachments(attachments: List<ComposerImageAttachment>) {
+        if (attachments.isEmpty()) return
+        _state.update { state ->
+            state.copy(imageAttachments = (state.imageAttachments + attachments).take(4))
+        }
+    }
+
+    fun removeImageAttachment(id: String) {
+        _state.update { state ->
+            state.copy(imageAttachments = state.imageAttachments.filterNot { it.id == id })
+        }
+    }
+
+    fun editFromMessage(messageId: String) {
+        val sessionId = _state.value.currentSessionId ?: return
+        val message = _state.value.messages.firstOrNull { it.info.id == messageId && it.info.isUser } ?: return
+        val draft = message.parts.firstOrNull { it.isText }?.text?.trim().orEmpty()
+        if (draft.isBlank()) return
+
+        viewModelScope.launch {
+            repository.revertSession(sessionId, messageId)
+                .onSuccess { updatedSession ->
+                    _state.update { state ->
+                        state.copy(
+                            sessions = state.sessions.map { session -> if (session.id == sessionId) updatedSession else session },
+                            inputText = draft,
+                            imageAttachments = emptyList(),
+                            error = null
+                        )
+                    }
+                    settingsManager.setDraftText(sessionId, draft)
+                    loadMessages(sessionId)
+                    loadSessions()
+                }
+                .onFailure { error ->
+                    _state.update { it.copy(error = "Failed to edit message: ${errorMessageOrFallback(error, "unknown error")}") }
+                }
+        }
     }
 
     fun selectAgent(agentName: String) {

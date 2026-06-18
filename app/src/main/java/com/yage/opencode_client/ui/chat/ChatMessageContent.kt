@@ -1,5 +1,8 @@
 package com.yage.opencode_client.ui.chat
 
+import android.graphics.BitmapFactory
+import android.util.Base64
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -56,7 +59,10 @@ import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextDecoration
@@ -84,7 +90,8 @@ internal fun ChatMessageList(
     workspaceDirectory: String?,
     onLoadMore: () -> Unit,
     onFileClick: (String) -> Unit,
-    onForkFromMessage: (String) -> Unit
+    onForkFromMessage: (String) -> Unit,
+    onEditFromMessage: (String) -> Unit
 ) {
     val listState = rememberLazyListState()
     val layoutInfo = listState.layoutInfo
@@ -154,7 +161,8 @@ internal fun ChatMessageList(
                 repository = repository,
                 workspaceDirectory = workspaceDirectory,
                 onFileClick = onFileClick,
-                onForkFromMessage = onForkFromMessage
+                onForkFromMessage = onForkFromMessage,
+                onEditFromMessage = onEditFromMessage
             )
         }
         if (isLoading && messages.size >= messageLimit) {
@@ -191,7 +199,8 @@ private fun MessageRow(
     repository: OpenCodeRepository,
     workspaceDirectory: String?,
     onFileClick: (String) -> Unit,
-    onForkFromMessage: (String) -> Unit
+    onForkFromMessage: (String) -> Unit,
+    onEditFromMessage: (String) -> Unit
 ) {
     val isUser = message.info.isUser
 
@@ -264,36 +273,50 @@ private fun MessageRow(
                 i += 1
             }
         }
-        if (!isUser) {
-            Row(
-                modifier = Modifier.fillMaxWidth().padding(start = 4.dp, top = 2.dp),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                message.info.resolvedModel?.let { model ->
-                    Text(
-                        text = "${model.providerId}/${model.modelId}",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f),
+        Row(
+            modifier = Modifier.fillMaxWidth().padding(start = 4.dp, top = 2.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            if (!isUser) message.info.resolvedModel?.let { model ->
+                Text(
+                    text = "${model.providerId}/${model.modelId}",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f),
+                )
+            }
+            Spacer(modifier = Modifier.weight(1f))
+            Box {
+                var showMenu by remember { mutableStateOf(false) }
+                IconButton(
+                    onClick = { showMenu = true },
+                    modifier = Modifier.size(24.dp)
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.MoreVert,
+                        contentDescription = "More options",
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f),
+                        modifier = Modifier.size(16.dp)
                     )
                 }
-                Spacer(modifier = Modifier.weight(1f))
-                Box {
-                    var showMenu by remember { mutableStateOf(false) }
-                    IconButton(
-                        onClick = { showMenu = true },
-                        modifier = Modifier.size(24.dp)
-                    ) {
-                        Icon(
-                            imageVector = Icons.Default.MoreVert,
-                            contentDescription = "More options",
-                            tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f),
-                            modifier = Modifier.size(16.dp)
+                DropdownMenu(
+                    expanded = showMenu,
+                    onDismissRequest = { showMenu = false }
+                ) {
+                    if (isUser) {
+                        DropdownMenuItem(
+                            text = { Text("Edit from here") },
+                            leadingIcon = {
+                                Icon(
+                                    imageVector = Icons.Default.Edit,
+                                    contentDescription = null
+                                )
+                            },
+                            onClick = {
+                                showMenu = false
+                                onEditFromMessage(message.info.id)
+                            }
                         )
-                    }
-                    DropdownMenu(
-                        expanded = showMenu,
-                        onDismissRequest = { showMenu = false }
-                    ) {
+                    } else {
                         DropdownMenuItem(
                             text = { Text("Fork from here") },
                             leadingIcon = {
@@ -333,9 +356,79 @@ private fun PartView(
             workspaceDirectory = workspaceDirectory
         )
         part.isReasoning -> ReasoningCard(streamingTextOverride ?: part.text ?: "", part.toolReason, false, modifier)
+        part.isImageAttachment -> ImageFilePart(part, modifier)
+        part.isFile -> FileAttachmentPart(part, modifier)
         part.isTool -> ToolCard(part, onFileClick, modifier)
         part.isPatch && part.filePathsForNavigationFiltered.isNotEmpty() -> PatchCard(part.filePathsForNavigationFiltered, onFileClick, modifier)
     }
+}
+
+@Composable
+private fun ImageFilePart(part: Part, modifier: Modifier = Modifier.fillMaxWidth()) {
+    val imageBitmap = remember(part.url) {
+        part.url?.decodeDataUriImage()?.asImageBitmap()
+    }
+    if (imageBitmap == null) {
+        FileAttachmentPart(part, modifier)
+        return
+    }
+    Column(modifier = modifier.padding(vertical = 4.dp)) {
+        Image(
+            bitmap = imageBitmap,
+            contentDescription = part.filename ?: "Attached image",
+            modifier = Modifier
+                .fillMaxWidth()
+                .clip(RoundedCornerShape(12.dp)),
+            contentScale = ContentScale.FillWidth
+        )
+        part.filename?.let { filename ->
+            Text(
+                text = filename,
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(top = 4.dp)
+            )
+        }
+    }
+}
+
+@Composable
+private fun FileAttachmentPart(part: Part, modifier: Modifier = Modifier.fillMaxWidth()) {
+    Surface(
+        color = MaterialTheme.colorScheme.surfaceVariant,
+        shape = RoundedCornerShape(12.dp),
+        modifier = modifier.padding(vertical = 4.dp)
+    ) {
+        Row(
+            modifier = Modifier.fillMaxWidth().padding(10.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Icon(
+                imageVector = Icons.Default.Description,
+                contentDescription = null,
+                tint = MaterialTheme.colorScheme.primary,
+                modifier = Modifier.size(16.dp)
+            )
+            Spacer(modifier = Modifier.width(8.dp))
+            Text(
+                text = part.filename ?: part.mime ?: "Attached file",
+                style = MaterialTheme.typography.labelMedium,
+                color = MaterialTheme.colorScheme.onSurface,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
+        }
+    }
+}
+
+private fun String.decodeDataUriImage(): android.graphics.Bitmap? {
+    val marker = ";base64,"
+    val markerIndex = indexOf(marker)
+    if (!startsWith("data:image/") || markerIndex < 0) return null
+    return runCatching {
+        val bytes = Base64.decode(substring(markerIndex + marker.length), Base64.DEFAULT)
+        BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
+    }.getOrNull()
 }
 
 /**
