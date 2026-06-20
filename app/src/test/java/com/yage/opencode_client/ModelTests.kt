@@ -333,8 +333,8 @@ class ModelTests {
     }
 
     @Test
-    fun `ModelOption shortName returns GLM for Ollama GLM 5_2`() {
-        assertEquals("GLM", modelOption("Ollama GLM 5.2").shortName)
+    fun `ModelOption shortName returns OGLM-5_2 for Ollama GLM 5_2`() {
+        assertEquals("OGLM-5.2", modelOption("Ollama GLM 5.2").shortName)
     }
 
     @Test
