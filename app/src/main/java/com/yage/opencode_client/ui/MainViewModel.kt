@@ -81,7 +81,7 @@ data class AppState(
                 displayName == "DeepSeek Local" -> "DS-L"
                 displayName == "DeepSeek V4 Pro" -> "DS-Pro"
                 displayName == "Ollama DeepSeek V4 Pro" -> "ODS-Pro"
-                displayName == "Ollama Kimi K2.6" -> "Kimi"
+                displayName == "Ollama GLM 5.2" -> "GLM"
                 "Haiku" in displayName -> "Haiku"
                 "Gemini" in displayName -> "Gemini"
                 "GPT" in displayName -> "GPT"

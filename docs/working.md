@@ -105,6 +105,12 @@ Android 当前基线：`MainActivity.TabletLayout` 固定三栏，左栏 `Sessio
 
 如果某个阶段测试失败，先修复再 commit。不要把 broken checkpoint commit 到分支，除非明确标记为 WIP 且用户要求保留。
 
+## 2026-06-20
+
+- 模型列表中将 `Ollama Kimi K2.6`（`ollama-cloud/kimi-k2.6`）替换为 `Ollama GLM 5.2`（`ollama-cloud/glm-5.2`）。OpenCode server 的 `ollama-cloud` provider registry 已通过 `scripts/regen_models_local.py` 的 `INJECTIONS` 注入 `glm-5.2` 条目，model key 是 `glm-5.2`。
+- `ModelOption.shortName` 从 `Ollama Kimi K2.6 -> Kimi` 改为 `Ollama GLM 5.2 -> GLM`，对齐 iOS model chip 显示。
+- Android 用 index 持久化 session model selection，GLM 5.2 占据原 Kimi 的 index 6 槽位，无需 canonical mapping 即可平滑迁移。
+
 ## 2026-06-10
 
 - 模型列表中将 `MiniMax M3`（`ollama-cloud/minimax-m3`）替换为 `Ollama Kimi K2.6`（`ollama-cloud/kimi-k2.6`）。OpenCode server 的 `ollama-cloud` provider registry 暴露的 model key 是 `kimi-k2.6`；直接传 Ollama library tag `kimi-k2.6:cloud` 会让 `prompt_async` 返回 204 但后台不生成 assistant message。

@@ -333,6 +333,11 @@ class ModelTests {
     }
 
     @Test
+    fun `ModelOption shortName returns GLM for Ollama GLM 5_2`() {
+        assertEquals("GLM", modelOption("Ollama GLM 5.2").shortName)
+    }
+
+    @Test
     fun `ModelOption shortName returns first word for unknown models`() {
         assertEquals("DeepSeek", modelOption("DeepSeek V3").shortName)
     }
