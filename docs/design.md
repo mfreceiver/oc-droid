@@ -95,6 +95,146 @@ Quiet Tech 的 token 定义在 `ui/theme/Color.kt`，并在 `ui/theme/Theme.kt` 
 - **Theme**（LIGHT / DARK / SYSTEM）：分段控件（`SingleChoiceSegmentedButtonRow`），选中段电蓝。
 - Switch / toggle accent 用 `colorScheme.primary` 电蓝。
 
+## Host Profiles 与 SSH Tunnel（Phase 8）
+
+### 设计意图
+
+Host Profiles 的主任务是让用户在 30 秒内判断“我现在连的是哪个 OpenCode 环境、它通过什么路径访问、失败时卡在哪一步”。SSH Tunnel 是高级连接 transport，但 UI 不能把高级性转嫁成猜谜。用户应该只需要理解三件事：选哪个 profile、服务器是否授权了这台 Android 设备的 public key、连接失败属于 gateway/auth/tunnel/health 哪一段。
+
+### 用户不确定性清单
+
+第一次配置 SSH 的用户会自然卡在几件事上。第一，SSH gateway 和 OpenCode server 不是同一个字段；gateway 是入口，remotePort 是 gateway 侧分配给 OpenCode instance 的端口。第二，Android 设备的 SSH public key 需要复制到服务器授权，而不是填写 OpenCode Basic Auth。第三，本地 `127.0.0.1:<port>` 是 app 内部细节，用户不应该编辑。第四，host key mismatch 是安全事件，不是普通连接失败。
+
+设计上要把这些不确定性显式放在界面里，而不是靠文档解释。
+
+### Settings 入口
+
+Settings 顶部的 Server Connection 改为 **Connection Profile** 卡片，不再直接展示一个全局 Server URL 表单。
+
+卡片默认状态：
+
+```text
+Connection Profile
+VPS OpenCode                         SSH Tunnel
+gateway.example.com:8006 -> :19001
+[Test Connection] [Manage Profiles]
+```
+
+Direct profile 的 summary 显示 server URL；SSH profile 的 summary 显示 `gateway:port -> :remotePort`。卡片内只放当前 profile 的摘要和两个动作：`Test Connection`、`Manage Profiles`。编辑不在卡片内展开，避免 Settings 首屏变成复杂表单。
+
+### Host Profiles 列表
+
+`Manage Profiles` 进入独立 screen 或 modal sheet。手机使用全屏 screen；平板 Settings pane 足够宽时可以使用右侧 detail pane，但第一版可先全屏保持简单。
+
+列表结构：
+
+```text
+Host Profiles
+[Import]                         [+]
+
+Current
+▌ VPS OpenCode            SSH Tunnel
+  gateway.example.com:8006 -> :19001
+
+Other Profiles
+  Localhost               Direct
+  http://localhost:4096
+```
+
+选中 profile 使用 Quiet Tech 统一的 3dp 电蓝左色条 + muted selected background。Transport 用小 chip 表示：Direct 为中性 chip，SSH Tunnel 为电蓝描边 chip。Row 右侧用 overflow menu 承载 `Edit`、`Duplicate`、`Export JSON`、`Delete`。`Delete` 是破坏性动作，删除最后一个 profile 时禁用并说明“Keep at least one profile”。
+
+### Profile Editor
+
+Editor 顶部是 profile name，其下是 Direct / SSH Tunnel segmented control。切换 transport 时保留当前已输入字段，但保存时按当前 transport 校验。
+
+Direct mode 字段：
+
+```text
+Profile name
+Server URL
+Basic Auth username (optional)
+Basic Auth password (optional)
+[Test Connection] [Save]
+```
+
+SSH mode 字段：
+
+```text
+Profile name
+SSH gateway host
+SSH port
+SSH username
+Assigned remote port
+
+Device public key
+ssh-ed25519 AAAA... opencode-android
+[Copy public key] [Rotate key]
+
+OpenCode Basic Auth (optional)
+[Test Connection] [Save]
+```
+
+不要展示可编辑的 local URL。可以在辅助文字里解释：“Android creates a local tunnel automatically when this profile is active.” 这句话只解释机制，不要求用户操作。
+
+### SSH Key 与 Host Key 交互
+
+Public key 是配置 SSH 的核心动作，不能藏在 overflow 里。SSH editor 中 public key block 始终可见；如果还没有 key，显示 `Generate device key`，生成后替换成 key preview 和 `Copy public key`。
+
+Rotate key 必须二次确认：
+
+```text
+Rotate SSH key?
+Your server will stop accepting this Android device until you add the new public key.
+[Keep key] [Rotate key]
+```
+
+Host key mismatch 是阻断状态，不给“continue anyway”。错误卡片文案结构：发生了什么、为什么重要、怎么恢复。
+
+```text
+SSH host key changed
+The gateway fingerprint no longer matches the trusted key saved on this device. This can happen after a server rebuild, but it can also indicate a man-in-the-middle attack.
+Expected: SHA256:...
+Got:      SHA256:...
+[Reset trusted host] [Cancel]
+```
+
+`Reset trusted host` 之后下次连接重新走 TOFU；不要在同一弹窗里直接 trust 新 key。
+
+### Test Connection 反馈
+
+SSH test 需要分阶段显示，不要只给一个 spinner。阶段顺序与 RFC 一致：SSH gateway、Host key、SSH auth、Local tunnel、OpenCode health。已完成阶段显示 check；当前阶段显示 progress；失败阶段显示错误和恢复动作。
+
+```text
+Testing SSH Tunnel
+✓ SSH gateway reachable
+✓ Host key trusted
+✓ SSH key accepted
+✓ Local tunnel ready
+… Checking OpenCode health
+```
+
+Direct test 仍然只显示 server health，但复用同一个 result card 样式，避免 Settings 里出现两套反馈语言。
+
+### Import / Export
+
+Import 使用 paste dialog，不做文件 picker 第一版。Dialog 标题是 `Import Host Profile JSON`，输入框支持多行，主按钮 `Import Profile`。成功后进入 imported profile 的 detail/editor，并显示 snackbar：`Imported profile "VPS OpenCode"`。
+
+Export 使用 bottom sheet 展示只读 JSON 和 `Copy JSON`。Sheet 顶部明确写 `Secrets are not included`，避免用户误以为导出的 profile 可以在另一台设备上直接完成 SSH auth。
+
+### 状态、无障碍和测试合同
+
+所有主要动作使用明确 content description：`Manage host profiles`、`Add host profile`、`Import host profile JSON`、`Copy SSH public key`、`Reset trusted SSH host`。不要只依赖 icon。
+
+测试 tag 使用稳定语义，不使用可变标题：`host.profile.list`、`host.profile.row.<id>`、`host.profile.current`、`host.editor.transport.direct`、`host.editor.transport.ssh`、`host.editor.ssh.publicKey`、`host.test.phase.<phase>`。
+
+### 不做清单
+
+- 不做系统 VPN UI。
+- 不展示 OpenSSH config 编辑器。
+- 不支持 jump host chain、ssh-agent、FIDO/U2F key 第一版。
+- 不把 Basic Auth 和 SSH auth 混在一个“Username/Password”区块里。
+- 不在后台保活说明里暗示永久在线；Phase 8 的承诺是前台连接和回前台恢复。
+
 ## 不做清单
 
 - 不重新设计信息架构（手机 = Chat/Files/Settings 底部 tab；平板 = 三栏）。
