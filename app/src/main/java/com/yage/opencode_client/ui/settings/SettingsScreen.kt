@@ -345,7 +345,7 @@ private fun HostProfilesManagerScreen(
                 OutlinedTextField(
                     value = importText,
                     onValueChange = { importText = it },
-                    label = { Text("JSON") },
+                    label = { Text(stringResource(R.string.common_json)) },
                     minLines = 6,
                     modifier = Modifier.fillMaxWidth()
                 )
@@ -365,10 +365,10 @@ private fun HostProfilesManagerScreen(
     exportText?.let { json ->
         AlertDialog(
             onDismissRequest = { exportText = null },
-            title = { Text("Export Host Profile JSON") },
+            title = { Text(stringResource(R.string.host_profile_export_title)) },
             text = {
                 Column {
-                    Text("Secrets are not included.", style = MaterialTheme.typography.bodySmall)
+                    Text(stringResource(R.string.host_profile_no_secrets), style = MaterialTheme.typography.bodySmall)
                     Spacer(modifier = Modifier.height(8.dp))
                     Text(json, style = MaterialTheme.typography.bodySmall)
                 }
@@ -377,7 +377,7 @@ private fun HostProfilesManagerScreen(
                 Button(onClick = {
                     clipboard.setText(AnnotatedString(json))
                     exportText = null
-                }) { Text("Copy JSON") }
+                }) { Text(stringResource(R.string.host_profile_copy_json)) }
             },
             dismissButton = { TextButton(onClick = { exportText = null }) { Text(stringResource(R.string.common_close)) } }
         )
@@ -420,19 +420,19 @@ internal fun HostProfileRow(
             .testTag("host.profile.row.${profile.id}")
     ) {
         Column(modifier = Modifier.weight(1f), horizontalAlignment = Alignment.Start) {
-            Text(if (selected) "${profile.displayName} · Current" else profile.displayName)
+            Text(if (selected) stringResource(R.string.host_profile_current_suffix, profile.displayName) else profile.displayName)
             Text(profile.connectionSummary, style = MaterialTheme.typography.bodySmall)
         }
         Text(if (profile.transport == HostTransport.SSH_TUNNEL) stringResource(R.string.host_profile_ssh_tunnel) else stringResource(R.string.host_profile_direct))
         IconButton(onClick = { menuExpanded = true }) {
-            Icon(Icons.Default.MoreVert, contentDescription = "Host profile actions")
+            Icon(Icons.Default.MoreVert, contentDescription = stringResource(R.string.host_profile_actions))
         }
         DropdownMenu(expanded = menuExpanded, onDismissRequest = { menuExpanded = false }) {
-            DropdownMenuItem(text = { Text("Edit") }, onClick = { menuExpanded = false; onEdit() }, leadingIcon = { Icon(Icons.Default.Edit, null) })
-            DropdownMenuItem(text = { Text("Duplicate") }, onClick = { menuExpanded = false; onDuplicate() })
-            DropdownMenuItem(text = { Text("Export JSON") }, onClick = { menuExpanded = false; onExport() }, leadingIcon = { Icon(Icons.Default.ContentCopy, null) })
+            DropdownMenuItem(text = { Text(stringResource(R.string.common_edit)) }, onClick = { menuExpanded = false; onEdit() }, leadingIcon = { Icon(Icons.Default.Edit, null) })
+            DropdownMenuItem(text = { Text(stringResource(R.string.common_duplicate)) }, onClick = { menuExpanded = false; onDuplicate() })
+            DropdownMenuItem(text = { Text(stringResource(R.string.host_profile_export_json)) }, onClick = { menuExpanded = false; onExport() }, leadingIcon = { Icon(Icons.Default.ContentCopy, null) })
             DropdownMenuItem(
-                text = { Text(if (canDelete) "Delete" else "Keep at least one profile") },
+                text = { Text(if (canDelete) stringResource(R.string.common_delete) else stringResource(R.string.host_profile_keep_one)) },
                 onClick = { menuExpanded = false; if (canDelete) onDelete() },
                 enabled = canDelete,
                 leadingIcon = { Icon(Icons.Default.Delete, null) }
@@ -457,16 +457,17 @@ internal fun HostProfileDetailDialog(
         title = { Text(profile.displayName) },
         text = {
             Column {
-                Text("Transport: ${if (profile.transport == HostTransport.SSH_TUNNEL) "SSH Tunnel" else "Direct"}")
-                Text("OpenCode URL: ${if (profile.transport == HostTransport.SSH_TUNNEL) "Managed by SSH Tunnel" else profile.serverUrl}")
-                Text("Status: ${if (isCurrent) "Current" else "Saved profile"}")
+                val transportLabel = if (profile.transport == HostTransport.SSH_TUNNEL) stringResource(R.string.host_profile_ssh_tunnel) else stringResource(R.string.host_profile_direct)
+                Text(stringResource(R.string.host_profile_transport, transportLabel))
+                Text(stringResource(R.string.host_profile_opencode_url, if (profile.transport == HostTransport.SSH_TUNNEL) stringResource(R.string.host_profile_managed_by_ssh) else profile.serverUrl))
+                Text(stringResource(R.string.host_profile_status, if (isCurrent) stringResource(R.string.host_profile_current) else stringResource(R.string.host_profile_saved)))
                 if (profile.transport == HostTransport.SSH_TUNNEL && profile.ssh != null) {
                     Spacer(modifier = Modifier.height(12.dp))
-                    Text("SSH Gateway", style = MaterialTheme.typography.labelMedium)
-                    Text("Host: ${profile.ssh.host}")
-                    Text("SSH port: ${profile.ssh.port}")
-                    Text("Username: ${profile.ssh.username}")
-                    Text("Assigned remote port: ${profile.ssh.remotePort}")
+                    Text(stringResource(R.string.host_profile_ssh_gateway), style = MaterialTheme.typography.labelMedium)
+                    Text(stringResource(R.string.host_profile_host, profile.ssh.host))
+                    Text(stringResource(R.string.host_profile_ssh_port_value, profile.ssh.port))
+                    Text(stringResource(R.string.host_profile_username, profile.ssh.username))
+                    Text(stringResource(R.string.host_profile_remote_port_value, profile.ssh.remotePort))
                 }
             }
         },
@@ -478,7 +479,7 @@ internal fun HostProfileDetailDialog(
                 }
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     OutlinedButton(onClick = onTest) { Text(stringResource(R.string.settings_test_connection)) }
-                    OutlinedButton(onClick = onEdit) { Text("Edit") }
+                    OutlinedButton(onClick = onEdit) { Text(stringResource(R.string.common_edit)) }
                 }
                 Spacer(modifier = Modifier.height(8.dp))
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -552,10 +553,10 @@ internal fun HostProfileEditorDialog(
 
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text(if (initial.name.isBlank()) "Add Host Profile" else "Edit Host Profile") },
+        title = { Text(if (initial.name.isBlank()) stringResource(R.string.host_profile_add_title) else stringResource(R.string.host_profile_edit_title)) },
         text = {
             Column {
-                OutlinedTextField(value = name, onValueChange = { name = it }, label = { Text("Profile name") }, modifier = Modifier.fillMaxWidth())
+                OutlinedTextField(value = name, onValueChange = { name = it }, label = { Text(stringResource(R.string.host_profile_name)) }, modifier = Modifier.fillMaxWidth())
                 Spacer(modifier = Modifier.height(8.dp))
                 SingleChoiceSegmentedButtonRow(modifier = Modifier.fillMaxWidth()) {
                     SegmentedButton(
@@ -573,18 +574,18 @@ internal fun HostProfileEditorDialog(
                 }
                 Spacer(modifier = Modifier.height(8.dp))
                 if (transport == HostTransport.DIRECT) {
-                    OutlinedTextField(value = serverUrl, onValueChange = { serverUrl = it }, label = { Text("Server URL") }, modifier = Modifier.fillMaxWidth())
+                    OutlinedTextField(value = serverUrl, onValueChange = { serverUrl = it }, label = { Text(stringResource(R.string.settings_server_url)) }, modifier = Modifier.fillMaxWidth())
                 } else {
-                    OutlinedTextField(value = sshHost, onValueChange = { sshHost = it }, label = { Text("SSH gateway host") }, modifier = Modifier.fillMaxWidth())
-                    OutlinedTextField(value = sshPort, onValueChange = { sshPort = it }, label = { Text("SSH port") }, modifier = Modifier.fillMaxWidth())
-                    OutlinedTextField(value = sshUsername, onValueChange = { sshUsername = it }, label = { Text("SSH username") }, modifier = Modifier.fillMaxWidth())
-                    OutlinedTextField(value = remotePort, onValueChange = { remotePort = it }, label = { Text("Assigned remote port") }, modifier = Modifier.fillMaxWidth())
+                    OutlinedTextField(value = sshHost, onValueChange = { sshHost = it }, label = { Text(stringResource(R.string.host_profile_ssh_gateway_host)) }, modifier = Modifier.fillMaxWidth())
+                    OutlinedTextField(value = sshPort, onValueChange = { sshPort = it }, label = { Text(stringResource(R.string.host_profile_ssh_port)) }, modifier = Modifier.fillMaxWidth())
+                    OutlinedTextField(value = sshUsername, onValueChange = { sshUsername = it }, label = { Text(stringResource(R.string.host_profile_ssh_username)) }, modifier = Modifier.fillMaxWidth())
+                    OutlinedTextField(value = remotePort, onValueChange = { remotePort = it }, label = { Text(stringResource(R.string.host_profile_remote_port)) }, modifier = Modifier.fillMaxWidth())
                     Spacer(modifier = Modifier.height(8.dp))
                     OutlinedButton(onClick = onCopyPublicKey) { Text(stringResource(R.string.host_profile_copy_device_key)) }
                 }
                 Spacer(modifier = Modifier.height(8.dp))
-                OutlinedTextField(value = authUsername, onValueChange = { authUsername = it }, label = { Text("OpenCode Basic Auth username (optional)") }, modifier = Modifier.fillMaxWidth())
-                OutlinedTextField(value = authPassword, onValueChange = { authPassword = it }, label = { Text("OpenCode Basic Auth password (optional)") }, modifier = Modifier.fillMaxWidth())
+                OutlinedTextField(value = authUsername, onValueChange = { authUsername = it }, label = { Text(stringResource(R.string.host_profile_basic_auth_username)) }, modifier = Modifier.fillMaxWidth())
+                OutlinedTextField(value = authPassword, onValueChange = { authPassword = it }, label = { Text(stringResource(R.string.host_profile_basic_auth_password)) }, modifier = Modifier.fillMaxWidth())
             }
         },
         confirmButton = {

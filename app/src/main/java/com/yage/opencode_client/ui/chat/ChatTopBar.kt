@@ -47,9 +47,11 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import com.yage.opencode_client.R
 import com.yage.opencode_client.data.model.Session
 import com.yage.opencode_client.data.model.SessionStatus
 import com.yage.opencode_client.data.model.TodoItem
@@ -143,7 +145,7 @@ internal fun ChatTopBar(
                         ) {
                             Icon(
                                 Icons.AutoMirrored.Filled.List,
-                                contentDescription = "Sessions",
+                                contentDescription = stringResource(R.string.sessions_title),
                                 modifier = Modifier.size(20.dp),
                                 tint = MaterialTheme.colorScheme.onSurfaceVariant
                             )
@@ -157,7 +159,7 @@ internal fun ChatTopBar(
                     ) {
                         Icon(
                             Icons.Default.Edit,
-                            contentDescription = "Rename session",
+                            contentDescription = stringResource(R.string.sessions_rename_title),
                             modifier = Modifier.size(20.dp),
                             tint = MaterialTheme.colorScheme.onSurfaceVariant
                         )
@@ -171,7 +173,7 @@ internal fun ChatTopBar(
                         ) {
                             Icon(
                                 Icons.Default.Add,
-                                contentDescription = "New session",
+                                contentDescription = stringResource(R.string.sessions_new),
                                 modifier = Modifier.size(20.dp),
                                 tint = MaterialTheme.colorScheme.primary
                             )
@@ -201,7 +203,7 @@ internal fun ChatTopBar(
                                 modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp)
                             ) {
                                 Text(
-                                    text = state.availableModels.getOrNull(state.selectedModelIndex)?.shortName ?: "Model",
+                                    text = state.availableModels.getOrNull(state.selectedModelIndex)?.shortName ?: stringResource(R.string.chat_model_fallback),
                                     style = MaterialTheme.typography.labelSmall,
                                     fontWeight = FontWeight.SemiBold,
                                     color = MaterialTheme.colorScheme.primary,
@@ -209,7 +211,7 @@ internal fun ChatTopBar(
                                 )
                                 Icon(
                                     Icons.Default.KeyboardArrowDown,
-                                    contentDescription = "Switch LLM model",
+                                    contentDescription = stringResource(R.string.chat_switch_model),
                                     modifier = Modifier.size(14.dp),
                                     tint = MaterialTheme.colorScheme.primary
                                 )
@@ -223,7 +225,7 @@ internal fun ChatTopBar(
                                 DropdownMenuItem(
                                     text = {
                                         Text(
-                                            "No models",
+                                            stringResource(R.string.sessions_no_models),
                                             color = MaterialTheme.colorScheme.outline
                                         )
                                     },
@@ -265,7 +267,7 @@ internal fun ChatTopBar(
                         ) {
                             Icon(
                                 Icons.Default.Checklist,
-                                contentDescription = if (todoBadge.isEmpty()) "Todo" else "Todo $todoBadge",
+                                contentDescription = if (todoBadge.isEmpty()) stringResource(R.string.chat_todo) else "${stringResource(R.string.chat_todo)} $todoBadge",
                                 modifier = Modifier.size(16.dp),
                                 tint = MaterialTheme.colorScheme.onSurfaceVariant
                             )
@@ -295,7 +297,7 @@ internal fun ChatTopBar(
                         ) {
                             Icon(
                                 Icons.Default.Settings,
-                                contentDescription = "Settings",
+                                contentDescription = stringResource(R.string.nav_settings),
                                 modifier = Modifier.size(20.dp),
                                 tint = MaterialTheme.colorScheme.onSurfaceVariant
                             )
@@ -356,12 +358,12 @@ internal fun ChatTopBar(
         }
         AlertDialog(
             onDismissRequest = { showRenameDialog = false },
-            title = { Text("Rename Session") },
+            title = { Text(stringResource(R.string.sessions_rename_title)) },
             text = {
                 OutlinedTextField(
                     value = renameText,
                     onValueChange = { renameText = it },
-                    label = { Text("Session title") },
+                    label = { Text(stringResource(R.string.sessions_title_label)) },
                     singleLine = true
                 )
             },
@@ -374,12 +376,12 @@ internal fun ChatTopBar(
                         showRenameDialog = false
                     }
                 ) {
-                    Text("Rename")
+                    Text(stringResource(R.string.sessions_rename_action))
                 }
             },
             dismissButton = {
                 TextButton(onClick = { showRenameDialog = false }) {
-                    Text("Cancel")
+                    Text(stringResource(R.string.common_cancel))
                 }
             }
         )
@@ -388,7 +390,7 @@ internal fun ChatTopBar(
     if (showTodoDialog) {
         AlertDialog(
             onDismissRequest = { showTodoDialog = false },
-            title = { Text("Todo") },
+            title = { Text(stringResource(R.string.chat_todo)) },
             text = {
                 TodoListPanel(
                     todos = state.sessionTodos,
@@ -397,7 +399,7 @@ internal fun ChatTopBar(
             },
             confirmButton = {
                 TextButton(onClick = { showTodoDialog = false }) {
-                    Text("Done")
+                    Text(stringResource(R.string.common_done))
                 }
             }
         )
@@ -418,38 +420,38 @@ private fun ContextUsageDialog(
 ) {
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text("Context") },
+        title = { Text(stringResource(R.string.chat_context)) },
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
                 if (usage == null) {
                     Text(
-                        "No usage data",
+                        stringResource(R.string.chat_no_usage_data),
                         style = MaterialTheme.typography.bodyMedium,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
                 } else {
-                    ContextUsageSection("Model") {
-                        ContextUsageRow("Provider", usage.providerId ?: "Unknown")
-                        ContextUsageRow("Model", usage.modelId ?: "Unknown")
-                        ContextUsageRow("Context limit", formatCount(usage.contextLimit))
+                    ContextUsageSection(stringResource(R.string.chat_context_model_section)) {
+                        ContextUsageRow(stringResource(R.string.chat_context_provider), usage.providerId ?: stringResource(R.string.chat_context_unknown))
+                        ContextUsageRow(stringResource(R.string.chat_context_model), usage.modelId ?: stringResource(R.string.chat_context_unknown))
+                        ContextUsageRow(stringResource(R.string.chat_context_limit), formatCount(usage.contextLimit))
                     }
-                    ContextUsageSection("Tokens") {
-                        ContextUsageRow("Total", formatCount(usage.totalTokens))
-                        ContextUsageRow("Input", formatOptionalCount(usage.inputTokens))
-                        ContextUsageRow("Output", formatOptionalCount(usage.outputTokens))
-                        ContextUsageRow("Reasoning", formatOptionalCount(usage.reasoningTokens))
-                        ContextUsageRow("Cached read", formatOptionalCount(usage.cachedReadTokens))
-                        ContextUsageRow("Cached write", formatOptionalCount(usage.cachedWriteTokens))
+                    ContextUsageSection(stringResource(R.string.chat_context_tokens)) {
+                        ContextUsageRow(stringResource(R.string.chat_context_total), formatCount(usage.totalTokens))
+                        ContextUsageRow(stringResource(R.string.chat_context_input), formatOptionalCount(usage.inputTokens))
+                        ContextUsageRow(stringResource(R.string.chat_context_output), formatOptionalCount(usage.outputTokens))
+                        ContextUsageRow(stringResource(R.string.chat_context_reasoning), formatOptionalCount(usage.reasoningTokens))
+                        ContextUsageRow(stringResource(R.string.chat_context_cached_read), formatOptionalCount(usage.cachedReadTokens))
+                        ContextUsageRow(stringResource(R.string.chat_context_cached_write), formatOptionalCount(usage.cachedWriteTokens))
                     }
-                    ContextUsageSection("Cost") {
-                        ContextUsageRow("Cost", usage.cost?.let { "$" + String.format(Locale.US, "%.4f", it) } ?: "No cost data")
+                    ContextUsageSection(stringResource(R.string.chat_context_cost)) {
+                        ContextUsageRow(stringResource(R.string.chat_context_cost), usage.cost?.let { "$" + String.format(Locale.US, "%.4f", it) } ?: stringResource(R.string.chat_context_no_cost))
                     }
                 }
             }
         },
         confirmButton = {
             TextButton(onClick = onDismiss) {
-                Text("Done")
+                Text(stringResource(R.string.common_done))
             }
         }
     )
@@ -544,7 +546,7 @@ internal fun ChatEmptyState(
             )
             Spacer(modifier = Modifier.height(16.dp))
             Text(
-                if (isConnected) "Select or create a session" else "Connect to server",
+                if (isConnected) stringResource(R.string.chat_select_or_create_session) else stringResource(R.string.chat_connect_to_server),
                 style = MaterialTheme.typography.bodyLarge
             )
             Spacer(modifier = Modifier.height(8.dp))
@@ -553,7 +555,7 @@ internal fun ChatEmptyState(
                     onClick = onConnect,
                     modifier = Modifier.padding(horizontal = 24.dp, vertical = 12.dp)
                 ) {
-                    Text("Connect")
+                    Text(stringResource(R.string.chat_connect))
                 }
             }
         }

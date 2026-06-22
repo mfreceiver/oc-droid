@@ -63,12 +63,14 @@ import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.role
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
+import com.yage.opencode_client.R
 import com.yage.opencode_client.data.model.ComposerImageAttachment
 import com.yage.opencode_client.data.model.PermissionRequest
 import com.yage.opencode_client.data.model.PermissionResponse
@@ -102,14 +104,14 @@ internal fun ChatInputBar(
 ) {
     val canSend = (text.isNotBlank() || imageAttachments.isNotEmpty()) && !isTranscribing && !isRetryingSpeech
     val voiceStatus = when {
-        isRecording -> "Listening"
-        isTranscribing -> "Transcribing"
-        isRetryingSpeech -> "Retry this segment"
-        hasPreservedSpeechAudio -> "Preserved audio"
+        isRecording -> stringResource(R.string.chat_listening)
+        isTranscribing -> stringResource(R.string.chat_transcribing)
+        isRetryingSpeech -> stringResource(R.string.chat_retry_segment)
+        hasPreservedSpeechAudio -> stringResource(R.string.chat_preserved_audio)
         else -> null
     }
     val composerStatus = listOfNotNull(
-        if (isBusy) agentActivityText ?: "Agent running" else null,
+        if (isBusy) agentActivityText ?: stringResource(R.string.chat_agent_running) else null,
         voiceStatus
     ).joinToString(" · ").takeIf { it.isNotEmpty() }
 
@@ -167,7 +169,7 @@ internal fun ChatInputBar(
                     contentColor = MaterialTheme.colorScheme.primary,
                     dimWhenDisabled = true,
                     icon = Icons.Default.Add,
-                    contentDescription = "Add image"
+                    contentDescription = stringResource(R.string.chat_add_image)
                 )
                 Spacer(modifier = Modifier.width(8.dp))
 
@@ -179,7 +181,7 @@ internal fun ChatInputBar(
                 ) {
                     if (text.isEmpty()) {
                         Text(
-                            if (isRecording) "Transcription will appear here..." else "Type a message...",
+                            if (isRecording) stringResource(R.string.chat_transcription_placeholder) else stringResource(R.string.chat_type_message),
                             style = MaterialTheme.typography.bodyLarge,
                             color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f)
                         )
@@ -203,7 +205,7 @@ internal fun ChatInputBar(
                     contentColor = Color.White,
                     dimWhenDisabled = true,
                     icon = Icons.AutoMirrored.Filled.Send,
-                    contentDescription = "Send"
+                    contentDescription = stringResource(R.string.chat_send)
                 )
             }
 
@@ -250,7 +252,7 @@ private fun ImageAttachmentStrip(
                 ) {
                     Icon(
                         imageVector = Icons.Default.Close,
-                        contentDescription = "Remove image",
+                        contentDescription = stringResource(R.string.chat_remove_image),
                         tint = Color.White,
                         modifier = Modifier.size(14.dp)
                     )
@@ -274,11 +276,11 @@ private fun VoiceRail(
     onDiscardSpeech: () -> Unit,
 ) {
     val railTitle = when {
-        isRecording -> "Listening"
-        isTranscribing -> "Transcribing"
-        isRetryingSpeech -> "Retry this segment"
-        hasPreservedSpeechAudio -> "Preserved audio"
-        else -> "Tap to speak"
+        isRecording -> stringResource(R.string.chat_listening)
+        isTranscribing -> stringResource(R.string.chat_transcribing)
+        isRetryingSpeech -> stringResource(R.string.chat_retry_segment)
+        hasPreservedSpeechAudio -> stringResource(R.string.chat_preserved_audio)
+        else -> stringResource(R.string.chat_tap_to_speak)
     }
     val mode = when {
         isRecording -> WaveformMode.Active
@@ -286,6 +288,7 @@ private fun VoiceRail(
         else -> WaveformMode.Idle
     }
     val accent = MaterialTheme.colorScheme.primary
+    val waveformDescription = stringResource(R.string.chat_speech_waveform)
     val railColor = if (mode == WaveformMode.Idle) {
         MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f)
     } else {
@@ -308,7 +311,7 @@ private fun VoiceRail(
                 hasPreservedSpeechAudio -> Icons.Default.Refresh
                 else -> Icons.Default.Mic
             },
-            contentDescription = if (hasPreservedSpeechAudio) "Retry this segment" else railTitle,
+            contentDescription = if (hasPreservedSpeechAudio) stringResource(R.string.chat_retry_segment) else railTitle,
         )
 
         VoiceRailWaveform(
@@ -318,21 +321,21 @@ private fun VoiceRail(
             modifier = Modifier
                 .weight(1f)
                 .height(24.dp)
-                .semantics { contentDescription = "Speech waveform" }
+                .semantics { contentDescription = waveformDescription }
         )
 
         when {
             isTranscribing -> TextButton(onClick = onAbortSpeech) {
-                Text("Stop transcription wait", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Text(stringResource(R.string.chat_stop_transcription_wait), color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
             hasPreservedSpeechAudio -> TextButton(
                 onClick = onDiscardSpeech,
                 enabled = !isRetryingSpeech,
             ) {
-                Text("Discard audio", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Text(stringResource(R.string.chat_discard_audio), color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
             else -> Text(
-                text = if (isSpeechConfigured) railTitle else "Configure speech",
+                text = if (isSpeechConfigured) railTitle else stringResource(R.string.chat_configure_speech),
                 style = MaterialTheme.typography.labelMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 maxLines = 1,
@@ -400,13 +403,13 @@ private fun QuietComposerStatus(
                 IconButton(onClick = { menuExpanded = true }, modifier = Modifier.size(32.dp)) {
                     Icon(
                         Icons.Default.MoreHoriz,
-                        contentDescription = "Interrupt agent",
+                        contentDescription = stringResource(R.string.chat_interrupt_agent),
                         tint = MaterialTheme.colorScheme.onSurfaceVariant
                     )
                 }
                 DropdownMenu(expanded = menuExpanded, onDismissRequest = { menuExpanded = false }) {
                     DropdownMenuItem(
-                        text = { Text("Interrupt agent") },
+                        text = { Text(stringResource(R.string.chat_interrupt_agent)) },
                         leadingIcon = { Icon(Icons.Default.Stop, contentDescription = null, tint = StopRed) },
                         onClick = {
                             menuExpanded = false
@@ -597,15 +600,15 @@ internal fun ChatPermissionCard(
                 Spacer(modifier = Modifier.size(16.dp))
                 Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
                     TextButton(onClick = { onRespond(PermissionResponse.REJECT) }) {
-                        Text("Reject", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        Text(stringResource(R.string.permission_reject), color = MaterialTheme.colorScheme.onSurfaceVariant)
                     }
                     Spacer(modifier = Modifier.width(8.dp))
                     TextButton(onClick = { onRespond(PermissionResponse.ONCE) }) {
-                        Text("Allow Once", color = MaterialTheme.colorScheme.primary)
+                        Text(stringResource(R.string.permission_allow_once), color = MaterialTheme.colorScheme.primary)
                     }
                     Spacer(modifier = Modifier.width(8.dp))
                     TextButton(onClick = { onRespond(PermissionResponse.ALWAYS) }) {
-                        Text("Always Allow", color = MaterialTheme.colorScheme.primary)
+                        Text(stringResource(R.string.permission_always_allow), color = MaterialTheme.colorScheme.primary)
                     }
                 }
             }

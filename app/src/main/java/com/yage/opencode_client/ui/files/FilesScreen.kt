@@ -19,9 +19,11 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.yage.opencode_client.R
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -41,17 +43,17 @@ fun FilesScreen(
     Column(modifier = Modifier.fillMaxSize()) {
         if (state.selectedFilePath == null) {
             TopAppBar(
-                title = { Text(state.currentPath.ifEmpty { "Files" }) },
+                title = { Text(state.currentPath.ifEmpty { stringResource(R.string.files_title) }) },
                 navigationIcon = {
                     if (state.currentPath.isNotEmpty()) {
                         IconButton(onClick = viewModel::navigateUp) {
-                            Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
+                            Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = stringResource(R.string.common_back))
                         }
                     }
                 },
                 actions = {
                     IconButton(onClick = viewModel::refresh) {
-                        Icon(Icons.Default.Refresh, contentDescription = "Refresh")
+                        Icon(Icons.Default.Refresh, contentDescription = stringResource(R.string.common_refresh))
                     }
                 }
             )
@@ -62,7 +64,7 @@ fun FilesScreen(
                 modifier = Modifier.padding(16.dp),
                 action = {
                     TextButton(onClick = viewModel::clearError) {
-                        Text("Dismiss")
+                        Text(stringResource(R.string.common_dismiss))
                     }
                 }
             ) {

@@ -304,7 +304,7 @@ private fun TabletLayout(viewModel: MainViewModel) {
                             IconButton(onClick = { sessionsPaneCollapsed = false }) {
                                 Icon(
                                     Icons.AutoMirrored.Filled.KeyboardArrowRight,
-                                    contentDescription = "Show sessions"
+                                    contentDescription = stringResource(R.string.sessions_show)
                                 )
                             }
                         }

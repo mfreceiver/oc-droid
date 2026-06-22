@@ -45,9 +45,11 @@ import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
 import androidx.core.content.FileProvider
+import com.yage.opencode_client.R
 import com.mikepenz.markdown.m3.Markdown
 import com.yage.opencode_client.data.model.FileContent
 import com.yage.opencode_client.data.repository.OpenCodeRepository
@@ -59,10 +61,10 @@ import java.io.File
 import kotlin.math.max
 import kotlin.math.min
 
-private enum class MarkdownPreviewMode(val label: String) {
-    Web("Web Preview"),
-    Native("Native Preview"),
-    Source("Markdown Source")
+private enum class MarkdownPreviewMode {
+    Web,
+    Native,
+    Source
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -92,14 +94,14 @@ internal fun FilePreviewPane(
             title = { Text(path.substringAfterLast('/'), style = MaterialTheme.typography.titleSmall) },
             navigationIcon = {
                 IconButton(onClick = onClose) {
-                    Icon(Icons.Default.Close, contentDescription = "Close")
+                    Icon(Icons.Default.Close, contentDescription = stringResource(R.string.common_close))
                 }
             },
             actions = {
                 if (previewKind == FilePreviewUtils.PreviewContentKind.MARKDOWN) {
                     Box {
                         IconButton(onClick = { modeMenuExpanded = true }) {
-                            Icon(Icons.Default.MoreVert, contentDescription = "Preview mode")
+                            Icon(Icons.Default.MoreVert, contentDescription = stringResource(R.string.files_preview_mode))
                         }
                         DropdownMenu(
                             expanded = modeMenuExpanded,
@@ -107,7 +109,15 @@ internal fun FilePreviewPane(
                         ) {
                             MarkdownPreviewMode.entries.forEach { mode ->
                                 DropdownMenuItem(
-                                    text = { Text(mode.label) },
+                                    text = {
+                                        Text(
+                                            when (mode) {
+                                                MarkdownPreviewMode.Web -> stringResource(R.string.files_open_web_preview)
+                                                MarkdownPreviewMode.Native -> stringResource(R.string.files_open_native_preview)
+                                                MarkdownPreviewMode.Source -> stringResource(R.string.files_open_markdown_source)
+                                            }
+                                        )
+                                    },
                                     onClick = {
                                         markdownPreviewMode = mode
                                         modeMenuExpanded = false
@@ -118,11 +128,11 @@ internal fun FilePreviewPane(
                     }
                 }
                 IconButton(onClick = onRefresh, enabled = !isRefreshing) {
-                    Icon(Icons.Default.Refresh, contentDescription = "Refresh")
+                    Icon(Icons.Default.Refresh, contentDescription = stringResource(R.string.common_refresh))
                 }
                 if (imagePayload != null) {
                     IconButton(onClick = { shareImage(context, path, imagePayload.bytes) }) {
-                        Icon(Icons.Default.Share, contentDescription = "Share")
+                        Icon(Icons.Default.Share, contentDescription = stringResource(R.string.files_share))
                     }
                 }
             }
