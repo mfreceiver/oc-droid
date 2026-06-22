@@ -1,6 +1,7 @@
 package com.yage.opencode_client.ui
 
 import com.yage.opencode_client.data.repository.OpenCodeRepository
+import com.yage.opencode_client.data.repository.HostProfileStore
 import com.yage.opencode_client.util.SettingsManager
 import com.yage.voiceflowkit.VoiceFlowClient
 import com.yage.voiceflowkit.VoiceFlowConfig
@@ -12,12 +13,15 @@ import kotlinx.coroutines.launch
 internal fun applySavedSettings(
     repository: OpenCodeRepository,
     settingsManager: SettingsManager,
+    hostProfileStore: HostProfileStore,
     state: MutableStateFlow<AppState>
 ) {
+    val currentProfile = hostProfileStore.currentProfile()
+    val password = currentProfile.basicAuth?.passwordId?.let { settingsManager.basicAuthPassword(it) }
     repository.configure(
-        baseUrl = settingsManager.serverUrl,
-        username = settingsManager.username,
-        password = settingsManager.password
+        baseUrl = currentProfile.serverUrl,
+        username = currentProfile.basicAuth?.username,
+        password = password
     )
 
     val savedModelIndex = settingsManager.selectedModelIndex
@@ -29,6 +33,8 @@ internal fun applySavedSettings(
     state.update {
         it.copy(
             currentSessionId = settingsManager.currentSessionId,
+            hostProfiles = hostProfileStore.profiles(),
+            currentHostProfileId = currentProfile.id,
             selectedModelIndex = clampedModelIndex,
             selectedAgentName = settingsManager.selectedAgentName ?: "build",
             themeMode = settingsManager.themeMode

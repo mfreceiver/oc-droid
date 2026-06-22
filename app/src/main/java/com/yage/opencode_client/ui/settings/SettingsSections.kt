@@ -41,7 +41,78 @@ import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.unit.dp
 import com.yage.opencode_client.ui.AIBuilderSettings
 import com.yage.opencode_client.ui.AppState
+import com.yage.opencode_client.data.model.HostProfile
+import com.yage.opencode_client.data.model.HostTransport
 import com.yage.opencode_client.util.ThemeMode
+
+@Composable
+internal fun ConnectionProfileSection(
+    profile: HostProfile,
+    isTesting: Boolean,
+    state: AppState,
+    testResult: TestResult?,
+    onTestConnection: () -> Unit,
+    onManageProfiles: () -> Unit
+) {
+    SectionHeader(title = "Connection Profile")
+
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
+    ) {
+        Column(modifier = Modifier.padding(16.dp)) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(profile.displayName, style = MaterialTheme.typography.titleMedium)
+                    Text(profile.connectionSummary, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+                Text(
+                    if (profile.transport == HostTransport.SSH_TUNNEL) "SSH Tunnel" else "Direct",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.primary
+                )
+            }
+
+            Spacer(modifier = Modifier.height(16.dp))
+
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Button(onClick = onTestConnection, enabled = !isTesting) {
+                    if (isTesting) {
+                        CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp)
+                        Spacer(modifier = Modifier.width(8.dp))
+                    }
+                    Text("Test Connection")
+                }
+                OutlinedButton(onClick = onManageProfiles) {
+                    Text("Manage Profiles")
+                }
+            }
+        }
+    }
+
+    testResult?.let { ResultCard(result = it) }
+
+    if (state.isConnected) {
+        Spacer(modifier = Modifier.height(12.dp))
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Icon(
+                Icons.Default.CheckCircle,
+                contentDescription = null,
+                tint = MaterialTheme.colorScheme.primary,
+                modifier = Modifier.size(20.dp)
+            )
+            Spacer(modifier = Modifier.width(8.dp))
+            Text("Connected", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.primary)
+            state.serverVersion?.let { version ->
+                Text(" (v$version)", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.outline)
+            }
+        }
+    }
+}
 
 @Composable
 internal fun ServerConnectionSection(
@@ -339,7 +410,7 @@ internal fun AboutSection() {
 }
 
 @Composable
-private fun SectionHeader(title: String) {
+internal fun SectionHeader(title: String) {
     Text(
         title,
         style = MaterialTheme.typography.titleMedium

@@ -305,7 +305,7 @@ data class HostProfile(
 
 1. `SettingsManager` 保存 `host_profiles_json` 和 `current_host_profile_id`。旧的 `server_url / username / password` 作为 migration source，首次加载时自动生成一个 Direct profile。
 2. Basic Auth password 继续存在 EncryptedSharedPreferences，但 profile 只保存 `passwordId`。Export 不输出 password。
-3. SSH private key 是设备级 secret，存 app-private encrypted storage 或 EncryptedSharedPreferences；多个 SSH profiles 复用同一把 key。
+3. SSH private key 是设备级 secret，存 app-private encrypted storage 或 EncryptedSharedPreferences；多个 SSH profiles 复用同一把 key。第一版由 BouncyCastle 生成 Ed25519 key，写出 OpenSSH private key，再由 JSch 读取执行 SSH auth；导出的 public key 为 `ssh-ed25519 ... opencode-android`，与 iOS 和 private-host gateway 的 `authorized_keys` 约束保持一致。Non-exportable Android Keystore key 留作后续增强。Rotate key 是显式恢复动作，UI 必须先确认并提示用户更新服务器授权；不要对开发期旧 RSA key 做自动迁移。
 4. Known hosts 以 SSH gateway `host:port` 为 key 存 fingerprint。多个 profile 指向同一 gateway 时共享 trust state。
 
 跨端 import/export JSON 与 iOS 对齐。Transport JSON 使用 iOS raw value：`direct` / `sshTunnel`。Direct export 包含 `version/name/transport/serverURL`；SSH export 包含 `version/name/transport/ssh{host,port,username,remotePort}`。Export 不包含 private key、Basic Auth password、known host fingerprint、local port、last used time。Import SSH profile 时强制 `transport = SSH_TUNNEL`，并由 app 管理 resolved local URL。

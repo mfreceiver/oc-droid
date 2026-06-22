@@ -147,7 +147,8 @@ class ReadToolCardIntegrationTest {
                     workspaceDirectory = null,
                     onLoadMore = {},
                     onFileClick = {},
-                    onForkFromMessage = {}
+                    onForkFromMessage = {},
+                    onEditFromMessage = {}
                 )
             }
         }
