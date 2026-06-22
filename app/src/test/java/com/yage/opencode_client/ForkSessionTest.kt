@@ -2,7 +2,11 @@ package com.yage.opencode_client
 
 import android.util.Log
 import com.yage.opencode_client.data.model.Session
+import com.yage.opencode_client.data.model.HostProfile
+import com.yage.opencode_client.data.repository.HostProfileStore
 import com.yage.opencode_client.data.repository.OpenCodeRepository
+import com.yage.opencode_client.ssh.SSHKeyManager
+import com.yage.opencode_client.ssh.TunnelManager
 import com.yage.opencode_client.ui.AppState
 import com.yage.opencode_client.ui.MainViewModel
 import com.yage.opencode_client.util.SettingsManager
@@ -41,6 +45,9 @@ class ForkSessionTest {
     private lateinit var settingsManager: SettingsManager
     private lateinit var voiceFlowClient: VoiceFlowClient
     private lateinit var microphone: VoiceFlowMicrophone
+    private lateinit var hostProfileStore: HostProfileStore
+    private lateinit var tunnelManager: TunnelManager
+    private lateinit var sshKeyManager: SSHKeyManager
 
     @Before
     fun setUp() {
@@ -54,6 +61,13 @@ class ForkSessionTest {
         settingsManager = mockk(relaxed = true)
         voiceFlowClient = mockk(relaxed = true)
         microphone = mockk(relaxed = true)
+        hostProfileStore = mockk(relaxed = true)
+        tunnelManager = mockk(relaxed = true)
+        sshKeyManager = mockk(relaxed = true)
+
+        val defaultProfile = HostProfile.defaultDirect("http://server.test")
+        every { hostProfileStore.currentProfile() } returns defaultProfile
+        every { hostProfileStore.profiles() } returns listOf(defaultProfile)
 
         every { settingsManager.serverUrl } returns "http://server.test"
         every { settingsManager.username } returns null
@@ -102,7 +116,7 @@ class ForkSessionTest {
     }
 
     private fun createViewModel(): MainViewModel {
-        return MainViewModel(repository, settingsManager, voiceFlowClient, microphone)
+        return MainViewModel(repository, settingsManager, voiceFlowClient, microphone, hostProfileStore, tunnelManager, sshKeyManager)
     }
 
     @Test

@@ -4,7 +4,11 @@ import android.util.Log
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.yage.opencode_client.data.model.*
+import com.yage.opencode_client.data.repository.HostProfileStore
 import com.yage.opencode_client.data.repository.OpenCodeRepository
+import com.yage.opencode_client.ssh.SSHKeyManager
+import com.yage.opencode_client.ssh.TunnelManager
+import com.yage.opencode_client.ssh.TunnelResult
 import com.yage.opencode_client.util.SettingsManager
 import com.yage.opencode_client.util.ThemeMode
 import com.yage.voiceflowkit.VoiceFlowClient
@@ -72,7 +76,10 @@ data class AppState(
     val isTestingAIBuilderConnection: Boolean = false,
     val sessionTodos: Map<String, List<TodoItem>> = emptyMap(),
     val sendingSessionIds: Set<String> = emptySet(),
-    val imageAttachments: List<ComposerImageAttachment> = emptyList()
+    val imageAttachments: List<ComposerImageAttachment> = emptyList(),
+    val hostProfiles: List<HostProfile> = emptyList(),
+    val currentHostProfileId: String? = null,
+    val connectionPhase: String? = null
 ) {
     data class ModelOption(val displayName: String, val providerId: String, val modelId: String) {
         val shortName: String
@@ -332,7 +339,10 @@ class MainViewModel @Inject constructor(
     internal val repository: OpenCodeRepository,
     private val settingsManager: SettingsManager,
     private val voiceFlowClient: VoiceFlowClient,
-    private val microphone: VoiceFlowMicrophone
+    private val microphone: VoiceFlowMicrophone,
+    private val hostProfileStore: HostProfileStore,
+    private val tunnelManager: TunnelManager,
+    private val sshKeyManager: SSHKeyManager
 ) : ViewModel() {
 
     private val _state = MutableStateFlow(AppState())
@@ -353,7 +363,7 @@ class MainViewModel @Inject constructor(
     }
 
     private fun loadSettings() {
-        applySavedSettings(repository, settingsManager, _state)
+        applySavedSettings(repository, settingsManager, hostProfileStore, _state)
     }
 
     fun configureServer(url: String, username: String? = null, password: String? = null) {
@@ -361,6 +371,103 @@ class MainViewModel @Inject constructor(
         settingsManager.username = username
         settingsManager.password = password
         repository.configure(url, username, password)
+    }
+
+    fun getHostProfiles(): List<HostProfile> = hostProfileStore.profiles()
+
+    fun currentHostProfile(): HostProfile = hostProfileStore.currentProfile()
+
+    fun saveHostProfile(profile: HostProfile, basicAuthPassword: String? = null) {
+        val normalized = if (profile.basicAuth != null) {
+            profile.copy(basicAuth = profile.basicAuth.copy(passwordId = profile.id))
+        } else {
+            profile
+        }
+        if (normalized.basicAuth != null) {
+            settingsManager.setBasicAuthPassword(normalized.id, basicAuthPassword)
+        }
+        hostProfileStore.save(normalized)
+        refreshHostProfileState()
+    }
+
+    fun selectHostProfile(profileId: String) {
+        viewModelScope.launch {
+            val profile = hostProfileStore.select(profileId)
+            configureRepositoryForProfileAsync(profile)
+            refreshHostProfileState()
+            testConnection(force = true)
+        }
+    }
+
+    fun duplicateHostProfile(profileId: String) {
+        hostProfileStore.duplicate(profileId)
+        refreshHostProfileState()
+    }
+
+    fun deleteHostProfile(profileId: String) {
+        hostProfileStore.delete(profileId)
+        val current = hostProfileStore.currentProfile()
+        configureRepositoryForProfile(current, startTunnel = false)
+        refreshHostProfileState()
+    }
+
+    fun importHostProfile(payload: String): Result<HostProfile> = runCatching {
+        hostProfileStore.importJson(payload).also { refreshHostProfileState() }
+    }
+
+    fun exportHostProfile(profile: HostProfile): String = hostProfileStore.exportJson(profile)
+
+    fun ensureSshPublicKey(): String = sshKeyManager.ensureKeyPair()
+
+    fun sshPublicKey(): String? = sshKeyManager.publicKey()
+
+    fun rotateSshKey(): String = sshKeyManager.rotateKey()
+
+    private fun refreshHostProfileState() {
+        _state.update {
+            it.copy(
+                hostProfiles = hostProfileStore.profiles(),
+                currentHostProfileId = hostProfileStore.currentProfile().id
+            )
+        }
+    }
+
+    private fun configureRepositoryForProfile(profile: HostProfile, startTunnel: Boolean) {
+        val password = profile.basicAuth?.passwordId?.let { settingsManager.basicAuthPassword(it) }
+        if (profile.transport == HostTransport.SSH_TUNNEL && startTunnel) {
+            viewModelScope.launch { configureRepositoryForProfileAsync(profile) }
+            return
+        }
+        repository.configure(profile.serverUrl, profile.basicAuth?.username, password)
+    }
+
+    private suspend fun configureRepositoryForProfileAsync(profile: HostProfile): Boolean {
+        val password = profile.basicAuth?.passwordId?.let { settingsManager.basicAuthPassword(it) }
+        val baseUrl = when (profile.transport) {
+            HostTransport.DIRECT -> profile.serverUrl
+            HostTransport.SSH_TUNNEL -> {
+                val ssh = profile.ssh ?: run {
+                    _state.update { it.copy(error = "SSH profile is missing tunnel settings") }
+                    return false
+                }
+                when (val result = tunnelManager.ensureStarted(ssh)) {
+                    is TunnelResult.Success -> result.localUrl
+                    is TunnelResult.Failure -> {
+                        _state.update {
+                            it.copy(
+                                isConnected = false,
+                                isConnecting = false,
+                                connectionPhase = result.phase.name,
+                                error = result.message
+                            )
+                        }
+                        return false
+                    }
+                }
+            }
+        }
+        repository.configure(baseUrl, profile.basicAuth?.username, password)
+        return true
     }
 
     fun getSavedConnectionSettings(): ConnectionFormSettings = ConnectionFormSettings(
@@ -607,14 +714,40 @@ class MainViewModel @Inject constructor(
         _state.update { it.copy(speechError = message) }
     }
 
-    fun testConnection() {
+    fun testConnection(force: Boolean = false) {
         val now = System.currentTimeMillis()
-        if (now - lastHealthCheckTime < 30_000) return
+        if (!force && now - lastHealthCheckTime < 30_000) return
         lastHealthCheckTime = now
-        launchConnectionTest(viewModelScope, repository, _state) {
-            loadInitialData()
-            startSSE()
-            startBusyPolling()
+        viewModelScope.launch {
+            _state.update { it.copy(isConnecting = true, error = null, connectionPhase = null) }
+            val profile = hostProfileStore.currentProfile()
+            if (!configureRepositoryForProfileAsync(profile)) return@launch
+            repository.checkHealth()
+                .onSuccess { health ->
+                    _state.update {
+                        it.copy(
+                            isConnected = health.healthy,
+                            serverVersion = health.version,
+                            isConnecting = false,
+                            connectionPhase = if (health.healthy) "connected" else "health"
+                        )
+                    }
+                    if (health.healthy) {
+                        loadInitialData()
+                        startSSE()
+                        startBusyPolling()
+                    }
+                }
+                .onFailure { error ->
+                    _state.update {
+                        it.copy(
+                            isConnected = false,
+                            isConnecting = false,
+                            connectionPhase = "health",
+                            error = errorMessageOrFallback(error, "Connection failed")
+                        )
+                    }
+                }
         }
     }
 

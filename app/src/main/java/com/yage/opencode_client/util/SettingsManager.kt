@@ -38,6 +38,37 @@ class SettingsManager @Inject constructor(
         get() = encryptedPrefs.getString(KEY_PASSWORD, null)
         set(value) = encryptedPrefs.edit().putString(KEY_PASSWORD, value).apply()
 
+    var hostProfilesJson: String?
+        get() = encryptedPrefs.getString(KEY_HOST_PROFILES, null)
+        set(value) = encryptedPrefs.edit().putString(KEY_HOST_PROFILES, value).apply()
+
+    var currentHostProfileId: String?
+        get() = encryptedPrefs.getString(KEY_CURRENT_HOST_PROFILE_ID, null)
+        set(value) = encryptedPrefs.edit().putString(KEY_CURRENT_HOST_PROFILE_ID, value).apply()
+
+    var sshPrivateKeyPem: String?
+        get() = encryptedPrefs.getString(KEY_SSH_PRIVATE_KEY, null)
+        set(value) = encryptedPrefs.edit().putString(KEY_SSH_PRIVATE_KEY, value).apply()
+
+    var sshPublicKey: String?
+        get() = encryptedPrefs.getString(KEY_SSH_PUBLIC_KEY, null)
+        set(value) = encryptedPrefs.edit().putString(KEY_SSH_PUBLIC_KEY, value).apply()
+
+    var knownHostsJson: String?
+        get() = encryptedPrefs.getString(KEY_KNOWN_HOSTS, null)
+        set(value) = encryptedPrefs.edit().putString(KEY_KNOWN_HOSTS, value).apply()
+
+    fun basicAuthPassword(passwordId: String): String? {
+        if (passwordId == LEGACY_BASIC_AUTH_PASSWORD_ID) return password
+        return encryptedPrefs.getString(basicAuthPasswordKey(passwordId), null)
+    }
+
+    fun setBasicAuthPassword(passwordId: String, value: String?) {
+        encryptedPrefs.edit().apply {
+            if (value.isNullOrBlank()) remove(basicAuthPasswordKey(passwordId)) else putString(basicAuthPasswordKey(passwordId), value)
+        }.apply()
+    }
+
     var currentSessionId: String?
         get() = encryptedPrefs.getString(KEY_SESSION_ID, null)
         set(value) = encryptedPrefs.edit().putString(KEY_SESSION_ID, value).apply()
@@ -147,9 +178,15 @@ class SettingsManager @Inject constructor(
         const val DEFAULT_AI_BUILDER_BASE_URL = "https://space.ai-builders.com/backend"
         const val DEFAULT_AI_BUILDER_CUSTOM_PROMPT = "All file and directory names should use snake_case (lowercase with underscores)."
         const val DEFAULT_AI_BUILDER_TERMINOLOGY = "adhoc_jobs, life_consulting, survey_sessions, thought_review"
+        const val LEGACY_BASIC_AUTH_PASSWORD_ID = "legacy_basic_auth_password"
         private const val KEY_SERVER_URL = "server_url"
         private const val KEY_USERNAME = "username"
         private const val KEY_PASSWORD = "password"
+        private const val KEY_HOST_PROFILES = "host_profiles_json"
+        private const val KEY_CURRENT_HOST_PROFILE_ID = "current_host_profile_id"
+        private const val KEY_SSH_PRIVATE_KEY = "ssh_private_key_pem"
+        private const val KEY_SSH_PUBLIC_KEY = "ssh_public_key"
+        private const val KEY_KNOWN_HOSTS = "ssh_known_hosts_json"
         private const val KEY_SESSION_ID = "session_id"
         private const val KEY_MODEL_INDEX = "model_index"
         private const val KEY_AGENT_NAME = "agent_name"
@@ -163,6 +200,8 @@ class SettingsManager @Inject constructor(
         private const val KEY_SESSION_DRAFTS = "session_drafts"
         private const val KEY_SESSION_MODELS = "session_models"
         private const val KEY_SESSION_AGENTS = "session_agents"
+
+        private fun basicAuthPasswordKey(passwordId: String): String = "basic_auth_password_$passwordId"
     }
 }
 

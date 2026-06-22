@@ -2,6 +2,8 @@ package com.yage.opencode_client.di
 
 import android.content.Context
 import com.yage.opencode_client.data.repository.OpenCodeRepository
+import com.yage.opencode_client.ssh.JschTunnelManager
+import com.yage.opencode_client.ssh.TunnelManager
 import com.yage.opencode_client.util.SettingsManager
 import com.yage.voiceflowkit.VoiceFlowClient
 import com.yage.voiceflowkit.VoiceFlowConfig
@@ -19,6 +21,10 @@ object AppModule {
     @Provides
     @Singleton
     fun provideOpenCodeRepository(): OpenCodeRepository = OpenCodeRepository()
+
+    @Provides
+    @Singleton
+    fun provideTunnelManager(manager: JschTunnelManager): TunnelManager = manager
 
     /**
      * VoiceFlowKit is a DI-agnostic library (no Hilt inside it), so we provide its

@@ -167,7 +167,7 @@ SSH username
 Assigned remote port
 
 Device public key
-ssh-ed25519 AAAA... opencode-android
+ssh-rsa AAAA... opencode-android
 [Copy public key] [Rotate key]
 
 OpenCode Basic Auth (optional)
