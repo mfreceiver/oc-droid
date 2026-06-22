@@ -8,9 +8,9 @@
 |------|------|
 | **RFC 编号** | RFC-001 |
 | **标题** | OpenCode Android Client 技术方案 |
-| **状态** | Accepted + Phase 7 Draft |
+| **状态** | Accepted + Phase 8 SSH Host Profiles Draft |
 | **创建日期** | 2026-02 |
-| **最后更新** | 2026-06-14 |
+| **最后更新** | 2026-06-21 |
 | **PRD 引用** | [PRD.md](PRD.md) |
 
 ---
@@ -32,6 +32,8 @@
 │  ChatScreen            │  MainViewModel        │  OpenCodeApi               │
 │  FilesScreen           │                       │  SSEClient                 │
 │  SettingsScreen        │                       │  OpenCodeRepository        │
+│  HostProfilesScreen    │                       │  TunnelManager             │
+│                        │                       │  SSHKeyManager             │
 │  Components            │                       │  AIBuildersAudioClient     │
 │                        │                       │  AudioRecorderManager      │
 │                        │                       │  SettingsManager           │
@@ -45,6 +47,8 @@
 │  POST /v1/audio/realtime/sessions  │  WS /v1/audio/realtime/ws    │
 └─────────────────────────────────────────────────────────────────┘
 ```
+
+SSH Tunnel 模式下，OpenCode REST/SSE 仍然使用同一套 OkHttp/Retrofit/SSEClient。差异只发生在 repository 配置前：`TunnelManager` 先建立 `127.0.0.1:<localPort>` 到 SSH gateway 侧 `127.0.0.1:<remotePort>` 的 local forward，然后 `OpenCodeRepository.configure()` 使用本地 loopback URL。这样 Files、Chat、SSE、health check 不需要各自感知 SSH。
 
 **分层说明**：
 - **UI Layer**：Jetpack Compose 声明式 UI
@@ -65,22 +69,22 @@
 | 依赖注入 | Hilt | 官方推荐，Dagger 封装 |
 | Markdown | multiplatform-markdown-renderer-m3 | 已落地，Compose 兼容性好 |
 | Markdown Web Preview | Android WebView + bundled markdown-it + DOMPurify | Phase 7 对齐 iOS PR #94，承载 HTML-in-Markdown / CSS cards / inline SVG |
-| SSH（可选） | Apache Mina SSHD 或 JSch | 成熟，支持端口转发 |
+| SSH Tunnel | mwiede/JSch | Java 实现、依赖面小，适合 app 内 local port forwarding；Apache Mina SSHD 作为替代方案 |
 | 安全存储 | EncryptedSharedPreferences + Keystore | Android 官方方案 |
 
 ### 2.1 HTTP 连接配置
 
 Android 9+ 默认禁止明文流量。`network_security_config.xml` 设置 base-config cleartextTrafficPermitted="false"，仅对 localhost、127.0.0.1、10.0.2.2、ts.net（Tailscale MagicDNS）开放 HTTP，其余强制 HTTPS。Android 不支持 IP 段匹配，局域网 IP 需使用 HTTPS 或 Tailscale。
 
-### 2.2 SSH 库选型（可选）
+### 2.2 SSH 库选型
 
 | 库 | 语言 | 维护状态 | 推荐度 |
 |----|------|----------|--------|
-| **Apache Mina SSHD** | Java | 活跃 | ★★★★★ |
-| JSch | Java | 维护模式 | ★★★★ |
+| **mwiede/JSch** | Java | 活跃 fork | ★★★★★ |
+| Apache Mina SSHD | Java | 活跃 | ★★★★ |
 | sshj | Java | 活跃 | ★★★★ |
 
-**推荐 Apache Mina SSHD**：功能完整，支持端口转发，文档齐全。
+**推荐 mwiede/JSch**：Android 端只需要 SSH client + local port forwarding，不需要完整 SSH server/subsystem。mwiede/JSch 是 JSch 的维护 fork，API 面小，接入成本低，适合 Phase 8 先完成 iOS feature parity。Apache Mina SSHD 功能完整，但体积、配置、线程池和 forwarding filter 复杂度更高，作为 JSch 在 key format 或 Android crypto 上遇到阻塞时的替代方案。sshj 保留为备选，不作为第一实现。
 
 ---
 
@@ -254,6 +258,105 @@ class SSEClient(
 | `AudioTranscriptionConfig.sendChunkSizeBytes` | `240_000` | live send chunk 上限 |
 | `AudioTranscriptionConfig.realtimeReplayChunkSizeBytes` | `240_000` | recovery replay chunk 上限 |
 | `AudioTranscriptionConfig.realtimeHeartbeatIntervalSeconds` | `12` | heartbeat 间隔 |
+
+### 3.5 Host Profiles 与 SSH Tunnel
+
+Phase 8 把连接层从单一全局 `serverUrl` 升级为 Host Profiles。Profile 是用户可理解的 OpenCode 环境；transport 是访问路径。Direct transport 直接访问 OpenCode HTTP(S) URL；SSH Tunnel transport 通过 app 内 SSH local forwarding 访问 gateway 后面的 OpenCode instance。Repository、REST API、SSE 和 Files 不直接感知 SSH，只消费最终 resolved base URL。
+
+核心数据模型：
+
+```kotlin
+@Serializable
+enum class HostTransport {
+    @SerialName("direct")
+    DIRECT,
+    @SerialName("sshTunnel")
+    SSH_TUNNEL
+}
+
+@Serializable
+data class BasicAuthConfig(
+    val username: String,
+    val passwordId: String
+)
+
+@Serializable
+data class SshTunnelConfig(
+    val host: String,
+    val port: Int = 8006,
+    val username: String = "opencode",
+    val remotePort: Int = 19001
+)
+
+@Serializable
+data class HostProfile(
+    val id: String,
+    val name: String,
+    val transport: HostTransport,
+    @SerialName("serverURL")
+    val serverUrl: String,
+    val basicAuth: BasicAuthConfig? = null,
+    val ssh: SshTunnelConfig? = null,
+    val lastUsedAt: Long? = null
+)
+```
+
+存储策略：
+
+1. `SettingsManager` 保存 `host_profiles_json` 和 `current_host_profile_id`。旧的 `server_url / username / password` 作为 migration source，首次加载时自动生成一个 Direct profile。
+2. Basic Auth password 继续存在 EncryptedSharedPreferences，但 profile 只保存 `passwordId`。Export 不输出 password。
+3. SSH private key 是设备级 secret，存 app-private encrypted storage 或 EncryptedSharedPreferences；多个 SSH profiles 复用同一把 key。
+4. Known hosts 以 SSH gateway `host:port` 为 key 存 fingerprint。多个 profile 指向同一 gateway 时共享 trust state。
+
+跨端 import/export JSON 与 iOS 对齐。Transport JSON 使用 iOS raw value：`direct` / `sshTunnel`。Direct export 包含 `version/name/transport/serverURL`；SSH export 包含 `version/name/transport/ssh{host,port,username,remotePort}`。Export 不包含 private key、Basic Auth password、known host fingerprint、local port、last used time。Import SSH profile 时强制 `transport = SSH_TUNNEL`，并由 app 管理 resolved local URL。
+
+```json
+{
+  "version": 1,
+  "name": "VPS OpenCode",
+  "transport": "sshTunnel",
+  "ssh": {
+    "host": "gateway.example.com",
+    "port": 8006,
+    "username": "opencode",
+    "remotePort": 19001
+  }
+}
+```
+
+连接解析流程：
+
+```kotlin
+suspend fun resolveProfile(profile: HostProfile): ResolvedConnection {
+    return when (profile.transport) {
+        HostTransport.DIRECT -> ResolvedConnection(profile.serverUrl, profile.basicAuth)
+        HostTransport.SSH_TUNNEL -> {
+            val localUrl = tunnelManager.ensureStarted(profile.ssh!!)
+            ResolvedConnection(localUrl, profile.basicAuth)
+        }
+    }
+}
+```
+
+`TunnelManager.ensureStarted()` 必须幂等：同一 SSH config 已连接时直接返回当前 local URL；config 变化时先关闭旧 tunnel 再启动新 tunnel。Local port 优先用稳定端口 `4096`；如果端口被占用，回退到随机可用端口，并把实际 local URL 只保存在 runtime state，不写入 export JSON。
+
+SSH Tunnel 状态机：
+
+| Phase | 说明 | 失败提示 |
+|------|------|----------|
+| `sshGateway` | TCP 连接 SSH gateway | gateway 不可达、端口错误、网络断开 |
+| `sshHostKey` | TOFU / fingerprint 校验 | host key changed，需要 reset trusted host |
+| `sshAuth` | private key auth | public key 未授权、私钥损坏、用户名错误 |
+| `localTunnel` | 绑定 loopback local port 并建立 forwarding | 本地端口占用、forwarding 被服务端拒绝 |
+| `health` | 通过 local URL 请求 `/global/health` | OpenCode server 未启动、remotePort 错误 |
+| `connected` | REST/SSE 可用 | - |
+
+生命周期边界：
+
+1. App 前台使用时自动建立 tunnel；切换 profile 时关闭旧 tunnel 并重建。
+2. App 进入后台时可以断开 SSE 与 tunnel；回前台先 `ensureStarted()`，再 REST 全量同步和重建 SSE。
+3. Phase 8 不实现后台永久 tunnel，不添加 Foreground Service，也不把 SSH tunnel 作为 notification transport。
+4. `testConnection()` 不能只复用 30 秒 health debounce。用户保存或修改 SSH config 后，必须重新跑 tunnel phase；health check 的防抖只作用于未变化的 resolved connection。
 
 ---
 
