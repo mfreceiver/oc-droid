@@ -63,12 +63,14 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.mikepenz.markdown.m3.Markdown
+import com.yage.opencode_client.R
 import com.yage.opencode_client.data.model.MessageWithParts
 import com.yage.opencode_client.data.model.Part
 import com.yage.opencode_client.data.model.TodoItem
@@ -293,7 +295,7 @@ private fun MessageRow(
                 ) {
                     Icon(
                         imageVector = Icons.Default.MoreVert,
-                        contentDescription = "More options",
+                        contentDescription = stringResource(R.string.chat_more_options),
                         tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f),
                         modifier = Modifier.size(16.dp)
                     )
@@ -304,7 +306,7 @@ private fun MessageRow(
                 ) {
                     if (isUser) {
                         DropdownMenuItem(
-                            text = { Text("Edit from here") },
+                            text = { Text(stringResource(R.string.chat_edit_from_here)) },
                             leadingIcon = {
                                 Icon(
                                     imageVector = Icons.Default.Edit,
@@ -318,7 +320,7 @@ private fun MessageRow(
                         )
                     } else {
                         DropdownMenuItem(
-                            text = { Text("Fork from here") },
+                            text = { Text(stringResource(R.string.chat_fork_from_here)) },
                             leadingIcon = {
                                 Icon(
                                     imageVector = Icons.AutoMirrored.Filled.CallSplit,
@@ -882,7 +884,7 @@ private fun ToolCard(
                         IconButton(onClick = { onFileClick(firstFile) }, modifier = Modifier.size(28.dp)) {
                             Icon(
                                 Icons.AutoMirrored.Filled.OpenInNew,
-                                contentDescription = "Show in Files",
+                                contentDescription = stringResource(R.string.files_show_in_files),
                                 modifier = Modifier.size(18.dp),
                                 tint = MaterialTheme.colorScheme.primary
                             )
@@ -958,7 +960,7 @@ private fun ToolCard(
                                 IconButton(onClick = { onFileClick(path) }, modifier = Modifier.size(28.dp)) {
                                     Icon(
                                         Icons.AutoMirrored.Filled.OpenInNew,
-                                        contentDescription = "Show in Files",
+                                        contentDescription = stringResource(R.string.files_show_in_files),
                                         modifier = Modifier.size(18.dp),
                                         tint = MaterialTheme.colorScheme.primary
                                     )
@@ -1012,7 +1014,7 @@ private fun PatchCard(
                         IconButton(onClick = { onFileClick(path) }, modifier = Modifier.size(28.dp)) {
                             Icon(
                                 Icons.AutoMirrored.Filled.OpenInNew,
-                                contentDescription = "Show in Files",
+                                contentDescription = stringResource(R.string.files_show_in_files),
                                 modifier = Modifier.size(18.dp),
                                 tint = MaterialTheme.colorScheme.primary
                             )

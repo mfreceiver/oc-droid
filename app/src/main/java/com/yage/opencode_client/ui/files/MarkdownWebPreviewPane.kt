@@ -36,9 +36,11 @@ import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import com.mikepenz.markdown.m3.Markdown
+import com.yage.opencode_client.R
 import com.yage.opencode_client.BuildConfig
 import com.yage.opencode_client.data.repository.OpenCodeRepository
 import com.yage.opencode_client.ui.theme.markdownTypographyCompact
@@ -310,17 +312,17 @@ private fun WebPreviewOversizeGate(
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
         Text(
-            text = "This Markdown file is large. Web Preview may be slow or memory-heavy.",
+            text = stringResource(R.string.files_markdown_large_warning),
             style = MaterialTheme.typography.bodyMedium
         )
         Button(onClick = onContinue, modifier = Modifier.padding(top = 16.dp)) {
-            Text("Open Web Preview")
+            Text(stringResource(R.string.files_open_web_preview))
         }
         OutlinedButton(onClick = onOpenNative, modifier = Modifier.padding(top = 8.dp)) {
-            Text("Open Native Preview")
+            Text(stringResource(R.string.files_open_native_preview))
         }
         OutlinedButton(onClick = onOpenSource, modifier = Modifier.padding(top = 8.dp)) {
-            Text("Open Markdown Source")
+            Text(stringResource(R.string.files_open_markdown_source))
         }
     }
 }
@@ -340,10 +342,10 @@ private fun WebPreviewError(
     ) {
         Text(text = message, style = MaterialTheme.typography.bodyMedium)
         OutlinedButton(onClick = onOpenNative, modifier = Modifier.padding(top = 16.dp)) {
-            Text("Open Native Preview")
+            Text(stringResource(R.string.files_open_native_preview))
         }
         OutlinedButton(onClick = onOpenSource, modifier = Modifier.padding(top = 8.dp)) {
-            Text("Open Markdown Source")
+            Text(stringResource(R.string.files_open_markdown_source))
         }
     }
 }

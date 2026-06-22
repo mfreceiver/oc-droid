@@ -57,7 +57,7 @@ internal fun ConnectionProfileSection(
     onTestConnection: () -> Unit,
     onManageProfiles: () -> Unit
 ) {
-    SectionHeader(title = "Connection Profile")
+    SectionHeader(title = stringResource(R.string.settings_connection_profile))
 
     Card(
         modifier = Modifier.fillMaxWidth(),
@@ -74,7 +74,7 @@ internal fun ConnectionProfileSection(
                     Text(profile.connectionSummary, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
                 Text(
-                    if (profile.transport == HostTransport.SSH_TUNNEL) "SSH Tunnel" else "Direct",
+                    if (profile.transport == HostTransport.SSH_TUNNEL) stringResource(R.string.host_profile_ssh_tunnel) else stringResource(R.string.host_profile_direct),
                     style = MaterialTheme.typography.labelMedium,
                     color = MaterialTheme.colorScheme.primary
                 )
@@ -88,10 +88,10 @@ internal fun ConnectionProfileSection(
                         CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp)
                         Spacer(modifier = Modifier.width(8.dp))
                     }
-                    Text("Test Connection")
+                    Text(stringResource(R.string.settings_test_connection))
                 }
                 OutlinedButton(onClick = onManageProfiles) {
-                    Text("Manage Profiles")
+                    Text(stringResource(R.string.settings_manage_profiles))
                 }
             }
         }
@@ -109,7 +109,7 @@ internal fun ConnectionProfileSection(
                 modifier = Modifier.size(20.dp)
             )
             Spacer(modifier = Modifier.width(8.dp))
-            Text("Connected", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.primary)
+            Text(stringResource(R.string.settings_connected), style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.primary)
             state.serverVersion?.let { version ->
                 Text(" (v$version)", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.outline)
             }
@@ -133,12 +133,12 @@ internal fun ServerConnectionSection(
     onTestConnection: () -> Unit,
     onSave: () -> Unit
 ) {
-    SectionHeader(title = "Server Connection")
+    SectionHeader(title = stringResource(R.string.settings_server_connection))
 
     OutlinedTextField(
         value = serverUrl,
         onValueChange = onServerUrlChange,
-        label = { Text("Server URL") },
+        label = { Text(stringResource(R.string.settings_server_url)) },
         placeholder = { Text("http://localhost:4096") },
         modifier = Modifier.fillMaxWidth(),
         singleLine = true,
@@ -150,7 +150,7 @@ internal fun ServerConnectionSection(
     OutlinedTextField(
         value = username,
         onValueChange = onUsernameChange,
-        label = { Text("Username (optional)") },
+        label = { Text(stringResource(R.string.settings_username_optional)) },
         modifier = Modifier.fillMaxWidth(),
         singleLine = true,
         leadingIcon = { Icon(Icons.Default.Person, contentDescription = null) }
@@ -161,7 +161,7 @@ internal fun ServerConnectionSection(
     OutlinedTextField(
         value = password,
         onValueChange = onPasswordChange,
-        label = { Text("Password (optional)") },
+        label = { Text(stringResource(R.string.settings_password_optional)) },
         modifier = Modifier.fillMaxWidth(),
         singleLine = true,
         visualTransformation = if (showPassword) VisualTransformation.None else PasswordVisualTransformation(),
@@ -169,7 +169,7 @@ internal fun ServerConnectionSection(
             IconButton(onClick = onTogglePasswordVisibility) {
                 Icon(
                     if (showPassword) Icons.Default.VisibilityOff else Icons.Default.Visibility,
-                    contentDescription = if (showPassword) "Hide password" else "Show password"
+                    contentDescription = if (showPassword) stringResource(R.string.settings_hide_password) else stringResource(R.string.settings_show_password)
                 )
             }
         },
@@ -193,14 +193,14 @@ internal fun ServerConnectionSection(
                 )
                 Spacer(modifier = Modifier.width(8.dp))
             }
-            Text("Test Connection")
+            Text(stringResource(R.string.settings_test_connection))
         }
 
         OutlinedButton(
             onClick = onSave,
             enabled = serverUrl.isNotBlank()
         ) {
-            Text("Save")
+            Text(stringResource(R.string.settings_save))
         }
     }
 
@@ -217,7 +217,7 @@ internal fun ServerConnectionSection(
             )
             Spacer(modifier = Modifier.width(8.dp))
             Text(
-                "Connected",
+                stringResource(R.string.settings_connected),
                 style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.primary
             )
@@ -324,12 +324,12 @@ internal fun SpeechRecognitionSection(
     onTestConnection: () -> Unit,
     onSave: () -> Unit
 ) {
-    SectionHeader(title = "Speech Recognition")
+    SectionHeader(title = stringResource(R.string.settings_speech_recognition))
 
     OutlinedTextField(
         value = aiBuilderBaseURL,
         onValueChange = onBaseUrlChange,
-        label = { Text("AI Builder Base URL") },
+        label = { Text(stringResource(R.string.settings_ai_builder_base_url)) },
         modifier = Modifier.fillMaxWidth(),
         singleLine = true,
         leadingIcon = { Icon(Icons.Default.Cloud, contentDescription = null) }
@@ -340,7 +340,7 @@ internal fun SpeechRecognitionSection(
     OutlinedTextField(
         value = aiBuilderToken,
         onValueChange = onTokenChange,
-        label = { Text("AI Builder Token") },
+        label = { Text(stringResource(R.string.settings_ai_builder_token)) },
         modifier = Modifier.fillMaxWidth(),
         singleLine = true,
         visualTransformation = if (showAIBuilderToken) VisualTransformation.None else PasswordVisualTransformation(),
@@ -348,7 +348,7 @@ internal fun SpeechRecognitionSection(
             IconButton(onClick = onToggleTokenVisibility) {
                 Icon(
                     if (showAIBuilderToken) Icons.Default.VisibilityOff else Icons.Default.Visibility,
-                    contentDescription = if (showAIBuilderToken) "Hide token" else "Show token"
+                    contentDescription = if (showAIBuilderToken) stringResource(R.string.settings_hide_token) else stringResource(R.string.settings_show_token)
                 )
             }
         },
@@ -360,7 +360,7 @@ internal fun SpeechRecognitionSection(
     OutlinedTextField(
         value = aiBuilderCustomPrompt,
         onValueChange = onPromptChange,
-        label = { Text("Custom Prompt") },
+        label = { Text(stringResource(R.string.settings_custom_prompt)) },
         modifier = Modifier.fillMaxWidth(),
         minLines = 3,
         maxLines = 6
@@ -371,8 +371,8 @@ internal fun SpeechRecognitionSection(
     OutlinedTextField(
         value = aiBuilderTerminology,
         onValueChange = onTerminologyChange,
-        label = { Text("Terminology") },
-        placeholder = { Text("comma-separated terms") },
+        label = { Text(stringResource(R.string.settings_terminology)) },
+        placeholder = { Text(stringResource(R.string.settings_terminology_placeholder)) },
         modifier = Modifier.fillMaxWidth(),
         singleLine = true
     )
@@ -394,14 +394,14 @@ internal fun SpeechRecognitionSection(
                 )
                 Spacer(modifier = Modifier.width(8.dp))
             }
-            Text("Test Connection")
+            Text(stringResource(R.string.settings_test_connection))
         }
 
         OutlinedButton(
             onClick = onSave,
             enabled = aiBuilderBaseURL.isNotBlank()
         ) {
-            Text("Save")
+            Text(stringResource(R.string.settings_save))
         }
     }
 
@@ -414,9 +414,9 @@ internal fun SpeechRecognitionSection(
             result = TestResult(
                 success = state.aiBuilderConnectionOK,
                 message = if (state.aiBuilderConnectionOK) {
-                    "Connected successfully"
+                    stringResource(R.string.settings_connected_successfully)
                 } else {
-                    state.aiBuilderConnectionError ?: "Connection failed"
+                    state.aiBuilderConnectionError ?: stringResource(R.string.settings_connection_failed)
                 }
             )
         )
@@ -425,7 +425,7 @@ internal fun SpeechRecognitionSection(
 
 @Composable
 internal fun AboutSection() {
-    SectionHeader(title = "About")
+    SectionHeader(title = stringResource(R.string.settings_about))
 
     Text(
         "OpenCode Android Client",
@@ -440,7 +440,7 @@ internal fun AboutSection() {
     Spacer(modifier = Modifier.height(8.dp))
 
     Text(
-        "A native Android client for OpenCode AI coding agent.",
+        stringResource(R.string.settings_about_description),
         style = MaterialTheme.typography.bodySmall,
         color = MaterialTheme.colorScheme.outline
     )

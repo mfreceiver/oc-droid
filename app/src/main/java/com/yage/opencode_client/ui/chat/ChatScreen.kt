@@ -19,12 +19,14 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.compose.LocalLifecycleOwner
+import com.yage.opencode_client.R
 import com.yage.opencode_client.data.model.MessageWithParts
 import com.yage.opencode_client.data.model.Part
 import com.yage.opencode_client.data.model.SessionStatus
@@ -53,7 +55,7 @@ fun ChatScreen(
         if (granted) {
             viewModel.toggleRecording()
         } else {
-            viewModel.setSpeechError("Microphone permission denied. Please allow microphone access in system settings.")
+            viewModel.setSpeechError(context.getString(R.string.chat_microphone_permission_denied))
         }
     }
     val imagePickerLauncher = rememberLauncherForActivityResult(
@@ -165,7 +167,7 @@ fun ChatScreen(
                     modifier = Modifier.padding(16.dp),
                     action = {
                         TextButton(onClick = { viewModel.clearError() }) {
-                            Text("Dismiss")
+                            Text(stringResource(R.string.common_dismiss))
                         }
                     }
                 ) {
@@ -216,11 +218,11 @@ fun ChatScreen(
         state.speechError?.let { speechError ->
             AlertDialog(
                 onDismissRequest = { viewModel.clearSpeechError() },
-                title = { Text("Speech Recognition") },
+                title = { Text(stringResource(R.string.settings_speech_recognition)) },
                 text = { Text(speechError) },
                 confirmButton = {
                     TextButton(onClick = { viewModel.clearSpeechError() }) {
-                        Text("OK")
+                        Text(stringResource(R.string.common_ok))
                     }
                 }
             )

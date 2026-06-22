@@ -59,9 +59,11 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.lerp
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
+import com.yage.opencode_client.R
 import com.yage.opencode_client.data.model.Session
 import com.yage.opencode_client.data.model.SessionStatus
 import com.yage.opencode_client.ui.theme.StopRed
@@ -80,9 +82,9 @@ private fun formatRelativeTime(updatedMs: Long): String = DateUtils.getRelativeT
 @Composable
 private fun sessionStatusLabel(status: SessionStatus?): String? = when {
     status == null -> null
-    status.isBusy -> "Running"
-    status.isRetry -> "Retrying"
-    status.isIdle -> "Idle"
+    status.isBusy -> stringResource(R.string.sessions_status_running)
+    status.isRetry -> stringResource(R.string.sessions_status_retrying)
+    status.isIdle -> stringResource(R.string.sessions_status_idle)
     else -> null
 }
 
@@ -235,11 +237,11 @@ private fun BoxScope.SwipeActionBackground(
             Column(horizontalAlignment = Alignment.CenterHorizontally) {
                 Icon(
                     if (isArchived) Icons.Default.Restore else Icons.Default.Archive,
-                    contentDescription = if (isArchived) "Restore session" else "Archive session",
+                    contentDescription = if (isArchived) stringResource(R.string.sessions_restore) else stringResource(R.string.sessions_archive),
                     tint = MaterialTheme.colorScheme.primary,
                 )
                 Text(
-                    if (isArchived) "Restore" else "Archive",
+                    if (isArchived) stringResource(R.string.sessions_restore) else stringResource(R.string.sessions_archive),
                     style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.primary
                 )
@@ -256,10 +258,10 @@ private fun BoxScope.SwipeActionBackground(
             Column(horizontalAlignment = Alignment.CenterHorizontally) {
                 Icon(
                     Icons.Default.Delete,
-                    contentDescription = "Delete session",
+                    contentDescription = stringResource(R.string.sessions_delete),
                     tint = StopRed,
                 )
-                Text("Delete", style = MaterialTheme.typography.labelSmall, color = StopRed)
+                Text(stringResource(R.string.sessions_delete), style = MaterialTheme.typography.labelSmall, color = StopRed)
             }
         }
     }
@@ -317,22 +319,22 @@ fun SessionList(
                     .padding(horizontal = 12.dp, vertical = 8.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                Text("Sessions", style = MaterialTheme.typography.titleSmall)
+                Text(stringResource(R.string.sessions_title), style = MaterialTheme.typography.titleSmall)
                 Spacer(modifier = Modifier.weight(1f))
                 if (isLoadingMoreSessions) {
                     CircularProgressIndicator(modifier = Modifier.size(18.dp), strokeWidth = 2.dp)
                 } else if (hasMoreSessions) {
-                    TextButton(onClick = onLoadMoreSessions) { Text("Load older") }
+                    TextButton(onClick = onLoadMoreSessions) { Text(stringResource(R.string.sessions_load_older)) }
                 }
-                TextButton(onClick = onCreateSession) { Text("New") }
+                TextButton(onClick = onCreateSession) { Text(stringResource(R.string.sessions_new)) }
                 if (onOpenSettings != null) {
                     IconButton(onClick = onOpenSettings) {
-                        Icon(Icons.Default.Settings, contentDescription = "Settings")
+                        Icon(Icons.Default.Settings, contentDescription = stringResource(R.string.nav_settings))
                     }
                 }
                 if (onCollapseSessions != null) {
                     IconButton(onClick = onCollapseSessions) {
-                        Icon(Icons.AutoMirrored.Filled.KeyboardArrowLeft, contentDescription = "Hide sessions")
+                        Icon(Icons.AutoMirrored.Filled.KeyboardArrowLeft, contentDescription = stringResource(R.string.sessions_hide))
                     }
                 }
             }
@@ -351,7 +353,7 @@ fun SessionList(
                     .testTag("session_list")
             ) {
                 item(key = "active_header") {
-                    SessionSectionHeader(title = "Active", isExpanded = true, onClick = {})
+                    SessionSectionHeader(title = stringResource(R.string.sessions_active), isExpanded = true, onClick = {})
                 }
                 if (activeRows.isEmpty()) {
                     item(key = "active_empty") { EmptySectionRow("No active sessions") }
@@ -377,7 +379,7 @@ fun SessionList(
 
                 item(key = "archived_header") {
                     SessionSectionHeader(
-                        title = "Archived",
+                        title = stringResource(R.string.sessions_archived),
                         isExpanded = archivedExpanded,
                         onClick = { archivedExpanded = !archivedExpanded }
                     )

@@ -17,7 +17,9 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
+import com.yage.opencode_client.R
 import com.yage.opencode_client.data.model.FileNode
 import com.yage.opencode_client.ui.theme.AddedFile
 import com.yage.opencode_client.ui.theme.DeletedFile
@@ -75,7 +77,7 @@ internal fun FileRow(
         if (file.ignored == true) {
             Spacer(modifier = Modifier.width(8.dp))
             Text(
-                text = "ignored",
+                text = stringResource(R.string.files_ignored),
                 style = MaterialTheme.typography.labelSmall,
                 color = MaterialTheme.colorScheme.outline
             )
