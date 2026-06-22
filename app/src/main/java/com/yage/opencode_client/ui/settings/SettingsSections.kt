@@ -36,13 +36,16 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.unit.dp
+import com.yage.opencode_client.R
 import com.yage.opencode_client.ui.AIBuilderSettings
 import com.yage.opencode_client.ui.AppState
 import com.yage.opencode_client.data.model.HostProfile
 import com.yage.opencode_client.data.model.HostTransport
+import com.yage.opencode_client.util.LanguageMode
 import com.yage.opencode_client.util.ThemeMode
 
 @Composable
@@ -233,11 +236,15 @@ internal fun ServerConnectionSection(
 @Composable
 internal fun AppearanceSection(
     themeMode: ThemeMode,
-    onThemeSelected: (ThemeMode) -> Unit
+    languageMode: LanguageMode,
+    onThemeSelected: (ThemeMode) -> Unit,
+    onLanguageSelected: (LanguageMode) -> Unit
 ) {
-    SectionHeader(title = "Appearance")
+    SectionHeader(title = stringResource(R.string.settings_appearance))
 
     val modes = ThemeMode.values()
+    Text(stringResource(R.string.settings_theme), style = MaterialTheme.typography.labelMedium)
+    Spacer(modifier = Modifier.height(8.dp))
     SingleChoiceSegmentedButtonRow(
         modifier = Modifier.fillMaxWidth()
     ) {
@@ -260,9 +267,39 @@ internal fun AppearanceSection(
             ) {
                 Text(
                     when (mode) {
-                        ThemeMode.LIGHT -> "Light"
-                        ThemeMode.DARK -> "Dark"
-                        ThemeMode.SYSTEM -> "System"
+                        ThemeMode.LIGHT -> stringResource(R.string.settings_theme_light)
+                        ThemeMode.DARK -> stringResource(R.string.settings_theme_dark)
+                        ThemeMode.SYSTEM -> stringResource(R.string.settings_follow_system)
+                    }
+                )
+            }
+        }
+    }
+
+    Spacer(modifier = Modifier.height(16.dp))
+    Text(stringResource(R.string.settings_language), style = MaterialTheme.typography.labelMedium)
+    Spacer(modifier = Modifier.height(8.dp))
+    val languages = LanguageMode.values()
+    SingleChoiceSegmentedButtonRow(modifier = Modifier.fillMaxWidth()) {
+        languages.forEachIndexed { index, mode ->
+            SegmentedButton(
+                selected = languageMode == mode,
+                onClick = { onLanguageSelected(mode) },
+                shape = SegmentedButtonDefaults.itemShape(index = index, count = languages.size),
+                colors = SegmentedButtonDefaults.colors(
+                    activeContainerColor = MaterialTheme.colorScheme.primary,
+                    activeContentColor = MaterialTheme.colorScheme.onPrimary,
+                    activeBorderColor = MaterialTheme.colorScheme.primary,
+                    inactiveContainerColor = MaterialTheme.colorScheme.surface,
+                    inactiveContentColor = MaterialTheme.colorScheme.onSurfaceVariant,
+                    inactiveBorderColor = MaterialTheme.colorScheme.outline
+                )
+            ) {
+                Text(
+                    when (mode) {
+                        LanguageMode.SYSTEM -> stringResource(R.string.settings_follow_system)
+                        LanguageMode.ENGLISH -> stringResource(R.string.settings_language_english)
+                        LanguageMode.CHINESE -> stringResource(R.string.settings_language_chinese)
                     }
                 )
             }

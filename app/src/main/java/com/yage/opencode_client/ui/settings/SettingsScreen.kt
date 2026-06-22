@@ -38,10 +38,12 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.yage.opencode_client.R
 import com.yage.opencode_client.data.model.BasicAuthConfig
 import com.yage.opencode_client.data.model.HostProfile
 import com.yage.opencode_client.data.model.HostTransport
@@ -113,10 +115,10 @@ fun SettingsScreen(
     Column(modifier = Modifier.fillMaxSize()) {
         if (onBack != null) {
             TopAppBar(
-                title = { Text("Settings") },
+                title = { Text(stringResource(R.string.settings_title)) },
                 navigationIcon = {
                     IconButton(onClick = onBack) {
-                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
+                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = stringResource(R.string.common_back))
                     }
                 }
             )
@@ -145,7 +147,9 @@ fun SettingsScreen(
 
             AppearanceSection(
                 themeMode = state.themeMode,
-                onThemeSelected = viewModel::setThemeMode
+                languageMode = state.languageMode,
+                onThemeSelected = viewModel::setThemeMode,
+                onLanguageSelected = viewModel::setLanguageMode
             )
 
             SettingsSectionDivider()
@@ -234,18 +238,18 @@ private fun HostProfilesManagerScreen(
 
     Column(modifier = Modifier.fillMaxSize()) {
         TopAppBar(
-            title = { Text("Host Profiles") },
+            title = { Text(stringResource(R.string.host_profiles_title)) },
             navigationIcon = {
                 IconButton(onClick = onBack) {
-                    Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
+                    Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = stringResource(R.string.common_back))
                 }
             },
             actions = {
                 IconButton(onClick = { importing = true }) {
-                    Icon(Icons.Default.FileDownload, contentDescription = "Import host profile JSON")
+                    Icon(Icons.Default.FileDownload, contentDescription = stringResource(R.string.host_profile_import_json))
                 }
                 IconButton(onClick = { editingProfile = newDirectProfile() }) {
-                    Icon(Icons.Default.Add, contentDescription = "Add host profile")
+                    Icon(Icons.Default.Add, contentDescription = stringResource(R.string.host_profile_add))
                 }
             }
         )
@@ -336,7 +340,7 @@ private fun HostProfilesManagerScreen(
     if (importing) {
         AlertDialog(
             onDismissRequest = { importing = false },
-            title = { Text("Import Host Profile JSON") },
+            title = { Text(stringResource(R.string.host_profile_import_json)) },
             text = {
                 OutlinedTextField(
                     value = importText,
@@ -352,9 +356,9 @@ private fun HostProfilesManagerScreen(
                         .onFailure { error = it.message ?: "Import failed" }
                     importing = false
                     importText = ""
-                }) { Text("Import Profile") }
+                }) { Text(stringResource(R.string.common_import)) }
             },
-            dismissButton = { TextButton(onClick = { importing = false }) { Text("Cancel") } }
+            dismissButton = { TextButton(onClick = { importing = false }) { Text(stringResource(R.string.common_cancel)) } }
         )
     }
 
@@ -375,24 +379,24 @@ private fun HostProfilesManagerScreen(
                     exportText = null
                 }) { Text("Copy JSON") }
             },
-            dismissButton = { TextButton(onClick = { exportText = null }) { Text("Close") } }
+            dismissButton = { TextButton(onClick = { exportText = null }) { Text(stringResource(R.string.common_close)) } }
         )
     }
 
     if (confirmKeyRotation) {
         AlertDialog(
             onDismissRequest = { confirmKeyRotation = false },
-            title = { Text("Rotate Device Key?") },
-            text = { Text("This creates a new SSH key for this Android device. Update the server with the new public key before using SSH Tunnel profiles again.") },
+            title = { Text(stringResource(R.string.host_profile_rotate_key_title)) },
+            text = { Text(stringResource(R.string.host_profile_rotate_key_message)) },
             confirmButton = {
                 Button(onClick = {
                     val key = viewModel.rotateSshKey()
                     clipboard.setText(AnnotatedString(key))
                     publicKeyCopied = true
                     confirmKeyRotation = false
-                }) { Text("Rotate and Copy Key") }
+                }) { Text(stringResource(R.string.host_profile_rotate_and_copy_key)) }
             },
-            dismissButton = { TextButton(onClick = { confirmKeyRotation = false }) { Text("Cancel") } }
+            dismissButton = { TextButton(onClick = { confirmKeyRotation = false }) { Text(stringResource(R.string.common_cancel)) } }
         )
     }
 }
@@ -419,7 +423,7 @@ internal fun HostProfileRow(
             Text(if (selected) "${profile.displayName} · Current" else profile.displayName)
             Text(profile.connectionSummary, style = MaterialTheme.typography.bodySmall)
         }
-        Text(if (profile.transport == HostTransport.SSH_TUNNEL) "SSH Tunnel" else "Direct")
+        Text(if (profile.transport == HostTransport.SSH_TUNNEL) stringResource(R.string.host_profile_ssh_tunnel) else stringResource(R.string.host_profile_direct))
         IconButton(onClick = { menuExpanded = true }) {
             Icon(Icons.Default.MoreVert, contentDescription = "Host profile actions")
         }
@@ -469,23 +473,23 @@ internal fun HostProfileDetailDialog(
         confirmButton = {
             Column(horizontalAlignment = Alignment.End) {
                 if (!isCurrent) {
-                    Button(onClick = onUse) { Text("Use This Host") }
+                    Button(onClick = onUse) { Text(stringResource(R.string.host_profile_use_this_host)) }
                     Spacer(modifier = Modifier.height(8.dp))
                 }
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    OutlinedButton(onClick = onTest) { Text("Test Connection") }
+                    OutlinedButton(onClick = onTest) { Text(stringResource(R.string.settings_test_connection)) }
                     OutlinedButton(onClick = onEdit) { Text("Edit") }
                 }
                 Spacer(modifier = Modifier.height(8.dp))
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    OutlinedButton(onClick = onExport) { Text("Copy Config JSON") }
+                    OutlinedButton(onClick = onExport) { Text(stringResource(R.string.host_profile_copy_config_json)) }
                     if (profile.transport == HostTransport.SSH_TUNNEL) {
-                        OutlinedButton(onClick = onCopyPublicKey) { Text("Copy Device Public Key") }
+                        OutlinedButton(onClick = onCopyPublicKey) { Text(stringResource(R.string.host_profile_copy_device_key)) }
                     }
                 }
             }
         },
-        dismissButton = { TextButton(onClick = onDismiss) { Text("Close") } }
+        dismissButton = { TextButton(onClick = onDismiss) { Text(stringResource(R.string.common_close)) } }
     )
 }
 
@@ -496,14 +500,14 @@ internal fun DevicePublicKeySection(
     onCopy: () -> Unit,
     onRotate: () -> Unit
 ) {
-    SectionHeader(title = "Device Key")
+    SectionHeader(title = stringResource(R.string.host_profile_device_key))
     Card(
         modifier = Modifier.fillMaxWidth(),
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
     ) {
         Column(modifier = Modifier.padding(16.dp)) {
             Text(
-                "This Android device uses one SSH public key for all SSH Tunnel profiles.",
+                stringResource(R.string.host_profile_device_key_footer),
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
@@ -516,13 +520,13 @@ internal fun DevicePublicKeySection(
                     onClick = onCopy,
                     modifier = Modifier.testTag("ssh.publicKey.copy")
                 ) {
-                    Text(if (copied) "Public key copied" else "Copy device public key", maxLines = 1)
+                    Text(if (copied) stringResource(R.string.host_profile_public_key_copied) else stringResource(R.string.host_profile_copy_device_key), maxLines = 1)
                 }
                 OutlinedButton(
                     onClick = onRotate,
                     modifier = Modifier.testTag("ssh.publicKey.rotate")
                 ) {
-                    Text("Rotate key", maxLines = 1)
+                    Text(stringResource(R.string.host_profile_rotate_key), maxLines = 1)
                 }
             }
         }
@@ -559,13 +563,13 @@ internal fun HostProfileEditorDialog(
                         onClick = { transport = HostTransport.DIRECT },
                         shape = SegmentedButtonDefaults.itemShape(0, 2),
                         modifier = Modifier.testTag("host.editor.transport.direct")
-                    ) { Text("Direct") }
+                    ) { Text(stringResource(R.string.host_profile_direct)) }
                     SegmentedButton(
                         selected = transport == HostTransport.SSH_TUNNEL,
                         onClick = { transport = HostTransport.SSH_TUNNEL },
                         shape = SegmentedButtonDefaults.itemShape(1, 2),
                         modifier = Modifier.testTag("host.editor.transport.ssh")
-                    ) { Text("SSH Tunnel") }
+                    ) { Text(stringResource(R.string.host_profile_ssh_tunnel)) }
                 }
                 Spacer(modifier = Modifier.height(8.dp))
                 if (transport == HostTransport.DIRECT) {
@@ -576,7 +580,7 @@ internal fun HostProfileEditorDialog(
                     OutlinedTextField(value = sshUsername, onValueChange = { sshUsername = it }, label = { Text("SSH username") }, modifier = Modifier.fillMaxWidth())
                     OutlinedTextField(value = remotePort, onValueChange = { remotePort = it }, label = { Text("Assigned remote port") }, modifier = Modifier.fillMaxWidth())
                     Spacer(modifier = Modifier.height(8.dp))
-                    OutlinedButton(onClick = onCopyPublicKey) { Text("Copy Device Public Key") }
+                    OutlinedButton(onClick = onCopyPublicKey) { Text(stringResource(R.string.host_profile_copy_device_key)) }
                 }
                 Spacer(modifier = Modifier.height(8.dp))
                 OutlinedTextField(value = authUsername, onValueChange = { authUsername = it }, label = { Text("OpenCode Basic Auth username (optional)") }, modifier = Modifier.fillMaxWidth())
@@ -603,9 +607,9 @@ internal fun HostProfileEditorDialog(
                     )
                 }
                 onSave(saved, authPassword.ifBlank { null })
-            }) { Text("Save") }
+            }) { Text(stringResource(R.string.settings_save)) }
         },
-        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } }
+        dismissButton = { TextButton(onClick = onDismiss) { Text(stringResource(R.string.common_cancel)) } }
     )
 }
 
