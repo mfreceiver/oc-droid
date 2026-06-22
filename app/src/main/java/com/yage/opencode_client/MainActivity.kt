@@ -22,6 +22,7 @@ import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.res.stringResource
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.statusBars
 import androidx.compose.foundation.layout.windowInsetsPadding
@@ -44,33 +45,34 @@ import com.yage.opencode_client.ui.session.SessionList
 import com.yage.opencode_client.ui.settings.SettingsScreen
 import com.yage.opencode_client.ui.theme.OpenCodeTheme
 import com.yage.opencode_client.ui.theme.compactTypography
+import com.yage.opencode_client.util.AppLocaleController
 import com.yage.opencode_client.util.ThemeMode
 import dagger.hilt.android.AndroidEntryPoint
 import javax.inject.Inject
 
 sealed class Screen(
     val route: String,
-    val title: String,
+    val titleRes: Int,
     val selectedIcon: androidx.compose.ui.graphics.vector.ImageVector,
     val unselectedIcon: androidx.compose.ui.graphics.vector.ImageVector
 ) {
     object Chat : Screen(
         "chat",
-        "Chat",
+        R.string.nav_chat,
         Icons.AutoMirrored.Filled.Chat,
         Icons.Outlined.ChatBubbleOutline
     )
 
     object Files : Screen(
         "files",
-        "Files",
+        R.string.nav_files,
         Icons.Default.Folder,
         Icons.Outlined.Folder
     )
 
     object Settings : Screen(
         "settings",
-        "Settings",
+        R.string.nav_settings,
         Icons.Default.Settings,
         Icons.Outlined.Settings
     )
@@ -115,6 +117,9 @@ class MainActivity : ComponentActivity() {
                 }
             }
             val state by viewModel.state.collectAsStateWithLifecycle()
+            LaunchedEffect(state.languageMode) {
+                AppLocaleController.apply(state.languageMode)
+            }
             val darkTheme = when (state.themeMode) {
                 ThemeMode.LIGHT -> false
                 ThemeMode.DARK -> true
@@ -157,16 +162,17 @@ private fun PhoneLayout(viewModel: MainViewModel) {
             NavigationBar {
                 screens.forEach { screen ->
                     val selected = currentRoute == screen.route
+                    val title = stringResource(screen.titleRes)
                     NavigationBarItem(
                         selected = selected,
                         onClick = { navigateToTopLevel(screen.route) },
                         icon = {
                             Icon(
                                 if (selected) screen.selectedIcon else screen.unselectedIcon,
-                                contentDescription = screen.title
+                                contentDescription = title
                             )
                         },
-                        label = { Text(screen.title) }
+                        label = { Text(title) }
                     )
                 }
             }

@@ -10,6 +10,7 @@ import com.yage.opencode_client.ssh.SSHKeyManager
 import com.yage.opencode_client.ssh.TunnelManager
 import com.yage.opencode_client.ssh.TunnelResult
 import com.yage.opencode_client.util.SettingsManager
+import com.yage.opencode_client.util.LanguageMode
 import com.yage.opencode_client.util.ThemeMode
 import com.yage.voiceflowkit.VoiceFlowClient
 import com.yage.voiceflowkit.VoiceFlowConfig
@@ -61,6 +62,7 @@ data class AppState(
     val inputText: String = "",
     val error: String? = null,
     val themeMode: ThemeMode = ThemeMode.SYSTEM,
+    val languageMode: LanguageMode = LanguageMode.SYSTEM,
     val filePathToShowInFiles: String? = null,
     val filePreviewOriginRoute: String? = null,
     val streamingPartTexts: Map<String, String> = emptyMap(),
@@ -171,6 +173,7 @@ data class AppState(
     data class SettingsState(
         val error: String? = null,
         val themeMode: ThemeMode = ThemeMode.SYSTEM,
+        val languageMode: LanguageMode = LanguageMode.SYSTEM,
         val selectedModelIndex: Int = 2,
         val selectedAgentName: String = "build",
         val availableModels: List<ModelOption> = ModelPresets.list,
@@ -240,6 +243,7 @@ data class AppState(
         get() = SettingsState(
             error = error,
             themeMode = themeMode,
+            languageMode = languageMode,
             selectedModelIndex = selectedModelIndex,
             selectedAgentName = selectedAgentName,
             availableModels = availableModels,
@@ -980,6 +984,11 @@ class MainViewModel @Inject constructor(
     fun setThemeMode(mode: ThemeMode) {
         settingsManager.themeMode = mode
         _state.update { it.copy(themeMode = mode) }
+    }
+
+    fun setLanguageMode(mode: LanguageMode) {
+        settingsManager.languageMode = mode
+        _state.update { it.copy(languageMode = mode) }
     }
 
     fun respondPermission(sessionId: String, permissionId: String, response: PermissionResponse) {

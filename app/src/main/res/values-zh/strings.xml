@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">OpenCode Client</string>
+    <string name="nav_chat">聊天</string>
+    <string name="nav_files">文件</string>
+    <string name="nav_settings">设置</string>
+    <string name="settings_title">设置</string>
+    <string name="settings_appearance">外观</string>
+    <string name="settings_theme">主题</string>
+    <string name="settings_theme_light">浅色</string>
+    <string name="settings_theme_dark">深色</string>
+    <string name="settings_follow_system">跟随系统</string>
+    <string name="settings_language">语言</string>
+    <string name="settings_language_english">English</string>
+    <string name="settings_language_chinese">中文</string>
+    <string name="settings_connected">已连接</string>
+    <string name="settings_disconnected">未连接</string>
+    <string name="settings_test_connection">测试连接</string>
+    <string name="settings_save">保存</string>
+    <string name="common_back">返回</string>
+    <string name="common_cancel">取消</string>
+    <string name="common_close">关闭</string>
+    <string name="common_import">导入</string>
+    <string name="common_delete">删除</string>
+    <string name="host_profiles_title">Host Profiles</string>
+    <string name="host_profile_add">添加 host profile</string>
+    <string name="host_profile_import_json">导入 host profile JSON</string>
+    <string name="host_profile_device_key">设备密钥</string>
+    <string name="host_profile_device_key_footer">这台 Android 设备对所有 SSH Tunnel profiles 复用同一把 SSH 公钥。</string>
+    <string name="host_profile_copy_device_key">复制设备公钥</string>
+    <string name="host_profile_public_key_copied">公钥已复制</string>
+    <string name="host_profile_rotate_key">更换密钥</string>
+    <string name="host_profile_rotate_key_title">要更换设备密钥吗？</string>
+    <string name="host_profile_rotate_key_message">这会为这台 Android 设备生成新的 SSH 密钥。再次使用 SSH Tunnel profiles 前，请先在服务器上更新新的公钥。</string>
+    <string name="host_profile_rotate_and_copy_key">更换并复制新公钥</string>
+    <string name="host_profile_use_this_host">使用这个 Host</string>
+    <string name="host_profile_copy_config_json">复制配置 JSON</string>
+    <string name="host_profile_ssh_tunnel">SSH Tunnel</string>
+    <string name="host_profile_direct">Direct</string>
+</resources>

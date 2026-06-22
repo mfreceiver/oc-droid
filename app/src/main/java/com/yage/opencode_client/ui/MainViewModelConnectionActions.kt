@@ -37,7 +37,8 @@ internal fun applySavedSettings(
             currentHostProfileId = currentProfile.id,
             selectedModelIndex = clampedModelIndex,
             selectedAgentName = settingsManager.selectedAgentName ?: "build",
-            themeMode = settingsManager.themeMode
+            themeMode = settingsManager.themeMode,
+            languageMode = settingsManager.languageMode
         )
     }
 

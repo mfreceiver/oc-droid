@@ -85,6 +85,10 @@ class SettingsManager @Inject constructor(
         get() = ThemeMode.valueOf(encryptedPrefs.getString(KEY_THEME, ThemeMode.SYSTEM.name) ?: ThemeMode.SYSTEM.name)
         set(value) = encryptedPrefs.edit().putString(KEY_THEME, value.name).apply()
 
+    var languageMode: LanguageMode
+        get() = LanguageMode.valueOf(encryptedPrefs.getString(KEY_LANGUAGE, LanguageMode.SYSTEM.name) ?: LanguageMode.SYSTEM.name)
+        set(value) = encryptedPrefs.edit().putString(KEY_LANGUAGE, value.name).apply()
+
     var aiBuilderBaseURL: String
         get() = encryptedPrefs.getString(KEY_AI_BUILDER_BASE_URL, DEFAULT_AI_BUILDER_BASE_URL) ?: DEFAULT_AI_BUILDER_BASE_URL
         set(value) = encryptedPrefs.edit().putString(KEY_AI_BUILDER_BASE_URL, value).apply()
@@ -191,6 +195,7 @@ class SettingsManager @Inject constructor(
         private const val KEY_MODEL_INDEX = "model_index"
         private const val KEY_AGENT_NAME = "agent_name"
         private const val KEY_THEME = "theme"
+        private const val KEY_LANGUAGE = "language"
         private const val KEY_AI_BUILDER_BASE_URL = "ai_builder_base_url"
         private const val KEY_AI_BUILDER_TOKEN = "ai_builder_token"
         private const val KEY_AI_BUILDER_CUSTOM_PROMPT = "ai_builder_custom_prompt"
@@ -207,4 +212,10 @@ class SettingsManager @Inject constructor(
 
 enum class ThemeMode {
     LIGHT, DARK, SYSTEM
+}
+
+enum class LanguageMode(val languageTag: String) {
+    SYSTEM(""),
+    ENGLISH("en"),
+    CHINESE("zh")
 }
