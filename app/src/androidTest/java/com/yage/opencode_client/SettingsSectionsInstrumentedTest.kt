@@ -4,8 +4,10 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.assertIsEnabled
 import androidx.compose.ui.test.assertIsNotEnabled
+import androidx.compose.ui.test.assertCountEquals
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onNodeWithText
+import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.performClick
 import com.yage.opencode_client.data.model.HostProfile
@@ -13,6 +15,8 @@ import com.yage.opencode_client.data.model.HostTransport
 import com.yage.opencode_client.data.model.SshTunnelConfig
 import com.yage.opencode_client.ui.AppState
 import com.yage.opencode_client.ui.settings.ConnectionProfileSection
+import com.yage.opencode_client.ui.settings.DevicePublicKeySection
+import com.yage.opencode_client.ui.settings.HostProfileDetailDialog
 import com.yage.opencode_client.ui.settings.HostProfileEditorDialog
 import com.yage.opencode_client.ui.settings.SpeechRecognitionSection
 import org.junit.Rule
@@ -105,7 +109,7 @@ class SettingsSectionsInstrumentedTest {
     }
 
     @Test
-    fun hostProfileEditorShowsSshFieldsAndPublicKey() {
+    fun hostProfileEditorShowsSshFieldsWithoutDeviceKeyBlock() {
         val profile = HostProfile(
             id = "ssh-1",
             name = "VPS OpenCode",
@@ -118,20 +122,15 @@ class SettingsSectionsInstrumentedTest {
             MaterialTheme {
                 HostProfileEditorDialog(
                     initial = profile,
-                    publicKey = "ssh-rsa AAAATEST opencode-android",
                     onDismiss = {},
                     onSave = { _, _ -> },
-                    onCopyPublicKey = {},
-                    onRotateKey = {}
                 )
             }
         }
 
         composeRule.onNodeWithText("SSH gateway host").assertIsDisplayed()
         composeRule.onNodeWithText("Assigned remote port").assertIsDisplayed()
-        composeRule.onNodeWithText("Device public key").assertIsDisplayed()
-        composeRule.onNodeWithTag("host.editor.ssh.publicKey").assertIsDisplayed()
-        composeRule.onNodeWithText("Copy public key").assertIsDisplayed()
+        composeRule.onAllNodesWithText("Device public key").assertCountEquals(0)
     }
 
     @Test
@@ -142,11 +141,8 @@ class SettingsSectionsInstrumentedTest {
             MaterialTheme {
                 HostProfileEditorDialog(
                     initial = profile,
-                    publicKey = "ssh-rsa AAAATEST opencode-android",
                     onDismiss = {},
                     onSave = { _, _ -> },
-                    onCopyPublicKey = {},
-                    onRotateKey = {}
                 )
             }
         }
@@ -154,5 +150,49 @@ class SettingsSectionsInstrumentedTest {
         composeRule.onNodeWithText("Server URL").assertIsDisplayed()
         composeRule.onNodeWithTag("host.editor.transport.ssh").performClick()
         composeRule.onNodeWithText("SSH gateway host").assertIsDisplayed()
+    }
+
+    @Test
+    fun devicePublicKeySectionIsGlobalToHostProfiles() {
+        composeRule.setContent {
+            MaterialTheme {
+                DevicePublicKeySection(copied = false, onCopy = {})
+            }
+        }
+
+        composeRule.onNodeWithText("Device Key").assertIsDisplayed()
+        composeRule.onNodeWithText("This Android device uses one SSH public key for all SSH Tunnel profiles.").assertIsDisplayed()
+        composeRule.onNodeWithTag("ssh.publicKey.copy").assertIsDisplayed()
+    }
+
+    @Test
+    fun hostProfileDetailShowsUseAndCopyActionsForSshProfile() {
+        val profile = HostProfile(
+            id = "ssh-1",
+            name = "VPS OpenCode",
+            transport = HostTransport.SSH_TUNNEL,
+            serverUrl = "http://127.0.0.1:4096",
+            ssh = SshTunnelConfig(host = "gateway.example.com", port = 8006, username = "opencode", remotePort = 19001)
+        )
+
+        composeRule.setContent {
+            MaterialTheme {
+                HostProfileDetailDialog(
+                    profile = profile,
+                    isCurrent = false,
+                    onDismiss = {},
+                    onUse = {},
+                    onEdit = {},
+                    onExport = {},
+                    onCopyPublicKey = {},
+                    onTest = {}
+                )
+            }
+        }
+
+        composeRule.onNodeWithText("Use This Host").assertIsDisplayed()
+        composeRule.onNodeWithText("Copy Config JSON").assertIsDisplayed()
+        composeRule.onNodeWithText("Copy Device Public Key").assertIsDisplayed()
+        composeRule.onNodeWithText("Host: gateway.example.com").assertIsDisplayed()
     }
 }

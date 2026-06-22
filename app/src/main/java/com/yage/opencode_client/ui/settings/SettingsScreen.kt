@@ -9,11 +9,13 @@ import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Edit
-import androidx.compose.material.icons.filled.FileUpload
+import androidx.compose.material.icons.filled.FileDownload
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
+import androidx.compose.material3.Card
+import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Icon
@@ -219,7 +221,15 @@ private fun HostProfilesManagerScreen(
     var importText by remember { mutableStateOf("") }
     var exportText by remember { mutableStateOf<String?>(null) }
     var error by remember { mutableStateOf<String?>(null) }
-    var sshPublicKey by remember { mutableStateOf(viewModel.sshPublicKey()) }
+    var publicKeyCopied by remember { mutableStateOf(false) }
+    var detailProfile by remember { mutableStateOf<HostProfile?>(null) }
+
+    LaunchedEffect(publicKeyCopied) {
+        if (publicKeyCopied) {
+            delay(2000)
+            publicKeyCopied = false
+        }
+    }
 
     Column(modifier = Modifier.fillMaxSize()) {
         TopAppBar(
@@ -231,7 +241,7 @@ private fun HostProfilesManagerScreen(
             },
             actions = {
                 IconButton(onClick = { importing = true }) {
-                    Icon(Icons.Default.FileUpload, contentDescription = "Import host profile JSON")
+                    Icon(Icons.Default.FileDownload, contentDescription = "Import host profile JSON")
                 }
                 IconButton(onClick = { editingProfile = newDirectProfile() }) {
                     Icon(Icons.Default.Add, contentDescription = "Add host profile")
@@ -254,7 +264,7 @@ private fun HostProfilesManagerScreen(
                     profile = profile,
                     selected = profile.id == currentProfileId,
                     canDelete = profiles.size > 1,
-                    onSelect = { viewModel.selectHostProfile(profile.id) },
+                    onOpen = { detailProfile = profile },
                     onEdit = { editingProfile = profile },
                     onDuplicate = { viewModel.duplicateHostProfile(profile.id) },
                     onExport = { exportText = viewModel.exportHostProfile(profile) },
@@ -265,27 +275,53 @@ private fun HostProfilesManagerScreen(
                 )
                 Spacer(modifier = Modifier.height(8.dp))
             }
+
+            SettingsSectionDivider()
+
+            DevicePublicKeySection(
+                copied = publicKeyCopied,
+                onCopy = {
+                    val key = viewModel.ensureSshPublicKey()
+                    clipboard.setText(AnnotatedString(key))
+                    publicKeyCopied = true
+                }
+            )
         }
     }
 
     editingProfile?.let { profile ->
         HostProfileEditorDialog(
             initial = profile,
-            publicKey = sshPublicKey,
             onDismiss = { editingProfile = null },
             onSave = { saved, password ->
                 viewModel.saveHostProfile(saved, password)
                 editingProfile = null
+            }
+        )
+    }
+
+    detailProfile?.let { profile ->
+        HostProfileDetailDialog(
+            profile = profile,
+            isCurrent = profile.id == currentProfileId,
+            onDismiss = { detailProfile = null },
+            onUse = {
+                viewModel.selectHostProfile(profile.id)
+                detailProfile = null
             },
+            onEdit = {
+                editingProfile = profile
+                detailProfile = null
+            },
+            onExport = { exportText = viewModel.exportHostProfile(profile) },
             onCopyPublicKey = {
                 val key = viewModel.ensureSshPublicKey()
-                sshPublicKey = key
                 clipboard.setText(AnnotatedString(key))
+                publicKeyCopied = true
             },
-            onRotateKey = {
-                val key = viewModel.rotateSshKey()
-                sshPublicKey = key
-                clipboard.setText(AnnotatedString(key))
+            onTest = {
+                viewModel.selectHostProfile(profile.id)
+                detailProfile = null
             }
         )
     }
@@ -342,7 +378,7 @@ internal fun HostProfileRow(
     profile: HostProfile,
     selected: Boolean,
     canDelete: Boolean,
-    onSelect: () -> Unit,
+    onOpen: () -> Unit,
     onEdit: () -> Unit,
     onDuplicate: () -> Unit,
     onExport: () -> Unit,
@@ -350,7 +386,7 @@ internal fun HostProfileRow(
 ) {
     var menuExpanded by remember { mutableStateOf(false) }
     OutlinedButton(
-        onClick = onSelect,
+        onClick = onOpen,
         modifier = Modifier
             .fillMaxWidth()
             .testTag("host.profile.row.${profile.id}")
@@ -378,13 +414,86 @@ internal fun HostProfileRow(
 }
 
 @Composable
+internal fun HostProfileDetailDialog(
+    profile: HostProfile,
+    isCurrent: Boolean,
+    onDismiss: () -> Unit,
+    onUse: () -> Unit,
+    onEdit: () -> Unit,
+    onExport: () -> Unit,
+    onCopyPublicKey: () -> Unit,
+    onTest: () -> Unit
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text(profile.displayName) },
+        text = {
+            Column {
+                Text("Transport: ${if (profile.transport == HostTransport.SSH_TUNNEL) "SSH Tunnel" else "Direct"}")
+                Text("OpenCode URL: ${if (profile.transport == HostTransport.SSH_TUNNEL) "Managed by SSH Tunnel" else profile.serverUrl}")
+                Text("Status: ${if (isCurrent) "Current" else "Saved profile"}")
+                if (profile.transport == HostTransport.SSH_TUNNEL && profile.ssh != null) {
+                    Spacer(modifier = Modifier.height(12.dp))
+                    Text("SSH Gateway", style = MaterialTheme.typography.labelMedium)
+                    Text("Host: ${profile.ssh.host}")
+                    Text("SSH port: ${profile.ssh.port}")
+                    Text("Username: ${profile.ssh.username}")
+                    Text("Assigned remote port: ${profile.ssh.remotePort}")
+                }
+            }
+        },
+        confirmButton = {
+            Column(horizontalAlignment = Alignment.End) {
+                if (!isCurrent) {
+                    Button(onClick = onUse) { Text("Use This Host") }
+                    Spacer(modifier = Modifier.height(8.dp))
+                }
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    OutlinedButton(onClick = onTest) { Text("Test Connection") }
+                    OutlinedButton(onClick = onEdit) { Text("Edit") }
+                }
+                Spacer(modifier = Modifier.height(8.dp))
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    OutlinedButton(onClick = onExport) { Text("Copy Config JSON") }
+                    if (profile.transport == HostTransport.SSH_TUNNEL) {
+                        OutlinedButton(onClick = onCopyPublicKey) { Text("Copy Device Public Key") }
+                    }
+                }
+            }
+        },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("Close") } }
+    )
+}
+
+@Composable
+internal fun DevicePublicKeySection(
+    copied: Boolean,
+    onCopy: () -> Unit
+) {
+    SectionHeader(title = "Device Key")
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
+    ) {
+        Column(modifier = Modifier.padding(16.dp)) {
+            Text(
+                "This Android device uses one SSH public key for all SSH Tunnel profiles.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            Spacer(modifier = Modifier.height(12.dp))
+            OutlinedButton(onClick = onCopy, modifier = Modifier.testTag("ssh.publicKey.copy")) {
+                Text(if (copied) "Public key copied" else "Copy device public key")
+            }
+        }
+    }
+}
+
+@Composable
 internal fun HostProfileEditorDialog(
     initial: HostProfile,
-    publicKey: String?,
     onDismiss: () -> Unit,
     onSave: (HostProfile, String?) -> Unit,
-    onCopyPublicKey: () -> Unit,
-    onRotateKey: () -> Unit
 ) {
     var name by remember(initial.id) { mutableStateOf(initial.name) }
     var transport by remember(initial.id) { mutableStateOf(initial.transport) }
@@ -425,17 +534,6 @@ internal fun HostProfileEditorDialog(
                     OutlinedTextField(value = sshPort, onValueChange = { sshPort = it }, label = { Text("SSH port") }, modifier = Modifier.fillMaxWidth())
                     OutlinedTextField(value = sshUsername, onValueChange = { sshUsername = it }, label = { Text("SSH username") }, modifier = Modifier.fillMaxWidth())
                     OutlinedTextField(value = remotePort, onValueChange = { remotePort = it }, label = { Text("Assigned remote port") }, modifier = Modifier.fillMaxWidth())
-                    Spacer(modifier = Modifier.height(8.dp))
-                    Text("Device public key", style = MaterialTheme.typography.labelMedium)
-                    Text(
-                        publicKey ?: "No device key generated yet. Copy public key to generate one.",
-                        style = MaterialTheme.typography.bodySmall,
-                        modifier = Modifier.testTag("host.editor.ssh.publicKey")
-                    )
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        OutlinedButton(onClick = onCopyPublicKey) { Text("Copy public key") }
-                        OutlinedButton(onClick = onRotateKey) { Text("Rotate key") }
-                    }
                 }
                 Spacer(modifier = Modifier.height(8.dp))
                 OutlinedTextField(value = authUsername, onValueChange = { authUsername = it }, label = { Text("OpenCode Basic Auth username (optional)") }, modifier = Modifier.fillMaxWidth())
