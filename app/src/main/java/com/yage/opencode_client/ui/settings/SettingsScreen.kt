@@ -223,6 +223,7 @@ private fun HostProfilesManagerScreen(
     var error by remember { mutableStateOf<String?>(null) }
     var publicKeyCopied by remember { mutableStateOf(false) }
     var detailProfile by remember { mutableStateOf<HostProfile?>(null) }
+    var confirmKeyRotation by remember { mutableStateOf(false) }
 
     LaunchedEffect(publicKeyCopied) {
         if (publicKeyCopied) {
@@ -284,7 +285,8 @@ private fun HostProfilesManagerScreen(
                     val key = viewModel.ensureSshPublicKey()
                     clipboard.setText(AnnotatedString(key))
                     publicKeyCopied = true
-                }
+                },
+                onRotate = { confirmKeyRotation = true }
             )
         }
     }
@@ -296,6 +298,11 @@ private fun HostProfilesManagerScreen(
             onSave = { saved, password ->
                 viewModel.saveHostProfile(saved, password)
                 editingProfile = null
+            },
+            onCopyPublicKey = {
+                val key = viewModel.ensureSshPublicKey()
+                clipboard.setText(AnnotatedString(key))
+                publicKeyCopied = true
             }
         )
     }
@@ -369,6 +376,23 @@ private fun HostProfilesManagerScreen(
                 }) { Text("Copy JSON") }
             },
             dismissButton = { TextButton(onClick = { exportText = null }) { Text("Close") } }
+        )
+    }
+
+    if (confirmKeyRotation) {
+        AlertDialog(
+            onDismissRequest = { confirmKeyRotation = false },
+            title = { Text("Rotate Device Key?") },
+            text = { Text("This creates a new SSH key for this Android device. Update the server with the new public key before using SSH Tunnel profiles again.") },
+            confirmButton = {
+                Button(onClick = {
+                    val key = viewModel.rotateSshKey()
+                    clipboard.setText(AnnotatedString(key))
+                    publicKeyCopied = true
+                    confirmKeyRotation = false
+                }) { Text("Rotate and Copy Key") }
+            },
+            dismissButton = { TextButton(onClick = { confirmKeyRotation = false }) { Text("Cancel") } }
         )
     }
 }
@@ -466,9 +490,11 @@ internal fun HostProfileDetailDialog(
 }
 
 @Composable
+@OptIn(ExperimentalLayoutApi::class)
 internal fun DevicePublicKeySection(
     copied: Boolean,
-    onCopy: () -> Unit
+    onCopy: () -> Unit,
+    onRotate: () -> Unit
 ) {
     SectionHeader(title = "Device Key")
     Card(
@@ -482,8 +508,22 @@ internal fun DevicePublicKeySection(
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
             Spacer(modifier = Modifier.height(12.dp))
-            OutlinedButton(onClick = onCopy, modifier = Modifier.testTag("ssh.publicKey.copy")) {
-                Text(if (copied) "Public key copied" else "Copy device public key")
+            FlowRow(
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                OutlinedButton(
+                    onClick = onCopy,
+                    modifier = Modifier.testTag("ssh.publicKey.copy")
+                ) {
+                    Text(if (copied) "Public key copied" else "Copy device public key", maxLines = 1)
+                }
+                OutlinedButton(
+                    onClick = onRotate,
+                    modifier = Modifier.testTag("ssh.publicKey.rotate")
+                ) {
+                    Text("Rotate key", maxLines = 1)
+                }
             }
         }
     }
@@ -494,6 +534,7 @@ internal fun HostProfileEditorDialog(
     initial: HostProfile,
     onDismiss: () -> Unit,
     onSave: (HostProfile, String?) -> Unit,
+    onCopyPublicKey: () -> Unit = {},
 ) {
     var name by remember(initial.id) { mutableStateOf(initial.name) }
     var transport by remember(initial.id) { mutableStateOf(initial.transport) }
@@ -534,6 +575,8 @@ internal fun HostProfileEditorDialog(
                     OutlinedTextField(value = sshPort, onValueChange = { sshPort = it }, label = { Text("SSH port") }, modifier = Modifier.fillMaxWidth())
                     OutlinedTextField(value = sshUsername, onValueChange = { sshUsername = it }, label = { Text("SSH username") }, modifier = Modifier.fillMaxWidth())
                     OutlinedTextField(value = remotePort, onValueChange = { remotePort = it }, label = { Text("Assigned remote port") }, modifier = Modifier.fillMaxWidth())
+                    Spacer(modifier = Modifier.height(8.dp))
+                    OutlinedButton(onClick = onCopyPublicKey) { Text("Copy Device Public Key") }
                 }
                 Spacer(modifier = Modifier.height(8.dp))
                 OutlinedTextField(value = authUsername, onValueChange = { authUsername = it }, label = { Text("OpenCode Basic Auth username (optional)") }, modifier = Modifier.fillMaxWidth())

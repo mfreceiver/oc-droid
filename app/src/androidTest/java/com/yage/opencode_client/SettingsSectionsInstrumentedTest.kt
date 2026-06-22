@@ -150,19 +150,21 @@ class SettingsSectionsInstrumentedTest {
         composeRule.onNodeWithText("Server URL").assertIsDisplayed()
         composeRule.onNodeWithTag("host.editor.transport.ssh").performClick()
         composeRule.onNodeWithText("SSH gateway host").assertIsDisplayed()
+        composeRule.onNodeWithText("Copy Device Public Key").assertIsDisplayed()
     }
 
     @Test
     fun devicePublicKeySectionIsGlobalToHostProfiles() {
         composeRule.setContent {
             MaterialTheme {
-                DevicePublicKeySection(copied = false, onCopy = {})
+                DevicePublicKeySection(copied = false, onCopy = {}, onRotate = {})
             }
         }
 
         composeRule.onNodeWithText("Device Key").assertIsDisplayed()
         composeRule.onNodeWithText("This Android device uses one SSH public key for all SSH Tunnel profiles.").assertIsDisplayed()
         composeRule.onNodeWithTag("ssh.publicKey.copy").assertIsDisplayed()
+        composeRule.onNodeWithTag("ssh.publicKey.rotate").assertIsDisplayed()
     }
 
     @Test
