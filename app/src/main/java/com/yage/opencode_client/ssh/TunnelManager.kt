@@ -8,7 +8,9 @@ import com.jcraft.jsch.UserInfo
 import com.yage.opencode_client.data.model.SshTunnelConfig
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import org.bouncycastle.jce.provider.BouncyCastleProvider
 import java.net.ServerSocket
+import java.security.Security
 import javax.inject.Inject
 import javax.inject.Singleton
 
@@ -39,6 +41,7 @@ class JschTunnelManager @Inject constructor(
         val localPort = chooseLocalPort(preferred = 4096)
         val hostKeyRepository = TofuHostKeyRepository(config, knownHostStore)
         val jsch = JSch().apply {
+            ensureBouncyCastleProvider()
             addIdentity("opencode-android", privateKey, null, null)
             this.hostKeyRepository = hostKeyRepository
         }
@@ -91,6 +94,12 @@ class JschTunnelManager @Inject constructor(
             "reject hostkey" in message || "hostkey" in message -> ConnectionPhase.SSH_HOST_KEY
             "auth" in message || "userauth" in message -> ConnectionPhase.SSH_AUTH
             else -> ConnectionPhase.SSH_GATEWAY
+        }
+    }
+
+    private fun ensureBouncyCastleProvider() {
+        if (Security.getProvider(BouncyCastleProvider.PROVIDER_NAME) == null) {
+            Security.addProvider(BouncyCastleProvider())
         }
     }
 }

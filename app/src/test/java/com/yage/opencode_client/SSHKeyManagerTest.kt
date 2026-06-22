@@ -1,5 +1,6 @@
 package com.yage.opencode_client
 
+import com.jcraft.jsch.JSch
 import com.yage.opencode_client.ssh.SSHKeyManager
 import com.yage.opencode_client.util.SettingsManager
 import io.mockk.every
@@ -30,10 +31,11 @@ class SSHKeyManagerTest {
     fun `ensureKeyPair generates OpenSSH public key and private key`() {
         val generated = manager.ensureKeyPair()
 
-        assertTrue(generated.startsWith("ssh-rsa "))
+        assertTrue(generated.startsWith("ssh-ed25519 "))
         assertTrue(generated.endsWith(" opencode-android"))
         assertNotNull(manager.privateKeyBytes())
         assertTrue(privateKey.orEmpty().contains("PRIVATE KEY"))
+        JSch().addIdentity("test", manager.privateKeyBytes(), null, null)
     }
 
     @Test
@@ -42,6 +44,6 @@ class SSHKeyManagerTest {
         val second = manager.rotateKey()
 
         assertNotEquals(first, second)
-        assertTrue(second.startsWith("ssh-rsa "))
+        assertTrue(second.startsWith("ssh-ed25519 "))
     }
 }
