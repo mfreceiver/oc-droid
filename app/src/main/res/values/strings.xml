@@ -54,7 +54,7 @@
     <string name="sessions_active">Active</string>
     <string name="sessions_archived">Archived</string>
     <string name="sessions_load_older">Load older</string>
-    <string name="sessions_new">New</string>
+    <string name="sessions_new">+</string>
     <string name="sessions_show">Show sessions</string>
     <string name="sessions_hide">Hide sessions</string>
     <string name="sessions_delete">Delete</string>
@@ -67,6 +67,10 @@
     <string name="sessions_no_models">No models</string>
     <string name="sessions_archive">Archive</string>
     <string name="sessions_restore">Restore</string>
+    <string name="sessions_no_active">No active sessions</string>
+    <string name="sessions_no_archived">No archived sessions</string>
+    <string name="sessions_expand">Expand %1$s</string>
+    <string name="sessions_collapse">Collapse %1$s</string>
     <string name="chat_model_fallback">Model</string>
     <string name="chat_switch_model">Switch LLM model</string>
     <string name="chat_todo">Todo</string>

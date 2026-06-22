@@ -356,7 +356,7 @@ fun SessionList(
                     SessionSectionHeader(title = stringResource(R.string.sessions_active), isExpanded = true, onClick = {})
                 }
                 if (activeRows.isEmpty()) {
-                    item(key = "active_empty") { EmptySectionRow("No active sessions") }
+                    item(key = "active_empty") { EmptySectionRow(stringResource(R.string.sessions_no_active)) }
                 }
                 itemsIndexed(activeRows, key = { _, (node, _) -> node.session.id }) { index, (node, depth) ->
                     SessionRowItem(
@@ -385,7 +385,7 @@ fun SessionList(
                     )
                 }
                 if (archivedExpanded && archivedRows.isEmpty()) {
-                    item(key = "archived_empty") { EmptySectionRow("No archived sessions") }
+                    item(key = "archived_empty") { EmptySectionRow(stringResource(R.string.sessions_no_archived)) }
                 }
                 itemsIndexed(archivedRows, key = { _, (node, _) -> node.session.id }) { index, (node, depth) ->
                     SessionRowItem(
@@ -427,7 +427,7 @@ private fun SessionSectionHeader(title: String, isExpanded: Boolean, onClick: ()
         )
         Icon(
             if (isExpanded) Icons.Default.KeyboardArrowDown else Icons.Default.ChevronRight,
-            contentDescription = if (isExpanded) "Collapse $title" else "Expand $title",
+            contentDescription = if (isExpanded) stringResource(R.string.sessions_collapse, title) else stringResource(R.string.sessions_expand, title),
             modifier = Modifier.size(18.dp),
             tint = MaterialTheme.colorScheme.onSurfaceVariant
         )
