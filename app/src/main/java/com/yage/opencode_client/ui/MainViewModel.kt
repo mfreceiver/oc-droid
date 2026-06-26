@@ -89,7 +89,6 @@ data class AppState(
                 displayName == "DeepSeek V4 Flash" -> "DS-Flash"
                 displayName == "DeepSeek Local" -> "DS-L"
                 displayName == "DeepSeek V4 Pro" -> "DS-Pro"
-                displayName == "Ollama DeepSeek V4 Pro" -> "ODS-Pro"
                 displayName == "Ollama GLM 5.2" -> "OGLM-5.2"
                 "Haiku" in displayName -> "Haiku"
                 "Gemini" in displayName -> "Gemini"

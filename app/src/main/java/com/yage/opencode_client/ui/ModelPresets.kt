@@ -11,7 +11,6 @@ object ModelPresets {
         AppState.ModelOption("DeepSeek V4 Flash", "deepseek", "deepseek-v4-flash"),
         AppState.ModelOption("DeepSeek Local", "ds4", "deepseek-v4-flash"),
         AppState.ModelOption("DeepSeek V4 Pro", "deepseek", "deepseek-v4-pro"),
-        AppState.ModelOption("Ollama DeepSeek V4 Pro", "ollama-cloud", "deepseek-v4-pro"),
         AppState.ModelOption("Ollama GLM 5.2", "ollama-cloud", "glm-5.2"),
     )
 }
