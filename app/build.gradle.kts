@@ -1,4 +1,5 @@
 import java.util.Base64
+import java.util.Properties
 
 // Load .env for integration test credentials (not checked in)
 val envFile = rootProject.file(".env")
@@ -47,6 +48,21 @@ android {
         testInstrumentationRunnerArguments["aiBuilderToken"] = env["AI_BUILDER_TOKEN"] ?: ""
     }
 
+    signingConfigs {
+        create("release") {
+            // Credentials live in gitignored local.properties (see docs/build-apk.md).
+            val props = Properties()
+            val propsFile = rootProject.file("local.properties")
+            if (propsFile.exists()) {
+                props.load(propsFile.inputStream())
+            }
+            storeFile = file(props.getProperty("release.storeFile", "release.keystore"))
+            storePassword = props.getProperty("release.storePassword", "")
+            keyAlias = props.getProperty("release.keyAlias", "release")
+            keyPassword = props.getProperty("release.keyPassword", "")
+        }
+    }
+
     buildTypes {
         release {
             isMinifyEnabled = true
@@ -55,6 +71,7 @@ android {
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
             )
+            signingConfig = signingConfigs.getByName("release")
         }
     }
     compileOptions {
