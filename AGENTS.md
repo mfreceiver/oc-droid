@@ -84,6 +84,13 @@ git checkout dev && git rebase master        # 必要时 git push --force-with-l
 - 一键同步：`bash scripts/sync-upstream.sh [--rebase]`（fetch 上游+tag → 同步 master → 推 origin）。
 - 上游的 `feat/*`、`fix/*` 分支已镜像备查；**不要**主动并入 dev，等上游合并后自动随 master 进入。需要提前试用某未合并功能时，临时 `git checkout -b trial upstream/<分支>`，不并入 dev。
 
+## 安全审计（同步上游后）
+
+- **每次 `sync-upstream.sh` 跟进上游后，对差异部分做增量安全审计**（排查后门 + 严重性能问题），产出新的带日期报告。
+- 工作流与审计台账见 `docs/security-audit-workflow.md`；全量基线报告见 `docs/security-audit-2026-06-27.md`。
+- 审计用 gpter / glmer / kimo 三方并行，只审 `diff` 出来的差异文件；重点查新增凭证/网络端点/依赖，并对照基线报告的 H1~H4、M1~M6 是否被上游重新引入。
+- 报告命名 `docs/security-audit-YYYY-MM-DD.md`，完成后把日期/上游版本/基点追加到工作流文档的「审计台账」。
+
 ## 改动与冲突控制
 
 - 自定义内容尽量放**新文件**（如 `FORK_SYNC.md`、`docs/build-apk.md`），少改上游文件，降低合并冲突。
@@ -101,5 +108,7 @@ git checkout dev && git rebase master        # 必要时 git push --force-with-l
 
 - `FORK_SYNC.md` — fork 同步与管理策略（完整版）
 - `docs/build-apk.md` — 本地构建 / 签名 / 发版指南（实测版）
+- `docs/security-audit-workflow.md` — 同步上游后的差异审计工作流与台账
+- `docs/security-audit-2026-06-27.md` — 安全审计全量基线报告
 - `README.md` — 项目功能与使用说明
 - `docs/PRD.md` / `docs/RFC.md` — 产品需求与技术方案
