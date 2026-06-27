@@ -19,6 +19,9 @@
 /app/build/
 */build/
 
+# Built APKs (never commit; distribute via Gitea Releases)
+*.apk
+
 # Local config
 *.properties
 !gradle/wrapper/gradle-wrapper.properties
