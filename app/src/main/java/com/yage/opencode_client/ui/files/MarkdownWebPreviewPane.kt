@@ -43,7 +43,9 @@ import com.mikepenz.markdown.m3.Markdown
 import com.yage.opencode_client.R
 import com.yage.opencode_client.BuildConfig
 import com.yage.opencode_client.data.repository.OpenCodeRepository
-import com.yage.opencode_client.ui.theme.markdownTypographyCompact
+import com.yage.opencode_client.ui.theme.LocalMarkdownFontSizes
+import com.yage.opencode_client.ui.theme.MarkdownFontSizes
+import com.yage.opencode_client.ui.theme.markdownTypography
 import com.yage.opencode_client.ui.util.DataUriImageTransformer
 import com.yage.opencode_client.ui.util.MarkdownImageResolver
 import org.json.JSONObject
@@ -122,8 +124,10 @@ private fun ResolvedMarkdownWebPreview(
             onOpenSource = onOpenSource
         )
     } else {
+        val fontSizes = LocalMarkdownFontSizes.current
         MarkdownWebView(
             markdown = resolvedContent,
+            fontSizes = fontSizes,
             onRenderError = { error = it },
             onOpenNative = onOpenNative,
             onOpenSource = onOpenSource
@@ -135,6 +139,7 @@ private fun ResolvedMarkdownWebPreview(
 @Composable
 private fun MarkdownWebView(
     markdown: String,
+    fontSizes: com.yage.opencode_client.ui.theme.MarkdownFontSizes = com.yage.opencode_client.ui.theme.MarkdownFontSizes(),
     onRenderError: (String) -> Unit,
     onOpenNative: () -> Unit,
     onOpenSource: () -> Unit
@@ -183,7 +188,7 @@ private fun MarkdownWebView(
                     webViewClient = object : WebViewClient() {
                         override fun onPageFinished(view: WebView, url: String?) {
                             webPreviewLog("onPageFinished url=$url")
-                            view.renderMarkdown(markdown, theme)
+                            view.renderMarkdown(markdown, theme, fontSizes)
                         }
 
                         override fun onPageCommitVisible(view: WebView, url: String?) {
@@ -215,7 +220,7 @@ private fun MarkdownWebView(
             update = { webView ->
                 webPreviewLog("update render length=${markdown.length} theme=$theme ready=$webContentReady")
                 webView.setBackgroundColor(webViewBackground)
-                webView.renderMarkdown(markdown, theme)
+                webView.renderMarkdown(markdown, theme, fontSizes)
             }
         )
 
@@ -248,11 +253,23 @@ private class AndroidPreviewBridge(
     }
 }
 
-private fun WebView.renderMarkdown(markdown: String, theme: String) {
+private fun WebView.renderMarkdown(markdown: String, theme: String, fontSizes: MarkdownFontSizes) {
     webPreviewLog("renderMarkdown requested length=${markdown.length} theme=$theme")
     val payload = JSONObject()
         .put("markdown", markdown)
         .put("theme", theme)
+        .put("fontSizes", JSONObject()
+            .put("h1", fontSizes.h1.toDouble())
+            .put("h2", fontSizes.h2.toDouble())
+            .put("h3", fontSizes.h3.toDouble())
+            .put("h4", fontSizes.h4.toDouble())
+            .put("h5", fontSizes.h5.toDouble())
+            .put("h6", fontSizes.h6.toDouble())
+            .put("body", fontSizes.body.toDouble())
+            .put("code", fontSizes.code.toDouble())
+            .put("inlineCode", fontSizes.inlineCode.toDouble())
+            .put("quote", fontSizes.quote.toDouble())
+        )
         .toString()
     evaluateJavascript(
         """
@@ -287,9 +304,10 @@ private fun MarkdownFallbackOverlay(markdown: String) {
             contentPadding = PaddingValues(16.dp)
         ) {
             item {
+                val fontSizes = LocalMarkdownFontSizes.current
                 Markdown(
                     content = markdown,
-                    typography = markdownTypographyCompact(),
+                    typography = markdownTypography(fontSizes),
                     modifier = Modifier.fillMaxWidth(),
                     imageTransformer = DataUriImageTransformer
                 )

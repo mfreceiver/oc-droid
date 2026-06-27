@@ -75,6 +75,8 @@ import com.yage.opencode_client.data.model.MessageWithParts
 import com.yage.opencode_client.data.model.Part
 import com.yage.opencode_client.data.model.TodoItem
 import com.yage.opencode_client.data.repository.OpenCodeRepository
+import com.yage.opencode_client.ui.theme.LocalMarkdownFontSizes
+import com.yage.opencode_client.ui.theme.markdownTypography
 import com.yage.opencode_client.ui.theme.markdownTypographyCompact
 import com.yage.opencode_client.ui.util.DataUriImageTransformer
 import com.yage.opencode_client.ui.util.HttpImageHolder
@@ -685,9 +687,10 @@ private fun TextPart(
             )
         } else {
             val normalizedText = remember(text) { MarkdownImageResolver.normalizeStandaloneImageBlocks(text) }
+            val fontSizes = LocalMarkdownFontSizes.current
             SelectionContainer {
                 CompositionLocalProvider(LocalContentColor provides MaterialTheme.colorScheme.onSurface) {
-                    Markdown(content = normalizedText, typography = markdownTypographyCompact(), modifier = innerModifier, imageTransformer = DataUriImageTransformer)
+                    Markdown(content = normalizedText, typography = markdownTypography(fontSizes), modifier = innerModifier, imageTransformer = DataUriImageTransformer)
                 }
             }
         }
@@ -718,11 +721,12 @@ private fun ResolvedMarkdownText(
         }
     }
 
+    val fontSizes = LocalMarkdownFontSizes.current
     SelectionContainer {
         CompositionLocalProvider(LocalContentColor provides MaterialTheme.colorScheme.onSurface) {
             Markdown(
                 content = resolvedText ?: normalizedText,
-                typography = markdownTypographyCompact(),
+                typography = markdownTypography(fontSizes),
                 modifier = modifier,
                 imageTransformer = DataUriImageTransformer
             )
@@ -781,11 +785,12 @@ private fun ReasoningCard(
             }
             if ((expanded || isStreaming) && text.isNotBlank()) {
                 val normalizedText = remember(text) { MarkdownImageResolver.normalizeStandaloneImageBlocks(text) }
+                val fontSizes = LocalMarkdownFontSizes.current
                 SelectionContainer {
                     CompositionLocalProvider(LocalContentColor provides MaterialTheme.colorScheme.onSurfaceVariant) {
                         Markdown(
                             content = normalizedText,
-                            typography = markdownTypographyCompact(),
+                            typography = markdownTypography(fontSizes),
                             modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
                             imageTransformer = DataUriImageTransformer
                         )

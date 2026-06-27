@@ -2,8 +2,10 @@ package com.yage.opencode_client.util
 
 import android.content.Context
 import android.content.SharedPreferences
+import android.util.Log
 import androidx.security.crypto.EncryptedSharedPreferences
 import androidx.security.crypto.MasterKey
+import com.yage.opencode_client.ui.theme.MarkdownFontSizes
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
@@ -46,18 +48,6 @@ class SettingsManager @Inject constructor(
         get() = encryptedPrefs.getString(KEY_CURRENT_HOST_PROFILE_ID, null)
         set(value) = encryptedPrefs.edit().putString(KEY_CURRENT_HOST_PROFILE_ID, value).apply()
 
-    var sshPrivateKeyPem: String?
-        get() = encryptedPrefs.getString(KEY_SSH_PRIVATE_KEY, null)
-        set(value) = encryptedPrefs.edit().putString(KEY_SSH_PRIVATE_KEY, value).apply()
-
-    var sshPublicKey: String?
-        get() = encryptedPrefs.getString(KEY_SSH_PUBLIC_KEY, null)
-        set(value) = encryptedPrefs.edit().putString(KEY_SSH_PUBLIC_KEY, value).apply()
-
-    var knownHostsJson: String?
-        get() = encryptedPrefs.getString(KEY_KNOWN_HOSTS, null)
-        set(value) = encryptedPrefs.edit().putString(KEY_KNOWN_HOSTS, value).apply()
-
     fun basicAuthPassword(passwordId: String): String? {
         if (passwordId == LEGACY_BASIC_AUTH_PASSWORD_ID) return password
         return encryptedPrefs.getString(basicAuthPasswordKey(passwordId), null)
@@ -69,13 +59,23 @@ class SettingsManager @Inject constructor(
         }.apply()
     }
 
+    fun getTunnelPassword(id: String): String? {
+        return encryptedPrefs.getString(tunnelPasswordKey(id), null)
+    }
+
+    fun setTunnelPassword(id: String, password: String?) {
+        encryptedPrefs.edit().apply {
+            if (password.isNullOrBlank()) remove(tunnelPasswordKey(id)) else putString(tunnelPasswordKey(id), password)
+        }.apply()
+    }
+
+    fun clearTunnelPassword(id: String) {
+        encryptedPrefs.edit().remove(tunnelPasswordKey(id)).apply()
+    }
+
     var currentSessionId: String?
         get() = encryptedPrefs.getString(KEY_SESSION_ID, null)
         set(value) = encryptedPrefs.edit().putString(KEY_SESSION_ID, value).apply()
-
-    var selectedModelIndex: Int
-        get() = encryptedPrefs.getInt(KEY_MODEL_INDEX, 1)
-        set(value) = encryptedPrefs.edit().putInt(KEY_MODEL_INDEX, value).apply()
 
     var selectedAgentName: String?
         get() = encryptedPrefs.getString(KEY_AGENT_NAME, null)
@@ -89,29 +89,35 @@ class SettingsManager @Inject constructor(
         get() = LanguageMode.valueOf(encryptedPrefs.getString(KEY_LANGUAGE, LanguageMode.SYSTEM.name) ?: LanguageMode.SYSTEM.name)
         set(value) = encryptedPrefs.edit().putString(KEY_LANGUAGE, value.name).apply()
 
-    var aiBuilderBaseURL: String
-        get() = encryptedPrefs.getString(KEY_AI_BUILDER_BASE_URL, DEFAULT_AI_BUILDER_BASE_URL) ?: DEFAULT_AI_BUILDER_BASE_URL
-        set(value) = encryptedPrefs.edit().putString(KEY_AI_BUILDER_BASE_URL, value).apply()
+    var markdownFontSizes: MarkdownFontSizes
+        get() {
+            val json = encryptedPrefs.getString(KEY_MARKDOWN_FONT_SIZES, null) ?: return MarkdownFontSizes()
+            return try {
+                Json.decodeFromString<MarkdownFontSizes>(json)
+            } catch (e: Exception) {
+                Log.w(TAG, "Failed to parse markdown font sizes, using defaults", e)
+                MarkdownFontSizes()
+            }
+        }
+        set(value) {
+            val json = Json.encodeToString(value)
+            encryptedPrefs.edit().putString(KEY_MARKDOWN_FONT_SIZES, json).apply()
+        }
 
-    var aiBuilderToken: String
-        get() = encryptedPrefs.getString(KEY_AI_BUILDER_TOKEN, "") ?: ""
-        set(value) = encryptedPrefs.edit().putString(KEY_AI_BUILDER_TOKEN, value).apply()
-
-    var aiBuilderCustomPrompt: String
-        get() = encryptedPrefs.getString(KEY_AI_BUILDER_CUSTOM_PROMPT, DEFAULT_AI_BUILDER_CUSTOM_PROMPT) ?: DEFAULT_AI_BUILDER_CUSTOM_PROMPT
-        set(value) = encryptedPrefs.edit().putString(KEY_AI_BUILDER_CUSTOM_PROMPT, value).apply()
-
-    var aiBuilderTerminology: String
-        get() = encryptedPrefs.getString(KEY_AI_BUILDER_TERMINOLOGY, DEFAULT_AI_BUILDER_TERMINOLOGY) ?: DEFAULT_AI_BUILDER_TERMINOLOGY
-        set(value) = encryptedPrefs.edit().putString(KEY_AI_BUILDER_TERMINOLOGY, value).apply()
-
-    var aiBuilderLastOKSignature: String?
-        get() = encryptedPrefs.getString(KEY_AI_BUILDER_LAST_OK_SIG, null)
-        set(value) = encryptedPrefs.edit().putString(KEY_AI_BUILDER_LAST_OK_SIG, value).apply()
-
-    var aiBuilderLastOKTestedAt: Long
-        get() = encryptedPrefs.getLong(KEY_AI_BUILDER_LAST_OK_TESTED, 0L)
-        set(value) = encryptedPrefs.edit().putLong(KEY_AI_BUILDER_LAST_OK_TESTED, value).apply()
+    var recentSessionIds: List<String>
+        get() {
+            val json = encryptedPrefs.getString(KEY_RECENT_SESSION_IDS, null) ?: return emptyList()
+            return try {
+                Json.decodeFromString<List<String>>(json)
+            } catch (e: Exception) {
+                Log.w(TAG, "Failed to parse recent session IDs, using empty", e)
+                emptyList()
+            }
+        }
+        set(value) {
+            val json = Json.encodeToString(value)
+            encryptedPrefs.edit().putString(KEY_RECENT_SESSION_IDS, json).apply()
+        }
 
     fun getDraftText(sessionId: String): String {
         val json = encryptedPrefs.getString(KEY_SESSION_DRAFTS, null) ?: return ""
@@ -137,26 +143,6 @@ class SettingsManager @Inject constructor(
         encryptedPrefs.edit().putString(KEY_SESSION_DRAFTS, Json.encodeToString(map)).apply()
     }
 
-    fun getModelForSession(sessionId: String): Int? {
-        val json = encryptedPrefs.getString(KEY_SESSION_MODELS, null) ?: return null
-        return try {
-            Json.decodeFromString<Map<String, String>>(json)[sessionId]?.toIntOrNull()
-        } catch (e: Exception) {
-            null
-        }
-    }
-
-    fun setModelForSession(sessionId: String, modelIndex: Int) {
-        val json = encryptedPrefs.getString(KEY_SESSION_MODELS, null)
-        val map: MutableMap<String, String> = try {
-            json?.let { Json.decodeFromString<Map<String, String>>(it).toMutableMap() } ?: mutableMapOf()
-        } catch (e: Exception) {
-            mutableMapOf()
-        }
-        map[sessionId] = modelIndex.toString()
-        encryptedPrefs.edit().putString(KEY_SESSION_MODELS, Json.encodeToString(map)).apply()
-    }
-
     fun getAgentForSession(sessionId: String): String? {
         val json = encryptedPrefs.getString(KEY_SESSION_AGENTS, null) ?: return null
         return try {
@@ -178,35 +164,25 @@ class SettingsManager @Inject constructor(
     }
 
     companion object {
+        private const val TAG = "SettingsManager"
         const val DEFAULT_SERVER = "http://localhost:4096"
-        const val DEFAULT_AI_BUILDER_BASE_URL = "https://space.ai-builders.com/backend"
-        const val DEFAULT_AI_BUILDER_CUSTOM_PROMPT = "All file and directory names should use snake_case (lowercase with underscores)."
-        const val DEFAULT_AI_BUILDER_TERMINOLOGY = "adhoc_jobs, life_consulting, survey_sessions, thought_review"
         const val LEGACY_BASIC_AUTH_PASSWORD_ID = "legacy_basic_auth_password"
         private const val KEY_SERVER_URL = "server_url"
         private const val KEY_USERNAME = "username"
         private const val KEY_PASSWORD = "password"
         private const val KEY_HOST_PROFILES = "host_profiles_json"
         private const val KEY_CURRENT_HOST_PROFILE_ID = "current_host_profile_id"
-        private const val KEY_SSH_PRIVATE_KEY = "ssh_private_key_pem"
-        private const val KEY_SSH_PUBLIC_KEY = "ssh_public_key"
-        private const val KEY_KNOWN_HOSTS = "ssh_known_hosts_json"
         private const val KEY_SESSION_ID = "session_id"
-        private const val KEY_MODEL_INDEX = "model_index"
         private const val KEY_AGENT_NAME = "agent_name"
         private const val KEY_THEME = "theme"
         private const val KEY_LANGUAGE = "language"
-        private const val KEY_AI_BUILDER_BASE_URL = "ai_builder_base_url"
-        private const val KEY_AI_BUILDER_TOKEN = "ai_builder_token"
-        private const val KEY_AI_BUILDER_CUSTOM_PROMPT = "ai_builder_custom_prompt"
-        private const val KEY_AI_BUILDER_TERMINOLOGY = "ai_builder_terminology"
-        private const val KEY_AI_BUILDER_LAST_OK_SIG = "ai_builder_last_ok_sig"
-        private const val KEY_AI_BUILDER_LAST_OK_TESTED = "ai_builder_last_ok_tested"
         private const val KEY_SESSION_DRAFTS = "session_drafts"
-        private const val KEY_SESSION_MODELS = "session_models"
         private const val KEY_SESSION_AGENTS = "session_agents"
+        private const val KEY_MARKDOWN_FONT_SIZES = "markdown_font_sizes_json"
+        private const val KEY_RECENT_SESSION_IDS = "recent_session_ids"
 
         private fun basicAuthPasswordKey(passwordId: String): String = "basic_auth_password_$passwordId"
+        private fun tunnelPasswordKey(id: String): String = "tunnel_password_$id"
     }
 }
 

@@ -8,9 +8,6 @@ import kotlinx.serialization.json.Json
 import org.junit.Assert.*
 import org.junit.Test
 
-private fun modelOption(displayName: String) =
-    AppState.ModelOption(displayName = displayName, providerId = "test", modelId = "test")
-
 class ModelTests {
     private val json = Json {
         ignoreUnknownKeys = true
@@ -305,46 +302,6 @@ class ModelTests {
         )
         assertTrue(file.isFile)
         assertFalse(file.isDirectory)
-    }
-
-    @Test
-    fun `ModelOption shortName returns DeepSeek for DeepSeek models`() {
-        assertEquals("DeepSeek", modelOption("DeepSeek V3").shortName)
-    }
-
-    @Test
-    fun `ModelOption shortName returns Haiku for Haiku models`() {
-        assertEquals("Haiku", modelOption("Claude 3 Haiku").shortName)
-    }
-
-    @Test
-    fun `ModelOption shortName returns Gemini for Gemini models`() {
-        assertEquals("Gemini", modelOption("Gemini 2.5 Pro").shortName)
-    }
-
-    @Test
-    fun `ModelOption shortName returns GPT for GPT models`() {
-        assertEquals("GPT", modelOption("GPT-4o").shortName)
-    }
-
-    @Test
-    fun `ModelOption shortName returns Grok for Grok models`() {
-        assertEquals("Grok", modelOption("Grok 3").shortName)
-    }
-
-    @Test
-    fun `ModelOption shortName returns OGLM-5_2 for Ollama GLM 5_2`() {
-        assertEquals("OGLM-5.2", modelOption("Ollama GLM 5.2").shortName)
-    }
-
-    @Test
-    fun `ModelOption shortName returns first word for unknown models`() {
-        assertEquals("DeepSeek", modelOption("DeepSeek V3").shortName)
-    }
-
-    @Test
-    fun `ModelOption shortName returns empty string for empty displayName`() {
-        assertEquals("", modelOption("").shortName)
     }
 
     @Test

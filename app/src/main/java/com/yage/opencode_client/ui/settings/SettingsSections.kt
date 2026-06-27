@@ -41,10 +41,8 @@ import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.unit.dp
 import com.yage.opencode_client.R
-import com.yage.opencode_client.ui.AIBuilderSettings
 import com.yage.opencode_client.ui.AppState
 import com.yage.opencode_client.data.model.HostProfile
-import com.yage.opencode_client.data.model.HostTransport
 import com.yage.opencode_client.util.LanguageMode
 import com.yage.opencode_client.util.ThemeMode
 
@@ -73,11 +71,6 @@ internal fun ConnectionProfileSection(
                     Text(profile.displayName, style = MaterialTheme.typography.titleMedium)
                     Text(profile.connectionSummary, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
-                Text(
-                    if (profile.transport == HostTransport.SSH_TUNNEL) stringResource(R.string.host_profile_ssh_tunnel) else stringResource(R.string.host_profile_direct),
-                    style = MaterialTheme.typography.labelMedium,
-                    color = MaterialTheme.colorScheme.primary
-                )
             }
 
             Spacer(modifier = Modifier.height(16.dp))
@@ -308,122 +301,6 @@ internal fun AppearanceSection(
 }
 
 @Composable
-internal fun SpeechRecognitionSection(
-    state: AppState,
-    aiBuilderBaseURL: String,
-    aiBuilderToken: String,
-    aiBuilderCustomPrompt: String,
-    aiBuilderTerminology: String,
-    showAIBuilderToken: Boolean,
-    saveMessage: String? = null,
-    onBaseUrlChange: (String) -> Unit,
-    onTokenChange: (String) -> Unit,
-    onPromptChange: (String) -> Unit,
-    onTerminologyChange: (String) -> Unit,
-    onToggleTokenVisibility: () -> Unit,
-    onTestConnection: () -> Unit,
-    onSave: () -> Unit
-) {
-    SectionHeader(title = stringResource(R.string.settings_speech_recognition))
-
-    OutlinedTextField(
-        value = aiBuilderBaseURL,
-        onValueChange = onBaseUrlChange,
-        label = { Text(stringResource(R.string.settings_ai_builder_base_url)) },
-        modifier = Modifier.fillMaxWidth(),
-        singleLine = true,
-        leadingIcon = { Icon(Icons.Default.Cloud, contentDescription = null) }
-    )
-
-    Spacer(modifier = Modifier.height(12.dp))
-
-    OutlinedTextField(
-        value = aiBuilderToken,
-        onValueChange = onTokenChange,
-        label = { Text(stringResource(R.string.settings_ai_builder_token)) },
-        modifier = Modifier.fillMaxWidth(),
-        singleLine = true,
-        visualTransformation = if (showAIBuilderToken) VisualTransformation.None else PasswordVisualTransformation(),
-        trailingIcon = {
-            IconButton(onClick = onToggleTokenVisibility) {
-                Icon(
-                    if (showAIBuilderToken) Icons.Default.VisibilityOff else Icons.Default.Visibility,
-                    contentDescription = if (showAIBuilderToken) stringResource(R.string.settings_hide_token) else stringResource(R.string.settings_show_token)
-                )
-            }
-        },
-        leadingIcon = { Icon(Icons.Default.Lock, contentDescription = null) }
-    )
-
-    Spacer(modifier = Modifier.height(12.dp))
-
-    OutlinedTextField(
-        value = aiBuilderCustomPrompt,
-        onValueChange = onPromptChange,
-        label = { Text(stringResource(R.string.settings_custom_prompt)) },
-        modifier = Modifier.fillMaxWidth(),
-        minLines = 3,
-        maxLines = 6
-    )
-
-    Spacer(modifier = Modifier.height(12.dp))
-
-    OutlinedTextField(
-        value = aiBuilderTerminology,
-        onValueChange = onTerminologyChange,
-        label = { Text(stringResource(R.string.settings_terminology)) },
-        placeholder = { Text(stringResource(R.string.settings_terminology_placeholder)) },
-        modifier = Modifier.fillMaxWidth(),
-        singleLine = true
-    )
-
-    Spacer(modifier = Modifier.height(16.dp))
-
-    Row(
-        modifier = Modifier.fillMaxWidth(),
-        horizontalArrangement = Arrangement.spacedBy(8.dp)
-    ) {
-        Button(
-            onClick = onTestConnection,
-            enabled = aiBuilderBaseURL.isNotBlank() && !state.isTestingAIBuilderConnection
-        ) {
-            if (state.isTestingAIBuilderConnection) {
-                CircularProgressIndicator(
-                    modifier = Modifier.size(16.dp),
-                    strokeWidth = 2.dp
-                )
-                Spacer(modifier = Modifier.width(8.dp))
-            }
-            Text(stringResource(R.string.settings_test_connection))
-        }
-
-        OutlinedButton(
-            onClick = onSave,
-            enabled = aiBuilderBaseURL.isNotBlank()
-        ) {
-            Text(stringResource(R.string.settings_save))
-        }
-    }
-
-    // A "Settings saved" notice takes precedence (it's the most recent action and
-    // auto-dismisses); otherwise show the latest connection test result.
-    if (saveMessage != null) {
-        ResultCard(result = TestResult(success = true, message = saveMessage))
-    } else if (state.aiBuilderConnectionOK || state.aiBuilderConnectionError != null) {
-        ResultCard(
-            result = TestResult(
-                success = state.aiBuilderConnectionOK,
-                message = if (state.aiBuilderConnectionOK) {
-                    stringResource(R.string.settings_connected_successfully)
-                } else {
-                    state.aiBuilderConnectionError ?: stringResource(R.string.settings_connection_failed)
-                }
-            )
-        )
-    }
-}
-
-@Composable
 internal fun AboutSection() {
     SectionHeader(title = stringResource(R.string.settings_about))
 
@@ -506,17 +383,3 @@ internal data class TestResult(
     val success: Boolean,
     val message: String
 )
-
-internal fun buildAIBuilderSettings(
-    baseURL: String,
-    token: String,
-    customPrompt: String,
-    terminology: String
-): AIBuilderSettings {
-    return AIBuilderSettings(
-        baseURL = baseURL,
-        token = token,
-        customPrompt = customPrompt,
-        terminology = terminology
-    )
-}

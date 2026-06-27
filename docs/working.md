@@ -1,5 +1,7 @@
 # OpenCode Android 客户端工作日志
 
+> 注：本文件为历史开发日志。语音输入、AI Builder 集成、SSH 隧道等功能已在后续版本移除，相关条目仅作历史记录保留。
+
 ## 2026-06-14 — Phase 7：Markdown Web Preview + Tablet Sessions 折叠
 
 ### Compact 后恢复步骤

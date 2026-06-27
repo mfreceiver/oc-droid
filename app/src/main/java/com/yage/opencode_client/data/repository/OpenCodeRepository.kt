@@ -3,6 +3,7 @@ package com.yage.opencode_client.data.repository
 import com.yage.opencode_client.data.api.*
 import com.yage.opencode_client.data.model.*
 import kotlinx.coroutines.flow.Flow
+import okhttp3.FormBody
 import okhttp3.OkHttpClient
 import retrofit2.Retrofit
 import com.jakewharton.retrofit2.converter.kotlinx.serialization.asConverterFactory
@@ -25,6 +26,11 @@ class OpenCodeRepository @Inject constructor() {
     private var baseUrl: String = DEFAULT_SERVER
     private var username: String? = null
     private var password: String? = null
+
+    // Current workdir context for directory-scoped requests. Read by the OkHttp
+    // interceptor on IO threads, so mark @Volatile for visibility across threads.
+    @Volatile
+    private var currentDirectory: String? = null
 
     private val json = Json {
         ignoreUnknownKeys = true
@@ -55,8 +61,22 @@ class OpenCodeRepository @Inject constructor() {
                 level = HttpLoggingInterceptor.Level.BASIC
             })
             .addInterceptor { chain ->
-                val request = chain.request().newBuilder()
+                val original = chain.request()
+                // A request carrying the skip-dir marker opts out of directory
+                // injection (used by global endpoints like session list / agents).
+                val skipDir = original.header(SKIP_DIR_HEADER) != null
+                val dir = currentDirectory
+                val request = original.newBuilder()
                     .apply {
+                        if (skipDir) {
+                            removeHeader(SKIP_DIR_HEADER)
+                        }
+                        // Inject the directory header unless the caller opted out.
+                        // Only added when a workdir context is set.
+                        if (!skipDir && dir != null) {
+                            header(DIRECTORY_HEADER, dir)
+                        }
+                        // Basic Auth injection (unchanged behavior).
                         val u = username
                         val p = password
                         if (u != null && p != null) {
@@ -101,8 +121,21 @@ class OpenCodeRepository @Inject constructor() {
         this.baseUrl = baseUrl
         this.username = username
         this.password = password
+        // Switching host invalidates any workdir context.
+        currentDirectory = null
         rebuildClients()
     }
+
+    /**
+     * Set the current workdir directory context injected into directory-scoped
+     * requests via the `X-Opencode-Directory` header. Pass null to clear it.
+     */
+    fun setCurrentDirectory(dir: String?) {
+        currentDirectory = dir
+    }
+
+    /** Returns the currently configured workdir directory, or null when unset. */
+    fun getCurrentDirectory(): String? = currentDirectory
 
     suspend fun checkHealth(): Result<HealthResponse> = runCatching { api.getHealth() }
 
@@ -237,7 +270,46 @@ class OpenCodeRepository @Inject constructor() {
 
     fun connectSSE(): Flow<Result<SSEEvent>> = sseClient.connect(baseUrl, username, password)
 
+    /**
+     * Activates a tunnel by POSTing the password to the tunnel endpoint.
+     * Uses an independent OkHttpClient without any Basic Auth interceptor,
+     * since tunnel authentication uses form-encoded POST (not HTTP Basic Auth).
+     */
+    suspend fun activateTunnel(tunnelUrl: String, password: String): Result<Unit> = runCatching {
+        val client = buildTunnelOkHttpClient()
+        val formBody = FormBody.Builder()
+            .add("persist_auth", "off")
+            .add("pw", password)
+            .build()
+        val request = okhttp3.Request.Builder()
+            .url(tunnelUrl)
+            .post(formBody)
+            .build()
+        val response = client.newCall(request).execute()
+        if (!response.isSuccessful) {
+            val body = response.body?.string().orEmpty()
+            throw Exception("Tunnel activation failed ${response.code}: $body")
+        }
+        response.close()
+    }
+
+    private fun buildTunnelOkHttpClient(): OkHttpClient {
+        return OkHttpClient.Builder()
+            .sslSocketFactory(trustAllSslSocketFactory(), trustAllTrustManager)
+            .hostnameVerifier { _, _ -> true }
+            .connectTimeout(15, java.util.concurrent.TimeUnit.SECONDS)
+            .readTimeout(15, java.util.concurrent.TimeUnit.SECONDS)
+            .build()
+    }
+
     companion object {
         const val DEFAULT_SERVER = "http://localhost:4096"
+
+        // Header injected to scope a request to a workdir directory.
+        const val DIRECTORY_HEADER = "X-Opencode-Directory"
+        // Marker header carried on Retrofit methods (via @Headers) to opt out of
+        // automatic directory injection for global / by-id endpoints. The
+        // interceptor strips it before the request leaves the client.
+        const val SKIP_DIR_HEADER = "X-Opencode-Skip-Dir"
     }
 }

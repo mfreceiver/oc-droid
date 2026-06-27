@@ -740,4 +740,152 @@ class OpenCodeRepositoryTest {
             replacementServer.shutdown()
         }
     }
+
+    // --- directory dimension (X-Opencode-Directory) ---
+
+    @Test
+    fun `getCurrentDirectory returns null by default`() {
+        assertNull(repository.getCurrentDirectory())
+    }
+
+    @Test
+    fun `setCurrentDirectory stores and returns the value`() {
+        repository.setCurrentDirectory("/workdir/project")
+        assertEquals("/workdir/project", repository.getCurrentDirectory())
+        repository.setCurrentDirectory(null)
+        assertNull(repository.getCurrentDirectory())
+    }
+
+    @Test
+    fun `setCurrentDirectory injects directory header on scoped requests`() = runBlocking {
+        repository.setCurrentDirectory("/workdir/project")
+        server.enqueue(jsonResponse("[]"))
+
+        repository.getFileStatus()
+
+        val request = server.takeRequest()
+        assertEquals("/file/status", request.path)
+        assertEquals("/workdir/project", request.getHeader("X-Opencode-Directory"))
+    }
+
+    @Test
+    fun `directory header is omitted when no directory is set`() = runBlocking {
+        server.enqueue(jsonResponse("[]"))
+
+        repository.getFileStatus()
+
+        val request = server.takeRequest()
+        assertNull(request.getHeader("X-Opencode-Directory"))
+    }
+
+    @Test
+    fun `skip-dir endpoints omit directory header and strip marker`() = runBlocking {
+        repository.setCurrentDirectory("/workdir/project")
+        server.enqueue(jsonResponse("[]"))
+
+        repository.getSessions()
+
+        val request = server.takeRequest()
+        assertEquals("/session", request.path)
+        assertNull("skip-dir endpoint must not carry directory header", request.getHeader("X-Opencode-Directory"))
+        assertNull("skip-dir marker must be stripped before sending", request.getHeader("X-Opencode-Skip-Dir"))
+    }
+
+    @Test
+    fun `activateTunnel success posts form body and returns success`() = runBlocking {
+        server.enqueue(MockResponse().setResponseCode(200))
+
+        val result = repository.activateTunnel(
+            tunnelUrl = server.url("/").toString().trimEnd('/'),
+            password = "tunnel-secret"
+        )
+
+        assertTrue(result.isSuccess)
+        val request = server.takeRequest()
+        assertEquals("POST", request.method)
+        assertEquals("/", request.path)
+        val body = request.body.readUtf8()
+        assertTrue(body.contains("persist_auth=off"))
+        assertTrue(body.contains("pw=tunnel-secret"))
+    }
+
+    @Test
+    fun `activateTunnel failure on non-200 response`() = runBlocking {
+        server.enqueue(
+            MockResponse()
+                .setResponseCode(403)
+                .setBody("Forbidden")
+        )
+
+        val result = repository.activateTunnel(
+            tunnelUrl = server.url("/").toString().trimEnd('/'),
+            password = "wrong-password"
+        )
+
+        assertTrue(result.isFailure)
+        assertTrue(result.exceptionOrNull()!!.message!!.contains("403"))
+    }
+
+    @Test
+    fun `activateTunnel does not carry Basic Auth header`() = runBlocking {
+        repository.configure(
+            baseUrl = server.url("/").toString().trimEnd('/'),
+            username = "alice",
+            password = "secret"
+        )
+        server.enqueue(MockResponse().setResponseCode(200))
+
+        val result = repository.activateTunnel(
+            tunnelUrl = server.url("/").toString().trimEnd('/'),
+            password = "tunnel-secret"
+        )
+
+        assertTrue(result.isSuccess)
+        val request = server.takeRequest()
+        assertNull("Tunnel activation must not carry Basic Auth header", request.getHeader("Authorization"))
+    }
+
+    @Test
+    fun `activateTunnel sends form-encoded content type`() = runBlocking {
+        server.enqueue(MockResponse().setResponseCode(200))
+
+        repository.activateTunnel(
+            tunnelUrl = server.url("/").toString().trimEnd('/'),
+            password = "tunnel-secret"
+        )
+
+        val request = server.takeRequest()
+        val contentType = request.getHeader("Content-Type")
+        assertNotNull(contentType)
+        assertTrue(contentType!!.startsWith("application/x-www-form-urlencoded"))
+    }
+
+    @Test
+    fun `configure resets current directory to null`() = runBlocking {
+        repository.setCurrentDirectory("/workdir/project")
+        repository.configure(baseUrl = server.url("/").toString().trimEnd('/'))
+        server.enqueue(jsonResponse("[]"))
+
+        repository.getFileStatus()
+
+        val request = server.takeRequest()
+        assertNull(request.getHeader("X-Opencode-Directory"))
+    }
+
+    @Test
+    fun `directory injection coexists with Basic Auth header`() = runBlocking {
+        repository.configure(
+            baseUrl = server.url("/").toString().trimEnd('/'),
+            username = "alice",
+            password = "secret"
+        )
+        repository.setCurrentDirectory("/workdir/project")
+        server.enqueue(jsonResponse("[]"))
+
+        repository.getFileStatus()
+
+        val request = server.takeRequest()
+        assertEquals("/workdir/project", request.getHeader("X-Opencode-Directory"))
+        assertEquals("Basic YWxpY2U6c2VjcmV0", request.getHeader("Authorization"))
+    }
 }

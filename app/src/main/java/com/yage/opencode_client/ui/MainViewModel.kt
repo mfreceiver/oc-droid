@@ -6,36 +6,27 @@ import androidx.lifecycle.viewModelScope
 import com.yage.opencode_client.data.model.*
 import com.yage.opencode_client.data.repository.HostProfileStore
 import com.yage.opencode_client.data.repository.OpenCodeRepository
-import com.yage.opencode_client.ssh.SSHKeyManager
-import com.yage.opencode_client.ssh.TunnelManager
-import com.yage.opencode_client.ssh.TunnelResult
 import com.yage.opencode_client.util.SettingsManager
 import com.yage.opencode_client.util.LanguageMode
 import com.yage.opencode_client.util.ThemeMode
-import com.yage.voiceflowkit.VoiceFlowClient
-import com.yage.voiceflowkit.VoiceFlowConfig
-import com.yage.voiceflowkit.VoiceFlowMicrophone
-import com.yage.voiceflowkit.VoiceFlowPreservedAudio
-import com.yage.voiceflowkit.VoiceFlowSession
+import com.yage.opencode_client.ui.theme.MarkdownFontSizes
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.Job
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.runBlocking
 import javax.inject.Inject
+
+sealed class TunnelActivationState {
+    data object Idle : TunnelActivationState()
+    data object Loading : TunnelActivationState()
+    data object Success : TunnelActivationState()
+    data class Error(val message: String) : TunnelActivationState()
+}
 
 data class ConnectionFormSettings(
     val serverUrl: String,
     val username: String,
     val password: String
-)
-
-data class AIBuilderSettings(
-    val baseURL: String,
-    val token: String,
-    val customPrompt: String,
-    val terminology: String
 )
 
 data class AppState(
@@ -55,7 +46,6 @@ data class AppState(
     val isLoadingMessages: Boolean = false,
     val agents: List<AgentInfo> = emptyList(),
     val selectedAgentName: String = "build",
-    val selectedModelIndex: Int = 2,
     val providers: ProvidersResponse? = null,
     val pendingPermissions: List<PermissionRequest> = emptyList(),
     val pendingQuestions: List<QuestionRequest> = emptyList(),
@@ -63,41 +53,19 @@ data class AppState(
     val error: String? = null,
     val themeMode: ThemeMode = ThemeMode.SYSTEM,
     val languageMode: LanguageMode = LanguageMode.SYSTEM,
+    val markdownFontSizes: MarkdownFontSizes = MarkdownFontSizes(),
     val filePathToShowInFiles: String? = null,
     val filePreviewOriginRoute: String? = null,
     val streamingPartTexts: Map<String, String> = emptyMap(),
     val streamingReasoningPart: Part? = null,
-    val isRecording: Boolean = false,
-    val isTranscribing: Boolean = false,
-    val hasPreservedSpeechAudio: Boolean = false,
-    val isRetryingSpeech: Boolean = false,
-    val speechAudioLevel: Float = 0f,
-    val speechError: String? = null,
-    val aiBuilderConnectionOK: Boolean = false,
-    val aiBuilderConnectionError: String? = null,
-    val isTestingAIBuilderConnection: Boolean = false,
     val sessionTodos: Map<String, List<TodoItem>> = emptyMap(),
     val sendingSessionIds: Set<String> = emptySet(),
     val imageAttachments: List<ComposerImageAttachment> = emptyList(),
     val hostProfiles: List<HostProfile> = emptyList(),
     val currentHostProfileId: String? = null,
-    val connectionPhase: String? = null
+    val connectionPhase: String? = null,
+    val tunnelActivationState: TunnelActivationState = TunnelActivationState.Idle
 ) {
-    data class ModelOption(val displayName: String, val providerId: String, val modelId: String) {
-        val shortName: String
-            get() = when {
-                displayName == "DeepSeek V4 Flash" -> "DS-Flash"
-                displayName == "DeepSeek Local" -> "DS-L"
-                displayName == "DeepSeek V4 Pro" -> "DS-Pro"
-                displayName == "Ollama GLM 5.2" -> "OGLM-5.2"
-                "Haiku" in displayName -> "Haiku"
-                "Gemini" in displayName -> "Gemini"
-                "GPT" in displayName -> "GPT"
-                "Grok" in displayName -> "Grok"
-                else -> displayName.split(" ").firstOrNull() ?: displayName
-            }
-    }
-
     data class ContextUsage(
         val percentage: Float,
         val totalTokens: Int,
@@ -153,17 +121,6 @@ data class AppState(
         val imageAttachments: List<ComposerImageAttachment> = emptyList()
     )
 
-    data class SpeechState(
-        val isRecording: Boolean = false,
-        val isTranscribing: Boolean = false,
-        val hasPreservedSpeechAudio: Boolean = false,
-        val isRetryingSpeech: Boolean = false,
-        val speechError: String? = null,
-        val isTestingAIBuilderConnection: Boolean = false,
-        val aiBuilderConnectionOK: Boolean = false,
-        val aiBuilderConnectionError: String? = null
-    )
-
     data class FileUiState(
         val filePathToShowInFiles: String? = null,
         val filePreviewOriginRoute: String? = null
@@ -173,13 +130,10 @@ data class AppState(
         val error: String? = null,
         val themeMode: ThemeMode = ThemeMode.SYSTEM,
         val languageMode: LanguageMode = LanguageMode.SYSTEM,
-        val selectedModelIndex: Int = 2,
         val selectedAgentName: String = "build",
-        val availableModels: List<ModelOption> = ModelPresets.list,
         val contextUsage: ContextUsage? = null,
         val agents: List<AgentInfo> = emptyList(),
-        val providers: ProvidersResponse? = null,
-        val isRecording: Boolean = false
+        val providers: ProvidersResponse? = null
     )
 
     val connectionState: ConnectionState
@@ -220,18 +174,6 @@ data class AppState(
             return messages.filter { message -> message.info.id < revertMessageId }
         }
 
-    val speechState: SpeechState
-        get() = SpeechState(
-            isRecording = isRecording,
-            isTranscribing = isTranscribing,
-            hasPreservedSpeechAudio = hasPreservedSpeechAudio,
-            isRetryingSpeech = isRetryingSpeech,
-            speechError = speechError,
-            isTestingAIBuilderConnection = isTestingAIBuilderConnection,
-            aiBuilderConnectionOK = aiBuilderConnectionOK,
-            aiBuilderConnectionError = aiBuilderConnectionError
-        )
-
     val fileUiState: FileUiState
         get() = FileUiState(
             filePathToShowInFiles = filePathToShowInFiles,
@@ -243,17 +185,17 @@ data class AppState(
             error = error,
             themeMode = themeMode,
             languageMode = languageMode,
-            selectedModelIndex = selectedModelIndex,
             selectedAgentName = selectedAgentName,
-            availableModels = availableModels,
             contextUsage = contextUsage,
             agents = agents,
-            providers = providers,
-            isRecording = isRecording
+            providers = providers
         )
 
     val currentSession: Session?
         get() = sessions.find { it.id == currentSessionId }
+
+    val currentHostProfile: HostProfile?
+        get() = hostProfiles.find { it.id == currentHostProfileId }
 
     val currentSessionStatus: SessionStatus?
         get() = currentSessionId?.let { sessionStatuses[it] }
@@ -267,23 +209,6 @@ data class AppState(
     val visibleAgents: List<AgentInfo>
         get() = agents.filter { it.isVisible }
 
-    /** Curated model list (filtered like iOS), not the full API response. */
-    val availableModels: List<ModelOption>
-        get() = ModelPresets.list
-
-    private val providerModelsIndex: Map<String, ProviderModel>
-        get() = providers?.providers?.flatMap { provider ->
-            provider.models.flatMap { (modelKey, model) ->
-                listOfNotNull(
-                    "${provider.id}/$modelKey" to model,
-                    model.id.takeIf { it.isNotEmpty() }?.let { "${provider.id}/$it" to model },
-                    model.resolvedProviderId?.let { resolvedProvider ->
-                        model.id.takeIf { it.isNotEmpty() }?.let { modelId -> "$resolvedProvider/$modelId" to model }
-                    }
-                )
-            }
-        }?.toMap() ?: emptyMap()
-
     val contextUsage: ContextUsage?
         get() {
             val lastAssistant = messages.lastOrNull { it.info.isAssistant && tokenTotal(it.info.tokens) != null }
@@ -295,7 +220,17 @@ data class AppState(
             val model = lastAssistant.info.resolvedModel
                 ?: return logContextUsageUnavailable("assistant message has no resolved model; message=${lastAssistant.info.id}")
             val key = "${model.providerId}/${model.modelId}"
-            val index = providerModelsIndex
+            val index = providers?.providers?.flatMap { provider ->
+                provider.models.flatMap { (modelKey, providerModel) ->
+                    listOfNotNull(
+                        "${provider.id}/$modelKey" to providerModel,
+                        providerModel.id.takeIf { it.isNotEmpty() }?.let { "${provider.id}/$it" to providerModel },
+                        providerModel.resolvedProviderId?.let { resolvedProvider ->
+                            providerModel.id.takeIf { it.isNotEmpty() }?.let { modelId -> "$resolvedProvider/$modelId" to providerModel }
+                        }
+                    )
+                }
+            }?.toMap() ?: emptyMap()
             val providerModel = index[key] ?: index.entries
                 .filter { it.key.substringAfter('/') == model.modelId }
                 .takeIf { it.size == 1 }
@@ -340,12 +275,8 @@ data class AppState(
 @HiltViewModel
 class MainViewModel @Inject constructor(
     internal val repository: OpenCodeRepository,
-    private val settingsManager: SettingsManager,
-    private val voiceFlowClient: VoiceFlowClient,
-    private val microphone: VoiceFlowMicrophone,
-    private val hostProfileStore: HostProfileStore,
-    private val tunnelManager: TunnelManager,
-    private val sshKeyManager: SSHKeyManager
+    internal val settingsManager: SettingsManager,
+    private val hostProfileStore: HostProfileStore
 ) : ViewModel() {
 
     private val _state = MutableStateFlow(AppState())
@@ -353,12 +284,6 @@ class MainViewModel @Inject constructor(
 
     private var sseJob: Job? = null
     private var pollJob: Job? = null
-    private var speechHeartbeatJob: Job? = null
-    private var speechAudioLevelJob: Job? = null
-    private var speechSession: VoiceFlowSession? = null
-    private var speechExistingInput: String = ""
-    private var preservedSpeechAudio: VoiceFlowPreservedAudio? = null
-    private var preservedSpeechExistingInput: String = ""
     private var lastHealthCheckTime = 0L
 
     init {
@@ -380,7 +305,7 @@ class MainViewModel @Inject constructor(
 
     fun currentHostProfile(): HostProfile = hostProfileStore.currentProfile()
 
-    fun saveHostProfile(profile: HostProfile, basicAuthPassword: String? = null) {
+    fun saveHostProfile(profile: HostProfile, basicAuthPassword: String? = null, tunnelPassword: String? = null) {
         val normalized = if (profile.basicAuth != null) {
             profile.copy(basicAuth = profile.basicAuth.copy(passwordId = profile.id))
         } else {
@@ -389,6 +314,12 @@ class MainViewModel @Inject constructor(
         if (normalized.basicAuth != null) {
             settingsManager.setBasicAuthPassword(normalized.id, basicAuthPassword)
         }
+        // Handle tunnel password
+        if (!tunnelPassword.isNullOrBlank()) {
+            settingsManager.setTunnelPassword(profile.id, tunnelPassword)
+        } else if (profile.tunnelPasswordId != null) {
+            settingsManager.clearTunnelPassword(profile.id)
+        }
         hostProfileStore.save(normalized)
         refreshHostProfileState()
     }
@@ -396,7 +327,16 @@ class MainViewModel @Inject constructor(
     fun selectHostProfile(profileId: String) {
         viewModelScope.launch {
             val profile = hostProfileStore.select(profileId)
-            configureRepositoryForProfileAsync(profile)
+            _state.update { it.copy(
+                currentSessionId = null,
+                messages = emptyList(),
+                sessionStatuses = emptyMap(),
+                streamingPartTexts = emptyMap(),
+                streamingReasoningPart = null,
+                sessionTodos = emptyMap()
+            ) }
+            settingsManager.currentSessionId = null
+            configureRepositoryForProfile(profile)
             refreshHostProfileState()
             testConnection(force = true)
         }
@@ -410,7 +350,7 @@ class MainViewModel @Inject constructor(
     fun deleteHostProfile(profileId: String) {
         hostProfileStore.delete(profileId)
         val current = hostProfileStore.currentProfile()
-        configureRepositoryForProfile(current, startTunnel = false)
+        configureRepositoryForProfile(current)
         refreshHostProfileState()
     }
 
@@ -419,12 +359,6 @@ class MainViewModel @Inject constructor(
     }
 
     fun exportHostProfile(profile: HostProfile): String = hostProfileStore.exportJson(profile)
-
-    fun ensureSshPublicKey(): String = sshKeyManager.ensureKeyPair()
-
-    fun sshPublicKey(): String? = sshKeyManager.publicKey()
-
-    fun rotateSshKey(): String = sshKeyManager.rotateKey()
 
     private fun refreshHostProfileState() {
         _state.update {
@@ -435,42 +369,9 @@ class MainViewModel @Inject constructor(
         }
     }
 
-    private fun configureRepositoryForProfile(profile: HostProfile, startTunnel: Boolean) {
+    private fun configureRepositoryForProfile(profile: HostProfile) {
         val password = profile.basicAuth?.passwordId?.let { settingsManager.basicAuthPassword(it) }
-        if (profile.transport == HostTransport.SSH_TUNNEL && startTunnel) {
-            viewModelScope.launch { configureRepositoryForProfileAsync(profile) }
-            return
-        }
         repository.configure(profile.serverUrl, profile.basicAuth?.username, password)
-    }
-
-    private suspend fun configureRepositoryForProfileAsync(profile: HostProfile): Boolean {
-        val password = profile.basicAuth?.passwordId?.let { settingsManager.basicAuthPassword(it) }
-        val baseUrl = when (profile.transport) {
-            HostTransport.DIRECT -> profile.serverUrl
-            HostTransport.SSH_TUNNEL -> {
-                val ssh = profile.ssh ?: run {
-                    _state.update { it.copy(error = "SSH profile is missing tunnel settings") }
-                    return false
-                }
-                when (val result = tunnelManager.ensureStarted(ssh)) {
-                    is TunnelResult.Success -> result.localUrl
-                    is TunnelResult.Failure -> {
-                        _state.update {
-                            it.copy(
-                                isConnected = false,
-                                isConnecting = false,
-                                connectionPhase = result.phase.name,
-                                error = result.message
-                            )
-                        }
-                        return false
-                    }
-                }
-            }
-        }
-        repository.configure(baseUrl, profile.basicAuth?.username, password)
-        return true
     }
 
     fun getSavedConnectionSettings(): ConnectionFormSettings = ConnectionFormSettings(
@@ -479,244 +380,6 @@ class MainViewModel @Inject constructor(
         password = settingsManager.password ?: ""
     )
 
-    fun getAIBuilderSettings(): AIBuilderSettings = AIBuilderSettings(
-        baseURL = settingsManager.aiBuilderBaseURL,
-        token = settingsManager.aiBuilderToken,
-        customPrompt = settingsManager.aiBuilderCustomPrompt,
-        terminology = settingsManager.aiBuilderTerminology
-    )
-
-    fun saveAIBuilderSettings(settings: AIBuilderSettings) {
-        settingsManager.aiBuilderBaseURL = settings.baseURL
-        settingsManager.aiBuilderToken = settings.token
-        settingsManager.aiBuilderCustomPrompt = settings.customPrompt
-        settingsManager.aiBuilderTerminology = settings.terminology
-        _state.update { it.copy(aiBuilderConnectionOK = false, aiBuilderConnectionError = null) }
-        settingsManager.aiBuilderLastOKSignature = null
-    }
-
-    fun testAIBuilderConnection() {
-        launchAIBuilderConnectionTest(viewModelScope, settingsManager, voiceFlowClient, _state)
-    }
-
-    fun toggleRecording() {
-        val currentState = _state.value
-        val speechConfig = currentSpeechInputConfig(settingsManager)
-        Log.d(
-            TAG,
-            "toggleRecording clicked: recording=${currentState.isRecording}, transcribing=${currentState.isTranscribing}, aiBuilderOK=${currentState.aiBuilderConnectionOK}, tokenSet=${speechConfig.token.isNotEmpty()}"
-        )
-        if (currentState.isTranscribing) {
-            Log.w(TAG, "Ignoring toggle while transcription is in progress")
-            _state.update {
-                it.copy(speechError = "Still transcribing previous audio, please wait.")
-            }
-            return
-        }
-        if (currentState.isRecording) {
-            val session = speechSession
-            // Stop PCM capture first so no further chunks race the commit.
-            viewModelScope.launch { microphone.stop() }
-            stopSpeechAudioLevelConsumer()
-            speechHeartbeatJob?.cancel()
-            speechHeartbeatJob = null
-            _state.update { it.copy(isRecording = false, isTranscribing = true) }
-            if (session == null) {
-                Log.e(TAG, "Realtime speech session is missing on stop")
-                _state.update { it.copy(isTranscribing = false, speechError = "Recording failed: realtime session missing") }
-                return
-            }
-            launchRealtimeSpeechStop(
-                scope = viewModelScope,
-                state = _state,
-                session = session,
-                existingInput = speechExistingInput,
-                tag = TAG,
-                shouldApply = { speechSession === session },
-                terminateSession = ::terminateSpeechSession,
-            ) {
-                speechSession = null
-            }
-        } else {
-            if (speechConfig.token.isEmpty()) {
-                Log.w(TAG, "Speech start blocked: missing AI Builder token")
-                _state.update {
-                    it.copy(speechError = "Speech recognition requires an AI Builder token. Configure it in Settings.")
-                }
-                return
-            }
-            if (!currentState.aiBuilderConnectionOK) {
-                Log.w(TAG, "Speech start blocked: AI Builder connection test has not passed")
-                _state.update {
-                    it.copy(speechError = "AI Builder connection test has not passed. Please test in Settings first.")
-                }
-                return
-            }
-            speechExistingInput = currentState.inputText
-            viewModelScope.launch {
-                try {
-                    // Refresh the library config with the latest endpoint/token/prompt/
-                    // terms before opening the session, then start the realtime session.
-                    voiceFlowClient.updateConfig(
-                        VoiceFlowConfig(
-                            endpoint = speechConfig.baseURL.ifEmpty { VoiceFlowConfig.DEFAULT_ENDPOINT },
-                            tokenProvider = { speechConfig.token },
-                            prompt = speechConfig.prompt.ifEmpty { null },
-                            terms = speechConfig.terms,
-                        )
-                    )
-                    clearPreservedSpeechAudio()
-                    val session = voiceFlowClient.startSession()
-                    speechSession = session
-                    startSpeechAudioLevelConsumer()
-
-                    // Stream PCM16/24kHz/mono chunks from the mic into the session. The
-                    // library owns cache replay + WS recovery internally.
-                    microphone.start { chunk ->
-                        viewModelScope.launch { session.sendAudioChunk(chunk) }
-                    }
-
-                    speechHeartbeatJob?.cancel()
-                    speechHeartbeatJob = viewModelScope.launch {
-                        while (true) {
-                            delay(SPEECH_HEARTBEAT_INTERVAL_SECONDS * 1000L)
-                            session.ping()
-                        }
-                    }
-                    Log.d(TAG, "Realtime recording started")
-                    _state.update { it.copy(isRecording = true) }
-                } catch (e: Exception) {
-                    Log.e(TAG, "Failed to start recording", e)
-                    runCatching { microphone.stop() }
-                    stopSpeechAudioLevelConsumer()
-                    speechSession?.let { session ->
-                        runCatching { terminateSpeechSession(session) }
-                    }
-                    speechSession = null
-                    speechHeartbeatJob?.cancel()
-                    speechHeartbeatJob = null
-                    _state.update {
-                        it.copy(
-                            isRecording = false,
-                            speechError = "Failed to start recording: ${errorMessageOrFallback(e, "unknown error")}"
-                        )
-                    }
-                }
-            }
-        }
-    }
-
-    private suspend fun terminateSpeechSession(session: VoiceFlowSession) {
-        try {
-            session.abortPreservingAudio()?.let { voiceFlowClient.discardPreservedAudio(it) }
-        } catch (error: Exception) {
-            Log.e(TAG, "Failed to terminate speech session", error)
-        }
-    }
-
-    fun stopSpeechForBackground() {
-        val session = speechSession
-        speechHeartbeatJob?.cancel()
-        speechHeartbeatJob = null
-        stopSpeechAudioLevelConsumer()
-        speechSession = null
-        _state.update { it.copy(isRecording = false, isTranscribing = false, speechAudioLevel = 0f) }
-        viewModelScope.launch {
-            runCatching { microphone.stop() }
-            if (session != null) {
-                terminateSpeechSession(session)
-            }
-        }
-    }
-
-    fun clearSpeechError() {
-        _state.update { it.copy(speechError = null) }
-    }
-
-    fun abortSpeechRecognition() {
-        val session = speechSession ?: return
-        val prefix = speechExistingInput
-        speechHeartbeatJob?.cancel()
-        speechHeartbeatJob = null
-        stopSpeechAudioLevelConsumer()
-        speechSession = null
-        _state.update { it.copy(isRecording = false, isTranscribing = false, speechAudioLevel = 0f) }
-        viewModelScope.launch {
-            runCatching { microphone.stop() }
-            try {
-                val preserved = session.abortPreservingAudio()
-                clearPreservedSpeechAudio()
-                if (preserved != null) {
-                    preservedSpeechAudio = preserved
-                    preservedSpeechExistingInput = prefix
-                    _state.update { it.copy(hasPreservedSpeechAudio = true) }
-                }
-            } catch (error: Exception) {
-                Log.e(TAG, "Failed to abort speech recognition", error)
-                _state.update { it.copy(speechError = errorMessageOrFallback(error, "Failed to abort speech recognition")) }
-            }
-        }
-    }
-
-    fun retryPreservedSpeechAudio() {
-        val preserved = preservedSpeechAudio ?: return
-        val prefix = preservedSpeechExistingInput
-        _state.update { it.copy(isRetryingSpeech = true) }
-        viewModelScope.launch {
-            try {
-                val result = voiceFlowClient.transcribe(preserved) { partial ->
-                    _state.update { it.copy(inputText = mergedSpeechInput(prefix, partial)) }
-                }
-                _state.update {
-                    it.copy(
-                        inputText = mergedSpeechInput(prefix, result.text),
-                        isRetryingSpeech = false,
-                    )
-                }
-                clearPreservedSpeechAudio()
-            } catch (error: Exception) {
-                Log.e(TAG, "Failed to retry preserved speech audio", error)
-                _state.update {
-                    it.copy(
-                        isRetryingSpeech = false,
-                        speechError = errorMessageOrFallback(error, "Transcription failed"),
-                    )
-                }
-            }
-        }
-    }
-
-    private fun clearPreservedSpeechAudio() {
-        preservedSpeechAudio?.let { voiceFlowClient.discardPreservedAudio(it) }
-        preservedSpeechAudio = null
-        preservedSpeechExistingInput = ""
-        _state.update { it.copy(hasPreservedSpeechAudio = false) }
-    }
-
-    fun discardPreservedSpeechAudio() {
-        clearPreservedSpeechAudio()
-    }
-
-    private fun startSpeechAudioLevelConsumer() {
-        speechAudioLevelJob?.cancel()
-        _state.update { it.copy(speechAudioLevel = 0f) }
-        speechAudioLevelJob = viewModelScope.launch {
-            microphone.audioLevel.collect { level ->
-                _state.update { it.copy(speechAudioLevel = level.coerceIn(0f, 1f)) }
-            }
-        }
-    }
-
-    private fun stopSpeechAudioLevelConsumer() {
-        speechAudioLevelJob?.cancel()
-        speechAudioLevelJob = null
-        _state.update { it.copy(speechAudioLevel = 0f) }
-    }
-
-    fun setSpeechError(message: String) {
-        _state.update { it.copy(speechError = message) }
-    }
-
     fun testConnection(force: Boolean = false) {
         val now = System.currentTimeMillis()
         if (!force && now - lastHealthCheckTime < 30_000) return
@@ -724,7 +387,7 @@ class MainViewModel @Inject constructor(
         viewModelScope.launch {
             _state.update { it.copy(isConnecting = true, error = null, connectionPhase = null) }
             val profile = hostProfileStore.currentProfile()
-            if (!configureRepositoryForProfileAsync(profile)) return@launch
+            configureRepositoryForProfile(profile)
             repository.checkHealth()
                 .onSuccess { health ->
                     _state.update {
@@ -766,6 +429,7 @@ class MainViewModel @Inject constructor(
             scope = viewModelScope,
             repository = repository,
             state = _state,
+            settingsManager = settingsManager,
             onSelectSession = ::selectSession,
             onLoadSessionStatus = ::loadSessionStatus,
             onLoadMessages = { sessionId -> loadMessages(sessionId) }
@@ -787,8 +451,13 @@ class MainViewModel @Inject constructor(
 
     fun selectSession(sessionId: String) {
         selectSessionState(_state, settingsManager, sessionId)
+        // Sync the repository's workdir context to the selected session so that
+        // directory-scoped requests (files, prompt, create) target the right cwd.
+        syncCurrentDirectoryForSession(_state, repository, sessionId)
         loadMessages(sessionId)
         loadSessionStatus()
+        // Update MRU: move selected session to front, deduplicate, cap at 8
+        settingsManager.recentSessionIds = (listOf(sessionId) + settingsManager.recentSessionIds).distinct().take(8)
     }
 
     fun loadMessages(sessionId: String, resetLimit: Boolean = true) {
@@ -809,7 +478,16 @@ class MainViewModel @Inject constructor(
         viewModelScope.launch {
             repository.getAgents()
                 .onSuccess { agents ->
-                    _state.update { it.copy(agents = agents) }
+                    val currentAgent = _state.value.selectedAgentName
+                    val validAgent = if (agents.none { it.name == currentAgent }) {
+                        "build"
+                    } else {
+                        currentAgent
+                    }
+                    _state.update { it.copy(agents = agents, selectedAgentName = validAgent) }
+                    if (validAgent != currentAgent) {
+                        settingsManager.selectedAgentName = validAgent
+                    }
                 }
                 .onFailure { error ->
                     reportNonFatalIssue(TAG, "Failed to load agents", error)
@@ -827,12 +505,22 @@ class MainViewModel @Inject constructor(
         launchCreateSession(viewModelScope, repository, _state, title, ::selectSession)
     }
 
-    fun forkSession(sessionId: String, messageId: String?) {
-        launchForkSession(viewModelScope, repository, _state, sessionId, messageId, ::selectSession)
+    fun createSessionInWorkdir(workdir: String) {
+        viewModelScope.launch {
+            repository.setCurrentDirectory(workdir)
+            repository.createSession(title = null)
+                .onSuccess { session ->
+                    _state.update { it.copy(sessions = listOf(session) + it.sessions) }
+                    selectSession(session.id)
+                }
+                .onFailure { error ->
+                    _state.update { it.copy(error = "Failed to create session in $workdir: ${error.message}") }
+                }
+        }
     }
 
-    fun updateSessionTitle(sessionId: String, title: String) {
-        launchUpdateSessionTitle(viewModelScope, repository, _state, sessionId, title)
+    fun forkSession(sessionId: String, messageId: String?) {
+        launchForkSession(viewModelScope, repository, _state, sessionId, messageId, ::selectSession)
     }
 
     fun archiveSession(sessionId: String) {
@@ -857,7 +545,7 @@ class MainViewModel @Inject constructor(
         _state.update { state -> state.copy(sendingSessionIds = state.sendingSessionIds + sessionId) }
 
         val agent = _state.value.selectedAgentName
-        val model = buildSelectedModel(_state.value)
+        val model: Message.ModelInfo? = null
         val currentSession = _state.value.currentSession
 
         fun dispatchSend() {
@@ -973,13 +661,6 @@ class MainViewModel @Inject constructor(
         }
     }
 
-    fun selectModel(index: Int) {
-        val clamped = index.coerceIn(0, ModelPresets.list.size - 1)
-        settingsManager.selectedModelIndex = clamped
-        _state.update { it.copy(selectedModelIndex = clamped) }
-        _state.value.currentSessionId?.let { settingsManager.setModelForSession(it, clamped) }
-    }
-
     fun setThemeMode(mode: ThemeMode) {
         settingsManager.themeMode = mode
         _state.update { it.copy(themeMode = mode) }
@@ -988,6 +669,11 @@ class MainViewModel @Inject constructor(
     fun setLanguageMode(mode: LanguageMode) {
         settingsManager.languageMode = mode
         _state.update { it.copy(languageMode = mode) }
+    }
+
+    fun setMarkdownFontSizes(sizes: MarkdownFontSizes) {
+        settingsManager.markdownFontSizes = sizes
+        _state.update { it.copy(markdownFontSizes = sizes) }
     }
 
     fun respondPermission(sessionId: String, permissionId: String, response: PermissionResponse) {
@@ -1061,6 +747,42 @@ class MainViewModel @Inject constructor(
         _state.update { it.copy(error = null) }
     }
 
+    fun refreshCurrentHost() {
+        testConnection(force = true)
+    }
+
+    fun activateTunnelForCurrentHost() {
+        val profile = hostProfileStore.currentProfile()
+        val passwordId = profile.tunnelPasswordId
+        if (passwordId == null) return
+        val password = settingsManager.getTunnelPassword(passwordId)
+        if (password.isNullOrBlank()) return
+
+        _state.update { it.copy(tunnelActivationState = TunnelActivationState.Loading) }
+        viewModelScope.launch {
+            repository.activateTunnel(profile.serverUrl, password)
+                .onSuccess {
+                    _state.update {
+                        it.copy(
+                            tunnelActivationState = TunnelActivationState.Success,
+                            error = "Tunnel activated"
+                        )
+                    }
+                    Log.d(TAG, "Tunnel activated successfully for ${profile.serverUrl}")
+                }
+                .onFailure { error ->
+                    val msg = errorMessageOrFallback(error, "Tunnel activation failed")
+                    _state.update {
+                        it.copy(
+                            tunnelActivationState = TunnelActivationState.Error(msg),
+                            error = "Tunnel activation failed: $msg"
+                        )
+                    }
+                    Log.e(TAG, "Tunnel activation failed", error)
+                }
+        }
+    }
+
     fun showFileInFiles(path: String, originRoute: String? = null) {
         _state.update { it.copy(filePathToShowInFiles = path, filePreviewOriginRoute = originRoute) }
     }
@@ -1094,17 +816,10 @@ class MainViewModel @Inject constructor(
     override fun onCleared() {
         sseJob?.cancel()
         pollJob?.cancel()
-        speechHeartbeatJob?.cancel()
-        microphone.discard()
-        runBlocking { speechSession?.let { terminateSpeechSession(it) } }
-        speechSession = null
         super.onCleared()
     }
 
     private companion object {
         private const val TAG = "MainViewModel"
-
-        /** Mirrors VoiceFlowKit's internal heartbeat cadence (12s ping). */
-        private const val SPEECH_HEARTBEAT_INTERVAL_SECONDS = 12L
     }
 }

@@ -1,6 +1,7 @@
 package com.yage.opencode_client.ui.chat
 
 import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -14,12 +15,12 @@ import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.automirrored.filled.Chat
 import androidx.compose.material.icons.filled.Checklist
-import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.automirrored.filled.List
 import androidx.compose.material.icons.filled.Settings
@@ -34,7 +35,6 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
-import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -51,13 +51,18 @@ import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import com.yage.opencode_client.R
+import com.yage.opencode_client.data.model.AgentInfo
+import com.yage.opencode_client.data.model.HostProfile
 import com.yage.opencode_client.data.model.Session
 import com.yage.opencode_client.data.model.SessionStatus
 import com.yage.opencode_client.data.model.TodoItem
 import com.yage.opencode_client.ui.AppState
+import com.yage.opencode_client.ui.TunnelActivationState
 import com.yage.opencode_client.ui.session.SessionList
 import com.yage.opencode_client.ui.theme.BrandGold
+import com.yage.opencode_client.ui.theme.BrandPrimary
 import java.util.Locale
 
 internal data class ChatTopBarState(
@@ -68,13 +73,20 @@ internal data class ChatTopBarState(
     val isLoadingMoreSessions: Boolean,
     val isRefreshingSessions: Boolean = false,
     val expandedSessionIds: Set<String> = emptySet(),
-    val availableModels: List<AppState.ModelOption>,
-    val selectedModelIndex: Int,
+    val agents: List<AgentInfo>,
+    val selectedAgentName: String,
     val contextUsage: AppState.ContextUsage?,
     val sessionTodos: List<TodoItem> = emptyList(),
     val showSettingsButton: Boolean = true,
-    val showNewSessionInTopBar: Boolean = true,
-    val showSessionListInTopBar: Boolean = true
+    val showSessionListInTopBar: Boolean = true,
+    val hostName: String = "",
+    val isConnected: Boolean = false,
+    val isConnecting: Boolean = false,
+    val connectionPhase: String? = null,
+    val hostProfiles: List<HostProfile> = emptyList(),
+    val currentHostProfileId: String? = null,
+    val tunnelActivationState: TunnelActivationState = TunnelActivationState.Idle,
+    val showTunnelAuth: Boolean = false
 )
 
 internal data class ChatTopBarActions(
@@ -86,9 +98,11 @@ internal data class ChatTopBarActions(
     val onLoadMoreSessions: () -> Unit,
     val onRefreshSessions: () -> Unit = {},
     val onToggleSessionExpanded: (String) -> Unit = {},
-    val onSelectModel: (Int) -> Unit,
+    val onSelectAgent: (String) -> Unit,
     val onNavigateToSettings: () -> Unit = {},
-    val onRenameSession: (String) -> Unit = {}
+    val onRefresh: () -> Unit = {},
+    val onSelectHost: (String) -> Unit = {},
+    val onActivateTunnel: () -> Unit = {}
 )
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -100,10 +114,10 @@ internal fun ChatTopBar(
 ) {
     val currentSession = state.sessions.find { it.id == state.currentSessionId }
     var showSessionSheet by remember { mutableStateOf(false) }
-    var showModelMenu by remember { mutableStateOf(false) }
-    var showRenameDialog by remember { mutableStateOf(false) }
+    var showAgentMenu by remember { mutableStateOf(false) }
     var showTodoDialog by remember { mutableStateOf(false) }
     var showContextDialog by remember { mutableStateOf(false) }
+    var showServerDialog by remember { mutableStateOf(false) }
 
     LaunchedEffect(showSessionSheet) {
         if (showSessionSheet) actions.onRefreshSessions()
@@ -153,33 +167,6 @@ internal fun ChatTopBar(
                         Spacer(modifier = Modifier.width(4.dp))
                     }
 
-                    IconButton(
-                        onClick = { showRenameDialog = true },
-                        modifier = Modifier.size(36.dp)
-                    ) {
-                        Icon(
-                            Icons.Default.Edit,
-                            contentDescription = stringResource(R.string.sessions_rename_title),
-                            modifier = Modifier.size(20.dp),
-                            tint = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                    }
-
-                    if (state.showNewSessionInTopBar) {
-                        Spacer(modifier = Modifier.width(4.dp))
-                        IconButton(
-                            onClick = actions.onCreateSession,
-                            modifier = Modifier.size(36.dp)
-                        ) {
-                            Icon(
-                                Icons.Default.Add,
-                                contentDescription = stringResource(R.string.sessions_new),
-                                modifier = Modifier.size(20.dp),
-                                tint = MaterialTheme.colorScheme.primary
-                            )
-                        }
-                    }
-
                 }
 
                 Spacer(modifier = Modifier.weight(1f))
@@ -188,9 +175,38 @@ internal fun ChatTopBar(
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(4.dp)
                 ) {
+                    // Server status indicator
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier
+                            .clickable { showServerDialog = true }
+                            .padding(horizontal = 8.dp, vertical = 4.dp)
+                    ) {
+                        val dotColor = when {
+                            state.isConnecting -> Color(0xFFFFA500)
+                            state.isConnected -> Color(0xFF4CAF50)
+                            state.connectionPhase == null -> MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.4f)
+                            else -> Color(0xFFF44336)
+                        }
+                        Text(
+                            text = "●",
+                            color = dotColor,
+                            fontSize = 10.sp,
+                            modifier = Modifier.padding(end = 4.dp)
+                        )
+                        Text(
+                            text = state.hostName,
+                            style = MaterialTheme.typography.labelSmall,
+                            fontWeight = FontWeight.Medium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
+
                     Box(modifier = Modifier.weight(1f, fill = false)) {
                         Surface(
-                            onClick = { showModelMenu = true },
+                            onClick = { showAgentMenu = true },
                             shape = RoundedCornerShape(50),
                             color = Color.Transparent,
                             border = BorderStroke(
@@ -203,7 +219,7 @@ internal fun ChatTopBar(
                                 modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp)
                             ) {
                                 Text(
-                                    text = state.availableModels.getOrNull(state.selectedModelIndex)?.shortName ?: stringResource(R.string.chat_model_fallback),
+                                    text = state.selectedAgentName,
                                     style = MaterialTheme.typography.labelSmall,
                                     fontWeight = FontWeight.SemiBold,
                                     color = MaterialTheme.colorScheme.primary,
@@ -211,41 +227,40 @@ internal fun ChatTopBar(
                                 )
                                 Icon(
                                     Icons.Default.KeyboardArrowDown,
-                                    contentDescription = stringResource(R.string.chat_switch_model),
+                                    contentDescription = "Switch agent",
                                     modifier = Modifier.size(14.dp),
                                     tint = MaterialTheme.colorScheme.primary
                                 )
                             }
                         }
                         DropdownMenu(
-                            expanded = showModelMenu,
-                            onDismissRequest = { showModelMenu = false }
+                            expanded = showAgentMenu,
+                            onDismissRequest = { showAgentMenu = false }
                         ) {
-                            if (state.availableModels.isEmpty()) {
+                            state.agents.forEach { agent ->
                                 DropdownMenuItem(
                                     text = {
-                                        Text(
-                                            stringResource(R.string.sessions_no_models),
-                                            color = MaterialTheme.colorScheme.outline
-                                        )
-                                    },
-                                    onClick = { }
-                                )
-                            }
-                            state.availableModels.forEachIndexed { index, model ->
-                                DropdownMenuItem(
-                                    text = {
-                                        Text(
-                                            model.displayName,
-                                            color = if (index == state.selectedModelIndex)
-                                                MaterialTheme.colorScheme.primary
-                                            else
-                                                MaterialTheme.colorScheme.onSurface
-                                        )
+                                        Row(verticalAlignment = Alignment.CenterVertically) {
+                                            Text(
+                                                agent.name,
+                                                color = if (agent.name == state.selectedAgentName)
+                                                    MaterialTheme.colorScheme.primary
+                                                else
+                                                    MaterialTheme.colorScheme.onSurface
+                                            )
+                                            if (!agent.description.isNullOrBlank()) {
+                                                Spacer(modifier = Modifier.width(8.dp))
+                                                Text(
+                                                    agent.description,
+                                                    style = MaterialTheme.typography.bodySmall,
+                                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                                )
+                                            }
+                                        }
                                     },
                                     onClick = {
-                                        actions.onSelectModel(index)
-                                        showModelMenu = false
+                                        actions.onSelectAgent(agent.name)
+                                        showAgentMenu = false
                                     }
                                 )
                             }
@@ -348,45 +363,6 @@ internal fun ChatTopBar(
         }
     }
 
-    if (showRenameDialog) {
-        var renameText by remember(currentSession?.id) {
-            mutableStateOf(
-                currentSession?.title
-                    ?: currentSession?.directory?.split("/")?.lastOrNull()
-                    ?: ""
-            )
-        }
-        AlertDialog(
-            onDismissRequest = { showRenameDialog = false },
-            title = { Text(stringResource(R.string.sessions_rename_title)) },
-            text = {
-                OutlinedTextField(
-                    value = renameText,
-                    onValueChange = { renameText = it },
-                    label = { Text(stringResource(R.string.sessions_title_label)) },
-                    singleLine = true
-                )
-            },
-            confirmButton = {
-                TextButton(
-                    onClick = {
-                        if (renameText.isNotBlank()) {
-                            actions.onRenameSession(renameText.trim())
-                        }
-                        showRenameDialog = false
-                    }
-                ) {
-                    Text(stringResource(R.string.sessions_rename_action))
-                }
-            },
-            dismissButton = {
-                TextButton(onClick = { showRenameDialog = false }) {
-                    Text(stringResource(R.string.common_cancel))
-                }
-            }
-        )
-    }
-
     if (showTodoDialog) {
         AlertDialog(
             onDismissRequest = { showTodoDialog = false },
@@ -409,6 +385,22 @@ internal fun ChatTopBar(
         ContextUsageDialog(
             usage = state.contextUsage,
             onDismiss = { showContextDialog = false }
+        )
+    }
+
+    if (showServerDialog) {
+        ServerManagementDialog(
+            hostProfiles = state.hostProfiles,
+            currentHostProfileId = state.currentHostProfileId,
+            tunnelActivationState = state.tunnelActivationState,
+            showTunnelAuth = state.showTunnelAuth,
+            onSelectHost = { profileId ->
+                actions.onSelectHost(profileId)
+                showServerDialog = false
+            },
+            onRefresh = { actions.onRefresh() },
+            onActivateTunnel = { actions.onActivateTunnel() },
+            onDismiss = { showServerDialog = false }
         )
     }
 }
@@ -445,6 +437,113 @@ private fun ContextUsageDialog(
                     }
                     ContextUsageSection(stringResource(R.string.chat_context_cost)) {
                         ContextUsageRow(stringResource(R.string.chat_context_cost), usage.cost?.let { "$" + String.format(Locale.US, "%.4f", it) } ?: stringResource(R.string.chat_context_no_cost))
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = onDismiss) {
+                Text(stringResource(R.string.common_done))
+            }
+        }
+    )
+}
+
+@Composable
+private fun ServerManagementDialog(
+    hostProfiles: List<HostProfile>,
+    currentHostProfileId: String?,
+    tunnelActivationState: TunnelActivationState,
+    showTunnelAuth: Boolean,
+    onSelectHost: (String) -> Unit,
+    onRefresh: () -> Unit,
+    onActivateTunnel: () -> Unit,
+    onDismiss: () -> Unit
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Servers") },
+        text = {
+            Column(
+                modifier = Modifier
+                    .heightIn(max = 400.dp)
+                    .verticalScroll(rememberScrollState())
+            ) {
+                if (hostProfiles.isEmpty()) {
+                    Text(
+                        "No hosts configured",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                } else {
+                    hostProfiles.forEach { profile ->
+                        val isSelected = profile.id == currentHostProfileId
+                        Surface(
+                            onClick = { onSelectHost(profile.id) },
+                            shape = RoundedCornerShape(8.dp),
+                            color = if (isSelected) BrandPrimary.copy(alpha = 0.1f) else Color.Transparent,
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Column(
+                                modifier = Modifier.padding(12.dp),
+                                verticalArrangement = Arrangement.spacedBy(2.dp)
+                            ) {
+                                Text(
+                                    text = profile.name,
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal,
+                                    color = if (isSelected) BrandPrimary else MaterialTheme.colorScheme.onSurface
+                                )
+                                Text(
+                                    text = profile.serverUrl,
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                        }
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(12.dp))
+
+                Row(
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Button(
+                        onClick = onRefresh,
+                        modifier = Modifier.weight(1f),
+                        shape = RoundedCornerShape(8.dp),
+                        colors = androidx.compose.material3.ButtonDefaults.buttonColors(
+                            containerColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.1f),
+                            contentColor = MaterialTheme.colorScheme.primary
+                        )
+                    ) {
+                        Text("Refresh")
+                    }
+
+                    if (showTunnelAuth) {
+                        val isActivating = tunnelActivationState is TunnelActivationState.Loading
+                        Button(
+                            onClick = onActivateTunnel,
+                            enabled = !isActivating,
+                            modifier = Modifier.weight(1f),
+                            shape = RoundedCornerShape(8.dp),
+                            colors = androidx.compose.material3.ButtonDefaults.buttonColors(
+                                containerColor = BrandPrimary.copy(alpha = 0.1f),
+                                contentColor = BrandPrimary
+                            )
+                        ) {
+                            if (isActivating) {
+                                CircularProgressIndicator(
+                                    modifier = Modifier.size(16.dp),
+                                    strokeWidth = 2.dp,
+                                    color = BrandPrimary
+                                )
+                            } else {
+                                Text("Activate Tunnel")
+                            }
+                        }
                     }
                 }
             }

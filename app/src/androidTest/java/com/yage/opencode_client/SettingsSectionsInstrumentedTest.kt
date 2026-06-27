@@ -2,23 +2,13 @@ package com.yage.opencode_client
 
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.ui.test.assertIsDisplayed
-import androidx.compose.ui.test.assertIsEnabled
-import androidx.compose.ui.test.assertIsNotEnabled
-import androidx.compose.ui.test.assertCountEquals
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onNodeWithText
-import androidx.compose.ui.test.onAllNodesWithText
-import androidx.compose.ui.test.onNodeWithTag
-import androidx.compose.ui.test.performClick
 import com.yage.opencode_client.data.model.HostProfile
-import com.yage.opencode_client.data.model.HostTransport
-import com.yage.opencode_client.data.model.SshTunnelConfig
 import com.yage.opencode_client.ui.AppState
 import com.yage.opencode_client.ui.settings.ConnectionProfileSection
-import com.yage.opencode_client.ui.settings.DevicePublicKeySection
 import com.yage.opencode_client.ui.settings.HostProfileDetailDialog
 import com.yage.opencode_client.ui.settings.HostProfileEditorDialog
-import com.yage.opencode_client.ui.settings.SpeechRecognitionSection
 import org.junit.Rule
 import org.junit.Test
 
@@ -27,66 +17,11 @@ class SettingsSectionsInstrumentedTest {
     val composeRule = createComposeRule()
 
     @Test
-    fun speechSectionDisablesActionsWhenBaseUrlIsBlank() {
-        composeRule.setContent {
-            MaterialTheme {
-                SpeechRecognitionSection(
-                    state = AppState(),
-                    aiBuilderBaseURL = "",
-                    aiBuilderToken = "",
-                    aiBuilderCustomPrompt = "",
-                    aiBuilderTerminology = "",
-                    showAIBuilderToken = false,
-                    onBaseUrlChange = {},
-                    onTokenChange = {},
-                    onPromptChange = {},
-                    onTerminologyChange = {},
-                    onToggleTokenVisibility = {},
-                    onTestConnection = {},
-                    onSave = {}
-                )
-            }
-        }
-
-        composeRule.onNodeWithText("Test Connection").assertIsNotEnabled()
-        composeRule.onNodeWithText("Save").assertIsNotEnabled()
-    }
-
-    @Test
-    fun speechSectionShowsSuccessResultAndEnablesActionsWhenConfigured() {
-        composeRule.setContent {
-            MaterialTheme {
-                SpeechRecognitionSection(
-                    state = AppState(aiBuilderConnectionOK = true),
-                    aiBuilderBaseURL = "https://builder.example.com",
-                    aiBuilderToken = "token",
-                    aiBuilderCustomPrompt = "",
-                    aiBuilderTerminology = "",
-                    showAIBuilderToken = false,
-                    onBaseUrlChange = {},
-                    onTokenChange = {},
-                    onPromptChange = {},
-                    onTerminologyChange = {},
-                    onToggleTokenVisibility = {},
-                    onTestConnection = {},
-                    onSave = {}
-                )
-            }
-        }
-
-        composeRule.onNodeWithText("Test Connection").assertIsEnabled()
-        composeRule.onNodeWithText("Save").assertIsEnabled()
-        composeRule.onNodeWithText("Connected successfully").assertIsDisplayed()
-    }
-
-    @Test
-    fun connectionProfileSectionShowsCurrentSshProfileSummary() {
+    fun connectionProfileSectionShowsCurrentProfileSummary() {
         val profile = HostProfile(
-            id = "ssh-1",
-            name = "VPS OpenCode",
-            transport = HostTransport.SSH_TUNNEL,
-            serverUrl = "http://127.0.0.1:4096",
-            ssh = SshTunnelConfig(host = "gateway.example.com", port = 8006, username = "opencode", remotePort = 19001)
+            id = "p1",
+            name = "OpenCode Server",
+            serverUrl = "https://opencode.example.com"
         )
 
         composeRule.setContent {
@@ -102,39 +37,13 @@ class SettingsSectionsInstrumentedTest {
             }
         }
 
-        composeRule.onNodeWithText("VPS OpenCode").assertIsDisplayed()
-        composeRule.onNodeWithText("gateway.example.com:8006 -> :19001").assertIsDisplayed()
-        composeRule.onNodeWithText("SSH Tunnel").assertIsDisplayed()
+        composeRule.onNodeWithText("OpenCode Server").assertIsDisplayed()
+        composeRule.onNodeWithText("https://opencode.example.com").assertIsDisplayed()
         composeRule.onNodeWithText("Manage Profiles").assertIsDisplayed()
     }
 
     @Test
-    fun hostProfileEditorShowsSshFieldsWithoutDeviceKeyBlock() {
-        val profile = HostProfile(
-            id = "ssh-1",
-            name = "VPS OpenCode",
-            transport = HostTransport.SSH_TUNNEL,
-            serverUrl = "http://127.0.0.1:4096",
-            ssh = SshTunnelConfig(host = "gateway.example.com", port = 8006, username = "opencode", remotePort = 19001)
-        )
-
-        composeRule.setContent {
-            MaterialTheme {
-                HostProfileEditorDialog(
-                    initial = profile,
-                    onDismiss = {},
-                    onSave = { _, _ -> },
-                )
-            }
-        }
-
-        composeRule.onNodeWithText("SSH gateway host").assertIsDisplayed()
-        composeRule.onNodeWithText("Assigned remote port").assertIsDisplayed()
-        composeRule.onAllNodesWithText("Device public key").assertCountEquals(0)
-    }
-
-    @Test
-    fun hostProfileEditorSwitchesBetweenDirectAndSshModes() {
+    fun hostProfileEditorShowsServerUrlAndAuthFields() {
         val profile = HostProfile.defaultDirect("http://localhost:4096")
 
         composeRule.setContent {
@@ -148,33 +57,14 @@ class SettingsSectionsInstrumentedTest {
         }
 
         composeRule.onNodeWithText("Server URL").assertIsDisplayed()
-        composeRule.onNodeWithTag("host.editor.transport.ssh").performClick()
-        composeRule.onNodeWithText("SSH gateway host").assertIsDisplayed()
-        composeRule.onNodeWithText("Copy Device Public Key").assertIsDisplayed()
     }
 
     @Test
-    fun devicePublicKeySectionIsGlobalToHostProfiles() {
-        composeRule.setContent {
-            MaterialTheme {
-                DevicePublicKeySection(copied = false, onCopy = {}, onRotate = {})
-            }
-        }
-
-        composeRule.onNodeWithText("Device Key").assertIsDisplayed()
-        composeRule.onNodeWithText("This Android device uses one SSH public key for all SSH Tunnel profiles.").assertIsDisplayed()
-        composeRule.onNodeWithTag("ssh.publicKey.copy").assertIsDisplayed()
-        composeRule.onNodeWithTag("ssh.publicKey.rotate").assertIsDisplayed()
-    }
-
-    @Test
-    fun hostProfileDetailShowsUseAndCopyActionsForSshProfile() {
+    fun hostProfileDetailShowsUseAndCopyActionsForProfile() {
         val profile = HostProfile(
-            id = "ssh-1",
-            name = "VPS OpenCode",
-            transport = HostTransport.SSH_TUNNEL,
-            serverUrl = "http://127.0.0.1:4096",
-            ssh = SshTunnelConfig(host = "gateway.example.com", port = 8006, username = "opencode", remotePort = 19001)
+            id = "p1",
+            name = "OpenCode Server",
+            serverUrl = "https://opencode.example.com"
         )
 
         composeRule.setContent {
@@ -186,7 +76,6 @@ class SettingsSectionsInstrumentedTest {
                     onUse = {},
                     onEdit = {},
                     onExport = {},
-                    onCopyPublicKey = {},
                     onTest = {}
                 )
             }
@@ -194,7 +83,5 @@ class SettingsSectionsInstrumentedTest {
 
         composeRule.onNodeWithText("Use This Host").assertIsDisplayed()
         composeRule.onNodeWithText("Copy Config JSON").assertIsDisplayed()
-        composeRule.onNodeWithText("Copy Device Public Key").assertIsDisplayed()
-        composeRule.onNodeWithText("Host: gateway.example.com").assertIsDisplayed()
     }
 }

@@ -6,27 +6,34 @@ import retrofit2.Response
 import retrofit2.http.*
 
 interface OpenCodeApi {
+    @Headers("X-Opencode-Skip-Dir: 1")
     @GET("global/health")
     suspend fun getHealth(): HealthResponse
 
+    @Headers("X-Opencode-Skip-Dir: 1")
     @GET("session")
     suspend fun getSessions(@Query("limit") limit: Int? = null): List<Session>
 
     @POST("session")
     suspend fun createSession(@Body body: CreateSessionRequest = CreateSessionRequest()): Session
 
+    @Headers("X-Opencode-Skip-Dir: 1")
     @GET("session/{id}")
     suspend fun getSession(@Path("id") sessionId: String): Session
 
+    @Headers("X-Opencode-Skip-Dir: 1")
     @PATCH("session/{id}")
     suspend fun updateSession(@Path("id") sessionId: String, @Body body: UpdateSessionRequest): Session
 
+    @Headers("X-Opencode-Skip-Dir: 1")
     @DELETE("session/{id}")
     suspend fun deleteSession(@Path("id") sessionId: String): Response<Unit>
 
+    @Headers("X-Opencode-Skip-Dir: 1")
     @GET("session/status")
     suspend fun getSessionStatus(): Map<String, SessionStatus>
 
+    @Headers("X-Opencode-Skip-Dir: 1")
     @GET("session/{id}/message")
     suspend fun getMessages(
         @Path("id") sessionId: String,
@@ -39,21 +46,25 @@ interface OpenCodeApi {
         @Body body: PromptRequest
     ): Response<Unit>
 
+    @Headers("X-Opencode-Skip-Dir: 1")
     @POST("session/{id}/abort")
     suspend fun abortSession(@Path("id") sessionId: String): Response<Unit>
 
+    @Headers("X-Opencode-Skip-Dir: 1")
     @POST("session/{id}/fork")
     suspend fun forkSession(
         @Path("id") sessionId: String,
         @Body body: ForkSessionRequest
     ): Session
 
+    @Headers("X-Opencode-Skip-Dir: 1")
     @POST("session/{id}/revert")
     suspend fun revertSession(
         @Path("id") sessionId: String,
         @Body body: RevertSessionRequest
     ): Session
 
+    @Headers("X-Opencode-Skip-Dir: 1")
     @POST("session/{id}/permissions/{permissionId}")
     suspend fun respondPermission(
         @Path("id") sessionId: String,
@@ -61,33 +72,43 @@ interface OpenCodeApi {
         @Body body: PermissionResponseRequest
     ): Response<Unit>
 
+    @Headers("X-Opencode-Skip-Dir: 1")
     @GET("permission")
     suspend fun getPendingPermissions(): List<PermissionRequest>
 
+    @Headers("X-Opencode-Skip-Dir: 1")
     @GET("question")
     suspend fun getPendingQuestions(): List<QuestionRequest>
 
+    @Headers("X-Opencode-Skip-Dir: 1")
     @POST("question/{requestId}/reply")
     suspend fun replyQuestion(
         @Path("requestId") requestId: String,
         @Body body: QuestionReplyRequest
     ): Response<Unit>
 
+    @Headers("X-Opencode-Skip-Dir: 1")
     @POST("question/{requestId}/reject")
     suspend fun rejectQuestion(@Path("requestId") requestId: String): Response<Unit>
 
+    @Headers("X-Opencode-Skip-Dir: 1")
     @GET("config/providers")
     suspend fun getProviders(): ProvidersResponse
 
+    @Headers("X-Opencode-Skip-Dir: 1")
     @GET("agent")
     suspend fun getAgents(): List<AgentInfo>
 
+    @Headers("X-Opencode-Skip-Dir: 1")
     @GET("session/{id}/diff")
     suspend fun getSessionDiff(@Path("id") sessionId: String): List<FileDiff>
 
+    @Headers("X-Opencode-Skip-Dir: 1")
     @GET("session/{id}/todo")
     suspend fun getSessionTodos(@Path("id") sessionId: String): List<TodoItem>
 
+    // file* endpoints deliberately omit Skip-Dir: they require the directory
+    // context to resolve the correct workdir.
     @GET("file")
     suspend fun getFileTree(@Query("path") path: String? = ""): List<FileNode>
 

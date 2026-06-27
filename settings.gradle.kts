@@ -19,8 +19,6 @@ dependencyResolutionManagement {
     repositories {
         google()
         mavenCentral()
-        // VoiceFlowKit is published from grapeot/voiceflow-android via JitPack.
-        maven { url = uri("https://jitpack.io") }
     }
 }
 

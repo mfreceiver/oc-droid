@@ -14,6 +14,7 @@ internal fun launchLoadSessions(
     scope: CoroutineScope,
     repository: OpenCodeRepository,
     state: MutableStateFlow<AppState>,
+    settingsManager: SettingsManager,
     onSelectSession: (String) -> Unit,
     onLoadSessionStatus: () -> Unit,
     onLoadMessages: (String) -> Unit
@@ -39,6 +40,9 @@ internal fun launchLoadSessions(
                         isRefreshingSessions = false
                     )
                 }
+                // Clean stale session IDs from MRU after sessions are loaded
+                val loadedSessionIds = state.value.sessions.map { s -> s.id }.toSet()
+                settingsManager.recentSessionIds = settingsManager.recentSessionIds.filter { it in loadedSessionIds }
                 val currentId = state.value.currentSessionId
                 val refreshedSessions = state.value.sessions
                 val hasCurrentSession = currentId != null && refreshedSessions.any { it.id == currentId }
@@ -162,6 +166,21 @@ internal fun selectSessionState(
     }
 }
 
+/**
+ * Sync the repository's workdir directory context to the selected session's
+ * directory. Looks up the session in the current state's session list so that
+ * subsequent directory-scoped requests (file ops, prompt, session creation)
+ * target the correct workdir. No-op when the session is not yet loaded.
+ */
+internal fun syncCurrentDirectoryForSession(
+    state: MutableStateFlow<AppState>,
+    repository: OpenCodeRepository,
+    sessionId: String
+) {
+    val directory = state.value.sessions.firstOrNull { it.id == sessionId }?.directory
+    repository.setCurrentDirectory(directory)
+}
+
 internal fun launchLoadMessages(
     scope: CoroutineScope,
     repository: OpenCodeRepository,
@@ -177,20 +196,13 @@ internal fun launchLoadMessages(
             .onSuccess { messages ->
                 if (sessionId == state.value.currentSessionId) {
                     val lastAssistant = messages.lastOrNull { it.info.isAssistant }
-                    val inferredModelIndex = lastAssistant?.info?.resolvedModel?.let { model ->
-                        ModelPresets.list.indexOfFirst {
-                            it.providerId == model.providerId && it.modelId == model.modelId
-                        }.takeIf { it >= 0 }
-                    }
                     val inferredAgentName = lastAssistant?.info?.agent
-                    val modelIndex = settingsManager?.getModelForSession(sessionId) ?: inferredModelIndex
                     val agentName = settingsManager?.getAgentForSession(sessionId) ?: inferredAgentName
                     state.update {
                         it.copy(
                             messages = messages,
                             messageLimit = limit,
                             isLoadingMessages = false,
-                            selectedModelIndex = modelIndex ?: it.selectedModelIndex,
                             selectedAgentName = agentName ?: it.selectedAgentName
                         )
                     }
@@ -326,26 +338,6 @@ internal fun launchForkSession(
     }
 }
 
-internal fun launchUpdateSessionTitle(
-    scope: CoroutineScope,
-    repository: OpenCodeRepository,
-    state: MutableStateFlow<AppState>,
-    sessionId: String,
-    title: String
-) {
-    scope.launch {
-        repository.updateSession(sessionId, title)
-            .onSuccess { updated ->
-                state.update {
-                    it.copy(sessions = it.sessions.map { session -> if (session.id == sessionId) updated else session })
-                }
-            }
-            .onFailure { error ->
-                state.update { it.copy(error = "Failed to update session: ${errorMessageOrFallback(error, "unknown error")}") }
-            }
-    }
-}
-
 internal fun launchSetSessionArchived(
     scope: CoroutineScope,
     repository: OpenCodeRepository,
@@ -406,15 +398,6 @@ internal fun launchDeleteSession(
             .onFailure { error ->
                 state.update { it.copy(error = "Failed to delete session: ${errorMessageOrFallback(error, "unknown error")}") }
             }
-    }
-}
-
-internal fun buildSelectedModel(state: AppState): Message.ModelInfo? {
-    val selectedModel = state.availableModels.getOrNull(state.selectedModelIndex)
-    return selectedModel?.let {
-        Message.ModelInfo(it.providerId, it.modelId)
-    } ?: state.providers?.default?.let {
-        Message.ModelInfo(it.providerId, it.modelId)
     }
 }
 

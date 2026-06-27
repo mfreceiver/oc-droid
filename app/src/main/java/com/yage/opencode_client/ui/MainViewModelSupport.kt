@@ -8,7 +8,6 @@ import com.yage.opencode_client.data.model.Session
 import com.yage.opencode_client.data.model.SessionStatus
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonPrimitive
-import java.security.MessageDigest
 
 private val lenientJson = Json { ignoreUnknownKeys = true }
 
@@ -35,28 +34,6 @@ internal data class MessagePartDeltaEvent(
     val partType: String,
     val delta: String?
 )
-
-/**
- * Strip surrounding/hidden whitespace (including zero-width and BOM) from a bearer
- * token. Previously lived on `AIBuildersAudioClient`; kept here as a UI-layer helper
- * after the audio pipeline moved into the VoiceFlowKit library.
- */
-internal fun sanitizeBearerToken(rawToken: String): String {
-    return rawToken
-        .trim()
-        .filterNot { ch ->
-            ch.isWhitespace() ||
-                Character.getType(ch) == Character.FORMAT.toInt() ||
-                ch == '﻿'
-        }
-}
-
-internal fun aiBuilderSignature(baseURL: String, token: String): String {
-    val input = "$baseURL|$token"
-    return MessageDigest.getInstance("SHA-256")
-        .digest(input.toByteArray())
-        .joinToString("") { "%02x".format(it) }
-}
 
 internal fun errorMessageOrFallback(throwable: Throwable?, fallback: String): String {
     Log.e("OC_ERROR", "error surfaced to UI", throwable)
@@ -179,13 +156,3 @@ internal fun reportNonFatalIssue(tag: String, message: String, throwable: Throwa
     }
 }
 
-internal fun mergedSpeechInput(prefix: String, transcript: String): String {
-    val cleaned = transcript.trim()
-    if (cleaned.isEmpty()) return prefix
-    if (prefix.isEmpty()) return cleaned
-    return "$prefix $cleaned"
-}
-
-internal fun speechFailureInput(existingInput: String, currentInput: String): String {
-    return currentInput.ifBlank { existingInput }
-}

@@ -1,0 +1,3 @@
+# Allow opencode/orchestrator to read deepwork session state
+!.slim/deepwork/
+!.slim/deepwork/**

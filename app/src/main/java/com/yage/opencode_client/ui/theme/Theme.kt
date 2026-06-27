@@ -7,6 +7,7 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.ui.Modifier
 
 // Quiet Tech color schemes. Dynamic color (Material You) is deliberately NOT
@@ -63,19 +64,22 @@ private val LightColorScheme = lightColorScheme(
 @Composable
 fun OpenCodeTheme(
     darkTheme: Boolean = isSystemInDarkTheme(),
+    markdownFontSizes: MarkdownFontSizes = MarkdownFontSizes(),
     content: @Composable () -> Unit
 ) {
     val colorScheme = if (darkTheme) DarkColorScheme else LightColorScheme
 
-    MaterialTheme(
-        colorScheme = colorScheme,
-        typography = Typography
-    ) {
-        Surface(
-            modifier = Modifier.fillMaxSize(),
-            color = colorScheme.background
+    CompositionLocalProvider(LocalMarkdownFontSizes provides markdownFontSizes) {
+        MaterialTheme(
+            colorScheme = colorScheme,
+            typography = Typography
         ) {
-            content()
+            Surface(
+                modifier = Modifier.fillMaxSize(),
+                color = colorScheme.background
+            ) {
+                content()
+            }
         }
     }
 }

@@ -5,14 +5,10 @@ import com.yage.opencode_client.data.model.Session
 import com.yage.opencode_client.data.model.HostProfile
 import com.yage.opencode_client.data.repository.HostProfileStore
 import com.yage.opencode_client.data.repository.OpenCodeRepository
-import com.yage.opencode_client.ssh.SSHKeyManager
-import com.yage.opencode_client.ssh.TunnelManager
 import com.yage.opencode_client.ui.AppState
 import com.yage.opencode_client.ui.MainViewModel
 import com.yage.opencode_client.util.SettingsManager
 import com.yage.opencode_client.util.ThemeMode
-import com.yage.voiceflowkit.VoiceFlowClient
-import com.yage.voiceflowkit.VoiceFlowMicrophone
 import io.mockk.coEvery
 import io.mockk.coVerify
 import io.mockk.every
@@ -43,11 +39,7 @@ class ForkSessionTest {
 
     private lateinit var repository: OpenCodeRepository
     private lateinit var settingsManager: SettingsManager
-    private lateinit var voiceFlowClient: VoiceFlowClient
-    private lateinit var microphone: VoiceFlowMicrophone
     private lateinit var hostProfileStore: HostProfileStore
-    private lateinit var tunnelManager: TunnelManager
-    private lateinit var sshKeyManager: SSHKeyManager
 
     @Before
     fun setUp() {
@@ -59,11 +51,7 @@ class ForkSessionTest {
 
         repository = mockk(relaxed = true)
         settingsManager = mockk(relaxed = true)
-        voiceFlowClient = mockk(relaxed = true)
-        microphone = mockk(relaxed = true)
         hostProfileStore = mockk(relaxed = true)
-        tunnelManager = mockk(relaxed = true)
-        sshKeyManager = mockk(relaxed = true)
 
         val defaultProfile = HostProfile.defaultDirect("http://server.test")
         every { hostProfileStore.currentProfile() } returns defaultProfile
@@ -73,34 +61,18 @@ class ForkSessionTest {
         every { settingsManager.username } returns null
         every { settingsManager.password } returns null
         every { settingsManager.currentSessionId } returns null
-        every { settingsManager.selectedModelIndex } returns 0
         every { settingsManager.selectedAgentName } returns null
         every { settingsManager.themeMode } returns ThemeMode.SYSTEM
-        every { settingsManager.aiBuilderBaseURL } returns "https://space.ai-builders.com/backend"
-        every { settingsManager.aiBuilderToken } returns ""
-        every { settingsManager.aiBuilderCustomPrompt } returns ""
-        every { settingsManager.aiBuilderTerminology } returns ""
-        every { settingsManager.aiBuilderLastOKSignature } returns null
-        every { settingsManager.aiBuilderLastOKTestedAt } returns 0L
 
         every { settingsManager.serverUrl = any() } just runs
         every { settingsManager.username = any() } just runs
         every { settingsManager.password = any() } just runs
         every { settingsManager.currentSessionId = any() } just runs
-        every { settingsManager.selectedModelIndex = any() } just runs
         every { settingsManager.selectedAgentName = any() } just runs
         every { settingsManager.themeMode = any() } just runs
-        every { settingsManager.aiBuilderBaseURL = any() } just runs
-        every { settingsManager.aiBuilderToken = any() } just runs
-        every { settingsManager.aiBuilderCustomPrompt = any() } just runs
-        every { settingsManager.aiBuilderTerminology = any() } just runs
-        every { settingsManager.aiBuilderLastOKSignature = any() } just runs
-        every { settingsManager.aiBuilderLastOKTestedAt = any() } just runs
 
         every { settingsManager.getDraftText(any()) } returns ""
         every { settingsManager.setDraftText(any(), any()) } just runs
-        every { settingsManager.getModelForSession(any()) } returns null
-        every { settingsManager.setModelForSession(any(), any()) } just runs
         every { settingsManager.getAgentForSession(any()) } returns null
         every { settingsManager.setAgentForSession(any(), any()) } just runs
 
@@ -116,7 +88,7 @@ class ForkSessionTest {
     }
 
     private fun createViewModel(): MainViewModel {
-        return MainViewModel(repository, settingsManager, voiceFlowClient, microphone, hostProfileStore, tunnelManager, sshKeyManager)
+        return MainViewModel(repository, settingsManager, hostProfileStore)
     }
 
     @Test

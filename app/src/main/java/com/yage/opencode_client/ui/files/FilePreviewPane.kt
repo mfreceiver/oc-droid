@@ -53,7 +53,8 @@ import com.yage.opencode_client.R
 import com.mikepenz.markdown.m3.Markdown
 import com.yage.opencode_client.data.model.FileContent
 import com.yage.opencode_client.data.repository.OpenCodeRepository
-import com.yage.opencode_client.ui.theme.markdownTypographyCompact
+import com.yage.opencode_client.ui.theme.LocalMarkdownFontSizes
+import com.yage.opencode_client.ui.theme.markdownTypography
 import com.yage.opencode_client.ui.util.DataUriImageTransformer
 import com.yage.opencode_client.ui.util.HttpImageHolder
 import com.yage.opencode_client.ui.util.MarkdownImageResolver
@@ -198,9 +199,10 @@ private fun PreviewMarkdown(
         contentPadding = PaddingValues(16.dp)
     ) {
         item {
+            val fontSizes = LocalMarkdownFontSizes.current
             Markdown(
                 content = resolvedContent ?: normalizedContent,
-                typography = markdownTypographyCompact(),
+                typography = markdownTypography(fontSizes),
                 modifier = Modifier.fillMaxWidth(),
                 imageTransformer = DataUriImageTransformer
             )

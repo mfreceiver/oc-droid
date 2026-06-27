@@ -10,25 +10,23 @@ import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.FileDownload
+import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.MoreVert
+import androidx.compose.material.icons.filled.Visibility
+import androidx.compose.material.icons.filled.VisibilityOff
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
-import androidx.compose.material3.Card
-import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
-import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.SingleChoiceSegmentedButtonRow
-import androidx.compose.material3.SegmentedButton
-import androidx.compose.material3.SegmentedButtonDefaults
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -40,14 +38,14 @@ import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.text.input.PasswordVisualTransformation
+import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.yage.opencode_client.R
 import com.yage.opencode_client.data.model.BasicAuthConfig
 import com.yage.opencode_client.data.model.HostProfile
-import com.yage.opencode_client.data.model.HostTransport
-import com.yage.opencode_client.data.model.SshTunnelConfig
 import com.yage.opencode_client.ui.MainViewModel
 import kotlinx.coroutines.delay
 
@@ -58,19 +56,10 @@ fun SettingsScreen(
     onBack: (() -> Unit)? = null
 ) {
     val state by viewModel.state.collectAsStateWithLifecycle()
-    val savedAIBuilder = remember(viewModel) { viewModel.getAIBuilderSettings() }
 
     var showHostProfiles by remember { mutableStateOf(false) }
     var isTesting by remember { mutableStateOf(false) }
     var testResult by remember { mutableStateOf<TestResult?>(null) }
-    var aiBuilderBaseURL by remember { mutableStateOf(savedAIBuilder.baseURL) }
-    var aiBuilderToken by remember { mutableStateOf(savedAIBuilder.token) }
-    var aiBuilderCustomPrompt by remember { mutableStateOf(savedAIBuilder.customPrompt) }
-    var aiBuilderTerminology by remember { mutableStateOf(savedAIBuilder.terminology) }
-    var showAIBuilderToken by remember { mutableStateOf(false) }
-    // Independent "Settings saved" notice for the Speech section, so it shows in
-    // its own section rather than reusing the server section's testResult.
-    var aiBuilderSaveMessage by remember { mutableStateOf<String?>(null) }
 
     LaunchedEffect(state.isConnecting) {
         if (!state.isConnecting && isTesting) {
@@ -86,19 +75,12 @@ fun SettingsScreen(
         }
     }
 
-    // Auto-dismiss the transient "Settings saved" notices after a short delay,
-    // for both the server and speech sections. Connection results (success/error)
-    // stay until the user changes a field.
+    // Auto-dismiss the transient "Settings saved" notice after a short delay.
+    // Connection results (success/error) stay until the user changes a field.
     LaunchedEffect(testResult) {
         if (testResult?.message == "Settings saved") {
             delay(2000)
             testResult = null
-        }
-    }
-    LaunchedEffect(aiBuilderSaveMessage) {
-        if (aiBuilderSaveMessage != null) {
-            delay(2000)
-            aiBuilderSaveMessage = null
         }
     }
 
@@ -154,58 +136,6 @@ fun SettingsScreen(
 
             SettingsSectionDivider()
 
-            SpeechRecognitionSection(
-                state = state,
-                aiBuilderBaseURL = aiBuilderBaseURL,
-                aiBuilderToken = aiBuilderToken,
-                aiBuilderCustomPrompt = aiBuilderCustomPrompt,
-                aiBuilderTerminology = aiBuilderTerminology,
-                showAIBuilderToken = showAIBuilderToken,
-                saveMessage = aiBuilderSaveMessage,
-                onBaseUrlChange = {
-                    aiBuilderBaseURL = it
-                    aiBuilderSaveMessage = null
-                },
-                onTokenChange = {
-                    aiBuilderToken = it
-                    aiBuilderSaveMessage = null
-                },
-                onPromptChange = {
-                    aiBuilderCustomPrompt = it
-                    aiBuilderSaveMessage = null
-                },
-                onTerminologyChange = {
-                    aiBuilderTerminology = it
-                    aiBuilderSaveMessage = null
-                },
-                onToggleTokenVisibility = { showAIBuilderToken = !showAIBuilderToken },
-                onTestConnection = {
-                    aiBuilderSaveMessage = null
-                    viewModel.saveAIBuilderSettings(
-                        buildAIBuilderSettings(
-                            baseURL = aiBuilderBaseURL,
-                            token = aiBuilderToken,
-                            customPrompt = aiBuilderCustomPrompt,
-                            terminology = aiBuilderTerminology
-                        )
-                    )
-                    viewModel.testAIBuilderConnection()
-                },
-                onSave = {
-                    viewModel.saveAIBuilderSettings(
-                        buildAIBuilderSettings(
-                            baseURL = aiBuilderBaseURL,
-                            token = aiBuilderToken,
-                            customPrompt = aiBuilderCustomPrompt,
-                            terminology = aiBuilderTerminology
-                        )
-                    )
-                    aiBuilderSaveMessage = "Settings saved"
-                }
-            )
-
-            SettingsSectionDivider()
-
             AboutSection()
         }
     }
@@ -225,16 +155,7 @@ private fun HostProfilesManagerScreen(
     var importText by remember { mutableStateOf("") }
     var exportText by remember { mutableStateOf<String?>(null) }
     var error by remember { mutableStateOf<String?>(null) }
-    var publicKeyCopied by remember { mutableStateOf(false) }
     var detailProfile by remember { mutableStateOf<HostProfile?>(null) }
-    var confirmKeyRotation by remember { mutableStateOf(false) }
-
-    LaunchedEffect(publicKeyCopied) {
-        if (publicKeyCopied) {
-            delay(2000)
-            publicKeyCopied = false
-        }
-    }
 
     Column(modifier = Modifier.fillMaxSize()) {
         TopAppBar(
@@ -280,18 +201,6 @@ private fun HostProfilesManagerScreen(
                 )
                 Spacer(modifier = Modifier.height(8.dp))
             }
-
-            SettingsSectionDivider()
-
-            DevicePublicKeySection(
-                copied = publicKeyCopied,
-                onCopy = {
-                    val key = viewModel.ensureSshPublicKey()
-                    clipboard.setText(AnnotatedString(key))
-                    publicKeyCopied = true
-                },
-                onRotate = { confirmKeyRotation = true }
-            )
         }
     }
 
@@ -299,14 +208,9 @@ private fun HostProfilesManagerScreen(
         HostProfileEditorDialog(
             initial = profile,
             onDismiss = { editingProfile = null },
-            onSave = { saved, password ->
-                viewModel.saveHostProfile(saved, password)
+            onSave = { saved, password, tunnelPassword ->
+                viewModel.saveHostProfile(saved, password, tunnelPassword)
                 editingProfile = null
-            },
-            onCopyPublicKey = {
-                val key = viewModel.ensureSshPublicKey()
-                clipboard.setText(AnnotatedString(key))
-                publicKeyCopied = true
             }
         )
     }
@@ -325,11 +229,6 @@ private fun HostProfilesManagerScreen(
                 detailProfile = null
             },
             onExport = { exportText = viewModel.exportHostProfile(profile) },
-            onCopyPublicKey = {
-                val key = viewModel.ensureSshPublicKey()
-                clipboard.setText(AnnotatedString(key))
-                publicKeyCopied = true
-            },
             onTest = {
                 viewModel.selectHostProfile(profile.id)
                 detailProfile = null
@@ -382,23 +281,6 @@ private fun HostProfilesManagerScreen(
             dismissButton = { TextButton(onClick = { exportText = null }) { Text(stringResource(R.string.common_close)) } }
         )
     }
-
-    if (confirmKeyRotation) {
-        AlertDialog(
-            onDismissRequest = { confirmKeyRotation = false },
-            title = { Text(stringResource(R.string.host_profile_rotate_key_title)) },
-            text = { Text(stringResource(R.string.host_profile_rotate_key_message)) },
-            confirmButton = {
-                Button(onClick = {
-                    val key = viewModel.rotateSshKey()
-                    clipboard.setText(AnnotatedString(key))
-                    publicKeyCopied = true
-                    confirmKeyRotation = false
-                }) { Text(stringResource(R.string.host_profile_rotate_and_copy_key)) }
-            },
-            dismissButton = { TextButton(onClick = { confirmKeyRotation = false }) { Text(stringResource(R.string.common_cancel)) } }
-        )
-    }
 }
 
 @Composable
@@ -423,7 +305,6 @@ internal fun HostProfileRow(
             Text(if (selected) stringResource(R.string.host_profile_current_suffix, profile.displayName) else profile.displayName)
             Text(profile.connectionSummary, style = MaterialTheme.typography.bodySmall)
         }
-        Text(if (profile.transport == HostTransport.SSH_TUNNEL) stringResource(R.string.host_profile_ssh_tunnel) else stringResource(R.string.host_profile_direct))
         IconButton(onClick = { menuExpanded = true }) {
             Icon(Icons.Default.MoreVert, contentDescription = stringResource(R.string.host_profile_actions))
         }
@@ -449,7 +330,6 @@ internal fun HostProfileDetailDialog(
     onUse: () -> Unit,
     onEdit: () -> Unit,
     onExport: () -> Unit,
-    onCopyPublicKey: () -> Unit,
     onTest: () -> Unit
 ) {
     AlertDialog(
@@ -457,18 +337,8 @@ internal fun HostProfileDetailDialog(
         title = { Text(profile.displayName) },
         text = {
             Column {
-                val transportLabel = if (profile.transport == HostTransport.SSH_TUNNEL) stringResource(R.string.host_profile_ssh_tunnel) else stringResource(R.string.host_profile_direct)
-                Text(stringResource(R.string.host_profile_transport, transportLabel))
-                Text(stringResource(R.string.host_profile_opencode_url, if (profile.transport == HostTransport.SSH_TUNNEL) stringResource(R.string.host_profile_managed_by_ssh) else profile.serverUrl))
+                Text(stringResource(R.string.host_profile_opencode_url, profile.serverUrl))
                 Text(stringResource(R.string.host_profile_status, if (isCurrent) stringResource(R.string.host_profile_current) else stringResource(R.string.host_profile_saved)))
-                if (profile.transport == HostTransport.SSH_TUNNEL && profile.ssh != null) {
-                    Spacer(modifier = Modifier.height(12.dp))
-                    Text(stringResource(R.string.host_profile_ssh_gateway), style = MaterialTheme.typography.labelMedium)
-                    Text(stringResource(R.string.host_profile_host, profile.ssh.host))
-                    Text(stringResource(R.string.host_profile_ssh_port_value, profile.ssh.port))
-                    Text(stringResource(R.string.host_profile_username, profile.ssh.username))
-                    Text(stringResource(R.string.host_profile_remote_port_value, profile.ssh.remotePort))
-                }
             }
         },
         confirmButton = {
@@ -482,12 +352,7 @@ internal fun HostProfileDetailDialog(
                     OutlinedButton(onClick = onEdit) { Text(stringResource(R.string.common_edit)) }
                 }
                 Spacer(modifier = Modifier.height(8.dp))
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    OutlinedButton(onClick = onExport) { Text(stringResource(R.string.host_profile_copy_config_json)) }
-                    if (profile.transport == HostTransport.SSH_TUNNEL) {
-                        OutlinedButton(onClick = onCopyPublicKey) { Text(stringResource(R.string.host_profile_copy_device_key)) }
-                    }
-                }
+                OutlinedButton(onClick = onExport) { Text(stringResource(R.string.host_profile_copy_config_json)) }
             }
         },
         dismissButton = { TextButton(onClick = onDismiss) { Text(stringResource(R.string.common_close)) } }
@@ -495,61 +360,17 @@ internal fun HostProfileDetailDialog(
 }
 
 @Composable
-@OptIn(ExperimentalLayoutApi::class)
-internal fun DevicePublicKeySection(
-    copied: Boolean,
-    onCopy: () -> Unit,
-    onRotate: () -> Unit
-) {
-    SectionHeader(title = stringResource(R.string.host_profile_device_key))
-    Card(
-        modifier = Modifier.fillMaxWidth(),
-        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
-    ) {
-        Column(modifier = Modifier.padding(16.dp)) {
-            Text(
-                stringResource(R.string.host_profile_device_key_footer),
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
-            )
-            Spacer(modifier = Modifier.height(12.dp))
-            FlowRow(
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-                verticalArrangement = Arrangement.spacedBy(8.dp)
-            ) {
-                OutlinedButton(
-                    onClick = onCopy,
-                    modifier = Modifier.testTag("ssh.publicKey.copy")
-                ) {
-                    Text(if (copied) stringResource(R.string.host_profile_public_key_copied) else stringResource(R.string.host_profile_copy_device_key), maxLines = 1)
-                }
-                OutlinedButton(
-                    onClick = onRotate,
-                    modifier = Modifier.testTag("ssh.publicKey.rotate")
-                ) {
-                    Text(stringResource(R.string.host_profile_rotate_key), maxLines = 1)
-                }
-            }
-        }
-    }
-}
-
-@Composable
 internal fun HostProfileEditorDialog(
     initial: HostProfile,
     onDismiss: () -> Unit,
-    onSave: (HostProfile, String?) -> Unit,
-    onCopyPublicKey: () -> Unit = {},
+    onSave: (HostProfile, String?, String?) -> Unit,
 ) {
     var name by remember(initial.id) { mutableStateOf(initial.name) }
-    var transport by remember(initial.id) { mutableStateOf(initial.transport) }
     var serverUrl by remember(initial.id) { mutableStateOf(initial.serverUrl) }
     var authUsername by remember(initial.id) { mutableStateOf(initial.basicAuth?.username.orEmpty()) }
     var authPassword by remember(initial.id) { mutableStateOf("") }
-    var sshHost by remember(initial.id) { mutableStateOf(initial.ssh?.host.orEmpty()) }
-    var sshPort by remember(initial.id) { mutableStateOf((initial.ssh?.port ?: 8006).toString()) }
-    var sshUsername by remember(initial.id) { mutableStateOf(initial.ssh?.username ?: "opencode") }
-    var remotePort by remember(initial.id) { mutableStateOf((initial.ssh?.remotePort ?: 19001).toString()) }
+    var tunnelPassword by remember(initial.id) { mutableStateOf("") }
+    var showTunnelPassword by remember(initial.id) { mutableStateOf(false) }
 
     AlertDialog(
         onDismissRequest = onDismiss,
@@ -558,56 +379,41 @@ internal fun HostProfileEditorDialog(
             Column {
                 OutlinedTextField(value = name, onValueChange = { name = it }, label = { Text(stringResource(R.string.host_profile_name)) }, modifier = Modifier.fillMaxWidth())
                 Spacer(modifier = Modifier.height(8.dp))
-                SingleChoiceSegmentedButtonRow(modifier = Modifier.fillMaxWidth()) {
-                    SegmentedButton(
-                        selected = transport == HostTransport.DIRECT,
-                        onClick = { transport = HostTransport.DIRECT },
-                        shape = SegmentedButtonDefaults.itemShape(0, 2),
-                        modifier = Modifier.testTag("host.editor.transport.direct")
-                    ) { Text(stringResource(R.string.host_profile_direct)) }
-                    SegmentedButton(
-                        selected = transport == HostTransport.SSH_TUNNEL,
-                        onClick = { transport = HostTransport.SSH_TUNNEL },
-                        shape = SegmentedButtonDefaults.itemShape(1, 2),
-                        modifier = Modifier.testTag("host.editor.transport.ssh")
-                    ) { Text(stringResource(R.string.host_profile_ssh_tunnel)) }
-                }
-                Spacer(modifier = Modifier.height(8.dp))
-                if (transport == HostTransport.DIRECT) {
-                    OutlinedTextField(value = serverUrl, onValueChange = { serverUrl = it }, label = { Text(stringResource(R.string.settings_server_url)) }, modifier = Modifier.fillMaxWidth())
-                } else {
-                    OutlinedTextField(value = sshHost, onValueChange = { sshHost = it }, label = { Text(stringResource(R.string.host_profile_ssh_gateway_host)) }, modifier = Modifier.fillMaxWidth())
-                    OutlinedTextField(value = sshPort, onValueChange = { sshPort = it }, label = { Text(stringResource(R.string.host_profile_ssh_port)) }, modifier = Modifier.fillMaxWidth())
-                    OutlinedTextField(value = sshUsername, onValueChange = { sshUsername = it }, label = { Text(stringResource(R.string.host_profile_ssh_username)) }, modifier = Modifier.fillMaxWidth())
-                    OutlinedTextField(value = remotePort, onValueChange = { remotePort = it }, label = { Text(stringResource(R.string.host_profile_remote_port)) }, modifier = Modifier.fillMaxWidth())
-                    Spacer(modifier = Modifier.height(8.dp))
-                    OutlinedButton(onClick = onCopyPublicKey) { Text(stringResource(R.string.host_profile_copy_device_key)) }
-                }
+                OutlinedTextField(value = serverUrl, onValueChange = { serverUrl = it }, label = { Text(stringResource(R.string.settings_server_url)) }, modifier = Modifier.fillMaxWidth())
                 Spacer(modifier = Modifier.height(8.dp))
                 OutlinedTextField(value = authUsername, onValueChange = { authUsername = it }, label = { Text(stringResource(R.string.host_profile_basic_auth_username)) }, modifier = Modifier.fillMaxWidth())
                 OutlinedTextField(value = authPassword, onValueChange = { authPassword = it }, label = { Text(stringResource(R.string.host_profile_basic_auth_password)) }, modifier = Modifier.fillMaxWidth())
+                Spacer(modifier = Modifier.height(8.dp))
+                OutlinedTextField(
+                    value = tunnelPassword,
+                    onValueChange = { tunnelPassword = it },
+                    label = { Text(stringResource(R.string.host_profile_tunnel_password_label)) },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth(),
+                    visualTransformation = if (showTunnelPassword) VisualTransformation.None else PasswordVisualTransformation(),
+                    trailingIcon = {
+                        IconButton(onClick = { showTunnelPassword = !showTunnelPassword }) {
+                            Icon(
+                                if (showTunnelPassword) Icons.Default.VisibilityOff else Icons.Default.Visibility,
+                                contentDescription = if (showTunnelPassword) stringResource(R.string.settings_hide_password) else stringResource(R.string.settings_show_password)
+                            )
+                        }
+                    },
+                    leadingIcon = { Icon(Icons.Default.Lock, contentDescription = null) }
+                )
             }
         },
         confirmButton = {
             Button(onClick = {
                 val basicAuth = authUsername.ifBlank { null }?.let { BasicAuthConfig(username = it, passwordId = initial.id) }
-                val saved = if (transport == HostTransport.DIRECT) {
-                    initial.copy(name = name.ifBlank { "Untitled" }, transport = HostTransport.DIRECT, serverUrl = serverUrl, basicAuth = basicAuth, ssh = null)
-                } else {
-                    initial.copy(
-                        name = name.ifBlank { "Untitled" },
-                        transport = HostTransport.SSH_TUNNEL,
-                        serverUrl = "http://127.0.0.1:4096",
-                        basicAuth = basicAuth,
-                        ssh = SshTunnelConfig(
-                            host = sshHost,
-                            port = sshPort.toIntOrNull() ?: 8006,
-                            username = sshUsername,
-                            remotePort = remotePort.toIntOrNull() ?: 19001
-                        )
-                    )
-                }
-                onSave(saved, authPassword.ifBlank { null })
+                val tunnelId = tunnelPassword.ifBlank { null }?.let { initial.id }
+                val saved = initial.copy(
+                    name = name.ifBlank { "Untitled" },
+                    serverUrl = serverUrl,
+                    basicAuth = basicAuth,
+                    tunnelPasswordId = tunnelId
+                )
+                onSave(saved, authPassword.ifBlank { null }, tunnelPassword.ifBlank { null })
             }) { Text(stringResource(R.string.settings_save)) }
         },
         dismissButton = { TextButton(onClick = onDismiss) { Text(stringResource(R.string.common_cancel)) } }

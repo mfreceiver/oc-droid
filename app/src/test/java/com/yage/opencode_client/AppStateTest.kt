@@ -1,7 +1,6 @@
 package com.yage.opencode_client
 
 import com.yage.opencode_client.ui.AppState
-import com.yage.opencode_client.ui.ModelPresets
 import com.yage.opencode_client.data.model.*
 import com.yage.opencode_client.util.ThemeMode
 import org.junit.Assert.*
@@ -27,7 +26,6 @@ class AppStateTest {
         assertFalse(state.isLoadingMessages)
         assertTrue(state.agents.isEmpty())
         assertEquals("build", state.selectedAgentName)
-        assertEquals(2, state.selectedModelIndex)
         assertNull(state.providers)
         assertTrue(state.pendingPermissions.isEmpty())
         assertEquals("", state.inputText)
@@ -150,29 +148,6 @@ class AppStateTest {
             )
         }
         return ProvidersResponse(providers = providers)
-    }
-
-    @Test
-    fun `availableModels returns curated presets (filtered like iOS)`() {
-        val state = AppState()
-        val models = state.availableModels
-
-        assertEquals(ModelPresets.list.size, models.size)
-        assertEquals(ModelPresets.list, models)
-        assertEquals("GLM-5.2", models[0].displayName)
-        assertEquals("zai-coding-plan", models[0].providerId)
-        assertEquals("glm-5.2", models[0].modelId)
-        assertEquals("GPT-5.5", models[1].displayName)
-        assertEquals("openai", models[1].providerId)
-        assertEquals("gpt-5.5", models[1].modelId)
-    }
-
-    @Test
-    fun `availableModels independent of providers`() {
-        val stateWithProviders = AppState(providers = makeProviders(Triple("openai", "gpt-4", "GPT-4")))
-        val stateWithoutProviders = AppState(providers = null)
-        assertEquals(stateWithProviders.availableModels, stateWithoutProviders.availableModels)
-        assertEquals(ModelPresets.list, stateWithProviders.availableModels)
     }
 
     private fun makeContextUsageState(

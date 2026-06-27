@@ -13,18 +13,14 @@ import com.yage.opencode_client.data.model.SSEEvent
 import com.yage.opencode_client.data.model.SSEPayload
 import com.yage.opencode_client.data.model.HealthResponse
 import com.yage.opencode_client.data.model.HostProfile
+import com.yage.opencode_client.data.model.BasicAuthConfig
 import com.yage.opencode_client.data.repository.HostProfileStore
 import com.yage.opencode_client.data.repository.OpenCodeRepository
-import com.yage.opencode_client.ssh.SSHKeyManager
-import com.yage.opencode_client.ssh.TunnelManager
 import com.yage.opencode_client.ui.AppState
 import com.yage.opencode_client.ui.MainViewModel
-import com.yage.opencode_client.ui.ModelPresets
 import com.yage.opencode_client.ui.session.buildSessionTree
 import com.yage.opencode_client.util.SettingsManager
 import com.yage.opencode_client.util.ThemeMode
-import com.yage.voiceflowkit.VoiceFlowClient
-import com.yage.voiceflowkit.VoiceFlowMicrophone
 import io.mockk.coEvery
 import io.mockk.coVerify
 import io.mockk.coVerifyOrder
@@ -52,7 +48,6 @@ import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Rule
 import org.junit.Test
-import java.security.MessageDigest
 
 @OptIn(ExperimentalCoroutinesApi::class)
 class MainViewModelTest {
@@ -62,11 +57,7 @@ class MainViewModelTest {
 
     private lateinit var repository: OpenCodeRepository
     private lateinit var settingsManager: SettingsManager
-    private lateinit var voiceFlowClient: VoiceFlowClient
-    private lateinit var microphone: VoiceFlowMicrophone
     private lateinit var hostProfileStore: HostProfileStore
-    private lateinit var tunnelManager: TunnelManager
-    private lateinit var sshKeyManager: SSHKeyManager
 
     @Before
     fun setUp() {
@@ -78,11 +69,7 @@ class MainViewModelTest {
 
         repository = mockk(relaxed = true)
         settingsManager = mockk(relaxed = true)
-        voiceFlowClient = mockk(relaxed = true)
-        microphone = mockk(relaxed = true)
         hostProfileStore = mockk(relaxed = true)
-        tunnelManager = mockk(relaxed = true)
-        sshKeyManager = mockk(relaxed = true)
 
         val defaultProfile = HostProfile.defaultDirect("http://server.test")
         every { hostProfileStore.currentProfile() } returns defaultProfile
@@ -92,34 +79,18 @@ class MainViewModelTest {
         every { settingsManager.username } returns null
         every { settingsManager.password } returns null
         every { settingsManager.currentSessionId } returns null
-        every { settingsManager.selectedModelIndex } returns 0
         every { settingsManager.selectedAgentName } returns null
         every { settingsManager.themeMode } returns ThemeMode.SYSTEM
-        every { settingsManager.aiBuilderBaseURL } returns "https://space.ai-builders.com/backend"
-        every { settingsManager.aiBuilderToken } returns ""
-        every { settingsManager.aiBuilderCustomPrompt } returns ""
-        every { settingsManager.aiBuilderTerminology } returns ""
-        every { settingsManager.aiBuilderLastOKSignature } returns null
-        every { settingsManager.aiBuilderLastOKTestedAt } returns 0L
 
         every { settingsManager.serverUrl = any() } just runs
         every { settingsManager.username = any() } just runs
         every { settingsManager.password = any() } just runs
         every { settingsManager.currentSessionId = any() } just runs
-        every { settingsManager.selectedModelIndex = any() } just runs
         every { settingsManager.selectedAgentName = any() } just runs
         every { settingsManager.themeMode = any() } just runs
-        every { settingsManager.aiBuilderBaseURL = any() } just runs
-        every { settingsManager.aiBuilderToken = any() } just runs
-        every { settingsManager.aiBuilderCustomPrompt = any() } just runs
-        every { settingsManager.aiBuilderTerminology = any() } just runs
-        every { settingsManager.aiBuilderLastOKSignature = any() } just runs
-        every { settingsManager.aiBuilderLastOKTestedAt = any() } just runs
 
         every { settingsManager.getDraftText(any()) } returns ""
         every { settingsManager.setDraftText(any(), any()) } just runs
-        every { settingsManager.getModelForSession(any()) } returns null
-        every { settingsManager.setModelForSession(any(), any()) } just runs
         every { settingsManager.getAgentForSession(any()) } returns null
         every { settingsManager.setAgentForSession(any(), any()) } just runs
 
@@ -131,7 +102,7 @@ class MainViewModelTest {
     }
 
     private fun createViewModel(): MainViewModel {
-        return MainViewModel(repository, settingsManager, voiceFlowClient, microphone, hostProfileStore, tunnelManager, sshKeyManager)
+        return MainViewModel(repository, settingsManager, hostProfileStore)
     }
 
     private fun updateState(viewModel: MainViewModel, transform: (AppState) -> AppState) {
@@ -148,38 +119,8 @@ class MainViewModelTest {
         method.invoke(viewModel, event)
     }
 
-    private fun sha256(input: String): String {
-        return MessageDigest.getInstance("SHA-256")
-            .digest(input.toByteArray())
-            .joinToString("") { "%02x".format(it) }
-    }
-
     @Test
-    fun `init clamps saved model index and configures repository`() = runTest {
-        every { settingsManager.selectedModelIndex } returns 999
-
-        val viewModel = createViewModel()
-
-        assertEquals(ModelPresets.list.lastIndex, viewModel.state.value.selectedModelIndex)
-        verify { settingsManager.selectedModelIndex = ModelPresets.list.lastIndex }
-        verify { repository.configure("http://server.test", null, null) }
-    }
-
-    @Test
-    fun `init restores AI Builder connection when signature matches`() = runTest {
-        val baseUrl = "https://builder.example.com"
-        val token = "secret-token"
-        every { settingsManager.aiBuilderBaseURL } returns baseUrl
-        every { settingsManager.aiBuilderToken } returns token
-        every { settingsManager.aiBuilderLastOKSignature } returns sha256("$baseUrl|$token")
-
-        val viewModel = createViewModel()
-
-        assertTrue(viewModel.state.value.aiBuilderConnectionOK)
-    }
-
-    @Test
-    fun `sendMessage success clears input and uses selected preset model`() = runTest {
+    fun `sendMessage success clears input`() = runTest {
         coEvery { repository.sendMessage(any(), any(), any(), any()) } returns Result.success(Unit)
         coEvery { repository.getSessions(100) } returns Result.success(
             listOf(com.yage.opencode_client.data.model.Session(id = "session-1", directory = "/tmp/project"))
@@ -190,18 +131,16 @@ class MainViewModelTest {
         advanceUntilIdle()
         viewModel.setInputText("  hello world  ")
         viewModel.selectAgent("review")
-        viewModel.selectModel(1)
 
         viewModel.sendMessage()
         advanceUntilIdle()
 
-        val selected = ModelPresets.list[1]
         coVerify {
             repository.sendMessage(
                 "session-1",
                 "hello world",
                 "review",
-                Message.ModelInfo(selected.providerId, selected.modelId)
+                null
             )
         }
         assertEquals("", viewModel.state.value.inputText)
@@ -387,6 +326,45 @@ class MainViewModelTest {
         assertEquals(1, sessions.size)
         assertEquals("session-1", sessions.single().id)
         assertEquals("Server Title", sessions.single().title)
+    }
+
+    @Test
+    fun `createSessionInWorkdir sets directory and creates session`() = runTest {
+        val created = Session(
+            id = "session-1",
+            directory = "/home/user/myproject",
+            title = null
+        )
+        coEvery { repository.createSession(title = null) } returns Result.success(created)
+        every { repository.setCurrentDirectory(any()) } just runs
+
+        val viewModel = createViewModel()
+
+        viewModel.createSessionInWorkdir("/home/user/myproject")
+        advanceUntilIdle()
+
+        coVerifyOrder {
+            repository.setCurrentDirectory("/home/user/myproject")
+            repository.createSession(title = null)
+        }
+        val sessions = viewModel.state.value.sessions
+        assertEquals(1, sessions.size)
+        assertEquals("session-1", sessions.single().id)
+        assertEquals("session-1", viewModel.state.value.currentSessionId)
+    }
+
+    @Test
+    fun `createSessionInWorkdir handles failure`() = runTest {
+        coEvery { repository.createSession(title = null) } returns Result.failure(IllegalStateException("network error"))
+        every { repository.setCurrentDirectory(any()) } just runs
+
+        val viewModel = createViewModel()
+
+        viewModel.createSessionInWorkdir("/tmp/fail")
+        advanceUntilIdle()
+
+        assertEquals("Failed to create session in /tmp/fail: network error", viewModel.state.value.error)
+        assertTrue(viewModel.state.value.sessions.isEmpty())
     }
 
     @Test
@@ -758,16 +736,14 @@ class MainViewModelTest {
     }
 
     @Test
-    fun `loadMessages updates selected agent and preset model from last assistant`() = runTest {
-        val preset = ModelPresets.list[2]
+    fun `loadMessages updates selected agent from last assistant`() = runTest {
         val messages = listOf(
             MessageWithParts(info = Message(id = "u1", role = "user")),
             MessageWithParts(
                 info = Message(
                     id = "a1",
                     role = "assistant",
-                    agent = "plan",
-                    model = Message.ModelInfo(preset.providerId, preset.modelId)
+                    agent = "plan"
                 )
             )
         )
@@ -781,48 +757,6 @@ class MainViewModelTest {
 
         assertEquals(messages, viewModel.state.value.messages)
         assertEquals("plan", viewModel.state.value.selectedAgentName)
-        assertEquals(2, viewModel.state.value.selectedModelIndex)
-    }
-
-    @Test
-    fun `toggleRecording shows token guidance when AI Builder token missing`() = runTest {
-        val viewModel = createViewModel()
-
-        viewModel.toggleRecording()
-
-        assertEquals(
-            "Speech recognition requires an AI Builder token. Configure it in Settings.",
-            viewModel.state.value.speechError
-        )
-        assertFalse(viewModel.state.value.isRecording)
-    }
-
-    @Test
-    fun `toggleRecording requires successful AI Builder connection before recording`() = runTest {
-        every { settingsManager.aiBuilderToken } returns "token"
-        val viewModel = createViewModel()
-
-        viewModel.toggleRecording()
-
-        assertEquals(
-            "AI Builder connection test has not passed. Please test in Settings first.",
-            viewModel.state.value.speechError
-        )
-        assertFalse(viewModel.state.value.isRecording)
-    }
-
-    @Test
-    fun `toggleRecording handles missing realtime session when stopping recording`() = runTest {
-        every { settingsManager.aiBuilderToken } returns "token"
-        val viewModel = createViewModel()
-        updateState(viewModel) { it.copy(isRecording = true, aiBuilderConnectionOK = true, inputText = "draft") }
-
-        viewModel.toggleRecording()
-
-        assertFalse(viewModel.state.value.isRecording)
-        assertFalse(viewModel.state.value.isTranscribing)
-        assertEquals("Recording failed: realtime session missing", viewModel.state.value.speechError)
-        assertEquals("draft", viewModel.state.value.inputText)
     }
 
     @Test
@@ -1067,16 +1001,6 @@ class MainViewModelTest {
     }
 
     @Test
-    fun `clearSpeechError clears speech error state`() = runTest {
-        val viewModel = createViewModel()
-        updateState(viewModel) { it.copy(speechError = "bad mic") }
-
-        viewModel.clearSpeechError()
-
-        assertNull(viewModel.state.value.speechError)
-    }
-
-    @Test
     fun `setInputText with active session saves draft to settings manager`() = runTest {
         val viewModel = createViewModel()
         updateState(viewModel) { it.copy(currentSessionId = "s1") }
@@ -1102,16 +1026,6 @@ class MainViewModelTest {
     }
 
     @Test
-    fun `selectModel with active session saves model index per session`() = runTest {
-        val viewModel = createViewModel()
-        updateState(viewModel) { it.copy(currentSessionId = "s1") }
-
-        viewModel.selectModel(2)
-
-        verify { settingsManager.setModelForSession("s1", 2) }
-    }
-
-    @Test
     fun `selectAgent with active session saves agent name per session`() = runTest {
         val viewModel = createViewModel()
         updateState(viewModel) { it.copy(currentSessionId = "s1") }
@@ -1134,30 +1048,6 @@ class MainViewModelTest {
         advanceUntilIdle()
 
         verify { settingsManager.setDraftText("s1", "") }
-    }
-
-    @Test
-    fun `loadMessages uses per-session saved model index over message inference`() = runTest {
-        val inferredPreset = ModelPresets.list[2]
-        val messages = listOf(
-            MessageWithParts(
-                info = Message(
-                    id = "a1",
-                    role = "assistant",
-                    model = Message.ModelInfo(inferredPreset.providerId, inferredPreset.modelId)
-                )
-            )
-        )
-        coEvery { repository.getMessages("session-1", 30) } returns Result.success(messages)
-        every { settingsManager.getModelForSession("session-1") } returns 3
-
-        val viewModel = createViewModel()
-        updateState(viewModel) { it.copy(currentSessionId = "session-1") }
-
-        viewModel.loadMessages("session-1")
-        advanceUntilIdle()
-
-        assertEquals(3, viewModel.state.value.selectedModelIndex)
     }
 
     @Test
@@ -1193,31 +1083,6 @@ class MainViewModelTest {
 
         coVerify(exactly = 1) { repository.deleteSession("session-1") }
         assertEquals(listOf("session-2"), viewModel.state.value.sessions.map { it.id })
-    }
-
-    @Test
-    fun `updateSessionTitle calls repository and updates session title`() = runTest {
-        val updated = com.yage.opencode_client.data.model.Session(
-            id = "session-1",
-            directory = "/tmp/project",
-            title = "Updated Title"
-        )
-        coEvery { repository.updateSession("session-1", "Updated Title") } returns Result.success(updated)
-
-        val viewModel = createViewModel()
-        updateState(viewModel) {
-            it.copy(
-                sessions = listOf(
-                    com.yage.opencode_client.data.model.Session(id = "session-1", directory = "/tmp/project", title = "Old Title")
-                )
-            )
-        }
-
-        viewModel.updateSessionTitle("session-1", "Updated Title")
-        advanceUntilIdle()
-
-        coVerify(exactly = 1) { repository.updateSession("session-1", "Updated Title") }
-        assertEquals("Updated Title", viewModel.state.value.sessions.single().title)
     }
 
     @Test
@@ -1432,6 +1297,80 @@ class MainViewModelTest {
         )
 
         assertEquals(listOf("question-2"), viewModel.state.value.pendingQuestions.map { it.id })
+    }
+
+    @Test
+    fun `activateTunnelForCurrentHost no-ops when profile has no tunnelPasswordId`() = runTest {
+        val viewModel = createViewModel()
+        advanceUntilIdle()
+
+        val initialState = viewModel.state.value
+        viewModel.activateTunnelForCurrentHost()
+        advanceUntilIdle()
+
+        assertEquals(initialState, viewModel.state.value)
+        coVerify(exactly = 0) { repository.activateTunnel(any(), any()) }
+    }
+
+    @Test
+    fun `activateTunnelForCurrentHost no-ops when tunnel password is empty`() = runTest {
+        val profileWithTunnel = HostProfile.defaultDirect("http://server.test").copy(
+            tunnelPasswordId = "profile-1"
+        )
+        every { hostProfileStore.currentProfile() } returns profileWithTunnel
+        every { settingsManager.getTunnelPassword("profile-1") } returns null
+
+        val viewModel = createViewModel()
+        advanceUntilIdle()
+
+        viewModel.activateTunnelForCurrentHost()
+        advanceUntilIdle()
+
+        coVerify(exactly = 0) { repository.activateTunnel(any(), any()) }
+    }
+
+    @Test
+    fun `activateTunnelForCurrentHost sets Loading then Success on success`() = runTest {
+        val profileWithTunnel = HostProfile.defaultDirect("http://server.test").copy(
+            tunnelPasswordId = "profile-1"
+        )
+        every { hostProfileStore.currentProfile() } returns profileWithTunnel
+        every { settingsManager.getTunnelPassword("profile-1") } returns "tunnel-secret"
+        coEvery { repository.activateTunnel("http://server.test", "tunnel-secret") } returns Result.success(Unit)
+
+        val viewModel = createViewModel()
+        advanceUntilIdle()
+
+        viewModel.activateTunnelForCurrentHost()
+        advanceUntilIdle()
+
+        coVerify { repository.activateTunnel("http://server.test", "tunnel-secret") }
+        assertEquals(
+            com.yage.opencode_client.ui.TunnelActivationState.Success,
+            viewModel.state.value.tunnelActivationState
+        )
+    }
+
+    @Test
+    fun `activateTunnelForCurrentHost sets Error on failure`() = runTest {
+        val profileWithTunnel = HostProfile.defaultDirect("http://server.test").copy(
+            tunnelPasswordId = "profile-1"
+        )
+        every { hostProfileStore.currentProfile() } returns profileWithTunnel
+        every { settingsManager.getTunnelPassword("profile-1") } returns "bad-password"
+        coEvery {
+            repository.activateTunnel("http://server.test", "bad-password")
+        } returns Result.failure(IllegalStateException("Tunnel activation failed 403: Forbidden"))
+
+        val viewModel = createViewModel()
+        advanceUntilIdle()
+
+        viewModel.activateTunnelForCurrentHost()
+        advanceUntilIdle()
+
+        val activationState = viewModel.state.value.tunnelActivationState
+        assertTrue(activationState is com.yage.opencode_client.ui.TunnelActivationState.Error)
+        assertTrue((activationState as com.yage.opencode_client.ui.TunnelActivationState.Error).message.contains("403"))
     }
 
     @org.junit.After

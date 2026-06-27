@@ -1,13 +1,21 @@
 package com.yage.opencode_client.data.repository
 
+import android.util.Log
 import com.yage.opencode_client.data.model.HostProfile
 import com.yage.opencode_client.data.model.HostProfileExportPayload
 import com.yage.opencode_client.data.model.HostProfileImportPayload
 import com.yage.opencode_client.util.SettingsManager
 import kotlinx.serialization.SerializationException
+import kotlinx.serialization.builtins.ListSerializer
 import kotlinx.serialization.decodeFromString
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonElement
+import kotlinx.serialization.json.decodeFromJsonElement
+import kotlinx.serialization.json.jsonArray
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
 import javax.inject.Inject
 import javax.inject.Singleton
 
@@ -23,18 +31,22 @@ class HostProfileStore @Inject constructor(
 
     @Synchronized
     fun profiles(): List<HostProfile> {
-        val decoded = decodeProfiles(settingsManager.hostProfilesJson)
-        if (decoded.isNotEmpty()) return decoded
-
-        val migrated = listOf(
-            HostProfile.defaultDirect(
-                serverUrl = settingsManager.serverUrl,
-                username = settingsManager.username,
-                passwordId = SettingsManager.LEGACY_BASIC_AUTH_PASSWORD_ID.takeIf { !settingsManager.password.isNullOrBlank() }
-            )
-        )
-        saveProfiles(migrated, migrated.first().id)
-        return migrated
+        val raw = settingsManager.hostProfilesJson
+        // Decode + one-time SSH migration. On parse failure we MUST NOT
+        // overwrite the original JSON — that would silently destroy data.
+        val decoded = decodeProfiles(raw)
+        return when (decoded) {
+            is DecodeOutcome.ParseFailure -> {
+                // Preserve the corrupt JSON on disk so the user can recover
+                // (or a future fix-up can run). Do NOT fall through to the
+                // migration path, which would overwrite with a fresh default.
+                emptyList()
+            }
+            is DecodeOutcome.Decoded -> {
+                if (decoded.profiles.isNotEmpty()) return decoded.profiles
+                migrateLegacySettings()
+            }
+        }
     }
 
     @Synchronized
@@ -101,13 +113,71 @@ class HostProfileStore @Inject constructor(
         return profile
     }
 
-    private fun decodeProfiles(raw: String?): List<HostProfile> {
-        if (raw.isNullOrBlank()) return emptyList()
-        return runCatching { json.decodeFromString<List<HostProfile>>(raw) }.getOrElse { emptyList() }
+    /**
+     * Decodes the raw JSON payload and performs a one-time migration that strips
+     * legacy SSH-only profiles (`transport == "sshTunnel"`). On successful decode
+     * with SSH entries removed, the cleaned list is persisted in place. On parse
+     * failure, returns [DecodeOutcome.ParseFailure] so callers can preserve the
+     * original payload instead of overwriting it.
+     */
+    private fun decodeProfiles(raw: String?): DecodeOutcome {
+        if (raw.isNullOrBlank()) return DecodeOutcome.Decoded(emptyList())
+        return runCatching {
+            val elements = json.decodeFromString<JsonElement>(raw).jsonArray
+            val filtered = elements.filterNot { el ->
+                runCatching {
+                    el.jsonObject["transport"]?.jsonPrimitive?.content == "sshTunnel"
+                }.getOrDefault(false)
+            }
+            val profiles = json.decodeFromJsonElement(
+                ListSerializer(HostProfile.serializer()),
+                JsonArray(filtered)
+            )
+            if (filtered.size != elements.size) {
+                Log.w(
+                    TAG,
+                    "Removed ${elements.size - filtered.size} legacy SSH profile(s) (SSH support removed)"
+                )
+                // Persist the cleanup. Safe: we successfully decoded every
+                // remaining entry, so this is a deliberate migration rather
+                // than a destructive overwrite.
+                val remainingCurrentId = settingsManager.currentHostProfileId
+                    ?.takeIf { id -> profiles.any { it.id == id } }
+                saveProfiles(profiles, remainingCurrentId)
+            }
+            profiles
+        }.fold(
+            onSuccess = { DecodeOutcome.Decoded(it) },
+            onFailure = {
+                Log.w(TAG, "Failed to decode host profiles JSON; preserving original payload", it)
+                DecodeOutcome.ParseFailure
+            }
+        )
+    }
+
+    private fun migrateLegacySettings(): List<HostProfile> {
+        val migrated = listOf(
+            HostProfile.defaultDirect(
+                serverUrl = settingsManager.serverUrl,
+                username = settingsManager.username,
+                passwordId = SettingsManager.LEGACY_BASIC_AUTH_PASSWORD_ID.takeIf { !settingsManager.password.isNullOrBlank() }
+            )
+        )
+        saveProfiles(migrated, migrated.first().id)
+        return migrated
     }
 
     private fun saveProfiles(profiles: List<HostProfile>, currentId: String?) {
         settingsManager.hostProfilesJson = json.encodeToString(profiles)
         settingsManager.currentHostProfileId = currentId ?: profiles.firstOrNull()?.id
+    }
+
+    private sealed interface DecodeOutcome {
+        data class Decoded(val profiles: List<HostProfile>) : DecodeOutcome
+        object ParseFailure : DecodeOutcome
+    }
+
+    private companion object {
+        private const val TAG = "HostProfileStore"
     }
 }

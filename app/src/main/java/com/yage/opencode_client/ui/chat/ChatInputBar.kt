@@ -1,7 +1,6 @@
 package com.yage.opencode_client.ui.chat
 
 import android.graphics.BitmapFactory
-import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -32,9 +31,7 @@ import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Circle
 import androidx.compose.material.icons.filled.Close
-import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.MoreHoriz
-import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
@@ -48,16 +45,12 @@ import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.geometry.CornerRadius
-import androidx.compose.ui.geometry.Offset
-import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.asImageBitmap
@@ -76,19 +69,11 @@ import com.yage.opencode_client.data.model.PermissionRequest
 import com.yage.opencode_client.data.model.PermissionResponse
 import com.yage.opencode_client.ui.theme.StopRed
 import kotlinx.coroutines.delay
-import kotlin.math.PI
-import kotlin.math.sin
 
 @Composable
 internal fun ChatInputBar(
     text: String,
     isBusy: Boolean,
-    isRecording: Boolean,
-    isTranscribing: Boolean,
-    hasPreservedSpeechAudio: Boolean,
-    isRetryingSpeech: Boolean,
-    speechAudioLevel: Float,
-    isSpeechConfigured: Boolean,
     agentActivityText: String?,
     agentStartedAtMillis: Long?,
     imageAttachments: List<ComposerImageAttachment>,
@@ -97,23 +82,9 @@ internal fun ChatInputBar(
     onAddImages: () -> Unit,
     onRemoveImage: (String) -> Unit,
     onAbort: () -> Unit,
-    onAbortSpeech: () -> Unit,
-    onRetrySpeech: () -> Unit,
-    onDiscardSpeech: () -> Unit,
-    onToggleRecording: () -> Unit
 ) {
-    val canSend = (text.isNotBlank() || imageAttachments.isNotEmpty()) && !isTranscribing && !isRetryingSpeech
-    val voiceStatus = when {
-        isRecording -> stringResource(R.string.chat_listening)
-        isTranscribing -> stringResource(R.string.chat_transcribing)
-        isRetryingSpeech -> stringResource(R.string.chat_retry_segment)
-        hasPreservedSpeechAudio -> stringResource(R.string.chat_preserved_audio)
-        else -> null
-    }
-    val composerStatus = listOfNotNull(
-        if (isBusy) agentActivityText ?: stringResource(R.string.chat_agent_running) else null,
-        voiceStatus
-    ).joinToString(" · ").takeIf { it.isNotEmpty() }
+    val canSend = text.isNotBlank() || imageAttachments.isNotEmpty()
+    val composerStatus = if (isBusy) agentActivityText ?: stringResource(R.string.chat_agent_running) else null
 
     Surface(
         modifier = Modifier.fillMaxWidth().imePadding(),
@@ -133,19 +104,6 @@ internal fun ChatInputBar(
                 )
             }
 
-            VoiceRail(
-                isRecording = isRecording,
-                isTranscribing = isTranscribing,
-                isRetryingSpeech = isRetryingSpeech,
-                hasPreservedSpeechAudio = hasPreservedSpeechAudio,
-                audioLevel = speechAudioLevel,
-                isSpeechConfigured = isSpeechConfigured,
-                onToggleRecording = onToggleRecording,
-                onAbortSpeech = onAbortSpeech,
-                onRetrySpeech = onRetrySpeech,
-                onDiscardSpeech = onDiscardSpeech,
-            )
-
             if (imageAttachments.isNotEmpty()) {
                 ImageAttachmentStrip(
                     attachments = imageAttachments,
@@ -164,7 +122,7 @@ internal fun ChatInputBar(
             ) {
                 ChatPrimaryActionButton(
                     onClick = onAddImages,
-                    enabled = imageAttachments.size < 4 && !isTranscribing && !isRetryingSpeech,
+                    enabled = imageAttachments.size < 4,
                     containerColor = MaterialTheme.colorScheme.surface,
                     contentColor = MaterialTheme.colorScheme.primary,
                     dimWhenDisabled = true,
@@ -181,7 +139,7 @@ internal fun ChatInputBar(
                 ) {
                     if (text.isEmpty()) {
                         Text(
-                            if (isRecording) stringResource(R.string.chat_transcription_placeholder) else stringResource(R.string.chat_type_message),
+                            stringResource(R.string.chat_type_message),
                             style = MaterialTheme.typography.bodyLarge,
                             color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f)
                         )
@@ -263,94 +221,6 @@ private fun ImageAttachmentStrip(
 }
 
 @Composable
-private fun VoiceRail(
-    isRecording: Boolean,
-    isTranscribing: Boolean,
-    isRetryingSpeech: Boolean,
-    hasPreservedSpeechAudio: Boolean,
-    audioLevel: Float,
-    isSpeechConfigured: Boolean,
-    onToggleRecording: () -> Unit,
-    onAbortSpeech: () -> Unit,
-    onRetrySpeech: () -> Unit,
-    onDiscardSpeech: () -> Unit,
-) {
-    val railTitle = when {
-        isRecording -> stringResource(R.string.chat_listening)
-        isTranscribing -> stringResource(R.string.chat_transcribing)
-        isRetryingSpeech -> stringResource(R.string.chat_retry_segment)
-        hasPreservedSpeechAudio -> stringResource(R.string.chat_preserved_audio)
-        else -> stringResource(R.string.chat_tap_to_speak)
-    }
-    val mode = when {
-        isRecording -> WaveformMode.Active
-        isTranscribing || isRetryingSpeech -> WaveformMode.Generating
-        else -> WaveformMode.Idle
-    }
-    val accent = MaterialTheme.colorScheme.primary
-    val waveformDescription = stringResource(R.string.chat_speech_waveform)
-    val railColor = if (mode == WaveformMode.Idle) {
-        MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f)
-    } else {
-        accent
-    }
-
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(horizontal = 4.dp, vertical = 8.dp),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(10.dp)
-    ) {
-        VoiceTransportButton(
-            onClick = if (hasPreservedSpeechAudio) onRetrySpeech else onToggleRecording,
-            enabled = !isTranscribing && !isRetryingSpeech,
-            containerColor = if (isRecording) StopRed else accent,
-            icon = when {
-                isRecording -> Icons.Default.Stop
-                hasPreservedSpeechAudio -> Icons.Default.Refresh
-                else -> Icons.Default.Mic
-            },
-            contentDescription = if (hasPreservedSpeechAudio) stringResource(R.string.chat_retry_segment) else railTitle,
-        )
-
-        VoiceRailWaveform(
-            mode = mode,
-            color = railColor,
-            level = speechLevelForMode(mode, audioLevel),
-            modifier = Modifier
-                .weight(1f)
-                .height(24.dp)
-                .semantics { contentDescription = waveformDescription }
-        )
-
-        when {
-            isTranscribing -> TextButton(onClick = onAbortSpeech) {
-                Text(stringResource(R.string.chat_stop_transcription_wait), color = MaterialTheme.colorScheme.onSurfaceVariant)
-            }
-            hasPreservedSpeechAudio -> TextButton(
-                onClick = onDiscardSpeech,
-                enabled = !isRetryingSpeech,
-            ) {
-                Text(stringResource(R.string.chat_discard_audio), color = MaterialTheme.colorScheme.onSurfaceVariant)
-            }
-            else -> Text(
-                text = if (isSpeechConfigured) railTitle else stringResource(R.string.chat_configure_speech),
-                style = MaterialTheme.typography.labelMedium,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                maxLines = 1,
-            )
-        }
-    }
-}
-
-private fun speechLevelForMode(mode: WaveformMode, audioLevel: Float): Float = when (mode) {
-    WaveformMode.Active -> audioLevel
-    WaveformMode.Generating -> 0.2f
-    WaveformMode.Idle -> 0.04f
-}
-
-@Composable
 private fun QuietComposerStatus(
     status: String,
     isBusy: Boolean,
@@ -425,98 +295,6 @@ private fun QuietComposerStatus(
 private fun formatElapsed(elapsedMillis: Long): String {
     val seconds = (elapsedMillis.coerceAtLeast(0L) / 1_000L).toInt()
     return "%d:%02d".format(seconds / 60, seconds % 60)
-}
-
-private enum class WaveformMode { Idle, Active, Generating }
-
-private const val WAVEFORM_TICK_MS = 66L
-
-@Composable
-private fun VoiceRailWaveform(
-    mode: WaveformMode,
-    color: Color,
-    level: Float,
-    modifier: Modifier = Modifier,
-) {
-    val bars = remember { mutableStateListOf<Float>().apply { repeat(40) { add(0.04f) } } }
-    var phase by remember { mutableStateOf(0f) }
-
-    LaunchedEffect(mode, level) {
-        while (mode != WaveformMode.Idle) {
-            if (mode == WaveformMode.Active) {
-                bars.removeAt(0)
-                bars.add(level.coerceIn(0.04f, 1f))
-            } else {
-                phase += 0.22f
-            }
-            delay(WAVEFORM_TICK_MS)
-        }
-    }
-
-    Canvas(modifier = modifier) {
-        val gap = 4.dp.toPx()
-        val barWidth = 3.dp.toPx()
-        val barCount = minOf(
-            bars.size,
-            ((size.width + gap) / (barWidth + gap)).toInt().coerceAtLeast(1)
-        )
-        val totalWidth = barCount * barWidth + (barCount - 1) * gap
-        val startX = ((size.width - totalWidth) / 2f).coerceAtLeast(0f)
-        val centerY = size.height / 2f
-        val firstBarIndex = bars.size - barCount
-
-        repeat(barCount) { index ->
-            val raw = when (mode) {
-                WaveformMode.Active -> bars[firstBarIndex + index]
-                WaveformMode.Generating -> 0.15f + 0.55f * ((sin(index * 0.45f + phase) + 1f) / 2f)
-                WaveformMode.Idle -> 0.08f + 0.05f * ((sin(index * PI.toFloat() / 5f) + 1f) / 2f)
-            }
-            val height = (2.dp.toPx() + raw.coerceIn(0f, 1f) * (size.height - 2.dp.toPx()))
-                .coerceAtLeast(2.dp.toPx())
-            val left = startX + index * (barWidth + gap)
-            drawRoundRect(
-                color = color.copy(alpha = if (mode == WaveformMode.Idle) 0.55f else 1f),
-                topLeft = Offset(left, centerY - height / 2f),
-                size = Size(barWidth, height),
-                cornerRadius = CornerRadius(barWidth / 2f, barWidth / 2f)
-            )
-        }
-    }
-}
-
-@Composable
-private fun VoiceTransportButton(
-    onClick: () -> Unit,
-    enabled: Boolean,
-    containerColor: Color,
-    icon: ImageVector,
-    contentDescription: String,
-) {
-    val interaction = remember { MutableInteractionSource() }
-    Box(
-        modifier = Modifier
-            .size(32.dp)
-            .clip(CircleShape)
-            .background(containerColor.copy(alpha = if (enabled) 1f else 0.35f))
-            .clickable(
-                enabled = enabled,
-                interactionSource = interaction,
-                indication = null,
-                onClick = onClick
-            )
-            .semantics {
-                this.contentDescription = contentDescription
-                this.role = Role.Button
-            },
-        contentAlignment = Alignment.Center
-    ) {
-        Icon(
-            icon,
-            contentDescription = null,
-            tint = Color.White,
-            modifier = Modifier.size(18.dp)
-        )
-    }
 }
 
 @Composable

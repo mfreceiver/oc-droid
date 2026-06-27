@@ -29,8 +29,8 @@ android {
         applicationId = "com.yage.opencode_client"
         minSdk = 26
         targetSdk = 34
-        versionCode = 12
-        versionName = "0.1.20260622"
+        versionCode = 13
+        versionName = "0.1.20260627"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         // Integration test credentials from .env (dynamic, not in code)
@@ -44,8 +44,6 @@ android {
         testInstrumentationRunnerArguments["openCodeAgent"] = env["OPENCODE_AGENT"] ?: ""
         testInstrumentationRunnerArguments["openCodeModelProvider"] = env["OPENCODE_MODEL_PROVIDER"] ?: ""
         testInstrumentationRunnerArguments["openCodeModelId"] = env["OPENCODE_MODEL_ID"] ?: ""
-        testInstrumentationRunnerArguments["aiBuilderBaseUrl"] = env["AI_BUILDER_BASE_URL"] ?: ""
-        testInstrumentationRunnerArguments["aiBuilderToken"] = env["AI_BUILDER_TOKEN"] ?: ""
     }
 
     signingConfigs {
@@ -101,10 +99,6 @@ dependencies {
     implementation(libs.androidx.lifecycle.runtime.compose)
     implementation(libs.androidx.security.crypto)
     
-    // VoiceFlowKit: realtime speech transcription pipeline, consumed remotely from
-    // grapeot/voiceflow-android via JitPack (com.github.<user>:<repo>:<tag>).
-    implementation("com.github.grapeot:voiceflow-android:0.3.1")
-
     implementation(libs.okhttp)
     implementation(libs.okhttp.logging)
     implementation(libs.okhttp.sse)
@@ -112,8 +106,6 @@ dependencies {
     implementation(libs.retrofit.kotlinx.serialization)
     implementation(libs.kotlinx.serialization.json)
     implementation(libs.kotlinx.coroutines.android)
-    implementation(libs.bcprov)
-    implementation(libs.jsch)
     
     implementation(libs.hilt.android)
     ksp(libs.hilt.compiler)

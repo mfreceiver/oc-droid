@@ -52,7 +52,7 @@ export PATH="$JAVA_HOME/bin:$PATH:$ANDROID_HOME/platform-tools"
 ./gradlew connectedDebugAndroidTest         # 集成测试（需 .env 凭证 + 运行中的 OpenCode Server）
 ```
 
-集成测试前：复制 `.env.example` 为 `.env`，填入 `OPENCODE_*` / `AI_BUILDER_*` 凭证。
+集成测试前：复制 `.env.example` 为 `.env`，填入 `OPENCODE_*` 凭证。
 
 ## 设备安全（硬性规定）
 

@@ -15,9 +15,15 @@
 
 ---
 
+> ⚠️ **已弃用功能说明**：语音输入与 AI Builder 集成已在阶段 A 移除。本文档中涉及 AI Builder WebSocket 语音转写、`AIBuildersAudioClient`、`AudioRecorderManager`、语音权限、`AppState.aiBuilderConnection*` 字段的章节均仅作历史设计记录，当前代码库不再包含语音相关实现。下方相关章节已就地标注「❌ 已弃用」。
+
+---
+
 ## 摘要
 
-本 RFC 提出 OpenCode Android Client 的技术实现方案。核心是：在 Android 8.0+ 上构建一个基于 Jetpack Compose 的原生客户端，通过 HTTP REST + SSE 与 OpenCode Server 通信，并通过 AI Builder WebSocket API 提供语音转写能力，实现远程监控、消息发送、文档审查等能力。
+本 RFC 提出 OpenCode Android Client 的技术实现方案。核心是：在 Android 8.0+ 上构建一个基于 Jetpack Compose 的原生客户端，通过 HTTP REST + SSE 与 OpenCode Server 通信，实现远程监控、消息发送、文档审查等能力。
+
+> 注：早期版本曾通过 AI Builder WebSocket API 提供语音转写能力，该功能已在阶段 A 移除（见 §3.4、§6.1、§6.2 的已弃用标注）。
 
 ---
 
@@ -34,19 +40,21 @@
 │  SettingsScreen        │                       │  OpenCodeRepository        │
 │  HostProfilesScreen    │                       │  TunnelManager             │
 │                        │                       │  SSHKeyManager             │
-│  Components            │                       │  AIBuildersAudioClient     │
-│                        │                       │  AudioRecorderManager      │
+│  Components            │                       │  AIBuildersAudioClient ❌   │
+│                        │                       │  AudioRecorderManager ❌    │
 │                        │                       │  SettingsManager           │
 └─────────────────────────────────────────────────────────────────┘
                               │
                               │ OkHttp (REST + SSE + WebSocket)
                               ▼
 ┌─────────────────────────────────────────────────────────────────┐
-│          OpenCode Server + AI Builder Speech Services            │
+│          OpenCode Server + AI Builder Speech Services ❌         │
 │  GET /global/event  │  POST /session/:id/prompt_async  │  ...     │
-│  POST /v1/audio/realtime/sessions  │  WS /v1/audio/realtime/ws    │
+│  POST /v1/audio/realtime/sessions  │  WS /v1/audio/realtime/ws ❌ │
 └─────────────────────────────────────────────────────────────────┘
 ```
+
+> ❌ **已弃用**：上图中的 `AIBuildersAudioClient`、`AudioRecorderManager`、`AI Builder Speech Services` 以及 `/v1/audio/realtime/*` 端点属于已移除的语音转写链路，当前架构不再包含这些组件。
 
 SSH Tunnel 模式下，OpenCode REST/SSE 仍然使用同一套 OkHttp/Retrofit/SSEClient。差异只发生在 repository 配置前：`TunnelManager` 先建立 `127.0.0.1:<localPort>` 到 SSH gateway 侧 `127.0.0.1:<remotePort>` 的 local forward，然后 `OpenCodeRepository.configure()` 使用本地 loopback URL。这样 Files、Chat、SSE、health check 不需要各自感知 SSH。
 
@@ -236,7 +244,9 @@ class SSEClient(
 - SSE 断开：指数退避重连，上限 30s
 - 服务器不可达：显示 Disconnected 状态
 
-### 3.4 语音转写链路
+### 3.4 语音转写链路 ❌ 已弃用
+
+> ❌ **已弃用（语音功能已移除）**：以下整个语音转写链路（`AudioRecorderManager`、`RealtimeSpeechAudioCache`、`RealtimeSpeechStreamer`、`AIBuildersAudioClient`、AI Builder realtime session、PCM cache/replay recovery）已在阶段 A 移除，当前代码库不再包含相关实现。本节内容仅作历史设计记录保留。
 
 - 录音端使用 `AudioRecorderManager.startRealtimeCapture()`：`AudioRecord` 直接采集 PCM16 mono 24kHz chunk，点击麦克风后立即开始写入本地 cache，不等待网络 session 创建完成
 - 本地缓存使用 `RealtimeSpeechAudioCache`：每次录音创建一个临时 `.pcm` 文件，`append()` 追加 chunk，`readChunk(offset, maxBytes)` 支持从任意 offset 读取，stop/cancel 后删除
@@ -248,7 +258,7 @@ class SSEClient(
 - 输入框合并策略使用 `mergedSpeechInput(prefix, transcript)`：保留原输入，在转写结果前后只做必要空格拼接
 - 连接测试使用 AI Builder API，成功状态按 `baseURL + token` 的签名缓存，避免每次进入页面都强制重测
 
-关键常量：
+关键常量（已弃用）：
 
 | 常量 | 值 | 说明 |
 |------|----|------|
@@ -390,20 +400,17 @@ data class AppState(
     val themeMode: ThemeMode = ThemeMode.SYSTEM,
     val filePathToShowInFiles: String? = null,
     val streamingPartTexts: Map<String, String> = emptyMap(),
-    val streamingReasoningPart: Part? = null,
-    val isRecording: Boolean = false,
-    val isTranscribing: Boolean = false,
-    val speechError: String? = null,
-    val aiBuilderConnectionOK: Boolean = false,
-    val aiBuilderConnectionError: String? = null,
-    val isTestingAIBuilderConnection: Boolean = false
+    val streamingReasoningPart: Part? = null
+    // 语音/AI Builder 相关字段（isRecording / isTranscribing / speechError /
+    // aiBuilderConnectionOK / aiBuilderConnectionError / isTestingAIBuilderConnection）
+    // 已随语音功能一并移除，不再存在于 AppState。
 )
 
 @HiltViewModel
 class MainViewModel @Inject constructor(
     private val repository: OpenCodeRepository,
-    private val settingsManager: SettingsManager,
-    private val audioRecorderManager: AudioRecorderManager
+    private val settingsManager: SettingsManager
+    // 注：早期版本曾注入 audioRecorderManager: AudioRecorderManager，语音功能移除后已删除该依赖。
 ) : ViewModel() {
     private val _state = MutableStateFlow(AppState())
     val state: StateFlow<AppState> = _state.asStateFlow()
@@ -603,7 +610,7 @@ fun TabletLayout() {
 }
 ```
 
-当前实现里，`MainViewModel` 仍然是状态入口，但连接初始化、session/message 同步、SSE/polling、语音转写编排已经拆到同包 helper 文件；这样保留统一状态入口，同时把副作用逻辑按职责分散到更小的单元。
+当前实现里，`MainViewModel` 仍然是状态入口，但连接初始化、session/message 同步、SSE/polling 已经拆到同包 helper 文件（早期版本还包含语音转写编排，已随语音功能移除）；这样保留统一状态入口，同时把副作用逻辑按职责分散到更小的单元。
 
 ### 5.2 消息渲染
 
@@ -963,16 +970,17 @@ class CredentialManager(context: Context) {
             putString("server_url", url)
             putString("auth_username", username)
             putString("auth_password", password)
-            putString("ai_builder_base_url", "https://space.ai-builders.com/backend")
-            putString("ai_builder_token", "")
+            // ai_builder_base_url / ai_builder_token 已随语音功能移除
         }
     }
 }
 ```
 
-语音相关配置也走 `EncryptedSharedPreferences`：AI Builder Base URL、Token、Custom Prompt、Terminology、上次成功连接签名与时间戳都保存在本地加密存储中。
+~~语音相关配置也走 `EncryptedSharedPreferences`：AI Builder Base URL、Token、Custom Prompt、Terminology、上次成功连接签名与时间戳都保存在本地加密存储中。~~ ❌ 已弃用（语音功能已移除，相关配置项不再存储）。
 
-### 6.2 语音权限与输入行为
+### 6.2 语音权限与输入行为 ❌ 已弃用
+
+> ❌ **已弃用（语音功能已移除）**：以下 `RECORD_AUDIO` 权限、录音/转写输入行为均随语音功能一并移除，当前版本不再申请麦克风权限、不存在录音/转写状态。本节内容仅作历史设计记录保留。
 
 - `RECORD_AUDIO` 采用运行时权限请求，未授权时在 Chat 页直接提示
 - 录音中允许继续发送当前已输入文本，避免语音输入阻塞文字输入流；WebSocket 卡住时可先 abort 释放发送门控，再按需 retry 上一段 preserved audio
@@ -1063,7 +1071,7 @@ app/
 | Phase | 范围 | 预计周期 |
 |-------|------|----------|
 | 1 | 项目搭建、网络层、SSE、Session、消息发送、流式渲染 | 已完成 |
-| 2 | Part 渲染、权限审批、主题、语音输入 | 已完成 |
+| 2 | Part 渲染、权限审批、主题（早期含语音输入，已移除） | 已完成 |
 | 3 | 文件树、Markdown / 图片预览、Diff、平板布局 | 已完成 |
 | 5 | UX 对齐 iOS：Chat toolbar 重排（§5.4）、Session Rename UI、草稿持久化（§4.3）、Model/Agent per-session（§4.4） | ✅ 完成 |
 | 5b | 消息历史分页修复（§5.5）、Model/Agent Capsule 文本化（§5.6）、平板 toolbar 适配（§5.7）、消息模型标注（§5.8） | 1-2 天 |

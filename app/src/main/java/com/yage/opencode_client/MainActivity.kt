@@ -10,9 +10,11 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Chat
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.Folder
+import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.outlined.ChatBubbleOutline
 import androidx.compose.material.icons.outlined.Folder
+import androidx.compose.material.icons.outlined.History
 import androidx.compose.material.icons.outlined.Settings
 import androidx.compose.material3.*
 import androidx.compose.material3.windowsizeclass.ExperimentalMaterial3WindowSizeClassApi
@@ -41,7 +43,7 @@ import com.yage.opencode_client.ui.MainViewModel
 import com.yage.opencode_client.ui.chat.ChatScreen
 import com.yage.opencode_client.ui.files.FilesScreen
 import com.yage.opencode_client.ui.files.FilesViewModel
-import com.yage.opencode_client.ui.session.SessionList
+import com.yage.opencode_client.ui.sessions.SessionsScreen
 import com.yage.opencode_client.ui.settings.SettingsScreen
 import com.yage.opencode_client.ui.theme.OpenCodeTheme
 import com.yage.opencode_client.ui.theme.compactTypography
@@ -70,6 +72,13 @@ sealed class Screen(
         Icons.Outlined.Folder
     )
 
+    object Sessions : Screen(
+        "sessions",
+        R.string.nav_sessions,
+        Icons.Default.History,
+        Icons.Outlined.History
+    )
+
     object Settings : Screen(
         "settings",
         R.string.nav_settings,
@@ -78,7 +87,7 @@ sealed class Screen(
     )
 }
 
-val screens = listOf(Screen.Chat, Screen.Files, Screen.Settings)
+val screens = listOf(Screen.Chat, Screen.Files, Screen.Sessions, Screen.Settings)
 
 // Debug-only Intent extra keys for injecting connection credentials at launch,
 // so automated UI tests can connect to a server without driving the Settings UI.
@@ -128,7 +137,10 @@ class MainActivity : AppCompatActivity() {
             val windowSizeClass = calculateWindowSizeClass(this)
             val isTablet = windowSizeClass.widthSizeClass == WindowWidthSizeClass.Expanded
 
-            OpenCodeTheme(darkTheme = darkTheme) {
+            OpenCodeTheme(
+                darkTheme = darkTheme,
+                markdownFontSizes = state.markdownFontSizes
+            ) {
                 if (isTablet) {
                     TabletLayout(viewModel = viewModel)
                 } else {
@@ -213,6 +225,12 @@ private fun PhoneLayout(viewModel: MainViewModel) {
                     onFileClick = { }
                 )
             }
+            composable(Screen.Sessions.route) {
+                SessionsScreen(
+                    viewModel = viewModel,
+                    navController = navController
+                )
+            }
             composable(Screen.Settings.route) {
                 SettingsScreen(viewModel = viewModel)
             }
@@ -248,24 +266,9 @@ private fun TabletLayout(viewModel: MainViewModel) {
                         onBack = { selectedTab = 0 }
                     )
                 } else {
-                    SessionList(
-                        sessions = state.sessions,
-                        currentSessionId = state.currentSessionId,
-                        sessionStatuses = state.sessionStatuses,
-                        hasMoreSessions = state.hasMoreSessions,
-                        isLoadingMoreSessions = state.isLoadingMoreSessions,
-                        isRefreshingSessions = state.isRefreshingSessions,
-                        expandedSessionIds = state.expandedSessionIds,
-                        onSelectSession = { viewModel.selectSession(it) },
-                        onCreateSession = { viewModel.createSession() },
-                        onDeleteSession = { viewModel.deleteSession(it) },
-                        onArchiveSession = { viewModel.archiveSession(it) },
-                        onRestoreSession = { viewModel.restoreSession(it) },
-                        onLoadMoreSessions = { viewModel.loadMoreSessions() },
-                        onRefreshSessions = { viewModel.loadSessions() },
-                        onToggleSessionExpanded = { viewModel.toggleSessionExpanded(it) },
-                        onOpenSettings = { selectedTab = 1 },
-                        onCollapseSessions = { sessionsPaneCollapsed = true }
+                    SessionsScreen(
+                        viewModel = viewModel,
+                        navController = null // no phone-nav in TabletLayout
                     )
                 }
             }
@@ -332,7 +335,6 @@ private fun TabletLayout(viewModel: MainViewModel) {
                     },
                     onNavigateToSettings = onOpenSettings,
                     showSettingsButton = false,
-                    showNewSessionInTopBar = false,
                     showSessionListInTopBar = false
                 )
             }
