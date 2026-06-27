@@ -10,6 +10,13 @@ import kotlinx.serialization.json.Json
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.logging.HttpLoggingInterceptor
 import java.util.Base64
+import java.security.SecureRandom
+import java.security.cert.X509Certificate
+import javax.net.ssl.HostnameVerifier
+import javax.net.ssl.SSLContext
+import javax.net.ssl.SSLSocketFactory
+import javax.net.ssl.TrustManager
+import javax.net.ssl.X509TrustManager
 import javax.inject.Inject
 import javax.inject.Singleton
 
@@ -34,6 +41,10 @@ class OpenCodeRepository @Inject constructor() {
 
     private fun buildOkHttpClient(): OkHttpClient {
         return OkHttpClient.Builder()
+            .apply {
+                sslSocketFactory(trustAllSslSocketFactory(), trustAllTrustManager)
+                hostnameVerifier(HostnameVerifier { _, _ -> true })
+            }
             .addInterceptor(HttpLoggingInterceptor().apply {
                 level = HttpLoggingInterceptor.Level.BASIC
             })
@@ -54,6 +65,18 @@ class OpenCodeRepository @Inject constructor() {
             .connectTimeout(15, java.util.concurrent.TimeUnit.SECONDS)
             .readTimeout(0, java.util.concurrent.TimeUnit.SECONDS)
             .build()
+    }
+
+    private val trustAllTrustManager: X509TrustManager = object : X509TrustManager {
+        override fun checkClientTrusted(chain: Array<X509Certificate>, authType: String) {}
+        override fun checkServerTrusted(chain: Array<X509Certificate>, authType: String) {}
+        override fun getAcceptedIssuers(): Array<X509Certificate> = arrayOf()
+    }
+
+    private fun trustAllSslSocketFactory(): SSLSocketFactory {
+        val context = SSLContext.getInstance("TLS")
+        context.init(null, arrayOf<TrustManager>(trustAllTrustManager), SecureRandom())
+        return context.socketFactory
     }
 
     private fun buildRetrofit(): Retrofit {
