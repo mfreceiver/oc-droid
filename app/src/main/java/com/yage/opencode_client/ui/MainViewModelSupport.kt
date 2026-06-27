@@ -59,6 +59,7 @@ internal fun aiBuilderSignature(baseURL: String, token: String): String {
 }
 
 internal fun errorMessageOrFallback(throwable: Throwable?, fallback: String): String {
+    Log.e("OC_ERROR", "error surfaced to UI", throwable)
     val message = throwable?.message?.trim().orEmpty()
     return if (message.isEmpty()) fallback else message
 }

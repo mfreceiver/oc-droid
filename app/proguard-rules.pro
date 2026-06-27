@@ -58,3 +58,6 @@
 }
 # App @Serializable models (data.model.**) already kept above via -keep ... { *; },
 # which preserves their $Companion and $serializer accessors.
+
+# --- kotlinx-serialization Retrofit converter: does generic Type reflection ---
+-keep class com.jakewharton.retrofit2.** { *; }
