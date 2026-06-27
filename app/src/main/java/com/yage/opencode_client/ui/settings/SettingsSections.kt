@@ -49,10 +49,7 @@ import com.yage.opencode_client.util.ThemeMode
 @Composable
 internal fun ConnectionProfileSection(
     profile: HostProfile,
-    isTesting: Boolean,
     state: AppState,
-    testResult: TestResult?,
-    onTestConnection: () -> Unit,
     onManageProfiles: () -> Unit
 ) {
     SectionHeader(title = stringResource(R.string.settings_connection_profile))
@@ -69,41 +66,48 @@ internal fun ConnectionProfileSection(
             ) {
                 Column(modifier = Modifier.weight(1f)) {
                     Text(profile.displayName, style = MaterialTheme.typography.titleMedium)
+                    Text(
+                        profile.serverUrl,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                // Connected badge + version surfaces the live server status on
+                // the right of the profile row. The Test Connection action lives
+                // on the per-row icons inside Manage Connections now, so it is
+                // intentionally not duplicated here.
+                if (state.isConnected) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Icon(
+                            Icons.Default.CheckCircle,
+                            contentDescription = null,
+                            tint = MaterialTheme.colorScheme.primary,
+                            modifier = Modifier.size(20.dp)
+                        )
+                        Spacer(modifier = Modifier.width(4.dp))
+                        Text(
+                            stringResource(R.string.settings_connected),
+                            style = MaterialTheme.typography.labelMedium,
+                            color = MaterialTheme.colorScheme.primary
+                        )
+                        state.serverVersion?.let { version ->
+                            Text(
+                                " (v$version)",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.outline
+                            )
+                        }
+                    }
                 }
             }
 
             Spacer(modifier = Modifier.height(16.dp))
 
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                Button(onClick = onTestConnection, enabled = !isTesting) {
-                    if (isTesting) {
-                        CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp)
-                        Spacer(modifier = Modifier.width(8.dp))
-                    }
-                    Text(stringResource(R.string.settings_test_connection))
-                }
-                OutlinedButton(onClick = onManageProfiles) {
-                    Text(stringResource(R.string.settings_manage_profiles))
-                }
-            }
-        }
-    }
-
-    testResult?.let { ResultCard(result = it) }
-
-    if (state.isConnected) {
-        Spacer(modifier = Modifier.height(12.dp))
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            Icon(
-                Icons.Default.CheckCircle,
-                contentDescription = null,
-                tint = MaterialTheme.colorScheme.primary,
-                modifier = Modifier.size(20.dp)
-            )
-            Spacer(modifier = Modifier.width(8.dp))
-            Text(stringResource(R.string.settings_connected), style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.primary)
-            state.serverVersion?.let { version ->
-                Text(" (v$version)", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.outline)
+            OutlinedButton(
+                onClick = onManageProfiles,
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Text(stringResource(R.string.settings_manage_profiles))
             }
         }
     }
@@ -306,11 +310,14 @@ internal fun AboutSection() {
     SectionHeader(title = stringResource(R.string.settings_about))
 
     Text(
-        "OpenCode Android Client",
+        stringResource(R.string.app_name),
         style = MaterialTheme.typography.bodyLarge
     )
     Text(
-        "Version 1.0",
+        // BuildConfig.VERSION_NAME is generated at build time from
+        // app/build.gradle.kts, so this always reflects the shipped version
+        // without a hardcoded string to keep in sync.
+        stringResource(R.string.settings_version, com.yage.opencode_client.BuildConfig.VERSION_NAME),
         style = MaterialTheme.typography.bodySmall,
         color = MaterialTheme.colorScheme.outline
     )

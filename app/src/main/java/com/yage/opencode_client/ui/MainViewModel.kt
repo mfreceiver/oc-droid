@@ -29,6 +29,17 @@ data class ConnectionFormSettings(
     val password: String
 )
 
+/**
+ * Result of an independent host connectivity probe (see
+ * [MainViewModel.testHostConnection]). [versionSuffix] is a pre-formatted
+ * suffix like " (v1.2.3)" when the server reported a version, or null/empty
+ * otherwise. [message] carries an error string on failure.
+ */
+data class TestProbeResult(
+    val success: Boolean,
+    val versionSuffix: String?
+)
+
 data class AppState(
     val isConnected: Boolean = false,
     val isConnecting: Boolean = false,
@@ -426,6 +437,34 @@ class MainViewModel @Inject constructor(
         password = settingsManager.password ?: ""
     )
 
+    /**
+     * One-shot connectivity probe for [profile] that does NOT switch the current
+     * host, mutate repository configuration, or change [AppState]. Used by the
+     * host list's per-row "test" icon so a profile can be probed independently.
+     * The result is delivered via [onResult] on the main dispatcher, suitable
+     * for showing a toast or snackbar.
+     */
+    fun testHostConnection(
+        profile: HostProfile,
+        onResult: (TestProbeResult) -> Unit
+    ) {
+        viewModelScope.launch {
+            val password = profile.basicAuth?.passwordId?.let { settingsManager.basicAuthPassword(it) }
+            repository.checkHealthFor(profile.serverUrl, profile.basicAuth?.username, password)
+                .onSuccess { health ->
+                    if (health.healthy) {
+                        val suffix = health.version?.let { " (v$it)" } ?: ""
+                        onResult(TestProbeResult(true, suffix))
+                    } else {
+                        onResult(TestProbeResult(false, null))
+                    }
+                }
+                .onFailure { err ->
+                    onResult(TestProbeResult(false, err.message ?: ""))
+                }
+        }
+    }
+
     fun testConnection(force: Boolean = false) {
         val now = System.currentTimeMillis()
         if (!force && now - lastHealthCheckTime < 30_000) return
@@ -434,8 +473,7 @@ class MainViewModel @Inject constructor(
             _state.update { it.copy(isConnecting = true, error = null, connectionPhase = null) }
             val profile = hostProfileStore.currentProfile()
             configureRepositoryForProfile(profile)
-            repository.checkHealth()
-                .onSuccess { health ->
+            repository.checkHealth()                .onSuccess { health ->
                     _state.update {
                         it.copy(
                             isConnected = health.healthy,

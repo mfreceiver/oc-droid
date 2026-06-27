@@ -49,10 +49,10 @@ import com.yage.opencode_client.data.repository.OpenCodeRepository
  * "Connect new project" entry to let the user pick a project workdir on the
  * server instead of typing a path by hand.
  *
- * Browsing starts at `~` (server home). Only directories are listed; files are
- * filtered out. Tapping a folder descends into it; the up affordance returns to
- * the parent. Confirming calls [onSelect] with the currently displayed path
- * (absolute, `~`-rooted).
+ * Browsing starts at `/home/` (common Linux home base). Only directories are
+ * listed; files are filtered out. Tapping a folder descends into it; the up
+ * affordance returns to the parent. Confirming calls [onSelect] with the
+ * currently displayed path (absolute, `/`-rooted).
  *
  * Listings are fetched via [OpenCodeRepository.getFileTreeForDirectory], which
  * bypasses the repository's session-scoped workdir injection so browsing is
@@ -71,7 +71,7 @@ fun DirectoryPickerSheet(
 ) {
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
 
-    var currentPath by remember { mutableStateOf("~") }
+    var currentPath by remember { mutableStateOf("/home/") }
     var entries by remember { mutableStateOf<List<FileNode>>(emptyList()) }
     var isLoading by remember { mutableStateOf(true) }
     var error by remember { mutableStateOf<String?>(null) }
@@ -273,23 +273,20 @@ private fun DirectoryRow(name: String, onClick: () -> Unit) {
 }
 
 /**
- * Returns the parent path of [path] (a `~`-rooted or absolute path), or null if
- * [path] is already the browse root (`~`) and cannot ascend further.
+ * Returns the parent path of [path] (an absolute `/`-rooted path), or null if
+ * [path] is already the filesystem root (`/`) and cannot ascend further.
  */
 private fun parentPath(path: String): String? {
-    if (path == "~") return null
-    if (path.startsWith("~/")) {
-        val idx = path.lastIndexOf('/')
-        // "~/foo" -> idx = 1 -> parent = "~"
-        val parent = path.substring(0, idx)
-        return parent.ifEmpty { "~" }
-    }
-    val idx = path.lastIndexOf('/')
-    return if (idx <= 0) path else path.substring(0, idx)
+    if (path == "/") return null
+    // Normalize trailing slash (except for root) so "/home/" and "/home" behave
+    // identically when ascending.
+    val normalized = if (path.length > 1 && path.endsWith("/")) path.dropLast(1) else path
+    if (normalized == "/") return null
+    val idx = normalized.lastIndexOf('/')
+    return if (idx == 0) "/" else normalized.substring(0, idx)
 }
 
-/** Appends a child segment [name] to [current], handling `~` and trailing `/`. */
+/** Appends a child segment [name] to [current], handling trailing `/`. */
 private fun childPath(current: String, name: String): String {
-    if (current == "~") return "~/$name"
     return if (current.endsWith("/")) "$current$name" else "$current/$name"
 }

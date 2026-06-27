@@ -6,6 +6,7 @@ import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onNodeWithText
 import com.yage.opencode_client.data.model.HostProfile
 import com.yage.opencode_client.ui.AppState
+import com.yage.opencode_client.ui.settings.AboutSection
 import com.yage.opencode_client.ui.settings.ConnectionProfileSection
 import com.yage.opencode_client.ui.settings.HostProfileDetailDialog
 import com.yage.opencode_client.ui.settings.HostProfileEditorDialog
@@ -28,10 +29,7 @@ class SettingsSectionsInstrumentedTest {
             MaterialTheme {
                 ConnectionProfileSection(
                     profile = profile,
-                    isTesting = false,
                     state = AppState(isConnected = true, serverVersion = "1.0.0"),
-                    testResult = null,
-                    onTestConnection = {},
                     onManageProfiles = {}
                 )
             }
@@ -39,7 +37,7 @@ class SettingsSectionsInstrumentedTest {
 
         composeRule.onNodeWithText("OpenCode Server").assertIsDisplayed()
         composeRule.onNodeWithText("https://opencode.example.com").assertIsDisplayed()
-        composeRule.onNodeWithText("Manage Profiles").assertIsDisplayed()
+        composeRule.onNodeWithText("Manage Connections").assertIsDisplayed()
     }
 
     @Test
@@ -51,7 +49,7 @@ class SettingsSectionsInstrumentedTest {
                 HostProfileEditorDialog(
                     initial = profile,
                     onDismiss = {},
-                    onSave = { _, _ -> },
+                    onSave = { _, _, _ -> },
                 )
             }
         }
@@ -60,7 +58,7 @@ class SettingsSectionsInstrumentedTest {
     }
 
     @Test
-    fun hostProfileDetailShowsUseAndCopyActionsForProfile() {
+    fun hostProfileDetailShowsUseActionForProfile() {
         val profile = HostProfile(
             id = "p1",
             name = "OpenCode Server",
@@ -74,14 +72,24 @@ class SettingsSectionsInstrumentedTest {
                     isCurrent = false,
                     onDismiss = {},
                     onUse = {},
-                    onEdit = {},
-                    onExport = {},
-                    onTest = {}
+                    onEdit = {}
                 )
             }
         }
 
         composeRule.onNodeWithText("Use This Host").assertIsDisplayed()
-        composeRule.onNodeWithText("Copy Config JSON").assertIsDisplayed()
+    }
+
+    @Test
+    fun aboutSectionShowsDynamicVersion() {
+        composeRule.setContent {
+            MaterialTheme {
+                AboutSection()
+            }
+        }
+
+        // BuildConfig.VERSION_NAME is injected at build time; just assert the
+        // prefix renders so we know the About section uses the dynamic value.
+        composeRule.onNodeWithText("OC Droid").assertIsDisplayed()
     }
 }

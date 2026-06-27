@@ -126,6 +126,31 @@ fun SessionsScreen(
                 item(key = "workdirs_empty") {
                     EmptyRow(stringResource(R.string.sessions_tab_no_workdirs))
                 }
+                // When there are no workdir rows to host the connect button,
+                // expose a standalone connect-new-project entry so the user is
+                // never stranded without a way to connect their first project.
+                item(key = "workdir_connect_new") {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable { showNewWorkdirDialog = true }
+                            .padding(horizontal = 16.dp, vertical = 14.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Icon(
+                            Icons.Default.CreateNewFolder,
+                            contentDescription = null,
+                            modifier = Modifier.size(22.dp),
+                            tint = MaterialTheme.colorScheme.primary
+                        )
+                        Spacer(modifier = Modifier.width(10.dp))
+                        Text(
+                            text = stringResource(R.string.sessions_connect_new_project),
+                            style = MaterialTheme.typography.bodyMedium.copy(fontWeight = FontWeight.Medium),
+                            color = MaterialTheme.colorScheme.primary
+                        )
+                    }
+                }
             } else {
                 items(workdirGroups, key = { "workdir_${it.key}" }) { (workdir, sessionsInWorkdir) ->
                     val isExpanded = expandedWorkdirs.contains(workdir)
@@ -182,6 +207,17 @@ fun SessionsScreen(
                                     modifier = Modifier.size(18.dp)
                                 )
                             }
+                            IconButton(
+                                onClick = { showNewWorkdirDialog = true },
+                                modifier = Modifier.size(32.dp)
+                            ) {
+                                Icon(
+                                    Icons.Default.CreateNewFolder,
+                                    contentDescription = stringResource(R.string.sessions_connect_new_project),
+                                    modifier = Modifier.size(18.dp),
+                                    tint = MaterialTheme.colorScheme.primary
+                                )
+                            }
                         }
 
                         // Expandable session list within workdir
@@ -206,30 +242,6 @@ fun SessionsScreen(
                             color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f)
                         )
                     }
-                }
-            }
-
-            // --- Connect new project entry (always at bottom of workdir section) ---
-            item(key = "workdir_connect_new") {
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .clickable { showNewWorkdirDialog = true }
-                        .padding(horizontal = 16.dp, vertical = 14.dp),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Icon(
-                        Icons.Default.CreateNewFolder,
-                        contentDescription = null,
-                        modifier = Modifier.size(22.dp),
-                        tint = MaterialTheme.colorScheme.primary
-                    )
-                    Spacer(modifier = Modifier.width(10.dp))
-                    Text(
-                        text = stringResource(R.string.sessions_connect_new_project),
-                        style = MaterialTheme.typography.bodyMedium.copy(fontWeight = FontWeight.Medium),
-                        color = MaterialTheme.colorScheme.primary
-                    )
                 }
             }
         }

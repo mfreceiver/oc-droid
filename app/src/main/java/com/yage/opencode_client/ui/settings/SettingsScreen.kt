@@ -1,5 +1,6 @@
 package com.yage.opencode_client.ui.settings
 
+import android.widget.Toast
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
@@ -11,38 +12,39 @@ import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.Visibility
 import androidx.compose.material.icons.filled.VisibilityOff
-import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material.icons.filled.Wifi
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
-import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Surface
-import androidx.compose.material3.TextButton
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
-import androidx.compose.material3.MaterialTheme
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
-import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.yage.opencode_client.R
 import com.yage.opencode_client.data.model.BasicAuthConfig
 import com.yage.opencode_client.data.model.HostProfile
 import com.yage.opencode_client.ui.MainViewModel
-import kotlinx.coroutines.delay
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -53,31 +55,6 @@ fun SettingsScreen(
     val state by viewModel.state.collectAsStateWithLifecycle()
 
     var showHostProfiles by remember { mutableStateOf(false) }
-    var isTesting by remember { mutableStateOf(false) }
-    var testResult by remember { mutableStateOf<TestResult?>(null) }
-
-    LaunchedEffect(state.isConnecting) {
-        if (!state.isConnecting && isTesting) {
-            isTesting = false
-            testResult = TestResult(
-                success = state.isConnected,
-                message = if (state.isConnected) {
-                    "Connected successfully" + (state.serverVersion?.let { " (v$it)" } ?: "")
-                } else {
-                    state.error ?: "Connection failed"
-                }
-            )
-        }
-    }
-
-    // Auto-dismiss the transient "Settings saved" notice after a short delay.
-    // Connection results (success/error) stay until the user changes a field.
-    LaunchedEffect(testResult) {
-        if (testResult?.message == "Settings saved") {
-            delay(2000)
-            testResult = null
-        }
-    }
 
     if (showHostProfiles) {
         HostProfilesManagerScreen(
@@ -113,14 +90,7 @@ fun SettingsScreen(
         ) {
             ConnectionProfileSection(
                 profile = state.hostProfiles.firstOrNull { it.id == state.currentHostProfileId } ?: viewModel.currentHostProfile(),
-                isTesting = isTesting,
                 state = state,
-                testResult = testResult,
-                onTestConnection = {
-                    isTesting = true
-                    testResult = null
-                    viewModel.testConnection(force = true)
-                },
                 onManageProfiles = { showHostProfiles = true }
             )
 
@@ -151,7 +121,13 @@ private fun HostProfilesManagerScreen(
     var editingProfile by remember { mutableStateOf<HostProfile?>(null) }
     var error by remember { mutableStateOf<String?>(null) }
     var detailProfile by remember { mutableStateOf<HostProfile?>(null) }
+    // Tracks the profile currently being probed by the per-row "test" icon so
+    // its icon can show a spinner. Null when no row is testing.
+    var testingProfileId by remember { mutableStateOf<String?>(null) }
     val deleteFailedText = stringResource(R.string.host_profile_delete_failed)
+    val context = LocalContext.current
+    val testSuccessText = stringResource(R.string.host_profile_test_success)
+    val testFailedText = stringResource(R.string.host_profile_test_failed)
 
     Column(modifier = Modifier.fillMaxSize()) {
         TopAppBar(
@@ -182,8 +158,27 @@ private fun HostProfilesManagerScreen(
                 HostProfileRow(
                     profile = profile,
                     selected = profile.id == currentProfileId,
+                    isTesting = testingProfileId == profile.id,
                     onOpen = { detailProfile = profile },
-                    onSelect = { viewModel.selectHostProfile(profile.id) }
+                    onSelect = { viewModel.selectHostProfile(profile.id) },
+                    onEdit = { editingProfile = profile },
+                    onTest = {
+                        // Independent connectivity probe: does NOT switch the
+                        // current host, only runs a one-shot health check against
+                        // this profile's URL + Basic Auth and toasts the result.
+                        if (testingProfileId == null) {
+                            testingProfileId = profile.id
+                            viewModel.testHostConnection(profile) { result ->
+                                testingProfileId = null
+                                val message = if (result.success) {
+                                    String.format(testSuccessText, result.versionSuffix ?: "")
+                                } else {
+                                    testFailedText
+                                }
+                                Toast.makeText(context, message, Toast.LENGTH_SHORT).show()
+                            }
+                        }
+                    }
                 )
                 Spacer(modifier = Modifier.height(8.dp))
             }
@@ -193,9 +188,17 @@ private fun HostProfilesManagerScreen(
     editingProfile?.let { profile ->
         HostProfileEditorDialog(
             initial = profile,
+            // The "+" action creates a fresh profile that isn't persisted yet,
+            // so it must not expose the destructive delete affordance.
+            canDelete = profiles.any { it.id == profile.id } && profiles.size > 1,
             onDismiss = { editingProfile = null },
             onSave = { saved, password, tunnelPassword ->
                 viewModel.saveHostProfile(saved, password, tunnelPassword)
+                editingProfile = null
+            },
+            onDelete = {
+                runCatching { viewModel.deleteHostProfile(profile.id) }
+                    .onFailure { error = it.message ?: deleteFailedText }
                 editingProfile = null
             }
         )
@@ -205,7 +208,6 @@ private fun HostProfilesManagerScreen(
         HostProfileDetailDialog(
             profile = profile,
             isCurrent = profile.id == currentProfileId,
-            canDelete = profiles.size > 1,
             onDismiss = { detailProfile = null },
             onUse = {
                 viewModel.selectHostProfile(profile.id)
@@ -213,15 +215,6 @@ private fun HostProfilesManagerScreen(
             },
             onEdit = {
                 editingProfile = profile
-                detailProfile = null
-            },
-            onDelete = {
-                runCatching { viewModel.deleteHostProfile(profile.id) }
-                    .onFailure { error = it.message ?: deleteFailedText }
-                detailProfile = null
-            },
-            onTest = {
-                viewModel.selectHostProfile(profile.id)
                 detailProfile = null
             }
         )
@@ -232,8 +225,11 @@ private fun HostProfilesManagerScreen(
 internal fun HostProfileRow(
     profile: HostProfile,
     selected: Boolean,
+    isTesting: Boolean,
     onOpen: () -> Unit,
-    onSelect: () -> Unit
+    onSelect: () -> Unit,
+    onEdit: () -> Unit,
+    onTest: () -> Unit
 ) {
     Surface(
         onClick = onOpen,
@@ -260,6 +256,29 @@ internal fun HostProfileRow(
                     .weight(1f)
                     .padding(horizontal = 8.dp)
             )
+            // Edit: opens the editor dialog. IconButton consumes the click so
+            // it does not bubble up to the row's Surface onOpen handler.
+            IconButton(onClick = onEdit) {
+                Icon(
+                    Icons.Default.Edit,
+                    contentDescription = stringResource(R.string.host_profile_edit_icon)
+                )
+            }
+            // Test: independent one-shot connectivity probe (no host switch).
+            // Shows a spinner in place of the icon while the probe is in flight.
+            IconButton(onClick = onTest, enabled = !isTesting) {
+                if (isTesting) {
+                    CircularProgressIndicator(
+                        modifier = Modifier.size(20.dp),
+                        strokeWidth = 2.dp
+                    )
+                } else {
+                    Icon(
+                        Icons.Default.Wifi,
+                        contentDescription = stringResource(R.string.host_profile_test_icon)
+                    )
+                }
+            }
         }
     }
 }
@@ -268,12 +287,9 @@ internal fun HostProfileRow(
 internal fun HostProfileDetailDialog(
     profile: HostProfile,
     isCurrent: Boolean,
-    canDelete: Boolean,
     onDismiss: () -> Unit,
     onUse: () -> Unit,
-    onEdit: () -> Unit,
-    onDelete: () -> Unit,
-    onTest: () -> Unit
+    onEdit: () -> Unit
 ) {
     AlertDialog(
         onDismissRequest = onDismiss,
@@ -283,7 +299,10 @@ internal fun HostProfileDetailDialog(
                 Text(profile.serverUrl, style = MaterialTheme.typography.bodyMedium)
                 Spacer(modifier = Modifier.height(4.dp))
                 Text(
-                    stringResource(R.string.host_profile_status, if (isCurrent) stringResource(R.string.host_profile_current) else stringResource(R.string.host_profile_saved)),
+                    stringResource(
+                        R.string.host_profile_status,
+                        if (isCurrent) stringResource(R.string.host_profile_current) else stringResource(R.string.host_profile_saved)
+                    ),
                     style = MaterialTheme.typography.bodySmall
                 )
             }
@@ -294,12 +313,7 @@ internal fun HostProfileDetailDialog(
                     Button(onClick = onUse) { Text(stringResource(R.string.host_profile_use_this_host)) }
                     Spacer(modifier = Modifier.height(8.dp))
                 }
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    OutlinedButton(onClick = onTest) { Text(stringResource(R.string.settings_test_connection)) }
-                    OutlinedButton(onClick = onEdit) { Text(stringResource(R.string.common_edit)) }
-                }
-                Spacer(modifier = Modifier.height(8.dp))
-                OutlinedButton(onClick = onDelete, enabled = canDelete) { Text(stringResource(R.string.common_delete)) }
+                TextButton(onClick = onEdit) { Text(stringResource(R.string.common_edit)) }
             }
         }
     )
@@ -310,6 +324,8 @@ internal fun HostProfileEditorDialog(
     initial: HostProfile,
     onDismiss: () -> Unit,
     onSave: (HostProfile, String?, String?) -> Unit,
+    canDelete: Boolean = false,
+    onDelete: () -> Unit = {}
 ) {
     var name by remember(initial.id) { mutableStateOf(initial.name) }
     var serverUrl by remember(initial.id) { mutableStateOf(initial.serverUrl) }
@@ -317,6 +333,7 @@ internal fun HostProfileEditorDialog(
     var authPassword by remember(initial.id) { mutableStateOf("") }
     var tunnelPassword by remember(initial.id) { mutableStateOf("") }
     var showTunnelPassword by remember(initial.id) { mutableStateOf(false) }
+    var showDeleteConfirm by remember(initial.id) { mutableStateOf(false) }
 
     AlertDialog(
         onDismissRequest = onDismiss,
@@ -349,21 +366,70 @@ internal fun HostProfileEditorDialog(
                 )
             }
         },
+        // Bottom action row: [Delete(red)] ... [Cancel] [Save].
+        // Delete is only shown when editing an existing, deletable profile and
+        // is tinted with the error color to make the destructive action stand
+        // out. The confirmButton Row carries all three actions so they share a
+        // single baseline and the delete button can sit on the far left.
         confirmButton = {
-            Button(onClick = {
-                val basicAuth = authUsername.ifBlank { null }?.let { BasicAuthConfig(username = it, passwordId = initial.id) }
-                val tunnelId = tunnelPassword.ifBlank { null }?.let { initial.id }
-                val saved = initial.copy(
-                    name = name.ifBlank { "Untitled" },
-                    serverUrl = serverUrl,
-                    basicAuth = basicAuth,
-                    tunnelPasswordId = tunnelId
-                )
-                onSave(saved, authPassword.ifBlank { null }, tunnelPassword.ifBlank { null })
-            }) { Text(stringResource(R.string.settings_save)) }
-        },
-        dismissButton = { TextButton(onClick = onDismiss) { Text(stringResource(R.string.common_cancel)) } }
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                if (canDelete) {
+                    TextButton(
+                        onClick = { showDeleteConfirm = true },
+                        colors = ButtonDefaults.textButtonColors(
+                            contentColor = MaterialTheme.colorScheme.error
+                        )
+                    ) {
+                        Icon(Icons.Default.Delete, contentDescription = null)
+                        Spacer(modifier = Modifier.width(4.dp))
+                        Text(stringResource(R.string.common_delete))
+                    }
+                } else {
+                    Spacer(Modifier)
+                }
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    TextButton(onClick = onDismiss) { Text(stringResource(R.string.common_cancel)) }
+                    Button(onClick = {
+                        val basicAuth = authUsername.ifBlank { null }?.let { BasicAuthConfig(username = it, passwordId = initial.id) }
+                        val tunnelId = tunnelPassword.ifBlank { null }?.let { initial.id }
+                        val saved = initial.copy(
+                            name = name.ifBlank { "Untitled" },
+                            serverUrl = serverUrl,
+                            basicAuth = basicAuth,
+                            tunnelPasswordId = tunnelId
+                        )
+                        onSave(saved, authPassword.ifBlank { null }, tunnelPassword.ifBlank { null })
+                    }) { Text(stringResource(R.string.settings_save)) }
+                }
+            }
+        }
     )
+
+    if (showDeleteConfirm) {
+        AlertDialog(
+            onDismissRequest = { showDeleteConfirm = false },
+            title = { Text(stringResource(R.string.host_profile_delete_confirm_title)) },
+            text = { Text(stringResource(R.string.host_profile_delete_confirm_message)) },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        showDeleteConfirm = false
+                        onDelete()
+                    },
+                    colors = ButtonDefaults.textButtonColors(
+                        contentColor = MaterialTheme.colorScheme.error
+                    )
+                ) { Text(stringResource(R.string.common_delete)) }
+            },
+            dismissButton = {
+                TextButton(onClick = { showDeleteConfirm = false }) { Text(stringResource(R.string.common_cancel)) }
+            }
+        )
+    }
 }
 
 private fun newDirectProfile(): HostProfile = HostProfile.defaultDirect()

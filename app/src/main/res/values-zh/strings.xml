@@ -17,7 +17,7 @@
     <string name="settings_connected">已连接</string>
     <string name="settings_disconnected">未连接</string>
     <string name="settings_test_connection">测试连接</string>
-    <string name="settings_manage_profiles">管理连接配置</string>
+    <string name="settings_manage_profiles">管理连接</string>
     <string name="settings_save">保存</string>
     <string name="settings_saved">设置已保存</string>
     <string name="settings_connection_profile">连接配置</string>
@@ -29,6 +29,13 @@
     <string name="settings_hide_password">隐藏密码</string>
     <string name="settings_about">关于</string>
     <string name="settings_about_description">OpenCode AI coding agent 的原生 Android 客户端。</string>
+    <string name="settings_version">版本 %1$s</string>
+    <string name="host_profile_edit_icon">编辑</string>
+    <string name="host_profile_test_icon">测试连接</string>
+    <string name="host_profile_delete_confirm_title">删除配置</string>
+    <string name="host_profile_delete_confirm_message">确定删除此主机配置？此操作不可恢复。</string>
+    <string name="host_profile_test_success">已连接%1$s</string>
+    <string name="host_profile_test_failed">连接失败</string>
     <string name="common_back">返回</string>
     <string name="common_cancel">取消</string>
     <string name="common_close">关闭</string>

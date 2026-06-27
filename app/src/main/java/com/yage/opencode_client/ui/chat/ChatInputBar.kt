@@ -130,10 +130,10 @@ internal fun ChatInputBar(
                         onValueChange = onTextChange,
                         modifier = Modifier
                             .fillMaxWidth()
-                            .heightIn(min = 66.dp, max = 132.dp),
+                            .heightIn(min = 44.dp, max = 120.dp),
                         textStyle = LocalTextStyle.current.copy(color = MaterialTheme.colorScheme.onSurface),
                         cursorBrush = SolidColor(MaterialTheme.colorScheme.primary),
-                        maxLines = 6
+                        maxLines = 3
                     )
                 }
 

@@ -5,6 +5,7 @@ import com.yage.opencode_client.data.model.*
 import kotlinx.coroutines.flow.Flow
 import okhttp3.FormBody
 import okhttp3.OkHttpClient
+import okhttp3.Request
 import retrofit2.Retrofit
 import com.jakewharton.retrofit2.converter.kotlinx.serialization.asConverterFactory
 import kotlinx.serialization.json.Json
@@ -138,6 +139,46 @@ class OpenCodeRepository @Inject constructor() {
     fun getCurrentDirectory(): String? = currentDirectory
 
     suspend fun checkHealth(): Result<HealthResponse> = runCatching { api.getHealth() }
+
+    /**
+     * One-shot health probe against [baseUrl] with optional Basic Auth, WITHOUT
+     * mutating this repository's current configuration. Used by the host list's
+     * per-row "test" action so a profile can be probed without switching hosts.
+     *
+     * Builds a throwaway OkHttp client (trust-all, matching the main client's
+     * TLS behavior) and parses the same [HealthResponse] shape served by
+     * `GET /global/health`.
+     */
+    suspend fun checkHealthFor(
+        baseUrl: String,
+        username: String? = null,
+        password: String? = null
+    ): Result<HealthResponse> = runCatching {
+        val client = OkHttpClient.Builder()
+            .apply {
+                sslSocketFactory(trustAllSslSocketFactory(), trustAllTrustManager)
+                hostnameVerifier(HostnameVerifier { _, _ -> true })
+            }
+            .connectTimeout(15, java.util.concurrent.TimeUnit.SECONDS)
+            .readTimeout(15, java.util.concurrent.TimeUnit.SECONDS)
+            .build()
+        val normalizedUrl = (if (baseUrl.startsWith("http")) baseUrl else "http://$baseUrl")
+            .trimEnd('/') + "/global/health"
+        val requestBuilder = Request.Builder()
+            .url(normalizedUrl)
+            .header("X-Opencode-Skip-Dir", "1")
+        if (!username.isNullOrBlank() && !password.isNullOrBlank()) {
+            val credential = "$username:$password"
+            val encoded = Base64.getEncoder().encodeToString(credential.toByteArray())
+            requestBuilder.header("Authorization", "Basic $encoded")
+        }
+        client.newCall(requestBuilder.build()).execute().use { res ->
+            if (!res.isSuccessful) error("HTTP ${res.code}")
+            val body = res.body?.string().orEmpty()
+            if (body.isBlank()) error("Empty response body")
+            json.decodeFromString(HealthResponse.serializer(), body)
+        }
+    }
 
     suspend fun getSessions(limit: Int? = null): Result<List<Session>> = runCatching { api.getSessions(limit) }
 

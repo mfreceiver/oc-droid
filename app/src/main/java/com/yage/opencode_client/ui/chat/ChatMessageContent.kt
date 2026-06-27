@@ -16,6 +16,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
@@ -79,6 +80,9 @@ import com.yage.opencode_client.ui.util.DataUriImageTransformer
 import com.yage.opencode_client.ui.util.HttpImageHolder
 import com.yage.opencode_client.ui.util.MarkdownImageResolver
 import kotlinx.coroutines.flow.collect
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 
 @Composable
 internal fun ChatMessageList(
@@ -145,7 +149,7 @@ internal fun ChatMessageList(
             val streamingKey = "${streamingReasoningPart.messageId}:${streamingReasoningPart.id}"
             val streamingText = streamingPartTexts[streamingKey] ?: ""
             item(key = "streaming-reasoning") {
-                Box(modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp)) {
+                Box(modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp)) {
                     ReasoningCard(
                         text = streamingText,
                         title = streamingReasoningPart.toolReason,
@@ -202,7 +206,7 @@ private fun MessageRow(
 ) {
     val isUser = message.info.isUser
 
-    Column(modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp)) {
+    Column(modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp)) {
         // No "OpenCode" speaker title — the user's blue left bar vs the
         // assistant's container-less reply already make it clear who's speaking,
         // so an extra blue label is redundant.
@@ -258,7 +262,7 @@ private fun MessageRow(
                     SubAgentCard(
                         part = subPart,
                         onOpenSubAgent = onOpenSubAgent,
-                        modifier = Modifier.fillMaxWidth()
+                        modifier = Modifier.widthIn(max = 280.dp)
                     )
                 }
 
@@ -267,7 +271,7 @@ private fun MessageRow(
                         parts = plainToolParts,
                         onFileClick = onFileClick,
                         onOpenSubAgent = onOpenSubAgent,
-                        modifier = Modifier.fillMaxWidth()
+                        modifier = Modifier.widthIn(max = 280.dp)
                     )
                 }
 
@@ -286,19 +290,30 @@ private fun MessageRow(
                 i += 1
             }
         }
-        // Model label only — the previous edit/fork overflow menu added clutter
-        // (every row had a 3-dot icon) and the actions are reachable from the
-        // session list. The provider/model tag is enough context for assistant
-        // messages; user messages render nothing here.
-        if (!isUser) {
-            message.info.resolvedModel?.let { model ->
-                Text(
-                    text = "${model.providerId}/${model.modelId}",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f),
-                    modifier = Modifier.padding(start = 4.dp, top = 2.dp)
-                )
+        // Footer caption — replaces the previous provider/model label.
+        //  - Assistant: completion time (hh:mm), falling back to created time.
+        //  - User: "<modelId> <created hh:mm>" so the user can see which agent
+        //    model handled the turn and when the prompt was sent.
+        val timeInfo = message.info.time
+        val footerText = if (isUser) {
+            val modelId = message.info.resolvedModel?.modelId
+            val sendTime = timeInfo?.created?.let(::formatHm)
+            when {
+                modelId != null && sendTime != null -> "$modelId $sendTime"
+                modelId != null -> modelId
+                sendTime != null -> sendTime
+                else -> null
             }
+        } else {
+            (timeInfo?.completed ?: timeInfo?.created)?.let(::formatHm)
+        }
+        if (footerText != null) {
+            Text(
+                text = footerText,
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f),
+                modifier = Modifier.padding(start = 4.dp, top = 2.dp)
+            )
         }
     }
 }
@@ -325,8 +340,8 @@ private fun PartView(
         part.isReasoning -> ReasoningCard(streamingTextOverride ?: part.text ?: "", part.toolReason, false, modifier)
         part.isImageAttachment -> ImageFilePart(part, modifier)
         part.isFile -> FileAttachmentPart(part, modifier)
-        part.isSubAgentTask -> SubAgentCard(part, onOpenSubAgent, modifier)
-        part.isTool -> ToolCard(part, onFileClick, modifier)
+        part.isSubAgentTask -> SubAgentCard(part, onOpenSubAgent, Modifier.widthIn(max = 280.dp))
+        part.isTool -> ToolCard(part, onFileClick, Modifier.widthIn(max = 280.dp))
         part.isPatch && part.filePathsForNavigationFiltered.isNotEmpty() -> PatchCard(part.filePathsForNavigationFiltered, onFileClick, modifier)
     }
 }
@@ -397,6 +412,16 @@ private fun String.decodeDataUriImage(): android.graphics.Bitmap? {
         val bytes = Base64.decode(substring(markerIndex + marker.length), Base64.DEFAULT)
         BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
     }.getOrNull()
+}
+
+/**
+ * Formats an epoch-millis timestamp as `HH:mm` (24h, locale-neutral numerics).
+ * Used for the per-message footer caption that replaced the model label.
+ */
+private fun formatHm(epochMs: Long): String = try {
+    SimpleDateFormat("HH:mm", Locale.getDefault()).format(Date(epochMs))
+} catch (_: Exception) {
+    ""
 }
 
 /**
@@ -583,7 +608,7 @@ private fun ToolCallsRow(
     ) {
         Column(modifier = Modifier.padding(12.dp)) {
             Row(
-                modifier = Modifier.fillMaxWidth().clickable { expanded = !expanded },
+                modifier = Modifier.clickable { expanded = !expanded },
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Text(
@@ -592,7 +617,7 @@ private fun ToolCallsRow(
                     fontWeight = FontWeight.Medium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
-                Spacer(modifier = Modifier.weight(1f))
+                Spacer(modifier = Modifier.width(6.dp))
                 Icon(
                     if (expanded) Icons.Default.KeyboardArrowDown else Icons.Default.ChevronRight,
                     contentDescription = if (expanded) "Collapse" else "Expand",
@@ -624,25 +649,31 @@ private fun TextPart(
 ) {
     val innerModifier = modifier.padding(12.dp)
     if (isUser) {
-        Surface(
-            color = MaterialTheme.colorScheme.primary.copy(alpha = 0.10f),
-            shape = RoundedCornerShape(12.dp),
-            modifier = modifier
-        ) {
-            Row(modifier = Modifier.fillMaxWidth()) {
-                Box(
-                    modifier = Modifier
-                        .width(3.dp)
-                        .fillMaxHeight()
-                        .background(MaterialTheme.colorScheme.primary)
-                )
-                SelectionContainer {
-                    Text(
-                        text = text,
-                        modifier = Modifier.padding(12.dp),
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = MaterialTheme.colorScheme.onSurface
+        // Cap the user bubble at 80% of the row width so the assistant's reply
+        // (and the right gutter) keeps the chat from feeling wall-to-wall. The
+        // outer Column carries the 80% cap; the Surface + Row inside are
+        // wrap-content, so short prompts still render at their natural width
+        // and only long prompts hit the cap and wrap.
+        Column(modifier = modifier.fillMaxWidth(0.8f)) {
+            Surface(
+                color = MaterialTheme.colorScheme.primary.copy(alpha = 0.10f),
+                shape = RoundedCornerShape(12.dp)
+            ) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Box(
+                        modifier = Modifier
+                            .width(3.dp)
+                            .fillMaxHeight()
+                            .background(MaterialTheme.colorScheme.primary)
                     )
+                    SelectionContainer {
+                        Text(
+                            text = text,
+                            modifier = Modifier.padding(12.dp),
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onSurface
+                        )
+                    }
                 }
             }
         }
@@ -761,14 +792,23 @@ private fun ReasoningCard(
                 // by overriding `body` when rendering, so it visually de-emphasizes
                 // chain-of-thought vs the main assistant reply.
                 val reasoningFontSizes = fontSizes.copy(body = fontSizes.reasoning)
-                SelectionContainer {
-                    CompositionLocalProvider(LocalContentColor provides MaterialTheme.colorScheme.onSurfaceVariant) {
-                        Markdown(
-                            content = normalizedText,
-                            typography = markdownTypography(reasoningFontSizes),
-                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp),
-                            imageTransformer = DataUriImageTransformer
-                        )
+                // Wrap the expanded body in a rounded surfaceVariant panel so the
+                // chain-of-thought is visually framed as "thinking" content,
+                // distinct from the transparent header row above it.
+                Surface(
+                    modifier = Modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = 4.dp),
+                    shape = RoundedCornerShape(8.dp),
+                    color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f)
+                ) {
+                    SelectionContainer {
+                        CompositionLocalProvider(LocalContentColor provides MaterialTheme.colorScheme.onSurfaceVariant) {
+                            Markdown(
+                                content = normalizedText,
+                                typography = markdownTypography(reasoningFontSizes),
+                                modifier = Modifier.padding(8.dp),
+                                imageTransformer = DataUriImageTransformer
+                            )
+                        }
                     }
                 }
             }
@@ -871,7 +911,7 @@ private fun SubAgentCard(
                     .background(MaterialTheme.colorScheme.primary)
             )
             Row(
-                modifier = Modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = 10.dp),
+                modifier = Modifier.padding(horizontal = 10.dp, vertical = 10.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Icon(
@@ -881,7 +921,11 @@ private fun SubAgentCard(
                     tint = MaterialTheme.colorScheme.primary
                 )
                 Spacer(modifier = Modifier.width(8.dp))
-                Column(modifier = Modifier.weight(1f)) {
+                // weight(fill = false) lets the text column size to its content
+                // (rather than expanding to fill the parent), so the whole card
+                // shrinks to fit the label + status icon + chevron — matching the
+                // "not full-width" treatment applied to ToolCard / ToolCallsRow.
+                Column(modifier = Modifier.weight(1f, fill = false)) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Text(
                             text = label,
@@ -993,7 +1037,7 @@ private fun ToolCard(
     ) {
         CompositionLocalProvider(LocalContentColor provides MaterialTheme.colorScheme.onSurfaceVariant) {
             Column(modifier = Modifier.padding(12.dp)) {
-                Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
                     if (isRunning) {
                         CircularProgressIndicator(modifier = Modifier.size(14.dp), strokeWidth = 2.dp)
                     } else {
@@ -1010,8 +1054,8 @@ private fun ToolCard(
                         style = MaterialTheme.typography.labelLarge,
                         color = titleColor
                     )
-                    Spacer(modifier = Modifier.weight(1f))
                     if (firstFile != null) {
+                        Spacer(modifier = Modifier.width(4.dp))
                         IconButton(onClick = { onFileClick(firstFile) }, modifier = Modifier.size(28.dp)) {
                             Icon(
                                 Icons.AutoMirrored.Filled.OpenInNew,

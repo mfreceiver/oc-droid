@@ -176,12 +176,6 @@ internal fun ChatTopBar(
                                 color = MaterialTheme.colorScheme.primary,
                                 maxLines = 1
                             )
-                            Icon(
-                                Icons.Default.KeyboardArrowDown,
-                                contentDescription = stringResource(R.string.chat_switch_agent),
-                                modifier = Modifier.size(14.dp),
-                                tint = MaterialTheme.colorScheme.primary
-                            )
                         }
                         DropdownMenu(
                             expanded = showAgentMenu,
@@ -207,34 +201,23 @@ internal fun ChatTopBar(
                         }
                     }
 
-                    // Todo badge
-                    val todoList = state.sessionTodos
-                    val todoBadge = if (todoList.isNotEmpty()) {
-                        "${todoList.count { it.isCompleted }}/${todoList.size}"
-                    } else ""
-                    Surface(
-                        onClick = { showTodoDialog = true },
-                        shape = RoundedCornerShape(50),
-                        color = Color.Transparent
-                    ) {
-                        Row(
-                            verticalAlignment = Alignment.CenterVertically,
-                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp)
+                    // Todo badge — only rendered when there are todos. Icon-only
+                    // (no count) to keep the toolbar quiet; the count is still
+                    // visible inside the dialog.
+                    if (state.sessionTodos.isNotEmpty()) {
+                        Surface(
+                            onClick = { showTodoDialog = true },
+                            shape = RoundedCornerShape(50),
+                            color = Color.Transparent
                         ) {
                             Icon(
                                 Icons.Default.Checklist,
-                                contentDescription = if (todoBadge.isEmpty()) stringResource(R.string.chat_todo) else "${stringResource(R.string.chat_todo)} $todoBadge",
-                                modifier = Modifier.size(16.dp),
+                                contentDescription = stringResource(R.string.chat_todo),
+                                modifier = Modifier
+                                    .padding(horizontal = 10.dp, vertical = 5.dp)
+                                    .size(16.dp),
                                 tint = MaterialTheme.colorScheme.onSurfaceVariant
                             )
-                            if (todoBadge.isNotEmpty()) {
-                                Spacer(modifier = Modifier.width(4.dp))
-                                Text(
-                                    todoBadge,
-                                    style = MaterialTheme.typography.labelSmall,
-                                    color = MaterialTheme.colorScheme.primary
-                                )
-                            }
                         }
                     }
 
@@ -401,7 +384,6 @@ private fun SessionDropdownRow(
     onCloseSession: (String) -> Unit
 ) {
     val currentTitle = currentSession?.displayName ?: "—"
-    val currentWorkdir = currentSession?.directory
     Box {
         Row(
             verticalAlignment = Alignment.CenterVertically,
@@ -410,31 +392,24 @@ private fun SessionDropdownRow(
                 .clickable(onClick = onToggleExpand)
                 .padding(vertical = 2.dp)
         ) {
-            Icon(
-                Icons.Default.KeyboardArrowDown,
-                contentDescription = null,
-                modifier = Modifier.size(18.dp),
-                tint = MaterialTheme.colorScheme.onSurfaceVariant
-            )
-            Spacer(modifier = Modifier.width(4.dp))
+            // Title on the left (fills available width), dropdown arrow on
+            // the right. workdir is intentionally omitted from the collapsed
+            // row — it is still shown inside each dropdown item below.
             Text(
                 text = truncateTitle(currentTitle),
                 style = MaterialTheme.typography.bodyMedium,
                 fontWeight = FontWeight.SemiBold,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
-                color = MaterialTheme.colorScheme.onSurface
+                color = MaterialTheme.colorScheme.onSurface,
+                modifier = Modifier.weight(1f)
             )
-            if (currentWorkdir != null) {
-                Spacer(modifier = Modifier.width(6.dp))
-                Text(
-                    text = "(${workdirBasename(currentWorkdir)})",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis
-                )
-            }
+            Icon(
+                Icons.Default.KeyboardArrowDown,
+                contentDescription = null,
+                modifier = Modifier.size(18.dp),
+                tint = MaterialTheme.colorScheme.onSurfaceVariant
+            )
         }
         DropdownMenu(
             expanded = expanded,
