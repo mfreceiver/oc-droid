@@ -47,21 +47,14 @@
 # sees ParameterizedType (List<Session>, Map<...>) instead of raw Class.
 -keep interface com.yage.opencode_client.data.api.OpenCodeApi { *; }
 
-# kotlinx.serialization: companion serializer() accessors (official R8 rules).
--if @kotlinx.serialization.Serializable class **
--keepclassmembers class <1> {
-    static <1>$Companion Companion;
-}
--if @kotlinx.serialization.Serializable class ** {
-    static **$*;
-}
--keepclassmembers class <2>$<3> {
-    kotlinx.serialization.KSerializer serializer(...);
-}
+# kotlinx.serialization: keep serializer() reflection (R8 9-compatible form;
+# the official -if/-keep templates with "**$*" are rejected by this R8 version).
+-dontnote kotlinx.serialization.**
 -keepclassmembers class kotlinx.serialization.json.** {
     *** Companion;
 }
 -keepclasseswithmembers class kotlinx.serialization.json.** {
     kotlinx.serialization.KSerializer serializer(...);
 }
--dontnote kotlinx.serialization.**
+# App @Serializable models (data.model.**) already kept above via -keep ... { *; },
+# which preserves their $Companion and $serializer accessors.
