@@ -1,6 +1,5 @@
 package com.yage.opencode_client.ui.settings
 
-import android.widget.Toast
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
@@ -9,14 +8,11 @@ import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Edit
-import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.Visibility
 import androidx.compose.material.icons.filled.VisibilityOff
-import androidx.compose.material.icons.filled.Wifi
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
-import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -35,11 +31,11 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.yage.opencode_client.R
@@ -138,13 +134,7 @@ private fun HostProfilesManagerScreen(
     var editingProfile by remember { mutableStateOf<HostProfile?>(null) }
     var error by remember { mutableStateOf<String?>(null) }
     var detailProfile by remember { mutableStateOf<HostProfile?>(null) }
-    // Tracks the profile currently being probed by the per-row "test" icon so
-    // its icon can show a spinner. Null when no row is testing.
-    var testingProfileId by remember { mutableStateOf<String?>(null) }
     val deleteFailedText = stringResource(R.string.host_profile_delete_failed)
-    val context = LocalContext.current
-    val testSuccessText = stringResource(R.string.host_profile_test_success)
-    val testFailedText = stringResource(R.string.host_profile_test_failed)
 
     Column(modifier = Modifier.fillMaxSize()) {
         TopAppBar(
@@ -175,27 +165,9 @@ private fun HostProfilesManagerScreen(
                 HostProfileRow(
                     profile = profile,
                     selected = profile.id == currentProfileId,
-                    isTesting = testingProfileId == profile.id,
                     onOpen = { detailProfile = profile },
                     onSelect = { viewModel.selectHostProfile(profile.id) },
-                    onEdit = { editingProfile = profile },
-                    onTest = {
-                        // Independent connectivity probe: does NOT switch the
-                        // current host, only runs a one-shot health check against
-                        // this profile's URL + Basic Auth and toasts the result.
-                        if (testingProfileId == null) {
-                            testingProfileId = profile.id
-                            viewModel.testHostConnection(profile) { result ->
-                                testingProfileId = null
-                                val message = if (result.success) {
-                                    String.format(testSuccessText, result.versionSuffix ?: "")
-                                } else {
-                                    testFailedText
-                                }
-                                Toast.makeText(context, message, Toast.LENGTH_SHORT).show()
-                            }
-                        }
-                    }
+                    onEdit = { editingProfile = profile }
                 )
                 Spacer(modifier = Modifier.height(8.dp))
             }
@@ -209,8 +181,14 @@ private fun HostProfilesManagerScreen(
             // so it must not expose the destructive delete affordance.
             canDelete = profiles.any { it.id == profile.id } && profiles.size > 1,
             onDismiss = { editingProfile = null },
-            onSave = { saved, password, tunnelPassword ->
-                viewModel.saveHostProfile(saved, password, tunnelPassword)
+            onSave = { saved, basicAuthPassword, basicAuthEdited, tunnelPassword, tunnelEdited ->
+                viewModel.saveHostProfile(
+                    saved,
+                    basicAuthPassword = basicAuthPassword,
+                    basicAuthEdited = basicAuthEdited,
+                    tunnelPassword = tunnelPassword,
+                    tunnelEdited = tunnelEdited
+                )
                 editingProfile = null
             },
             onDelete = {
@@ -242,11 +220,9 @@ private fun HostProfilesManagerScreen(
 internal fun HostProfileRow(
     profile: HostProfile,
     selected: Boolean,
-    isTesting: Boolean,
     onOpen: () -> Unit,
     onSelect: () -> Unit,
-    onEdit: () -> Unit,
-    onTest: () -> Unit
+    onEdit: () -> Unit
 ) {
     Surface(
         onClick = onOpen,
@@ -266,13 +242,23 @@ internal fun HostProfileRow(
                 selected = selected,
                 onClick = onSelect
             )
-            Text(
-                profile.displayName,
-                style = MaterialTheme.typography.bodyLarge,
+            Column(
                 modifier = Modifier
                     .weight(1f)
                     .padding(horizontal = 8.dp)
-            )
+            ) {
+                Text(
+                    profile.displayName,
+                    style = MaterialTheme.typography.bodyLarge
+                )
+                Text(
+                    profile.serverUrl,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+            }
             // Edit: opens the editor dialog. IconButton consumes the click so
             // it does not bubble up to the row's Surface onOpen handler.
             IconButton(onClick = onEdit) {
@@ -280,21 +266,6 @@ internal fun HostProfileRow(
                     Icons.Default.Edit,
                     contentDescription = stringResource(R.string.host_profile_edit_icon)
                 )
-            }
-            // Test: independent one-shot connectivity probe (no host switch).
-            // Shows a spinner in place of the icon while the probe is in flight.
-            IconButton(onClick = onTest, enabled = !isTesting) {
-                if (isTesting) {
-                    CircularProgressIndicator(
-                        modifier = Modifier.size(20.dp),
-                        strokeWidth = 2.dp
-                    )
-                } else {
-                    Icon(
-                        Icons.Default.Wifi,
-                        contentDescription = stringResource(R.string.host_profile_test_icon)
-                    )
-                }
             }
         }
     }
@@ -340,7 +311,13 @@ internal fun HostProfileDetailDialog(
 internal fun HostProfileEditorDialog(
     initial: HostProfile,
     onDismiss: () -> Unit,
-    onSave: (HostProfile, String?, String?) -> Unit,
+    onSave: (
+        profile: HostProfile,
+        basicAuthPassword: String,
+        basicAuthEdited: Boolean,
+        tunnelPassword: String,
+        tunnelEdited: Boolean
+    ) -> Unit,
     canDelete: Boolean = false,
     onDelete: () -> Unit = {}
 ) {
@@ -348,7 +325,10 @@ internal fun HostProfileEditorDialog(
     var serverUrl by remember(initial.id) { mutableStateOf(initial.serverUrl) }
     var authUsername by remember(initial.id) { mutableStateOf(initial.basicAuth?.username.orEmpty()) }
     var authPassword by remember(initial.id) { mutableStateOf("") }
+    var passwordEdited by remember(initial.id) { mutableStateOf(false) }
     var tunnelPassword by remember(initial.id) { mutableStateOf("") }
+    var tunnelEdited by remember(initial.id) { mutableStateOf(false) }
+    var showBasicPassword by remember(initial.id) { mutableStateOf(false) }
     var showTunnelPassword by remember(initial.id) { mutableStateOf(false) }
     var showDeleteConfirm by remember(initial.id) { mutableStateOf(false) }
 
@@ -357,17 +337,67 @@ internal fun HostProfileEditorDialog(
         title = { Text(if (initial.name.isBlank()) stringResource(R.string.host_profile_add_title) else stringResource(R.string.host_profile_edit_title)) },
         text = {
             Column {
-                OutlinedTextField(value = name, onValueChange = { name = it }, label = { Text(stringResource(R.string.host_profile_name)) }, modifier = Modifier.fillMaxWidth())
+                // 配置名 (required)
+                Text(stringResource(R.string.host_profile_name), style = MaterialTheme.typography.labelMedium)
+                OutlinedTextField(
+                    value = name,
+                    onValueChange = { name = it },
+                    placeholder = { Text(stringResource(R.string.host_profile_name)) },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth()
+                )
                 Spacer(modifier = Modifier.height(8.dp))
-                OutlinedTextField(value = serverUrl, onValueChange = { serverUrl = it }, label = { Text(stringResource(R.string.settings_server_url)) }, modifier = Modifier.fillMaxWidth())
+                // 服务器地址 (required)
+                Text(stringResource(R.string.settings_server_url), style = MaterialTheme.typography.labelMedium)
+                OutlinedTextField(
+                    value = serverUrl,
+                    onValueChange = { serverUrl = it },
+                    placeholder = { Text("http://localhost:4096") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth()
+                )
                 Spacer(modifier = Modifier.height(8.dp))
-                OutlinedTextField(value = authUsername, onValueChange = { authUsername = it }, label = { Text(stringResource(R.string.host_profile_basic_auth_username)) }, modifier = Modifier.fillMaxWidth())
-                OutlinedTextField(value = authPassword, onValueChange = { authPassword = it }, label = { Text(stringResource(R.string.host_profile_basic_auth_password)) }, modifier = Modifier.fillMaxWidth())
+                // Username (optional)
+                Text(stringResource(R.string.host_profile_basic_auth_username), style = MaterialTheme.typography.labelMedium)
+                OutlinedTextField(
+                    value = authUsername,
+                    onValueChange = { authUsername = it },
+                    placeholder = { Text("（可选）") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth()
+                )
                 Spacer(modifier = Modifier.height(8.dp))
+                // Password (optional, masked)
+                Text(stringResource(R.string.host_profile_basic_auth_password), style = MaterialTheme.typography.labelMedium)
+                OutlinedTextField(
+                    value = authPassword,
+                    onValueChange = {
+                        passwordEdited = true
+                        authPassword = it
+                    },
+                    placeholder = { Text("（可选）") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth(),
+                    visualTransformation = if (showBasicPassword) VisualTransformation.None else PasswordVisualTransformation(),
+                    trailingIcon = {
+                        IconButton(onClick = { showBasicPassword = !showBasicPassword }) {
+                            Icon(
+                                if (showBasicPassword) Icons.Default.VisibilityOff else Icons.Default.Visibility,
+                                contentDescription = if (showBasicPassword) stringResource(R.string.settings_hide_password) else stringResource(R.string.settings_show_password)
+                            )
+                        }
+                    }
+                )
+                Spacer(modifier = Modifier.height(8.dp))
+                // Tunnel auth (optional, masked)
+                Text(stringResource(R.string.host_profile_tunnel_password_label), style = MaterialTheme.typography.labelMedium)
                 OutlinedTextField(
                     value = tunnelPassword,
-                    onValueChange = { tunnelPassword = it },
-                    label = { Text(stringResource(R.string.host_profile_tunnel_password_label)) },
+                    onValueChange = {
+                        tunnelEdited = true
+                        tunnelPassword = it
+                    },
+                    placeholder = { Text("（可选）") },
                     singleLine = true,
                     modifier = Modifier.fillMaxWidth(),
                     visualTransformation = if (showTunnelPassword) VisualTransformation.None else PasswordVisualTransformation(),
@@ -378,8 +408,7 @@ internal fun HostProfileEditorDialog(
                                 contentDescription = if (showTunnelPassword) stringResource(R.string.settings_hide_password) else stringResource(R.string.settings_show_password)
                             )
                         }
-                    },
-                    leadingIcon = { Icon(Icons.Default.Lock, contentDescription = null) }
+                    }
                 )
             }
         },
@@ -412,14 +441,37 @@ internal fun HostProfileEditorDialog(
                     TextButton(onClick = onDismiss) { Text(stringResource(R.string.common_cancel)) }
                     Button(onClick = {
                         val basicAuth = authUsername.ifBlank { null }?.let { BasicAuthConfig(username = it, passwordId = initial.id) }
-                        val tunnelId = tunnelPassword.ifBlank { null }?.let { initial.id }
+                        // #5: respect tunnelEdited so an untouched (blank)
+                        // password field does NOT clear the stored
+                        // tunnelPasswordId. The editor field is always seeded
+                        // blank (passwords are write-only), so without this
+                        // guard every save wiped the tunnel credential.
+                        val tunnelId = if (tunnelEdited) {
+                            tunnelPassword.ifBlank { null }?.let { initial.id }
+                        } else {
+                            initial.tunnelPasswordId
+                        }
                         val saved = initial.copy(
                             name = name.ifBlank { "Untitled" },
                             serverUrl = serverUrl,
                             basicAuth = basicAuth,
                             tunnelPasswordId = tunnelId
                         )
-                        onSave(saved, authPassword.ifBlank { null }, tunnelPassword.ifBlank { null })
+                        // If the user blanks the username on a profile that
+                        // previously had basic auth, force passwordEdited so
+                        // saveHostProfile removes any leftover stored password.
+                        val effectivePasswordEdited = passwordEdited ||
+                            (authUsername.isBlank() && initial.basicAuth != null)
+                        // Positional call: onSave is a function-type parameter,
+                        // so Kotlin prohibits named arguments here. Names are
+                        // documented by the lambda signature instead.
+                        onSave(
+                            saved,
+                            authPassword,
+                            effectivePasswordEdited,
+                            tunnelPassword,
+                            tunnelEdited
+                        )
                     }) { Text(stringResource(R.string.settings_save)) }
                 }
             }

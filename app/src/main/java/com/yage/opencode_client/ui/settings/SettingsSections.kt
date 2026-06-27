@@ -66,11 +66,6 @@ internal fun ConnectionProfileSection(
             ) {
                 Column(modifier = Modifier.weight(1f)) {
                     Text(profile.displayName, style = MaterialTheme.typography.titleMedium)
-                    Text(
-                        profile.serverUrl,
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
                 }
                 // Connected badge + version surfaces the live server status on
                 // the right of the profile row. The Test Connection action lives

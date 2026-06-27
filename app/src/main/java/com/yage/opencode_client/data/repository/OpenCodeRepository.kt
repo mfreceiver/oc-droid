@@ -201,6 +201,20 @@ class OpenCodeRepository @Inject constructor(
     suspend fun getSessions(limit: Int? = null): Result<List<Session>> = runCatching { api.getSessions(limit) }
 
     /**
+     * Fetches the root sessions whose [Session.directory] exactly matches
+     * [directory]. Uses the server's `?directory` + `?roots` query params
+     * (priority: query param > header > cwd, per lib-1) so the result is
+     * scoped to this workdir and excludes sub-agent (child) sessions.
+     *
+     * Used by [com.yage.opencode_client.ui.MainViewModel.createSessionInWorkdir]
+     * to surface existing conversations in a newly-connected project, stored
+     * separately in [com.yage.opencode_client.ui.AppState.directorySessions]
+     * so periodic global refreshes do not discard it.
+     */
+    suspend fun getSessionsForDirectory(directory: String, limit: Int? = null): Result<List<Session>> =
+        runCatching { api.getSessions(limit = limit, directory = directory, roots = true) }
+
+    /**
      * Fetches a single session by ID. Used to resolve a child/sub-agent session
      * that may not be present in the cached [getSessions] list (e.g. when the
      * user navigates into a sub-agent before the parent's child list finished

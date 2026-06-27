@@ -98,10 +98,11 @@ internal fun ChatMessageList(
     workspaceDirectory: String?,
     onLoadMore: () -> Unit,
     onFileClick: (String) -> Unit,
-    onOpenSubAgent: (String) -> Unit
+    onOpenSubAgent: (String) -> Unit,
+    expandedParts: Map<String, Boolean>,
+    onToggleExpand: (String, Boolean) -> Unit
 ) {
     val listState = rememberLazyListState()
-    val layoutInfo = listState.layoutInfo
     var shouldAutoScroll by remember { mutableStateOf(true) }
     val contentVersion = remember(messages, streamingPartTexts, streamingReasoningPart, isLoading) {
         messages.size +
@@ -125,21 +126,27 @@ internal fun ChatMessageList(
         }
     }
 
-    // remember keys prevent stale-closure: isLoading/messages/messageLimit are plain values, not State.
-    // reverseLayout=true: highest index = visual top (oldest). lastVisible >= total-3 fires there.
-    val shouldLoadMore = remember(isLoading, messages.size, messageLimit) {
+    // reverseLayout=true: highest index = visual top (oldest). Reading
+    // listState.layoutInfo *inside* derivedStateOf (rather than capturing it as
+    // a local val outside) lets the snapshot system track the read so the
+    // predicate actually re-evaluates on scroll. The param-dependent guards
+    // (isLoading / messages.size / messageLimit) live in the LaunchedEffect
+    // key, so pagination re-checks fire whenever they change. Dedup/continuation
+    // is safe: loadMoreMessages already guards on isLoadingMessages, and the
+    // messages.size >= messageLimit condition turns false once the server
+    // returns a short page.
+    val nearTop = remember {
         derivedStateOf {
-            if (isLoading || messages.isEmpty()) return@derivedStateOf false
-            if (messages.size < messageLimit) return@derivedStateOf false
-            val visible = layoutInfo.visibleItemsInfo
-            if (visible.isEmpty()) return@derivedStateOf false
-            val total = layoutInfo.totalItemsCount
-            val lastVisible = visible.maxOfOrNull { it.index } ?: return@derivedStateOf false
-            lastVisible >= total - 3
+            val info = listState.layoutInfo
+            val visible = info.visibleItemsInfo
+            if (visible.isEmpty()) false
+            else (visible.maxOfOrNull { it.index } ?: 0) >= info.totalItemsCount - 3
         }
     }
-    LaunchedEffect(shouldLoadMore.value) {
-        if (shouldLoadMore.value) onLoadMore()
+    LaunchedEffect(nearTop.value, isLoading, messages.size, messageLimit) {
+        if (!isLoading && messages.isNotEmpty() && messages.size >= messageLimit && nearTop.value) {
+            onLoadMore()
+        }
     }
 
     LazyColumn(
@@ -169,7 +176,9 @@ internal fun ChatMessageList(
                 repository = repository,
                 workspaceDirectory = workspaceDirectory,
                 onFileClick = onFileClick,
-                onOpenSubAgent = onOpenSubAgent
+                onOpenSubAgent = onOpenSubAgent,
+                expandedParts = expandedParts,
+                onToggleExpand = onToggleExpand
             )
         }
         if (isLoading && messages.size >= messageLimit) {
@@ -206,11 +215,16 @@ private fun MessageRow(
     repository: OpenCodeRepository,
     workspaceDirectory: String?,
     onFileClick: (String) -> Unit,
-    onOpenSubAgent: (String) -> Unit
+    onOpenSubAgent: (String) -> Unit,
+    expandedParts: Map<String, Boolean>,
+    onToggleExpand: (String, Boolean) -> Unit
 ) {
     val isUser = message.info.isUser
 
-    Column(modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp)) {
+    Column(
+        modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp),
+        horizontalAlignment = if (isUser) Alignment.End else Alignment.Start
+    ) {
         // No "OpenCode" speaker title — the user's blue left bar vs the
         // assistant's container-less reply already make it clear who's speaking,
         // so an extra blue label is redundant.
@@ -248,6 +262,9 @@ private fun MessageRow(
                     PatchCard(
                         part = writePart,
                         onFileClick = onFileClick,
+                        expandedParts = expandedParts,
+                        onToggleExpand = onToggleExpand,
+                        expandedKey = "${message.info.id}|${writePart.id}",
                         modifier = Modifier.widthIn(max = MAX_CARD_WIDTH)
                     )
                 }
@@ -290,6 +307,9 @@ private fun MessageRow(
                         parts = plainToolParts,
                         onFileClick = onFileClick,
                         onOpenSubAgent = onOpenSubAgent,
+                        messageId = message.info.id,
+                        expandedParts = expandedParts,
+                        onToggleExpand = onToggleExpand,
                         modifier = Modifier.widthIn(max = MAX_CARD_WIDTH)
                     )
                 }
@@ -304,6 +324,9 @@ private fun MessageRow(
                     workspaceDirectory = workspaceDirectory,
                     onFileClick = onFileClick,
                     onOpenSubAgent = onOpenSubAgent,
+                    messageId = message.info.id,
+                    expandedParts = expandedParts,
+                    onToggleExpand = onToggleExpand,
                     modifier = Modifier.fillMaxWidth()
                 )
                 i += 1
@@ -331,7 +354,7 @@ private fun MessageRow(
                 text = footerText,
                 style = MaterialTheme.typography.labelSmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f),
-                modifier = Modifier.padding(start = 4.dp, top = 2.dp)
+                modifier = Modifier.padding(end = 4.dp, top = 2.dp)
             )
         }
     }
@@ -346,8 +369,12 @@ private fun PartView(
     workspaceDirectory: String?,
     onFileClick: (String) -> Unit,
     onOpenSubAgent: (String) -> Unit,
+    messageId: String,
+    expandedParts: Map<String, Boolean>,
+    onToggleExpand: (String, Boolean) -> Unit,
     modifier: Modifier = Modifier.fillMaxWidth()
 ) {
+    val expandKey = "${messageId}|${part.id}"
     when {
         part.isText -> TextPart(
             text = streamingTextOverride ?: part.text ?: "",
@@ -357,17 +384,34 @@ private fun PartView(
             workspaceDirectory = workspaceDirectory
         )
         part.isReasoning -> ReasoningCard(
-            streamingTextOverride ?: part.text ?: "",
-            part.toolReason,
-            false,
-            modifier.widthIn(max = MAX_CARD_WIDTH)
+            text = streamingTextOverride ?: part.text ?: "",
+            title = part.toolReason,
+            isStreaming = false,
+            expandedParts = expandedParts,
+            onToggleExpand = onToggleExpand,
+            expandedKey = expandKey,
+            modifier = modifier.widthIn(max = MAX_CARD_WIDTH)
         )
         part.isImageAttachment -> ImageFilePart(part, modifier)
         part.isFile -> FileAttachmentPart(part, modifier)
         part.isSubAgentTask -> SubAgentCard(part, onOpenSubAgent, Modifier.widthIn(max = MAX_CARD_WIDTH))
-        part.isTool -> ToolCard(part, onFileClick, Modifier.widthIn(max = MAX_CARD_WIDTH))
+        part.isTool -> ToolCard(
+            part = part,
+            onFileClick = onFileClick,
+            expandedParts = expandedParts,
+            onToggleExpand = onToggleExpand,
+            expandedKey = expandKey,
+            modifier = Modifier.widthIn(max = MAX_CARD_WIDTH)
+        )
         part.isPatch && part.filePathsForNavigationFiltered.isNotEmpty() -> {
-            PatchCard(part = part, onFileClick = onFileClick, modifier = Modifier.widthIn(max = MAX_CARD_WIDTH))
+            PatchCard(
+                part = part,
+                onFileClick = onFileClick,
+                expandedParts = expandedParts,
+                onToggleExpand = onToggleExpand,
+                expandedKey = expandKey,
+                modifier = Modifier.widthIn(max = MAX_CARD_WIDTH)
+            )
         }
     }
 }
@@ -624,9 +668,13 @@ private fun ToolCallsRow(
     parts: List<Part>,
     onFileClick: (String) -> Unit,
     onOpenSubAgent: (String) -> Unit,
+    messageId: String,
+    expandedParts: Map<String, Boolean>,
+    onToggleExpand: (String, Boolean) -> Unit,
     modifier: Modifier = Modifier.fillMaxWidth()
 ) {
-    var expanded by remember { mutableStateOf(false) }
+    val expandedKey = "${messageId}|${parts.first().id}"
+    val expanded = expandedParts[expandedKey] ?: false
     Card(
         modifier = modifier.padding(vertical = 4.dp).testTag("toolcard.toolcalls"),
         shape = RoundedCornerShape(12.dp),
@@ -634,7 +682,6 @@ private fun ToolCallsRow(
     ) {
         Column(modifier = Modifier.padding(12.dp)) {
             Row(
-                modifier = Modifier.clickable { expanded = !expanded },
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Text(
@@ -644,12 +691,14 @@ private fun ToolCallsRow(
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
                 Spacer(modifier = Modifier.width(6.dp))
-                Icon(
-                    if (expanded) Icons.Default.KeyboardArrowDown else Icons.Default.ChevronRight,
-                    contentDescription = if (expanded) "Collapse" else "Expand",
-                    modifier = Modifier.size(18.dp),
-                    tint = MaterialTheme.colorScheme.onSurfaceVariant
-                )
+                IconButton(onClick = { onToggleExpand(expandedKey, expanded) }) {
+                    Icon(
+                        if (expanded) Icons.Default.KeyboardArrowDown else Icons.Default.ChevronRight,
+                        contentDescription = if (expanded) "Collapse" else "Expand",
+                        modifier = Modifier.size(20.dp),
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
             }
             if (expanded) {
                 Spacer(modifier = Modifier.size(8.dp))
@@ -657,7 +706,14 @@ private fun ToolCallsRow(
                     if (part.isSubAgentTask) {
                         SubAgentCard(part, onOpenSubAgent, Modifier.fillMaxWidth())
                     } else {
-                        ToolCard(part, onFileClick, Modifier.fillMaxWidth())
+                        ToolCard(
+                            part = part,
+                            onFileClick = onFileClick,
+                            expandedParts = expandedParts,
+                            onToggleExpand = onToggleExpand,
+                            expandedKey = "${messageId}|${part.id}",
+                            modifier = Modifier.fillMaxWidth()
+                        )
                     }
                 }
             }
@@ -765,13 +821,12 @@ private fun ReasoningCard(
     text: String,
     title: String?,
     isStreaming: Boolean = false,
+    expandedParts: Map<String, Boolean> = emptyMap(),
+    onToggleExpand: (String, Boolean) -> Unit = { _, _ -> },
+    expandedKey: String? = null,
     modifier: Modifier = Modifier.fillMaxWidth()
 ) {
-    var expanded by remember { mutableStateOf(isStreaming) }
-
-    LaunchedEffect(isStreaming) {
-        if (isStreaming) expanded = true
-    }
+    val expanded = expandedKey?.let { expandedParts[it] } ?: isStreaming
 
     // Visually quiet: transparent container (vs ToolCard's surfaceVariant) and
     // onSurfaceVariant label/icon so chain-of-thought reads as auxiliary context
@@ -800,12 +855,12 @@ private fun ReasoningCard(
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
                 Spacer(modifier = Modifier.weight(1f))
-                if (!isStreaming) {
-                    IconButton(onClick = { expanded = !expanded }, modifier = Modifier.size(22.dp)) {
+                if (!isStreaming && expandedKey != null) {
+                    IconButton(onClick = { onToggleExpand(expandedKey, expanded) }) {
                         Icon(
                             if (expanded) Icons.Default.KeyboardArrowDown else Icons.Default.ChevronRight,
                             contentDescription = if (expanded) "Collapse" else "Expand",
-                            modifier = Modifier.size(18.dp),
+                            modifier = Modifier.size(20.dp),
                             tint = MaterialTheme.colorScheme.onSurfaceVariant
                         )
                     }
@@ -1162,6 +1217,9 @@ private fun parseTaskXml(output: String?): TaskXmlResult? {
 private fun ToolCard(
     part: Part,
     onFileClick: (String) -> Unit,
+    expandedParts: Map<String, Boolean>,
+    onToggleExpand: (String, Boolean) -> Unit,
+    expandedKey: String,
     modifier: Modifier = Modifier.fillMaxWidth()
 ) {
     val toolName = part.tool ?: ""
@@ -1175,7 +1233,7 @@ private fun ToolCard(
 
     val isRunning = status == "running"
     val isError = status == "error"
-    var expanded by remember { mutableStateOf(isRunning) }
+    val expanded = expandedParts[expandedKey] ?: isRunning
     val firstFile = filePaths.firstOrNull()
     val displayName = if (toolName == "apply_patch") "patch" else toolName
 
@@ -1245,11 +1303,11 @@ private fun ToolCard(
                         }
                     }
                     Spacer(modifier = Modifier.width(2.dp))
-                    IconButton(onClick = { expanded = !expanded }, modifier = Modifier.size(20.dp)) {
+                    IconButton(onClick = { onToggleExpand(expandedKey, expanded) }) {
                         Icon(
                             if (expanded) Icons.Default.KeyboardArrowDown else Icons.Default.ChevronRight,
                             contentDescription = if (expanded) "Collapse" else "Expand",
-                            modifier = Modifier.size(14.dp),
+                            modifier = Modifier.size(20.dp),
                             tint = MaterialTheme.colorScheme.onSurfaceVariant
                         )
                     }
@@ -1348,6 +1406,9 @@ private fun ToolCard(
 private fun PatchCard(
     part: Part,
     onFileClick: (String) -> Unit,
+    expandedParts: Map<String, Boolean>,
+    onToggleExpand: (String, Boolean) -> Unit,
+    expandedKey: String,
     modifier: Modifier = Modifier.fillMaxWidth()
 ) {
     val primaryFile = part.files?.firstOrNull()
@@ -1376,7 +1437,7 @@ private fun PatchCard(
         }
     }
 
-    var expanded by remember { mutableStateOf(false) }
+    val expanded = expandedParts[expandedKey] ?: false
 
     Surface(
         modifier = modifier
@@ -1389,8 +1450,7 @@ private fun PatchCard(
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(horizontal = 10.dp, vertical = 8.dp)
-                    .clickable { expanded = !expanded },
+                    .padding(horizontal = 10.dp, vertical = 8.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Icon(
@@ -1428,12 +1488,14 @@ private fun PatchCard(
                     )
                 }
                 Spacer(modifier = Modifier.weight(1f))
-                Icon(
-                    if (expanded) Icons.Default.KeyboardArrowDown else Icons.Default.ChevronRight,
-                    contentDescription = if (expanded) "Collapse" else "Expand",
-                    modifier = Modifier.size(14.dp),
-                    tint = MaterialTheme.colorScheme.onSurfaceVariant
-                )
+                IconButton(onClick = { onToggleExpand(expandedKey, expanded) }) {
+                    Icon(
+                        if (expanded) Icons.Default.KeyboardArrowDown else Icons.Default.ChevronRight,
+                        contentDescription = if (expanded) "Collapse" else "Expand",
+                        modifier = Modifier.size(20.dp),
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
             }
             if (expanded) {
                 Column(modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp)) {

@@ -48,6 +48,9 @@ google-services.json
 .DS_Store
 Thumbs.db
 
+# Reference repos (local research only, never commit)
+oc-ref/
+
 # Python (if any scripts)
 __pycache__/
 *.py[cod]

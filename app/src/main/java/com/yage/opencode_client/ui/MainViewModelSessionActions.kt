@@ -32,7 +32,12 @@ internal fun launchLoadSessions(
         repository.getSessions(limit)
             .onSuccess { sessions ->
                 state.update {
-                    val mergedSessions = mergeRefreshedSessionsPreservingLocalActivity(sessions, it.sessions)
+                    val mergedSessions = mergeRefreshedSessionsPreservingLocalActivity(
+                        sessions,
+                        it.sessions,
+                        it.currentSessionId,
+                        it.openSessionIds.toSet()
+                    )
                     it.copy(
                         sessions = mergedSessions,
                         hasMoreSessions = mergedSessions.size >= limit,
@@ -49,19 +54,19 @@ internal fun launchLoadSessions(
                 }
                 val currentId = state.value.currentSessionId
                 val refreshedSessions = state.value.sessions
-                val hasCurrentSession = currentId != null && refreshedSessions.any { it.id == currentId }
                 when {
                     // Skip auto-select when the user is mid-draft (a workdir
                     // has been chosen but no session created yet): selecting a
                     // session would discard the draft's repository workdir and
                     // hijack the empty chat page the user is composing into.
                     currentId == null && state.value.draftWorkdir == null && refreshedSessions.isNotEmpty() -> onSelectSession(refreshedSessions.first().id)
-                    hasCurrentSession -> {
+                    // currentId is set: keep it. Even when the session is
+                    // temporarily absent from the refreshed list (e.g. just
+                    // created, or a directory session), tolerate it — reload
+                    // its messages but do NOT silently reselect first(). #10.
+                    currentId != null -> {
                         onLoadSessionStatus()
-                        onLoadMessages(currentId!!)
-                    }
-                    state.value.draftWorkdir == null && refreshedSessions.isNotEmpty() -> {
-                        onSelectSession(refreshedSessions.first().id)
+                        onLoadMessages(currentId)
                     }
                     else -> {
                         state.update { it.copy(currentSessionId = null, messages = emptyList()) }
@@ -106,7 +111,12 @@ internal fun launchLoadMoreSessions(
                     return@onSuccess
                 }
                 state.update {
-                    val mergedSessions = mergeRefreshedSessionsPreservingLocalActivity(sessions, it.sessions)
+                    val mergedSessions = mergeRefreshedSessionsPreservingLocalActivity(
+                        sessions,
+                        it.sessions,
+                        it.currentSessionId,
+                        it.openSessionIds.toSet()
+                    )
                     it.copy(
                         sessions = mergedSessions,
                         loadedSessionLimit = nextLimit,
@@ -116,11 +126,17 @@ internal fun launchLoadMoreSessions(
                 }
                 val currentId = state.value.currentSessionId
                 val refreshedSessions = state.value.sessions
-                val hasCurrentSession = currentId != null && refreshedSessions.any { it.id == currentId }
                 when {
-                    currentId == null && refreshedSessions.isNotEmpty() -> onSelectSession(refreshedSessions.first().id)
-                    hasCurrentSession -> Unit
-                    refreshedSessions.isNotEmpty() -> onSelectSession(refreshedSessions.first().id)
+                    // Mirror loadSessions' draft guard for consistency: never
+                    // auto-select first() while the user is mid-draft. This
+                    // branch is currently dead (loadMore is only triggered by
+                    // user scroll, not initial load), but the guard keeps the
+                    // two paths symmetric if the trigger ever changes.
+                    currentId == null && state.value.draftWorkdir == null && refreshedSessions.isNotEmpty() -> onSelectSession(refreshedSessions.first().id)
+                    // A non-null currentId is never silently replaced by
+                    // refreshedSessions.first(): tolerate the session even when
+                    // it is temporarily absent from the refreshed list. #10.
+                    currentId != null -> Unit
                     else -> state.update { it.copy(currentSessionId = null, messages = emptyList()) }
                 }
             }
@@ -386,19 +402,36 @@ internal fun launchDeleteSession(
     scope: CoroutineScope,
     repository: OpenCodeRepository,
     state: MutableStateFlow<AppState>,
+    settingsManager: SettingsManager,
     sessionId: String,
     onSelectSession: (String) -> Unit
 ) {
     scope.launch {
         repository.deleteSession(sessionId)
             .onSuccess {
-                val newSessions = state.value.sessions.filter { it.id != sessionId }
-                state.update { it.copy(sessions = newSessions) }
+                // Purge the deleted id from both the global sessions list AND
+                // directorySessions. If the session was originally surfaced via
+                // a connected workdir (createSessionInWorkdir's directory fetch),
+                // leaving it in directorySessions would let SessionsScreen's
+                // union render it — and re-selecting it would upsert a ghost
+                // copy of an already-deleted server session (#10).
+                state.update {
+                    val newSessions = it.sessions.filter { s -> s.id != sessionId }
+                    val newDirSessions = it.directorySessions
+                        .mapValues { (_, list) -> list.filter { s -> s.id != sessionId } }
+                        .filterValues { it.isNotEmpty() }
+                    it.copy(sessions = newSessions, directorySessions = newDirSessions)
+                }
                 if (state.value.currentSessionId == sessionId) {
-                    val newCurrent = newSessions.firstOrNull()?.id
+                    val newCurrent = state.value.sessions.firstOrNull()?.id
                     if (newCurrent != null) {
                         onSelectSession(newCurrent)
                     } else {
+                        // #10: no remaining session — clear the persisted
+                        // currentSessionId too, otherwise a stale id survives
+                        // in SettingsManager and would be restored on next
+                        // launch / host switch, pointing at a deleted session.
+                        settingsManager.currentSessionId = null
                         state.update { it.copy(currentSessionId = null, messages = emptyList()) }
                     }
                 }

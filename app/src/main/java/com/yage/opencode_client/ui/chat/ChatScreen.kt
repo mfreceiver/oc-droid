@@ -1,5 +1,6 @@
 package com.yage.opencode_client.ui.chat
 
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Box
@@ -7,7 +8,6 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Snackbar
 import androidx.compose.material3.Text
@@ -40,6 +40,9 @@ fun ChatScreen(
     showSettingsButton: Boolean = true
 ) {
     val state by viewModel.state.collectAsStateWithLifecycle()
+    // #13: per-part expand/collapse state lives in its own StateFlow (not in
+    // AppState) so toggling a card doesn't recompose the whole ChatScreen.
+    val expandedParts by viewModel.expandedParts.collectAsStateWithLifecycle()
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     val imagePickerLauncher = rememberLauncherForActivityResult(
@@ -78,11 +81,22 @@ fun ChatScreen(
             .filter { it.parentId == null }
     }
 
-    // statusBarsPadding() keeps the ChatTopBar below the status bar (the phone
-    // Scaffold uses contentWindowInsets = 0). It consumes the inset, so nested
-    // TopAppBars in the tablet layout (already padded at the Row level) see 0
-    // and never double-pad.
-    Column(modifier = Modifier.fillMaxSize().statusBarsPadding()) {
+    // #14: edge-swipe / system-back returns to the parent session when viewing a
+    // child. Registered here (deeper than PhoneLayout's pager-level BackHandler
+    // from #12) so it wins dispatch priority while a child session is open.
+    // lastParent caches the most recent non-null parentId so the back callback
+    // still resolves the right target even if state recomposes mid-press.
+    val parent = state.currentSession?.parentId
+    var lastParent by remember { mutableStateOf<String?>(null) }
+    if (parent != null) lastParent = parent
+    BackHandler(enabled = parent != null) { lastParent?.let { viewModel.selectSession(it) } }
+
+    // Status-bar inset is handled by ChatTopBar's M3 TopAppBar (its default
+    // TopAppBarDefaults.windowInsets consumes the status bar inset), so this
+    // Column must NOT also apply statusBarsPadding() — that would double-pad.
+    // If ChatTopBar ever reverts to not handling the inset, re-add
+    // .statusBarsPadding() here.
+    Column(modifier = Modifier.fillMaxSize()) {
         ChatTopBar(
             state = ChatTopBarState(
                 sessions = state.sessions,
@@ -146,7 +160,9 @@ fun ChatScreen(
                     workspaceDirectory = state.currentSession?.directory,
                     onLoadMore = { viewModel.loadMoreMessages() },
                     onFileClick = onNavigateToFiles,
-                    onOpenSubAgent = viewModel::openSubAgent
+                    onOpenSubAgent = viewModel::openSubAgent,
+                    expandedParts = expandedParts,
+                    onToggleExpand = viewModel::togglePartExpand
                 )
             }
 

@@ -12,7 +12,11 @@ interface OpenCodeApi {
 
     @Headers("X-Opencode-Skip-Dir: 1")
     @GET("session")
-    suspend fun getSessions(@Query("limit") limit: Int? = null): List<Session>
+    suspend fun getSessions(
+        @Query("limit") limit: Int? = null,
+        @Query("directory") directory: String? = null,
+        @Query("roots") roots: Boolean? = null
+    ): List<Session>
 
     @POST("session")
     suspend fun createSession(@Body body: CreateSessionRequest = CreateSessionRequest()): Session

@@ -100,6 +100,7 @@ class MainViewModelTest {
 
         every { repository.connectSSE() } returns emptyFlow()
         coEvery { repository.getSessions(any()) } returns Result.success(emptyList())
+        coEvery { repository.getSessionsForDirectory(any(), any()) } returns Result.success(emptyList())
         coEvery { repository.getSessionStatus() } returns Result.success(emptyMap())
         coEvery { repository.getMessages(any(), any()) } returns Result.success(emptyList())
         coEvery { repository.getPendingPermissions() } returns Result.success(emptyList())
@@ -696,6 +697,254 @@ class MainViewModelTest {
 
         coVerify(exactly = 1) { repository.getSessions(20) }
         assertEquals(20, viewModel.state.value.loadedSessionLimit)
+    }
+
+    // --- #10b: auto-select guards (currentSessionId never silently replaced) ---
+
+    @Test
+    fun `loadSessions does not override non-null currentSessionId with first`() = runTest {
+        // Scenario: currentSessionId is set but the session is temporarily
+        // absent from the refreshed list (e.g. created moments ago, not yet
+        // propagated). loadSessions must NOT silently reselect sessions.first().
+        val knownSessions = listOf(
+            com.yage.opencode_client.data.model.Session(id = "session-A", directory = "/tmp/a"),
+            com.yage.opencode_client.data.model.Session(id = "session-B", directory = "/tmp/b")
+        )
+        coEvery { repository.getSessions(any()) } returns Result.success(knownSessions)
+
+        val viewModel = createViewModel()
+        updateState(viewModel) {
+            it.copy(currentSessionId = "session-not-in-list")
+        }
+
+        viewModel.loadSessions()
+        advanceUntilIdle()
+
+        assertEquals(
+            "currentSessionId must be preserved, not replaced by first()",
+            "session-not-in-list",
+            viewModel.state.value.currentSessionId
+        )
+        // Messages for the (temporarily-absent) current session are reloaded
+        // so the user keeps their context.
+        coVerify(atLeast = 1) { repository.getMessages("session-not-in-list", any()) }
+    }
+
+    @Test
+    fun `loadMoreSessions does not override non-null currentSessionId with first`() = runTest {
+        val initial = (1..10).map { index ->
+            com.yage.opencode_client.data.model.Session(id = "session-$index", directory = "/tmp/$index")
+        }
+        val expanded = (1..15).map { index ->
+            com.yage.opencode_client.data.model.Session(id = "session-$index", directory = "/tmp/$index")
+        }
+        coEvery { repository.getSessions(20) } returns Result.success(expanded)
+
+        val viewModel = createViewModel()
+        updateState(viewModel) {
+            it.copy(
+                sessions = initial,
+                loadedSessionLimit = 10,
+                hasMoreSessions = true,
+                // currentSessionId is set but the session is NOT in the refreshed
+                // list — loadMore must keep it rather than reselecting first().
+                currentSessionId = "session-not-in-list"
+            )
+        }
+
+        viewModel.loadMoreSessions()
+        advanceUntilIdle()
+
+        assertEquals(
+            "currentSessionId preserved across loadMore even when absent from refresh",
+            "session-not-in-list",
+            viewModel.state.value.currentSessionId
+        )
+    }
+
+    // --- #10a: createSessionInWorkdir populates directorySessions ---
+
+    @Test
+    fun `createSessionInWorkdir fetches directory sessions into directorySessions map`() = runTest {
+        val workdir = "/home/user/myproject"
+        val existing = listOf(
+            com.yage.opencode_client.data.model.Session(id = "existing-1", directory = workdir, title = "Prior chat"),
+            com.yage.opencode_client.data.model.Session(id = "existing-2", directory = workdir, title = "Another")
+        )
+        every { repository.setCurrentDirectory(any()) } just runs
+        coEvery { repository.getSessionsForDirectory(workdir, any()) } returns Result.success(existing)
+
+        val viewModel = createViewModel()
+        viewModel.createSessionInWorkdir(workdir)
+        advanceUntilIdle()
+
+        assertEquals(workdir, viewModel.state.value.draftWorkdir)
+        val dirSessions = viewModel.state.value.directorySessions[workdir]
+        assertNotNull("directorySessions should contain an entry for the workdir", dirSessions)
+        assertEquals(2, dirSessions!!.size)
+        assertEquals("existing-1", dirSessions[0].id)
+        // The fetched sessions must NOT pollute the global sessions list.
+        assertTrue(
+            "directory sessions must not be written into state.sessions",
+            viewModel.state.value.sessions.none { it.id == "existing-1" }
+        )
+    }
+
+    @Test
+    fun `createSessionInWorkdir directorySessions failure is silently ignored`() = runTest {
+        val workdir = "/home/user/broken"
+        every { repository.setCurrentDirectory(any()) } just runs
+        coEvery { repository.getSessionsForDirectory(workdir, any()) } returns Result.failure(IllegalStateException("boom"))
+
+        val viewModel = createViewModel()
+        viewModel.createSessionInWorkdir(workdir)
+        advanceUntilIdle()
+
+        assertEquals(workdir, viewModel.state.value.draftWorkdir)
+        assertNull(viewModel.state.value.error)
+        assertTrue(viewModel.state.value.directorySessions.isEmpty())
+    }
+
+    // --- #13: expandedParts lifecycle ---
+
+    @Test
+    fun `togglePartExpand flips the value for a key`() = runTest {
+        val viewModel = createViewModel()
+
+        viewModel.togglePartExpand("msg-1|part-1", false)
+        assertEquals(true, viewModel.expandedParts.value["msg-1|part-1"])
+
+        viewModel.togglePartExpand("msg-1|part-1", true)
+        assertEquals(false, viewModel.expandedParts.value["msg-1|part-1"])
+    }
+
+    @Test
+    fun `selectSession clears expandedParts`() = runTest {
+        val viewModel = createViewModel()
+        updateState(viewModel) {
+            it.copy(
+                currentSessionId = "session-1",
+                sessions = listOf(com.yage.opencode_client.data.model.Session(id = "session-1", directory = "/tmp")),
+                inputText = "draft1"
+            )
+        }
+        viewModel.togglePartExpand("msg-1|part-1", false)
+        viewModel.togglePartExpand("msg-2|part-2", false)
+        assertEquals(2, viewModel.expandedParts.value.size)
+
+        viewModel.selectSession("session-1")
+        advanceUntilIdle()
+
+        assertTrue(
+            "expandedParts must be cleared on session switch",
+            viewModel.expandedParts.value.isEmpty()
+        )
+    }
+
+    // --- #5: saveHostProfile three-state contract ---
+
+    @Test
+    fun `saveHostProfile writes basic auth password when basicAuthEdited is true`() = runTest {
+        val profile = HostProfile.defaultDirect("http://server.test").copy(
+            id = "profile-1",
+            basicAuth = BasicAuthConfig(username = "alice", passwordId = "profile-1")
+        )
+
+        val viewModel = createViewModel()
+        viewModel.saveHostProfile(
+            profile,
+            basicAuthPassword = "new-secret",
+            basicAuthEdited = true
+        )
+
+        verify { settingsManager.setBasicAuthPassword("profile-1", "new-secret") }
+    }
+
+    @Test
+    fun `saveHostProfile removes basic auth password when edited and blank`() = runTest {
+        val profile = HostProfile.defaultDirect("http://server.test").copy(
+            id = "profile-1",
+            basicAuth = BasicAuthConfig(username = "alice", passwordId = "profile-1")
+        )
+
+        val viewModel = createViewModel()
+        viewModel.saveHostProfile(
+            profile,
+            basicAuthPassword = "",
+            basicAuthEdited = true
+        )
+
+        // blank → setBasicAuthPassword with "" which SettingsManager maps to remove.
+        verify { settingsManager.setBasicAuthPassword("profile-1", "") }
+    }
+
+    @Test
+    fun `saveHostProfile skips basic auth write when basicAuthEdited is false`() = runTest {
+        val profile = HostProfile.defaultDirect("http://server.test").copy(
+            id = "profile-1",
+            basicAuth = BasicAuthConfig(username = "alice", passwordId = "profile-1")
+        )
+
+        val viewModel = createViewModel()
+        viewModel.saveHostProfile(
+            profile,
+            basicAuthPassword = "whatever",
+            basicAuthEdited = false
+        )
+
+        verify(exactly = 0) { settingsManager.setBasicAuthPassword(any(), any()) }
+    }
+
+    @Test
+    fun `saveHostProfile skips tunnel write when tunnelEdited is false`() = runTest {
+        val profile = HostProfile.defaultDirect("http://server.test").copy(
+            id = "profile-1",
+            tunnelPasswordId = "profile-1"
+        )
+
+        val viewModel = createViewModel()
+        viewModel.saveHostProfile(
+            profile,
+            tunnelPassword = "ignored",
+            tunnelEdited = false
+        )
+
+        verify(exactly = 0) { settingsManager.setTunnelPassword(any(), any()) }
+    }
+
+    @Test
+    fun `saveHostProfile writes tunnel password when tunnelEdited is true`() = runTest {
+        val profile = HostProfile.defaultDirect("http://server.test").copy(
+            id = "profile-1",
+            tunnelPasswordId = "profile-1"
+        )
+
+        val viewModel = createViewModel()
+        viewModel.saveHostProfile(
+            profile,
+            tunnelPassword = "tunnel-secret",
+            tunnelEdited = true
+        )
+
+        verify { settingsManager.setTunnelPassword("profile-1", "tunnel-secret") }
+    }
+
+    @Test
+    fun `saveHostProfile clears tunnel password when edited and blank`() = runTest {
+        val profile = HostProfile.defaultDirect("http://server.test").copy(
+            id = "profile-1",
+            tunnelPasswordId = "profile-1"
+        )
+
+        val viewModel = createViewModel()
+        viewModel.saveHostProfile(
+            profile,
+            tunnelPassword = "",
+            tunnelEdited = true
+        )
+
+        // blank → setTunnelPassword with "" which SettingsManager maps to remove.
+        verify { settingsManager.setTunnelPassword("profile-1", "") }
     }
 
     @Test
@@ -1391,6 +1640,195 @@ class MainViewModelTest {
         val activationState = viewModel.state.value.tunnelActivationState
         assertTrue(activationState is com.yage.opencode_client.ui.TunnelActivationState.Error)
         assertTrue((activationState as com.yage.opencode_client.ui.TunnelActivationState.Error).message.contains("403"))
+    }
+
+    // --- #10: directory-only session selection upserts into sessions (A) ---
+
+    @Test
+    fun `selectSession on directorySessions-only session upserts it and preserves workdir`() = runTest {
+        val workdir = "/home/user/project"
+        val dirSession = com.yage.opencode_client.data.model.Session(
+            id = "dir-only-1", directory = workdir, title = "From directory"
+        )
+        every { repository.setCurrentDirectory(any()) } just runs
+
+        val viewModel = createViewModel()
+        updateState(viewModel) {
+            it.copy(directorySessions = mapOf(workdir to listOf(dirSession)))
+        }
+        // Precondition: the session lives only in directorySessions.
+        assertTrue(viewModel.state.value.sessions.none { it.id == "dir-only-1" })
+
+        viewModel.selectSession("dir-only-1")
+        advanceUntilIdle()
+
+        // #10: the directory session must be upserted so currentSession resolves
+        // (previously it stayed null and the workdir was dropped).
+        assertEquals("dir-only-1", viewModel.state.value.currentSessionId)
+        assertNotNull(viewModel.state.value.currentSession)
+        assertEquals("dir-only-1", viewModel.state.value.currentSession?.id)
+        // workdir sync must target the directory session's directory, not null.
+        verify { repository.setCurrentDirectory(workdir) }
+    }
+
+    // --- #14: openSubAgent surfaces error when child unresolvable (B) ---
+
+    @Test
+    fun `openSubAgent surfaces error and keeps currentSessionId when child cannot be resolved`() = runTest {
+        coEvery { repository.getSession("child-missing") } returns Result.failure(IllegalStateException("404"))
+
+        val viewModel = createViewModel()
+        updateState(viewModel) { it.copy(currentSessionId = "parent-1") }
+        val beforeId = viewModel.state.value.currentSessionId
+
+        viewModel.openSubAgent("child-missing")
+        advanceUntilIdle()
+
+        assertEquals(beforeId, viewModel.state.value.currentSessionId)
+        assertNotNull("error channel must be set when child session is unavailable", viewModel.state.value.error)
+    }
+
+    // --- #13/#16: toggle collapses a default-expanded card on first tap (C) ---
+
+    @Test
+    fun `togglePartExpand collapses a default-expanded card on first tap`() = runTest {
+        // Regression: a running tool card displays expanded by default
+        // (expanded = expandedParts[key] ?: isRunning = true). The first tap
+        // must collapse it, which requires the toggle to invert the displayed
+        // value supplied by the caller, not the raw map value (which is absent).
+        val viewModel = createViewModel()
+
+        viewModel.togglePartExpand("msg-1|tool-1", currentValue = true)
+
+        assertEquals(false, viewModel.expandedParts.value["msg-1|tool-1"])
+    }
+
+    // --- #10: closeSession preserves closed draft, does not pollute next (F) ---
+
+    @Test
+    fun `closeSession preserves closed session draft and does not pollute next session draft`() = runTest {
+        every { settingsManager.openSessionIds } returns listOf("s1", "s2")
+        every { settingsManager.openSessionIds = any() } just runs
+        every { settingsManager.getDraftText("s2") } returns "s2draft"
+        every { repository.setCurrentDirectory(any()) } just runs
+
+        val viewModel = createViewModel()
+        updateState(viewModel) {
+            it.copy(
+                currentSessionId = "s1",
+                inputText = "s1-unsent-draft",
+                openSessionIds = listOf("s1", "s2")
+            )
+        }
+
+        viewModel.closeSession("s1")
+        advanceUntilIdle()
+
+        // Closed session's draft must be saved under its own id (not lost).
+        verify(atLeast = 1) { settingsManager.setDraftText("s1", "s1-unsent-draft") }
+        // The next session must NOT inherit the closed session's draft text.
+        verify(exactly = 0) { settingsManager.setDraftText("s2", "s1-unsent-draft") }
+        // s2 becomes current and its own draft is restored.
+        assertEquals("s2", viewModel.state.value.currentSessionId)
+        assertEquals("s2draft", viewModel.state.value.inputText)
+    }
+
+    // --- #10: deleteSession syncs settingsManager when no sessions remain (E) ---
+
+    @Test
+    fun `deleteSession clears persisted currentSessionId when no sessions remain`() = runTest {
+        coEvery { repository.deleteSession("s1") } returns Result.success(Unit)
+
+        val viewModel = createViewModel()
+        updateState(viewModel) {
+            it.copy(
+                sessions = listOf(com.yage.opencode_client.data.model.Session(id = "s1", directory = "/tmp")),
+                currentSessionId = "s1"
+            )
+        }
+
+        viewModel.deleteSession("s1")
+        advanceUntilIdle()
+
+        assertNull(viewModel.state.value.currentSessionId)
+        verify { settingsManager.currentSessionId = null }
+    }
+
+    // --- #10: draft sendMessage double-tap creates session only once (G) ---
+
+    @Test
+    fun `sendMessage draft mode creates session only once on rapid double tap`() = runTest {
+        val created = com.yage.opencode_client.data.model.Session(id = "s1", directory = "/home/user/proj")
+        coEvery { repository.createSession(title = null) } returns Result.success(created)
+        coEvery { repository.sendMessage(any(), any(), any(), any(), any()) } returns Result.success(Unit)
+        coEvery { repository.getSessions(any()) } returns Result.success(listOf(created))
+        every { repository.setCurrentDirectory(any()) } just runs
+
+        val viewModel = createViewModel()
+        viewModel.createSessionInWorkdir("/home/user/proj")
+        advanceUntilIdle()
+        viewModel.setInputText("hello")
+
+        // Rapid double-tap with no advanceUntilIdle between the two calls:
+        // the second invoke must observe draftWorkdir=null (cleared sync by
+        // the first) and early-return instead of issuing a second POST /session.
+        viewModel.sendMessage()
+        viewModel.sendMessage()
+        advanceUntilIdle()
+
+        coVerify(exactly = 1) { repository.createSession(title = null) }
+    }
+
+    // --- #10: deleteSession purges directorySessions ghost (Fix 1) ---
+
+    @Test
+    fun `deleteSession removes the session from directorySessions so it cannot be re-selected`() = runTest {
+        val workdir = "/home/user/project"
+        val ghost = com.yage.opencode_client.data.model.Session(
+            id = "dir-ghost", directory = workdir, title = "From directory"
+        )
+        coEvery { repository.deleteSession("dir-ghost") } returns Result.success(Unit)
+
+        val viewModel = createViewModel()
+        updateState(viewModel) {
+            it.copy(directorySessions = mapOf(workdir to listOf(ghost)))
+        }
+        // Precondition: the session lives in directorySessions (not in sessions).
+        assertTrue(viewModel.state.value.directorySessions[workdir]?.any { it.id == "dir-ghost" } == true)
+        assertTrue(viewModel.state.value.sessions.none { it.id == "dir-ghost" })
+
+        viewModel.deleteSession("dir-ghost")
+        advanceUntilIdle()
+
+        coVerify(exactly = 1) { repository.deleteSession("dir-ghost") }
+        // The ghost must be gone from directorySessions so the union UI cannot
+        // render / re-select it.
+        val remaining = viewModel.state.value.directorySessions[workdir].orEmpty()
+        assertTrue("deleted id must be purged from directorySessions", remaining.none { it.id == "dir-ghost" })
+    }
+
+    // --- #10: draft createSession failure restores draftWorkdir (Fix 2) ---
+
+    @Test
+    fun `sendMessage draft mode restores draftWorkdir when createSession fails so user can retry`() = runTest {
+        coEvery { repository.createSession(title = null) } returns Result.failure(IllegalStateException("network error"))
+        every { repository.setCurrentDirectory(any()) } just runs
+
+        val viewModel = createViewModel()
+        viewModel.createSessionInWorkdir("/home/user/retry-proj")
+        advanceUntilIdle()
+        viewModel.setInputText("hello")
+
+        viewModel.sendMessage()
+        advanceUntilIdle()
+
+        // draft mode restored — composer stays in draft, user can retry
+        assertEquals("/home/user/retry-proj", viewModel.state.value.draftWorkdir)
+        assertNull(viewModel.state.value.currentSessionId)
+        // input text preserved for retry
+        assertEquals("hello", viewModel.state.value.inputText)
+        assertNotNull(viewModel.state.value.error)
+        assertTrue(viewModel.state.value.error!!.contains("network error"))
     }
 
     @org.junit.After

@@ -32,17 +32,6 @@ data class ConnectionFormSettings(
     val password: String
 )
 
-/**
- * Result of an independent host connectivity probe (see
- * [MainViewModel.testHostConnection]). [versionSuffix] is a pre-formatted
- * suffix like " (v1.2.3)" when the server reported a version, or null/empty
- * otherwise. [message] carries an error string on failure.
- */
-data class TestProbeResult(
-    val success: Boolean,
-    val versionSuffix: String?
-)
-
 data class AppState(
     val isConnected: Boolean = false,
     val isConnecting: Boolean = false,
@@ -85,6 +74,15 @@ data class AppState(
      * to render sub-agent cards and to support parent->child navigation.
      */
     val childSessions: Map<String, List<Session>> = emptyMap(),
+    /**
+     * Per-directory root sessions, keyed by workdir path. Populated by
+     * [MainViewModel.createSessionInWorkdir] via
+     * [OpenCodeRepository.getSessionsForDirectory] so the user can see (and
+     * pick up) prior conversations when connecting a project. Stored
+     * separately from [sessions] so periodic global refreshes do not discard
+     * it. [SessionsScreen] merges both for display.
+     */
+    val directorySessions: Map<String, List<Session>> = emptyMap(),
     /**
      * Mirror of [SettingsManager.openSessionIds] (browser-tab style list of
      * "open" session IDs in open-order, most recently opened first). Kept in
@@ -365,6 +363,37 @@ class MainViewModel @Inject constructor(
     private val _state = MutableStateFlow(AppState())
     val state: StateFlow<AppState> = _state.asStateFlow()
 
+    /**
+     * Expansion state for the four collapsible card types (ToolCallsRow,
+     * ReasoningCard, ToolCard, PatchCard). Kept in a dedicated StateFlow
+     * (NOT inside [AppState]) so toggling a card only recomposes the
+     * subscribers of this flow (the individual cards), not the whole
+     * ChatScreen. Key format: `"${messageId}|${partKey}"` (constructed by
+     * the card layer; this VM does not parse keys).
+     *
+     * Cleared on session switch via [clearExpandedParts] (called from
+     * [selectSession]) so switching conversations resets all cards to their
+     * default collapsed state. loadMore / loadMessages deliberately do NOT
+     * clear it — the user's in-progress expand state must survive history
+     * pagination.
+     */
+    private val _expandedParts = MutableStateFlow<Map<String, Boolean>>(emptyMap())
+    val expandedParts: StateFlow<Map<String, Boolean>> = _expandedParts.asStateFlow()
+
+    // currentValue is the card's *actually displayed* expansion state
+    // (expandedParts[key] ?: per-card-default), supplied by the caller. The
+    // previous signature read current[key] ?: false here, which mismatched the
+    // cards' display default (running tool default=true): the first tap on a
+    // default-expanded card wrote true → no visible change (#13/#16). Passing
+    // the displayed value makes the toggle always invert what the user sees.
+    fun togglePartExpand(key: String, currentValue: Boolean) {
+        _expandedParts.update { current -> current + (key to !currentValue) }
+    }
+
+    internal fun clearExpandedParts() {
+        _expandedParts.value = emptyMap()
+    }
+
     private var sseJob: Job? = null
     private var pollJob: Job? = null
     private var lastHealthCheckTime = 0L
@@ -388,20 +417,53 @@ class MainViewModel @Inject constructor(
 
     fun currentHostProfile(): HostProfile = hostProfileStore.currentProfile()
 
-    fun saveHostProfile(profile: HostProfile, basicAuthPassword: String? = null, tunnelPassword: String? = null) {
+    /**
+     * Persists [profile] and conditionally writes/clears the Basic Auth and
+     * tunnel passwords according to the explicit three-state contract:
+     *
+     *  - [basicAuthEdited] = true  → write [basicAuthPassword] (blank removes
+     *    the stored value, matching [SettingsManager.setBasicAuthPassword]'s
+     *    blank→remove semantics).
+     *  - [basicAuthEdited] = false → skip the Basic Auth branch entirely
+     *    (preserve whatever is currently stored). This is the fix for #5:
+     *    previously any save with a blank editor password field wiped the
+     *    stored credential.
+     *  - [tunnelEdited] / [tunnelPassword] follow the same rule for the
+     *    tunnel credential.
+     *
+     * When the editor clears the Basic Auth username ([HostProfile.basicAuth]
+     * becomes null) it passes [basicAuthEdited] = true + [basicAuthPassword]
+     * = "" so the orphaned password is removed — no special-case branch here.
+     *
+     * @see SettingsManager.setBasicAuthPassword
+     * @see SettingsManager.setTunnelPassword
+     */
+    fun saveHostProfile(
+        profile: HostProfile,
+        basicAuthPassword: String = "",
+        basicAuthEdited: Boolean = false,
+        tunnelPassword: String = "",
+        tunnelEdited: Boolean = false
+    ) {
         val normalized = if (profile.basicAuth != null) {
             profile.copy(basicAuth = profile.basicAuth.copy(passwordId = profile.id))
         } else {
             profile
         }
-        if (normalized.basicAuth != null) {
+        if (basicAuthEdited) {
             settingsManager.setBasicAuthPassword(normalized.id, basicAuthPassword)
         }
-        // Handle tunnel password
-        if (!tunnelPassword.isNullOrBlank()) {
-            settingsManager.setTunnelPassword(profile.id, tunnelPassword)
-        } else if (profile.tunnelPasswordId != null) {
-            settingsManager.clearTunnelPassword(profile.id)
+        if (tunnelEdited) {
+            settingsManager.setTunnelPassword(normalized.id, tunnelPassword)
+        }
+        // Defense-in-depth (#5): when basicAuth is null on the saved profile
+        // and the editor did not explicitly touch the password field, the
+        // three-state contract above intentionally leaves any stored password
+        // alone. But a profile with no basicAuth config should never retain an
+        // orphaned password, so clear it here regardless. (Safe even when no
+        // password was stored — setBasicAuthPassword(blank) is a no-op remove.)
+        if (normalized.basicAuth == null) {
+            settingsManager.setBasicAuthPassword(normalized.id, "")
         }
         hostProfileStore.save(normalized)
         refreshHostProfileState()
@@ -427,6 +489,7 @@ class MainViewModel @Inject constructor(
                 tempClearedUnread = emptySet(),
                 lastViewedTime = emptyMap(),
                 sessions = emptyList(),
+                directorySessions = emptyMap(),
                 draftWorkdir = null,
                 availableCommands = emptyList()
             ) }
@@ -475,34 +538,6 @@ class MainViewModel @Inject constructor(
         username = settingsManager.username ?: "",
         password = settingsManager.password ?: ""
     )
-
-    /**
-     * One-shot connectivity probe for [profile] that does NOT switch the current
-     * host, mutate repository configuration, or change [AppState]. Used by the
-     * host list's per-row "test" icon so a profile can be probed independently.
-     * The result is delivered via [onResult] on the main dispatcher, suitable
-     * for showing a toast or snackbar.
-     */
-    fun testHostConnection(
-        profile: HostProfile,
-        onResult: (TestProbeResult) -> Unit
-    ) {
-        viewModelScope.launch {
-            val password = profile.basicAuth?.passwordId?.let { settingsManager.basicAuthPassword(it) }
-            repository.checkHealthFor(profile.serverUrl, profile.basicAuth?.username, password)
-                .onSuccess { health ->
-                    if (health.healthy) {
-                        val suffix = health.version?.let { " (v$it)" } ?: ""
-                        onResult(TestProbeResult(true, suffix))
-                    } else {
-                        onResult(TestProbeResult(false, null))
-                    }
-                }
-                .onFailure { err ->
-                    onResult(TestProbeResult(false, err.message ?: ""))
-                }
-        }
-    }
 
     fun testConnection(force: Boolean = false) {
         val now = System.currentTimeMillis()
@@ -677,6 +712,27 @@ class MainViewModel @Inject constructor(
             _state.value.sessionStatuses[previousSessionId]?.isBusy == true
 
         selectSessionState(_state, settingsManager, sessionId)
+        // Look up the target session in the union of the cached sessions list
+        // and directorySessions (#10: a session surfaced for a connected
+        // workdir may not yet be in the global list) so the parentId check
+        // below is unambiguous, and so a directory-only session can be upserted
+        // into state.sessions before syncCurrentDirectoryForSession reads it.
+        // openSubAgent upserts children into sessions first so this lookup also
+        // succeeds for sub-agents.
+        val targetSession = (_state.value.sessions + _state.value.directorySessions.values.flatten())
+            .firstOrNull { it.id == sessionId }
+        // #10: if the session is currently only in directorySessions (not yet
+        // in the global sessions list), upsert it now. Without this,
+        // currentSession (which finds by id in sessions) would be null and
+        // syncCurrentDirectoryForSession would drop the workdir.
+        if (targetSession != null && _state.value.sessions.none { it.id == sessionId }) {
+            _state.update { it.copy(sessions = upsertSession(it.sessions, targetSession)) }
+        }
+        // Reset the collapsible-card expansion state (#13): switching sessions
+        // collapses all cards. Done here (not in selectSessionState / loadMessages)
+        // so history pagination (loadMore) preserves the user's in-progress
+        // expand state within the same session.
+        clearExpandedParts()
         // Sync the repository's workdir context to the selected session so that
         // directory-scoped requests (files, prompt, create) target the right cwd.
         syncCurrentDirectoryForSession(_state, repository, sessionId)
@@ -688,11 +744,6 @@ class MainViewModel @Inject constructor(
         // openSessionIds prepend for sub-agents (parentId != null): they are
         // transient navigations from within a parent conversation and must not
         // pollute the open-tabs list. Sub-agents are only reachable via SubAgentCard.
-        // Look up the target session directly (instead of relying on
-        // currentSession) so the parentId check is unambiguous even when the
-        // session is unknown to the cached list — see openSubAgent which
-        // upserts the child first so this lookup succeeds for sub-agents.
-        val targetSession = _state.value.sessions.firstOrNull { it.id == sessionId }
         val now = System.currentTimeMillis()
         _state.update {
             // Re-mark the previous session as unread if it was busy when the
@@ -766,12 +817,17 @@ class MainViewModel @Inject constructor(
                 ?: parentId?.let { pid -> _state.value.childSessions[pid]?.find { it.id == childSessionId } }
                 ?: _state.value.childSessions.values.flatten().firstOrNull { it.id == childSessionId }
                 ?: runCatching { repository.getSession(childSessionId).getOrNull() }.getOrNull()
+            // #14: only upsert + select when the child actually resolved.
+            // Previously a null child still triggered selectSession(childSessionId),
+            // which would set currentSessionId to a non-existent session and
+            // leave currentSession null. Surface the failure via the error
+            // channel instead (same mechanism as testConnection failures).
             if (child != null) {
-                _state.update { state ->
-                    state.copy(sessions = upsertSession(state.sessions, child))
-                }
+                _state.update { state -> state.copy(sessions = upsertSession(state.sessions, child)) }
+                selectSession(childSessionId)
+            } else {
+                _state.update { it.copy(error = "子任务会话不可用") }
             }
-            selectSession(childSessionId)
         }
     }
 
@@ -784,32 +840,35 @@ class MainViewModel @Inject constructor(
      * state and the persisted [currentSessionId] is cleared.
      */
     fun closeSession(sessionId: String) {
+        val isCurrent = _state.value.currentSessionId == sessionId
+        // Preserve the draft of the session being closed. selectSessionState
+        // would otherwise mis-target the save once currentSessionId has moved
+        // (it reads oldSessionId AFTER we've changed it), writing the closed
+        // session's draft into the next session (#10). Save it explicitly here
+        // so selectSession(nextId) only restores the next session's own draft.
+        if (isCurrent) {
+            settingsManager.setDraftText(sessionId, _state.value.inputText)
+        }
         val updated = settingsManager.openSessionIds.filter { it != sessionId }
         settingsManager.openSessionIds = updated
+        val nextId = updated.firstOrNull()
         _state.update { currentState ->
             val next = currentState.copy(
                 openSessionIds = updated,
                 unreadSessions = currentState.unreadSessions - sessionId
             )
-            if (currentState.currentSessionId == sessionId) {
-                // Auto-switch to the next remaining open tab so the user is
-                // not left looking at an empty chat if another tab exists.
-                val nextId = updated.firstOrNull()
-                if (nextId != null) {
-                    next.copy(currentSessionId = nextId)
-                } else {
-                    settingsManager.currentSessionId = null
-                    next.copy(currentSessionId = null, messages = emptyList())
-                }
+            if (isCurrent && nextId == null) {
+                settingsManager.currentSessionId = null
+                next.copy(currentSessionId = null, messages = emptyList(), inputText = "")
             } else {
+                // Keep currentSessionId pointing at the closed session for now;
+                // selectSession(nextId) below performs the switch (and saves the
+                // closed session's draft via the explicit setDraftText above).
                 next
             }
         }
-        // When auto-switching, fully load the newly selected session (messages,
-        // status, workdir sync) and clear its unread badge.
-        val newCurrent = _state.value.currentSessionId
-        if (newCurrent != null && newCurrent != sessionId) {
-            selectSession(newCurrent)
+        if (isCurrent && nextId != null) {
+            selectSession(nextId)
         }
     }
 
@@ -883,6 +942,18 @@ class MainViewModel @Inject constructor(
                 draftWorkdir = workdir
             )
         }
+        // Best-effort: fetch the existing root sessions for this workdir (#10)
+        // so the user can discover / resume prior conversations in the project
+        // they just connected. Stored in [AppState.directorySessions] (a map
+        // keyed by workdir), separate from the global sessions list, so the
+        // periodic global getSessions refresh does not discard it. Failures
+        // (older servers, transient network) are silently ignored.
+        viewModelScope.launch {
+            repository.getSessionsForDirectory(workdir)
+                .onSuccess { sessions ->
+                    _state.update { it.copy(directorySessions = it.directorySessions + (workdir to sessions)) }
+                }
+        }
     }
 
     fun forkSession(sessionId: String, messageId: String?) {
@@ -898,7 +969,7 @@ class MainViewModel @Inject constructor(
     }
 
     fun deleteSession(sessionId: String) {
-        launchDeleteSession(viewModelScope, repository, _state, sessionId, ::selectSession)
+        launchDeleteSession(viewModelScope, repository, _state, settingsManager, sessionId, ::selectSession)
     }
 
     fun sendMessage() {
@@ -913,6 +984,12 @@ class MainViewModel @Inject constructor(
         // the session via POST /session, switch currentSessionId to it, clear
         // the draft, prepend to openSessionIds, then dispatch the message.
         if (draftWorkdir != null && existingSessionId == null) {
+            // #10: synchronously clear draftWorkdir BEFORE launching the
+            // network call so a double-tap (race) cannot enter this branch a
+            // second time and create duplicate sessions. The local draftWorkdir
+            // captured above is used inside the coroutine. A second invoke now
+            // reads draftWorkdir=null → existingSessionId=null → early return.
+            _state.update { it.copy(draftWorkdir = null) }
             viewModelScope.launch {
                 repository.createSession(title = null)
                     .onSuccess { session ->
@@ -934,7 +1011,17 @@ class MainViewModel @Inject constructor(
                     }
                     .onFailure { error ->
                         _state.update {
-                            it.copy(error = "Failed to create session in $draftWorkdir: ${error.message ?: "unknown error"}")
+                            it.copy(
+                                // Restore draft mode so the user can retry.
+                                // draftWorkdir was synchronously cleared before
+                                // launch to guard against double-tap; on failure
+                                // we put it back (the captured local above) so
+                                // the composer stays in draft mode and the
+                                // untouched inputText remains editable. A retry
+                                // is a fresh invoke that re-clears + re-launches.
+                                draftWorkdir = draftWorkdir,
+                                error = "Failed to create session in $draftWorkdir: ${error.message ?: "unknown error"}"
+                            )
                         }
                     }
             }

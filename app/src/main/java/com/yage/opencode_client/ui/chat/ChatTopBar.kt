@@ -6,7 +6,6 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ColumnScope
-import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
@@ -16,6 +15,7 @@ import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -25,21 +25,24 @@ import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.Chat
 import androidx.compose.material.icons.filled.Checklist
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.DonutLarge
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material.icons.filled.SmartToy
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import androidx.compose.material3.TopAppBar
+import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -122,6 +125,15 @@ internal data class ChatTopBarActions(
     val onActivateTunnel: () -> Unit = {}
 )
 
+/**
+ * Max width for the in-title session dropdown anchor. The M3 [TopAppBar] title
+ * slot is not a [RowScope], so [Modifier.weight] has no effect there; this cap
+ * keeps the anchor (and the parent-back / draft affordances) from pushing the
+ * actions cluster, while the [DropdownMenu] itself uses a fixed width (see
+ * [SessionDropdownRow]).
+ */
+private val TITLE_SLOT_MAX_WIDTH = 240.dp
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 internal fun ChatTopBar(
@@ -130,44 +142,30 @@ internal fun ChatTopBar(
     modifier: Modifier = Modifier
 ) {
     val currentSession = state.sessions.find { it.id == state.currentSessionId }
-    var showAgentMenu by remember { mutableStateOf(false) }
     var showSessionMenu by remember { mutableStateOf(false) }
+    var showContextMenu by remember { mutableStateOf(false) }
     var showTodoDialog by remember { mutableStateOf(false) }
     var showContextDialog by remember { mutableStateOf(false) }
+    var showAgentDialog by remember { mutableStateOf(false) }
     var showServerDialog by remember { mutableStateOf(false) }
 
-    Surface(
+    // M3 TopAppBar replaces the former custom Surface+Row. The title slot
+    // carries the session dropdown (or parent-back / draft affordance); the
+    // actions slot carries the merged context menu, settings, and the server
+    // status dot. windowInsets is the TopAppBar default so the bar self-handles
+    // the status-bar inset (the caller-side statusBarsPadding is dropped by
+    // another channel — see RFC 0.1.3 §2-3).
+    TopAppBar(
         modifier = modifier,
-        color = MaterialTheme.colorScheme.surface,
-        tonalElevation = 2.dp
-    ) {
-        // Single-row layout: "Chat" label + inline session title dropdown (or
-        // parent-back affordance, or draft workdir basename) + right-side
-        // action cluster (agent / todo / context / settings / server). The
-        // previous second row has been folded into this one so the current
-        // session title sits immediately to the right of the "Chat" heading.
-        Row(
-            verticalAlignment = Alignment.CenterVertically,
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 16.dp, vertical = 8.dp)
-        ) {
-            Text(
-                text = stringResource(R.string.nav_chat),
-                style = MaterialTheme.typography.titleMedium,
-                fontWeight = FontWeight.Bold,
-                maxLines = 1
-            )
-            Spacer(modifier = Modifier.width(8.dp))
-
-            // --- Inline session title / parent back / draft workdir ---
+        windowInsets = TopAppBarDefaults.windowInsets,
+        title = {
             when {
                 state.parentSessionId != null -> {
                     Surface(
                         onClick = { actions.onSelectSession(state.parentSessionId) },
                         shape = RoundedCornerShape(6.dp),
                         color = Color.Transparent,
-                        modifier = Modifier.weight(1f)
+                        modifier = Modifier.widthIn(max = TITLE_SLOT_MAX_WIDTH)
                     ) {
                         Row(verticalAlignment = Alignment.CenterVertically) {
                             Icon(
@@ -180,7 +178,7 @@ internal fun ChatTopBar(
                             Text(
                                 text = state.parentSessionTitle
                                     ?: stringResource(R.string.chat_parent_session),
-                                style = MaterialTheme.typography.bodyMedium,
+                                style = MaterialTheme.typography.titleLarge,
                                 color = MaterialTheme.colorScheme.primary,
                                 maxLines = 1,
                                 overflow = TextOverflow.Ellipsis
@@ -198,12 +196,11 @@ internal fun ChatTopBar(
                         ?: state.draftWorkdir
                     Row(
                         verticalAlignment = Alignment.CenterVertically,
-                        modifier = Modifier.weight(1f)
+                        modifier = Modifier.widthIn(max = TITLE_SLOT_MAX_WIDTH)
                     ) {
                         Text(
                             text = draftBasename,
-                            style = MaterialTheme.typography.bodyMedium,
-                            fontWeight = FontWeight.SemiBold,
+                            style = MaterialTheme.typography.titleLarge,
                             maxLines = 1,
                             overflow = TextOverflow.Ellipsis
                         )
@@ -212,7 +209,7 @@ internal fun ChatTopBar(
 
                 else -> {
                     SessionDropdownRow(
-                        modifier = Modifier.weight(1f),
+                        modifier = Modifier.widthIn(max = TITLE_SLOT_MAX_WIDTH),
                         currentSession = currentSession,
                         openSessions = state.openSessions,
                         currentSessionId = state.currentSessionId,
@@ -227,113 +224,62 @@ internal fun ChatTopBar(
                     )
                 }
             }
-
-            // --- Right-side action cluster ---
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(4.dp)
-            ) {
-                // Agent dropdown (Material 3 TextButton)
-                Box {
-                    TextButton(
-                        onClick = { showAgentMenu = true },
-                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp)
-                    ) {
-                        Text(
-                            text = state.selectedAgentName,
-                            style = MaterialTheme.typography.labelSmall,
-                            fontWeight = FontWeight.SemiBold,
-                            color = MaterialTheme.colorScheme.primary,
-                            maxLines = 1
-                        )
-                    }
-                    DropdownMenu(
-                        expanded = showAgentMenu,
-                        onDismissRequest = { showAgentMenu = false }
-                    ) {
-                        state.agents.forEach { agent ->
-                            DropdownMenuItem(
-                                text = {
-                                    Text(
-                                        agent.name,
-                                        color = if (agent.name == state.selectedAgentName)
-                                            MaterialTheme.colorScheme.primary
-                                        else
-                                            MaterialTheme.colorScheme.onSurface
-                                    )
-                                },
-                                onClick = {
-                                    actions.onSelectAgent(agent.name)
-                                    showAgentMenu = false
-                                }
-                            )
-                        }
-                    }
+        },
+        actions = {
+            // --- Merged context menu: context / todo / agent in one dropdown.
+            // Trigger icon is the ContextUsageRing so the live usage state stays
+            // visible at a glance (#8).
+            ContextMenuButton(
+                usage = state.contextUsage,
+                todos = state.sessionTodos,
+                selectedAgentName = state.selectedAgentName,
+                expanded = showContextMenu,
+                onToggleExpand = { showContextMenu = !showContextMenu },
+                onContextClick = {
+                    showContextMenu = false
+                    showContextDialog = true
+                },
+                onTodoClick = {
+                    showContextMenu = false
+                    showTodoDialog = true
+                },
+                onAgentClick = {
+                    showContextMenu = false
+                    showAgentDialog = true
                 }
+            )
 
-                // Todo badge — only rendered when there are todos. Icon-only
-                // (no count) to keep the toolbar quiet; the count is still
-                // visible inside the dialog.
-                if (state.sessionTodos.isNotEmpty()) {
-                    Surface(
-                        onClick = { showTodoDialog = true },
-                        shape = RoundedCornerShape(50),
-                        color = Color.Transparent
-                    ) {
-                        Icon(
-                            Icons.Default.Checklist,
-                            contentDescription = stringResource(R.string.chat_todo),
-                            modifier = Modifier
-                                .padding(horizontal = 10.dp, vertical = 5.dp)
-                                .size(16.dp),
-                            tint = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                    }
-                }
-
-                // Context usage ring
-                Surface(
-                    onClick = { showContextDialog = true },
-                    shape = RoundedCornerShape(50),
-                    color = Color.Transparent
+            if (state.showSettingsButton) {
+                IconButton(
+                    onClick = actions.onNavigateToSettings,
+                    modifier = Modifier.size(36.dp)
                 ) {
-                    ContextUsageRing(usage = state.contextUsage)
+                    Icon(
+                        Icons.Default.Settings,
+                        contentDescription = stringResource(R.string.nav_settings),
+                        modifier = Modifier.size(20.dp),
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
                 }
-
-                if (state.showSettingsButton) {
-                    IconButton(
-                        onClick = actions.onNavigateToSettings,
-                        modifier = Modifier.size(36.dp)
-                    ) {
-                        Icon(
-                            Icons.Default.Settings,
-                            contentDescription = stringResource(R.string.nav_settings),
-                            modifier = Modifier.size(20.dp),
-                            tint = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                    }
-                }
-
-                // Server status indicator: dot only (no text). Slightly
-                // larger than the previous glyph so it remains tappable.
-                val dotColor = when {
-                    state.isConnecting -> Color(0xFFFFA500)
-                    state.isConnected -> Color(0xFF4CAF50)
-                    state.connectionPhase == null -> MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.4f)
-                    else -> Color(0xFFF44336)
-                }
-                Box(
-                    modifier = Modifier
-                        .clickable { showServerDialog = true }
-                        .padding(horizontal = 8.dp, vertical = 6.dp)
-                        .size(12.dp)
-                        .background(color = dotColor, shape = CircleShape)
-                )
             }
-        }
-    }
 
-    HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
+            // Server status indicator: dot only (no text). Slightly
+            // larger than the previous glyph so it remains tappable.
+            val dotColor = when {
+                state.isConnecting -> Color(0xFFFFA500)
+                state.isConnected -> Color(0xFF4CAF50)
+                state.connectionPhase == null -> MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.4f)
+                else -> Color(0xFFF44336)
+            }
+            Box(
+                modifier = Modifier
+                    .clickable { showServerDialog = true }
+                    .padding(horizontal = 8.dp, vertical = 6.dp)
+                    .size(12.dp)
+                    .background(color = dotColor, shape = CircleShape)
+            )
+        }
+    )
 
     if (showTodoDialog) {
         AlertDialog(
@@ -357,6 +303,50 @@ internal fun ChatTopBar(
         ContextUsageDialog(
             usage = state.contextUsage,
             onDismiss = { showContextDialog = false }
+        )
+    }
+
+    // Agent picker is a standalone AlertDialog (not a nested DropdownMenu) to
+    // avoid M3 nested-popup focus/dismiss conflicts (#8).
+    if (showAgentDialog) {
+        AlertDialog(
+            onDismissRequest = { showAgentDialog = false },
+            title = { Text(stringResource(R.string.chat_switch_agent)) },
+            text = {
+                Column(
+                    modifier = Modifier
+                        .heightIn(max = 400.dp)
+                        .verticalScroll(rememberScrollState())
+                ) {
+                    state.agents.forEach { agent ->
+                        val isSelected = agent.name == state.selectedAgentName
+                        Surface(
+                            onClick = {
+                                actions.onSelectAgent(agent.name)
+                                showAgentDialog = false
+                            },
+                            shape = RoundedCornerShape(8.dp),
+                            color = if (isSelected) MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.4f)
+                            else Color.Transparent,
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Text(
+                                text = agent.name,
+                                style = MaterialTheme.typography.bodyMedium,
+                                fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal,
+                                color = if (isSelected) MaterialTheme.colorScheme.onPrimaryContainer
+                                else MaterialTheme.colorScheme.onSurface,
+                                modifier = Modifier.padding(horizontal = 12.dp, vertical = 12.dp)
+                            )
+                        }
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = { showAgentDialog = false }) {
+                    Text(stringResource(R.string.common_done))
+                }
+            }
         )
     }
 
@@ -399,20 +389,19 @@ private fun SessionDropdownRow(
     onCloseSession: (String) -> Unit
 ) {
     val currentTitle = currentSession?.displayName ?: "—"
-    Box {
+    Box(modifier = modifier) {
         Row(
             verticalAlignment = Alignment.CenterVertically,
-            modifier = modifier
+            modifier = Modifier
                 .clickable(onClick = onToggleExpand)
                 .padding(vertical = 2.dp)
         ) {
-            // Title on the left (fills available width), dropdown arrow on
-            // the right. workdir is intentionally omitted from the collapsed
-            // row — it is still shown inside each dropdown item below.
+            // Title occupies the anchor row; the dropdown arrow sits to its
+            // right. The title now uses titleLarge (18sp Medium) since it lives
+            // in the TopAppBar title slot (#2).
             Text(
                 text = truncateTitle(currentTitle),
-                style = MaterialTheme.typography.bodyMedium,
-                fontWeight = FontWeight.SemiBold,
+                style = MaterialTheme.typography.titleLarge,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
                 color = MaterialTheme.colorScheme.onSurface,
@@ -427,83 +416,178 @@ private fun SessionDropdownRow(
         }
         DropdownMenu(
             expanded = expanded,
-            onDismissRequest = { if (expanded) onToggleExpand() }
+            onDismissRequest = { if (expanded) onToggleExpand() },
+            // Fixed width (not widthIn) so the cap is honored even when the
+            // anchor is narrow (#9).
+            modifier = Modifier.width(280.dp)
         ) {
-            if (openSessions.isEmpty()) {
-                DropdownMenuItem(
-                    text = {
-                        Text(
-                            stringResource(R.string.chat_select_or_create_session),
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                    },
-                    enabled = false,
-                    onClick = {}
-                )
-            } else {
-                openSessions.forEach { session ->
-                    val isSelected = session.id == currentSessionId
-                    Surface(
-                        color = if (isSelected) MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.6f)
-                        else Color.Transparent,
-                        shape = RoundedCornerShape(6.dp)
-                    ) {
-                        Row(
-                            verticalAlignment = Alignment.CenterVertically,
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .clickable {
-                                    onSelectSession(session.id)
-                                }
-                                .padding(horizontal = 12.dp, vertical = 8.dp)
+            // Scrollable, height-capped list so a long open-session set cannot
+            // cover the composer (#9).
+            Column(
+                modifier = Modifier
+                    .heightIn(max = 360.dp)
+                    .verticalScroll(rememberScrollState())
+            ) {
+                if (openSessions.isEmpty()) {
+                    DropdownMenuItem(
+                        text = {
+                            Text(
+                                stringResource(R.string.chat_select_or_create_session),
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        },
+                        enabled = false,
+                        onClick = {}
+                    )
+                } else {
+                    openSessions.forEach { session ->
+                        val isSelected = session.id == currentSessionId
+                        Surface(
+                            color = if (isSelected) MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.6f)
+                            else Color.Transparent,
+                            shape = RoundedCornerShape(6.dp)
                         ) {
-                            Column(modifier = Modifier.weight(1f)) {
-                                Text(
-                                    text = truncateTitle(session.displayName),
-                                    style = MaterialTheme.typography.bodyMedium,
-                                    fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal,
-                                    color = if (isSelected) MaterialTheme.colorScheme.onPrimaryContainer
-                                    else MaterialTheme.colorScheme.onSurface,
-                                    maxLines = 1,
-                                    overflow = TextOverflow.Ellipsis
-                                )
-                                Text(
-                                    text = workdirBasename(session.directory),
-                                    style = MaterialTheme.typography.labelSmall,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                    maxLines = 1,
-                                    overflow = TextOverflow.Ellipsis
-                                )
-                            }
-                            // Unread badge: a small primary-colored dot when this
-                            // session has received a new (message.created) event
-                            // since the user last viewed it. Cleared on open.
-                            if (session.id in unreadSessions) {
-                                Box(
-                                    modifier = Modifier
-                                        .padding(end = 4.dp)
-                                        .size(8.dp)
-                                        .background(
-                                            color = MaterialTheme.colorScheme.primary,
-                                            shape = CircleShape
-                                        )
-                                )
-                            }
-                            IconButton(
-                                onClick = { onCloseSession(session.id) },
-                                modifier = Modifier.size(28.dp)
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clickable {
+                                        onSelectSession(session.id)
+                                    }
+                                    .padding(horizontal = 12.dp, vertical = 8.dp)
                             ) {
-                                Icon(
-                                    Icons.Default.Close,
-                                    contentDescription = stringResource(R.string.common_close),
-                                    modifier = Modifier.size(16.dp),
-                                    tint = MaterialTheme.colorScheme.onSurfaceVariant
-                                )
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text(
+                                        text = truncateTitle(session.displayName),
+                                        style = MaterialTheme.typography.bodyMedium,
+                                        fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal,
+                                        color = if (isSelected) MaterialTheme.colorScheme.onPrimaryContainer
+                                        else MaterialTheme.colorScheme.onSurface,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+                                    Text(
+                                        text = workdirBasename(session.directory),
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+                                }
+                                // Unread badge: a small primary-colored dot when this
+                                // session has received a new (message.created) event
+                                // since the user last viewed it. Cleared on open.
+                                if (session.id in unreadSessions) {
+                                    Box(
+                                        modifier = Modifier
+                                            .padding(end = 4.dp)
+                                            .size(8.dp)
+                                            .background(
+                                                color = MaterialTheme.colorScheme.primary,
+                                                shape = CircleShape
+                                            )
+                                    )
+                                }
+                                IconButton(
+                                    onClick = { onCloseSession(session.id) },
+                                    modifier = Modifier.size(28.dp)
+                                ) {
+                                    Icon(
+                                        Icons.Default.Close,
+                                        contentDescription = stringResource(R.string.common_close),
+                                        modifier = Modifier.size(16.dp),
+                                        tint = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                }
                             }
                         }
                     }
                 }
             }
+        }
+    }
+}
+
+/**
+ * Single anchor + dropdown that folds the former Agent TextButton, Todo icon,
+ * and Context ring into one menu (#8). The anchor reuses [ContextUsageRing] so
+ * the live context pressure is always visible; tapping it opens a three-row
+ * dropdown whose items delegate to the existing dialogs.
+ */
+@Composable
+private fun ContextMenuButton(
+    usage: AppState.ContextUsage?,
+    todos: List<TodoItem>,
+    selectedAgentName: String,
+    expanded: Boolean,
+    onToggleExpand: () -> Unit,
+    onContextClick: () -> Unit,
+    onTodoClick: () -> Unit,
+    onAgentClick: () -> Unit
+) {
+    Box {
+        // The ring is the trigger; the previous standalone onClick (which opened
+        // the context dialog directly) is removed — the dropdown is the anchor.
+        Surface(
+            onClick = onToggleExpand,
+            shape = RoundedCornerShape(50),
+            color = Color.Transparent
+        ) {
+            ContextUsageRing(usage = usage)
+        }
+        DropdownMenu(
+            expanded = expanded,
+            onDismissRequest = { if (expanded) onToggleExpand() }
+        ) {
+            // 1. Context — "{pct}% {total}/{limit}", compact counts.
+            DropdownMenuItem(
+                text = {
+                    Text(
+                        if (usage != null) {
+                            val pct = (usage.percentage * 100).toInt()
+                            "$pct% ${formatCountCompact(usage.totalTokens)}/${formatCountCompact(usage.contextLimit)}"
+                        } else {
+                            stringResource(R.string.chat_context)
+                        }
+                    )
+                },
+                leadingIcon = {
+                    Icon(
+                        Icons.Default.DonutLarge,
+                        contentDescription = null,
+                        modifier = Modifier.size(18.dp)
+                    )
+                },
+                onClick = onContextClick
+            )
+            // 2. Todo — "{completed}/{total}", always shown (including 0/0).
+            DropdownMenuItem(
+                text = {
+                    val completed = todos.count { it.isCompleted }
+                    val total = todos.size
+                    Text("$completed/$total")
+                },
+                leadingIcon = {
+                    Icon(
+                        Icons.Default.Checklist,
+                        contentDescription = null,
+                        modifier = Modifier.size(18.dp)
+                    )
+                },
+                onClick = onTodoClick
+            )
+            // 3. Agent — selected agent name; opens the standalone picker dialog.
+            DropdownMenuItem(
+                text = { Text(selectedAgentName) },
+                leadingIcon = {
+                    Icon(
+                        Icons.Default.SmartToy,
+                        contentDescription = null,
+                        modifier = Modifier.size(18.dp)
+                    )
+                },
+                onClick = onAgentClick
+            )
         }
     }
 }
@@ -685,6 +769,14 @@ private fun ContextUsageRow(label: String, value: String) {
 private fun formatCount(value: Int): String = String.format(Locale.US, "%,d", value)
 
 private fun formatOptionalCount(value: Int?): String = value?.let(::formatCount) ?: "-"
+
+/**
+ * Compact count for space-constrained badges: ≥1000 collapses to "{value/1000}k"
+ * (113000 -> "113k"), smaller values render verbatim. Distinct from [formatCount]
+ * (locale-grouped) which stays in use inside the detail dialog (#8).
+ */
+private fun formatCountCompact(value: Int): String =
+    if (value >= 1000) "${value / 1000}k" else value.toString()
 
 @Composable
 internal fun ContextUsageRing(usage: AppState.ContextUsage?) {

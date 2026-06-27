@@ -1,6 +1,7 @@
 package com.yage.opencode_client
 
 import android.os.Bundle
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.appcompat.app.AppCompatActivity
@@ -110,15 +111,22 @@ class MainActivity : AppCompatActivity() {
             }
             val windowSizeClass = calculateWindowSizeClass(this)
             val isTablet = windowSizeClass.widthSizeClass == WindowWidthSizeClass.Expanded
+            // Landscape split: trigger on phone landscape orientation (≥400dp wide
+            // so a ~100dp session pane is still usable). Below 400dp fall back to
+            // the swipable PhoneLayout. Rotation state survives via the Hilt VM.
+            val config = androidx.compose.ui.platform.LocalConfiguration.current
+            val isLandscape =
+                config.orientation == android.content.res.Configuration.ORIENTATION_LANDSCAPE
+            val tooNarrow = config.screenWidthDp < 400
 
             OpenCodeTheme(
                 darkTheme = darkTheme,
                 markdownFontSizes = state.markdownFontSizes
             ) {
-                if (isTablet) {
-                    TabletLayout(viewModel = viewModel)
-                } else {
-                    PhoneLayout(viewModel = viewModel)
+                when {
+                    isTablet -> TabletLayout(viewModel = viewModel)
+                    isLandscape && !tooNarrow -> LandscapeSplitLayout(viewModel = viewModel)
+                    else -> PhoneLayout(viewModel = viewModel)
                 }
             }
         }
@@ -142,6 +150,13 @@ private fun PhoneLayout(viewModel: MainViewModel) {
 
     fun switchToPage(page: Int) {
         scope.launch { pagerState.animateScrollToPage(page) }
+    }
+
+    // #12: System back returns to Chat from any non-Chat page. On the Chat page
+    // itself the handler is disabled, so back exits the app (expected). Landscape
+    // and tablet layouts have no pager, so back exits the app directly there.
+    BackHandler(enabled = pagerState.currentPage != screens.indexOf(Screen.Chat)) {
+        switchToPage(screens.indexOf(Screen.Chat))
     }
 
     Scaffold(
@@ -207,7 +222,8 @@ private fun TabletLayout(viewModel: MainViewModel) {
         Row(
             modifier = Modifier
                 .fillMaxSize()
-                .windowInsetsPadding(WindowInsets.statusBars)
+                // Status-bar inset is consumed by each pane's own M3 TopAppBar
+                // (see RFC 0.1.3 §3 — single inset application rule).
         ) {
         // Left panel: Session list or Settings — 25% when expanded.
         if (!sessionsPaneCollapsed) {
@@ -296,6 +312,51 @@ private fun TabletLayout(viewModel: MainViewModel) {
                     showSettingsButton = false
                 )
             }
+        }
+    }
+}
+
+/**
+ * Landscape split layout (#1, RFC 0.1.3 §1): a two-pane Row used on phones in
+ * landscape orientation (width ≥400dp). Sessions on the left (25%), Chat on the
+ * right (75%). Settings has no entry in landscape (no pager); the settings
+ * button is hidden. Selecting a session drives the shared Hilt ViewModel, which
+ * the Chat pane observes — `onSwitchToChat` is intentionally a no-op.
+ *
+ * The Row intentionally applies NO status-bar inset padding; per §3 the inset
+ * is consumed by each pane's own M3 TopAppBar. Rotation state survives because
+ * the ViewModel is Hilt-scoped to the Activity.
+ *
+ * Files navigation is routed to `showFileInFiles` which caches the path so it
+ * can be displayed when the user rotates back to portrait (no Files pane in
+ * landscape to show it immediately).
+ */
+@Composable
+private fun LandscapeSplitLayout(viewModel: MainViewModel) {
+    Row(modifier = Modifier.fillMaxSize()) {
+        // Left pane: Sessions list — 25%.
+        Column(modifier = Modifier.weight(0.25f).fillMaxHeight()) {
+            SessionsScreen(
+                viewModel = viewModel,
+                onSwitchToChat = {} // Selection updates the shared VM, which the
+                                   // right-hand Chat pane observes automatically.
+            )
+        }
+
+        VerticalDivider()
+
+        // Right pane: Chat — 75%.
+        Column(modifier = Modifier.weight(0.75f).fillMaxHeight()) {
+            ChatScreen(
+                viewModel = viewModel,
+                onNavigateToFiles = { path ->
+                    // Cache the path; no Files pane in landscape, so it will be
+                    // shown when the user returns to portrait PhoneLayout.
+                    viewModel.showFileInFiles(path, originRoute = Screen.Chat.route)
+                },
+                onNavigateToSettings = {},
+                showSettingsButton = false
+            )
         }
     }
 }

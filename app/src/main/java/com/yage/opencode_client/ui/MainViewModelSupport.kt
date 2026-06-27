@@ -71,12 +71,34 @@ internal fun bumpSessionUpdated(sessions: List<Session>, sessionId: String, upda
     }
 }
 
+/**
+ * Merge a refreshed server snapshot of sessions ([refreshed]) into the local
+ * cached list ([local]) while preserving sessions the user is actively using.
+ *
+ * Time/title reconciliation (the [base] pass) is unchanged: when the local
+ * copy of a session carries a strictly-newer `time.updated` (e.g. it was just
+ * bumped by a session.updated SSE that brought the server-authoritative
+ * title), prefer the local title and lift the remote time so a concurrent
+ * full refresh does not clobber it.
+ *
+ * The [preserve] pass (#10) appends local-only sessions that the full refresh
+ * did not return, but ONLY when they are the currently-open session
+ * ([currentSessionId]) or appear in the browser-tab-style open list
+ * ([openSessionIds]). This prevents a loadSessions/loadMore refresh from
+ * silently evicting the session the user is currently viewing (e.g. a freshly
+ * created session that has not yet propagated into the global listing, or a
+ * directory-session the user selected from a connected workdir). Sessions
+ * outside this allow-list are allowed to drop naturally on refresh.
+ */
 internal fun mergeRefreshedSessionsPreservingLocalActivity(
     refreshed: List<Session>,
-    local: List<Session>
+    local: List<Session>,
+    currentSessionId: String?,
+    openSessionIds: Set<String>
 ): List<Session> {
     val localById = local.associateBy { it.id }
-    return refreshed.map { remote ->
+    val refreshedIds = refreshed.map { it.id }.toSet()
+    val base = refreshed.map { remote ->
         val localSession = localById[remote.id]
         val localUpdated = localSession?.time?.updated
         val remoteUpdated = remote.time?.updated
@@ -94,6 +116,11 @@ internal fun mergeRefreshedSessionsPreservingLocalActivity(
             remote
         }
     }
+    val preserve = local.filter {
+        it.id !in refreshedIds &&
+            (it.id == currentSessionId || it.id in openSessionIds)
+    }
+    return base + preserve
 }
 
 private fun Session.TimeInfo?.withUpdatedAtLeast(updated: Long): Session.TimeInfo {

@@ -46,9 +46,14 @@ fun SessionsScreen(
     var hiddenWorkdirs by remember { mutableStateOf(setOf<String>()) }
     var pendingDisconnectWorkdir by remember { mutableStateOf<String?>(null) }
 
-    // Derive recent sessions (root sessions: parentId == null, by time.updated desc, top 5)
-    val recentSessions = remember(state.sessions) {
-        state.sessions
+    // Derive recent sessions (root sessions: parentId == null, by time.updated desc, top 5).
+    // Source merges the global sessions list with directorySessions (#10: prior
+    // conversations discovered for a connected workdir that may not yet appear
+    // in the global list), deduplicated by id so a session present in both
+    // stores is only rendered once.
+    val recentSessions = remember(state.sessions, state.directorySessions) {
+        (state.sessions + state.directorySessions.values.flatten())
+            .distinctBy { it.id }
             .filter { it.parentId == null && !it.isArchived }
             .sortedByDescending { it.time?.updated ?: 0L }
             .take(5)
@@ -61,8 +66,15 @@ fun SessionsScreen(
     // The draft workdir (when the user has invoked createSessionInWorkdir but
     // no session has been POSTed yet) is appended with an empty session list
     // so the in-progress "connect" is visible alongside connected projects.
-    val workdirGroups = remember(state.sessions, hiddenWorkdirs, state.draftWorkdir) {
-        val sessionGroups = state.sessions
+    //
+    // Source merges state.sessions with state.directorySessions (#10) so a
+    // workdir that has only been discovered via the directory-scoped fetch
+    // (and not yet promoted into the global list by a periodic refresh) still
+    // shows its sessions here. Deduplicated by id to avoid double-rendering.
+    val workdirGroups = remember(state.sessions, state.directorySessions, hiddenWorkdirs, state.draftWorkdir) {
+        val allSessions = (state.sessions + state.directorySessions.values.flatten())
+            .distinctBy { it.id }
+        val sessionGroups = allSessions
             .filter { it.parentId == null && it.directory !in hiddenWorkdirs }
             .groupBy { it.directory }
             .mapValues { (_, sessList) ->
