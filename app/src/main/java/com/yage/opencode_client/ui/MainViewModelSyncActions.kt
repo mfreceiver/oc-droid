@@ -103,9 +103,18 @@ internal fun handleIncomingSseEvent(
             val sessionId = event.payload.getString("sessionID")
             if (sessionId != null && sessionId == state.value.currentSessionId) {
                 onRefreshMessages(sessionId, true)
+            } else if (sessionId != null) {
+                // Mark unread: an out-of-band message arrived for a session
+                // the user is not currently viewing.
+                markSessionUnread(state, sessionId)
             }
         }
         "message.updated" -> {
+            // Only refresh the open session's messages. Do NOT mark unread:
+            // message.updated fires for every streaming delta/touch on the
+            // server (token appends, tool updates, status flips), which would
+            // spam the unread badge. Unread marking is reserved for
+            // message.created (a genuinely new message) — see the branch above.
             val sessionId = event.payload.getString("sessionID")
             if (sessionId != null && sessionId == state.value.currentSessionId) {
                 onRefreshMessages(sessionId, false)
@@ -178,6 +187,25 @@ internal fun handleIncomingSseEvent(
                 return
             }
             state.update { it.copy(sessionTodos = it.sessionTodos + (sessionId to todos)) }
+        }
+    }
+}
+
+/**
+ * Mark [sessionId] as having unread activity. Skipped when the session is
+ * already the currently-open one (caller guards this) and when the user has
+ * never opened it before (we still want the badge in that case, so we only
+ * short-circuit on identical selected session, which the caller handles).
+ */
+private fun markSessionUnread(
+    state: MutableStateFlow<AppState>,
+    sessionId: String
+) {
+    state.update { current ->
+        if (sessionId == current.currentSessionId) {
+            current
+        } else {
+            current.copy(unreadSessions = current.unreadSessions + sessionId)
         }
     }
 }

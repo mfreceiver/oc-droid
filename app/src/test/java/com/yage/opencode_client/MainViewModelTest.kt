@@ -43,6 +43,7 @@ import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.buildJsonObject
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
@@ -329,13 +330,10 @@ class MainViewModelTest {
     }
 
     @Test
-    fun `createSessionInWorkdir sets directory and creates session`() = runTest {
-        val created = Session(
-            id = "session-1",
-            directory = "/home/user/myproject",
-            title = null
-        )
-        coEvery { repository.createSession(title = null) } returns Result.success(created)
+    fun `createSessionInWorkdir enters draft mode without issuing POST session`() = runTest {
+        // Deferred-create: createSessionInWorkdir must NOT call the server.
+        // It only sets the repository cwd and enters draftWorkdir state; the
+        // session is created lazily by sendMessage on first prompt.
         every { repository.setCurrentDirectory(any()) } just runs
 
         val viewModel = createViewModel()
@@ -343,28 +341,72 @@ class MainViewModelTest {
         viewModel.createSessionInWorkdir("/home/user/myproject")
         advanceUntilIdle()
 
-        coVerifyOrder {
-            repository.setCurrentDirectory("/home/user/myproject")
-            repository.createSession(title = null)
-        }
-        val sessions = viewModel.state.value.sessions
-        assertEquals(1, sessions.size)
-        assertEquals("session-1", sessions.single().id)
-        assertEquals("session-1", viewModel.state.value.currentSessionId)
+        coVerify(exactly = 0) { repository.createSession(any()) }
+        verify { repository.setCurrentDirectory("/home/user/myproject") }
+        assertEquals("/home/user/myproject", viewModel.state.value.draftWorkdir)
+        assertNull(viewModel.state.value.currentSessionId)
     }
 
     @Test
-    fun `createSessionInWorkdir handles failure`() = runTest {
+    fun `sendMessage materialises draft session via POST then dispatches the prompt`() = runTest {
+        val created = Session(
+            id = "session-1",
+            directory = "/home/user/myproject",
+            title = null
+        )
+        coEvery { repository.createSession(title = null) } returns Result.success(created)
+        coEvery { repository.sendMessage(any(), any(), any(), any(), any()) } returns Result.success(Unit)
+        coEvery { repository.getSessions(any()) } returns Result.success(listOf(created))
+        every { repository.setCurrentDirectory(any()) } just runs
+
+        val viewModel = createViewModel()
+        viewModel.createSessionInWorkdir("/home/user/myproject")
+        advanceUntilIdle()
+
+        viewModel.setInputText("hello")
+        viewModel.sendMessage()
+        advanceUntilIdle()
+
+        coVerifyOrder {
+            repository.setCurrentDirectory("/home/user/myproject")
+            repository.createSession(title = null)
+            repository.sendMessage("session-1", "hello", any(), any(), any())
+        }
+        assertEquals("session-1", viewModel.state.value.currentSessionId)
+        assertNull(viewModel.state.value.draftWorkdir)
+        assertTrue(viewModel.state.value.openSessionIds.contains("session-1"))
+    }
+
+    @Test
+    fun `selectSession discards in-progress draft`() = runTest {
+        every { repository.setCurrentDirectory(any()) } just runs
+
+        val viewModel = createViewModel()
+        viewModel.createSessionInWorkdir("/home/user/myproject")
+        advanceUntilIdle()
+        assertEquals("/home/user/myproject", viewModel.state.value.draftWorkdir)
+
+        viewModel.selectSession("session-1")
+        advanceUntilIdle()
+
+        assertNull(viewModel.state.value.draftWorkdir)
+    }
+
+    @Test
+    fun `createSessionInWorkdir draft surfaces error when first send cannot create session`() = runTest {
         coEvery { repository.createSession(title = null) } returns Result.failure(IllegalStateException("network error"))
         every { repository.setCurrentDirectory(any()) } just runs
 
         val viewModel = createViewModel()
-
         viewModel.createSessionInWorkdir("/tmp/fail")
         advanceUntilIdle()
+        viewModel.setInputText("hi")
+        viewModel.sendMessage()
+        advanceUntilIdle()
 
-        assertEquals("Failed to create session in /tmp/fail: network error", viewModel.state.value.error)
-        assertTrue(viewModel.state.value.sessions.isEmpty())
+        assertNull(viewModel.state.value.currentSessionId)
+        assertNotNull(viewModel.state.value.error)
+        assertTrue(viewModel.state.value.error!!.contains("network error"))
     }
 
     @Test

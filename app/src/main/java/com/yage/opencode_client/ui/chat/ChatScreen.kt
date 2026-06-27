@@ -2,15 +2,14 @@ package com.yage.opencode_client.ui.chat
 
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.compose.foundation.combinedClickable
-import androidx.compose.foundation.layout.*
-import androidx.compose.foundation.lazy.LazyRow
-import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Snackbar
-import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -23,7 +22,6 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
-import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.yage.opencode_client.R
@@ -39,8 +37,7 @@ fun ChatScreen(
     viewModel: MainViewModel,
     onNavigateToFiles: (String) -> Unit = {},
     onNavigateToSettings: () -> Unit = {},
-    showSettingsButton: Boolean = true,
-    showSessionListInTopBar: Boolean = true
+    showSettingsButton: Boolean = true
 ) {
     val state by viewModel.state.collectAsStateWithLifecycle()
     val context = LocalContext.current
@@ -61,7 +58,7 @@ fun ChatScreen(
     val currentActivity = remember(
         state.currentSessionId,
         state.currentSessionStatus,
-            state.visibleMessages,
+        state.visibleMessages,
         state.streamingReasoningPart,
         state.streamingPartTexts,
     ) {
@@ -72,6 +69,13 @@ fun ChatScreen(
             streamingReasoningPart = state.streamingReasoningPart,
             streamingPartTexts = state.streamingPartTexts,
         )
+    }
+
+    // Resolve openSessionIds to actual Session objects for the top-bar dropdown.
+    val openSessions = remember(state.sessions, state.openSessionIds) {
+        state.openSessionIds
+            .mapNotNull { id -> state.sessions.find { it.id == id } }
+            .filter { it.parentId == null }
     }
 
     // statusBarsPadding() keeps the ChatTopBar below the status bar (the phone
@@ -93,7 +97,6 @@ fun ChatScreen(
                 contextUsage = cachedContextUsage,
                 sessionTodos = state.sessionTodos[state.currentSessionId ?: ""] ?: emptyList(),
                 showSettingsButton = showSettingsButton,
-                showSessionListInTopBar = showSessionListInTopBar,
                 hostName = state.currentHostProfile?.name ?: "No Host",
                 isConnected = state.isConnected,
                 isConnecting = state.isConnecting,
@@ -102,6 +105,9 @@ fun ChatScreen(
                 currentHostProfileId = state.currentHostProfileId,
                 tunnelActivationState = state.tunnelActivationState,
                 showTunnelAuth = (state.currentHostProfile?.tunnelPasswordId != null),
+                openSessions = openSessions,
+                unreadSessions = state.unreadSessions,
+                draftWorkdir = state.draftWorkdir,
                 parentSessionId = state.currentSession?.parentId,
                 parentSessionTitle = state.currentSession?.parentId?.let { pid ->
                     state.sessions.firstOrNull { it.id == pid }?.displayName
@@ -109,13 +115,7 @@ fun ChatScreen(
             ),
             actions = ChatTopBarActions(
                 onSelectSession = viewModel::selectSession,
-                onCreateSession = viewModel::createSession,
-                onDeleteSession = viewModel::deleteSession,
-                onArchiveSession = viewModel::archiveSession,
-                onRestoreSession = viewModel::restoreSession,
-                onLoadMoreSessions = viewModel::loadMoreSessions,
-                onRefreshSessions = viewModel::loadSessions,
-                onToggleSessionExpanded = viewModel::toggleSessionExpanded,
+                onCloseSession = viewModel::closeSession,
                 onSelectAgent = viewModel::selectAgent,
                 onNavigateToSettings = onNavigateToSettings,
                 onRefresh = { viewModel.refreshCurrentHost() },
@@ -124,60 +124,18 @@ fun ChatScreen(
             )
         )
 
-        // MRU recent-sessions tag strip. Sub-agents (parentId != null) are
-        // excluded — they are only reachable from within a parent conversation.
-        // Reads from AppState.recentSessionIds (mirrored from SettingsManager)
-        // so long-press removal (which updates AppState) triggers recomposition.
-        val recentSessions = remember(state.sessions, state.currentSessionId, state.recentSessionIds) {
-            state.recentSessionIds
-                .mapNotNull { id -> state.sessions.find { it.id == id } }
-                .filter { it.parentId == null }
-                .take(8)
-        }
-        if (recentSessions.isNotEmpty()) {
-            LazyRow(
-                modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 4.dp),
-                horizontalArrangement = Arrangement.spacedBy(6.dp)
-            ) {
-                items(recentSessions) { session ->
-                    val isCurrent = session.id == state.currentSessionId
-                    Surface(
-                        shape = RoundedCornerShape(8.dp),
-                        color = if (isCurrent) MaterialTheme.colorScheme.primaryContainer
-                                else MaterialTheme.colorScheme.surfaceVariant,
-                        tonalElevation = if (isCurrent) 2.dp else 0.dp,
-                        modifier = Modifier.combinedClickable(
-                            onClick = { viewModel.selectSession(session.id) },
-                            onLongClick = { viewModel.removeFromRecent(session.id) }
-                        )
-                    ) {
-                        Column(modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp)) {
-                            Text(
-                                text = session.directory.split("/").lastOrNull() ?: session.directory,
-                                style = MaterialTheme.typography.labelSmall,
-                                maxLines = 1,
-                                color = if (isCurrent) MaterialTheme.colorScheme.onPrimaryContainer
-                                        else MaterialTheme.colorScheme.onSurfaceVariant
-                            )
-                            Text(
-                                text = session.displayName,
-                                style = MaterialTheme.typography.labelSmall,
-                                maxLines = 1,
-                                fontWeight = if (isCurrent) FontWeight.Bold else FontWeight.Normal
-                            )
-                        }
-                    }
-                }
-            }
-        }
-
+        // In draft mode (no session yet but a workdir has been chosen), the
+        // chat area is intentionally empty — the user is mid-composition and
+        // the session will materialise on first send. We do not render the
+        // "select or create session" empty state in that case.
         Box(modifier = Modifier.weight(1f)) {
-            if (state.currentSessionId == null) {
+            val isDraft = state.draftWorkdir != null && state.currentSessionId == null
+            if (state.currentSessionId == null && !isDraft) {
                 ChatEmptyState(
                     isConnected = state.isConnected,
                     onConnect = { viewModel.testConnection() }
                 )
-            } else {
+            } else if (state.currentSessionId != null) {
                 ChatMessageList(
                     messages = state.visibleMessages,
                     streamingPartTexts = state.streamingPartTexts,
@@ -211,7 +169,10 @@ fun ChatScreen(
             }
         }
 
-        if (state.currentSessionId != null) {
+        // Input bar is enabled whenever there is either a concrete session OR
+        // a draft workdir (so the user can type the first message that will
+        // materialise the session).
+        if (state.currentSessionId != null || state.draftWorkdir != null) {
             ChatInputBar(
                 text = state.inputText,
                 isBusy = currentSessionIsRunning,

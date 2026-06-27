@@ -8,7 +8,6 @@ import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Edit
-import androidx.compose.material.icons.filled.FileDownload
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.Visibility
 import androidx.compose.material.icons.filled.VisibilityOff
@@ -19,6 +18,8 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.RadioButton
+import androidx.compose.material3.Surface
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
@@ -93,16 +94,16 @@ fun SettingsScreen(
     // consumes the inset, so the tablet layout (already padded at its Row) and
     // the TopAppBar branch below both see 0 and never double-pad.
     Column(modifier = Modifier.fillMaxSize().statusBarsPadding()) {
-        if (onBack != null) {
-            TopAppBar(
-                title = { Text(stringResource(R.string.settings_title)) },
-                navigationIcon = {
+        TopAppBar(
+            title = { Text(stringResource(R.string.settings_title)) },
+            navigationIcon = {
+                if (onBack != null) {
                     IconButton(onClick = onBack) {
                         Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = stringResource(R.string.common_back))
                     }
                 }
-            )
-        }
+            }
+        )
 
         Column(
             modifier = Modifier
@@ -148,8 +149,6 @@ private fun HostProfilesManagerScreen(
     onBack: () -> Unit
 ) {
     var editingProfile by remember { mutableStateOf<HostProfile?>(null) }
-    var importing by remember { mutableStateOf(false) }
-    var importText by remember { mutableStateOf("") }
     var error by remember { mutableStateOf<String?>(null) }
     var detailProfile by remember { mutableStateOf<HostProfile?>(null) }
     val deleteFailedText = stringResource(R.string.host_profile_delete_failed)
@@ -163,9 +162,6 @@ private fun HostProfilesManagerScreen(
                 }
             },
             actions = {
-                IconButton(onClick = { importing = true }) {
-                    Icon(Icons.Default.FileDownload, contentDescription = stringResource(R.string.host_profile_import_json))
-                }
                 IconButton(onClick = { editingProfile = newDirectProfile() }) {
                     Icon(Icons.Default.Add, contentDescription = stringResource(R.string.host_profile_add))
                 }
@@ -186,7 +182,8 @@ private fun HostProfilesManagerScreen(
                 HostProfileRow(
                     profile = profile,
                     selected = profile.id == currentProfileId,
-                    onOpen = { detailProfile = profile }
+                    onOpen = { detailProfile = profile },
+                    onSelect = { viewModel.selectHostProfile(profile.id) }
                 )
                 Spacer(modifier = Modifier.height(8.dp))
             }
@@ -218,7 +215,6 @@ private fun HostProfilesManagerScreen(
                 editingProfile = profile
                 detailProfile = null
             },
-            onDuplicate = { viewModel.duplicateHostProfile(profile.id) },
             onDelete = {
                 runCatching { viewModel.deleteHostProfile(profile.id) }
                     .onFailure { error = it.message ?: deleteFailedText }
@@ -230,50 +226,41 @@ private fun HostProfilesManagerScreen(
             }
         )
     }
-
-    if (importing) {
-        AlertDialog(
-            onDismissRequest = { importing = false },
-            title = { Text(stringResource(R.string.host_profile_import_json)) },
-            text = {
-                OutlinedTextField(
-                    value = importText,
-                    onValueChange = { importText = it },
-                    label = { Text(stringResource(R.string.common_json)) },
-                    minLines = 6,
-                    modifier = Modifier.fillMaxWidth()
-                )
-            },
-            confirmButton = {
-                Button(onClick = {
-                    viewModel.importHostProfile(importText)
-                        .onFailure { error = it.message ?: "Import failed" }
-                    importing = false
-                    importText = ""
-                }) { Text(stringResource(R.string.common_import)) }
-            },
-            dismissButton = { TextButton(onClick = { importing = false }) { Text(stringResource(R.string.common_cancel)) } }
-        )
-    }
 }
 
 @Composable
 internal fun HostProfileRow(
     profile: HostProfile,
     selected: Boolean,
-    onOpen: () -> Unit
+    onOpen: () -> Unit,
+    onSelect: () -> Unit
 ) {
-    OutlinedButton(
+    Surface(
         onClick = onOpen,
         modifier = Modifier
             .fillMaxWidth()
-            .testTag("host.profile.row.${profile.id}")
+            .testTag("host.profile.row.${profile.id}"),
+        shape = MaterialTheme.shapes.medium,
+        color = MaterialTheme.colorScheme.surfaceVariant
     ) {
-        Text(
-            if (selected) stringResource(R.string.host_profile_current_suffix, profile.displayName)
-            else profile.displayName,
-            modifier = Modifier.weight(1f)
-        )
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 8.dp, vertical = 4.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            RadioButton(
+                selected = selected,
+                onClick = onSelect
+            )
+            Text(
+                profile.displayName,
+                style = MaterialTheme.typography.bodyLarge,
+                modifier = Modifier
+                    .weight(1f)
+                    .padding(horizontal = 8.dp)
+            )
+        }
     }
 }
 
@@ -285,7 +272,6 @@ internal fun HostProfileDetailDialog(
     onDismiss: () -> Unit,
     onUse: () -> Unit,
     onEdit: () -> Unit,
-    onDuplicate: () -> Unit,
     onDelete: () -> Unit,
     onTest: () -> Unit
 ) {
@@ -313,10 +299,7 @@ internal fun HostProfileDetailDialog(
                     OutlinedButton(onClick = onEdit) { Text(stringResource(R.string.common_edit)) }
                 }
                 Spacer(modifier = Modifier.height(8.dp))
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    OutlinedButton(onClick = onDuplicate) { Text(stringResource(R.string.common_duplicate)) }
-                    OutlinedButton(onClick = onDelete, enabled = canDelete) { Text(stringResource(R.string.common_delete)) }
-                }
+                OutlinedButton(onClick = onDelete, enabled = canDelete) { Text(stringResource(R.string.common_delete)) }
             }
         }
     )

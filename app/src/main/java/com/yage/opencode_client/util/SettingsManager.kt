@@ -104,19 +104,25 @@ class SettingsManager @Inject constructor(
             encryptedPrefs.edit().putString(KEY_MARKDOWN_FONT_SIZES, json).apply()
         }
 
-    var recentSessionIds: List<String>
+    /**
+     * "Open" (not closed) session IDs in open-order (most recently opened first).
+     * Replaces the previous MRU [recentSessionIds] model with a browser-tab style
+     * list: opening/switching a session prepends it; closing (x) removes it.
+     * Capped at 8 entries.
+     */
+    var openSessionIds: List<String>
         get() {
-            val json = encryptedPrefs.getString(KEY_RECENT_SESSION_IDS, null) ?: return emptyList()
+            val json = encryptedPrefs.getString(KEY_OPEN_SESSION_IDS, null) ?: return emptyList()
             return try {
                 Json.decodeFromString<List<String>>(json)
             } catch (e: Exception) {
-                Log.w(TAG, "Failed to parse recent session IDs, using empty", e)
+                Log.w(TAG, "Failed to parse open session IDs, using empty", e)
                 emptyList()
             }
         }
         set(value) {
             val json = Json.encodeToString(value)
-            encryptedPrefs.edit().putString(KEY_RECENT_SESSION_IDS, json).apply()
+            encryptedPrefs.edit().putString(KEY_OPEN_SESSION_IDS, json).apply()
         }
 
     fun getDraftText(sessionId: String): String {
@@ -179,7 +185,7 @@ class SettingsManager @Inject constructor(
         private const val KEY_SESSION_DRAFTS = "session_drafts"
         private const val KEY_SESSION_AGENTS = "session_agents"
         private const val KEY_MARKDOWN_FONT_SIZES = "markdown_font_sizes_json"
-        private const val KEY_RECENT_SESSION_IDS = "recent_session_ids"
+        private const val KEY_OPEN_SESSION_IDS = "open_session_ids"
 
         private fun basicAuthPasswordKey(passwordId: String): String = "basic_auth_password_$passwordId"
         private fun tunnelPasswordKey(id: String): String = "tunnel_password_$id"

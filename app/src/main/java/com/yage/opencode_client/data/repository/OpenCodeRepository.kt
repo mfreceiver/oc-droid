@@ -274,6 +274,24 @@ class OpenCodeRepository @Inject constructor() {
         api.getFileTree(path ?: "")
     }
 
+    /**
+     * Lists the contents of an arbitrary [directory] (independent of the
+     * currently selected session's workdir). Used by the "connect new project"
+     * directory picker to browse the server's filesystem starting at `~`.
+     *
+     * Bypasses the OkHttp interceptor's automatic `X-Opencode-Directory`
+     * injection by setting the skip-dir marker on the underlying call, then
+     * supplies [directory] explicitly so the server scopes the listing there.
+     * [path] is an optional sub-path relative to [directory] (empty = list the
+     * directory root).
+     */
+    suspend fun getFileTreeForDirectory(
+        directory: String,
+        path: String? = null
+    ): Result<List<FileNode>> = runCatching {
+        api.getFileTreeForDirectory(directory, path ?: "")
+    }
+
     suspend fun getFileContent(path: String): Result<FileContent> = runCatching {
         api.getFileContent(path)
     }

@@ -35,12 +35,9 @@
     <string name="common_done">Done</string>
     <string name="common_dismiss">Dismiss</string>
     <string name="common_edit">Edit</string>
-    <string name="common_duplicate">Duplicate</string>
-    <string name="common_import">Import</string>
     <string name="common_delete">Delete</string>
     <string name="common_refresh">Refresh</string>
     <string name="common_ok">OK</string>
-    <string name="common_json">JSON</string>
     <string name="sessions_title">Sessions</string>
     <string name="sessions_active">Recent</string>
     <string name="sessions_archived">Archived</string>
@@ -101,12 +98,10 @@
     <string name="files_open_markdown_source">Open Markdown Source</string>
     <string name="host_profiles_title">Host Profiles</string>
     <string name="host_profile_add">Add host profile</string>
-    <string name="host_profile_import_json">Import host profile JSON</string>
     <string name="host_profile_use_this_host">Use This Host</string>
     <string name="host_profile_status">Status: %1$s</string>
     <string name="host_profile_current">Current</string>
     <string name="host_profile_saved">Saved profile</string>
-    <string name="host_profile_current_suffix">%1$s · Current</string>
     <string name="host_profile_add_title">Add Host Profile</string>
     <string name="host_profile_edit_title">Edit Host Profile</string>
     <string name="host_profile_name">Profile name</string>
@@ -135,6 +130,7 @@
     <string name="sessions_tab_no_sessions">No sessions yet</string>
     <string name="sessions_tab_no_workdirs">No connected projects</string>
     <string name="sessions_connect_new_project">Connect Project</string>
+    <string name="sessions_picker_empty">No subdirectories</string>
     <string name="sessions_disconnect_workdir">Disconnect</string>
     <string name="sessions_disconnect_confirm">Disconnect this project?</string>
     <string name="server_dialog_title">Servers</string>

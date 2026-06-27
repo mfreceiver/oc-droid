@@ -2,11 +2,13 @@ package com.yage.opencode_client.ui.sessions
 
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.Add
@@ -39,7 +41,6 @@ fun SessionsScreen(
 ) {
     val state by viewModel.state.collectAsStateWithLifecycle()
     var showNewWorkdirDialog by remember { mutableStateOf(false) }
-    var newWorkdirPath by remember { mutableStateOf("") }
     var expandedWorkdirs by remember { mutableStateOf(setOf<String>()) }
     // Locally-hidden workdirs (long-press → disconnect). UI-only; reset on refresh/re-enter tab.
     var hiddenWorkdirs by remember { mutableStateOf(setOf<String>()) }
@@ -65,11 +66,6 @@ fun SessionsScreen(
             }
             .entries
             .sortedBy { it.key }
-    }
-
-    // Path candidates from existing session directories (for autocomplete in connect dialog).
-    val pathCandidates = remember(state.sessions) {
-        state.sessions.map { it.directory }.distinct().sorted()
     }
 
     // Navigate to Chat tab after selecting a session
@@ -112,6 +108,7 @@ fun SessionsScreen(
                 items(recentSessions, key = { it.id }) { session ->
                     SessionCard(
                         session = session,
+                        isUnread = session.id in state.unreadSessions,
                         onClick = { onSessionClick(session.id) }
                     )
                 }
@@ -197,6 +194,7 @@ fun SessionsScreen(
                                 sessionsInWorkdir.forEach { session ->
                                     SessionCard(
                                         session = session,
+                                        isUnread = session.id in state.unreadSessions,
                                         onClick = { onSessionClick(session.id) }
                                     )
                                 }
@@ -265,83 +263,14 @@ fun SessionsScreen(
         )
     }
 
-    // --- New Workdir Dialog (with path autocomplete based on existing session directories) ---
+    // --- Directory picker (modal bottom sheet) for connecting a new project ---
     if (showNewWorkdirDialog) {
-        // Dropdown anchor visibility state
-        var dropdownExpanded by remember { mutableStateOf(false) }
-        val filteredCandidates = remember(newWorkdirPath, pathCandidates) {
-            val q = newWorkdirPath.trim()
-            if (q.isEmpty()) pathCandidates
-            else pathCandidates.filter { it.contains(q, ignoreCase = true) }
-        }
-
-        AlertDialog(
-            onDismissRequest = {
+        DirectoryPickerSheet(
+            repository = viewModel.repository,
+            onDismiss = { showNewWorkdirDialog = false },
+            onSelect = { path ->
                 showNewWorkdirDialog = false
-                newWorkdirPath = ""
-            },
-            title = { Text(stringResource(R.string.sessions_tab_new_workdir)) },
-            text = {
-                Box {
-                    Column {
-                        OutlinedTextField(
-                            value = newWorkdirPath,
-                            onValueChange = {
-                                newWorkdirPath = it
-                                dropdownExpanded = it.isNotEmpty()
-                            },
-                            label = { Text(stringResource(R.string.sessions_tab_workdir_hint)) },
-                            singleLine = true,
-                            modifier = Modifier.fillMaxWidth()
-                        )
-                        if (filteredCandidates.isNotEmpty()) {
-                            Text(
-                                text = stringResource(R.string.sessions_tab_workdir_hint),
-                                style = MaterialTheme.typography.labelSmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                modifier = Modifier.padding(top = 6.dp, start = 4.dp)
-                            )
-                        }
-                    }
-                    DropdownMenu(
-                        expanded = dropdownExpanded && filteredCandidates.isNotEmpty(),
-                        onDismissRequest = { dropdownExpanded = false }
-                    ) {
-                        filteredCandidates.take(10).forEach { candidate ->
-                            DropdownMenuItem(
-                                text = { Text(candidate, style = MaterialTheme.typography.bodySmall) },
-                                onClick = {
-                                    newWorkdirPath = candidate
-                                    dropdownExpanded = false
-                                }
-                            )
-                        }
-                    }
-                }
-            },
-            confirmButton = {
-                TextButton(
-                    onClick = {
-                        val path = newWorkdirPath.trim()
-                        if (path.isNotEmpty()) {
-                            viewModel.createSessionInWorkdir(path)
-                        }
-                        showNewWorkdirDialog = false
-                        newWorkdirPath = ""
-                    }
-                ) {
-                    Text(stringResource(R.string.sessions_tab_add_workdir))
-                }
-            },
-            dismissButton = {
-                TextButton(
-                    onClick = {
-                        showNewWorkdirDialog = false
-                        newWorkdirPath = ""
-                    }
-                ) {
-                    Text(stringResource(R.string.common_cancel))
-                }
+                viewModel.createSessionInWorkdir(path)
             }
         )
     }
@@ -371,10 +300,12 @@ private fun SectionHeader(icon: androidx.compose.ui.graphics.vector.ImageVector,
 }
 
 @Composable
-private fun SessionCard(session: Session, onClick: () -> Unit) {
+private fun SessionCard(session: Session, isUnread: Boolean = false, onClick: () -> Unit) {
     val dirBasename = session.directory.split("/").filter { it.isNotEmpty() }.lastOrNull()
         ?: session.directory
-    val updatedText = session.time?.updated?.let { formatTime(it) }
+    // Prefer the latest message time (time.updated); fall back to time.created.
+    val updatedText = (session.time?.updated?.takeIf { it > 0L } ?: session.time?.created?.takeIf { it > 0L })
+        ?.let { formatTime(it) }
 
     ElevatedCard(
         modifier = Modifier
@@ -384,11 +315,26 @@ private fun SessionCard(session: Session, onClick: () -> Unit) {
         elevation = CardDefaults.elevatedCardElevation(defaultElevation = 1.dp)
     ) {
         Column(modifier = Modifier.padding(12.dp)) {
-            Text(
-                text = session.displayName,
-                style = MaterialTheme.typography.bodyMedium.copy(fontWeight = FontWeight.Bold),
-                color = MaterialTheme.colorScheme.onSurface
-            )
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    text = session.displayName,
+                    style = MaterialTheme.typography.bodyMedium.copy(fontWeight = FontWeight.Bold),
+                    color = MaterialTheme.colorScheme.onSurface,
+                    modifier = Modifier.weight(1f)
+                )
+                if (isUnread) {
+                    // Small primary-colored unread dot on the right edge.
+                    Box(
+                        modifier = Modifier
+                            .padding(start = 8.dp)
+                            .size(8.dp)
+                            .background(
+                                color = MaterialTheme.colorScheme.primary,
+                                shape = CircleShape
+                            )
+                    )
+                }
+            }
             Spacer(modifier = Modifier.height(2.dp))
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Text(
@@ -420,7 +366,7 @@ private fun EmptyRow(text: String) {
 
 private fun formatTime(epochMs: Long): String {
     return try {
-        val sdf = SimpleDateFormat("yyyy-MM", Locale.getDefault())
+        val sdf = SimpleDateFormat("yyyy-MM-dd HH:mm", Locale.getDefault())
         sdf.format(Date(epochMs))
     } catch (_: Exception) {
         ""

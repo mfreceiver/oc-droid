@@ -72,12 +72,34 @@ data class AppState(
      */
     val childSessions: Map<String, List<Session>> = emptyMap(),
     /**
-     * Mirror of [SettingsManager.recentSessionIds] (most-recently-used session
-     * IDs). Kept in AppState so the Compose UI recomposes when the MRU list
-     * changes (e.g. after long-press remove). [SettingsManager] remains the
-     * persistent source of truth — this field is the observable projection.
+     * Mirror of [SettingsManager.openSessionIds] (browser-tab style list of
+     * "open" session IDs in open-order, most recently opened first). Kept in
+     * AppState so the Compose UI recomposes when the list changes.
+     * [SettingsManager] remains the persistent source of truth — this field
+     * is the observable projection.
      */
-    val recentSessionIds: List<String> = emptyList()
+    val openSessionIds: List<String> = emptyList(),
+    /**
+     * Non-null when the user has entered "draft" (deferred-create) mode by
+     * invoking [MainViewModel.createSessionInWorkdir]. The repository's
+     * current directory has been set to this workdir, but no POST /session
+     * has been issued. The first [MainViewModel.sendMessage] will create
+     * the session on demand and clear this field. Selecting/creating any
+     * other session or switching host discards the draft.
+     */
+    val draftWorkdir: String? = null,
+    /**
+     * Per-session last-viewed epoch millis. Updated whenever the user
+     * selects/opens a session. Used as the basis for [unreadSessions].
+     * Not currently persisted across restarts.
+     */
+    val lastViewedTime: Map<String, Long> = emptyMap(),
+    /**
+     * Session IDs that have received SSE message updates more recently than
+     * their [lastViewedTime] (and are not the currently-open session).
+     * Drives the unread badge in the session lists. Cleared on open.
+     */
+    val unreadSessions: Set<String> = emptySet()
 ) {
     data class ContextUsage(
         val percentage: Float,
@@ -346,9 +368,20 @@ class MainViewModel @Inject constructor(
                 sessionStatuses = emptyMap(),
                 streamingPartTexts = emptyMap(),
                 streamingReasoningPart = null,
-                sessionTodos = emptyMap()
+                sessionTodos = emptyMap(),
+                // Switching host fully resets the per-host session/unread/draft
+                // state: the new host's sessions are unrelated to the previous
+                // one, so stale open tabs, unread markers and draft workdirs
+                // must not leak across hosts. [loadSessions] will repopulate
+                // [sessions]/[openSessionIds] for the new host.
+                openSessionIds = emptyList(),
+                unreadSessions = emptySet(),
+                lastViewedTime = emptyMap(),
+                sessions = emptyList(),
+                draftWorkdir = null
             ) }
             settingsManager.currentSessionId = null
+            settingsManager.openSessionIds = emptyList()
             configureRepositoryForProfile(profile)
             refreshHostProfileState()
             testConnection(force = true)
@@ -470,19 +503,28 @@ class MainViewModel @Inject constructor(
         loadMessages(sessionId)
         loadSessionStatus()
         loadChildSessions(sessionId)
-        // Update MRU: move selected session to front, deduplicate, cap at 8.
-        // Skip sub-agents (parentId != null): they are transient navigations
-        // from within a parent conversation and must not pollute the recent-
-        // session chips or list. Sub-agents are only reachable via SubAgentCard.
+        // Selecting a concrete session discards any in-progress draft.
+        // Update openSessionIds + unread tracking + lastViewedTime. Skip the
+        // openSessionIds prepend for sub-agents (parentId != null): they are
+        // transient navigations from within a parent conversation and must not
+        // pollute the open-tabs list. Sub-agents are only reachable via SubAgentCard.
         // Look up the target session directly (instead of relying on
         // currentSession) so the parentId check is unambiguous even when the
         // session is unknown to the cached list — see openSubAgent which
         // upserts the child first so this lookup succeeds for sub-agents.
         val targetSession = _state.value.sessions.firstOrNull { it.id == sessionId }
+        val now = System.currentTimeMillis()
+        _state.update {
+            it.copy(
+                draftWorkdir = null,
+                unreadSessions = it.unreadSessions - sessionId,
+                lastViewedTime = it.lastViewedTime + (sessionId to now)
+            )
+        }
         if (targetSession?.parentId == null) {
-            val updated = (listOf(sessionId) + settingsManager.recentSessionIds).distinct().take(8)
-            settingsManager.recentSessionIds = updated
-            _state.update { it.copy(recentSessionIds = updated) }
+            val updated = (listOf(sessionId) + settingsManager.openSessionIds).distinct().take(8)
+            settingsManager.openSessionIds = updated
+            _state.update { it.copy(openSessionIds = updated) }
         }
     }
 
@@ -519,8 +561,8 @@ class MainViewModel @Inject constructor(
      * Caller passes the child session ID obtained from a `task` part's metadata.
      * Without the upsert, [selectSession] would set `currentSession` to null
      * (the session is not in the cached list), which breaks the parent-back
-     * affordance and lets [selectSession]'s MRU branch mistake the unknown
-     * session for a root session.
+     * affordance and lets [selectSession]'s openSessionIds branch mistake the
+     * unknown session for a root session.
      */
     fun openSubAgent(childSessionId: String) {
         val parentId = _state.value.currentSessionId
@@ -540,12 +582,42 @@ class MainViewModel @Inject constructor(
         }
     }
 
-    /** Remove a session from the MRU recent-session list (long-press on MRU chip). */
-    fun removeFromRecent(sessionId: String) {
-        val updated = settingsManager.recentSessionIds.filter { it != sessionId }
-        settingsManager.recentSessionIds = updated
-        // Mirror into AppState so Compose observers (MRU chip strip) recompose.
-        _state.update { it.copy(recentSessionIds = updated) }
+    /**
+     * Remove a session from the "open" tabs list (browser-tab close). Only
+     * removes it from [AppState.openSessionIds] / [SettingsManager.openSessionIds];
+     * the session itself is not deleted from the server. If the closed session
+     * was the currently selected one, the next open session (if any) is
+     * selected automatically, otherwise the chat view returns to the empty
+     * state and the persisted [currentSessionId] is cleared.
+     */
+    fun closeSession(sessionId: String) {
+        val updated = settingsManager.openSessionIds.filter { it != sessionId }
+        settingsManager.openSessionIds = updated
+        _state.update { currentState ->
+            val next = currentState.copy(
+                openSessionIds = updated,
+                unreadSessions = currentState.unreadSessions - sessionId
+            )
+            if (currentState.currentSessionId == sessionId) {
+                // Auto-switch to the next remaining open tab so the user is
+                // not left looking at an empty chat if another tab exists.
+                val nextId = updated.firstOrNull()
+                if (nextId != null) {
+                    next.copy(currentSessionId = nextId)
+                } else {
+                    settingsManager.currentSessionId = null
+                    next.copy(currentSessionId = null, messages = emptyList())
+                }
+            } else {
+                next
+            }
+        }
+        // When auto-switching, fully load the newly selected session (messages,
+        // status, workdir sync) and clear its unread badge.
+        val newCurrent = _state.value.currentSessionId
+        if (newCurrent != null && newCurrent != sessionId) {
+            selectSession(newCurrent)
+        }
     }
 
     fun loadMessages(sessionId: String, resetLimit: Boolean = true) {
@@ -593,17 +665,30 @@ class MainViewModel @Inject constructor(
         launchCreateSession(viewModelScope, repository, _state, title, ::selectSession)
     }
 
+    /**
+     * Deferred ("draft") session creation: sets the repository's working
+     * directory and enters a draft state ([AppState.draftWorkdir]) without
+     * issuing POST /session. The session is created lazily by [sendMessage]
+     * on the first user prompt. If the user navigates away (selects another
+     * session or switches host), the draft is discarded.
+     */
     fun createSessionInWorkdir(workdir: String) {
-        viewModelScope.launch {
-            repository.setCurrentDirectory(workdir)
-            repository.createSession(title = null)
-                .onSuccess { session ->
-                    _state.update { it.copy(sessions = listOf(session) + it.sessions) }
-                    selectSession(session.id)
-                }
-                .onFailure { error ->
-                    _state.update { it.copy(error = "Failed to create session in $workdir: ${error.message}") }
-                }
+        repository.setCurrentDirectory(workdir)
+        // Clear any previously selected session: draft mode shows an empty
+        // chat page until the first message materialises the session.
+        settingsManager.currentSessionId = null
+        _state.update {
+            it.copy(
+                currentSessionId = null,
+                messages = emptyList(),
+                messageLimit = 30,
+                inputText = "",
+                imageAttachments = emptyList(),
+                sessionTodos = emptyMap(),
+                streamingPartTexts = emptyMap(),
+                streamingReasoningPart = null,
+                draftWorkdir = workdir
+            )
         }
     }
 
@@ -624,7 +709,51 @@ class MainViewModel @Inject constructor(
     }
 
     fun sendMessage() {
-        val sessionId = _state.value.currentSessionId ?: return
+        val draftWorkdir = _state.value.draftWorkdir
+        val existingSessionId = _state.value.currentSessionId
+        val text = _state.value.inputText.trim()
+        val attachments = _state.value.imageAttachments
+        if (text.isEmpty() && attachments.isEmpty()) return
+
+        // Draft mode: lazily create the session on the first send. The draft
+        // is tied to the workdir set by createSessionInWorkdir; we materialise
+        // the session via POST /session, switch currentSessionId to it, clear
+        // the draft, prepend to openSessionIds, then dispatch the message.
+        if (draftWorkdir != null && existingSessionId == null) {
+            viewModelScope.launch {
+                repository.createSession(title = null)
+                    .onSuccess { session ->
+                        _state.update { state ->
+                            val openIds = (listOf(session.id) + settingsManager.openSessionIds).distinct().take(8)
+                            settingsManager.openSessionIds = openIds
+                            val now = System.currentTimeMillis()
+                            state.copy(
+                                sessions = upsertSession(state.sessions, session),
+                                currentSessionId = session.id,
+                                draftWorkdir = null,
+                                openSessionIds = openIds,
+                                unreadSessions = state.unreadSessions - session.id,
+                                lastViewedTime = state.lastViewedTime + (session.id to now)
+                            )
+                        }
+                        settingsManager.currentSessionId = session.id
+                        dispatchSendMessage(session.id)
+                    }
+                    .onFailure { error ->
+                        _state.update {
+                            it.copy(error = "Failed to create session in $draftWorkdir: ${error.message ?: "unknown error"}")
+                        }
+                    }
+            }
+            return
+        }
+
+        val sessionId = existingSessionId ?: return
+        if (_state.value.sendingSessionIds.contains(sessionId)) return
+        dispatchSendMessage(sessionId)
+    }
+
+    private fun dispatchSendMessage(sessionId: String) {
         if (_state.value.sendingSessionIds.contains(sessionId)) return
         val text = _state.value.inputText.trim()
         val attachments = _state.value.imageAttachments

@@ -31,7 +31,7 @@ internal fun applySavedSettings(
             themeMode = settingsManager.themeMode,
             languageMode = settingsManager.languageMode,
             markdownFontSizes = settingsManager.markdownFontSizes,
-            recentSessionIds = settingsManager.recentSessionIds
+            openSessionIds = settingsManager.openSessionIds
         )
     }
 }

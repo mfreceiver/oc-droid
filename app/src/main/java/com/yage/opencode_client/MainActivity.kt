@@ -29,6 +29,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
 import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.isImeVisible
 import androidx.compose.foundation.layout.statusBars
 import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.lifecycle.compose.LocalLifecycleOwner
@@ -154,6 +155,7 @@ class MainActivity : AppCompatActivity() {
     }
 }
 
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun PhoneLayout(viewModel: MainViewModel) {
     val navController = rememberNavController()
@@ -187,24 +189,32 @@ private fun PhoneLayout(viewModel: MainViewModel) {
         (context as? Activity)?.finish()
     }
 
+    // Hide the bottom NavigationBar while the IME (soft keyboard) is open.
+    // Otherwise Scaffold's bottomBar padding and ChatInputBar.imePadding() both
+    // apply, leaving a gap roughly the height of the NavigationBar between the
+    // input field and the keyboard.
+    val imeVisible = WindowInsets.isImeVisible
+
     Scaffold(
         contentWindowInsets = WindowInsets(0, 0, 0, 0),
         bottomBar = {
-            NavigationBar {
-                screens.forEach { screen ->
-                    val selected = currentRoute == screen.route
-                    val title = stringResource(screen.titleRes)
-                    NavigationBarItem(
-                        selected = selected,
-                        onClick = { navigateToTopLevel(screen.route) },
-                        icon = {
-                            Icon(
-                                if (selected) screen.selectedIcon else screen.unselectedIcon,
-                                contentDescription = title
-                            )
-                        },
-                        label = { Text(title) }
-                    )
+            if (!imeVisible) {
+                NavigationBar {
+                    screens.forEach { screen ->
+                        val selected = currentRoute == screen.route
+                        val title = stringResource(screen.titleRes)
+                        NavigationBarItem(
+                            selected = selected,
+                            onClick = { navigateToTopLevel(screen.route) },
+                            icon = {
+                                Icon(
+                                    imageVector = if (selected) screen.selectedIcon else screen.unselectedIcon,
+                                    contentDescription = title,
+                                    modifier = Modifier.size(22.dp)
+                                )
+                            }
+                        )
+                    }
                 }
             }
         }
@@ -353,8 +363,7 @@ private fun TabletLayout(viewModel: MainViewModel) {
                         viewModel.showFileInFiles(path)
                     },
                     onNavigateToSettings = onOpenSettings,
-                    showSettingsButton = false,
-                    showSessionListInTopBar = false
+                    showSettingsButton = false
                 )
             }
         }

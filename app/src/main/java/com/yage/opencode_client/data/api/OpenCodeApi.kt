@@ -121,6 +121,20 @@ interface OpenCodeApi {
     @GET("file")
     suspend fun getFileTree(@Query("path") path: String? = ""): List<FileNode>
 
+    /**
+     * Variant of [getFileTree] for browsing an arbitrary directory that is
+     * independent of the current session's workdir. Carries the
+     * `X-Opencode-Skip-Dir` marker so the OkHttp interceptor does NOT overwrite
+     * the explicit `X-Opencode-Directory` header we pass for the browse target.
+     * Used by the "connect new project" directory picker.
+     */
+    @Headers("X-Opencode-Skip-Dir: 1")
+    @GET("file")
+    suspend fun getFileTreeForDirectory(
+        @Header("X-Opencode-Directory") directory: String,
+        @Query("path") path: String? = ""
+    ): List<FileNode>
+
     @GET("file/content")
     suspend fun getFileContent(@Query("path") path: String): FileContent
 

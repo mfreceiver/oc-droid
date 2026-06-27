@@ -69,7 +69,6 @@ internal fun ConnectionProfileSection(
             ) {
                 Column(modifier = Modifier.weight(1f)) {
                     Text(profile.displayName, style = MaterialTheme.typography.titleMedium)
-                    Text(profile.connectionSummary, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
             }
 

@@ -35,12 +35,9 @@
     <string name="common_done">完成</string>
     <string name="common_dismiss">关闭</string>
     <string name="common_edit">编辑</string>
-    <string name="common_duplicate">复制</string>
-    <string name="common_import">导入</string>
     <string name="common_delete">删除</string>
     <string name="common_refresh">刷新</string>
     <string name="common_ok">OK</string>
-    <string name="common_json">JSON</string>
     <string name="sessions_title">会话</string>
     <string name="sessions_active">近期会话</string>
     <string name="sessions_archived">已归档</string>
@@ -101,12 +98,10 @@
     <string name="files_open_markdown_source">打开 Markdown 源码</string>
     <string name="host_profiles_title">主机配置</string>
     <string name="host_profile_add">添加主机配置</string>
-    <string name="host_profile_import_json">导入主机配置 JSON</string>
     <string name="host_profile_use_this_host">使用这个主机</string>
     <string name="host_profile_status">状态：%1$s</string>
     <string name="host_profile_current">当前</string>
     <string name="host_profile_saved">已保存配置</string>
-    <string name="host_profile_current_suffix">%1$s · 当前</string>
     <string name="host_profile_add_title">添加主机配置</string>
     <string name="host_profile_edit_title">编辑主机配置</string>
     <string name="host_profile_name">配置名称</string>
@@ -135,6 +130,7 @@
     <string name="sessions_tab_no_sessions">暂无会话</string>
     <string name="sessions_tab_no_workdirs">暂无已连接的项目</string>
     <string name="sessions_connect_new_project">连接新项目</string>
+    <string name="sessions_picker_empty">没有子目录</string>
     <string name="sessions_disconnect_workdir">取消连接</string>
     <string name="sessions_disconnect_confirm">取消连接此项目？</string>
     <string name="server_dialog_title">服务器</string>

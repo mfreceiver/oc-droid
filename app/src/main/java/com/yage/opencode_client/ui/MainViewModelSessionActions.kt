@@ -40,23 +40,27 @@ internal fun launchLoadSessions(
                         isRefreshingSessions = false
                     )
                 }
-                // Clean stale session IDs from MRU after sessions are loaded
+                // Clean stale session IDs from openSessionIds after sessions are loaded
                 val loadedSessionIds = state.value.sessions.map { s -> s.id }.toSet()
-                val cleanedRecent = settingsManager.recentSessionIds.filter { it in loadedSessionIds }
-                if (cleanedRecent.size != settingsManager.recentSessionIds.size) {
-                    settingsManager.recentSessionIds = cleanedRecent
-                    state.update { it.copy(recentSessionIds = cleanedRecent) }
+                val cleanedOpen = settingsManager.openSessionIds.filter { it in loadedSessionIds }
+                if (cleanedOpen.size != settingsManager.openSessionIds.size) {
+                    settingsManager.openSessionIds = cleanedOpen
+                    state.update { it.copy(openSessionIds = cleanedOpen) }
                 }
                 val currentId = state.value.currentSessionId
                 val refreshedSessions = state.value.sessions
                 val hasCurrentSession = currentId != null && refreshedSessions.any { it.id == currentId }
                 when {
-                    currentId == null && refreshedSessions.isNotEmpty() -> onSelectSession(refreshedSessions.first().id)
+                    // Skip auto-select when the user is mid-draft (a workdir
+                    // has been chosen but no session created yet): selecting a
+                    // session would discard the draft's repository workdir and
+                    // hijack the empty chat page the user is composing into.
+                    currentId == null && state.value.draftWorkdir == null && refreshedSessions.isNotEmpty() -> onSelectSession(refreshedSessions.first().id)
                     hasCurrentSession -> {
                         onLoadSessionStatus()
                         onLoadMessages(currentId!!)
                     }
-                    refreshedSessions.isNotEmpty() -> {
+                    state.value.draftWorkdir == null && refreshedSessions.isNotEmpty() -> {
                         onSelectSession(refreshedSessions.first().id)
                     }
                     else -> {
