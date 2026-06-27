@@ -10,6 +10,7 @@
 .cxx
 
 # Kotlin
+.kotlin/
 *.class
 *.jar
 !gradle/wrapper/gradle-wrapper.jar
