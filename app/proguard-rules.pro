@@ -42,3 +42,26 @@
 # Disabling optimization avoids the invalid bytecode; shrinking + obfuscation
 # are kept, so release APK size is essentially unchanged.
 -dontoptimize
+# --- Added: fix release ParameterizedType / serialization errors ---
+# Retrofit API interface: keep generic return-type signatures so Retrofit reflection
+# sees ParameterizedType (List<Session>, Map<...>) instead of raw Class.
+-keep interface com.yage.opencode_client.data.api.OpenCodeApi { *; }
+
+# kotlinx.serialization: companion serializer() accessors (official R8 rules).
+-if @kotlinx.serialization.Serializable class **
+-keepclassmembers class <1> {
+    static <1>$Companion Companion;
+}
+-if @kotlinx.serialization.Serializable class ** {
+    static **$*;
+}
+-keepclassmembers class <2>$<3> {
+    kotlinx.serialization.KSerializer serializer(...);
+}
+-keepclassmembers class kotlinx.serialization.json.** {
+    *** Companion;
+}
+-keepclasseswithmembers class kotlinx.serialization.json.** {
+    kotlinx.serialization.KSerializer serializer(...);
+}
+-dontnote kotlinx.serialization.**
