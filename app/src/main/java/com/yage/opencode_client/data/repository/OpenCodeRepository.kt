@@ -34,6 +34,12 @@ class OpenCodeRepository @Inject constructor() {
         encodeDefaults = true  // Include type in parts - server needs discriminator
     }
 
+    private val trustAllTrustManager: X509TrustManager = object : X509TrustManager {
+        override fun checkClientTrusted(chain: Array<X509Certificate>, authType: String) {}
+        override fun checkServerTrusted(chain: Array<X509Certificate>, authType: String) {}
+        override fun getAcceptedIssuers(): Array<X509Certificate> = arrayOf()
+    }
+
     private var okHttpClient: OkHttpClient = buildOkHttpClient()
     private var retrofit: Retrofit = buildRetrofit()
     private var api: OpenCodeApi = retrofit.create(OpenCodeApi::class.java)
@@ -65,12 +71,6 @@ class OpenCodeRepository @Inject constructor() {
             .connectTimeout(15, java.util.concurrent.TimeUnit.SECONDS)
             .readTimeout(0, java.util.concurrent.TimeUnit.SECONDS)
             .build()
-    }
-
-    private val trustAllTrustManager: X509TrustManager = object : X509TrustManager {
-        override fun checkClientTrusted(chain: Array<X509Certificate>, authType: String) {}
-        override fun checkServerTrusted(chain: Array<X509Certificate>, authType: String) {}
-        override fun getAcceptedIssuers(): Array<X509Certificate> = arrayOf()
     }
 
     private fun trustAllSslSocketFactory(): SSLSocketFactory {
