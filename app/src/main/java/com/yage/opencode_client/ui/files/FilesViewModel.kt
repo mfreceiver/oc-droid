@@ -1,5 +1,7 @@
 package com.yage.opencode_client.ui.files
 
+import android.util.Log
+
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.yage.opencode_client.data.model.FileContent
@@ -152,6 +154,7 @@ class FilesViewModel @Inject constructor(
                     }
                 }
                 .onFailure { throwable ->
+                    Log.e("OC_ERROR", "loadFiles getFileTree failed", throwable)
                     _state.update {
                         it.copy(
                             isLoading = false,

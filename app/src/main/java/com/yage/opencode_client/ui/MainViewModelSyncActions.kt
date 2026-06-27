@@ -1,5 +1,7 @@
 package com.yage.opencode_client.ui
 
+import android.util.Log
+
 import com.yage.opencode_client.data.model.SSEEvent
 import com.yage.opencode_client.data.model.TodoItem
 import com.yage.opencode_client.data.repository.OpenCodeRepository
@@ -38,11 +40,13 @@ internal fun launchSseCollection(
     return scope.launch {
         repository.connectSSE()
             .catch { error ->
+                Log.e("OC_ERROR", "SSE collection failed", error)
                 state.update { it.copy(error = "SSE Error: ${error.message}") }
             }
             .collect { result ->
                 result.onSuccess { event -> onEvent(event) }
                     .onFailure { error ->
+                        Log.e("OC_ERROR", "SSE event failed", error)
                         state.update { it.copy(error = "SSE Error: ${error.message}") }
                     }
             }
