@@ -9,6 +9,7 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.Add
@@ -20,13 +21,12 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
-import androidx.navigation.NavController
 import com.yage.opencode_client.R
-import com.yage.opencode_client.Screen
 import com.yage.opencode_client.data.model.Session
 import com.yage.opencode_client.ui.MainViewModel
 import java.text.SimpleDateFormat
@@ -37,7 +37,7 @@ import java.util.Locale
 @Composable
 fun SessionsScreen(
     viewModel: MainViewModel,
-    navController: NavController?
+    onSwitchToChat: () -> Unit = {}
 ) {
     val state by viewModel.state.collectAsStateWithLifecycle()
     var showNewWorkdirDialog by remember { mutableStateOf(false) }
@@ -57,24 +57,30 @@ fun SessionsScreen(
     // Derive workdir groups, excluding locally-hidden workdirs and sub-agents
     // (parentId != null). Sub-agents are only reachable from within a parent
     // conversation via SubAgentCard, never from this workdir list.
-    val workdirGroups = remember(state.sessions, hiddenWorkdirs) {
-        state.sessions
+    //
+    // The draft workdir (when the user has invoked createSessionInWorkdir but
+    // no session has been POSTed yet) is appended with an empty session list
+    // so the in-progress "connect" is visible alongside connected projects.
+    val workdirGroups = remember(state.sessions, hiddenWorkdirs, state.draftWorkdir) {
+        val sessionGroups = state.sessions
             .filter { it.parentId == null && it.directory !in hiddenWorkdirs }
             .groupBy { it.directory }
             .mapValues { (_, sessList) ->
                 sessList.sortedByDescending { it.time?.updated ?: 0L }
             }
-            .entries
-            .sortedBy { it.key }
+            .toMutableMap()
+        state.draftWorkdir?.let { draft ->
+            if (draft !in sessionGroups && draft !in hiddenWorkdirs) {
+                sessionGroups[draft] = emptyList()
+            }
+        }
+        sessionGroups.entries.sortedBy { it.key }
     }
 
     // Navigate to Chat tab after selecting a session
     fun onSessionClick(sessionId: String) {
         viewModel.selectSession(sessionId)
-        navController?.navigate(Screen.Chat.route) {
-            popUpTo(Screen.Chat.route) { inclusive = true }
-            launchSingleTop = true
-        }
+        onSwitchToChat()
     }
 
     Scaffold(
@@ -82,6 +88,18 @@ fun SessionsScreen(
             TopAppBar(
                 title = {
                     Text(stringResource(R.string.nav_sessions))
+                },
+                actions = {
+                    // Connect-new-project affordance lives in the TopAppBar so
+                    // it is reachable from anywhere on the Sessions page (no
+                    // matter whether the workdir list is empty or populated).
+                    IconButton(onClick = { showNewWorkdirDialog = true }) {
+                        Icon(
+                            Icons.Default.CreateNewFolder,
+                            contentDescription = stringResource(R.string.sessions_connect_new_action),
+                            tint = MaterialTheme.colorScheme.primary
+                        )
+                    }
                 }
             )
         }
@@ -126,36 +144,12 @@ fun SessionsScreen(
                 item(key = "workdirs_empty") {
                     EmptyRow(stringResource(R.string.sessions_tab_no_workdirs))
                 }
-                // When there are no workdir rows to host the connect button,
-                // expose a standalone connect-new-project entry so the user is
-                // never stranded without a way to connect their first project.
-                item(key = "workdir_connect_new") {
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .clickable { showNewWorkdirDialog = true }
-                            .padding(horizontal = 16.dp, vertical = 14.dp),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Icon(
-                            Icons.Default.CreateNewFolder,
-                            contentDescription = null,
-                            modifier = Modifier.size(22.dp),
-                            tint = MaterialTheme.colorScheme.primary
-                        )
-                        Spacer(modifier = Modifier.width(10.dp))
-                        Text(
-                            text = stringResource(R.string.sessions_connect_new_project),
-                            style = MaterialTheme.typography.bodyMedium.copy(fontWeight = FontWeight.Medium),
-                            color = MaterialTheme.colorScheme.primary
-                        )
-                    }
-                }
             } else {
                 items(workdirGroups, key = { "workdir_${it.key}" }) { (workdir, sessionsInWorkdir) ->
                     val isExpanded = expandedWorkdirs.contains(workdir)
                     val displayName = workdir.split("/").filter { it.isNotEmpty() }.lastOrNull()
                         ?: workdir
+                    val isDraft = workdir == state.draftWorkdir && sessionsInWorkdir.isEmpty()
 
                     Column(modifier = Modifier.fillMaxWidth()) {
                         // Workdir header row (click = expand/collapse, long-click = disconnect)
@@ -183,21 +177,41 @@ fun SessionsScreen(
                                 tint = MaterialTheme.colorScheme.onSurfaceVariant
                             )
                             Spacer(modifier = Modifier.width(8.dp))
-                            Text(
-                                text = displayName,
-                                style = MaterialTheme.typography.bodyMedium.copy(fontWeight = FontWeight.Medium),
-                                color = MaterialTheme.colorScheme.onSurface,
-                                modifier = Modifier.weight(1f)
-                            )
-                            Text(
-                                text = workdir,
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                modifier = Modifier.padding(end = 8.dp)
-                            )
+                            Column(modifier = Modifier.weight(1f)) {
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    Text(
+                                        text = displayName,
+                                        style = MaterialTheme.typography.bodyMedium.copy(fontWeight = FontWeight.Medium),
+                                        color = MaterialTheme.colorScheme.onSurface
+                                    )
+                                    if (isDraft) {
+                                        Spacer(modifier = Modifier.width(6.dp))
+                                        Text(
+                                            text = stringResource(R.string.sessions_draft_badge),
+                                            style = MaterialTheme.typography.labelSmall,
+                                            color = MaterialTheme.colorScheme.primary,
+                                            modifier = Modifier
+                                                .clip(RoundedCornerShape(4.dp))
+                                                .background(
+                                                    MaterialTheme.colorScheme.primary.copy(alpha = 0.12f)
+                                                )
+                                                .padding(horizontal = 6.dp, vertical = 1.dp)
+                                        )
+                                    }
+                                }
+                                Text(
+                                    text = workdir,
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                            // Create-session affordance for this workdir. Tapping
+                            // it opens a fresh draft against this directory and
+                            // jumps to the chat page so the user can compose.
                             IconButton(
                                 onClick = {
                                     viewModel.createSessionInWorkdir(workdir)
+                                    onSwitchToChat()
                                 },
                                 modifier = Modifier.size(32.dp)
                             ) {
@@ -207,21 +221,10 @@ fun SessionsScreen(
                                     modifier = Modifier.size(18.dp)
                                 )
                             }
-                            IconButton(
-                                onClick = { showNewWorkdirDialog = true },
-                                modifier = Modifier.size(32.dp)
-                            ) {
-                                Icon(
-                                    Icons.Default.CreateNewFolder,
-                                    contentDescription = stringResource(R.string.sessions_connect_new_project),
-                                    modifier = Modifier.size(18.dp),
-                                    tint = MaterialTheme.colorScheme.primary
-                                )
-                            }
                         }
 
                         // Expandable session list within workdir
-                        AnimatedVisibility(visible = isExpanded) {
+                        AnimatedVisibility(visible = isExpanded && sessionsInWorkdir.isNotEmpty()) {
                             Column(
                                 modifier = Modifier
                                     .fillMaxWidth()
@@ -283,6 +286,9 @@ fun SessionsScreen(
             onSelect = { path ->
                 showNewWorkdirDialog = false
                 viewModel.createSessionInWorkdir(path)
+                // Jump to the chat page so the user can immediately compose
+                // the first message that will materialise the draft session.
+                onSwitchToChat()
             }
         )
     }

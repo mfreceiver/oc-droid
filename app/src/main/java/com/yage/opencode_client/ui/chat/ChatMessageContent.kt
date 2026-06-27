@@ -27,13 +27,16 @@ import androidx.compose.material.icons.automirrored.filled.CallSplit
 import androidx.compose.material.icons.filled.Build
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.ChevronRight
+import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Description
+import androidx.compose.material.icons.filled.FileOpen
 import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.automirrored.filled.OpenInNew
 import androidx.compose.material.icons.filled.Psychology
 import androidx.compose.material.icons.filled.RadioButtonUnchecked
-import androidx.compose.material.icons.filled.CheckCircle
+import androidx.compose.material.icons.filled.Terminal
+import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
@@ -153,7 +156,8 @@ internal fun ChatMessageList(
                     ReasoningCard(
                         text = streamingText,
                         title = streamingReasoningPart.toolReason,
-                        isStreaming = true
+                        isStreaming = true,
+                        modifier = Modifier.widthIn(max = MAX_CARD_WIDTH)
                     )
                 }
             }
@@ -233,10 +237,25 @@ private fun MessageRow(
 
                 val (fileParts, otherParts) = ToolCardClassifier.split(run)
 
-                if (fileParts.isNotEmpty()) {
+                // File operations split further into writes (-> stacked collapsible
+                // PatchCards with diff stats) and reads (-> the existing 2-column
+                // FileCard grid). Writes carry the visual weight of "the agent
+                // edited something" so they get the unified card skeleton; reads
+                // stay compact in the grid since they have no diff to summarize.
+                val (writeParts, readParts) = fileParts.partition { ToolCardClassifier.isWriteFileOperation(it) }
+
+                writeParts.forEach { writePart ->
+                    PatchCard(
+                        part = writePart,
+                        onFileClick = onFileClick,
+                        modifier = Modifier.widthIn(max = MAX_CARD_WIDTH)
+                    )
+                }
+
+                if (readParts.isNotEmpty()) {
                     // Android can't nest LazyVGrid inside LazyColumn, so use the existing
                     // chunked(2) + manual Row two-column layout (matches iPhone 2-up grid).
-                    fileParts.chunked(2).forEach { chunk ->
+                    readParts.chunked(2).forEach { chunk ->
                         Row(
                             modifier = Modifier.fillMaxWidth(),
                             horizontalArrangement = Arrangement.spacedBy(8.dp)
@@ -262,7 +281,7 @@ private fun MessageRow(
                     SubAgentCard(
                         part = subPart,
                         onOpenSubAgent = onOpenSubAgent,
-                        modifier = Modifier.widthIn(max = 280.dp)
+                        modifier = Modifier.widthIn(max = MAX_CARD_WIDTH)
                     )
                 }
 
@@ -271,7 +290,7 @@ private fun MessageRow(
                         parts = plainToolParts,
                         onFileClick = onFileClick,
                         onOpenSubAgent = onOpenSubAgent,
-                        modifier = Modifier.widthIn(max = 280.dp)
+                        modifier = Modifier.widthIn(max = MAX_CARD_WIDTH)
                     )
                 }
 
@@ -337,12 +356,19 @@ private fun PartView(
             repository = repository,
             workspaceDirectory = workspaceDirectory
         )
-        part.isReasoning -> ReasoningCard(streamingTextOverride ?: part.text ?: "", part.toolReason, false, modifier)
+        part.isReasoning -> ReasoningCard(
+            streamingTextOverride ?: part.text ?: "",
+            part.toolReason,
+            false,
+            modifier.widthIn(max = MAX_CARD_WIDTH)
+        )
         part.isImageAttachment -> ImageFilePart(part, modifier)
         part.isFile -> FileAttachmentPart(part, modifier)
-        part.isSubAgentTask -> SubAgentCard(part, onOpenSubAgent, Modifier.widthIn(max = 280.dp))
-        part.isTool -> ToolCard(part, onFileClick, Modifier.widthIn(max = 280.dp))
-        part.isPatch && part.filePathsForNavigationFiltered.isNotEmpty() -> PatchCard(part.filePathsForNavigationFiltered, onFileClick, modifier)
+        part.isSubAgentTask -> SubAgentCard(part, onOpenSubAgent, Modifier.widthIn(max = MAX_CARD_WIDTH))
+        part.isTool -> ToolCard(part, onFileClick, Modifier.widthIn(max = MAX_CARD_WIDTH))
+        part.isPatch && part.filePathsForNavigationFiltered.isNotEmpty() -> {
+            PatchCard(part = part, onFileClick = onFileClick, modifier = Modifier.widthIn(max = MAX_CARD_WIDTH))
+        }
     }
 }
 
@@ -854,19 +880,23 @@ private fun TodoListInline(
 
 /**
  * Card for `task` tool parts — sub-agent conversations spawned by the main
- * session. Visually distinct from [ToolCard]: a primary left stripe marks it as
- * an expandable sub-conversation, and tapping opens the child session in-place
- * via [onOpenSubAgent]. When the child session ID hasn't been assigned yet
- * (task still running with no metadata.sessionID), the card renders but is not
- * clickable.
+ * session. Renders under the unified collapsible-card skeleton:
+ *
+ *   [CallSplit/CheckCircle 14dp] 子任务[/完成]  @agentName  [status]  [>]
+ *   ------------------------------------------------------------
+ *   state.title (without the "(@xxx subagent)" suffix) + "→点击查看" link
+ *
+ * Tapping opens the child session in-place via [onOpenSubAgent]. When the
+ * child session ID hasn't been assigned yet (task still running with no
+ * metadata.sessionID), the card renders but is not clickable.
  *
  * Status mapping:
- *  - "running" → spinner
- *  - "error"   → red error icon
- *  - other     → green check (completed)
+ *  - "running" → spinner (and CallSplit icon)
+ *  - "error"   → Warning icon, red
+ *  - other     → CheckCircle (and "子任务完成" title) when sessionId resolves
  *
  * Sub-agent display name is parsed from titles shaped like "(@planner subagent)"
- * or "Research (@research subagent)"; falls back to the title/description.
+ * or "Research (@research subagent)" and shown as the @name badge in the header.
  */
 @Composable
 private fun SubAgentCard(
@@ -875,25 +905,46 @@ private fun SubAgentCard(
     modifier: Modifier = Modifier.fillMaxWidth()
 ) {
     val sessionId = part.taskSubSessionId
-    val title = part.state?.title
+    val rawTitle = part.state?.title
         ?: part.state?.metadataString("description")
-        ?: stringResource(R.string.chat_sub_agent)
+        ?: ""
     val description = part.state?.metadataString("description")?.takeIf { it.isNotEmpty() }
 
-    val subAgentName = remember(title, description) {
-        parseSubAgentName(title) ?: parseSubAgentName(description)
+    val subAgentName = remember(rawTitle, description) {
+        parseSubAgentName(rawTitle) ?: parseSubAgentName(description)
     }
-    val status = part.stateDisplay
-    val isRunning = status == "running"
-    val isError = status == "error"
+    // Title with the "(@xxx subagent)" suffix stripped — that information lives
+    // in the @agentName badge in the header now, so the body shouldn't repeat it.
+    val cleanTitle = remember(rawTitle, subAgentName) {
+        stripSubAgentSuffix(rawTitle).ifBlank { description ?: rawTitle }
+    }
 
-    val label = subAgentName ?: title
+    // If the task tool's output carries a <task …> XML result, surface its
+    // state/result so a finished sub-agent reads as "completed" even before
+    // metadata.sessionID lands.
+    val taskXml = remember(part.toolOutput) { parseTaskXml(part.toolOutput) }
+
+    val status = part.stateDisplay
+    val isRunning = status == "running" && taskXml?.state?.lowercase() != "completed"
+    val isError = status == "error" || taskXml?.state?.lowercase() == "error"
+    val isDone = !isRunning && !isError &&
+        (sessionId != null || taskXml?.state?.lowercase() == "completed")
+
+    val headerTitle = when {
+        isDone -> stringResource(R.string.chat_sub_agent_done)
+        else -> stringResource(R.string.chat_sub_agent)
+    }
+    val headerIcon = if (isDone) Icons.Default.CheckCircle else Icons.AutoMirrored.Filled.CallSplit
 
     val canOpen = sessionId != null
+    val clickLabel = stringResource(R.string.chat_click_to_view)
+
+    val tagSuffix = sessionId?.let { ".$it" } ?: ""
+
     Surface(
         modifier = modifier
-            .padding(vertical = 4.dp)
-            .testTag("toolcard.subagent" + (sessionId?.let { ".$it" } ?: ""))
+            .padding(vertical = 2.dp)
+            .testTag("toolcard.subagent$tagSuffix")
             .then(if (canOpen) Modifier.clickable { onOpenSubAgent(sessionId!!) } else Modifier),
         shape = RoundedCornerShape(12.dp),
         color = MaterialTheme.colorScheme.primary.copy(alpha = 0.06f),
@@ -902,79 +953,49 @@ private fun SubAgentCard(
             color = MaterialTheme.colorScheme.primary.copy(alpha = 0.25f)
         )
     ) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            // Primary stripe flags this as an expandable sub-conversation.
-            Box(
-                modifier = Modifier
-                    .width(3.dp)
-                    .fillMaxHeight()
-                    .background(MaterialTheme.colorScheme.primary)
-            )
-            Row(
-                modifier = Modifier.padding(horizontal = 10.dp, vertical = 10.dp),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
+        Column(modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
                 Icon(
-                    Icons.AutoMirrored.Filled.CallSplit,
+                    headerIcon,
                     contentDescription = null,
                     modifier = Modifier.size(14.dp),
                     tint = MaterialTheme.colorScheme.primary
                 )
-                Spacer(modifier = Modifier.width(8.dp))
-                // weight(fill = false) lets the text column size to its content
-                // (rather than expanding to fill the parent), so the whole card
-                // shrinks to fit the label + status icon + chevron — matching the
-                // "not full-width" treatment applied to ToolCard / ToolCallsRow.
-                Column(modifier = Modifier.weight(1f, fill = false)) {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Text(
-                            text = label,
-                            style = MaterialTheme.typography.labelLarge,
-                            color = MaterialTheme.colorScheme.primary,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis
-                        )
-                        if (subAgentName != null) {
-                            Spacer(modifier = Modifier.width(6.dp))
-                            Text(
-                                text = stringResource(R.string.chat_sub_agent),
-                                style = MaterialTheme.typography.labelSmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
-                            )
-                        }
-                    }
-                    if (description != null && description != label) {
-                        Text(
-                            text = description,
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis
-                        )
-                    } else if (!isRunning && !isError && sessionId == null) {
-                        Text(
-                            text = "waiting for sub-agent…",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                    }
+                Spacer(modifier = Modifier.width(6.dp))
+                Text(
+                    text = headerTitle,
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.primary,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f, fill = false)
+                )
+                if (subAgentName != null) {
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Text(
+                        text = "@$subAgentName",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
                 }
-                Spacer(modifier = Modifier.width(8.dp))
+                Spacer(modifier = Modifier.weight(1f))
                 when {
                     isRunning -> CircularProgressIndicator(
                         modifier = Modifier.size(14.dp),
                         strokeWidth = 2.dp
                     )
                     isError -> Icon(
-                        Icons.Default.RadioButtonUnchecked,
+                        Icons.Default.Warning,
                         contentDescription = "Sub-agent error",
-                        modifier = Modifier.size(16.dp),
+                        modifier = Modifier.size(14.dp),
                         tint = MaterialTheme.colorScheme.error
                     )
                     else -> Icon(
                         Icons.Default.CheckCircle,
                         contentDescription = "Sub-agent completed",
-                        modifier = Modifier.size(16.dp),
+                        modifier = Modifier.size(14.dp),
                         tint = MaterialTheme.colorScheme.primary
                     )
                 }
@@ -983,10 +1004,45 @@ private fun SubAgentCard(
                     Icon(
                         Icons.Default.ChevronRight,
                         contentDescription = "Open sub-agent conversation",
-                        modifier = Modifier.size(16.dp),
+                        modifier = Modifier.size(14.dp),
                         tint = MaterialTheme.colorScheme.primary
                     )
                 }
+            }
+            // Second line: task title (cleaned) + tap-to-view affordance. Hidden
+            // entirely when there's no title text to show (avoiding an empty row).
+            val bodyTitle = cleanTitle.ifBlank { taskXml?.taskResult?.takeIf { it.isNotBlank() } }.orEmpty()
+            if (bodyTitle.isNotBlank()) {
+                Row(
+                    modifier = Modifier
+                        .padding(top = 4.dp)
+                        .then(if (canOpen) Modifier.clickable { onOpenSubAgent(sessionId!!) } else Modifier),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        text = bodyTitle,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.weight(1f, fill = false)
+                    )
+                    if (isDone && canOpen) {
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text(
+                            text = "→$clickLabel",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.primary
+                        )
+                    }
+                }
+            } else if (!isRunning && !isError && sessionId == null) {
+                Text(
+                    text = "waiting for sub-agent…",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(top = 4.dp)
+                )
             }
         }
     }
@@ -1000,6 +1056,106 @@ private fun parseSubAgentName(text: String?): String? {
     if (text.isNullOrBlank()) return null
     val match = Regex("\\(@([A-Za-z0-9_-]+)\\s*subagent\\)", RegexOption.IGNORE_CASE).find(text)
     return match?.groupValues?.getOrNull(1)
+}
+
+/**
+ * Strips the trailing "(@xxx subagent)" marker from a sub-agent title so the
+ * body line doesn't redundantly echo what the header's @agentName badge already
+ * shows. Returns the cleaned title (may be blank if the marker was the only
+ * content); the caller decides whether to fall back to the description.
+ */
+private fun stripSubAgentSuffix(text: String?): String {
+    if (text.isNullOrBlank()) return ""
+    return Regex("\\s*\\(@[A-Za-z0-9_-]+\\s*subagent\\)", RegexOption.IGNORE_CASE)
+        .replace(text, "")
+        .trim()
+}
+
+/**
+ * Width cap applied to every unified collapsible card (reasoning / tool / file
+ * edit / sub-agent / merged tool-calls row). Keeps the chat readable on wide
+ * screens by left-aligning the agent's "side-channels" instead of stretching
+ * them wall-to-wall. Matches iOS's compact card width.
+ */
+private val MAX_CARD_WIDTH = 280.dp
+
+/**
+ * Picks the Material icon for a tool based on its name (lowercased, prefix-matched).
+ *  - read/grep/glob/list → FileOpen (file inspection)
+ *  - edit/write/patch/apply_patch → Edit (file mutation)
+ *  - bash/terminal/cmd → Terminal (shell)
+ *  - anything else → Build (generic tool)
+ */
+private fun toolIcon(toolName: String?): androidx.compose.ui.graphics.vector.ImageVector {
+    val lower = toolName?.lowercase() ?: return Icons.Default.Build
+    return when {
+        lower.startsWith("read") ||
+            lower.startsWith("grep") ||
+            lower.startsWith("glob") ||
+            lower.startsWith("list") ||
+            lower.startsWith("todoread") ||
+            lower.startsWith("webfetch") -> Icons.Default.FileOpen
+        lower.startsWith("edit") ||
+            lower.startsWith("write") ||
+            lower.startsWith("apply_patch") ||
+            lower.startsWith("patch") -> Icons.Default.Edit
+        lower.startsWith("bash") ||
+            lower.startsWith("terminal") ||
+            lower.startsWith("cmd") ||
+            lower.startsWith("shell") -> Icons.Default.Terminal
+        else -> Icons.Default.Build
+    }
+}
+
+/**
+ * Counts added/removed lines in a diff/patch text. Skips diff headers
+ * (`+++`/`---`/`@@`/`*** Add File:` / `*** Update File:` lines) so only true
+ * content lines are counted. Returns (additions, deletions).
+ */
+private fun countDiffLines(text: String): Pair<Int, Int> {
+    if (text.isEmpty()) return 0 to 0
+    var add = 0
+    var del = 0
+    for (rawLine in text.split("\n")) {
+        if (rawLine.startsWith("+++") || rawLine.startsWith("---")) continue
+        if (rawLine.startsWith("@@")) continue
+        if (rawLine.startsWith("***")) continue
+        when {
+            rawLine.startsWith("+") -> add++
+            rawLine.startsWith("-") -> del++
+        }
+    }
+    return add to del
+}
+
+/**
+ * Parsed view of a sub-agent `<task …>` XML block that the server sometimes
+ * embeds in a `task` tool's state.output once the child session finishes.
+ *  - [id]       → the child task id attribute (informational)
+ *  - [state]    → "completed" / "error" / etc.
+ *  - [taskResult] → inner `<task_result>…</task_result>` body, trimmed
+ *
+ * Returns null when the output doesn't contain a `<task` tag (the common case —
+ * most sub-agent outputs are plain text or empty).
+ */
+private data class TaskXmlResult(
+    val id: String?,
+    val state: String?,
+    val taskResult: String?
+)
+
+private fun parseTaskXml(output: String?): TaskXmlResult? {
+    if (output.isNullOrBlank()) return null
+    val taskIdx = output.indexOf("<task")
+    if (taskIdx < 0) return null
+    val idMatch = Regex("""<task[^>]*\sid="([^"]+)"""").find(output, taskIdx)
+    val stateMatch = Regex("""<task[^>]*\sstate="([^"]+)"""").find(output, taskIdx)
+    val resultMatch = Regex("""<task_result>([\s\S]*?)</task_result>""").find(output, taskIdx)
+    return TaskXmlResult(
+        id = idMatch?.groupValues?.getOrNull(1),
+        state = stateMatch?.groupValues?.getOrNull(1),
+        taskResult = resultMatch?.groupValues?.getOrNull(1)?.trim()?.takeIf { it.isNotBlank() }
+    )
 }
 
 @Composable
@@ -1018,6 +1174,7 @@ private fun ToolCard(
     val output = part.toolOutput
 
     val isRunning = status == "running"
+    val isError = status == "error"
     var expanded by remember { mutableStateOf(isRunning) }
     val firstFile = filePaths.firstOrNull()
     val displayName = if (toolName == "apply_patch") "patch" else toolName
@@ -1025,51 +1182,74 @@ private fun ToolCard(
     val isReadOnlyTool = listOf("read_file", "read", "grep", "glob", "list", "webfetch", "task", "todoread")
         .any { toolName.startsWith(it) }
 
+    val icon = remember(toolName) { toolIcon(toolName) }
+
     // Write/edit tools keep primary color so file mutations stay prominent;
     // read-only tools use the softer onSurfaceVariant to recede visually.
     val titleColor = if (isReadOnlyTool) MaterialTheme.colorScheme.onSurfaceVariant
         else MaterialTheme.colorScheme.primary
 
     Card(
-        modifier = modifier.padding(vertical = 4.dp),
+        modifier = modifier.padding(vertical = 2.dp),
         shape = RoundedCornerShape(12.dp),
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
     ) {
         CompositionLocalProvider(LocalContentColor provides MaterialTheme.colorScheme.onSurfaceVariant) {
-            Column(modifier = Modifier.padding(12.dp)) {
+            Column(modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp)) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    if (isRunning) {
-                        CircularProgressIndicator(modifier = Modifier.size(14.dp), strokeWidth = 2.dp)
-                    } else {
-                        Icon(
-                            Icons.Default.Build,
-                            contentDescription = null,
-                            modifier = Modifier.size(14.dp),
-                            tint = if (isReadOnlyTool) MaterialTheme.colorScheme.onSurfaceVariant else MaterialTheme.colorScheme.primary
-                        )
-                    }
-                    Spacer(modifier = Modifier.width(8.dp))
+                    Icon(
+                        icon,
+                        contentDescription = null,
+                        modifier = Modifier.size(14.dp),
+                        tint = if (isReadOnlyTool) MaterialTheme.colorScheme.onSurfaceVariant else MaterialTheme.colorScheme.primary
+                    )
+                    Spacer(modifier = Modifier.width(6.dp))
                     Text(
                         text = displayName.ifEmpty { reason ?: "tool" },
-                        style = MaterialTheme.typography.labelLarge,
-                        color = titleColor
+                        style = MaterialTheme.typography.labelMedium,
+                        color = titleColor,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.weight(1f, fill = false)
                     )
+                    Spacer(modifier = Modifier.weight(1f))
+                    // Status indicator — spinner while running, check on completion,
+                    // warning on error. The icon stays put so the row doesn't shift.
+                    when {
+                        isRunning -> CircularProgressIndicator(
+                            modifier = Modifier.size(14.dp),
+                            strokeWidth = 2.dp
+                        )
+                        isError -> Icon(
+                            Icons.Default.Warning,
+                            contentDescription = "Tool error",
+                            modifier = Modifier.size(14.dp),
+                            tint = MaterialTheme.colorScheme.error
+                        )
+                        else -> Icon(
+                            Icons.Default.CheckCircle,
+                            contentDescription = "Tool completed",
+                            modifier = Modifier.size(14.dp),
+                            tint = MaterialTheme.colorScheme.primary
+                        )
+                    }
                     if (firstFile != null) {
                         Spacer(modifier = Modifier.width(4.dp))
-                        IconButton(onClick = { onFileClick(firstFile) }, modifier = Modifier.size(28.dp)) {
+                        IconButton(onClick = { onFileClick(firstFile) }, modifier = Modifier.size(22.dp)) {
                             Icon(
                                 Icons.AutoMirrored.Filled.OpenInNew,
                                 contentDescription = stringResource(R.string.files_show_in_files),
-                                modifier = Modifier.size(18.dp),
+                                modifier = Modifier.size(14.dp),
                                 tint = MaterialTheme.colorScheme.primary
                             )
                         }
                     }
-                    IconButton(onClick = { expanded = !expanded }, modifier = Modifier.size(24.dp)) {
+                    Spacer(modifier = Modifier.width(2.dp))
+                    IconButton(onClick = { expanded = !expanded }, modifier = Modifier.size(20.dp)) {
                         Icon(
                             if (expanded) Icons.Default.KeyboardArrowDown else Icons.Default.ChevronRight,
                             contentDescription = if (expanded) "Collapse" else "Expand",
-                            modifier = Modifier.size(18.dp),
+                            modifier = Modifier.size(14.dp),
                             tint = MaterialTheme.colorScheme.onSurfaceVariant
                         )
                     }
@@ -1077,7 +1257,7 @@ private fun ToolCard(
 
                 if (expanded) {
                     if (!reason.isNullOrEmpty()) {
-                        Spacer(modifier = Modifier.size(8.dp))
+                        Spacer(modifier = Modifier.size(6.dp))
                         Text(
                             text = reason,
                             style = MaterialTheme.typography.bodySmall,
@@ -1088,7 +1268,7 @@ private fun ToolCard(
                     // todowrite shows a compact badge; full list is in the toolbar panel (matches iOS).
                     if (isTodoWrite) {
                         if (todos.isNotEmpty()) {
-                            Spacer(modifier = Modifier.size(8.dp))
+                            Spacer(modifier = Modifier.size(6.dp))
                             val completed = todos.count { it.isCompleted }
                             Text(
                                 "Todo updated · $completed/${todos.size}",
@@ -1098,11 +1278,11 @@ private fun ToolCard(
                         }
                     } else {
                         if (todos.isNotEmpty()) {
-                            Spacer(modifier = Modifier.size(8.dp))
+                            Spacer(modifier = Modifier.size(6.dp))
                             TodoListInline(todos)
                         }
                         if (!input.isNullOrEmpty()) {
-                            Spacer(modifier = Modifier.size(8.dp))
+                            Spacer(modifier = Modifier.size(6.dp))
                             Text(
                                 text = input,
                                 style = MaterialTheme.typography.bodySmall,
@@ -1111,7 +1291,7 @@ private fun ToolCard(
                             )
                         }
                         if (!output.isNullOrEmpty()) {
-                            Spacer(modifier = Modifier.size(8.dp))
+                            Spacer(modifier = Modifier.size(6.dp))
                             Text(
                                 text = output,
                                 style = MaterialTheme.typography.bodySmall,
@@ -1122,7 +1302,7 @@ private fun ToolCard(
                     }
 
                     if (filePaths.isNotEmpty()) {
-                        Spacer(modifier = Modifier.size(8.dp))
+                        Spacer(modifier = Modifier.size(6.dp))
                         filePaths.forEach { path ->
                             Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.Top) {
                                 Text(
@@ -1132,11 +1312,11 @@ private fun ToolCard(
                                     color = MaterialTheme.colorScheme.primary,
                                     modifier = Modifier.weight(1f)
                                 )
-                                IconButton(onClick = { onFileClick(path) }, modifier = Modifier.size(28.dp)) {
+                                IconButton(onClick = { onFileClick(path) }, modifier = Modifier.size(22.dp)) {
                                     Icon(
                                         Icons.AutoMirrored.Filled.OpenInNew,
                                         contentDescription = stringResource(R.string.files_show_in_files),
-                                        modifier = Modifier.size(18.dp),
+                                        modifier = Modifier.size(14.dp),
                                         tint = MaterialTheme.colorScheme.primary
                                     )
                                 }
@@ -1149,51 +1329,144 @@ private fun ToolCard(
     }
 }
 
+/**
+ * Collapsible card for a single file-edit operation (write/edit/patch/apply_patch).
+ * Unified skeleton:
+ *
+ *   [Edit 14dp] basename  +N -M   [▶]
+ *   ---------------------------------
+ *   full/path/to/file.ts (+ link to open in Files)
+ *
+ * Diff stats come from the first [Part.FileChange] in `part.files` when the
+ * server provided them; otherwise they're counted from the patch text in
+ * `state.inputSummary` / `state.output` by scanning for `+` / `-` line prefixes
+ * (skipping `+++`/`---`/`@@`/`***` diff headers). When the part spans multiple
+ * files, only the primary one is summarized in the header — the rest are still
+ * reachable via the OpenInNew buttons in the expanded body.
+ */
 @Composable
 private fun PatchCard(
-    filePaths: List<String>,
+    part: Part,
     onFileClick: (String) -> Unit,
     modifier: Modifier = Modifier.fillMaxWidth()
 ) {
-    Card(
-        modifier = modifier.padding(vertical = 4.dp),
+    val primaryFile = part.files?.firstOrNull()
+    val allPaths = part.filePathsForNavigationFiltered
+    val primaryPath = remember(part) {
+        primaryFile?.path?.replace("\\", "/")?.trim()
+            ?: part.metadata?.path?.takeIf { it.isNotEmpty() }
+            ?: part.state?.pathFromInput?.takeIf { it.isNotEmpty() }
+            ?: allPaths.firstOrNull()
+    }
+    val basename = remember(primaryPath) {
+        primaryPath?.substringAfterLast("/")?.takeIf { it.isNotEmpty() } ?: "file"
+    }
+
+    val (additions, deletions) = remember(part) {
+        val fileAdd = primaryFile?.additions
+        val fileDel = primaryFile?.deletions
+        if (fileAdd != null || fileDel != null) {
+            (fileAdd ?: 0) to (fileDel ?: 0)
+        } else {
+            val patchText = buildString {
+                part.state?.inputSummary?.let { append(it); append('\n') }
+                part.state?.output?.let { append(it) }
+            }
+            countDiffLines(patchText)
+        }
+    }
+
+    var expanded by remember { mutableStateOf(false) }
+
+    Surface(
+        modifier = modifier
+            .padding(vertical = 2.dp)
+            .testTag("toolcard.patch.$basename"),
         shape = RoundedCornerShape(12.dp),
-        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
+        color = MaterialTheme.colorScheme.surfaceVariant
     ) {
-        CompositionLocalProvider(LocalContentColor provides MaterialTheme.colorScheme.onSurfaceVariant) {
-            Column(modifier = Modifier.padding(12.dp)) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Icon(
-                        Icons.Default.Edit,
-                        contentDescription = null,
-                        modifier = Modifier.size(16.dp),
-                        tint = MaterialTheme.colorScheme.primary
-                    )
-                    Spacer(modifier = Modifier.width(8.dp))
+        Column {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 10.dp, vertical = 8.dp)
+                    .clickable { expanded = !expanded },
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Icon(
+                    Icons.Default.Edit,
+                    contentDescription = null,
+                    modifier = Modifier.size(14.dp),
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Spacer(modifier = Modifier.width(6.dp))
+                Text(
+                    text = basename,
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.onSurface,
+                    fontFamily = FontFamily.Monospace,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f, fill = false)
+                )
+                if (additions > 0) {
+                    Spacer(modifier = Modifier.width(6.dp))
                     Text(
-                        "${filePaths.size} ${if (filePaths.size == 1) "file" else "files"} changed",
-                        style = MaterialTheme.typography.labelLarge,
-                        color = MaterialTheme.colorScheme.primary
+                        text = "+$additions",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.primary,
+                        fontFamily = FontFamily.Monospace
                     )
                 }
-                Spacer(modifier = Modifier.size(8.dp))
-                filePaths.forEach { path ->
-                    Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.Top) {
+                if (deletions > 0) {
+                    Spacer(modifier = Modifier.width(4.dp))
+                    Text(
+                        text = "-$deletions",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.error,
+                        fontFamily = FontFamily.Monospace
+                    )
+                }
+                Spacer(modifier = Modifier.weight(1f))
+                Icon(
+                    if (expanded) Icons.Default.KeyboardArrowDown else Icons.Default.ChevronRight,
+                    contentDescription = if (expanded) "Collapse" else "Expand",
+                    modifier = Modifier.size(14.dp),
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+            if (expanded) {
+                Column(modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp)) {
+                    if (allPaths.isNotEmpty()) {
+                        allPaths.forEach { path ->
+                            Row(
+                                modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Text(
+                                    text = path,
+                                    style = MaterialTheme.typography.bodySmall,
+                                    fontFamily = FontFamily.Monospace,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    modifier = Modifier.weight(1f)
+                                )
+                                IconButton(onClick = { onFileClick(path) }, modifier = Modifier.size(22.dp)) {
+                                    Icon(
+                                        Icons.AutoMirrored.Filled.OpenInNew,
+                                        contentDescription = stringResource(R.string.files_show_in_files),
+                                        modifier = Modifier.size(14.dp),
+                                        tint = MaterialTheme.colorScheme.primary
+                                    )
+                                }
+                            }
+                        }
+                    } else if (primaryPath != null) {
                         Text(
-                            path,
+                            text = primaryPath,
                             style = MaterialTheme.typography.bodySmall,
                             fontFamily = FontFamily.Monospace,
-                            color = MaterialTheme.colorScheme.primary,
-                            modifier = Modifier.weight(1f)
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
-                        IconButton(onClick = { onFileClick(path) }, modifier = Modifier.size(28.dp)) {
-                            Icon(
-                                Icons.AutoMirrored.Filled.OpenInNew,
-                                contentDescription = stringResource(R.string.files_show_in_files),
-                                modifier = Modifier.size(18.dp),
-                                tint = MaterialTheme.colorScheme.primary
-                            )
-                        }
                     }
                 }
             }

@@ -28,6 +28,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -53,6 +54,14 @@ fun SettingsScreen(
     onBack: (() -> Unit)? = null
 ) {
     val state by viewModel.state.collectAsStateWithLifecycle()
+
+    // Refresh traffic counters once when the Settings screen enters
+    // composition so the displayed totals reflect the latest background
+    // accumulation. The tracker keeps counting regardless; this just syncs
+    // the snapshot for display.
+    LaunchedEffect(Unit) {
+        viewModel.refreshTrafficStats()
+    }
 
     var showHostProfiles by remember { mutableStateOf(false) }
 
@@ -101,6 +110,14 @@ fun SettingsScreen(
                 languageMode = state.languageMode,
                 onThemeSelected = viewModel::setThemeMode,
                 onLanguageSelected = viewModel::setLanguageMode
+            )
+
+            SettingsSectionDivider()
+
+            TrafficSection(
+                sent = state.trafficSent,
+                received = state.trafficReceived,
+                onReset = viewModel::resetTrafficStats
             )
 
             SettingsSectionDivider()

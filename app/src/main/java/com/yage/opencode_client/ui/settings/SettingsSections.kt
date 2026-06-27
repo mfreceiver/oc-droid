@@ -306,6 +306,78 @@ internal fun AppearanceSection(
 }
 
 @Composable
+internal fun TrafficSection(
+    sent: Long,
+    received: Long,
+    onReset: () -> Unit
+) {
+    SectionHeader(title = stringResource(R.string.settings_traffic))
+
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
+    ) {
+        Column(modifier = Modifier.padding(16.dp)) {
+            TrafficRow(
+                label = stringResource(R.string.settings_traffic_sent),
+                bytes = sent
+            )
+            Spacer(modifier = Modifier.height(8.dp))
+            TrafficRow(
+                label = stringResource(R.string.settings_traffic_received),
+                bytes = received
+            )
+            Spacer(modifier = Modifier.height(8.dp))
+            TrafficRow(
+                label = stringResource(R.string.settings_traffic_total),
+                bytes = sent + received
+            )
+            Spacer(modifier = Modifier.height(16.dp))
+            OutlinedButton(
+                onClick = onReset,
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Text(stringResource(R.string.settings_traffic_reset))
+            }
+        }
+    }
+}
+
+@Composable
+private fun TrafficRow(label: String, bytes: Long) {
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.SpaceBetween
+    ) {
+        Text(
+            label,
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+        Text(
+            formatBytes(bytes),
+            style = MaterialTheme.typography.bodyMedium
+        )
+    }
+}
+
+/**
+ * Formats [bytes] as a human-readable size. < 1KiB shows bytes; < 1MiB shows
+ * KiB; < 1GiB shows MiB; otherwise GiB. Locale.US enforces ASCII digits and a
+ * period decimal separator so the output is stable regardless of device locale.
+ */
+private fun formatBytes(bytes: Long): String {
+    val unit = 1024L
+    if (bytes < unit) return "$bytes B"
+    val kb = bytes.toDouble() / unit
+    if (kb < unit) return String.format(java.util.Locale.US, "%.1f KB", kb)
+    val mb = kb / unit
+    if (mb < unit) return String.format(java.util.Locale.US, "%.1f MB", mb)
+    val gb = mb / unit
+    return String.format(java.util.Locale.US, "%.2f GB", gb)
+}
+
+@Composable
 internal fun AboutSection() {
     SectionHeader(title = stringResource(R.string.settings_about))
 

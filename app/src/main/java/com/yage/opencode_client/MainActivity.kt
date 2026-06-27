@@ -1,23 +1,18 @@
 package com.yage.opencode_client
 
-import android.app.Activity
 import android.os.Bundle
-import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.appcompat.app.AppCompatActivity
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.statusBars
+import androidx.compose.foundation.layout.windowInsetsPadding
+import androidx.compose.foundation.pager.HorizontalPager
+import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.Chat
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
-import androidx.compose.material.icons.filled.Folder
-import androidx.compose.material.icons.filled.History
-import androidx.compose.material.icons.filled.Settings
-import androidx.compose.material.icons.outlined.ChatBubbleOutline
-import androidx.compose.material.icons.outlined.Folder
-import androidx.compose.material.icons.outlined.History
-import androidx.compose.material.icons.outlined.Settings
 import androidx.compose.material3.*
 import androidx.compose.material3.windowsizeclass.ExperimentalMaterial3WindowSizeClassApi
 import androidx.compose.material3.windowsizeclass.WindowWidthSizeClass
@@ -26,23 +21,13 @@ import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
-import androidx.compose.foundation.layout.WindowInsets
-import androidx.compose.foundation.layout.isImeVisible
-import androidx.compose.foundation.layout.statusBars
-import androidx.compose.foundation.layout.windowInsetsPadding
+import androidx.compose.ui.unit.dp
+import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.repeatOnLifecycle
-import androidx.compose.ui.unit.dp
-import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
-import androidx.navigation.compose.NavHost
-import androidx.navigation.compose.composable
-import androidx.navigation.compose.currentBackStackEntryAsState
-import androidx.navigation.compose.rememberNavController
-import androidx.navigation.NavGraph.Companion.findStartDestination
 import com.yage.opencode_client.ui.MainViewModel
 import com.yage.opencode_client.ui.chat.ChatScreen
 import com.yage.opencode_client.ui.files.FilesScreen
@@ -55,42 +40,27 @@ import com.yage.opencode_client.util.AppLocaleController
 import com.yage.opencode_client.util.ThemeMode
 import dagger.hilt.android.AndroidEntryPoint
 import javax.inject.Inject
+import kotlinx.coroutines.launch
 
+/**
+ * Top-level screens shown in the phone HorizontalPager.
+ *
+ * `route` is retained as a stable identity string (also used to tag the origin
+ * of a file-preview request via MainViewModel.showFileInFiles(originRoute=...)).
+ * `titleRes` provides the localized screen name shown in each page's own
+ * TopAppBar (each page renders its own title bar — there is no shared app bar).
+ */
 sealed class Screen(
     val route: String,
-    val titleRes: Int,
-    val selectedIcon: androidx.compose.ui.graphics.vector.ImageVector,
-    val unselectedIcon: androidx.compose.ui.graphics.vector.ImageVector
+    val titleRes: Int
 ) {
-    object Chat : Screen(
-        "chat",
-        R.string.nav_chat,
-        Icons.AutoMirrored.Filled.Chat,
-        Icons.Outlined.ChatBubbleOutline
-    )
-
-    object Sessions : Screen(
-        "sessions",
-        R.string.nav_sessions,
-        Icons.Default.History,
-        Icons.Outlined.History
-    )
-
-    object Files : Screen(
-        "files",
-        R.string.nav_files,
-        Icons.Default.Folder,
-        Icons.Outlined.Folder
-    )
-
-    object Settings : Screen(
-        "settings",
-        R.string.nav_settings,
-        Icons.Default.Settings,
-        Icons.Outlined.Settings
-    )
+    object Chat : Screen("chat", R.string.nav_chat)
+    object Sessions : Screen("sessions", R.string.nav_sessions)
+    object Files : Screen("files", R.string.nav_files)
+    object Settings : Screen("settings", R.string.nav_settings)
 }
 
+// Page order for the phone HorizontalPager: Chat → Sessions → Files → Settings.
 val screens = listOf(Screen.Chat, Screen.Sessions, Screen.Files, Screen.Settings)
 
 // Debug-only Intent extra keys for injecting connection credentials at launch,
@@ -155,113 +125,70 @@ class MainActivity : AppCompatActivity() {
     }
 }
 
-@OptIn(ExperimentalLayoutApi::class)
+/**
+ * Phone layout: a full-screen HorizontalPager that swipes left/right between
+ * the four top-level screens (Chat → Sessions → Files → Settings).
+ *
+ * The previous bottom NavigationBar + NavHost stack has been replaced by the
+ * pager. Each page renders its own TopAppBar showing the current screen name,
+ * so no shared app bar or title dropdown is needed. Cross-page navigation
+ * (e.g. tapping a file in Chat to open Files) is wired through callbacks that
+ * animate the pager to the target page.
+ */
 @Composable
 private fun PhoneLayout(viewModel: MainViewModel) {
-    val navController = rememberNavController()
-    val navBackStackEntry by navController.currentBackStackEntryAsState()
-    val currentRoute = navBackStackEntry?.destination?.route
-    val context = LocalContext.current
+    val pagerState = rememberPagerState(pageCount = { screens.size })
+    val scope = rememberCoroutineScope()
 
-    fun navigateToTopLevel(route: String) {
-        if (currentRoute == route) return
-        // Official Material 3 bottom-navigation pattern: popUpTo the start
-        // destination with saveState = true (preserving each tab's state) and
-        // restoreState = true on the new destination. This avoids the brittle
-        // `popUpTo(start) { inclusive = true }` form which can throw when the
-        // start destination has already been popped from the back stack. The
-        // user-facing back behavior (pressing back exits to the home screen
-        // instead of walking back to Chat) is handled by the BackHandler below.
-        navController.navigate(route) {
-            popUpTo(navController.graph.findStartDestination().id) {
-                saveState = true
-            }
-            launchSingleTop = true
-            restoreState = true
-        }
+    fun switchToPage(page: Int) {
+        scope.launch { pagerState.animateScrollToPage(page) }
     }
-
-    // Pressing back from any top-level tab exits to the home screen (launcher).
-    // BackHandler only fires when no descendant handler (dialogs, sheets, text
-    // fields with IME) consumed the event first, so in-composition overlays
-    // still dismiss normally.
-    BackHandler(enabled = currentRoute != null) {
-        (context as? Activity)?.finish()
-    }
-
-    // Hide the bottom NavigationBar while the IME (soft keyboard) is open.
-    // Otherwise Scaffold's bottomBar padding and ChatInputBar.imePadding() both
-    // apply, leaving a gap roughly the height of the NavigationBar between the
-    // input field and the keyboard.
-    val imeVisible = WindowInsets.isImeVisible
 
     Scaffold(
-        contentWindowInsets = WindowInsets(0, 0, 0, 0),
-        bottomBar = {
-            if (!imeVisible) {
-                NavigationBar {
-                    screens.forEach { screen ->
-                        val selected = currentRoute == screen.route
-                        val title = stringResource(screen.titleRes)
-                        NavigationBarItem(
-                            selected = selected,
-                            onClick = { navigateToTopLevel(screen.route) },
-                            icon = {
-                                Icon(
-                                    imageVector = if (selected) screen.selectedIcon else screen.unselectedIcon,
-                                    contentDescription = title,
-                                    modifier = Modifier.size(22.dp)
-                                )
-                            }
-                        )
-                    }
-                }
-            }
-        }
+        contentWindowInsets = WindowInsets(0, 0, 0, 0)
     ) { padding ->
-        NavHost(
-            navController = navController,
-            startDestination = Screen.Chat.route,
-            modifier = Modifier.padding(padding)
-        ) {
-            composable(Screen.Chat.route) {
-                ChatScreen(
+        HorizontalPager(
+            state = pagerState,
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(padding)
+        ) { page ->
+            when (screens[page]) {
+                Screen.Chat -> ChatScreen(
                     viewModel = viewModel,
                     onNavigateToFiles = { path ->
                         viewModel.showFileInFiles(path, originRoute = Screen.Chat.route)
-                        navigateToTopLevel(Screen.Files.route)
+                        switchToPage(screens.indexOf(Screen.Files))
                     },
                     onNavigateToSettings = {
-                        navigateToTopLevel(Screen.Settings.route)
+                        switchToPage(screens.indexOf(Screen.Settings))
                     },
                     showSettingsButton = false
                 )
-            }
-            composable(Screen.Files.route) {
-                val state by viewModel.state.collectAsStateWithLifecycle()
-                val filesViewModel: FilesViewModel = hiltViewModel()
-                FilesScreen(
-                    viewModel = filesViewModel,
-                    pathToShow = state.filePathToShowInFiles,
-                    sessionDirectory = state.currentSession?.directory,
-                    onCloseFile = {
-                        val origin = state.filePreviewOriginRoute
-                        viewModel.clearFileToShow()
-                        if (origin == Screen.Chat.route) {
-                            navigateToTopLevel(Screen.Chat.route)
-                        }
-                    },
-                    onFileClick = { }
-                )
-            }
-            composable(Screen.Sessions.route) {
-                SessionsScreen(
+                Screen.Sessions -> SessionsScreen(
                     viewModel = viewModel,
-                    navController = navController
+                    onSwitchToChat = { switchToPage(screens.indexOf(Screen.Chat)) }
                 )
-            }
-            composable(Screen.Settings.route) {
-                SettingsScreen(viewModel = viewModel)
+                Screen.Files -> {
+                    val state by viewModel.state.collectAsStateWithLifecycle()
+                    val filesViewModel: FilesViewModel = hiltViewModel()
+                    FilesScreen(
+                        viewModel = filesViewModel,
+                        pathToShow = state.filePathToShowInFiles,
+                        sessionDirectory = state.currentSession?.directory,
+                        onCloseFile = {
+                            // If the file preview was opened from Chat, return
+                            // there after closing; otherwise stay on Files.
+                            val origin = state.filePreviewOriginRoute
+                            viewModel.clearFileToShow()
+                            if (origin == Screen.Chat.route) {
+                                switchToPage(screens.indexOf(Screen.Chat))
+                            }
+                        },
+                        onFileClick = { }
+                    )
+                }
+                Screen.Settings -> SettingsScreen(viewModel = viewModel)
             }
         }
     }
@@ -297,7 +224,10 @@ private fun TabletLayout(viewModel: MainViewModel) {
                 } else {
                     SessionsScreen(
                         viewModel = viewModel,
-                        navController = null // no phone-nav in TabletLayout
+                        // No swipe on tablet (Chat is always visible in the right
+                        // pane); session selection updates the shared ViewModel
+                        // which the Chat pane observes.
+                        onSwitchToChat = {}
                     )
                 }
             }

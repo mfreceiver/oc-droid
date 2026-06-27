@@ -21,6 +21,7 @@ import com.yage.opencode_client.ui.MainViewModel
 import com.yage.opencode_client.ui.session.buildSessionTree
 import com.yage.opencode_client.util.SettingsManager
 import com.yage.opencode_client.util.ThemeMode
+import com.yage.opencode_client.util.TrafficTracker
 import io.mockk.coEvery
 import io.mockk.coVerify
 import io.mockk.coVerifyOrder
@@ -59,6 +60,7 @@ class MainViewModelTest {
     private lateinit var repository: OpenCodeRepository
     private lateinit var settingsManager: SettingsManager
     private lateinit var hostProfileStore: HostProfileStore
+    private lateinit var trafficTracker: TrafficTracker
 
     @Before
     fun setUp() {
@@ -71,6 +73,7 @@ class MainViewModelTest {
         repository = mockk(relaxed = true)
         settingsManager = mockk(relaxed = true)
         hostProfileStore = mockk(relaxed = true)
+        trafficTracker = mockk(relaxed = true)
 
         val defaultProfile = HostProfile.defaultDirect("http://server.test")
         every { hostProfileStore.currentProfile() } returns defaultProfile
@@ -103,7 +106,7 @@ class MainViewModelTest {
     }
 
     private fun createViewModel(): MainViewModel {
-        return MainViewModel(repository, settingsManager, hostProfileStore)
+        return MainViewModel(repository, settingsManager, hostProfileStore, trafficTracker)
     }
 
     private fun updateState(viewModel: MainViewModel, transform: (AppState) -> AppState) {

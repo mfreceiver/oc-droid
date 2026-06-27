@@ -86,6 +86,21 @@ internal fun handleIncomingSseEvent(
                         sessionStatuses = it.sessionStatuses + (statusEvent.sessionId to statusEvent.status)
                     )
                 }
+                // When a temp-cleared session finishes its in-flight work
+                // (busy -> idle) and is NOT the currently-open one, drop it
+                // from tempClearedUnread: there is no longer any pending work
+                // that would warrant re-marking it. If the session was already
+                // re-marked unread (because the user navigated away while it
+                // was busy), keep the badge so the user still knows there was
+                // activity — the user opening the session will clear it.
+                if (!statusEvent.status.isBusy &&
+                    statusEvent.sessionId != state.value.currentSessionId &&
+                    state.value.tempClearedUnread.contains(statusEvent.sessionId)
+                ) {
+                    state.update {
+                        it.copy(tempClearedUnread = it.tempClearedUnread - statusEvent.sessionId)
+                    }
+                }
                 if (statusEvent.sessionId == state.value.currentSessionId && !statusEvent.status.isBusy) {
                     state.update {
                         it.copy(

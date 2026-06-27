@@ -141,179 +141,193 @@ internal fun ChatTopBar(
         color = MaterialTheme.colorScheme.surface,
         tonalElevation = 2.dp
     ) {
-        Column(
+        // Single-row layout: "Chat" label + inline session title dropdown (or
+        // parent-back affordance, or draft workdir basename) + right-side
+        // action cluster (agent / todo / context / settings / server). The
+        // previous second row has been folded into this one so the current
+        // session title sits immediately to the right of the "Chat" heading.
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
             modifier = Modifier
                 .fillMaxWidth()
                 .padding(horizontal = 16.dp, vertical = 8.dp)
         ) {
-            // --- First row: title + right-side action cluster (TopAppBar-style) ---
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                modifier = Modifier.fillMaxWidth()
-            ) {
-                Text(
-                    text = stringResource(R.string.nav_chat),
-                    style = MaterialTheme.typography.titleMedium,
-                    fontWeight = FontWeight.Bold,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier.weight(1f)
-                )
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(4.dp)
-                ) {
-                    // Agent dropdown (Material 3 TextButton)
-                    Box {
-                        TextButton(
-                            onClick = { showAgentMenu = true },
-                            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp)
-                        ) {
-                            Text(
-                                text = state.selectedAgentName,
-                                style = MaterialTheme.typography.labelSmall,
-                                fontWeight = FontWeight.SemiBold,
-                                color = MaterialTheme.colorScheme.primary,
-                                maxLines = 1
-                            )
-                        }
-                        DropdownMenu(
-                            expanded = showAgentMenu,
-                            onDismissRequest = { showAgentMenu = false }
-                        ) {
-                            state.agents.forEach { agent ->
-                                DropdownMenuItem(
-                                    text = {
-                                        Text(
-                                            agent.name,
-                                            color = if (agent.name == state.selectedAgentName)
-                                                MaterialTheme.colorScheme.primary
-                                            else
-                                                MaterialTheme.colorScheme.onSurface
-                                        )
-                                    },
-                                    onClick = {
-                                        actions.onSelectAgent(agent.name)
-                                        showAgentMenu = false
-                                    }
-                                )
-                            }
-                        }
-                    }
+            Text(
+                text = stringResource(R.string.nav_chat),
+                style = MaterialTheme.typography.titleMedium,
+                fontWeight = FontWeight.Bold,
+                maxLines = 1
+            )
+            Spacer(modifier = Modifier.width(8.dp))
 
-                    // Todo badge — only rendered when there are todos. Icon-only
-                    // (no count) to keep the toolbar quiet; the count is still
-                    // visible inside the dialog.
-                    if (state.sessionTodos.isNotEmpty()) {
-                        Surface(
-                            onClick = { showTodoDialog = true },
-                            shape = RoundedCornerShape(50),
-                            color = Color.Transparent
-                        ) {
-                            Icon(
-                                Icons.Default.Checklist,
-                                contentDescription = stringResource(R.string.chat_todo),
-                                modifier = Modifier
-                                    .padding(horizontal = 10.dp, vertical = 5.dp)
-                                    .size(16.dp),
-                                tint = MaterialTheme.colorScheme.onSurfaceVariant
-                            )
-                        }
-                    }
-
-                    // Context usage ring
+            // --- Inline session title / parent back / draft workdir ---
+            when {
+                state.parentSessionId != null -> {
                     Surface(
-                        onClick = { showContextDialog = true },
-                        shape = RoundedCornerShape(50),
-                        color = Color.Transparent
+                        onClick = { actions.onSelectSession(state.parentSessionId) },
+                        shape = RoundedCornerShape(6.dp),
+                        color = Color.Transparent,
+                        modifier = Modifier.weight(1f)
                     ) {
-                        ContextUsageRing(usage = state.contextUsage)
-                    }
-
-                    if (state.showSettingsButton) {
-                        IconButton(
-                            onClick = actions.onNavigateToSettings,
-                            modifier = Modifier.size(36.dp)
-                        ) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
                             Icon(
-                                Icons.Default.Settings,
-                                contentDescription = stringResource(R.string.nav_settings),
-                                modifier = Modifier.size(20.dp),
-                                tint = MaterialTheme.colorScheme.onSurfaceVariant
+                                Icons.AutoMirrored.Filled.ArrowBack,
+                                contentDescription = stringResource(R.string.chat_back_to_parent_session),
+                                modifier = Modifier.size(16.dp),
+                                tint = MaterialTheme.colorScheme.primary
+                            )
+                            Spacer(modifier = Modifier.width(4.dp))
+                            Text(
+                                text = state.parentSessionTitle
+                                    ?: stringResource(R.string.chat_parent_session),
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = MaterialTheme.colorScheme.primary,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
                             )
                         }
                     }
-
-                    // Server status indicator: dot only (no text). Slightly
-                    // larger than the previous glyph so it remains tappable.
-                    val dotColor = when {
-                        state.isConnecting -> Color(0xFFFFA500)
-                        state.isConnected -> Color(0xFF4CAF50)
-                        state.connectionPhase == null -> MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.4f)
-                        else -> Color(0xFFF44336)
-                    }
-                    Box(
-                        modifier = Modifier
-                            .clickable { showServerDialog = true }
-                            .padding(horizontal = 8.dp, vertical = 6.dp)
-                            .size(12.dp)
-                            .background(color = dotColor, shape = CircleShape)
-                    )
                 }
-            }
 
-            Spacer(modifier = Modifier.height(6.dp))
-
-            // --- Second row: session dropdown / sub-agent back affordance ---
-            if (state.parentSessionId != null) {
-                Surface(
-                    onClick = { actions.onSelectSession(state.parentSessionId) },
-                    shape = RoundedCornerShape(6.dp),
-                    color = Color.Transparent
-                ) {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Icon(
-                            Icons.AutoMirrored.Filled.ArrowBack,
-                            contentDescription = stringResource(R.string.chat_back_to_parent_session),
-                            modifier = Modifier.size(16.dp),
-                            tint = MaterialTheme.colorScheme.primary
-                        )
-                        Spacer(modifier = Modifier.width(4.dp))
+                state.draftWorkdir != null -> {
+                    // Draft mode: no session yet. Show the workdir basename in
+                    // place of a session title; the dropdown is hidden (there
+                    // is no session to switch to until the first send).
+                    val draftBasename = state.draftWorkdir.split("/")
+                        .filter { it.isNotEmpty() }.lastOrNull()
+                        ?: state.draftWorkdir
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier.weight(1f)
+                    ) {
                         Text(
-                            text = state.parentSessionTitle ?: stringResource(R.string.chat_parent_session),
+                            text = draftBasename,
                             style = MaterialTheme.typography.bodyMedium,
-                            color = MaterialTheme.colorScheme.primary,
+                            fontWeight = FontWeight.SemiBold,
                             maxLines = 1,
                             overflow = TextOverflow.Ellipsis
                         )
                     }
                 }
-            } else if (state.draftWorkdir != null) {
-                // Draft mode: no session yet, show workdir basename only.
-                val draftBasename = state.draftWorkdir.split("/").filter { it.isNotEmpty() }.lastOrNull()
-                    ?: state.draftWorkdir
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text(
-                        text = draftBasename,
-                        style = MaterialTheme.typography.bodyMedium,
-                        fontWeight = FontWeight.SemiBold,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis
+
+                else -> {
+                    SessionDropdownRow(
+                        modifier = Modifier.weight(1f),
+                        currentSession = currentSession,
+                        openSessions = state.openSessions,
+                        currentSessionId = state.currentSessionId,
+                        unreadSessions = state.unreadSessions,
+                        expanded = showSessionMenu,
+                        onToggleExpand = { showSessionMenu = !showSessionMenu },
+                        onSelectSession = { id ->
+                            actions.onSelectSession(id)
+                            showSessionMenu = false
+                        },
+                        onCloseSession = actions.onCloseSession
                     )
                 }
-            } else {
-                SessionDropdownRow(
-                    currentSession = currentSession,
-                    openSessions = state.openSessions,
-                    currentSessionId = state.currentSessionId,
-                    unreadSessions = state.unreadSessions,
-                    expanded = showSessionMenu,
-                    onToggleExpand = { showSessionMenu = !showSessionMenu },
-                    onSelectSession = { id ->
-                        actions.onSelectSession(id)
-                        showSessionMenu = false
-                    },
-                    onCloseSession = actions.onCloseSession
+            }
+
+            // --- Right-side action cluster ---
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(4.dp)
+            ) {
+                // Agent dropdown (Material 3 TextButton)
+                Box {
+                    TextButton(
+                        onClick = { showAgentMenu = true },
+                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp)
+                    ) {
+                        Text(
+                            text = state.selectedAgentName,
+                            style = MaterialTheme.typography.labelSmall,
+                            fontWeight = FontWeight.SemiBold,
+                            color = MaterialTheme.colorScheme.primary,
+                            maxLines = 1
+                        )
+                    }
+                    DropdownMenu(
+                        expanded = showAgentMenu,
+                        onDismissRequest = { showAgentMenu = false }
+                    ) {
+                        state.agents.forEach { agent ->
+                            DropdownMenuItem(
+                                text = {
+                                    Text(
+                                        agent.name,
+                                        color = if (agent.name == state.selectedAgentName)
+                                            MaterialTheme.colorScheme.primary
+                                        else
+                                            MaterialTheme.colorScheme.onSurface
+                                    )
+                                },
+                                onClick = {
+                                    actions.onSelectAgent(agent.name)
+                                    showAgentMenu = false
+                                }
+                            )
+                        }
+                    }
+                }
+
+                // Todo badge — only rendered when there are todos. Icon-only
+                // (no count) to keep the toolbar quiet; the count is still
+                // visible inside the dialog.
+                if (state.sessionTodos.isNotEmpty()) {
+                    Surface(
+                        onClick = { showTodoDialog = true },
+                        shape = RoundedCornerShape(50),
+                        color = Color.Transparent
+                    ) {
+                        Icon(
+                            Icons.Default.Checklist,
+                            contentDescription = stringResource(R.string.chat_todo),
+                            modifier = Modifier
+                                .padding(horizontal = 10.dp, vertical = 5.dp)
+                                .size(16.dp),
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                }
+
+                // Context usage ring
+                Surface(
+                    onClick = { showContextDialog = true },
+                    shape = RoundedCornerShape(50),
+                    color = Color.Transparent
+                ) {
+                    ContextUsageRing(usage = state.contextUsage)
+                }
+
+                if (state.showSettingsButton) {
+                    IconButton(
+                        onClick = actions.onNavigateToSettings,
+                        modifier = Modifier.size(36.dp)
+                    ) {
+                        Icon(
+                            Icons.Default.Settings,
+                            contentDescription = stringResource(R.string.nav_settings),
+                            modifier = Modifier.size(20.dp),
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                }
+
+                // Server status indicator: dot only (no text). Slightly
+                // larger than the previous glyph so it remains tappable.
+                val dotColor = when {
+                    state.isConnecting -> Color(0xFFFFA500)
+                    state.isConnected -> Color(0xFF4CAF50)
+                    state.connectionPhase == null -> MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.4f)
+                    else -> Color(0xFFF44336)
+                }
+                Box(
+                    modifier = Modifier
+                        .clickable { showServerDialog = true }
+                        .padding(horizontal = 8.dp, vertical = 6.dp)
+                        .size(12.dp)
+                        .background(color = dotColor, shape = CircleShape)
                 )
             }
         }
@@ -374,6 +388,7 @@ private fun workdirBasename(directory: String): String =
 
 @Composable
 private fun SessionDropdownRow(
+    modifier: Modifier = Modifier,
     currentSession: Session?,
     openSessions: List<Session>,
     currentSessionId: String?,
@@ -387,8 +402,7 @@ private fun SessionDropdownRow(
     Box {
         Row(
             verticalAlignment = Alignment.CenterVertically,
-            modifier = Modifier
-                .fillMaxWidth()
+            modifier = modifier
                 .clickable(onClick = onToggleExpand)
                 .padding(vertical = 2.dp)
         ) {

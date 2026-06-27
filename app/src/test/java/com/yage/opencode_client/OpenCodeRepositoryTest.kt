@@ -20,6 +20,8 @@ import com.yage.opencode_client.data.model.Session
 import com.yage.opencode_client.data.model.SessionStatus
 import com.yage.opencode_client.data.model.TodoItem
 import com.yage.opencode_client.data.repository.OpenCodeRepository
+import com.yage.opencode_client.util.TrafficTracker
+import io.mockk.mockk
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -51,7 +53,7 @@ class OpenCodeRepositoryTest {
     @Before
     fun setup() = runBlocking {
         server.start()
-        repository = OpenCodeRepository()
+        repository = OpenCodeRepository(mockk(relaxed = true))
         repository.configure(baseUrl = server.url("/").toString().trimEnd('/'))
     }
 

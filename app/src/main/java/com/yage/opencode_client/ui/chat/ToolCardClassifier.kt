@@ -23,11 +23,31 @@ object ToolCardClassifier {
         "patch", "edit", "write", "read",
     )
 
+    /**
+     * Tools that mutate files (write/edit/patch). These render as the unified
+     * collapsible PatchCard (basename + diff stats) instead of the read-only
+     * FileCard grid.
+     */
+    val writeFilePrefixes = listOf(
+        "apply_patch", "edit_file", "write_file", "patch", "edit", "write",
+    )
+
     fun isFileOperation(part: Part): Boolean {
         if (part.isPatch && part.filePathsForNavigationFiltered.isNotEmpty()) return true
         if (!part.isTool) return false
         val tool = part.tool?.lowercase() ?: return false
         return fileOpToolPrefixes.any { tool.startsWith(it) }
+    }
+
+    /**
+     * True for file-mutating operations (write/edit/patch with a navigable path).
+     * Read-only file tools fall through to the FileCard grid.
+     */
+    fun isWriteFileOperation(part: Part): Boolean {
+        if (part.isPatch && part.filePathsForNavigationFiltered.isNotEmpty()) return true
+        if (!part.isTool) return false
+        val tool = part.tool?.lowercase() ?: return false
+        return writeFilePrefixes.any { tool.startsWith(it) }
     }
 
     /**

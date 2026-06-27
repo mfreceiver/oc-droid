@@ -21,6 +21,8 @@ import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -62,8 +64,10 @@ import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.role
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.yage.opencode_client.R
+import com.yage.opencode_client.data.api.CommandInfo
 import com.yage.opencode_client.data.model.ComposerImageAttachment
 import com.yage.opencode_client.data.model.PermissionRequest
 import com.yage.opencode_client.data.model.PermissionResponse
@@ -82,9 +86,34 @@ internal fun ChatInputBar(
     onAddImages: () -> Unit,
     onRemoveImage: (String) -> Unit,
     onAbort: () -> Unit,
+    availableCommands: List<CommandInfo> = emptyList(),
+    onExecuteCommand: (command: String, arguments: String) -> Unit = { _, _ -> }
 ) {
     val canSend = text.isNotBlank() || imageAttachments.isNotEmpty()
     val composerStatus = if (isBusy) agentActivityText ?: stringResource(R.string.chat_agent_running) else null
+
+    // --- Slash-command autocomplete state ---
+    // The composer offers command suggestions when the user types a leading
+    // "/" with no space yet (i.e. still in the command-name token). Matching
+    // is prefix-based against the merged local+server command list. Tapping a
+    // suggestion fills the input with "/<name> " so the user can append
+    // arguments; pressing send dispatches the command (rather than treating
+    // it as a normal chat message).
+    val isCommandInput = text.startsWith("/")
+    val commandNameToken = if (isCommandInput) {
+        text.removePrefix("/").substringBefore(' ').lowercase()
+    } else ""
+    val stillTypingCommand = isCommandInput && !text.contains(' ')
+    val matchingCommands = remember(text, availableCommands) {
+        if (!stillTypingCommand) emptyList()
+        else availableCommands.filter { info ->
+            val n = info.name.lowercase()
+            // Suggest names that extend what the user typed (exclude the exact
+            // match — once they have fully typed a name, the suggestion is
+            // noise). Empty token (just "/") lists everything.
+            n.startsWith(commandNameToken) && n != commandNameToken
+        }
+    }
 
     Surface(
         modifier = Modifier.fillMaxWidth().imePadding(),
@@ -101,6 +130,17 @@ internal fun ChatInputBar(
                     isBusy = isBusy,
                     startedAtMillis = if (isBusy) agentStartedAtMillis else null,
                     onAbort = onAbort,
+                )
+            }
+
+            // Command suggestions panel — rendered above the input row (the
+            // input sits at the bottom of the screen, so this visual ordering
+            // keeps the suggestions visible without a popup that would open
+            // off-screen below).
+            if (matchingCommands.isNotEmpty()) {
+                CommandSuggestionsPanel(
+                    commands = matchingCommands,
+                    onPick = { name -> onTextChange("/$name ") }
                 )
             }
 
@@ -138,7 +178,14 @@ internal fun ChatInputBar(
                 }
 
                 ChatPrimaryActionButton(
-                    onClick = onSend,
+                    onClick = {
+                        handleComposerSend(
+                            text = text,
+                            availableCommands = availableCommands,
+                            onSendMessage = onSend,
+                            onExecuteCommand = onExecuteCommand
+                        )
+                    },
                     enabled = canSend,
                     containerColor = MaterialTheme.colorScheme.primary,
                     contentColor = Color.White,
@@ -148,6 +195,78 @@ internal fun ChatInputBar(
                 )
             }
 
+        }
+    }
+}
+
+/**
+ * Routes the send-tap: a `/`-prefixed text matching a known command is
+ * dispatched via [onExecuteCommand] (and the typed text is parsed into
+ * command name + argument string); anything else falls through to a normal
+ * [onSendMessage].
+ */
+private fun handleComposerSend(
+    text: String,
+    availableCommands: List<CommandInfo>,
+    onSendMessage: () -> Unit,
+    onExecuteCommand: (String, String) -> Unit
+) {
+    val trimmed = text.trim()
+    if (trimmed.startsWith("/")) {
+        val withoutSlash = trimmed.removePrefix("/")
+        val cmdName = withoutSlash.substringBefore(' ').lowercase()
+        val args = withoutSlash.substringAfter(' ', "").trim()
+        val known = availableCommands.any { it.name.equals(cmdName, ignoreCase = true) }
+        if (known) {
+            onExecuteCommand(cmdName, args)
+            return
+        }
+    }
+    onSendMessage()
+}
+
+@Composable
+private fun CommandSuggestionsPanel(
+    commands: List<CommandInfo>,
+    onPick: (String) -> Unit
+) {
+    Surface(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(bottom = 4.dp),
+        shape = RoundedCornerShape(12.dp),
+        color = MaterialTheme.colorScheme.surfaceVariant,
+        tonalElevation = 1.dp
+    ) {
+        // Cap the visible list so a long server command catalog cannot shove
+        // the input off-screen on small devices.
+        LazyColumn(modifier = Modifier.heightIn(max = 220.dp)) {
+            items(commands, key = { it.name }) { cmd ->
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable { onPick(cmd.name) }
+                        .padding(horizontal = 12.dp, vertical = 8.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        text = "/${cmd.name}",
+                        style = MaterialTheme.typography.bodyMedium,
+                        fontFamily = FontFamily.Monospace,
+                        fontWeight = FontWeight.SemiBold,
+                        color = MaterialTheme.colorScheme.primary
+                    )
+                    cmd.description?.takeIf { it.isNotBlank() }?.let { desc ->
+                        Spacer(modifier = Modifier.width(12.dp))
+                        Text(
+                            text = desc,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            maxLines = 1
+                        )
+                    }
+                }
+            }
         }
     }
 }

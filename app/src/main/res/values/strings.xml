@@ -30,6 +30,11 @@
     <string name="settings_about">About</string>
     <string name="settings_about_description">A native Android client for OpenCode AI coding agent.</string>
     <string name="settings_version">Version %1$s</string>
+    <string name="settings_traffic">Traffic</string>
+    <string name="settings_traffic_sent">Sent</string>
+    <string name="settings_traffic_received">Received</string>
+    <string name="settings_traffic_total">Total</string>
+    <string name="settings_traffic_reset">Reset</string>
     <string name="host_profile_edit_icon">Edit</string>
     <string name="host_profile_test_icon">Test connection</string>
     <string name="host_profile_delete_confirm_title">Delete profile</string>
@@ -149,5 +154,17 @@
     <string name="chat_switch_agent">Switch agent</string>
     <string name="chat_thinking">Thinking</string>
     <string name="chat_sub_agent">Sub-agent</string>
+    <string name="chat_sub_agent_done">Sub-agent done</string>
+    <string name="chat_tool_calls">%1$d tool calls</string>
+    <string name="chat_click_to_view">Tap to view</string>
+    <string name="chat_files_changed">%1$d files changed</string>
     <string name="host_profile_delete_failed">Delete failed</string>
+    <string name="sessions_draft_badge">Draft</string>
+    <string name="sessions_connect_new_action">Connect a new project</string>
+    <string name="chat_command_section">Commands</string>
+    <string name="chat_command_clear">Start a new session</string>
+    <string name="chat_command_compact">Compact conversation history</string>
+    <string name="chat_command_undo">Undo the last change</string>
+    <string name="chat_command_redo">Redo the last undone change</string>
+    <string name="chat_command_no_session">Open or create a session before running /%1$s</string>
 </resources>

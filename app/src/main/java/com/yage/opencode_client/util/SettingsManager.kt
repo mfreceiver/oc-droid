@@ -149,6 +149,19 @@ class SettingsManager @Inject constructor(
         encryptedPrefs.edit().putString(KEY_SESSION_DRAFTS, Json.encodeToString(map)).apply()
     }
 
+    /**
+     * Cumulative bytes sent over HTTP, persisted across restarts. Seeded into
+     * [TrafficTracker] on app start; updated by [TrafficTracker] on every
+     * counted request. See [trafficBytesReceived] for the inbound counterpart.
+     */
+    var trafficBytesSent: Long
+        get() = encryptedPrefs.getLong(KEY_TRAFFIC_SENT, 0L)
+        set(value) = encryptedPrefs.edit().putLong(KEY_TRAFFIC_SENT, value).apply()
+
+    var trafficBytesReceived: Long
+        get() = encryptedPrefs.getLong(KEY_TRAFFIC_RECEIVED, 0L)
+        set(value) = encryptedPrefs.edit().putLong(KEY_TRAFFIC_RECEIVED, value).apply()
+
     fun getAgentForSession(sessionId: String): String? {
         val json = encryptedPrefs.getString(KEY_SESSION_AGENTS, null) ?: return null
         return try {
@@ -186,6 +199,8 @@ class SettingsManager @Inject constructor(
         private const val KEY_SESSION_AGENTS = "session_agents"
         private const val KEY_MARKDOWN_FONT_SIZES = "markdown_font_sizes_json"
         private const val KEY_OPEN_SESSION_IDS = "open_session_ids"
+        private const val KEY_TRAFFIC_SENT = "traffic_sent"
+        private const val KEY_TRAFFIC_RECEIVED = "traffic_received"
 
         private fun basicAuthPasswordKey(passwordId: String): String = "basic_auth_password_$passwordId"
         private fun tunnelPasswordKey(id: String): String = "tunnel_password_$id"

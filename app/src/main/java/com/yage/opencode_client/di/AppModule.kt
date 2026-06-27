@@ -1,6 +1,7 @@
 package com.yage.opencode_client.di
 
 import com.yage.opencode_client.data.repository.OpenCodeRepository
+import com.yage.opencode_client.util.TrafficTracker
 import dagger.Module
 import dagger.Provides
 import dagger.hilt.InstallIn
@@ -12,5 +13,7 @@ import javax.inject.Singleton
 object AppModule {
     @Provides
     @Singleton
-    fun provideOpenCodeRepository(): OpenCodeRepository = OpenCodeRepository()
+    fun provideOpenCodeRepository(
+        trafficTracker: TrafficTracker
+    ): OpenCodeRepository = OpenCodeRepository(trafficTracker)
 }

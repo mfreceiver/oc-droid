@@ -21,9 +21,12 @@ import javax.net.ssl.TrustManager
 import javax.net.ssl.X509TrustManager
 import javax.inject.Inject
 import javax.inject.Singleton
+import com.yage.opencode_client.util.TrafficTracker
 
 @Singleton
-class OpenCodeRepository @Inject constructor() {
+class OpenCodeRepository @Inject constructor(
+    private val trafficTracker: TrafficTracker
+) {
     private var baseUrl: String = DEFAULT_SERVER
     private var username: String? = null
     private var password: String? = null
@@ -88,6 +91,21 @@ class OpenCodeRepository @Inject constructor() {
                     }
                     .build()
                 chain.proceed(request)
+            }
+            // Traffic accounting: record request body (sent) and response body
+            // (received) byte counts. contentLength() returns -1 for unknown
+            // lengths (chunked / SSE streams), which TrafficTracker.add skips,
+            // so streaming responses are intentionally under-counted.
+            .addInterceptor { chain ->
+                val request = chain.request()
+                val sentBytes = request.body?.contentLength() ?: 0L
+                val response = chain.proceed(request)
+                val receivedBytes = response.body?.contentLength() ?: 0L
+                trafficTracker.add(
+                    sent = if (sentBytes > 0L) sentBytes else 0L,
+                    received = if (receivedBytes > 0L) receivedBytes else 0L
+                )
+                response
             }
             .connectTimeout(15, java.util.concurrent.TimeUnit.SECONDS)
             .readTimeout(0, java.util.concurrent.TimeUnit.SECONDS)
@@ -302,6 +320,37 @@ class OpenCodeRepository @Inject constructor() {
     suspend fun getProviders(): Result<ProvidersResponse> = runCatching { api.getProviders() }
 
     suspend fun getAgents(): Result<List<AgentInfo>> = runCatching { api.getAgents() }
+
+    /**
+     * Lists the server-defined slash commands. Combined in the ViewModel with a
+     * small set of client-side commands (/clear, /compact, /undo, /redo) to
+     * drive the composer's `/`-autocomplete.
+     */
+    suspend fun getCommands(): Result<List<CommandInfo>> = runCatching { api.getCommands() }
+
+    /**
+     * Executes a slash command against [sessionId]. The current workdir context
+     * (set when the session was selected) is injected automatically by the OkHttp
+     * interceptor; callers do NOT need to pass it explicitly.
+     *
+     * Returns a typed error on non-2xx responses so the ViewModel can surface
+     * the server's error body to the user.
+     */
+    suspend fun executeCommand(
+        sessionId: String,
+        command: String,
+        arguments: Map<String, String> = emptyMap(),
+        agent: String? = null
+    ): Result<Unit> = runCatching {
+        val response = api.executeCommand(
+            sessionId,
+            CommandRequest(command = command, arguments = arguments, agent = agent)
+        )
+        if (!response.isSuccessful) {
+            val errorBody = response.errorBody()?.string() ?: response.message()
+            throw Exception("Command failed ${response.code()}: $errorBody")
+        }
+    }
 
     suspend fun getSessionDiff(sessionId: String): Result<List<FileDiff>> = runCatching {
         api.getSessionDiff(sessionId)

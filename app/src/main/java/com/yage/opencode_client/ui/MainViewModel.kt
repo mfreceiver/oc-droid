@@ -3,17 +3,20 @@ package com.yage.opencode_client.ui
 import android.util.Log
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.yage.opencode_client.data.api.CommandInfo
 import com.yage.opencode_client.data.model.*
 import com.yage.opencode_client.data.repository.HostProfileStore
 import com.yage.opencode_client.data.repository.OpenCodeRepository
 import com.yage.opencode_client.util.SettingsManager
 import com.yage.opencode_client.util.LanguageMode
 import com.yage.opencode_client.util.ThemeMode
+import com.yage.opencode_client.util.TrafficTracker
 import com.yage.opencode_client.ui.theme.MarkdownFontSizes
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.launch
+import java.util.Locale
 import javax.inject.Inject
 
 sealed class TunnelActivationState {
@@ -110,8 +113,41 @@ data class AppState(
      * their [lastViewedTime] (and are not the currently-open session).
      * Drives the unread badge in the session lists. Cleared on open.
      */
-    val unreadSessions: Set<String> = emptySet()
+    val unreadSessions: Set<String> = emptySet(),
+    /**
+     * Sessions the user has opened (cleared the unread badge) and that are
+     * still eligible to be *re-marked* unread if they remain busy when the
+     * user navigates away, or if a new message.created arrives for them while
+     * they are not the current session.
+     *
+     * A session leaves this set when the server reports it going idle
+     * (busy -> idle) — at that point the in-flight task is complete and there
+     * is nothing further to surface. This implements the "swipe away from a
+     * busy session = re-mark unread; session completes cleanly = do not"
+     * behaviour.
+     */
+    val tempClearedUnread: Set<String> = emptySet(),
+    /**
+     * Slash commands available in the composer. Merges a small set of
+     * client-side commands (/clear, /compact, /undo, /redo) with the
+     * server-published list (GET /command). Populated by
+     * [MainViewModel.loadCommands] on connect.
+     */
+    val availableCommands: List<CommandInfo> = emptyList(),
+    /**
+     * Cumulative HTTP traffic counters mirrored from [TrafficTracker] for the
+     * Settings page. Refreshed on-demand by [MainViewModel.refreshTrafficStats]
+     * (e.g. when Settings opens) rather than on every request, to avoid
+     * recomposing the whole app on each network call. [totalTrafficBytes] is
+     * derived so it can never drift out of sync.
+     */
+    val trafficSent: Long = 0L,
+    val trafficReceived: Long = 0L
 ) {
+    /** Combined sent + received traffic, derived so it never drifts. */
+    val totalTrafficBytes: Long
+        get() = trafficSent + trafficReceived
+
     data class ContextUsage(
         val percentage: Float,
         val totalTokens: Int,
@@ -322,7 +358,8 @@ data class AppState(
 class MainViewModel @Inject constructor(
     internal val repository: OpenCodeRepository,
     internal val settingsManager: SettingsManager,
-    private val hostProfileStore: HostProfileStore
+    private val hostProfileStore: HostProfileStore,
+    internal val trafficTracker: TrafficTracker
 ) : ViewModel() {
 
     private val _state = MutableStateFlow(AppState())
@@ -387,9 +424,11 @@ class MainViewModel @Inject constructor(
                 // [sessions]/[openSessionIds] for the new host.
                 openSessionIds = emptyList(),
                 unreadSessions = emptySet(),
+                tempClearedUnread = emptySet(),
                 lastViewedTime = emptyMap(),
                 sessions = emptyList(),
-                draftWorkdir = null
+                draftWorkdir = null,
+                availableCommands = emptyList()
             ) }
             settingsManager.currentSessionId = null
             settingsManager.openSessionIds = emptyList()
@@ -506,6 +545,98 @@ class MainViewModel @Inject constructor(
         loadAgents()
         loadProviders()
         loadPendingQuestions()
+        loadCommands()
+    }
+
+    /**
+     * Best-effort fetch of the server-published slash commands. Merges the
+     * server list with a small set of client-side commands (/clear, /compact,
+     * /undo, /redo) so the composer's `/`-autocomplete surfaces both. Failures
+     * (older servers without GET /command, transient network errors) are
+     * swallowed: only the client-side commands remain available.
+     */
+    private fun loadCommands() {
+        viewModelScope.launch {
+            repository.getCommands()
+                .onSuccess { serverCommands ->
+                    _state.update {
+                        it.copy(availableCommands = mergeCommands(localCommands(), serverCommands))
+                    }
+                }
+                .onFailure { error ->
+                    reportNonFatalIssue(TAG, "Failed to load commands", error)
+                    _state.update { it.copy(availableCommands = localCommands()) }
+                }
+        }
+    }
+
+    private fun localCommands(): List<CommandInfo> = listOf(
+        CommandInfo(name = "clear", description = "Start a new session"),
+        CommandInfo(name = "compact", description = "Compact conversation history"),
+        CommandInfo(name = "undo", description = "Undo the last change"),
+        CommandInfo(name = "redo", description = "Redo the last undone change")
+    )
+
+    private fun mergeCommands(
+        local: List<CommandInfo>,
+        server: List<CommandInfo>
+    ): List<CommandInfo> {
+        // Server takes precedence on duplicates (its descriptions/hints are
+        // authoritative); local commands are appended only when the server did
+        // not also expose the same name.
+        val serverNames = server.mapTo(mutableSetOf()) { it.name.lowercase(Locale.getDefault()) }
+        val localOnly = local.filter { it.name.lowercase() !in serverNames }
+        return server + localOnly
+    }
+
+    /**
+     * Routes a `/command arguments` invocation. Local commands that have
+     * client-side semantics are handled here:
+     *   - `/clear`            -> start a new session in the current workdir.
+     *
+     * All other commands (including /compact, /undo, /redo when the server
+     * did not publish them, plus every server-defined command such as /init,
+     * /review) are forwarded to POST /session/{id}/command. The current
+     * workdir is injected by the OkHttp interceptor.
+     *
+     * [arguments] is the raw text the user typed after the command name. It is
+     * packed into the request as a single "text" argument for the server.
+     */
+    fun executeCommand(command: String, arguments: String) {
+        val cmd = command.removePrefix("/").trim().lowercase(Locale.getDefault())
+        if (cmd.isEmpty()) return
+        when (cmd) {
+            "clear" -> {
+                setInputText("")
+                // Start a new session in the current workdir (or fall back to
+                // a host-default createSession when no workdir is bound).
+                val workdir = repository.getCurrentDirectory()
+                    ?: _state.value.currentSession?.directory
+                if (workdir != null) {
+                    createSessionInWorkdir(workdir)
+                } else {
+                    createSession()
+                }
+            }
+            else -> {
+                val sessionId = _state.value.currentSessionId ?: run {
+                    _state.update {
+                        it.copy(error = "Open or create a session before running /$cmd")
+                    }
+                    return
+                }
+                setInputText("")
+                viewModelScope.launch {
+                    val args = if (arguments.isBlank()) emptyMap() else mapOf("text" to arguments)
+                    repository.executeCommand(sessionId, cmd, args)
+                        .onFailure { error ->
+                            _state.update {
+                                it.copy(error = errorMessageOrFallback(error, "Command /$cmd failed"))
+                            }
+                        }
+                }
+            }
+        }
     }
 
     fun loadSessions() {
@@ -534,6 +665,17 @@ class MainViewModel @Inject constructor(
     }
 
     fun selectSession(sessionId: String) {
+        // Capture the previously-selected session BEFORE selectSessionState
+        // overwrites currentSessionId. Used below to decide whether the
+        // session the user is leaving should be re-marked unread: if it was
+        // temp-cleared (user had viewed it) and is still busy, background
+        // activity may still produce output the user cares about — re-mark it.
+        val previousSessionId = _state.value.currentSessionId
+        val previousWasBusyAndCleared = previousSessionId != null &&
+            previousSessionId != sessionId &&
+            _state.value.tempClearedUnread.contains(previousSessionId) &&
+            _state.value.sessionStatuses[previousSessionId]?.isBusy == true
+
         selectSessionState(_state, settingsManager, sessionId)
         // Sync the repository's workdir context to the selected session so that
         // directory-scoped requests (files, prompt, create) target the right cwd.
@@ -553,10 +695,23 @@ class MainViewModel @Inject constructor(
         val targetSession = _state.value.sessions.firstOrNull { it.id == sessionId }
         val now = System.currentTimeMillis()
         _state.update {
-            it.copy(
+            // Re-mark the previous session as unread if it was busy when the
+            // user navigated away (its temp-cleared badge should resurface so
+            // the user knows there is still in-flight activity to come back to).
+            val withReMark = if (previousWasBusyAndCleared) {
+                it.copy(unreadSessions = it.unreadSessions + previousSessionId!!)
+            } else {
+                it
+            }
+            withReMark.copy(
                 draftWorkdir = null,
-                unreadSessions = it.unreadSessions - sessionId,
-                lastViewedTime = it.lastViewedTime + (sessionId to now)
+                unreadSessions = withReMark.unreadSessions - sessionId,
+                lastViewedTime = withReMark.lastViewedTime + (sessionId to now),
+                // Track the newly-selected session as "temp-cleared" so a
+                // subsequent switch away (while busy) or a new message.created
+                // can re-mark it. The previous session stays in the set until
+                // the server reports it going idle (handled in SyncActions).
+                tempClearedUnread = withReMark.tempClearedUnread + sessionId
             )
         }
         if (targetSession?.parentId == null) {
@@ -1000,6 +1155,27 @@ class MainViewModel @Inject constructor(
 
     fun clearError() {
         _state.update { it.copy(error = null) }
+    }
+
+    /**
+     * Mirrors the latest [TrafficTracker] totals into [AppState] so the Settings
+     * page renders current figures. Called on-demand (e.g. when Settings opens)
+     * rather than on every request, to avoid global recomposition per network
+     * call — the counter itself accumulates continuously in the background.
+     */
+    fun refreshTrafficStats() {
+        _state.update {
+            it.copy(
+                trafficSent = trafficTracker.totalBytesSent,
+                trafficReceived = trafficTracker.totalBytesReceived
+            )
+        }
+    }
+
+    /** Zeros the cumulative traffic counters (in-memory + persisted). */
+    fun resetTrafficStats() {
+        trafficTracker.reset()
+        refreshTrafficStats()
     }
 
     fun refreshCurrentHost() {

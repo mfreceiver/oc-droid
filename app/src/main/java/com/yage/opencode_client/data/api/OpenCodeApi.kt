@@ -108,6 +108,32 @@ interface OpenCodeApi {
     @GET("agent")
     suspend fun getAgents(): List<AgentInfo>
 
+    /**
+     * Lists commands supported by the server (e.g. /init, /review). Used by
+     * the chat composer to drive `/`-command autocompletion. Combined with a
+     * small set of client-side commands (/clear, /compact, /undo, /redo) in
+     * the ViewModel before being exposed to the UI.
+     *
+     * Marked Skip-Dir: the command list is global and not scoped to a workdir.
+     */
+    @Headers("X-Opencode-Skip-Dir: 1")
+    @GET("command")
+    suspend fun getCommands(): List<CommandInfo>
+
+    /**
+     * Executes a slash command against [sessionId]. The directory context is
+     * inherited from the OkHttp interceptor (i.e. the session's workdir), so
+     * this endpoint deliberately does NOT carry Skip-Dir.
+     *
+     * Returns Unit on success; failures surface through the Result wrapper in
+     * the repository.
+     */
+    @POST("session/{id}/command")
+    suspend fun executeCommand(
+        @Path("id") sessionId: String,
+        @Body body: CommandRequest
+    ): Response<Unit>
+
     @Headers("X-Opencode-Skip-Dir: 1")
     @GET("session/{id}/diff")
     suspend fun getSessionDiff(@Path("id") sessionId: String): List<FileDiff>
@@ -206,4 +232,45 @@ data class ForkSessionRequest(
 data class RevertSessionRequest(
     @kotlinx.serialization.SerialName("messageID") val messageId: String,
     @kotlinx.serialization.SerialName("partID") val partId: String? = null
+)
+
+/**
+ * Server-defined slash command metadata returned by GET /command. Used to drive
+ * the composer's `/`-command autocomplete. The [hints] bag carries optional
+ * argument schema and toolbar affordances; the client only reads a few keys.
+ */
+@kotlinx.serialization.Serializable
+data class CommandInfo(
+    val name: String,
+    val description: String? = null,
+    val agent: String? = null,
+    val hints: CommandHints? = null
+)
+
+@kotlinx.serialization.Serializable
+data class CommandHints(
+    /**
+     * Optional UI affordances keyed by action name (e.g. "primary" -> "Run").
+     * Opaque to the client; surfaced for future richer UI.
+     */
+    val actions: Map<String, String>? = null,
+    /**
+     * Optional argument descriptors. Kept as raw JsonObject because the server
+     * schema is open-ended (per-argument validation rules, types, etc.).
+     */
+    val arguments: List<JsonObject>? = null,
+    val locations: List<String>? = null,
+    val enabled: Boolean? = null
+)
+
+/**
+ * Body for POST /session/{id}/command. [arguments] is a free-form map keyed
+ * by argument name; the client typically passes simple string values parsed
+ * from the composer.
+ */
+@kotlinx.serialization.Serializable
+data class CommandRequest(
+    val command: String,
+    val arguments: Map<String, String> = emptyMap(),
+    val agent: String? = null
 )

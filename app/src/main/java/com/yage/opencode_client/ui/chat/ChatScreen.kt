@@ -184,6 +184,10 @@ fun ChatScreen(
                 onAddImages = { imagePickerLauncher.launch("image/*") },
                 onRemoveImage = viewModel::removeImageAttachment,
                 onAbort = { viewModel.abortSession() },
+                availableCommands = state.availableCommands,
+                onExecuteCommand = { command, arguments ->
+                    viewModel.executeCommand(command, arguments)
+                }
             )
         }
 
