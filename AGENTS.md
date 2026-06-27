@@ -39,6 +39,11 @@ export PATH="$JAVA_HOME/bin:$PATH:$ANDROID_HOME/platform-tools"
 - **keystore 与密码务必备份**——丢失则无法以同一身份升级 App。密码不在本文件，存于本机 `local.properties`。
 - 新增 App 签名应使用**独立 key**（一 App 一 key，规范），不要复用 x-liker / syncplayer 的 key。
 
+## 发布产物
+
+- 发布的 APK 统一放**项目根目录 `APK/` 文件夹**（已 gitignore，不入库），按 `opencode_client-<版本号>.apk` 命名（如 `opencode_client-0.1.20260622.apk`）。
+- 发版用 `tea` CLI 打 Gitea Release，tag 用 `v<版本>-fork.N`（fork 后缀避免与上游冲突），tag 指向 `dev` 分支提交。详见 `docs/build-apk.md` 第 6 节。
+
 ## 测试
 
 ```bash

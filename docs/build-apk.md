@@ -180,20 +180,42 @@ versionName = "0.1.20260622"    // 上游发版日期
 
 ---
 
-## 6. 发版到自建 Gitea（可选，参考 x-liker）
+## 6. 发版产物与 Gitea Release
 
-本机已装 `tea` CLI（`/home/mar/tools/tea/tea`）。打好 release APK 后：
+### 6.1 发布产物约定
+
+所有发布的 APK 放到**项目根目录的 `APK/` 文件夹**（已被 `.gitignore` 忽略，不入库），按 **`opencode_client-<versionName>.apk`** 命名：
+
+```
+APK/
+└── opencode_client-0.1.20260622.apk     # 即 opencode_client-<版本号>.apk
+```
+
+一键产出（从构建产物拷贝并命名）：
 
 ```bash
-mkdir -p releases
-cp app/build/outputs/apk/release/app-release.apk releases/opencode_client-$(grep versionName app/build.gradle.kts | head -1 | sed 's/.*"\(.*\)".*/\1/').apk
+mkdir -p APK
+VERSION=$(grep 'versionName' app/build.gradle.kts | head -1 | sed 's/.*"\([^"]*\)".*/\1/')
+cp app/build/outputs/apk/release/app-release.apk "APK/opencode_client-$VERSION.apk"
+```
+
+### 6.2 发版到自建 Gitea（用 tea CLI）
+
+本机已装 `tea` CLI（`/home/mar/tools/tea/tea`）。**tag 指向 `dev` 分支的发布提交**（dev 承载 fork 的签名配置与自定义）：
+
+```bash
+TAG="v$VERSION-fork.1"   # fork 发版加 -fork.N 后缀，避免与上游 tag 冲突
+git tag -a "$TAG" -m "Fork release: signed release APK based on upstream $VERSION"
+git push origin "$TAG"
 
 /home/mar/tools/tea/tea releases create -r mfreceiver/opencode_android_client \
-  --tag v<version> \
-  -t "v<version>" \
-  -n "Release v<version>" \
-  -a releases/opencode_client-<version>.apk
+  --tag "$TAG" \
+  -t "$TAG" \
+  -n "Release $TAG" \
+  -a "APK/opencode_client-$VERSION.apk"
 ```
+
+> `master` 纯跟上游、不掺自定义，因此发版 tag 打在 `dev` 上。详见 `FORK_SYNC.md` 的两线分支模型。
 
 ---
 
@@ -205,7 +227,8 @@ cp app/build/outputs/apk/release/app-release.apk releases/opencode_client-$(grep
 | Android SDK | android-35 + build-tools 35.0.0/35.0.1 ✓ |
 | `./gradlew assembleDebug` | **BUILD SUCCESSFUL**（12m12s，首次）✓ |
 | Debug APK | `app/build/outputs/apk/debug/app-debug.apk`（26 MB，已签名）✓ |
-| Release 签名 | 需按第 3 节配置（上游未提供） |
+| Release 签名 | 已配置（`signingConfigs.release` 读 `local.properties`），`assembleRelease` 通过 ✓ |
+| Release APK | `APK/opencode_client-0.1.20260622.apk`（4.3 MB，已签名校验 OK）✓ |
 
 ---
 
