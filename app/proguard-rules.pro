@@ -30,3 +30,15 @@
 # If you keep the line number information, uncomment this to
 # hide the original source file name.
 #-renamesourcefileattribute SourceFile
+
+# --- Keep line numbers for readable release stack traces ---
+-keepattributes SourceFile,LineNumberTable
+-renamesourcefileattribute SourceFile
+
+# --- R8: disable optimization ---
+# R8 miscompiles synchronized blocks inside coroutines -> java.lang.VerifyError
+# ("expected to be within a catch-all for an instruction where a monitor is held")
+# on release (e.g. Android 16). Debug builds are unaffected because they skip R8.
+# Disabling optimization avoids the invalid bytecode; shrinking + obfuscation
+# are kept, so release APK size is essentially unchanged.
+-dontoptimize
