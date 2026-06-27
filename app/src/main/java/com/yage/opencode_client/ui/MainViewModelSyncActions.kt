@@ -66,7 +66,6 @@ internal fun handleIncomingSseEvent(
             val created = parseSessionCreatedEvent(event)
             if (created != null) {
                 state.update { it.copy(sessions = upsertSession(it.sessions, created.session)) }
-                onRefreshSessions()
             } else {
                 onNonFatalIssue("Ignoring invalid session.created payload")
             }
@@ -75,7 +74,6 @@ internal fun handleIncomingSseEvent(
             val updated = parseSessionUpdatedEvent(event)
             if (updated != null) {
                 state.update { it.copy(sessions = upsertSession(it.sessions, updated)) }
-                onRefreshSessions()
             } else {
                 onNonFatalIssue("Ignoring invalid session.updated payload")
             }
@@ -95,7 +93,6 @@ internal fun handleIncomingSseEvent(
                             streamingReasoningPart = null
                         )
                     }
-                    onRefreshSessions()
                     onRefreshMessages(statusEvent.sessionId, false)
                 }
             } else {
@@ -104,20 +101,14 @@ internal fun handleIncomingSseEvent(
         }
         "message.created" -> {
             val sessionId = event.payload.getString("sessionID")
-            if (sessionId != null) {
-                onRefreshSessions()
-                if (sessionId == state.value.currentSessionId) {
-                    onRefreshMessages(sessionId, true)
-                }
+            if (sessionId != null && sessionId == state.value.currentSessionId) {
+                onRefreshMessages(sessionId, true)
             }
         }
         "message.updated" -> {
             val sessionId = event.payload.getString("sessionID")
-            if (sessionId != null) {
-                onRefreshSessions()
-                if (sessionId == state.value.currentSessionId) {
-                    onRefreshMessages(sessionId, false)
-                }
+            if (sessionId != null && sessionId == state.value.currentSessionId) {
+                onRefreshMessages(sessionId, false)
             }
         }
         "message.part.updated" -> {

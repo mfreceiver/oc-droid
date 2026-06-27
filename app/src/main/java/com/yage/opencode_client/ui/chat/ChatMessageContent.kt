@@ -29,7 +29,6 @@ import androidx.compose.material.icons.filled.ChevronRight
 import androidx.compose.material.icons.filled.Description
 import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.KeyboardArrowDown
-import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.automirrored.filled.OpenInNew
 import androidx.compose.material.icons.filled.Psychology
 import androidx.compose.material.icons.filled.RadioButtonUnchecked
@@ -37,8 +36,6 @@ import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
-import androidx.compose.material3.DropdownMenu
-import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -94,8 +91,7 @@ internal fun ChatMessageList(
     workspaceDirectory: String?,
     onLoadMore: () -> Unit,
     onFileClick: (String) -> Unit,
-    onForkFromMessage: (String) -> Unit,
-    onEditFromMessage: (String) -> Unit
+    onOpenSubAgent: (String) -> Unit
 ) {
     val listState = rememberLazyListState()
     val layoutInfo = listState.layoutInfo
@@ -165,8 +161,7 @@ internal fun ChatMessageList(
                 repository = repository,
                 workspaceDirectory = workspaceDirectory,
                 onFileClick = onFileClick,
-                onForkFromMessage = onForkFromMessage,
-                onEditFromMessage = onEditFromMessage
+                onOpenSubAgent = onOpenSubAgent
             )
         }
         if (isLoading && messages.size >= messageLimit) {
@@ -203,8 +198,7 @@ private fun MessageRow(
     repository: OpenCodeRepository,
     workspaceDirectory: String?,
     onFileClick: (String) -> Unit,
-    onForkFromMessage: (String) -> Unit,
-    onEditFromMessage: (String) -> Unit
+    onOpenSubAgent: (String) -> Unit
 ) {
     val isUser = message.info.isUser
 
@@ -255,10 +249,24 @@ private fun MessageRow(
                     }
                 }
 
-                if (otherParts.isNotEmpty()) {
+                // Sub-agent (`task`) cards render standalone so they stay visible
+                // and clickable even when bundled with other tools — burying them
+                // inside the collapsed "N tool calls" row would hide delegation
+                // events the user needs to see and tap into.
+                val (subAgentParts, plainToolParts) = otherParts.partition { it.isSubAgentTask }
+                subAgentParts.forEach { subPart ->
+                    SubAgentCard(
+                        part = subPart,
+                        onOpenSubAgent = onOpenSubAgent,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                }
+
+                if (plainToolParts.isNotEmpty()) {
                     ToolCallsRow(
-                        parts = otherParts,
+                        parts = plainToolParts,
                         onFileClick = onFileClick,
+                        onOpenSubAgent = onOpenSubAgent,
                         modifier = Modifier.fillMaxWidth()
                     )
                 }
@@ -272,70 +280,24 @@ private fun MessageRow(
                     repository = repository,
                     workspaceDirectory = workspaceDirectory,
                     onFileClick = onFileClick,
+                    onOpenSubAgent = onOpenSubAgent,
                     modifier = Modifier.fillMaxWidth()
                 )
                 i += 1
             }
         }
-        Row(
-            modifier = Modifier.fillMaxWidth().padding(start = 4.dp, top = 2.dp),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            if (!isUser) message.info.resolvedModel?.let { model ->
+        // Model label only — the previous edit/fork overflow menu added clutter
+        // (every row had a 3-dot icon) and the actions are reachable from the
+        // session list. The provider/model tag is enough context for assistant
+        // messages; user messages render nothing here.
+        if (!isUser) {
+            message.info.resolvedModel?.let { model ->
                 Text(
                     text = "${model.providerId}/${model.modelId}",
                     style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f),
+                    modifier = Modifier.padding(start = 4.dp, top = 2.dp)
                 )
-            }
-            Spacer(modifier = Modifier.weight(1f))
-            Box {
-                var showMenu by remember { mutableStateOf(false) }
-                IconButton(
-                    onClick = { showMenu = true },
-                    modifier = Modifier.size(24.dp)
-                ) {
-                    Icon(
-                        imageVector = Icons.Default.MoreVert,
-                        contentDescription = stringResource(R.string.chat_more_options),
-                        tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f),
-                        modifier = Modifier.size(16.dp)
-                    )
-                }
-                DropdownMenu(
-                    expanded = showMenu,
-                    onDismissRequest = { showMenu = false }
-                ) {
-                    if (isUser) {
-                        DropdownMenuItem(
-                            text = { Text(stringResource(R.string.chat_edit_from_here)) },
-                            leadingIcon = {
-                                Icon(
-                                    imageVector = Icons.Default.Edit,
-                                    contentDescription = null
-                                )
-                            },
-                            onClick = {
-                                showMenu = false
-                                onEditFromMessage(message.info.id)
-                            }
-                        )
-                    } else {
-                        DropdownMenuItem(
-                            text = { Text(stringResource(R.string.chat_fork_from_here)) },
-                            leadingIcon = {
-                                Icon(
-                                    imageVector = Icons.AutoMirrored.Filled.CallSplit,
-                                    contentDescription = null
-                                )
-                            },
-                            onClick = {
-                                showMenu = false
-                                onForkFromMessage(message.info.id)
-                            }
-                        )
-                    }
-                }
             }
         }
     }
@@ -349,6 +311,7 @@ private fun PartView(
     repository: OpenCodeRepository,
     workspaceDirectory: String?,
     onFileClick: (String) -> Unit,
+    onOpenSubAgent: (String) -> Unit,
     modifier: Modifier = Modifier.fillMaxWidth()
 ) {
     when {
@@ -362,6 +325,7 @@ private fun PartView(
         part.isReasoning -> ReasoningCard(streamingTextOverride ?: part.text ?: "", part.toolReason, false, modifier)
         part.isImageAttachment -> ImageFilePart(part, modifier)
         part.isFile -> FileAttachmentPart(part, modifier)
+        part.isSubAgentTask -> SubAgentCard(part, onOpenSubAgent, modifier)
         part.isTool -> ToolCard(part, onFileClick, modifier)
         part.isPatch && part.filePathsForNavigationFiltered.isNotEmpty() -> PatchCard(part.filePathsForNavigationFiltered, onFileClick, modifier)
     }
@@ -608,6 +572,7 @@ private fun FolderContents(
 private fun ToolCallsRow(
     parts: List<Part>,
     onFileClick: (String) -> Unit,
+    onOpenSubAgent: (String) -> Unit,
     modifier: Modifier = Modifier.fillMaxWidth()
 ) {
     var expanded by remember { mutableStateOf(false) }
@@ -625,20 +590,24 @@ private fun ToolCallsRow(
                     text = "${parts.size} tool calls",
                     style = MaterialTheme.typography.labelLarge,
                     fontWeight = FontWeight.Medium,
-                    color = MaterialTheme.colorScheme.primary
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
                 Spacer(modifier = Modifier.weight(1f))
                 Icon(
                     if (expanded) Icons.Default.KeyboardArrowDown else Icons.Default.ChevronRight,
                     contentDescription = if (expanded) "Collapse" else "Expand",
-                    modifier = Modifier.size(20.dp),
-                    tint = MaterialTheme.colorScheme.primary
+                    modifier = Modifier.size(18.dp),
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant
                 )
             }
             if (expanded) {
                 Spacer(modifier = Modifier.size(8.dp))
                 parts.forEach { part ->
-                    ToolCard(part, onFileClick, Modifier.fillMaxWidth())
+                    if (part.isSubAgentTask) {
+                        SubAgentCard(part, onOpenSubAgent, Modifier.fillMaxWidth())
+                    } else {
+                        ToolCard(part, onFileClick, Modifier.fillMaxWidth())
+                    }
                 }
             }
         }
@@ -747,38 +716,40 @@ private fun ReasoningCard(
         if (isStreaming) expanded = true
     }
 
-    Card(
-        modifier = modifier.padding(vertical = 4.dp),
+    // Visually quiet: transparent container (vs ToolCard's surfaceVariant) and
+    // onSurfaceVariant label/icon so chain-of-thought reads as auxiliary context
+    // next to the more prominent tool/file cards. Kept compact (vertical 2dp,
+    // 8dp inner padding) so a long reasoning block doesn't dominate the row.
+    Surface(
+        modifier = modifier.padding(vertical = 2.dp),
         shape = RoundedCornerShape(12.dp),
-        colors = CardDefaults.cardColors(
-            containerColor = MaterialTheme.colorScheme.surfaceVariant
-        )
+        color = MaterialTheme.colorScheme.surface.copy(alpha = 0.4f)
     ) {
         Column {
             Row(
-                modifier = Modifier.fillMaxWidth().padding(12.dp),
+                modifier = Modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = 6.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Icon(
                     Icons.Default.Psychology,
                     contentDescription = null,
-                    modifier = Modifier.size(20.dp),
-                    tint = MaterialTheme.colorScheme.primary
+                    modifier = Modifier.size(14.dp),
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant
                 )
-                Spacer(modifier = Modifier.width(8.dp))
+                Spacer(modifier = Modifier.width(6.dp))
                 Text(
-                    title ?: "Thinking",
-                    style = MaterialTheme.typography.labelLarge,
-                    color = MaterialTheme.colorScheme.primary
+                    title ?: stringResource(R.string.chat_thinking),
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
                 Spacer(modifier = Modifier.weight(1f))
                 if (!isStreaming) {
-                    IconButton(onClick = { expanded = !expanded }, modifier = Modifier.size(24.dp)) {
+                    IconButton(onClick = { expanded = !expanded }, modifier = Modifier.size(22.dp)) {
                         Icon(
                             if (expanded) Icons.Default.KeyboardArrowDown else Icons.Default.ChevronRight,
                             contentDescription = if (expanded) "Collapse" else "Expand",
-                            modifier = Modifier.size(20.dp),
-                            tint = MaterialTheme.colorScheme.primary
+                            modifier = Modifier.size(18.dp),
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant
                         )
                     }
                 }
@@ -786,12 +757,16 @@ private fun ReasoningCard(
             if ((expanded || isStreaming) && text.isNotBlank()) {
                 val normalizedText = remember(text) { MarkdownImageResolver.normalizeStandaloneImageBlocks(text) }
                 val fontSizes = LocalMarkdownFontSizes.current
+                // Reasoning text uses the smaller `reasoning` size (defaults to 12sp)
+                // by overriding `body` when rendering, so it visually de-emphasizes
+                // chain-of-thought vs the main assistant reply.
+                val reasoningFontSizes = fontSizes.copy(body = fontSizes.reasoning)
                 SelectionContainer {
                     CompositionLocalProvider(LocalContentColor provides MaterialTheme.colorScheme.onSurfaceVariant) {
                         Markdown(
                             content = normalizedText,
-                            typography = markdownTypography(fontSizes),
-                            modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+                            typography = markdownTypography(reasoningFontSizes),
+                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp),
                             imageTransformer = DataUriImageTransformer
                         )
                     }
@@ -837,6 +812,152 @@ private fun TodoListInline(
     }
 }
 
+/**
+ * Card for `task` tool parts — sub-agent conversations spawned by the main
+ * session. Visually distinct from [ToolCard]: a primary left stripe marks it as
+ * an expandable sub-conversation, and tapping opens the child session in-place
+ * via [onOpenSubAgent]. When the child session ID hasn't been assigned yet
+ * (task still running with no metadata.sessionID), the card renders but is not
+ * clickable.
+ *
+ * Status mapping:
+ *  - "running" → spinner
+ *  - "error"   → red error icon
+ *  - other     → green check (completed)
+ *
+ * Sub-agent display name is parsed from titles shaped like "(@planner subagent)"
+ * or "Research (@research subagent)"; falls back to the title/description.
+ */
+@Composable
+private fun SubAgentCard(
+    part: Part,
+    onOpenSubAgent: (String) -> Unit,
+    modifier: Modifier = Modifier.fillMaxWidth()
+) {
+    val sessionId = part.taskSubSessionId
+    val title = part.state?.title
+        ?: part.state?.metadataString("description")
+        ?: stringResource(R.string.chat_sub_agent)
+    val description = part.state?.metadataString("description")?.takeIf { it.isNotEmpty() }
+
+    val subAgentName = remember(title, description) {
+        parseSubAgentName(title) ?: parseSubAgentName(description)
+    }
+    val status = part.stateDisplay
+    val isRunning = status == "running"
+    val isError = status == "error"
+
+    val label = subAgentName ?: title
+
+    val canOpen = sessionId != null
+    Surface(
+        modifier = modifier
+            .padding(vertical = 4.dp)
+            .testTag("toolcard.subagent" + (sessionId?.let { ".$it" } ?: ""))
+            .then(if (canOpen) Modifier.clickable { onOpenSubAgent(sessionId!!) } else Modifier),
+        shape = RoundedCornerShape(12.dp),
+        color = MaterialTheme.colorScheme.primary.copy(alpha = 0.06f),
+        border = androidx.compose.foundation.BorderStroke(
+            width = 1.dp,
+            color = MaterialTheme.colorScheme.primary.copy(alpha = 0.25f)
+        )
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            // Primary stripe flags this as an expandable sub-conversation.
+            Box(
+                modifier = Modifier
+                    .width(3.dp)
+                    .fillMaxHeight()
+                    .background(MaterialTheme.colorScheme.primary)
+            )
+            Row(
+                modifier = Modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = 10.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Icon(
+                    Icons.AutoMirrored.Filled.CallSplit,
+                    contentDescription = null,
+                    modifier = Modifier.size(14.dp),
+                    tint = MaterialTheme.colorScheme.primary
+                )
+                Spacer(modifier = Modifier.width(8.dp))
+                Column(modifier = Modifier.weight(1f)) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text(
+                            text = label,
+                            style = MaterialTheme.typography.labelLarge,
+                            color = MaterialTheme.colorScheme.primary,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                        if (subAgentName != null) {
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text(
+                                text = stringResource(R.string.chat_sub_agent),
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                    }
+                    if (description != null && description != label) {
+                        Text(
+                            text = description,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    } else if (!isRunning && !isError && sessionId == null) {
+                        Text(
+                            text = "waiting for sub-agent…",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                }
+                Spacer(modifier = Modifier.width(8.dp))
+                when {
+                    isRunning -> CircularProgressIndicator(
+                        modifier = Modifier.size(14.dp),
+                        strokeWidth = 2.dp
+                    )
+                    isError -> Icon(
+                        Icons.Default.RadioButtonUnchecked,
+                        contentDescription = "Sub-agent error",
+                        modifier = Modifier.size(16.dp),
+                        tint = MaterialTheme.colorScheme.error
+                    )
+                    else -> Icon(
+                        Icons.Default.CheckCircle,
+                        contentDescription = "Sub-agent completed",
+                        modifier = Modifier.size(16.dp),
+                        tint = MaterialTheme.colorScheme.primary
+                    )
+                }
+                if (canOpen) {
+                    Spacer(modifier = Modifier.width(4.dp))
+                    Icon(
+                        Icons.Default.ChevronRight,
+                        contentDescription = "Open sub-agent conversation",
+                        modifier = Modifier.size(16.dp),
+                        tint = MaterialTheme.colorScheme.primary
+                    )
+                }
+            }
+        }
+    }
+}
+
+/**
+ * Extracts the `xxx` from a title shaped like "(@xxx subagent)" or
+ * "Description (@xxx subagent)". Returns null when no such marker is present.
+ */
+private fun parseSubAgentName(text: String?): String? {
+    if (text.isNullOrBlank()) return null
+    val match = Regex("\\(@([A-Za-z0-9_-]+)\\s*subagent\\)", RegexOption.IGNORE_CASE).find(text)
+    return match?.groupValues?.getOrNull(1)
+}
+
 @Composable
 private fun ToolCard(
     part: Part,
@@ -860,6 +981,11 @@ private fun ToolCard(
     val isReadOnlyTool = listOf("read_file", "read", "grep", "glob", "list", "webfetch", "task", "todoread")
         .any { toolName.startsWith(it) }
 
+    // Write/edit tools keep primary color so file mutations stay prominent;
+    // read-only tools use the softer onSurfaceVariant to recede visually.
+    val titleColor = if (isReadOnlyTool) MaterialTheme.colorScheme.onSurfaceVariant
+        else MaterialTheme.colorScheme.primary
+
     Card(
         modifier = modifier.padding(vertical = 4.dp),
         shape = RoundedCornerShape(12.dp),
@@ -869,12 +995,12 @@ private fun ToolCard(
             Column(modifier = Modifier.padding(12.dp)) {
                 Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                     if (isRunning) {
-                        CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp)
+                        CircularProgressIndicator(modifier = Modifier.size(14.dp), strokeWidth = 2.dp)
                     } else {
                         Icon(
                             Icons.Default.Build,
                             contentDescription = null,
-                            modifier = Modifier.size(16.dp),
+                            modifier = Modifier.size(14.dp),
                             tint = if (isReadOnlyTool) MaterialTheme.colorScheme.onSurfaceVariant else MaterialTheme.colorScheme.primary
                         )
                     }
@@ -882,7 +1008,7 @@ private fun ToolCard(
                     Text(
                         text = displayName.ifEmpty { reason ?: "tool" },
                         style = MaterialTheme.typography.labelLarge,
-                        color = MaterialTheme.colorScheme.primary
+                        color = titleColor
                     )
                     Spacer(modifier = Modifier.weight(1f))
                     if (firstFile != null) {
@@ -899,8 +1025,8 @@ private fun ToolCard(
                         Icon(
                             if (expanded) Icons.Default.KeyboardArrowDown else Icons.Default.ChevronRight,
                             contentDescription = if (expanded) "Collapse" else "Expand",
-                            modifier = Modifier.size(20.dp),
-                            tint = MaterialTheme.colorScheme.primary
+                            modifier = Modifier.size(18.dp),
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant
                         )
                     }
                 }

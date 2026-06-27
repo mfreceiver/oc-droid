@@ -21,6 +21,15 @@ interface OpenCodeApi {
     @GET("session/{id}")
     suspend fun getSession(@Path("id") sessionId: String): Session
 
+    /**
+     * Returns the child (sub-agent) sessions spawned by [sessionId], e.g. via
+     * the `task` tool. Used to render sub-agent cards and to navigate into a
+     * child session's conversation.
+     */
+    @Headers("X-Opencode-Skip-Dir: 1")
+    @GET("session/{id}/children")
+    suspend fun getChildren(@Path("id") sessionId: String): List<Session>
+
     @Headers("X-Opencode-Skip-Dir: 1")
     @PATCH("session/{id}")
     suspend fun updateSession(@Path("id") sessionId: String, @Body body: UpdateSessionRequest): Session

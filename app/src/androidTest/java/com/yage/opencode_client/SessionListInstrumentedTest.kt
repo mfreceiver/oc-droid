@@ -36,7 +36,6 @@ class SessionListInstrumentedTest {
                     sessions = sessions,
                     currentSessionId = "session-1",
                     onSelectSession = {},
-                    onCreateSession = {},
                     onDeleteSession = {}
                 )
             }
@@ -66,7 +65,6 @@ class SessionListInstrumentedTest {
                     currentSessionId = "session-1",
                     hasMoreSessions = true,
                     onSelectSession = {},
-                    onCreateSession = {},
                     onDeleteSession = {},
                     onLoadMoreSessions = { loadMoreCalls.incrementAndGet() }
                 )
@@ -92,7 +90,6 @@ class SessionListInstrumentedTest {
                     sessions = listOf(session),
                     currentSessionId = "session-1",
                     onSelectSession = {},
-                    onCreateSession = {},
                     onDeleteSession = {},
                     onCollapseSessions = { collapseCalls.incrementAndGet() }
                 )
@@ -123,7 +120,6 @@ class SessionListInstrumentedTest {
                     sessions = listOf(active, archived),
                     currentSessionId = "active-session",
                     onSelectSession = {},
-                    onCreateSession = {},
                     onDeleteSession = {}
                 )
             }
@@ -153,7 +149,6 @@ class SessionListInstrumentedTest {
                     sessions = listOf(session),
                     currentSessionId = "session-with-time",
                     onSelectSession = {},
-                    onCreateSession = {},
                     onDeleteSession = {}
                 )
             }
@@ -183,7 +178,6 @@ class SessionListInstrumentedTest {
                     currentSessionId = "session-busy",
                     sessionStatuses = mapOf("session-busy" to SessionStatus(type = "busy")),
                     onSelectSession = {},
-                    onCreateSession = {},
                     onDeleteSession = {}
                 )
             }
@@ -208,7 +202,6 @@ class SessionListInstrumentedTest {
                     currentSessionId = "session-idle",
                     sessionStatuses = mapOf("session-idle" to SessionStatus(type = "idle")),
                     onSelectSession = {},
-                    onCreateSession = {},
                     onDeleteSession = {}
                 )
             }

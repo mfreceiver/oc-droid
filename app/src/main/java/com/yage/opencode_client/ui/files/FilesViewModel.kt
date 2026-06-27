@@ -34,10 +34,6 @@ class FilesViewModel @Inject constructor(
     private val _state = MutableStateFlow(FilesUiState())
     val state: StateFlow<FilesUiState> = _state.asStateFlow()
 
-    init {
-        refresh()
-    }
-
     fun refresh() {
         loadFiles(_state.value.currentPath)
         loadFileStatuses()

@@ -6,19 +6,15 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Add
-import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.FileDownload
 import androidx.compose.material.icons.filled.Lock
-import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Visibility
 import androidx.compose.material.icons.filled.VisibilityOff
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
-import androidx.compose.material3.DropdownMenu
-import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.OutlinedButton
@@ -34,10 +30,8 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
-import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
-import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.Modifier
@@ -94,7 +88,11 @@ fun SettingsScreen(
         return
     }
 
-    Column(modifier = Modifier.fillMaxSize()) {
+    // Phone mode renders no TopAppBar here, so apply the status bar inset on the
+    // root so content never slides under the status bar. windowInsetsPadding
+    // consumes the inset, so the tablet layout (already padded at its Row) and
+    // the TopAppBar branch below both see 0 and never double-pad.
+    Column(modifier = Modifier.fillMaxSize().statusBarsPadding()) {
         if (onBack != null) {
             TopAppBar(
                 title = { Text(stringResource(R.string.settings_title)) },
@@ -149,13 +147,12 @@ private fun HostProfilesManagerScreen(
     currentProfileId: String?,
     onBack: () -> Unit
 ) {
-    val clipboard = LocalClipboardManager.current
     var editingProfile by remember { mutableStateOf<HostProfile?>(null) }
     var importing by remember { mutableStateOf(false) }
     var importText by remember { mutableStateOf("") }
-    var exportText by remember { mutableStateOf<String?>(null) }
     var error by remember { mutableStateOf<String?>(null) }
     var detailProfile by remember { mutableStateOf<HostProfile?>(null) }
+    val deleteFailedText = stringResource(R.string.host_profile_delete_failed)
 
     Column(modifier = Modifier.fillMaxSize()) {
         TopAppBar(
@@ -189,15 +186,7 @@ private fun HostProfilesManagerScreen(
                 HostProfileRow(
                     profile = profile,
                     selected = profile.id == currentProfileId,
-                    canDelete = profiles.size > 1,
-                    onOpen = { detailProfile = profile },
-                    onEdit = { editingProfile = profile },
-                    onDuplicate = { viewModel.duplicateHostProfile(profile.id) },
-                    onExport = { exportText = viewModel.exportHostProfile(profile) },
-                    onDelete = {
-                        runCatching { viewModel.deleteHostProfile(profile.id) }
-                            .onFailure { error = it.message }
-                    }
+                    onOpen = { detailProfile = profile }
                 )
                 Spacer(modifier = Modifier.height(8.dp))
             }
@@ -219,6 +208,7 @@ private fun HostProfilesManagerScreen(
         HostProfileDetailDialog(
             profile = profile,
             isCurrent = profile.id == currentProfileId,
+            canDelete = profiles.size > 1,
             onDismiss = { detailProfile = null },
             onUse = {
                 viewModel.selectHostProfile(profile.id)
@@ -228,7 +218,12 @@ private fun HostProfilesManagerScreen(
                 editingProfile = profile
                 detailProfile = null
             },
-            onExport = { exportText = viewModel.exportHostProfile(profile) },
+            onDuplicate = { viewModel.duplicateHostProfile(profile.id) },
+            onDelete = {
+                runCatching { viewModel.deleteHostProfile(profile.id) }
+                    .onFailure { error = it.message ?: deleteFailedText }
+                detailProfile = null
+            },
             onTest = {
                 viewModel.selectHostProfile(profile.id)
                 detailProfile = null
@@ -260,65 +255,25 @@ private fun HostProfilesManagerScreen(
             dismissButton = { TextButton(onClick = { importing = false }) { Text(stringResource(R.string.common_cancel)) } }
         )
     }
-
-    exportText?.let { json ->
-        AlertDialog(
-            onDismissRequest = { exportText = null },
-            title = { Text(stringResource(R.string.host_profile_export_title)) },
-            text = {
-                Column {
-                    Text(stringResource(R.string.host_profile_no_secrets), style = MaterialTheme.typography.bodySmall)
-                    Spacer(modifier = Modifier.height(8.dp))
-                    Text(json, style = MaterialTheme.typography.bodySmall)
-                }
-            },
-            confirmButton = {
-                Button(onClick = {
-                    clipboard.setText(AnnotatedString(json))
-                    exportText = null
-                }) { Text(stringResource(R.string.host_profile_copy_json)) }
-            },
-            dismissButton = { TextButton(onClick = { exportText = null }) { Text(stringResource(R.string.common_close)) } }
-        )
-    }
 }
 
 @Composable
 internal fun HostProfileRow(
     profile: HostProfile,
     selected: Boolean,
-    canDelete: Boolean,
-    onOpen: () -> Unit,
-    onEdit: () -> Unit,
-    onDuplicate: () -> Unit,
-    onExport: () -> Unit,
-    onDelete: () -> Unit
+    onOpen: () -> Unit
 ) {
-    var menuExpanded by remember { mutableStateOf(false) }
     OutlinedButton(
         onClick = onOpen,
         modifier = Modifier
             .fillMaxWidth()
             .testTag("host.profile.row.${profile.id}")
     ) {
-        Column(modifier = Modifier.weight(1f), horizontalAlignment = Alignment.Start) {
-            Text(if (selected) stringResource(R.string.host_profile_current_suffix, profile.displayName) else profile.displayName)
-            Text(profile.connectionSummary, style = MaterialTheme.typography.bodySmall)
-        }
-        IconButton(onClick = { menuExpanded = true }) {
-            Icon(Icons.Default.MoreVert, contentDescription = stringResource(R.string.host_profile_actions))
-        }
-        DropdownMenu(expanded = menuExpanded, onDismissRequest = { menuExpanded = false }) {
-            DropdownMenuItem(text = { Text(stringResource(R.string.common_edit)) }, onClick = { menuExpanded = false; onEdit() }, leadingIcon = { Icon(Icons.Default.Edit, null) })
-            DropdownMenuItem(text = { Text(stringResource(R.string.common_duplicate)) }, onClick = { menuExpanded = false; onDuplicate() })
-            DropdownMenuItem(text = { Text(stringResource(R.string.host_profile_export_json)) }, onClick = { menuExpanded = false; onExport() }, leadingIcon = { Icon(Icons.Default.ContentCopy, null) })
-            DropdownMenuItem(
-                text = { Text(if (canDelete) stringResource(R.string.common_delete) else stringResource(R.string.host_profile_keep_one)) },
-                onClick = { menuExpanded = false; if (canDelete) onDelete() },
-                enabled = canDelete,
-                leadingIcon = { Icon(Icons.Default.Delete, null) }
-            )
-        }
+        Text(
+            if (selected) stringResource(R.string.host_profile_current_suffix, profile.displayName)
+            else profile.displayName,
+            modifier = Modifier.weight(1f)
+        )
     }
 }
 
@@ -326,10 +281,12 @@ internal fun HostProfileRow(
 internal fun HostProfileDetailDialog(
     profile: HostProfile,
     isCurrent: Boolean,
+    canDelete: Boolean,
     onDismiss: () -> Unit,
     onUse: () -> Unit,
     onEdit: () -> Unit,
-    onExport: () -> Unit,
+    onDuplicate: () -> Unit,
+    onDelete: () -> Unit,
     onTest: () -> Unit
 ) {
     AlertDialog(
@@ -337,8 +294,12 @@ internal fun HostProfileDetailDialog(
         title = { Text(profile.displayName) },
         text = {
             Column {
-                Text(stringResource(R.string.host_profile_opencode_url, profile.serverUrl))
-                Text(stringResource(R.string.host_profile_status, if (isCurrent) stringResource(R.string.host_profile_current) else stringResource(R.string.host_profile_saved)))
+                Text(profile.serverUrl, style = MaterialTheme.typography.bodyMedium)
+                Spacer(modifier = Modifier.height(4.dp))
+                Text(
+                    stringResource(R.string.host_profile_status, if (isCurrent) stringResource(R.string.host_profile_current) else stringResource(R.string.host_profile_saved)),
+                    style = MaterialTheme.typography.bodySmall
+                )
             }
         },
         confirmButton = {
@@ -352,10 +313,12 @@ internal fun HostProfileDetailDialog(
                     OutlinedButton(onClick = onEdit) { Text(stringResource(R.string.common_edit)) }
                 }
                 Spacer(modifier = Modifier.height(8.dp))
-                OutlinedButton(onClick = onExport) { Text(stringResource(R.string.host_profile_copy_config_json)) }
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    OutlinedButton(onClick = onDuplicate) { Text(stringResource(R.string.common_duplicate)) }
+                    OutlinedButton(onClick = onDelete, enabled = canDelete) { Text(stringResource(R.string.common_delete)) }
+                }
             }
-        },
-        dismissButton = { TextButton(onClick = onDismiss) { Text(stringResource(R.string.common_close)) } }
+        }
     )
 }
 

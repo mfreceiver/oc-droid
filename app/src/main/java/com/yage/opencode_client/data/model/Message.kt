@@ -141,6 +141,19 @@ data class Part(
     val toolInputSummary: String? get() = state?.inputSummary
     val toolOutput: String? get() = state?.output
 
+    /**
+     * For `task` tool parts, the spawned sub-agent session ID is stored under
+     * the state's metadata `sessionID` key. Returns null for non-task parts or
+     * when the sub-session has not yet been assigned (e.g. still running).
+     */
+    val taskSubSessionId: String? get() = state?.metadataString("sessionID")
+
+    /**
+     * True for `task` tool parts: these spawn a sub-agent conversation that can
+     * be opened in-place via [taskSubSessionId].
+     */
+    val isSubAgentTask: Boolean get() = isTool && tool?.lowercase() == "task"
+
     val toolTodos: List<TodoItem>
         get() {
             if (!metadata?.todos.isNullOrEmpty()) return metadata?.todos ?: emptyList()
@@ -215,8 +228,22 @@ data class PartState(
     val inputSummary: String? = null,
     val output: String? = null,
     val pathFromInput: String? = null,
-    val todos: List<TodoItem>? = null
-)
+    val todos: List<TodoItem>? = null,
+    /**
+     * Raw metadata object from the tool state. Used for tools like `task` whose
+     * metadata carries a `sessionID` pointing at the spawned sub-agent session,
+     * plus a human-readable `description`.
+     */
+    val metadata: JsonObject? = null
+) {
+    /** Best-effort lookup of a string metadata field, accepting both casing variants. */
+    fun metadataString(key: String): String? {
+        val m = metadata ?: return null
+        val v = m[key] as? JsonPrimitive ?: m[key.lowercase()] as? JsonPrimitive
+            ?: m[key.uppercase()] as? JsonPrimitive
+        return v?.content?.takeIf { it.isNotEmpty() }
+    }
+}
 
 object PartStateSerializer : kotlinx.serialization.KSerializer<PartState> {
     override val descriptor = kotlinx.serialization.descriptors.PrimitiveSerialDescriptor("PartState", kotlinx.serialization.descriptors.PrimitiveKind.STRING)
@@ -296,7 +323,8 @@ object PartStateSerializer : kotlinx.serialization.KSerializer<PartState> {
                     inputSummary = inputSummary,
                     output = output,
                     pathFromInput = pathFromInput,
-                    todos = todos
+                    todos = todos,
+                    metadata = metadata
                 )
             }
             else -> PartState("…")

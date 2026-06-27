@@ -30,7 +30,8 @@ internal fun applySavedSettings(
             selectedAgentName = settingsManager.selectedAgentName ?: "build",
             themeMode = settingsManager.themeMode,
             languageMode = settingsManager.languageMode,
-            markdownFontSizes = settingsManager.markdownFontSizes
+            markdownFontSizes = settingsManager.markdownFontSizes,
+            recentSessionIds = settingsManager.recentSessionIds
         )
     }
 }

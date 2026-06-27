@@ -64,7 +64,20 @@ data class AppState(
     val hostProfiles: List<HostProfile> = emptyList(),
     val currentHostProfileId: String? = null,
     val connectionPhase: String? = null,
-    val tunnelActivationState: TunnelActivationState = TunnelActivationState.Idle
+    val tunnelActivationState: TunnelActivationState = TunnelActivationState.Idle,
+    /**
+     * Sub-agent (child) sessions keyed by parent session ID. Populated lazily
+     * after a session is selected via [MainViewModel.loadChildSessions]. Used
+     * to render sub-agent cards and to support parent->child navigation.
+     */
+    val childSessions: Map<String, List<Session>> = emptyMap(),
+    /**
+     * Mirror of [SettingsManager.recentSessionIds] (most-recently-used session
+     * IDs). Kept in AppState so the Compose UI recomposes when the MRU list
+     * changes (e.g. after long-press remove). [SettingsManager] remains the
+     * persistent source of truth — this field is the observable projection.
+     */
+    val recentSessionIds: List<String> = emptyList()
 ) {
     data class ContextUsage(
         val percentage: Float,
@@ -456,8 +469,83 @@ class MainViewModel @Inject constructor(
         syncCurrentDirectoryForSession(_state, repository, sessionId)
         loadMessages(sessionId)
         loadSessionStatus()
-        // Update MRU: move selected session to front, deduplicate, cap at 8
-        settingsManager.recentSessionIds = (listOf(sessionId) + settingsManager.recentSessionIds).distinct().take(8)
+        loadChildSessions(sessionId)
+        // Update MRU: move selected session to front, deduplicate, cap at 8.
+        // Skip sub-agents (parentId != null): they are transient navigations
+        // from within a parent conversation and must not pollute the recent-
+        // session chips or list. Sub-agents are only reachable via SubAgentCard.
+        // Look up the target session directly (instead of relying on
+        // currentSession) so the parentId check is unambiguous even when the
+        // session is unknown to the cached list — see openSubAgent which
+        // upserts the child first so this lookup succeeds for sub-agents.
+        val targetSession = _state.value.sessions.firstOrNull { it.id == sessionId }
+        if (targetSession?.parentId == null) {
+            val updated = (listOf(sessionId) + settingsManager.recentSessionIds).distinct().take(8)
+            settingsManager.recentSessionIds = updated
+            _state.update { it.copy(recentSessionIds = updated) }
+        }
+    }
+
+    /**
+     * Fetches the sub-agent (child) sessions for [sessionId] and stores them in
+     * [AppState.childSessions]. Best-effort: failures (older servers without the
+     * `children` endpoint, test mocks) are swallowed silently — the sub-agent
+     * cards simply fall back to the in-stream tool state.
+     */
+    fun loadChildSessions(sessionId: String) {
+        viewModelScope.launch {
+            try {
+                repository.getChildren(sessionId)
+                    .onSuccess { children ->
+                        _state.update { it.copy(childSessions = it.childSessions + (sessionId to children)) }
+                    }
+                    .onFailure { error ->
+                        reportNonFatalIssue(TAG, "Failed to load child sessions for $sessionId", error)
+                    }
+            } catch (cancellation: kotlinx.coroutines.CancellationException) {
+                throw cancellation
+            } catch (_: Exception) {
+                // Swallow: child sessions are a progressive-enhancement feature.
+            }
+        }
+    }
+
+    /**
+     * Opens a sub-agent conversation in-place: resolves the child session from
+     * any available cache (sessions list, parent's [AppState.childSessions] or
+     * a single-shot API fetch), upserts it into the sessions list (so workdir
+     * sync + session lookup work), then selects it.
+     *
+     * Caller passes the child session ID obtained from a `task` part's metadata.
+     * Without the upsert, [selectSession] would set `currentSession` to null
+     * (the session is not in the cached list), which breaks the parent-back
+     * affordance and lets [selectSession]'s MRU branch mistake the unknown
+     * session for a root session.
+     */
+    fun openSubAgent(childSessionId: String) {
+        val parentId = _state.value.currentSessionId
+        viewModelScope.launch {
+            // Try every local cache first; fall back to a single GET so we
+            // always have the child session in `state.sessions` before select.
+            val child = _state.value.sessions.firstOrNull { it.id == childSessionId }
+                ?: parentId?.let { pid -> _state.value.childSessions[pid]?.find { it.id == childSessionId } }
+                ?: _state.value.childSessions.values.flatten().firstOrNull { it.id == childSessionId }
+                ?: runCatching { repository.getSession(childSessionId).getOrNull() }.getOrNull()
+            if (child != null) {
+                _state.update { state ->
+                    state.copy(sessions = upsertSession(state.sessions, child))
+                }
+            }
+            selectSession(childSessionId)
+        }
+    }
+
+    /** Remove a session from the MRU recent-session list (long-press on MRU chip). */
+    fun removeFromRecent(sessionId: String) {
+        val updated = settingsManager.recentSessionIds.filter { it != sessionId }
+        settingsManager.recentSessionIds = updated
+        // Mirror into AppState so Compose observers (MRU chip strip) recompose.
+        _state.update { it.copy(recentSessionIds = updated) }
     }
 
     fun loadMessages(sessionId: String, resetLimit: Boolean = true) {

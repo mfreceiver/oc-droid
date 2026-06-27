@@ -104,33 +104,14 @@ internal fun ChatInputBar(
                 )
             }
 
-            if (imageAttachments.isNotEmpty()) {
-                ImageAttachmentStrip(
-                    attachments = imageAttachments,
-                    onRemoveImage = onRemoveImage,
-                    modifier = Modifier.padding(horizontal = 4.dp, vertical = 4.dp)
-                )
-            }
-
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
                     .clip(RoundedCornerShape(20.dp))
                     .background(MaterialTheme.colorScheme.surfaceVariant)
                     .padding(horizontal = 12.dp, vertical = 8.dp),
-                verticalAlignment = Alignment.Bottom
+                verticalAlignment = Alignment.CenterVertically
             ) {
-                ChatPrimaryActionButton(
-                    onClick = onAddImages,
-                    enabled = imageAttachments.size < 4,
-                    containerColor = MaterialTheme.colorScheme.surface,
-                    contentColor = MaterialTheme.colorScheme.primary,
-                    dimWhenDisabled = true,
-                    icon = Icons.Default.Add,
-                    contentDescription = stringResource(R.string.chat_add_image)
-                )
-                Spacer(modifier = Modifier.width(8.dp))
-
                 Box(
                     modifier = Modifier
                         .weight(1f)

@@ -1,12 +1,12 @@
 package com.yage.opencode_client.ui.chat
 
-import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -19,6 +19,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.Chat
 import androidx.compose.material.icons.filled.Checklist
 import androidx.compose.material.icons.filled.KeyboardArrowDown
@@ -62,7 +63,6 @@ import com.yage.opencode_client.ui.AppState
 import com.yage.opencode_client.ui.TunnelActivationState
 import com.yage.opencode_client.ui.session.SessionList
 import com.yage.opencode_client.ui.theme.BrandGold
-import com.yage.opencode_client.ui.theme.BrandPrimary
 import java.util.Locale
 
 internal data class ChatTopBarState(
@@ -86,7 +86,14 @@ internal data class ChatTopBarState(
     val hostProfiles: List<HostProfile> = emptyList(),
     val currentHostProfileId: String? = null,
     val tunnelActivationState: TunnelActivationState = TunnelActivationState.Idle,
-    val showTunnelAuth: Boolean = false
+    val showTunnelAuth: Boolean = false,
+    /**
+     * When non-null, the current session is a sub-agent (child) and tapping the
+     * back affordance should navigate to this parent session. Renders a small
+     * "← <parentName>" affordance above the title.
+     */
+    val parentSessionId: String? = null,
+    val parentSessionTitle: String? = null
 )
 
 internal data class ChatTopBarActions(
@@ -136,6 +143,34 @@ internal fun ChatTopBar(
             val titleText = currentSession?.title
                 ?: currentSession?.directory?.split("/")?.lastOrNull()
                 ?: "OpenCode"
+            // Sub-agent back affordance: when the current session is a child
+            // (parentID set), show "← <parent>" above the title so the user can
+            // return to the parent conversation without opening the session list.
+            if (state.parentSessionId != null) {
+                Surface(
+                    onClick = { actions.onSelectSession(state.parentSessionId) },
+                    shape = RoundedCornerShape(6.dp),
+                    color = Color.Transparent,
+                    modifier = Modifier.padding(bottom = 2.dp)
+                ) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Icon(
+                            Icons.AutoMirrored.Filled.ArrowBack,
+                            contentDescription = stringResource(R.string.chat_back_to_parent_session),
+                            modifier = Modifier.size(14.dp),
+                            tint = MaterialTheme.colorScheme.primary
+                        )
+                        Spacer(modifier = Modifier.width(4.dp))
+                        Text(
+                            text = state.parentSessionTitle ?: stringResource(R.string.chat_parent_session),
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.primary,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
+                }
+            }
             Text(
                 text = titleText,
                 style = MaterialTheme.typography.titleMedium,
@@ -175,63 +210,25 @@ internal fun ChatTopBar(
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(4.dp)
                 ) {
-                    // Server status indicator
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        modifier = Modifier
-                            .clickable { showServerDialog = true }
-                            .padding(horizontal = 8.dp, vertical = 4.dp)
-                    ) {
-                        val dotColor = when {
-                            state.isConnecting -> Color(0xFFFFA500)
-                            state.isConnected -> Color(0xFF4CAF50)
-                            state.connectionPhase == null -> MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.4f)
-                            else -> Color(0xFFF44336)
-                        }
-                        Text(
-                            text = "●",
-                            color = dotColor,
-                            fontSize = 10.sp,
-                            modifier = Modifier.padding(end = 4.dp)
-                        )
-                        Text(
-                            text = state.hostName,
-                            style = MaterialTheme.typography.labelSmall,
-                            fontWeight = FontWeight.Medium,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis
-                        )
-                    }
-
+                    // Agent dropdown (Material 3 TextButton)
                     Box(modifier = Modifier.weight(1f, fill = false)) {
-                        Surface(
+                        TextButton(
                             onClick = { showAgentMenu = true },
-                            shape = RoundedCornerShape(50),
-                            color = Color.Transparent,
-                            border = BorderStroke(
-                                1.dp,
-                                MaterialTheme.colorScheme.primary.copy(alpha = 0.3f)
-                            )
+                            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp)
                         ) {
-                            Row(
-                                verticalAlignment = Alignment.CenterVertically,
-                                modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp)
-                            ) {
-                                Text(
-                                    text = state.selectedAgentName,
-                                    style = MaterialTheme.typography.labelSmall,
-                                    fontWeight = FontWeight.SemiBold,
-                                    color = MaterialTheme.colorScheme.primary,
-                                    maxLines = 1
-                                )
-                                Icon(
-                                    Icons.Default.KeyboardArrowDown,
-                                    contentDescription = "Switch agent",
-                                    modifier = Modifier.size(14.dp),
-                                    tint = MaterialTheme.colorScheme.primary
-                                )
-                            }
+                            Text(
+                                text = state.selectedAgentName,
+                                style = MaterialTheme.typography.labelSmall,
+                                fontWeight = FontWeight.SemiBold,
+                                color = MaterialTheme.colorScheme.primary,
+                                maxLines = 1
+                            )
+                            Icon(
+                                Icons.Default.KeyboardArrowDown,
+                                contentDescription = stringResource(R.string.chat_switch_agent),
+                                modifier = Modifier.size(14.dp),
+                                tint = MaterialTheme.colorScheme.primary
+                            )
                         }
                         DropdownMenu(
                             expanded = showAgentMenu,
@@ -240,23 +237,13 @@ internal fun ChatTopBar(
                             state.agents.forEach { agent ->
                                 DropdownMenuItem(
                                     text = {
-                                        Row(verticalAlignment = Alignment.CenterVertically) {
-                                            Text(
-                                                agent.name,
-                                                color = if (agent.name == state.selectedAgentName)
-                                                    MaterialTheme.colorScheme.primary
-                                                else
-                                                    MaterialTheme.colorScheme.onSurface
-                                            )
-                                            if (!agent.description.isNullOrBlank()) {
-                                                Spacer(modifier = Modifier.width(8.dp))
-                                                Text(
-                                                    agent.description,
-                                                    style = MaterialTheme.typography.bodySmall,
-                                                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                                                )
-                                            }
-                                        }
+                                        Text(
+                                            agent.name,
+                                            color = if (agent.name == state.selectedAgentName)
+                                                MaterialTheme.colorScheme.primary
+                                            else
+                                                MaterialTheme.colorScheme.onSurface
+                                        )
                                     },
                                     onClick = {
                                         actions.onSelectAgent(agent.name)
@@ -318,6 +305,35 @@ internal fun ChatTopBar(
                             )
                         }
                     }
+
+                    // Server status indicator (rightmost)
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier
+                            .clickable { showServerDialog = true }
+                            .padding(horizontal = 8.dp, vertical = 4.dp)
+                    ) {
+                        val dotColor = when {
+                            state.isConnecting -> Color(0xFFFFA500)
+                            state.isConnected -> Color(0xFF4CAF50)
+                            state.connectionPhase == null -> MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.4f)
+                            else -> Color(0xFFF44336)
+                        }
+                        Text(
+                            text = "●",
+                            color = dotColor,
+                            fontSize = 10.sp,
+                            modifier = Modifier.padding(end = 4.dp)
+                        )
+                        Text(
+                            text = state.hostName,
+                            style = MaterialTheme.typography.labelSmall,
+                            fontWeight = FontWeight.Medium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
                 }
             }
         }
@@ -342,10 +358,6 @@ internal fun ChatTopBar(
                     expandedSessionIds = state.expandedSessionIds,
                     onSelectSession = {
                         actions.onSelectSession(it)
-                        showSessionSheet = false
-                    },
-                    onCreateSession = {
-                        actions.onCreateSession()
                         showSessionSheet = false
                     },
                     onDeleteSession = {
@@ -462,7 +474,7 @@ private fun ServerManagementDialog(
 ) {
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text("Servers") },
+        title = { Text(stringResource(R.string.server_dialog_title)) },
         text = {
             Column(
                 modifier = Modifier
@@ -471,7 +483,7 @@ private fun ServerManagementDialog(
             ) {
                 if (hostProfiles.isEmpty()) {
                     Text(
-                        "No hosts configured",
+                        stringResource(R.string.server_dialog_no_hosts),
                         style = MaterialTheme.typography.bodyMedium,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
@@ -481,7 +493,7 @@ private fun ServerManagementDialog(
                         Surface(
                             onClick = { onSelectHost(profile.id) },
                             shape = RoundedCornerShape(8.dp),
-                            color = if (isSelected) BrandPrimary.copy(alpha = 0.1f) else Color.Transparent,
+                            color = if (isSelected) MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.4f) else Color.Transparent,
                             modifier = Modifier.fillMaxWidth()
                         ) {
                             Column(
@@ -492,7 +504,7 @@ private fun ServerManagementDialog(
                                     text = profile.name,
                                     style = MaterialTheme.typography.bodyMedium,
                                     fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal,
-                                    color = if (isSelected) BrandPrimary else MaterialTheme.colorScheme.onSurface
+                                    color = if (isSelected) MaterialTheme.colorScheme.onPrimaryContainer else MaterialTheme.colorScheme.onSurface
                                 )
                                 Text(
                                     text = profile.serverUrl,
@@ -503,46 +515,32 @@ private fun ServerManagementDialog(
                         }
                     }
                 }
-
-                Spacer(modifier = Modifier.height(12.dp))
-
-                Row(
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
-                    modifier = Modifier.fillMaxWidth()
-                ) {
-                    Button(
-                        onClick = onRefresh,
-                        modifier = Modifier.weight(1f),
-                        shape = RoundedCornerShape(8.dp),
-                        colors = androidx.compose.material3.ButtonDefaults.buttonColors(
-                            containerColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.1f),
-                            contentColor = MaterialTheme.colorScheme.primary
-                        )
+            }
+        },
+        // Bottom button row: Refresh + Activate Tunnel (secondary actions) share the
+        // dialog's action bar with the Done confirm button, matching Material 3 dialog
+        // conventions. dismissButton renders on the left, confirmButton on the right.
+        dismissButton = {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(4.dp)
+            ) {
+                TextButton(onClick = onRefresh) {
+                    Text(stringResource(R.string.server_dialog_refresh))
+                }
+                if (showTunnelAuth) {
+                    val isActivating = tunnelActivationState is TunnelActivationState.Loading
+                    TextButton(
+                        onClick = onActivateTunnel,
+                        enabled = !isActivating
                     ) {
-                        Text("Refresh")
-                    }
-
-                    if (showTunnelAuth) {
-                        val isActivating = tunnelActivationState is TunnelActivationState.Loading
-                        Button(
-                            onClick = onActivateTunnel,
-                            enabled = !isActivating,
-                            modifier = Modifier.weight(1f),
-                            shape = RoundedCornerShape(8.dp),
-                            colors = androidx.compose.material3.ButtonDefaults.buttonColors(
-                                containerColor = BrandPrimary.copy(alpha = 0.1f),
-                                contentColor = BrandPrimary
+                        if (isActivating) {
+                            CircularProgressIndicator(
+                                modifier = Modifier.size(16.dp),
+                                strokeWidth = 2.dp
                             )
-                        ) {
-                            if (isActivating) {
-                                CircularProgressIndicator(
-                                    modifier = Modifier.size(16.dp),
-                                    strokeWidth = 2.dp,
-                                    color = BrandPrimary
-                                )
-                            } else {
-                                Text("Activate Tunnel")
-                            }
+                        } else {
+                            Text(stringResource(R.string.server_dialog_activate_tunnel))
                         }
                     }
                 }

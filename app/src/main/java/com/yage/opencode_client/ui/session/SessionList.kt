@@ -278,7 +278,6 @@ fun SessionList(
     isRefreshingSessions: Boolean = false,
     expandedSessionIds: Set<String> = emptySet(),
     onSelectSession: (String) -> Unit,
-    onCreateSession: () -> Unit,
     onDeleteSession: (String) -> Unit,
     onArchiveSession: (String) -> Unit = {},
     onRestoreSession: (String) -> Unit = {},
@@ -288,8 +287,10 @@ fun SessionList(
     onOpenSettings: (() -> Unit)? = null,
     onCollapseSessions: (() -> Unit)? = null
 ) {
-    val activeSessions = remember(sessions) { sessions.filter { !it.isArchived } }
-    val archivedSessions = remember(sessions) { sessions.filter { it.isArchived } }
+    // Only show root sessions (parentId == null) in the Sheet list. Sub-agents
+    // are reachable only via SubAgentCard from within a parent conversation.
+    val activeSessions = remember(sessions) { sessions.filter { !it.isArchived && it.parentId == null } }
+    val archivedSessions = remember(sessions) { sessions.filter { it.isArchived && it.parentId == null } }
     val activeTree = remember(activeSessions) { buildSessionTree(activeSessions) }
     val archivedTree = remember(archivedSessions) { buildSessionTree(archivedSessions) }
     val activeRows = remember(activeTree, expandedSessionIds) { flattenVisibleTree(activeTree, expandedSessionIds) }
@@ -321,12 +322,6 @@ fun SessionList(
             ) {
                 Text(stringResource(R.string.sessions_title), style = MaterialTheme.typography.titleSmall)
                 Spacer(modifier = Modifier.weight(1f))
-                if (isLoadingMoreSessions) {
-                    CircularProgressIndicator(modifier = Modifier.size(18.dp), strokeWidth = 2.dp)
-                } else if (hasMoreSessions) {
-                    TextButton(onClick = onLoadMoreSessions) { Text(stringResource(R.string.sessions_load_older)) }
-                }
-                TextButton(onClick = onCreateSession) { Text(stringResource(R.string.sessions_new)) }
                 if (onOpenSettings != null) {
                     IconButton(onClick = onOpenSettings) {
                         Icon(Icons.Default.Settings, contentDescription = stringResource(R.string.nav_settings))

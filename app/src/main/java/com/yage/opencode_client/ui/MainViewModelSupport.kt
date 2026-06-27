@@ -12,7 +12,7 @@ import kotlinx.serialization.json.JsonPrimitive
 private val lenientJson = Json { ignoreUnknownKeys = true }
 
 internal object MainViewModelTimings {
-    const val sessionPageSize = 100
+    const val sessionPageSize = 10
     const val messageRetryDelayMs = 400L
     const val messageRefreshDelayMs = 1200L
     const val busyPollingIntervalMs = 2000L

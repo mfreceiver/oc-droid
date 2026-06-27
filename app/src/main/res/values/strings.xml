@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <string name="app_name">OpenCode Client</string>
+    <string name="app_name">OC Droid</string>
     <string name="nav_chat">Chat</string>
     <string name="nav_files">Files</string>
     <string name="nav_sessions">Sessions</string>
@@ -42,7 +42,7 @@
     <string name="common_ok">OK</string>
     <string name="common_json">JSON</string>
     <string name="sessions_title">Sessions</string>
-    <string name="sessions_active">Active</string>
+    <string name="sessions_active">Recent</string>
     <string name="sessions_archived">Archived</string>
     <string name="sessions_load_older">Load older</string>
     <string name="sessions_new">+</string>
@@ -103,14 +103,6 @@
     <string name="host_profile_add">Add host profile</string>
     <string name="host_profile_import_json">Import host profile JSON</string>
     <string name="host_profile_use_this_host">Use This Host</string>
-    <string name="host_profile_copy_config_json">Copy Config JSON</string>
-    <string name="host_profile_export_json">Export JSON</string>
-    <string name="host_profile_export_title">Export Host Profile JSON</string>
-    <string name="host_profile_copy_json">Copy JSON</string>
-    <string name="host_profile_no_secrets">Secrets are not included.</string>
-    <string name="host_profile_actions">Host profile actions</string>
-    <string name="host_profile_keep_one">Keep at least one profile</string>
-    <string name="host_profile_opencode_url">OpenCode URL: %1$s</string>
     <string name="host_profile_status">Status: %1$s</string>
     <string name="host_profile_current">Current</string>
     <string name="host_profile_saved">Saved profile</string>
@@ -142,4 +134,17 @@
     <string name="sessions_tab_add_workdir">Connect</string>
     <string name="sessions_tab_no_sessions">No sessions yet</string>
     <string name="sessions_tab_no_workdirs">No connected projects</string>
+    <string name="sessions_connect_new_project">Connect Project</string>
+    <string name="sessions_disconnect_workdir">Disconnect</string>
+    <string name="sessions_disconnect_confirm">Disconnect this project?</string>
+    <string name="server_dialog_title">Servers</string>
+    <string name="server_dialog_no_hosts">No hosts configured</string>
+    <string name="server_dialog_refresh">Refresh</string>
+    <string name="server_dialog_activate_tunnel">Activate Tunnel</string>
+    <string name="chat_parent_session">Parent session</string>
+    <string name="chat_back_to_parent_session">Back to parent session</string>
+    <string name="chat_switch_agent">Switch agent</string>
+    <string name="chat_thinking">Thinking</string>
+    <string name="chat_sub_agent">Sub-agent</string>
+    <string name="host_profile_delete_failed">Delete failed</string>
 </resources>

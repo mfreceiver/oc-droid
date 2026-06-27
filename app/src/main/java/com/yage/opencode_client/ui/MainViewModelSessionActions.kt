@@ -42,7 +42,11 @@ internal fun launchLoadSessions(
                 }
                 // Clean stale session IDs from MRU after sessions are loaded
                 val loadedSessionIds = state.value.sessions.map { s -> s.id }.toSet()
-                settingsManager.recentSessionIds = settingsManager.recentSessionIds.filter { it in loadedSessionIds }
+                val cleanedRecent = settingsManager.recentSessionIds.filter { it in loadedSessionIds }
+                if (cleanedRecent.size != settingsManager.recentSessionIds.size) {
+                    settingsManager.recentSessionIds = cleanedRecent
+                    state.update { it.copy(recentSessionIds = cleanedRecent) }
+                }
                 val currentId = state.value.currentSessionId
                 val refreshedSessions = state.value.sessions
                 val hasCurrentSession = currentId != null && refreshedSessions.any { it.id == currentId }

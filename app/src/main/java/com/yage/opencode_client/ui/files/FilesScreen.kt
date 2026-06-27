@@ -36,6 +36,11 @@ fun FilesScreen(
 ) {
     val state by viewModel.state.collectAsStateWithLifecycle()
 
+    // Refresh once when entering the Files tab so the list is up to date.
+    LaunchedEffect(Unit) {
+        viewModel.refresh()
+    }
+
     LaunchedEffect(pathToShow, sessionDirectory) {
         viewModel.syncPathToShow(pathToShow, sessionDirectory)
     }

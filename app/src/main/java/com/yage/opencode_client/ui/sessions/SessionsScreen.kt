@@ -1,13 +1,16 @@
 package com.yage.opencode_client.ui.sessions
 
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.CreateNewFolder
 import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.KeyboardArrowDown
@@ -28,7 +31,7 @@ import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 
-@OptIn(ExperimentalMaterial3Api::class)
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
 @Composable
 fun SessionsScreen(
     viewModel: MainViewModel,
@@ -38,6 +41,9 @@ fun SessionsScreen(
     var showNewWorkdirDialog by remember { mutableStateOf(false) }
     var newWorkdirPath by remember { mutableStateOf("") }
     var expandedWorkdirs by remember { mutableStateOf(setOf<String>()) }
+    // Locally-hidden workdirs (long-press → disconnect). UI-only; reset on refresh/re-enter tab.
+    var hiddenWorkdirs by remember { mutableStateOf(setOf<String>()) }
+    var pendingDisconnectWorkdir by remember { mutableStateOf<String?>(null) }
 
     // Derive recent sessions (root sessions: parentId == null, by time.updated desc, top 5)
     val recentSessions = remember(state.sessions) {
@@ -47,15 +53,23 @@ fun SessionsScreen(
             .take(5)
     }
 
-    // Derive workdir groups
-    val workdirGroups = remember(state.sessions) {
+    // Derive workdir groups, excluding locally-hidden workdirs and sub-agents
+    // (parentId != null). Sub-agents are only reachable from within a parent
+    // conversation via SubAgentCard, never from this workdir list.
+    val workdirGroups = remember(state.sessions, hiddenWorkdirs) {
         state.sessions
+            .filter { it.parentId == null && it.directory !in hiddenWorkdirs }
             .groupBy { it.directory }
             .mapValues { (_, sessList) ->
                 sessList.sortedByDescending { it.time?.updated ?: 0L }
             }
             .entries
             .sortedBy { it.key }
+    }
+
+    // Path candidates from existing session directories (for autocomplete in connect dialog).
+    val pathCandidates = remember(state.sessions) {
+        state.sessions.map { it.directory }.distinct().sorted()
     }
 
     // Navigate to Chat tab after selecting a session
@@ -72,14 +86,6 @@ fun SessionsScreen(
             TopAppBar(
                 title = {
                     Text(stringResource(R.string.nav_sessions))
-                },
-                actions = {
-                    IconButton(onClick = { showNewWorkdirDialog = true }) {
-                        Icon(
-                            Icons.Default.Add,
-                            contentDescription = stringResource(R.string.sessions_tab_new_workdir)
-                        )
-                    }
                 }
             )
         }
@@ -130,17 +136,20 @@ fun SessionsScreen(
                         ?: workdir
 
                     Column(modifier = Modifier.fillMaxWidth()) {
-                        // Workdir header row
+                        // Workdir header row (click = expand/collapse, long-click = disconnect)
                         Row(
                             modifier = Modifier
                                 .fillMaxWidth()
-                                .clickable {
-                                    expandedWorkdirs = if (isExpanded) {
-                                        expandedWorkdirs - workdir
-                                    } else {
-                                        expandedWorkdirs + workdir
-                                    }
-                                }
+                                .combinedClickable(
+                                    onClick = {
+                                        expandedWorkdirs = if (isExpanded) {
+                                            expandedWorkdirs - workdir
+                                        } else {
+                                            expandedWorkdirs + workdir
+                                        }
+                                    },
+                                    onLongClick = { pendingDisconnectWorkdir = workdir }
+                                )
                                 .padding(horizontal = 16.dp, vertical = 10.dp),
                             verticalAlignment = Alignment.CenterVertically
                         ) {
@@ -201,11 +210,71 @@ fun SessionsScreen(
                     }
                 }
             }
+
+            // --- Connect new project entry (always at bottom of workdir section) ---
+            item(key = "workdir_connect_new") {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable { showNewWorkdirDialog = true }
+                        .padding(horizontal = 16.dp, vertical = 14.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Icon(
+                        Icons.Default.CreateNewFolder,
+                        contentDescription = null,
+                        modifier = Modifier.size(22.dp),
+                        tint = MaterialTheme.colorScheme.primary
+                    )
+                    Spacer(modifier = Modifier.width(10.dp))
+                    Text(
+                        text = stringResource(R.string.sessions_connect_new_project),
+                        style = MaterialTheme.typography.bodyMedium.copy(fontWeight = FontWeight.Medium),
+                        color = MaterialTheme.colorScheme.primary
+                    )
+                }
+            }
         }
     }
 
-    // --- New Workdir Dialog ---
+    // --- Disconnect workdir confirmation dialog (UI-only filter) ---
+    pendingDisconnectWorkdir?.let { workdir ->
+        AlertDialog(
+            onDismissRequest = { pendingDisconnectWorkdir = null },
+            title = { Text(stringResource(R.string.sessions_disconnect_workdir)) },
+            text = {
+                val name = workdir.split("/").filter { it.isNotEmpty() }.lastOrNull() ?: workdir
+                Text(stringResource(R.string.sessions_disconnect_confirm) + "\n\n" + name + "\n" + workdir)
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        hiddenWorkdirs = hiddenWorkdirs + workdir
+                        expandedWorkdirs = expandedWorkdirs - workdir
+                        pendingDisconnectWorkdir = null
+                    }
+                ) {
+                    Text(stringResource(R.string.sessions_disconnect_workdir))
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { pendingDisconnectWorkdir = null }) {
+                    Text(stringResource(R.string.common_cancel))
+                }
+            }
+        )
+    }
+
+    // --- New Workdir Dialog (with path autocomplete based on existing session directories) ---
     if (showNewWorkdirDialog) {
+        // Dropdown anchor visibility state
+        var dropdownExpanded by remember { mutableStateOf(false) }
+        val filteredCandidates = remember(newWorkdirPath, pathCandidates) {
+            val q = newWorkdirPath.trim()
+            if (q.isEmpty()) pathCandidates
+            else pathCandidates.filter { it.contains(q, ignoreCase = true) }
+        }
+
         AlertDialog(
             onDismissRequest = {
                 showNewWorkdirDialog = false
@@ -213,13 +282,42 @@ fun SessionsScreen(
             },
             title = { Text(stringResource(R.string.sessions_tab_new_workdir)) },
             text = {
-                OutlinedTextField(
-                    value = newWorkdirPath,
-                    onValueChange = { newWorkdirPath = it },
-                    label = { Text(stringResource(R.string.sessions_tab_workdir_hint)) },
-                    singleLine = true,
-                    modifier = Modifier.fillMaxWidth()
-                )
+                Box {
+                    Column {
+                        OutlinedTextField(
+                            value = newWorkdirPath,
+                            onValueChange = {
+                                newWorkdirPath = it
+                                dropdownExpanded = it.isNotEmpty()
+                            },
+                            label = { Text(stringResource(R.string.sessions_tab_workdir_hint)) },
+                            singleLine = true,
+                            modifier = Modifier.fillMaxWidth()
+                        )
+                        if (filteredCandidates.isNotEmpty()) {
+                            Text(
+                                text = stringResource(R.string.sessions_tab_workdir_hint),
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.padding(top = 6.dp, start = 4.dp)
+                            )
+                        }
+                    }
+                    DropdownMenu(
+                        expanded = dropdownExpanded && filteredCandidates.isNotEmpty(),
+                        onDismissRequest = { dropdownExpanded = false }
+                    ) {
+                        filteredCandidates.take(10).forEach { candidate ->
+                            DropdownMenuItem(
+                                text = { Text(candidate, style = MaterialTheme.typography.bodySmall) },
+                                onClick = {
+                                    newWorkdirPath = candidate
+                                    dropdownExpanded = false
+                                }
+                            )
+                        }
+                    }
+                }
             },
             confirmButton = {
                 TextButton(

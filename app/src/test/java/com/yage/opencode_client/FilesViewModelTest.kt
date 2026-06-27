@@ -36,7 +36,7 @@ class FilesViewModelTest {
     }
 
     @Test
-    fun `init loads root files and statuses`() = runTest {
+    fun `refresh loads root files and statuses`() = runTest {
         val files = listOf(
             FileNode(name = "src", path = "src", type = "directory"),
             FileNode(name = "README.md", path = "README.md", type = "file")
@@ -49,6 +49,7 @@ class FilesViewModelTest {
         coEvery { repository.getFileStatus() } returns Result.success(statuses)
 
         val viewModel = FilesViewModel(repository)
+        viewModel.refresh()
         advanceUntilIdle()
 
         assertEquals(files, viewModel.state.value.files)

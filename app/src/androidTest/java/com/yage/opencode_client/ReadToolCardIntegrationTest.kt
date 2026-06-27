@@ -147,8 +147,7 @@ class ReadToolCardIntegrationTest {
                     workspaceDirectory = null,
                     onLoadMore = {},
                     onFileClick = {},
-                    onForkFromMessage = {},
-                    onEditFromMessage = {}
+                    onOpenSubAgent = {}
                 )
             }
         }

@@ -141,6 +141,15 @@ class OpenCodeRepository @Inject constructor() {
 
     suspend fun getSessions(limit: Int? = null): Result<List<Session>> = runCatching { api.getSessions(limit) }
 
+    /**
+     * Fetches a single session by ID. Used to resolve a child/sub-agent session
+     * that may not be present in the cached [getSessions] list (e.g. when the
+     * user navigates into a sub-agent before the parent's child list finished
+     * loading). Best-effort: returns null on failure so callers can degrade
+     * gracefully.
+     */
+    suspend fun getSession(sessionId: String): Result<Session> = runCatching { api.getSession(sessionId) }
+
     suspend fun createSession(title: String? = null): Result<Session> = runCatching {
         api.createSession(CreateSessionRequest(title = title))
     }
@@ -159,6 +168,15 @@ class OpenCodeRepository @Inject constructor() {
 
     suspend fun getSessionStatus(): Result<Map<String, SessionStatus>> = runCatching {
         api.getSessionStatus()
+    }
+
+    /**
+     * Fetches the child (sub-agent) sessions spawned by [sessionId], typically
+     * via the `task` tool. Used by sub-agent cards and the parent->child
+     * navigation flow.
+     */
+    suspend fun getChildren(sessionId: String): Result<List<Session>> = runCatching {
+        api.getChildren(sessionId)
     }
 
     suspend fun getMessages(sessionId: String, limit: Int? = null): Result<List<MessageWithParts>> =

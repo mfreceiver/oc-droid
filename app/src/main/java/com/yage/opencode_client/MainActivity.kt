@@ -1,6 +1,8 @@
 package com.yage.opencode_client
 
+import android.app.Activity
 import android.os.Bundle
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.appcompat.app.AppCompatActivity
@@ -24,6 +26,7 @@ import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.statusBars
@@ -65,18 +68,18 @@ sealed class Screen(
         Icons.Outlined.ChatBubbleOutline
     )
 
-    object Files : Screen(
-        "files",
-        R.string.nav_files,
-        Icons.Default.Folder,
-        Icons.Outlined.Folder
-    )
-
     object Sessions : Screen(
         "sessions",
         R.string.nav_sessions,
         Icons.Default.History,
         Icons.Outlined.History
+    )
+
+    object Files : Screen(
+        "files",
+        R.string.nav_files,
+        Icons.Default.Folder,
+        Icons.Outlined.Folder
     )
 
     object Settings : Screen(
@@ -87,7 +90,7 @@ sealed class Screen(
     )
 }
 
-val screens = listOf(Screen.Chat, Screen.Files, Screen.Sessions, Screen.Settings)
+val screens = listOf(Screen.Chat, Screen.Sessions, Screen.Files, Screen.Settings)
 
 // Debug-only Intent extra keys for injecting connection credentials at launch,
 // so automated UI tests can connect to a server without driving the Settings UI.
@@ -156,9 +159,17 @@ private fun PhoneLayout(viewModel: MainViewModel) {
     val navController = rememberNavController()
     val navBackStackEntry by navController.currentBackStackEntryAsState()
     val currentRoute = navBackStackEntry?.destination?.route
+    val context = LocalContext.current
 
     fun navigateToTopLevel(route: String) {
         if (currentRoute == route) return
+        // Official Material 3 bottom-navigation pattern: popUpTo the start
+        // destination with saveState = true (preserving each tab's state) and
+        // restoreState = true on the new destination. This avoids the brittle
+        // `popUpTo(start) { inclusive = true }` form which can throw when the
+        // start destination has already been popped from the back stack. The
+        // user-facing back behavior (pressing back exits to the home screen
+        // instead of walking back to Chat) is handled by the BackHandler below.
         navController.navigate(route) {
             popUpTo(navController.graph.findStartDestination().id) {
                 saveState = true
@@ -168,8 +179,16 @@ private fun PhoneLayout(viewModel: MainViewModel) {
         }
     }
 
+    // Pressing back from any top-level tab exits to the home screen (launcher).
+    // BackHandler only fires when no descendant handler (dialogs, sheets, text
+    // fields with IME) consumed the event first, so in-composition overlays
+    // still dismiss normally.
+    BackHandler(enabled = currentRoute != null) {
+        (context as? Activity)?.finish()
+    }
+
     Scaffold(
-        contentWindowInsets = WindowInsets.statusBars,
+        contentWindowInsets = WindowInsets(0, 0, 0, 0),
         bottomBar = {
             NavigationBar {
                 screens.forEach { screen ->

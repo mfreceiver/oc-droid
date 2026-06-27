@@ -235,7 +235,7 @@ internal fun AppearanceSection(
 ) {
     SectionHeader(title = stringResource(R.string.settings_appearance))
 
-    val modes = ThemeMode.values()
+    val modes = listOf(ThemeMode.SYSTEM, ThemeMode.LIGHT, ThemeMode.DARK)
     Text(stringResource(R.string.settings_theme), style = MaterialTheme.typography.labelMedium)
     Spacer(modifier = Modifier.height(8.dp))
     SingleChoiceSegmentedButtonRow(
@@ -249,6 +249,7 @@ internal fun AppearanceSection(
                     index = index,
                     count = modes.size
                 ),
+                icon = {},
                 colors = SegmentedButtonDefaults.colors(
                     activeContainerColor = MaterialTheme.colorScheme.primary,
                     activeContentColor = MaterialTheme.colorScheme.onPrimary,
@@ -279,6 +280,7 @@ internal fun AppearanceSection(
                 selected = languageMode == mode,
                 onClick = { onLanguageSelected(mode) },
                 shape = SegmentedButtonDefaults.itemShape(index = index, count = languages.size),
+                icon = {},
                 colors = SegmentedButtonDefaults.colors(
                     activeContainerColor = MaterialTheme.colorScheme.primary,
                     activeContentColor = MaterialTheme.colorScheme.onPrimary,
