@@ -471,9 +471,14 @@ class MainViewModel @Inject constructor(
     /** Test-only visibility into the cache size (for assertions). */
     internal fun sessionWindowCacheSize(): Int = sessionWindowCache.size
 
-    /** Test-only visibility: returns the cached window for [sessionId] if any. */
+    /**
+     * Test-only visibility: returns the cached window for [sessionId] if any.
+     * TRUE read-only — iterates entries instead of `get` so it does NOT
+     * promote the entry to most-recently-used (the cache is access-ordered,
+     * so a plain `sessionWindowCache[sessionId]` would skew eviction order).
+     */
     internal fun peekSessionWindow(sessionId: String): CachedSessionWindow? =
-        sessionWindowCache[sessionId]
+        sessionWindowCache.entries.firstOrNull { it.key == sessionId }?.value
 
     /**
      * Writes [window] for [sessionId] into the LRU cache (overwriting any
@@ -1315,8 +1320,7 @@ class MainViewModel @Inject constructor(
 
     /**
      * §Manual message refresh: forces a NON-destructive reload of the current
-     * session's tail. Distinct from [refreshCurrentHost] (which is a server-
-     * health probe). `resetLimit=false` keeps the user's scrolled-up loaded
+     * session's tail. `resetLimit=false` keeps the user's scrolled-up loaded
      * history pages + cursor and merges the fresh latest-5 tail via the
      * §preserveUnfetched branch of [launchLoadMessages]; the streaming
      * overlay is also preserved. No-op when no session is selected or a
@@ -1738,10 +1742,6 @@ class MainViewModel @Inject constructor(
     fun resetTrafficStats() {
         trafficTracker.reset()
         refreshTrafficStats()
-    }
-
-    fun refreshCurrentHost() {
-        testConnection(force = true)
     }
 
     fun activateTunnelForCurrentHost() {

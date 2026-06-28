@@ -287,7 +287,8 @@ internal fun launchLoadMessages(
                         } else {
                             val olderKept = it.messages.filter { m ->
                                 m.id !in fetchedIds && (oldestFetchedCreated == null ||
-                                    (m.time?.created ?: Long.MAX_VALUE) < oldestFetchedCreated)
+                                    m.time?.created == null ||
+                                    m.time.created < oldestFetchedCreated)
                             }
                             val olderKeptIds = olderKept.map { m -> m.id }.toHashSet()
                             mergedMessages = olderKept + fetchedMessages

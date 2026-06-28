@@ -427,7 +427,13 @@ private fun PartView(
             val textContent = streamingTextOverride ?: part.text ?: ""
             // Detect background subagent task completion blocks injected as
             // user-role text messages by the server (ops.prompt with <task> XML).
-            val taskXml = if (textContent.contains("<task", ignoreCase = true)) {
+            // Restricted to user messages: the server only injects these as
+            // synthetic user prompts; assistant task output arrives via tool
+            // parts (handled by SubAgentCard). Matching is case-SENSITIVE to
+            // stay consistent with parseTaskXml (the server always emits
+            // lowercase <task>), so an assistant discussing the literal tag is
+            // never swallowed.
+            val taskXml = if (isUser && textContent.contains("<task")) {
                 parseTaskXml(textContent)
             } else null
             if (taskXml != null && taskXml.state != null &&
