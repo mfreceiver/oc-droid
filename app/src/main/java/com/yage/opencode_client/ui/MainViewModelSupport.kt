@@ -9,7 +9,7 @@ import com.yage.opencode_client.data.model.SessionStatus
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonPrimitive
 
-private val lenientJson = Json { ignoreUnknownKeys = true }
+internal val lenientJson = Json { ignoreUnknownKeys = true }
 
 internal object MainViewModelTimings {
     const val sessionPageSize = 10

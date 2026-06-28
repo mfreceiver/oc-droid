@@ -583,6 +583,88 @@ class MainViewModelTest {
     }
 
     @Test
+    fun `message updated SSE patches message info in place and preserves parts`() = runTest {
+        // S3: server carries a full { info: Message }. We replace ONLY the .info
+        // of the matching MessageWithParts, keeping its parts. No reload.
+        val part = Part(id = "part-1", messageId = "m1", sessionId = "session-1", type = "text")
+        val original = MessageWithParts(
+            info = Message(id = "m1", role = "assistant", agent = "build"),
+            parts = listOf(part)
+        )
+        val viewModel = createViewModel()
+        updateState(viewModel) {
+            it.copy(currentSessionId = "session-1", messages = listOf(original))
+        }
+
+        handleSse(
+            viewModel,
+            SSEEvent(
+                payload = SSEPayload(
+                    type = "message.updated",
+                    properties = buildJsonObject {
+                        put("sessionID", JsonPrimitive("session-1"))
+                        put(
+                            "info",
+                            buildJsonObject {
+                                put("id", JsonPrimitive("m1"))
+                                put("sessionID", JsonPrimitive("session-1"))
+                                put("role", JsonPrimitive("assistant"))
+                                put("agent", JsonPrimitive("code"))
+                                put("finish", JsonPrimitive("stop"))
+                            }
+                        )
+                    }
+                )
+            )
+        )
+        advanceUntilIdle()
+
+        val messages = viewModel.state.value.messages
+        assertEquals(1, messages.size)
+        // info metadata patched...
+        assertEquals("m1", messages[0].info.id)
+        assertEquals("code", messages[0].info.agent)
+        assertEquals("stop", messages[0].info.finish)
+        // ...parts preserved...
+        assertEquals(listOf(part), messages[0].parts)
+        // ...and no reload issued.
+        coVerify(exactly = 0) { repository.getMessagesPaged(any(), any(), any()) }
+    }
+
+    @Test
+    fun `message updated SSE with info for unknown message is a no-op`() = runTest {
+        // S3 gate: a message.updated whose id is not in the current view is a
+        // no-op (no insert, no reload) — it will load via message.created later.
+        val viewModel = createViewModel()
+        updateState(viewModel) {
+            it.copy(
+                currentSessionId = "session-1",
+                messages = listOf(MessageWithParts(info = Message(id = "other", role = "assistant")))
+            )
+        }
+
+        handleSse(
+            viewModel,
+            SSEEvent(
+                payload = SSEPayload(
+                    type = "message.updated",
+                    properties = buildJsonObject {
+                        put("info", buildJsonObject {
+                            put("id", JsonPrimitive("not-loaded"))
+                            put("role", JsonPrimitive("assistant"))
+                        })
+                    }
+                )
+            )
+        )
+        advanceUntilIdle()
+
+        assertEquals(1, viewModel.state.value.messages.size)
+        assertEquals("other", viewModel.state.value.messages[0].info.id)
+        coVerify(exactly = 0) { repository.getMessagesPaged(any(), any(), any()) }
+    }
+
+    @Test
     fun `loadSessions requests current limit and tracks hasMore`() = runTest {
         val sessions = (1..10).map { index ->
             com.yage.opencode_client.data.model.Session(id = "session-$index", directory = "/tmp/$index")

@@ -2,6 +2,7 @@ package com.yage.opencode_client.ui
 
 import android.util.Log
 
+import com.yage.opencode_client.data.model.Message
 import com.yage.opencode_client.data.model.SSEEvent
 import com.yage.opencode_client.data.model.TodoItem
 import com.yage.opencode_client.data.repository.OpenCodeRepository
@@ -128,15 +129,36 @@ internal fun handleIncomingSseEvent(
             }
         }
         "message.updated" -> {
-            // No-op. opencode-web trusts SSE for live text and does NOT reload
-            // on message.updated: live token text arrives via message.part.updated
-            // delta and is rendered in real-time through streamingPartTexts;
-            // structural sync is handled by message.created (reload) and a
-            // foreground catch-up. Removing the periodic reload also eliminates
-            // the last OOM-churn source.
-            //
-            // Do NOT mark unread: message.updated fires for every streaming delta,
-            // which would spam the unread badge.
+            // SSE-trust: patch the message metadata in-place from the server's
+            // authoritative `info` (mirrors opencode-web server-session.ts:706).
+            // Server payload confirmed to carry a full { info: Message } object.
+            // We update ONLY the `.info` of the matching MessageWithParts,
+            // preserving its already-loaded/streamed parts — `info` is metadata
+            // (role/agent/time/tokens/...), parts arrive via message.part.* .
+            // If the message isn't in the current view it's a no-op (it will be
+            // loaded by message.created / loadMore when relevant). No reload,
+            // no unread marking (message.updated fires per streaming delta).
+            val infoJson = event.payload.getJsonObject("info")
+            if (infoJson != null) {
+                val updated = runCatching {
+                    lenientJson.decodeFromJsonElement<Message>(infoJson)
+                }.getOrNull()
+                if (updated != null && updated.id.isNotEmpty()) {
+                    // Folded into a single atomic update (no TOCTOU): if the id
+                    // isn't in the current view, return s unchanged.
+                    state.update { s ->
+                        if (s.messages.none { it.info.id == updated.id }) {
+                            s
+                        } else {
+                            s.copy(
+                                messages = s.messages.map {
+                                    if (it.info.id == updated.id) it.copy(info = updated) else it
+                                }
+                            )
+                        }
+                    }
+                }
+            }
         }
         "message.part.updated" -> {
             val deltaEvent = parseMessagePartDeltaEvent(event) ?: return
