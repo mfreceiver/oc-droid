@@ -137,6 +137,9 @@ internal fun handleIncomingSseEvent(
             // are NOT touched. If the message isn't in the current view it's a
             // no-op (loaded later by message.created / loadMore). No reload,
             // no unread marking (message.updated fires per streaming delta).
+            // Defensive session guard: only patch the current session's view.
+            val eventSessionId = event.payload.getString("sessionID")
+            if (eventSessionId != null && eventSessionId != state.value.currentSessionId) return
             val infoJson = event.payload.getJsonObject("info")
             if (infoJson != null) {
                 val updated = runCatching {
@@ -184,8 +187,10 @@ internal fun handleIncomingSseEvent(
                             )
                         }
                     } else if (!delta.isNullOrBlank()) {
-                        val previousValue = state.value.streamingPartTexts[key] ?: ""
+                        // Read previous inside the atomic update so a concurrent
+                        // append to the same key isn't lost (TOCTOU-safe).
                         state.update {
+                            val previousValue = it.streamingPartTexts[key].orEmpty()
                             it.copy(
                                 streamingPartTexts = it.streamingPartTexts + (key to (previousValue + delta)),
                                 streamingReasoningPart = reasoningPartOrNull(
@@ -237,8 +242,9 @@ internal fun handleIncomingSseEvent(
             val delta = event.payload.getString("delta")
             if (!delta.isNullOrEmpty()) {
                 val key = partId
-                val previous = state.value.streamingPartTexts[key] ?: ""
+                // Read previous inside the atomic update (TOCTOU-safe append).
                 state.update {
+                    val previous = it.streamingPartTexts[key].orEmpty()
                     it.copy(streamingPartTexts = it.streamingPartTexts + (key to (previous + delta)))
                 }
             }

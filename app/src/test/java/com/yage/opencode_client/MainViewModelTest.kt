@@ -1662,6 +1662,43 @@ class MainViewModelTest {
     }
 
     @Test
+    fun `authoritative reload clears stale streaming overlay so finalized parts are not masked`() = runTest {
+        // Regression (gpter S0-S4 BLOCKER): a resetLimit=true reload (e.g.
+        // message.created) fetches the authoritative latest window. Any stale
+        // streaming overlay for those messages must be cleared atomically,
+        // else the partial overlay would mask the finalized part.text in the UI.
+        val finalizedPart = Part(id = "p1", messageId = "m1", sessionId = "session-1", type = "text", text = "Hello world!")
+        val messages = listOf(MessageWithParts(info = Message(id = "m1", role = "assistant"), parts = listOf(finalizedPart)))
+        coEvery { repository.getMessagesPaged("session-1", 2, any()) } returns Result.success(MessagesPage(messages, null))
+
+        val viewModel = createViewModel()
+        updateState(viewModel) {
+            it.copy(
+                currentSessionId = "session-1",
+                // Stale partial overlay from a just-finished stream:
+                streamingPartTexts = mapOf("p1" to "Hello wor")
+            )
+        }
+
+        // message.created → authoritative reload (resetLimit=true).
+        handleSse(
+            viewModel,
+            SSEEvent(payload = SSEPayload(type = "message.created", properties = buildJsonObject {
+                put("sessionID", JsonPrimitive("session-1"))
+            }))
+        )
+        advanceTimeBy(400)
+        advanceUntilIdle()
+
+        // Overlay cleared (finalization boundary)...
+        assertTrue("streaming overlay must be cleared on authoritative reload",
+            viewModel.state.value.streamingPartTexts.isEmpty())
+        assertNull(viewModel.state.value.streamingReasoningPart)
+        // ...and the finalized authoritative part is present.
+        assertEquals(listOf(finalizedPart), viewModel.state.value.partsByMessage["m1"])
+    }
+
+    @Test
     fun `handleSSEEvent question asked appends pending question`() = runTest {
         val viewModel = createViewModel()
 

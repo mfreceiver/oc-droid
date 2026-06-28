@@ -286,6 +286,19 @@ internal fun launchLoadMessages(
                             partsByMessage = mergedParts,
                             isLoadingMessages = false,
                             selectedAgentName = agentName ?: it.selectedAgentName,
+                            // §finalization-boundary (gpter BLOCKER): a resetLimit=true
+                            // reload fetches the AUTHORITATIVE latest window, so any
+                            // streaming overlay for those messages is now superseded.
+                            // Clear it so a stale partial (streamingPartTexts[partId])
+                            // cannot mask the finalized part.text in the UI. This is the
+                            // finalization boundary now that S1 removed the idle clear.
+                            // (resetLimit=false periodic reloads preserve the overlay
+                            // since they only fetch the latest window without finalizing
+                            // an in-flight turn.) Safe across callers: session-open and
+                            // foreground already wipe before load (redundant, harmless);
+                            // message.created / send first-paint are the intended clears.
+                            streamingPartTexts = if (resetLimit) emptyMap() else it.streamingPartTexts,
+                            streamingReasoningPart = if (resetLimit) null else it.streamingReasoningPart,
                             // Only (re)seed the history cursor on a fresh open; a
                             // periodic reload must NOT clobber an existing cursor
                             // (now safe because older history is preserved above).
