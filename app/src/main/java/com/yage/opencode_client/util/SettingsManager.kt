@@ -86,6 +86,16 @@ class SettingsManager @Inject constructor(
         get() = encryptedPrefs.getInt(KEY_LAST_NAV_PAGE, 0).coerceIn(0, 3)
         set(value) = encryptedPrefs.edit().putInt(KEY_LAST_NAV_PAGE, value.coerceIn(0, 3)).apply()
 
+    /**
+     * The workdir (project directory) the user last connected to. Restored on
+     * cold start so repository queries are re-scoped to the same project and
+     * its directory-scoped sessions are re-fetched — without this, restart
+     * resets currentDirectory to null and the connected project "vanishes".
+     */
+    var currentWorkdir: String?
+        get() = encryptedPrefs.getString(KEY_CURRENT_WORKDIR, null)
+        set(value) = encryptedPrefs.edit().putString(KEY_CURRENT_WORKDIR, value).apply()
+
     var selectedAgentName: String?
         get() = encryptedPrefs.getString(KEY_AGENT_NAME, null)
         set(value) = encryptedPrefs.edit().putString(KEY_AGENT_NAME, value).apply()
@@ -229,6 +239,7 @@ class SettingsManager @Inject constructor(
         private const val KEY_CURRENT_HOST_PROFILE_ID = "current_host_profile_id"
         private const val KEY_SESSION_ID = "session_id"
         private const val KEY_LAST_NAV_PAGE = "last_nav_page"
+        private const val KEY_CURRENT_WORKDIR = "current_workdir"
         private const val KEY_AGENT_NAME = "agent_name"
         private const val KEY_THEME = "theme"
         private const val KEY_LANGUAGE = "language"

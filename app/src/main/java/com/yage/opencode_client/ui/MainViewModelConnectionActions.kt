@@ -21,6 +21,10 @@ internal fun applySavedSettings(
         username = currentProfile.basicAuth?.username,
         password = password
     )
+    // Restore the last connected workdir so the repository is re-scoped to the
+    // same project on cold start (currentDirectory is otherwise in-memory only
+    // and the connected project would "vanish" after restart).
+    settingsManager.currentWorkdir?.let { repository.setCurrentDirectory(it) }
 
     state.update {
         it.copy(

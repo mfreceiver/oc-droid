@@ -299,7 +299,14 @@ internal fun launchLoadMoreMessages(
     sessionId: String
 ) {
     if (state.value.isLoadingMessages) return
-    val newLimit = state.value.messageLimit + 30
+    // §OOM stopgap: cap accumulated limit. The proper fix is cursor-based
+    // pagination (prepend older pages without re-fetching the latest), but
+    // until that lands, bounding messageLimit prevents the O(n²) reload
+    // explosion where every watchdog/created reload re-downloads an ever
+    // larger message set (each carrying full tool outputs). 90 ≈ 3 pages.
+    val maxLimit = 90
+    val newLimit = minOf(state.value.messageLimit + 30, maxLimit)
+    if (newLimit == state.value.messageLimit) return  // already at cap, no more history
     scope.launch {
         state.update { it.copy(isLoadingMessages = true) }
         repository.getMessages(sessionId, newLimit)

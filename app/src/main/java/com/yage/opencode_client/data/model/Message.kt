@@ -143,10 +143,13 @@ data class Part(
 
     /**
      * For `task` tool parts, the spawned sub-agent session ID is stored under
-     * the state's metadata `sessionID` key. Returns null for non-task parts or
-     * when the sub-session has not yet been assigned (e.g. still running).
+     * the state's metadata `sessionId` key (opencode-web / opencode server use
+     * camelCase `sessionId`). Historically this looked up `sessionID`, which
+     * never matched → the sub-agent card was never clickable. Try the canonical
+     * key first, then the legacy capitalization as a fallback.
      */
-    val taskSubSessionId: String? get() = state?.metadataString("sessionID")
+    val taskSubSessionId: String?
+        get() = state?.metadataString("sessionId") ?: state?.metadataString("sessionID")
 
     /**
      * True for `task` tool parts: these spawn a sub-agent conversation that can

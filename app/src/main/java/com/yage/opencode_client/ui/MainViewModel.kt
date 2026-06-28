@@ -828,6 +828,17 @@ class MainViewModel @Inject constructor(
         loadProviders()
         loadPendingQuestions()
         loadCommands()
+        // Re-fetch the directory-scoped sessions for the restored workdir so the
+        // connected project's sessions reappear after restart (directorySessions
+        // is in-memory and otherwise empty until the user re-connects).
+        settingsManager.currentWorkdir?.let { workdir ->
+            viewModelScope.launch {
+                repository.getSessionsForDirectory(workdir)
+                    .onSuccess { sessions ->
+                        _state.update { it.copy(directorySessions = it.directorySessions + (workdir to sessions)) }
+                    }
+            }
+        }
     }
 
     /**
@@ -1202,6 +1213,9 @@ class MainViewModel @Inject constructor(
                 draftWorkdir = workdir
             )
         }
+        // Persist the connected workdir so a restart re-scopes the repository
+        // to this project (currentDirectory is otherwise in-memory only).
+        settingsManager.currentWorkdir = workdir
         // Best-effort: fetch the existing root sessions for this workdir (#10)
         // so the user can discover / resume prior conversations in the project
         // they just connected. Stored in [AppState.directorySessions] (a map
@@ -1568,11 +1582,15 @@ class MainViewModel @Inject constructor(
                     Log.d(TAG, "Tunnel activated successfully for ${profile.serverUrl}")
                 }
                 .onFailure { error ->
-                    val msg = errorMessageOrFallback(error, "Tunnel activation failed")
+                    // The repository now enriches the exception with type+message
+                    // (e.g. "HTTP 401: ...", "UnknownHostException: ...",
+                    // "SSLPeerUnverifiedException: ..."). Surface that directly —
+                    // no generic prefix that would double up the fallback string.
+                    val msg = errorMessageOrFallback(error, "未知错误（无异常信息）")
                     _state.update {
                         it.copy(
                             tunnelActivationState = TunnelActivationState.Error(msg),
-                            error = "Tunnel activation failed: $msg"
+                            error = "隧道激活失败：$msg"
                         )
                     }
                     Log.e(TAG, "Tunnel activation failed", error)
@@ -1637,6 +1655,11 @@ class MainViewModel @Inject constructor(
          * the current session is busy, it kicks a fallback reload.
          */
         private const val WATCHDOG_INTERVAL_MS = 5_000L
-        private const val WATCHDOG_STALE_MS = 5_000L
+        // §OOM/bandwidth: relaxed from 5s→15s. A busy session with a stalled
+        // SSE feed no longer triggers a full getMessages reload every 5s (which
+        // re-downloads the whole messageLimit × all parts each time). 15s still
+        // recovers from genuine stalls, but cuts the worst-case reload rate
+        // 12/min → 4/min. Full fix = cursor pagination + SSE-incremental trust.
+        private const val WATCHDOG_STALE_MS = 15_000L
     }
 }

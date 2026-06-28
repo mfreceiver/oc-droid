@@ -25,6 +25,12 @@ import javax.inject.Inject
 import javax.inject.Singleton
 import com.yage.opencode_client.util.TrafficTracker
 
+/**
+ * Hard cap on any single HTTP response body (32 MB). See the §OOM P0 interceptor
+ * in [OpenCodeRepository.buildOkHttpClient] for why this exists.
+ */
+private const val MAX_RESPONSE_BYTES = 32L * 1024 * 1024
+
 @Singleton
 class OpenCodeRepository @Inject constructor(
     private val trafficTracker: TrafficTracker
@@ -174,6 +180,33 @@ class OpenCodeRepository @Inject constructor(
                     sent = if (sentBytes > 0L) sentBytes else 0L,
                     received = if (receivedBytes > 0L) receivedBytes else 0L
                 )
+                response
+            }
+            // §OOM P0: response-size guard. The retrofit kotlinx-serialization
+            // converter reads the WHOLE response body into a single String before
+            // deserializing; a long agentic session's getMessages can embed tens
+            // of MB of verbatim tool output, and a ~124MB body → a ~248MB char
+            // array that OOMs the 256MB heap. Wrap every response body with a
+            // counting source that throws IOException past the cap, routing the
+            // call to Result.onFailure ("Response too large: …") instead of
+            // crashing. Covers chunked (unknown length) responses too.
+            .addInterceptor { chain ->
+                val response = chain.proceed(chain.request())
+                // §OOM P0: response-size guard. The retrofit kotlinx-serialization
+                // converter reads the WHOLE body into a single String before
+                // deserializing; a long session's getMessages can carry tens of
+                // MB of verbatim tool output, and a ~124MB body → a ~248MB char
+                // array that OOMs the 256MB heap. Aborting on Content-Length
+                // BEFORE the body is consumed prevents the allocation and closes
+                // the transfer early (saves cellular bandwidth too). getMessages
+                // responses carry Content-Length; chunked/unknown (-1) pass through.
+                val len = response.body?.contentLength() ?: -1L
+                if (len > MAX_RESPONSE_BYTES) {
+                    response.close()
+                    throw java.io.IOException(
+                        "Response too large (>${MAX_RESPONSE_BYTES / (1024 * 1024)}MB, Content-Length=$len): ${chain.request().url.encodedPath}"
+                    )
+                }
                 response
             }
             .connectTimeout(15, java.util.concurrent.TimeUnit.SECONDS)
@@ -485,21 +518,38 @@ class OpenCodeRepository @Inject constructor(
      * since tunnel authentication uses form-encoded POST (not HTTP Basic Auth).
      */
     suspend fun activateTunnel(tunnelUrl: String, password: String): Result<Unit> = runCatching {
-        val client = buildTunnelOkHttpClient()
-        val formBody = FormBody.Builder()
-            .add("persist_auth", "off")
-            .add("pw", password)
-            .build()
-        val request = okhttp3.Request.Builder()
-            .url(tunnelUrl)
-            .post(formBody)
-            .build()
-        val response = client.newCall(request).execute()
-        if (!response.isSuccessful) {
-            val body = response.body?.string().orEmpty()
-            throw Exception("Tunnel activation failed ${response.code}: $body")
+        try {
+            val client = buildTunnelOkHttpClient()
+            val formBody = FormBody.Builder()
+                .add("persist_auth", "off")
+                .add("pw", password)
+                .build()
+            val request = okhttp3.Request.Builder()
+                .url(tunnelUrl)
+                .post(formBody)
+                .build()
+            val response = client.newCall(request).execute()
+            response.use {
+                if (!it.isSuccessful) {
+                    val body = it.body?.string().orEmpty()
+                    throw Exception("HTTP ${it.code}${if (it.message.isNotBlank()) " ${it.message}" else ""}: ${body.ifBlank { "(空响应体)" }}")
+                }
+            }
+        } catch (e: Exception) {
+            // Enrich network/IO/SSL failures with type + message + cause so the
+            // UI surfaces something debuggable. OkHttp network errors often carry
+            // a null/empty message, which previously collapsed to a useless
+            // "Tunnel activation failed" fallback with no diagnostic value.
+            throw Exception(buildString {
+                append(e::class.simpleName ?: "Exception")
+                e.message?.takeIf { it.isNotBlank() }?.let { append(": ").append(it) }
+                e.cause?.let { c ->
+                    append(" ← ")
+                    append(c::class.simpleName ?: "")
+                    c.message?.takeIf { it.isNotBlank() }?.let { append(": ").append(it) }
+                }
+            }, e)
         }
-        response.close()
     }
 
     private fun buildTunnelOkHttpClient(): OkHttpClient {

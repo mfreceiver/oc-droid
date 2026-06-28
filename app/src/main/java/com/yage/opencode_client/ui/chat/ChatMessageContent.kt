@@ -714,13 +714,13 @@ private fun ToolCallsRow(
         color = androidx.compose.ui.graphics.Color.Transparent,
         border = BorderStroke(1.dp, oc.borderBase)
     ) {
-        Column(modifier = Modifier.padding(12.dp)) {
+        Column(modifier = Modifier.padding(horizontal = 8.dp, vertical = 6.dp)) {
             Row(
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Text(
                     text = "${parts.size} tool calls",
-                    style = MaterialTheme.typography.labelLarge,
+                    style = MaterialTheme.typography.labelSmall,
                     fontWeight = FontWeight.Medium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
@@ -880,13 +880,14 @@ private fun ReasoningCard(
     // panel) at v2's radius-md (6dp). Muted label/icon stay.
     val oc = MaterialTheme.opencode
     Surface(
-        modifier = modifier.padding(vertical = 2.dp),
+        modifier = modifier.padding(vertical = 1.dp),
         shape = RoundedCornerShape(6.dp),
-        color = androidx.compose.ui.graphics.Color.Transparent
+        color = androidx.compose.ui.graphics.Color.Transparent,
+        border = BorderStroke(1.dp, oc.borderBase)
     ) {
         Column {
             Row(
-                modifier = Modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = 6.dp),
+                modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 4.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Icon(
@@ -898,7 +899,7 @@ private fun ReasoningCard(
                 Spacer(modifier = Modifier.width(6.dp))
                 Text(
                     title ?: stringResource(R.string.chat_thinking),
-                    style = MaterialTheme.typography.labelMedium,
+                    style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
                 Spacer(modifier = Modifier.weight(1f))
@@ -922,7 +923,7 @@ private fun ReasoningCard(
                 val reasoningFontSizes = fontSizes.copy(body = fontSizes.reasoning)
                 // §5.1 v2: layer01 folding body at 6dp radius (was surfaceVariant@50% / 8dp).
                 Surface(
-                    modifier = Modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = 4.dp),
+                    modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 2.dp),
                     shape = RoundedCornerShape(6.dp),
                     color = oc.layer01
                 ) {
@@ -1264,7 +1265,7 @@ private fun ToolCard(
         border = BorderStroke(1.dp, oc.borderBase)
     ) {
         CompositionLocalProvider(LocalContentColor provides MaterialTheme.colorScheme.onSurfaceVariant) {
-            Column(modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp)) {
+            Column(modifier = Modifier.padding(horizontal = 8.dp, vertical = 6.dp)) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Icon(
                         icon,
@@ -1275,7 +1276,7 @@ private fun ToolCard(
                     Spacer(modifier = Modifier.width(6.dp))
                     Text(
                         text = displayName.ifEmpty { reason ?: "tool" },
-                        style = MaterialTheme.typography.labelMedium,
+                        style = MaterialTheme.typography.labelSmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
@@ -1294,12 +1295,6 @@ private fun ToolCard(
                             contentDescription = "Tool error",
                             modifier = Modifier.size(14.dp),
                             tint = oc.stateDangerFg
-                        )
-                        else -> Icon(
-                            Icons.Default.CheckCircle,
-                            contentDescription = "Tool completed",
-                            modifier = Modifier.size(14.dp),
-                            tint = oc.stateSuccessFg
                         )
                     }
                     if (firstFile != null) {
@@ -1456,7 +1451,7 @@ private fun PatchCard(
     val oc = MaterialTheme.opencode
     Surface(
         modifier = modifier
-            .padding(vertical = 2.dp)
+            .padding(vertical = 1.dp)
             .testTag("toolcard.patch.$basename"),
         shape = RoundedCornerShape(6.dp),
         color = androidx.compose.ui.graphics.Color.Transparent,
@@ -1466,7 +1461,7 @@ private fun PatchCard(
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(horizontal = 10.dp, vertical = 8.dp),
+                    .padding(horizontal = 8.dp, vertical = 6.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Icon(
@@ -1478,7 +1473,7 @@ private fun PatchCard(
                 Spacer(modifier = Modifier.width(6.dp))
                 Text(
                     text = basename,
-                    style = MaterialTheme.typography.labelMedium,
+                    style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.onSurface,
                     fontFamily = FontFamily.Monospace,
                     maxLines = 1,
@@ -1555,9 +1550,10 @@ private fun PatchCard(
 // ── opencode-web paradigm: borderless single-line tool rows ──────────────
 
 /**
- * Borderless single-line tool display for non-file-write, non-context, non-task
- * tools (bash, webfetch, websearch, and everything else). Replaces the old
- * bordered [ToolCard] and the merged [ToolCallsRow].
+ * Compact single-line tool display for non-file-write, non-context, non-task
+ * tools (bash, webfetch, websearch, and everything else). Hairline bordered
+ * container (borderBase 1dp, 6dp radius, transparent background) for subtle
+ * visual grouping without heavy card weight.
  *
  * Collapsed: `[chevron] [spinner] Title · subtitle`
  * Expanded: indented output in monospace.
@@ -1617,10 +1613,17 @@ private fun BasicTool(
         }
     }
 
-    Column(modifier = modifier.padding(vertical = 2.dp)) {
+    Surface(
+        modifier = modifier.padding(vertical = 1.dp),
+        shape = RoundedCornerShape(6.dp),
+        color = androidx.compose.ui.graphics.Color.Transparent,
+        border = BorderStroke(1.dp, oc.borderBase)
+    ) {
+    Column {
         Row(
             modifier = Modifier
                 .fillMaxWidth()
+                .padding(horizontal = 8.dp, vertical = 4.dp)
                 .then(
                     if (canExpand) Modifier.clickable { onToggleExpand(expandedKey, expanded) }
                     else Modifier
@@ -1645,19 +1648,19 @@ private fun BasicTool(
             }
             Text(
                 text = title,
-                style = MaterialTheme.typography.labelMedium,
+                style = MaterialTheme.typography.labelSmall,
                 color = MaterialTheme.colorScheme.onSurface,
                 maxLines = 1
             )
             if (subtitle != null) {
                 Text(
                     text = " · ",
-                    style = MaterialTheme.typography.labelMedium,
+                    style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
                 Text(
                     text = subtitle,
-                    style = MaterialTheme.typography.labelMedium,
+                    style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
@@ -1678,7 +1681,7 @@ private fun BasicTool(
 
         // Expanded content
         if (expanded && canExpand) {
-            Column(modifier = Modifier.padding(start = 12.dp, top = 4.dp)) {
+            Column(modifier = Modifier.padding(start = 8.dp, top = 2.dp, end = 8.dp, bottom = 6.dp)) {
                 // For bash: show `$ <command>` header
                 if (isBash) {
                     val command = part.toolInputSummary
@@ -1704,6 +1707,7 @@ private fun BasicTool(
                 }
             }
         }
+    }
     }
 }
 
@@ -1742,10 +1746,18 @@ private fun ContextToolGroup(
 
     val stateWord = if (isRunning) "Exploring" else "Explored"
 
-    Column(modifier = modifier.padding(vertical = 2.dp)) {
+    val oc = MaterialTheme.opencode
+    Surface(
+        modifier = modifier.padding(vertical = 1.dp),
+        shape = RoundedCornerShape(6.dp),
+        color = androidx.compose.ui.graphics.Color.Transparent,
+        border = BorderStroke(1.dp, oc.borderBase)
+    ) {
+    Column {
         Row(
             modifier = Modifier
                 .fillMaxWidth()
+                .padding(horizontal = 8.dp, vertical = 4.dp)
                 .clickable { onToggleExpand(expandedKey, expanded) },
             verticalAlignment = Alignment.CenterVertically
         ) {
@@ -1758,7 +1770,7 @@ private fun ContextToolGroup(
             }
             Text(
                 text = "$stateWord · $countText",
-                style = MaterialTheme.typography.labelMedium,
+                style = MaterialTheme.typography.labelSmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
@@ -1773,7 +1785,7 @@ private fun ContextToolGroup(
         }
 
         if (expanded) {
-            Column(modifier = Modifier.padding(start = 12.dp, top = 4.dp)) {
+            Column(modifier = Modifier.padding(start = 8.dp, top = 2.dp, end = 8.dp, bottom = 4.dp)) {
                 for (part in parts) {
                     val toolLabel = contextToolLabel(part)
                     val subtitle = part.toolInputSummary
@@ -1786,7 +1798,7 @@ private fun ContextToolGroup(
                     ) {
                         Text(
                             text = "$toolLabel · $subtitle",
-                            style = MaterialTheme.typography.labelMedium,
+                            style = MaterialTheme.typography.labelSmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                             maxLines = 1,
                             overflow = TextOverflow.Ellipsis,
@@ -1796,6 +1808,7 @@ private fun ContextToolGroup(
                 }
             }
         }
+    }
     }
 }
 
