@@ -32,7 +32,7 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.hilt.navigation.compose.hiltViewModel
 import com.yage.opencode_client.R
-import com.yage.opencode_client.data.model.MessageWithParts
+import com.yage.opencode_client.data.model.Message
 import com.yage.opencode_client.data.model.Part
 import com.yage.opencode_client.data.model.SessionStatus
 import com.yage.opencode_client.ui.files.FilesScreen
@@ -71,6 +71,7 @@ fun ChatScreen(
         state.currentSessionId,
         state.currentSessionStatus,
         state.visibleMessages,
+        state.partsByMessage,
         state.streamingReasoningPart,
         state.streamingPartTexts,
     ) {
@@ -78,6 +79,7 @@ fun ChatScreen(
             sessionId = state.currentSessionId,
             status = state.currentSessionStatus,
             messages = state.visibleMessages,
+            partsByMessage = state.partsByMessage,
             streamingReasoningPart = state.streamingReasoningPart,
             streamingPartTexts = state.streamingPartTexts,
         )
@@ -187,6 +189,7 @@ fun ChatScreen(
             } else if (state.currentSessionId != null) {
                 ChatMessageList(
                     messages = state.visibleMessages,
+                    partsByMessage = state.partsByMessage,
                     streamingPartTexts = state.streamingPartTexts,
                     streamingReasoningPart = state.streamingReasoningPart,
                     isLoading = state.isLoadingMessages,
@@ -297,39 +300,42 @@ private data class CurrentSessionActivity(
 private fun currentSessionActivity(
     sessionId: String?,
     status: SessionStatus?,
-    messages: List<MessageWithParts>,
+    messages: List<Message>,
+    partsByMessage: Map<String, List<Part>>,
     streamingReasoningPart: Part?,
     streamingPartTexts: Map<String, String>,
 ): CurrentSessionActivity? {
     val sid = sessionId ?: return null
-    val startedAt = messages.lastOrNull { it.info.sessionId == sid && it.info.isUser }?.info?.time?.created
-    val text = bestSessionActivityText(sid, status, messages, streamingReasoningPart, streamingPartTexts)
+    val startedAt = messages.lastOrNull { it.sessionId == sid && it.isUser }?.time?.created
+    val text = bestSessionActivityText(sid, status, messages, partsByMessage, streamingReasoningPart, streamingPartTexts)
     return CurrentSessionActivity(text = text, startedAtMillis = startedAt)
 }
 
 private fun bestSessionActivityText(
     sessionId: String,
     status: SessionStatus?,
-    messages: List<MessageWithParts>,
+    messages: List<Message>,
+    partsByMessage: Map<String, List<Part>>,
     streamingReasoningPart: Part?,
     streamingPartTexts: Map<String, String>,
 ): String {
     status?.message?.trim()?.takeIf { it.isNotEmpty() }?.let { return it }
 
     messages.asReversed().forEach { message ->
-        if (message.info.sessionId != sessionId) return@forEach
-        message.parts.asReversed().firstOrNull { it.isTool && it.stateDisplay == "running" }
+        if (message.sessionId != sessionId) return@forEach
+        (partsByMessage[message.id] ?: emptyList()).asReversed()
+            .firstOrNull { it.isTool && it.stateDisplay == "running" }
             ?.let { part -> formatStatusFromPart(part)?.let { return it } }
     }
 
     if (streamingReasoningPart?.sessionId == sessionId) {
-        val key = "${streamingReasoningPart.messageId}:${streamingReasoningPart.id}"
+        val key = streamingReasoningPart.id
         return formatThinkingFromReasoningText(streamingPartTexts[key].orEmpty())
     }
 
     messages.asReversed().forEach { message ->
-        if (message.info.sessionId != sessionId) return@forEach
-        message.parts.asReversed().firstOrNull()?.let { part ->
+        if (message.sessionId != sessionId) return@forEach
+        (partsByMessage[message.id] ?: emptyList()).asReversed().firstOrNull()?.let { part ->
             formatStatusFromPart(part)?.let { return it }
         }
     }

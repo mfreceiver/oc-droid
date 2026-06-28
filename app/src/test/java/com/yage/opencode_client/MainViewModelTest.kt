@@ -584,16 +584,17 @@ class MainViewModelTest {
 
     @Test
     fun `message updated SSE patches message info in place and preserves parts`() = runTest {
-        // S3: server carries a full { info: Message }. We replace ONLY the .info
-        // of the matching MessageWithParts, keeping its parts. No reload.
+        // S3: server carries a full { info: Message }. We replace the matching
+        // Message in the split store, keeping its parts in partsByMessage.
         val part = Part(id = "part-1", messageId = "m1", sessionId = "session-1", type = "text")
-        val original = MessageWithParts(
-            info = Message(id = "m1", role = "assistant", agent = "build"),
-            parts = listOf(part)
-        )
+        val original = Message(id = "m1", role = "assistant", agent = "build")
         val viewModel = createViewModel()
         updateState(viewModel) {
-            it.copy(currentSessionId = "session-1", messages = listOf(original))
+            it.copy(
+                currentSessionId = "session-1",
+                messages = listOf(original),
+                partsByMessage = mapOf("m1" to listOf(part))
+            )
         }
 
         handleSse(
@@ -621,12 +622,12 @@ class MainViewModelTest {
 
         val messages = viewModel.state.value.messages
         assertEquals(1, messages.size)
-        // info metadata patched...
-        assertEquals("m1", messages[0].info.id)
-        assertEquals("code", messages[0].info.agent)
-        assertEquals("stop", messages[0].info.finish)
-        // ...parts preserved...
-        assertEquals(listOf(part), messages[0].parts)
+        // message metadata patched...
+        assertEquals("m1", messages[0].id)
+        assertEquals("code", messages[0].agent)
+        assertEquals("stop", messages[0].finish)
+        // ...parts preserved in partsByMessage...
+        assertEquals(listOf(part), viewModel.state.value.partsByMessage["m1"])
         // ...and no reload issued.
         coVerify(exactly = 0) { repository.getMessagesPaged(any(), any(), any()) }
     }
@@ -639,7 +640,7 @@ class MainViewModelTest {
         updateState(viewModel) {
             it.copy(
                 currentSessionId = "session-1",
-                messages = listOf(MessageWithParts(info = Message(id = "other", role = "assistant")))
+                messages = listOf(Message(id = "other", role = "assistant"))
             )
         }
 
@@ -660,7 +661,7 @@ class MainViewModelTest {
         advanceUntilIdle()
 
         assertEquals(1, viewModel.state.value.messages.size)
-        assertEquals("other", viewModel.state.value.messages[0].info.id)
+        assertEquals("other", viewModel.state.value.messages[0].id)
         coVerify(exactly = 0) { repository.getMessagesPaged(any(), any(), any()) }
     }
 
@@ -1125,7 +1126,7 @@ class MainViewModelTest {
         viewModel.loadMessages("session-1")
         advanceUntilIdle()
 
-        assertEquals(messages, viewModel.state.value.messages)
+        assertEquals(messages.map { it.info }, viewModel.state.value.messages)
         assertEquals("plan", viewModel.state.value.selectedAgentName)
     }
 
@@ -1155,15 +1156,15 @@ class MainViewModelTest {
             )
         )
 
-        assertEquals("thinking", viewModel.state.value.streamingPartTexts["message-1:part-1"])
+        assertEquals("thinking", viewModel.state.value.streamingPartTexts["part-1"])
         assertEquals("part-1", viewModel.state.value.streamingReasoningPart?.id)
     }
 
     @Test
     fun `handleSSEEvent message part delta accumulates into streamingPartTexts`() = runTest {
         // message.part.delta is a distinct web event with top-level ids and a
-        // field-level delta. Phase 2 (S2) accumulates into streamingPartTexts
-        // keyed "$messageId:$partId" (the current UI contract). It must NOT
+        // field-level delta. S2/S4 accumulate into streamingPartTexts keyed by
+        // bare partId (the UI contract after the split-store rekey). It must NOT
         // reload and must ignore non-current sessions.
         val viewModel = createViewModel()
         updateState(viewModel) { it.copy(currentSessionId = "session-1") }
@@ -1187,7 +1188,7 @@ class MainViewModelTest {
         delta("Hello")
         delta(", world")
 
-        assertEquals("Hello, world", viewModel.state.value.streamingPartTexts["message-1:part-1"])
+        assertEquals("Hello, world", viewModel.state.value.streamingPartTexts["part-1"])
         // No reload issued.
         coVerify(exactly = 0) { repository.getMessagesPaged(any(), any(), any()) }
     }
@@ -1321,7 +1322,7 @@ class MainViewModelTest {
         updateState(viewModel) {
             it.copy(
                 currentSessionId = "session-1",
-                streamingPartTexts = mapOf("message-1:part-1" to "partial"),
+                streamingPartTexts = mapOf("part-1" to "partial"),
                 streamingReasoningPart = Part(id = "part-1", messageId = "message-1", sessionId = "session-1", type = "reasoning")
             )
         }
@@ -1343,7 +1344,7 @@ class MainViewModelTest {
 
         assertTrue(viewModel.state.value.streamingPartTexts.isEmpty())
         assertNull(viewModel.state.value.streamingReasoningPart)
-        assertEquals(messages, viewModel.state.value.messages)
+        assertEquals(messages.map { it.info }, viewModel.state.value.messages)
     }
 
     @Test
@@ -1375,7 +1376,7 @@ class MainViewModelTest {
         // streamingPartTexts until the next message.created reload or a
         // foreground catch-up reconciles the persisted message list.
         val viewModel = createViewModel()
-        val streaming = mapOf("message-1:part-1" to "partial")
+        val streaming = mapOf("part-1" to "partial")
         val reasoning = Part(id = "part-1", messageId = "message-1", sessionId = "session-1", type = "reasoning")
         updateState(viewModel) {
             it.copy(
@@ -1657,7 +1658,7 @@ class MainViewModelTest {
         advanceTimeBy(400)
         advanceUntilIdle()
 
-        assertEquals(messages, viewModel.state.value.messages)
+        assertEquals(messages.map { it.info }, viewModel.state.value.messages)
     }
 
     @Test

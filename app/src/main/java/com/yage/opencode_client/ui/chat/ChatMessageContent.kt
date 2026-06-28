@@ -71,7 +71,7 @@ import com.mikepenz.markdown.compose.elements.highlightedCodeBlock
 import com.mikepenz.markdown.compose.elements.highlightedCodeFence
 import com.mikepenz.markdown.m3.Markdown
 import com.yage.opencode_client.R
-import com.yage.opencode_client.data.model.MessageWithParts
+import com.yage.opencode_client.data.model.Message
 import com.yage.opencode_client.data.model.Part
 import com.yage.opencode_client.data.model.TodoItem
 import com.yage.opencode_client.data.repository.OpenCodeRepository
@@ -89,7 +89,8 @@ import java.util.Locale
 
 @Composable
 internal fun ChatMessageList(
-    messages: List<MessageWithParts>,
+    messages: List<Message>,
+    partsByMessage: Map<String, List<Part>>,
     streamingPartTexts: Map<String, String>,
     streamingReasoningPart: Part?,
     isLoading: Boolean,
@@ -104,9 +105,9 @@ internal fun ChatMessageList(
 ) {
     val listState = rememberLazyListState()
     var shouldAutoScroll by remember { mutableStateOf(true) }
-    val contentVersion = remember(messages, streamingPartTexts, streamingReasoningPart, isLoading) {
+    val contentVersion = remember(messages, partsByMessage, streamingPartTexts, streamingReasoningPart, isLoading) {
         messages.size +
-            messages.sumOf { it.parts.size } +
+            partsByMessage.values.sumOf { it.size } +
             streamingPartTexts.hashCode() +
             (if (streamingReasoningPart != null) 1 else 0) +
             (if (isLoading) 1 else 0)
@@ -162,7 +163,7 @@ internal fun ChatMessageList(
         contentPadding = androidx.compose.foundation.layout.PaddingValues(vertical = 8.dp)
     ) {
         if (streamingReasoningPart != null) {
-            val streamingKey = "${streamingReasoningPart.messageId}:${streamingReasoningPart.id}"
+            val streamingKey = streamingReasoningPart.id
             val streamingText = streamingPartTexts[streamingKey] ?: ""
             item(key = "streaming-reasoning") {
                 Box(modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp)) {
@@ -175,9 +176,10 @@ internal fun ChatMessageList(
                 }
             }
         }
-        items(messages.reversed(), key = { it.info.id }) { message ->
+        items(messages.reversed(), key = { it.id }) { message ->
             MessageRow(
                 message = message,
+                parts = partsByMessage[message.id].orEmpty(),
                 streamingPartTexts = streamingPartTexts,
                 repository = repository,
                 workspaceDirectory = workspaceDirectory,
@@ -229,7 +231,8 @@ private sealed class ToolRenderItem {
 
 @Composable
 private fun MessageRow(
-    message: MessageWithParts,
+    message: Message,
+    parts: List<Part>,
     streamingPartTexts: Map<String, String>,
     repository: OpenCodeRepository,
     workspaceDirectory: String?,
@@ -238,7 +241,7 @@ private fun MessageRow(
     expandedParts: Map<String, Boolean>,
     onToggleExpand: (String, Boolean) -> Unit
 ) {
-    val isUser = message.info.isUser
+    val isUser = message.isUser
 
     Column(
         modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp),
@@ -249,9 +252,9 @@ private fun MessageRow(
         // so an extra blue label is redundant.
 
         var i = 0
-        while (i < message.parts.size) {
-            val part = message.parts[i]
-            val streamingText = streamingPartTexts["${message.info.id}:${part.id}"]
+        while (i < parts.size) {
+            val part = parts[i]
+            val streamingText = streamingPartTexts[part.id]
             val isToolLike = part.isTool || (part.isPatch && part.filePathsForNavigationFiltered.isNotEmpty())
             if (isToolLike) {
                 // Buffer a contiguous run of tool/patch parts, then classify and
@@ -263,8 +266,8 @@ private fun MessageRow(
                 //  - everything else → BasicTool (borderless single line)
                 val run = mutableListOf<Part>()
                 var j = i
-                while (j < message.parts.size) {
-                    val p = message.parts[j]
+                while (j < parts.size) {
+                    val p = parts[j]
                     if (p.isTool || (p.isPatch && p.filePathsForNavigationFiltered.isNotEmpty())) {
                         run.add(p)
                         j++
@@ -306,7 +309,7 @@ private fun MessageRow(
                             parts = item.parts,
                             expandedParts = expandedParts,
                             onToggleExpand = onToggleExpand,
-                            messageId = message.info.id,
+                            messageId = message.id,
                             modifier = Modifier.widthIn(max = MAX_CARD_WIDTH)
                         )
                         is ToolRenderItem.SubAgent -> SubAgentCard(
@@ -328,7 +331,7 @@ private fun MessageRow(
                                     onFileClick = onFileClick,
                                     expandedParts = expandedParts,
                                     onToggleExpand = onToggleExpand,
-                                    expandedKey = "${message.info.id}|${item.part.id}",
+                                    expandedKey = "${message.id}|${item.part.id}",
                                     modifier = Modifier.widthIn(max = MAX_CARD_WIDTH)
                                 )
                             }
@@ -338,7 +341,7 @@ private fun MessageRow(
                             onFileClick = onFileClick,
                             expandedParts = expandedParts,
                             onToggleExpand = onToggleExpand,
-                            expandedKey = "${message.info.id}|${item.part.id}",
+                            expandedKey = "${message.id}|${item.part.id}",
                             modifier = Modifier.widthIn(max = MAX_CARD_WIDTH)
                         )
                     }
@@ -354,7 +357,7 @@ private fun MessageRow(
                     workspaceDirectory = workspaceDirectory,
                     onFileClick = onFileClick,
                     onOpenSubAgent = onOpenSubAgent,
-                    messageId = message.info.id,
+                    messageId = message.id,
                     expandedParts = expandedParts,
                     onToggleExpand = onToggleExpand,
                     modifier = Modifier.fillMaxWidth()
@@ -366,9 +369,9 @@ private fun MessageRow(
         //  - Assistant: completion time (hh:mm), falling back to created time.
         //  - User: "<modelId> <created hh:mm>" so the user can see which agent
         //    model handled the turn and when the prompt was sent.
-        val timeInfo = message.info.time
+        val timeInfo = message.time
         val footerText = if (isUser) {
-            val modelId = message.info.resolvedModel?.modelId
+            val modelId = message.resolvedModel?.modelId
             val sendTime = timeInfo?.created?.let(::formatHm)
             when {
                 modelId != null && sendTime != null -> "$modelId $sendTime"

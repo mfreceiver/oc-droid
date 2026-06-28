@@ -51,7 +51,11 @@ data class AppState(
     // Q6: persisted last-opened phone pager page (0=Chat...3=Settings).
     val lastNavPage: Int = 0,
     val sessionStatuses: Map<String, SessionStatus> = emptyMap(),
-    val messages: List<MessageWithParts> = emptyList(),
+    // SSE-trust split store (S4): messages hold only Message metadata; parts
+    // live separately keyed by message id (populated by API load). Live
+    // streaming text is overlaid via streamingPartTexts (keyed by partId).
+    val messages: List<Message> = emptyList(),
+    val partsByMessage: Map<String, List<Part>> = emptyMap(),
     // §on-demand: cursor-based history paging. olderMessagesCursor is the opaque
     // V1 cursor for fetching the next older page (null = no more / reset).
     val olderMessagesCursor: String? = null,
@@ -202,7 +206,8 @@ data class AppState(
     }
 
     data class ChatState(
-        val messages: List<MessageWithParts> = emptyList(),
+        val messages: List<Message> = emptyList(),
+        val partsByMessage: Map<String, List<Part>> = emptyMap(),
         val streamingPartTexts: Map<String, String> = emptyMap(),
         val streamingReasoningPart: Part? = null,
         val isLoadingMessages: Boolean = false,
@@ -249,6 +254,7 @@ data class AppState(
     val chatState: ChatState
         get() = ChatState(
             messages = visibleMessages,
+            partsByMessage = partsByMessage,
             streamingPartTexts = streamingPartTexts,
             streamingReasoningPart = streamingReasoningPart,
             isLoadingMessages = isLoadingMessages,
@@ -256,10 +262,10 @@ data class AppState(
             imageAttachments = imageAttachments
         )
 
-    val visibleMessages: List<MessageWithParts>
+    val visibleMessages: List<Message>
         get() {
             val revertMessageId = currentSession?.revert?.messageId ?: return messages
-            return messages.filter { message -> message.info.id < revertMessageId }
+            return messages.filter { message -> message.id < revertMessageId }
         }
 
     val fileUiState: FileUiState
@@ -299,14 +305,14 @@ data class AppState(
 
     val contextUsage: ContextUsage?
         get() {
-            val lastAssistant = messages.lastOrNull { it.info.isAssistant && tokenTotal(it.info.tokens) != null }
+            val lastAssistant = messages.lastOrNull { it.isAssistant && tokenTotal(it.tokens) != null }
                 ?: return logContextUsageUnavailable("no assistant message with usable tokens; messages=${messages.size}")
-            val tokens = lastAssistant.info.tokens
+            val tokens = lastAssistant.tokens
                 ?: return logContextUsageUnavailable("latest assistant has no tokens; messages=${messages.size}")
             val total = tokenTotal(tokens)
                 ?: return logContextUsageUnavailable("assistant tokens have no usable totals; tokens=$tokens")
-            val model = lastAssistant.info.resolvedModel
-                ?: return logContextUsageUnavailable("assistant message has no resolved model; message=${lastAssistant.info.id}")
+            val model = lastAssistant.resolvedModel
+                ?: return logContextUsageUnavailable("assistant message has no resolved model; message=${lastAssistant.id}")
             val key = "${model.providerId}/${model.modelId}"
             val index = providers?.providers?.flatMap { provider ->
                 provider.models.flatMap { (modelKey, providerModel) ->
@@ -338,7 +344,7 @@ data class AppState(
                 reasoningTokens = tokens.reasoning,
                 cachedReadTokens = tokens.cache?.read,
                 cachedWriteTokens = tokens.cache?.write,
-                cost = lastAssistant.info.cost
+                cost = lastAssistant.cost
             )
         }
 
@@ -621,6 +627,7 @@ class MainViewModel @Inject constructor(
             _state.update { it.copy(
                 currentSessionId = null,
                 messages = emptyList(),
+                partsByMessage = emptyMap(),
                 sessionStatuses = emptyMap(),
                 streamingPartTexts = emptyMap(),
                 streamingReasoningPart = null,
@@ -1045,7 +1052,7 @@ class MainViewModel @Inject constructor(
             )
             if (isCurrent && nextId == null) {
                 settingsManager.currentSessionId = null
-                next.copy(currentSessionId = null, messages = emptyList(), inputText = "")
+                next.copy(currentSessionId = null, messages = emptyList(), partsByMessage = emptyMap(), inputText = "")
             } else {
                 // Keep currentSessionId pointing at the closed session for now;
                 // selectSession(nextId) below performs the switch (and saves the
@@ -1119,6 +1126,7 @@ class MainViewModel @Inject constructor(
             it.copy(
                 currentSessionId = null,
                 messages = emptyList(),
+                partsByMessage = emptyMap(),
                 inputText = "",
                 imageAttachments = emptyList(),
                 sessionTodos = emptyMap(),
@@ -1304,8 +1312,8 @@ class MainViewModel @Inject constructor(
 
     fun editFromMessage(messageId: String) {
         val sessionId = _state.value.currentSessionId ?: return
-        val message = _state.value.messages.firstOrNull { it.info.id == messageId && it.info.isUser } ?: return
-        val draft = message.parts.firstOrNull { it.isText }?.text?.trim().orEmpty()
+        val message = _state.value.messages.firstOrNull { it.id == messageId && it.isUser } ?: return
+        val draft = (_state.value.partsByMessage[messageId] ?: emptyList()).firstOrNull { it.isText }?.text?.trim().orEmpty()
         if (draft.isBlank()) return
 
         viewModelScope.launch {

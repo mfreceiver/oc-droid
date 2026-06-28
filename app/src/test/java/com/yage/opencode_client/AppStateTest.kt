@@ -155,13 +155,11 @@ class AppStateTest {
         modelId: String = "gpt-4",
         contextLimit: Int? = 128000
     ): AppState {
-        val message = MessageWithParts(
-            info = Message(
-                id = "msg-1",
-                role = "assistant",
-                model = Message.ModelInfo(providerId = providerId, modelId = modelId),
-                tokens = Message.TokenInfo(total = totalTokens)
-            )
+        val message = Message(
+            id = "msg-1",
+            role = "assistant",
+            model = Message.ModelInfo(providerId = providerId, modelId = modelId),
+            tokens = Message.TokenInfo(total = totalTokens)
         )
         val providerModel = ProviderModel(
             id = modelId,
@@ -186,31 +184,25 @@ class AppStateTest {
 
     @Test
     fun `contextUsage returns null when no assistant messages`() {
-        val userMessage = MessageWithParts(
-            info = Message(id = "msg-1", role = "user")
-        )
+        val userMessage = Message(id = "msg-1", role = "user")
         val state = AppState(messages = listOf(userMessage))
         assertNull(state.contextUsage)
     }
 
     @Test
     fun `contextUsage returns null when assistant has no tokens`() {
-        val message = MessageWithParts(
-            info = Message(id = "msg-1", role = "assistant", tokens = null)
-        )
+        val message = Message(id = "msg-1", role = "assistant", tokens = null)
         val state = AppState(messages = listOf(message))
         assertNull(state.contextUsage)
     }
 
     @Test
     fun `contextUsage returns null when total tokens is null`() {
-        val message = MessageWithParts(
-            info = Message(
-                id = "msg-1",
-                role = "assistant",
-                tokens = Message.TokenInfo(total = null),
-                model = Message.ModelInfo("openai", "gpt-4")
-            )
+        val message = Message(
+            id = "msg-1",
+            role = "assistant",
+            tokens = Message.TokenInfo(total = null),
+            model = Message.ModelInfo("openai", "gpt-4")
         )
         val state = AppState(messages = listOf(message))
         assertNull(state.contextUsage)
@@ -218,12 +210,10 @@ class AppStateTest {
 
     @Test
     fun `contextUsage returns null when no resolvedModel`() {
-        val message = MessageWithParts(
-            info = Message(
-                id = "msg-1",
-                role = "assistant",
-                tokens = Message.TokenInfo(total = 50000)
-            )
+        val message = Message(
+            id = "msg-1",
+            role = "assistant",
+            tokens = Message.TokenInfo(total = 50000)
         )
         val state = AppState(messages = listOf(message))
         assertNull(state.contextUsage)
@@ -231,14 +221,12 @@ class AppStateTest {
 
     @Test
     fun `contextUsage returns null when provider model not found`() {
-        val message = MessageWithParts(
-            info = Message(
+        val message = Message(
                 id = "msg-1",
                 role = "assistant",
                 model = Message.ModelInfo(providerId = "unknown", modelId = "missing"),
                 tokens = Message.TokenInfo(total = 50000)
             )
-        )
         val providers = ProvidersResponse(
             providers = listOf(
                 ConfigProvider(
@@ -281,13 +269,11 @@ class AppStateTest {
 
     @Test
     fun `contextUsage matches provider model map key when provider model id differs`() {
-        val message = MessageWithParts(
-            info = Message(
-                id = "msg-1",
-                role = "assistant",
-                model = Message.ModelInfo(providerId = "ollama-cloud", modelId = "deepseek-v4-pro"),
-                tokens = Message.TokenInfo(total = 64000)
-            )
+        val message = Message(
+            id = "msg-1",
+            role = "assistant",
+            model = Message.ModelInfo(providerId = "ollama-cloud", modelId = "deepseek-v4-pro"),
+            tokens = Message.TokenInfo(total = 64000)
         )
         val providers = ProvidersResponse(
             providers = listOf(
@@ -319,24 +305,18 @@ class AppStateTest {
 
     @Test
     fun `contextUsage uses last assistant message with tokens`() {
-        val oldAssistant = MessageWithParts(
-            info = Message(
-                id = "msg-1",
-                role = "assistant",
-                model = Message.ModelInfo("openai", "gpt-4"),
-                tokens = Message.TokenInfo(total = 10000)
-            )
+        val oldAssistant = Message(
+            id = "msg-1",
+            role = "assistant",
+            model = Message.ModelInfo("openai", "gpt-4"),
+            tokens = Message.TokenInfo(total = 10000)
         )
-        val userMsg = MessageWithParts(
-            info = Message(id = "msg-2", role = "user")
-        )
-        val newAssistant = MessageWithParts(
-            info = Message(
-                id = "msg-3",
-                role = "assistant",
-                model = Message.ModelInfo("openai", "gpt-4"),
-                tokens = Message.TokenInfo(total = 90000)
-            )
+        val userMsg = Message(id = "msg-2", role = "user")
+        val newAssistant = Message(
+            id = "msg-3",
+            role = "assistant",
+            model = Message.ModelInfo("openai", "gpt-4"),
+            tokens = Message.TokenInfo(total = 90000)
         )
         val providers = ProvidersResponse(
             providers = listOf(
@@ -363,26 +343,22 @@ class AppStateTest {
 
     @Test
     fun `contextUsage skips latest assistant when tokens are empty`() {
-        val usableAssistant = MessageWithParts(
-            info = Message(
-                id = "msg-1",
-                role = "assistant",
-                model = Message.ModelInfo("openai", "gpt-4"),
-                tokens = Message.TokenInfo(total = 90000)
-            )
+        val usableAssistant = Message(
+            id = "msg-1",
+            role = "assistant",
+            model = Message.ModelInfo("openai", "gpt-4"),
+            tokens = Message.TokenInfo(total = 90000)
         )
-        val emptyTokenAssistant = MessageWithParts(
-            info = Message(
-                id = "msg-2",
-                role = "assistant",
-                model = Message.ModelInfo("openai", "gpt-4"),
-                tokens = Message.TokenInfo(
-                    total = null,
-                    input = 0,
-                    output = 0,
-                    reasoning = 0,
-                    cache = Message.TokenInfo.CacheInfo(read = 0, write = 0)
-                )
+        val emptyTokenAssistant = Message(
+            id = "msg-2",
+            role = "assistant",
+            model = Message.ModelInfo("openai", "gpt-4"),
+            tokens = Message.TokenInfo(
+                total = null,
+                input = 0,
+                output = 0,
+                reasoning = 0,
+                cache = Message.TokenInfo.CacheInfo(read = 0, write = 0)
             )
         )
         val providers = ProvidersResponse(

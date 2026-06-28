@@ -132,11 +132,10 @@ internal fun handleIncomingSseEvent(
             // SSE-trust: patch the message metadata in-place from the server's
             // authoritative `info` (mirrors opencode-web server-session.ts:706).
             // Server payload confirmed to carry a full { info: Message } object.
-            // We update ONLY the `.info` of the matching MessageWithParts,
-            // preserving its already-loaded/streamed parts — `info` is metadata
-            // (role/agent/time/tokens/...), parts arrive via message.part.* .
-            // If the message isn't in the current view it's a no-op (it will be
-            // loaded by message.created / loadMore when relevant). No reload,
+            // We replace the matching Message in the split `messages` store
+            // (List<Message>); its parts live separately in partsByMessage and
+            // are NOT touched. If the message isn't in the current view it's a
+            // no-op (loaded later by message.created / loadMore). No reload,
             // no unread marking (message.updated fires per streaming delta).
             val infoJson = event.payload.getJsonObject("info")
             if (infoJson != null) {
@@ -147,12 +146,12 @@ internal fun handleIncomingSseEvent(
                     // Folded into a single atomic update (no TOCTOU): if the id
                     // isn't in the current view, return s unchanged.
                     state.update { s ->
-                        if (s.messages.none { it.info.id == updated.id }) {
+                        if (s.messages.none { it.id == updated.id }) {
                             s
                         } else {
                             s.copy(
                                 messages = s.messages.map {
-                                    if (it.info.id == updated.id) it.copy(info = updated) else it
+                                    if (it.id == updated.id) updated else it
                                 }
                             )
                         }
@@ -166,7 +165,7 @@ internal fun handleIncomingSseEvent(
                 val msgId = deltaEvent.messageId
                 val pId = deltaEvent.partId
                 if (msgId != null && pId != null) {
-                    val key = "$msgId:$pId"
+                    val key = pId
                     val fullText = deltaEvent.text
                     val delta = deltaEvent.delta
                     if (!fullText.isNullOrBlank()) {
@@ -223,21 +222,21 @@ internal fun handleIncomingSseEvent(
             //
             // Phase 2 scope (docs/architecture-v3-sse-trust.md §246): only
             // accumulate into streamingPartTexts. Field-level in-place updates
-            // on the Part object are deferred to Phase 4 (needs field→property
-            // mapping). NOTE: the key is "$messageId:$partId" (the CURRENT UI
-            // contract at ChatMessageContent.kt:254), NOT bare partId — the
-            // latter is the Phase 4 target once streamingPartTexts is rekeyed.
+            // on the Part object are deferred (needs field→property mapping).
+            // Keyed by bare partId (S4: streamingPartTexts is rekeyed from
+            // "msgId:partId" to partId, matching the UI consumers).
             val sessionId = event.payload.getString("sessionID") ?: return
             if (sessionId != state.value.currentSessionId) return
-            val messageId = event.payload.getString("messageID") ?: return
+            // messageID required for a well-formed delta event (validation guard).
+            event.payload.getString("messageID") ?: return
             val partId = event.payload.getString("partID") ?: return
             // `field` defaults to "text"; Phase 2 ignores it (accumulates into
-            // the text overlay regardless) — field-specific handling is Phase 4.
+            // the text overlay regardless) — field-specific handling is deferred.
             @Suppress("UNUSED_VARIABLE")
             val field = event.payload.getString("field") ?: "text"
             val delta = event.payload.getString("delta")
             if (!delta.isNullOrEmpty()) {
-                val key = "$messageId:$partId"
+                val key = partId
                 val previous = state.value.streamingPartTexts[key] ?: ""
                 state.update {
                     it.copy(streamingPartTexts = it.streamingPartTexts + (key to (previous + delta)))

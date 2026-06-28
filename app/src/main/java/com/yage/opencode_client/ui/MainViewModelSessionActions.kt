@@ -2,6 +2,7 @@ package com.yage.opencode_client.ui
 
 import com.yage.opencode_client.data.model.ComposerImageAttachment
 import com.yage.opencode_client.data.model.Message
+import com.yage.opencode_client.data.model.Part
 import com.yage.opencode_client.data.repository.OpenCodeRepository
 import com.yage.opencode_client.util.SettingsManager
 import kotlinx.coroutines.CoroutineScope
@@ -75,7 +76,7 @@ internal fun launchLoadSessions(
                         onLoadMessages(currentId)
                     }
                     else -> {
-                        state.update { it.copy(currentSessionId = null, messages = emptyList()) }
+                        state.update { it.copy(currentSessionId = null, messages = emptyList(), partsByMessage = emptyMap()) }
                     }
                 }
             }
@@ -143,7 +144,7 @@ internal fun launchLoadMoreSessions(
                     // refreshedSessions.first(): tolerate the session even when
                     // it is temporarily absent from the refreshed list. #10.
                     currentId != null -> Unit
-                    else -> state.update { it.copy(currentSessionId = null, messages = emptyList()) }
+                    else -> state.update { it.copy(currentSessionId = null, messages = emptyList(), partsByMessage = emptyMap()) }
                 }
             }
             .onFailure { error ->
@@ -194,6 +195,7 @@ internal fun selectSessionState(
         it.copy(
             currentSessionId = sessionId,
             messages = emptyList(),
+            partsByMessage = emptyMap(),
             inputText = restoredDraft,
             streamingPartTexts = emptyMap(),
             streamingReasoningPart = null
@@ -255,22 +257,33 @@ internal fun launchLoadMessages(
                         // periodic reload replaced `messages` wholesale while keeping
                         // the old cursor, causing the 🔴 history-断层 the reviewers
                         // flagged. Falls back to "keep all not-in-fetched" when
-                        // created times are unavailable.
+                        // created times are unavailable. S4 split-store: parts for
+                        // kept-older messages must be preserved alongside their
+                        // messages (partsByMessage mirrors the merge).
                         val fetchedIds = page.items.map { m -> m.info.id }.toHashSet()
                         val oldestFetchedCreated = page.items
                             .mapNotNull { m -> m.info.time?.created }
                             .minOrNull()
-                        val mergedMessages = if (resetLimit) {
-                            page.items
+                        val fetchedMessages = page.items.map { m -> m.info }
+                        val fetchedParts = page.items.associate { m -> m.info.id to m.parts }
+                        val mergedMessages: List<Message>
+                        val mergedParts: Map<String, List<Part>>
+                        if (resetLimit) {
+                            mergedMessages = fetchedMessages
+                            mergedParts = fetchedParts
                         } else {
                             val olderKept = it.messages.filter { m ->
-                                m.info.id !in fetchedIds && (oldestFetchedCreated == null ||
-                                    (m.info.time?.created ?: Long.MAX_VALUE) < oldestFetchedCreated)
+                                m.id !in fetchedIds && (oldestFetchedCreated == null ||
+                                    (m.time?.created ?: Long.MAX_VALUE) < oldestFetchedCreated)
                             }
-                            olderKept + page.items
+                            val olderKeptIds = olderKept.map { m -> m.id }.toHashSet()
+                            mergedMessages = olderKept + fetchedMessages
+                            // keep parts for older-kept messages + add fetched parts
+                            mergedParts = it.partsByMessage.filterKeys { id -> id in olderKeptIds } + fetchedParts
                         }
                         it.copy(
                             messages = mergedMessages,
+                            partsByMessage = mergedParts,
                             isLoadingMessages = false,
                             selectedAgentName = agentName ?: it.selectedAgentName,
                             // Only (re)seed the history cursor on a fresh open; a
@@ -348,11 +361,14 @@ internal fun launchLoadMoreMessages(
                     if (page.items.isNotEmpty()) {
                         // De-dup by message id at the seam (the page boundary may
                         // overlap the oldest already-loaded message by one).
-                        val existingIds = state.value.messages.map { it.info.id }.toHashSet()
+                        val existingIds = state.value.messages.map { it.id }.toHashSet()
                         val older = page.items.filterNot { it.info.id in existingIds }
+                        val olderMessages = older.map { it.info }
+                        val olderParts = older.associate { it.info.id to it.parts }
                         state.update {
                             it.copy(
-                                messages = older + it.messages,
+                                messages = olderMessages + it.messages,
+                                partsByMessage = olderParts + it.partsByMessage,
                                 olderMessagesCursor = page.nextCursor,
                                 hasMoreMessages = page.nextCursor != null,
                                 isLoadingMessages = false
@@ -506,7 +522,7 @@ internal fun launchDeleteSession(
                         // in SettingsManager and would be restored on next
                         // launch / host switch, pointing at a deleted session.
                         settingsManager.currentSessionId = null
-                        state.update { it.copy(currentSessionId = null, messages = emptyList()) }
+                        state.update { it.copy(currentSessionId = null, messages = emptyList(), partsByMessage = emptyMap()) }
                     }
                 }
             }

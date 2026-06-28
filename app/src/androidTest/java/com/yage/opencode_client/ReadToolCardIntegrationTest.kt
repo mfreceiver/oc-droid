@@ -138,7 +138,8 @@ class ReadToolCardIntegrationTest {
         composeRule.setContent {
             MaterialTheme {
                 ChatMessageList(
-                    messages = messages,
+                    messages = messages.map { it.info },
+                    partsByMessage = messages.associate { it.info.id to it.parts },
                     streamingPartTexts = emptyMap(),
                     streamingReasoningPart = null,
                     isLoading = false,
