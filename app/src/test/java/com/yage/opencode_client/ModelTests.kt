@@ -92,7 +92,9 @@ class ModelTests {
         )
         assertTrue(userMessage.isUser)
         assertFalse(userMessage.isAssistant)
-        
+        assertFalse(userMessage.isSystem)
+        assertFalse(userMessage.isToolRole)
+
         val assistantMessage = Message(
             id = "msg-2",
             role = "assistant",
@@ -100,6 +102,42 @@ class ModelTests {
         )
         assertTrue(assistantMessage.isAssistant)
         assertFalse(assistantMessage.isUser)
+        assertFalse(assistantMessage.isSystem)
+        assertFalse(assistantMessage.isToolRole)
+    }
+
+    @Test
+    fun `Message isSystem is case-insensitive`() {
+        // Exact + case variants all qualify as system.
+        assertTrue(Message(id = "m1", role = "system").isSystem)
+        assertTrue(Message(id = "m2", role = "SYSTEM").isSystem)
+        assertTrue(Message(id = "m3", role = "System").isSystem)
+        // Whitespace / typos do NOT match — only case-insensitive equality.
+        assertFalse(Message(id = "m4", role = " system ").isSystem)
+        assertFalse(Message(id = "m5", role = "systemic").isSystem)
+        // Non-system roles are not system.
+        assertFalse(Message(id = "m6", role = "user").isSystem)
+        assertFalse(Message(id = "m7", role = "assistant").isSystem)
+        assertFalse(Message(id = "m8", role = "tool").isSystem)
+    }
+
+    @Test
+    fun `Message isToolRole is true for anything that is not user or assistant`() {
+        // Hidden-from-transcript roles.
+        assertTrue(Message(id = "m1", role = "system").isToolRole)
+        assertTrue(Message(id = "m2", role = "tool").isToolRole)
+        assertTrue(Message(id = "m3", role = "environment").isToolRole)
+        assertTrue(Message(id = "m4", role = "whatever-else").isToolRole)
+        assertTrue(Message(id = "m5", role = "").isToolRole)
+        // Case-insensitive: SYSTEM is still not user/assistant.
+        assertTrue(Message(id = "m6", role = "SYSTEM").isToolRole)
+        // Visible roles.
+        assertFalse(Message(id = "m7", role = "user").isToolRole)
+        assertFalse(Message(id = "m8", role = "assistant").isToolRole)
+        // isUser/isAssistant are case-insensitive (consistent with isSystem),
+        // so a capitalized "User"/"Assistant" is still visible, not hidden.
+        assertFalse(Message(id = "m9", role = "User").isToolRole)
+        assertFalse(Message(id = "m10", role = "ASSISTANT").isToolRole)
     }
 
     @Test

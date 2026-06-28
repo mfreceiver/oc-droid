@@ -1130,6 +1130,88 @@ class MainViewModelTest {
         assertEquals("plan", viewModel.state.value.selectedAgentName)
     }
 
+    // --- §C: visibleMessages hides non-user/assistant (system/tool/environment) ---
+
+    @Test
+    fun `visibleMessages filters out system tool and environment roles`() = runTest {
+        // §C: only user and assistant messages are shown in the chat transcript.
+        // system / tool / environment / etc. are dropped by visibleMessages.
+        val mixed = listOf(
+            Message(id = "m1", role = "user"),
+            Message(id = "m2", role = "system"),
+            Message(id = "m3", role = "assistant"),
+            Message(id = "m4", role = "tool"),
+            Message(id = "m5", role = "environment"),
+            Message(id = "m6", role = "whatever-else")
+        )
+
+        val viewModel = createViewModel()
+        updateState(viewModel) {
+            it.copy(currentSessionId = "session-1", messages = mixed)
+        }
+
+        // chatState.messages is what the UI renders and is sourced from
+        // AppState.visibleMessages (the filtered view), NOT the raw messages field.
+        val visible = viewModel.state.value.chatState.messages
+        assertEquals(listOf("m1", "m3"), visible.map { it.id })
+        assertTrue(visible.all { it.isUser || it.isAssistant })
+        // The raw store is unchanged — system/tool messages still live in state.
+        assertEquals(6, viewModel.state.value.messages.size)
+    }
+
+    @Test
+    fun `visibleMessages preserves revert-id filtering combined with role filter`() = runTest {
+        // §C: the role filter must compose with the existing revert-id filter.
+        // Messages with id >= revert.messageId are dropped, AND system/tool
+        // messages are dropped too — regardless of which side of the revert
+        // cut they fall on.
+        val mixed = listOf(
+            Message(id = "m1", role = "user"),
+            Message(id = "m2", role = "system"),        // filtered by role
+            Message(id = "m3", role = "assistant"),
+            Message(id = "m4", role = "tool"),          // filtered by role + revert (id >= m4)
+            Message(id = "m5", role = "user"),          // filtered by revert only (id >= m4)
+            Message(id = "m6", role = "assistant")      // filtered by revert only (id >= m4)
+        )
+        val session = Session(
+            id = "session-1",
+            directory = "/tmp/project",
+            revert = Session.RevertInfo(messageId = "m4")
+        )
+
+        val viewModel = createViewModel()
+        updateState(viewModel) {
+            it.copy(currentSessionId = "session-1", sessions = listOf(session), messages = mixed)
+        }
+
+        val visible = viewModel.state.value.chatState.messages
+        // Revert cut keeps m1, m2, m3 (id < "m4"); role filter then drops m2 (system).
+        assertEquals(listOf("m1", "m3"), visible.map { it.id })
+    }
+
+    @Test
+    fun `visibleMessages without revert still applies role filter`() = runTest {
+        // §C sanity: with no revert metadata, only the role filter applies.
+        val mixed = listOf(
+            Message(id = "m1", role = "system"),
+            Message(id = "m2", role = "user"),
+            Message(id = "m3", role = "environment")
+        )
+
+        val viewModel = createViewModel()
+        updateState(viewModel) {
+            // No revert on the session → revert filter is a no-op.
+            it.copy(
+                currentSessionId = "session-1",
+                sessions = listOf(Session(id = "session-1", directory = "/tmp")),
+                messages = mixed
+            )
+        }
+
+        val visible = viewModel.state.value.chatState.messages
+        assertEquals(listOf("m2"), visible.map { it.id })
+    }
+
     @Test
     fun `handleSSEEvent appends streaming reasoning delta for current session`() = runTest {
         val viewModel = createViewModel()

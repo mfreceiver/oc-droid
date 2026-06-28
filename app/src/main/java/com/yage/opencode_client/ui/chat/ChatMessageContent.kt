@@ -21,9 +21,10 @@ import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.CallSplit
+import androidx.compose.material.icons.filled.AccountTree
 import androidx.compose.material.icons.filled.Build
 import androidx.compose.material.icons.filled.Edit
+import androidx.compose.material.icons.filled.ErrorOutline
 import androidx.compose.material.icons.filled.ChevronRight
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Description
@@ -34,6 +35,7 @@ import androidx.compose.material.icons.automirrored.filled.OpenInNew
 import androidx.compose.material.icons.filled.Psychology
 import androidx.compose.material.icons.filled.RadioButtonUnchecked
 import androidx.compose.material.icons.filled.Terminal
+import androidx.compose.material.icons.filled.TravelExplore
 import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -57,6 +59,7 @@ import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
@@ -389,6 +392,15 @@ private fun MessageRow(
                 modifier = Modifier.padding(end = 4.dp, top = 4.dp)
             )
         }
+        // Inline error card — visible when the message carries an error payload.
+        message.error?.message?.let { err ->
+            if (err.isNotBlank()) {
+                ErrorCard(
+                    text = err,
+                    modifier = Modifier.widthIn(max = MAX_CARD_WIDTH)
+                )
+            }
+        }
     }
 }
 
@@ -408,13 +420,20 @@ private fun PartView(
 ) {
     val expandKey = "${messageId}|${part.id}"
     when {
-        part.isText -> TextPart(
-            text = streamingTextOverride ?: part.text ?: "",
-            isUser = isUser,
-            modifier = modifier,
-            repository = repository,
-            workspaceDirectory = workspaceDirectory
-        )
+        part.isText -> {
+            val textContent = streamingTextOverride ?: part.text ?: ""
+            // The transcript-leak guard only applies to assistant/system content.
+            // User messages that happen to quote <task_result> must always render.
+            if (isUser || !textContent.contains("<task_result>", ignoreCase = true)) {
+                TextPart(
+                    text = textContent,
+                    isUser = isUser,
+                    modifier = modifier,
+                    repository = repository,
+                    workspaceDirectory = workspaceDirectory
+                )
+            }
+        }
         part.isReasoning -> ReasoningCard(
             text = streamingTextOverride ?: part.text ?: "",
             title = part.toolReason,
@@ -711,7 +730,7 @@ private fun ToolCallsRow(
     Surface(
         modifier = modifier.padding(vertical = 4.dp).testTag("toolcard.toolcalls"),
         shape = RoundedCornerShape(6.dp),
-        color = androidx.compose.ui.graphics.Color.Transparent,
+        color = Color.Transparent,
         border = BorderStroke(1.dp, oc.borderBase)
     ) {
         Column(modifier = Modifier.padding(horizontal = 8.dp, vertical = 6.dp)) {
@@ -879,16 +898,30 @@ private fun ReasoningCard(
     // Outer borderBase provides containment; no layer01 panel.
     val oc = MaterialTheme.opencode
     Surface(
-        modifier = modifier.padding(vertical = 1.dp),
+        modifier = modifier.widthIn(max = 220.dp).padding(vertical = 1.dp),
         shape = RoundedCornerShape(6.dp),
-        color = androidx.compose.ui.graphics.Color.Transparent,
+        color = Color.Transparent,
         border = BorderStroke(1.dp, oc.borderBase)
     ) {
         Column {
             Row(
-                modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 4.dp),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 8.dp, vertical = 4.dp)
+                    .then(
+                        if (!isStreaming && expandedKey != null)
+                            Modifier.clickable { onToggleExpand(expandedKey, expanded) }
+                        else Modifier
+                    ),
                 verticalAlignment = Alignment.CenterVertically
             ) {
+                Icon(
+                    Icons.Default.Psychology,
+                    contentDescription = null,
+                    modifier = Modifier.size(14.dp),
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Spacer(modifier = Modifier.width(4.dp))
                 Text(
                     title ?: stringResource(R.string.chat_thinking),
                     style = MaterialTheme.typography.labelSmall,
@@ -896,14 +929,12 @@ private fun ReasoningCard(
                 )
                 Spacer(modifier = Modifier.weight(1f))
                 if (!isStreaming && expandedKey != null) {
-                    IconButton(onClick = { onToggleExpand(expandedKey, expanded) }) {
-                        Icon(
-                            if (expanded) Icons.Default.KeyboardArrowDown else Icons.Default.ChevronRight,
-                            contentDescription = if (expanded) "Collapse" else "Expand",
-                            modifier = Modifier.size(20.dp),
-                            tint = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                    }
+                    Icon(
+                        if (expanded) Icons.Default.KeyboardArrowDown else Icons.Default.ChevronRight,
+                        contentDescription = if (expanded) "Collapse" else "Expand",
+                        modifier = Modifier.size(18.dp),
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
                 }
             }
             if ((expanded || isStreaming) && text.isNotBlank()) {
@@ -918,7 +949,7 @@ private fun ReasoningCard(
                 Surface(
                     modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 2.dp),
                     shape = RoundedCornerShape(6.dp),
-                    color = androidx.compose.ui.graphics.Color.Transparent
+                    color = Color.Transparent
                 ) {
                     SelectionContainer {
                         CompositionLocalProvider(LocalContentColor provides MaterialTheme.colorScheme.onSurfaceVariant) {
@@ -1027,19 +1058,28 @@ private fun SubAgentCard(
 
     Surface(
         modifier = modifier
-            .padding(vertical = 2.dp)
+            .padding(vertical = 1.dp)
             .testTag("toolcard.subagent$tagSuffix")
             .then(if (canOpen) Modifier.clickable { onOpenSubAgent(sessionId!!) } else Modifier),
         shape = RoundedCornerShape(6.dp),
-        color = oc.layer02,
+        color = Color.Transparent,
         border = BorderStroke(1.dp, oc.borderBase)
     ) {
-        Column(modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp)) {
+        Column(modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
+                // Leading icon — mirrors web's task icon
+                Icon(
+                    Icons.Default.AccountTree,
+                    contentDescription = null,
+                    modifier = Modifier.size(14.dp),
+                    tint = if (subAgentName != null) agentTone(subAgentName) else oc.accentText
+                )
+                Spacer(modifier = Modifier.width(4.dp))
                 // Status icon: spinner while running, warning on error, nothing on done
                 when {
                     isRunning -> CircularProgressIndicator(
                         modifier = Modifier.size(14.dp),
+                        color = if (subAgentName != null) agentTone(subAgentName) else oc.accentText,
                         strokeWidth = 2.dp
                     )
                     isError -> Icon(
@@ -1049,14 +1089,14 @@ private fun SubAgentCard(
                         tint = statusErrorColor
                     )
                 }
-                if (isRunning || isError) Spacer(modifier = Modifier.width(6.dp))
+                if (isRunning || isError) Spacer(modifier = Modifier.width(4.dp))
 
-                // Agent name in accent color
+                // Agent name in per-agent tone color
                 if (subAgentName != null) {
                     Text(
                         text = "@$subAgentName",
-                        style = MaterialTheme.typography.labelMedium,
-                        color = oc.accentText,
+                        style = MaterialTheme.typography.labelSmall,
+                        color = agentTone(subAgentName),
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis
                     )
@@ -1068,20 +1108,30 @@ private fun SubAgentCard(
                     if (subAgentName != null) {
                         Text(
                             text = " · ",
-                            style = MaterialTheme.typography.labelMedium,
+                            style = MaterialTheme.typography.labelSmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
                     }
                     Text(
                         text = bodyTitle,
-                        style = MaterialTheme.typography.labelMedium,
+                        style = MaterialTheme.typography.labelSmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
                         modifier = Modifier.weight(1f)
                     )
                 } else {
-                    Spacer(modifier = Modifier.weight(1f))
+                    // Empty card: show a minimal placeholder so the card isn't a blank frame
+                    if (isRunning && subAgentName == null) {
+                        Text(
+                            text = "Sub-agent starting…",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.weight(1f)
+                        )
+                    } else {
+                        Spacer(modifier = Modifier.weight(1f))
+                    }
                 }
 
                 // Chevron to open sub-agent conversation
@@ -1093,16 +1143,6 @@ private fun SubAgentCard(
                         tint = oc.accentText
                     )
                 }
-            }
-
-            // Waiting indicator when no session ID yet
-            if (!isRunning && !isError && sessionId == null) {
-                Text(
-                    text = "waiting for sub-agent…",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    modifier = Modifier.padding(top = 4.dp)
-                )
             }
         }
     }
@@ -1138,6 +1178,8 @@ private fun stripSubAgentSuffix(text: String?): String {
  * them wall-to-wall. Matches iOS's compact card width.
  */
 private val MAX_CARD_WIDTH = 280.dp
+
+
 
 /**
  * Picks the Material icon for a tool based on its name (lowercased, prefix-matched).
@@ -1254,7 +1296,7 @@ private fun ToolCard(
     Surface(
         modifier = modifier.padding(vertical = 2.dp),
         shape = RoundedCornerShape(6.dp),
-        color = androidx.compose.ui.graphics.Color.Transparent,
+        color = Color.Transparent,
         border = BorderStroke(1.dp, oc.borderBase)
     ) {
         CompositionLocalProvider(LocalContentColor provides MaterialTheme.colorScheme.onSurfaceVariant) {
@@ -1446,14 +1488,15 @@ private fun PatchCard(
             .padding(vertical = 1.dp)
             .testTag("toolcard.patch.$basename"),
         shape = RoundedCornerShape(6.dp),
-        color = androidx.compose.ui.graphics.Color.Transparent,
+        color = Color.Transparent,
         border = BorderStroke(1.dp, oc.borderBase)
     ) {
         Column {
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(horizontal = 8.dp, vertical = 4.dp),
+                    .padding(horizontal = 8.dp, vertical = 4.dp)
+                    .clickable { onToggleExpand(expandedKey, expanded) },
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Icon(
@@ -1486,14 +1529,12 @@ private fun PatchCard(
                     )
                 }
                 Spacer(modifier = Modifier.weight(1f))
-                IconButton(onClick = { onToggleExpand(expandedKey, expanded) }) {
-                    Icon(
-                        if (expanded) Icons.Default.KeyboardArrowDown else Icons.Default.ChevronRight,
-                        contentDescription = if (expanded) "Collapse" else "Expand",
-                        modifier = Modifier.size(20.dp),
-                        tint = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                }
+                Icon(
+                    if (expanded) Icons.Default.KeyboardArrowDown else Icons.Default.ChevronRight,
+                    contentDescription = if (expanded) "Collapse" else "Expand",
+                    modifier = Modifier.size(18.dp),
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant
+                )
             }
             if (expanded) {
                 Column(modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp)) {
@@ -1603,7 +1644,7 @@ private fun BasicTool(
     Surface(
         modifier = modifier.padding(vertical = 1.dp),
         shape = RoundedCornerShape(6.dp),
-        color = androidx.compose.ui.graphics.Color.Transparent,
+        color = Color.Transparent,
         border = BorderStroke(1.dp, oc.borderBase)
     ) {
     Column {
@@ -1737,7 +1778,7 @@ private fun ContextToolGroup(
     Surface(
         modifier = modifier.padding(vertical = 1.dp),
         shape = RoundedCornerShape(6.dp),
-        color = androidx.compose.ui.graphics.Color.Transparent,
+        color = Color.Transparent,
         border = BorderStroke(1.dp, oc.borderBase)
     ) {
     Column {
@@ -1748,6 +1789,13 @@ private fun ContextToolGroup(
                 .clickable { onToggleExpand(expandedKey, expanded) },
             verticalAlignment = Alignment.CenterVertically
         ) {
+            Icon(
+                Icons.Default.TravelExplore,
+                contentDescription = null,
+                modifier = Modifier.size(14.dp),
+                tint = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            Spacer(modifier = Modifier.width(4.dp))
             if (isRunning) {
                 CircularProgressIndicator(
                     modifier = Modifier.size(14.dp),
@@ -1808,5 +1856,47 @@ private fun contextToolLabel(part: Part): String {
         tool.startsWith("grep") -> "Grep"
         tool.startsWith("list") -> "List"
         else -> tool.replaceFirstChar { c -> c.uppercase() }
+    }
+}
+
+// ── Inline error card ─────────────────────────────────────────────────
+
+/**
+ * Compact error card with a danger-tinted border. Follows the same transparent
+ * shell pattern as other tool cards, but the border uses [oc.stateDangerFg] to
+ * signal a problem. The text is selectable for easy copy-paste.
+ */
+@Composable
+private fun ErrorCard(
+    text: String,
+    modifier: Modifier = Modifier.fillMaxWidth()
+) {
+    val oc = MaterialTheme.opencode
+    Surface(
+        modifier = modifier.padding(vertical = 1.dp),
+        shape = RoundedCornerShape(6.dp),
+        color = Color.Transparent,
+        border = BorderStroke(1.dp, oc.stateDangerFg)
+    ) {
+        Row(
+            modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
+            verticalAlignment = Alignment.Top
+        ) {
+            Icon(
+                Icons.Default.ErrorOutline,
+                contentDescription = null,
+                modifier = Modifier.size(14.dp),
+                tint = oc.stateDangerFg
+            )
+            Spacer(modifier = Modifier.width(6.dp))
+            SelectionContainer {
+                Text(
+                    text = text,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    softWrap = true
+                )
+            }
+        }
     }
 }

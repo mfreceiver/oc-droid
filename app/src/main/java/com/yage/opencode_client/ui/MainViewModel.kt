@@ -274,8 +274,15 @@ data class AppState(
 
     val visibleMessages: List<Message>
         get() {
-            val revertMessageId = currentSession?.revert?.messageId ?: return messages
-            return messages.filter { message -> message.id < revertMessageId }
+            val revertMessageId = currentSession?.revert?.messageId
+            val reverted = if (revertMessageId == null) {
+                messages
+            } else {
+                messages.filter { message -> message.id < revertMessageId }
+            }
+            // Filter out system / tool / environment messages — only user and
+            // assistant messages are shown in the chat transcript.
+            return reverted.filter { !it.isToolRole }
         }
 
     val fileUiState: FileUiState

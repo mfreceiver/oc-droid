@@ -69,8 +69,16 @@ data class Message(
             }
     }
 
-    val isUser: Boolean get() = role == "user"
-    val isAssistant: Boolean get() = role == "assistant"
+    val isUser: Boolean get() = role.equals("user", ignoreCase = true)
+    val isAssistant: Boolean get() = role.equals("assistant", ignoreCase = true)
+    val isSystem: Boolean get() = role.equals("system", ignoreCase = true)
+
+    /**
+     * True for any role that should be hidden from the chat transcript
+     * (system / tool / environment / etc.) — i.e. anything that is neither
+     * a user nor an assistant message.
+     */
+    val isToolRole: Boolean get() = !isUser && !isAssistant
 
     val resolvedModel: ModelInfo?
         get() = model ?: (if (providerId != null && modelId != null) {
