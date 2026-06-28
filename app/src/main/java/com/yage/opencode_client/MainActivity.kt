@@ -135,25 +135,18 @@ class MainActivity : AppCompatActivity() {
                 ThemeMode.DARK -> true
                 ThemeMode.SYSTEM -> isSystemInDarkTheme()
             }
-            val windowSizeClass = calculateWindowSizeClass(this)
-            val isTablet = windowSizeClass.widthSizeClass == WindowWidthSizeClass.Expanded
-            // Landscape split: trigger on phone landscape orientation (≥400dp wide
-            // so a ~100dp session pane is still usable). Below 400dp fall back to
-            // the swipable PhoneLayout. Rotation state survives via the Hilt VM.
-            val config = androidx.compose.ui.platform.LocalConfiguration.current
-            val isLandscape =
-                config.orientation == android.content.res.Configuration.ORIENTATION_LANDSCAPE
-            val tooNarrow = config.screenWidthDp < 400
-
+            // Single full-screen pane in ALL orientations/sizes. The former
+            // tablet/landscape split-pane (sidebar) layouts were removed: in
+            // landscape the screen simply rotates. A single pane keeps the
+            // global currentDirectory unambiguous (the Sessions file-browse
+            // overlay is full-screen, so Chat is never interactable during a
+            // browse — no desync), and matches the product decision to drop the
+            // sidebar feature.
             OpenCodeTheme(
                 darkTheme = darkTheme,
                 markdownFontSizes = state.markdownFontSizes
             ) {
-                when {
-                    isTablet -> TabletLayout(viewModel = viewModel)
-                    isLandscape && !tooNarrow -> LandscapeSplitLayout(viewModel = viewModel)
-                    else -> PhoneLayout(viewModel = viewModel, initialPage = state.lastNavPage)
-                }
+                PhoneLayout(viewModel = viewModel, initialPage = state.lastNavPage)
             }
         }
     }
@@ -193,7 +186,7 @@ class MainActivity : AppCompatActivity() {
 
 /**
  * Phone layout: a full-screen HorizontalPager that swipes left/right between
- * the four top-level screens (Chat → Sessions → Files → Settings).
+ * the three top-level screens (Chat → Sessions → Settings).
  *
  * The previous bottom NavigationBar + NavHost stack has been replaced by the
  * pager. Each page renders its own TopAppBar showing the current screen name,
@@ -249,157 +242,6 @@ private fun PhoneLayout(viewModel: MainViewModel, initialPage: Int = 0) {
                     onSwitchToChat = { switchToPage(screens.indexOf(Screen.Chat)) }
                 )
                 Screen.Settings -> SettingsScreen(viewModel = viewModel)
-            }
-        }
-    }
-}
-
-@OptIn(ExperimentalMaterial3Api::class)
-@Composable
-private fun TabletLayout(viewModel: MainViewModel) {
-    var selectedTab by remember { mutableIntStateOf(0) }
-    var sessionsPaneCollapsed by rememberSaveable { mutableStateOf(false) }
-    val onOpenSettings: () -> Unit = { selectedTab = 1 }
-    val state by viewModel.state.collectAsStateWithLifecycle()
-    val filesWeight = if (sessionsPaneCollapsed) 0.5f else 0.375f
-    val chatWeight = if (sessionsPaneCollapsed) 0.5f else 0.375f
-
-        Row(
-            modifier = Modifier
-                .fillMaxSize()
-                // Status-bar inset is consumed by each pane's own M3 TopAppBar
-                // (see RFC 0.1.3 §3 — single inset application rule).
-        ) {
-        // Left panel: Session list or Settings — 25% when expanded.
-        if (!sessionsPaneCollapsed) {
-            Column(
-                modifier = Modifier
-                    .weight(0.25f)
-                    .fillMaxHeight()
-            ) {
-                if (selectedTab == 1) {
-                    SettingsScreen(
-                        viewModel = viewModel,
-                        onBack = { selectedTab = 0 }
-                    )
-                } else {
-                    SessionsScreen(
-                        viewModel = viewModel,
-                        // No swipe on tablet (Chat is always visible in the right
-                        // pane); session selection updates the shared ViewModel
-                        // which the Chat pane observes.
-                        onSwitchToChat = {}
-                    )
-                }
-            }
-
-            VerticalDivider()
-        }
-
-        // Middle panel: FilesScreen (file preview) — 37.5%, or 50% when Sessions is collapsed.
-        Column(
-            modifier = Modifier
-                .weight(filesWeight)
-                .fillMaxHeight()
-        ) {
-            MaterialTheme(
-                colorScheme = MaterialTheme.colorScheme,
-                typography = compactTypography(MaterialTheme.typography)
-            ) {
-                val filesViewModel: FilesViewModel = hiltViewModel()
-                Box(modifier = Modifier.fillMaxSize()) {
-                    FilesScreen(
-                        viewModel = filesViewModel,
-                        pathToShow = state.filePathToShowInFiles,
-                        sessionDirectory = state.currentSession?.directory,
-                        onCloseFile = { viewModel.clearFileToShow() },
-                        onFileClick = { }
-                    )
-                    if (sessionsPaneCollapsed) {
-                        Surface(
-                            modifier = Modifier
-                                .align(Alignment.TopStart)
-                                .padding(4.dp),
-                            shape = MaterialTheme.shapes.small,
-                            color = MaterialTheme.colorScheme.surface.copy(alpha = 0.92f),
-                            tonalElevation = 3.dp
-                        ) {
-                            IconButton(onClick = { sessionsPaneCollapsed = false }) {
-                                Icon(
-                                    Icons.AutoMirrored.Filled.KeyboardArrowRight,
-                                    contentDescription = stringResource(R.string.sessions_show)
-                                )
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        VerticalDivider()
-
-        // Right panel: Chat — 37.5%, or 50% when Sessions is collapsed.
-        Column(
-            modifier = Modifier
-                .weight(chatWeight)
-                .fillMaxHeight()
-        ) {
-            MaterialTheme(
-                colorScheme = MaterialTheme.colorScheme,
-                typography = compactTypography(MaterialTheme.typography)
-            ) {
-                ChatScreen(
-                    viewModel = viewModel,
-                    onNavigateToSettings = onOpenSettings,
-                    showSettingsButton = false
-                )
-            }
-        }
-    }
-}
-
-/**
- * Landscape split layout (#1, RFC 0.1.3 §1): a two-pane Row used on phones in
- * landscape orientation (width ≥400dp). Sessions on the left (25%), Chat on the
- * right (75%). Settings has no entry in landscape (no pager); the settings
- * button is hidden. Selecting a session drives the shared Hilt ViewModel, which
- * the Chat pane observes — `onSwitchToChat` is intentionally a no-op.
- *
- * The Row intentionally applies NO status-bar inset padding; per §3 the inset
- * is consumed by each pane's own M3 TopAppBar. Rotation state survives because
- * the ViewModel is Hilt-scoped to the Activity.
- *
- * Files navigation is routed to `showFileInFiles` which caches the path so it
- * can be displayed when the user rotates back to portrait (no Files pane in
- * landscape to show it immediately).
- */
-@Composable
-private fun LandscapeSplitLayout(viewModel: MainViewModel) {
-    Row(modifier = Modifier.fillMaxSize()) {
-        // Left pane: Sessions list — 25%.
-        Column(modifier = Modifier.weight(0.25f).fillMaxHeight()) {
-            SessionsScreen(
-                viewModel = viewModel,
-                onSwitchToChat = {} // Selection updates the shared VM, which the
-                                   // right-hand Chat pane observes automatically.
-            )
-        }
-
-        VerticalDivider()
-
-        // Right pane: Chat — 75%.
-        // §评审 Stage C #5: wrap in compactTypography so landscape matches
-        // [TabletLayout]'s compact density for the chat pane.
-        Column(modifier = Modifier.weight(0.75f).fillMaxHeight()) {
-            MaterialTheme(
-                colorScheme = MaterialTheme.colorScheme,
-                typography = compactTypography(MaterialTheme.typography)
-            ) {
-                ChatScreen(
-                    viewModel = viewModel,
-                    onNavigateToSettings = {},
-                    showSettingsButton = false
-                )
             }
         }
     }
