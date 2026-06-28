@@ -15,7 +15,10 @@ import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.lazy.LazyRow
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -23,10 +26,10 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.Chat
+import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Checklist
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.DonutLarge
-import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.SmartToy
 import androidx.compose.material3.AlertDialog
@@ -51,6 +54,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
@@ -65,6 +69,7 @@ import com.yage.opencode_client.data.model.TodoItem
 import com.yage.opencode_client.ui.AppState
 import com.yage.opencode_client.ui.TunnelActivationState
 import com.yage.opencode_client.ui.theme.BrandGold
+import com.yage.opencode_client.ui.theme.opencode
 import java.util.Locale
 
 internal data class ChatTopBarState(
@@ -122,15 +127,22 @@ internal data class ChatTopBarActions(
     val onNavigateToSettings: () -> Unit = {},
     val onRefresh: () -> Unit = {},
     val onSelectHost: (String) -> Unit = {},
-    val onActivateTunnel: () -> Unit = {}
+    val onActivateTunnel: () -> Unit = {},
+    /**
+     * §17: opened by the trailing "+" affordance on the session tab strip.
+     * Defaults to a no-op so existing call sites (which do not wire a
+     * Sessions-page navigation through [ChatScreen]) keep compiling; the
+     * phone layout can opt in by passing a real callback.
+     */
+    val onNavigateToSessions: () -> Unit = {}
 )
 
 /**
- * Max width for the in-title session dropdown anchor. The M3 [TopAppBar] title
- * slot is not a [RowScope], so [Modifier.weight] has no effect there; this cap
- * keeps the anchor (and the parent-back / draft affordances) from pushing the
- * actions cluster, while the [DropdownMenu] itself uses a fixed width (see
- * [SessionDropdownRow]).
+ * Max width for the title-slot content (current session title, §8 breadcrumb,
+ * or draft workdir basename). The M3 [TopAppBar] title slot is not a
+ * [RowScope], so [Modifier.weight] has no effect there; this cap keeps the
+ * title from pushing the actions cluster. Session switching lives in the
+ * persistent second-row tab strip (§17, [SessionTabStrip]).
  */
 private val TITLE_SLOT_MAX_WIDTH = 240.dp
 
@@ -142,7 +154,6 @@ internal fun ChatTopBar(
     modifier: Modifier = Modifier
 ) {
     val currentSession = state.sessions.find { it.id == state.currentSessionId }
-    var showSessionMenu by remember { mutableStateOf(false) }
     var showContextMenu by remember { mutableStateOf(false) }
     var showTodoDialog by remember { mutableStateOf(false) }
     var showContextDialog by remember { mutableStateOf(false) }
@@ -155,35 +166,53 @@ internal fun ChatTopBar(
     // status dot. windowInsets is the TopAppBar default so the bar self-handles
     // the status-bar inset (the caller-side statusBarsPadding is dropped by
     // another channel — see RFC 0.1.3 §2-3).
+    // §17: a persistent session tab strip is rendered directly below the
+    // TopAppBar as a second row. The TopAppBar keeps status-bar inset
+    // handling via its default windowInsets; the outer Column carries the
+    // caller-supplied modifier.
+    Column(modifier = modifier) {
     TopAppBar(
-        modifier = modifier,
         windowInsets = TopAppBarDefaults.windowInsets,
         title = {
             when {
                 state.parentSessionId != null -> {
-                    Surface(
-                        onClick = { actions.onSelectSession(state.parentSessionId) },
-                        shape = RoundedCornerShape(6.dp),
-                        color = Color.Transparent,
+                    // §8: sub-agent breadcrumb "[parent] / [current]". Only the
+                    // parent segment is clickable (navigates back to the parent
+                    // session); the current segment is plain. Single-level only
+                    // — matches v2 which does not render a full ancestry chain
+                    // (Session.parentId may be multi-level, but the UI shows one).
+                    val parentTitle = state.parentSessionTitle
+                        ?: stringResource(R.string.chat_parent_session)
+                    val currentTitle = currentSession?.displayName.orEmpty()
+                    val oc = MaterialTheme.opencode
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
                         modifier = Modifier.widthIn(max = TITLE_SLOT_MAX_WIDTH)
                     ) {
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            Icon(
-                                Icons.AutoMirrored.Filled.ArrowBack,
-                                contentDescription = stringResource(R.string.chat_back_to_parent_session),
-                                modifier = Modifier.size(16.dp),
-                                tint = MaterialTheme.colorScheme.primary
-                            )
-                            Spacer(modifier = Modifier.width(4.dp))
-                            Text(
-                                text = state.parentSessionTitle
-                                    ?: stringResource(R.string.chat_parent_session),
-                                style = MaterialTheme.typography.titleLarge,
-                                color = MaterialTheme.colorScheme.primary,
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis
-                            )
-                        }
+                        Text(
+                            text = truncateTitle(parentTitle),
+                            style = MaterialTheme.typography.labelMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier
+                                .weight(1f, fill = false)
+                                .clickable {
+                                    state.parentSessionId?.let(actions.onSelectSession)
+                                }
+                        )
+                        Text(
+                            text = " / ",
+                            style = MaterialTheme.typography.labelMedium,
+                            color = oc.faint
+                        )
+                        Text(
+                            text = truncateTitle(currentTitle),
+                            style = MaterialTheme.typography.labelMedium,
+                            color = MaterialTheme.colorScheme.onSurface,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
                     }
                 }
 
@@ -208,20 +237,21 @@ internal fun ChatTopBar(
                 }
 
                 else -> {
-                    SessionDropdownRow(
-                        modifier = Modifier.widthIn(max = TITLE_SLOT_MAX_WIDTH),
-                        currentSession = currentSession,
-                        openSessions = state.openSessions,
-                        currentSessionId = state.currentSessionId,
-                        unreadSessions = state.unreadSessions,
-                        expanded = showSessionMenu,
-                        onToggleExpand = { showSessionMenu = !showSessionMenu },
-                        onSelectSession = { id ->
-                            actions.onSelectSession(id)
-                            showSessionMenu = false
-                        },
-                        onCloseSession = actions.onCloseSession
-                    )
+                    // §17: the dropdown session switcher moved to the persistent
+                    // tab strip rendered as the TopAppBar's second row. The title
+                    // slot now shows only the current session title.
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier.widthIn(max = TITLE_SLOT_MAX_WIDTH)
+                    ) {
+                        Text(
+                            text = truncateTitle(currentSession?.displayName ?: "—"),
+                            style = MaterialTheme.typography.titleLarge,
+                            color = MaterialTheme.colorScheme.onSurface,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
                 }
             }
         },
@@ -280,6 +310,14 @@ internal fun ChatTopBar(
             )
         }
     )
+
+        // §17: persistent horizontal session tab strip — the TopAppBar's
+        // second row. Always visible (incl. when viewing a sub-agent); per
+        // §17.2 the openSessions list is already filtered to root sessions
+        // (parentId == null) by ChatScreen, so it never duplicates the
+        // sub-agent currently shown in the title-slot breadcrumb.
+        SessionTabStrip(state = state, actions = actions)
+    }
 
     if (showTodoDialog) {
         AlertDialog(
@@ -373,138 +411,128 @@ private fun truncateTitle(value: String): String =
     if (value.length <= SESSION_TITLE_MAX_CHARS) value
     else value.take(SESSION_TITLE_MAX_CHARS - 1) + "…"
 
-private fun workdirBasename(directory: String): String =
-    directory.split("/").filter { it.isNotEmpty() }.lastOrNull() ?: directory
-
+/**
+ * §17: persistent horizontal session tab strip rendered as the TopAppBar's
+ * second row. Replaces the former title-slot dropdown switcher. Each tab shows
+ * the (truncated) session title, an unread dot when the session received an
+ * out-of-band message, and a close-X; the active session is highlighted with
+ * the v2 accent color. A trailing "+" affordance opens the Sessions page
+ * (create / pick another session).
+ *
+ * Per §17.2 the `openSessions` list is already filtered to root sessions
+ * (parentId == null) by ChatScreen, so sub-agent sessions never appear here —
+ * the tab strip and the title-slot breadcrumb (§8) coexist without conflict.
+ */
 @Composable
-private fun SessionDropdownRow(
-    modifier: Modifier = Modifier,
-    currentSession: Session?,
-    openSessions: List<Session>,
-    currentSessionId: String?,
-    unreadSessions: Set<String>,
-    expanded: Boolean,
-    onToggleExpand: () -> Unit,
-    onSelectSession: (String) -> Unit,
-    onCloseSession: (String) -> Unit
+private fun SessionTabStrip(
+    state: ChatTopBarState,
+    actions: ChatTopBarActions,
+    modifier: Modifier = Modifier
 ) {
-    val currentTitle = currentSession?.displayName ?: "—"
-    Box(modifier = modifier) {
-        Row(
-            verticalAlignment = Alignment.CenterVertically,
-            modifier = Modifier
-                .clickable(onClick = onToggleExpand)
-                .padding(vertical = 2.dp)
-        ) {
-            // Title occupies the anchor row; the dropdown arrow sits to its
-            // right. The title now uses titleLarge (18sp Medium) since it lives
-            // in the TopAppBar title slot (#2).
-            Text(
-                text = truncateTitle(currentTitle),
-                style = MaterialTheme.typography.titleLarge,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-                color = MaterialTheme.colorScheme.onSurface,
-                modifier = Modifier.weight(1f)
+    val oc = MaterialTheme.opencode
+    LazyRow(
+        modifier = modifier.fillMaxWidth(),
+        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp),
+        horizontalArrangement = Arrangement.spacedBy(2.dp)
+    ) {
+        items(state.openSessions, key = { it.id }) { session ->
+            SessionTab(
+                title = session.displayName,
+                isSelected = session.id == state.currentSessionId,
+                isUnread = session.id in state.unreadSessions,
+                accentColor = oc.accentText,
+                onSelect = { actions.onSelectSession(session.id) },
+                onClose = { actions.onCloseSession(session.id) }
             )
+        }
+        item(key = "tab_new_session") {
+            TabAddAffordance(onClick = actions.onNavigateToSessions)
+        }
+    }
+}
+
+/**
+ * A single session tab. The whole row is tappable (selects the session); the
+ * trailing X is a nested click target that closes the session. The active tab
+ * uses the v2 accent text color + SemiBold weight in lieu of a background fill
+ * (keeps the strip visually quiet, matching v2's understated tab treatment).
+ */
+@Composable
+private fun SessionTab(
+    title: String,
+    isSelected: Boolean,
+    isUnread: Boolean,
+    accentColor: Color,
+    onSelect: () -> Unit,
+    onClose: () -> Unit
+) {
+    val textColor = if (isSelected) accentColor
+    else MaterialTheme.colorScheme.onSurfaceVariant
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        modifier = Modifier
+            .heightIn(min = 36.dp)
+            .clip(RoundedCornerShape(6.dp))
+            .clickable(onClick = onSelect)
+            .padding(horizontal = 10.dp, vertical = 4.dp)
+    ) {
+        // Unread dot: rendered in the accent color so it reads as "activity"
+        // rather than an error. Cleared by the VM when the session is opened.
+        if (isUnread) {
+            Box(
+                modifier = Modifier
+                    .padding(end = 6.dp)
+                    .size(6.dp)
+                    .background(color = accentColor, shape = CircleShape)
+            )
+        }
+        Text(
+            text = truncateTitle(title),
+            style = MaterialTheme.typography.labelMedium,
+            color = textColor,
+            fontWeight = if (isSelected) FontWeight.SemiBold else FontWeight.Normal,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis
+        )
+        Spacer(modifier = Modifier.width(4.dp))
+        // Close affordance: a tight 20dp click target. Compose's clickable
+        // consumes the pointer event, so tapping the X fires onClose without
+        // also triggering the row's select clickable (standard nested-clickable
+        // behavior, same as a list row with a trailing IconButton).
+        Box(
+            modifier = Modifier
+                .size(20.dp)
+                .clickable(onClick = onClose),
+            contentAlignment = Alignment.Center
+        ) {
             Icon(
-                Icons.Default.KeyboardArrowDown,
-                contentDescription = null,
-                modifier = Modifier.size(18.dp),
+                Icons.Default.Close,
+                contentDescription = stringResource(R.string.common_close),
+                modifier = Modifier.size(14.dp),
                 tint = MaterialTheme.colorScheme.onSurfaceVariant
             )
         }
-        DropdownMenu(
-            expanded = expanded,
-            onDismissRequest = { if (expanded) onToggleExpand() },
-            // Fixed width (not widthIn) so the cap is honored even when the
-            // anchor is narrow (#9).
-            modifier = Modifier.width(280.dp)
-        ) {
-            // Scrollable, height-capped list so a long open-session set cannot
-            // cover the composer (#9).
-            Column(
-                modifier = Modifier
-                    .heightIn(max = 360.dp)
-                    .verticalScroll(rememberScrollState())
-            ) {
-                if (openSessions.isEmpty()) {
-                    DropdownMenuItem(
-                        text = {
-                            Text(
-                                stringResource(R.string.chat_select_or_create_session),
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
-                            )
-                        },
-                        enabled = false,
-                        onClick = {}
-                    )
-                } else {
-                    openSessions.forEach { session ->
-                        val isSelected = session.id == currentSessionId
-                        Surface(
-                            color = if (isSelected) MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.6f)
-                            else Color.Transparent,
-                            shape = RoundedCornerShape(6.dp)
-                        ) {
-                            Row(
-                                verticalAlignment = Alignment.CenterVertically,
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .clickable {
-                                        onSelectSession(session.id)
-                                    }
-                                    .padding(horizontal = 12.dp, vertical = 8.dp)
-                            ) {
-                                Column(modifier = Modifier.weight(1f)) {
-                                    Text(
-                                        text = truncateTitle(session.displayName),
-                                        style = MaterialTheme.typography.bodyMedium,
-                                        fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal,
-                                        color = if (isSelected) MaterialTheme.colorScheme.onPrimaryContainer
-                                        else MaterialTheme.colorScheme.onSurface,
-                                        maxLines = 1,
-                                        overflow = TextOverflow.Ellipsis
-                                    )
-                                    Text(
-                                        text = workdirBasename(session.directory),
-                                        style = MaterialTheme.typography.labelSmall,
-                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                        maxLines = 1,
-                                        overflow = TextOverflow.Ellipsis
-                                    )
-                                }
-                                // Unread badge: a small primary-colored dot when this
-                                // session has received a new (message.created) event
-                                // since the user last viewed it. Cleared on open.
-                                if (session.id in unreadSessions) {
-                                    Box(
-                                        modifier = Modifier
-                                            .padding(end = 4.dp)
-                                            .size(8.dp)
-                                            .background(
-                                                color = MaterialTheme.colorScheme.primary,
-                                                shape = CircleShape
-                                            )
-                                    )
-                                }
-                                IconButton(
-                                    onClick = { onCloseSession(session.id) },
-                                    modifier = Modifier.size(28.dp)
-                                ) {
-                                    Icon(
-                                        Icons.Default.Close,
-                                        contentDescription = stringResource(R.string.common_close),
-                                        modifier = Modifier.size(16.dp),
-                                        tint = MaterialTheme.colorScheme.onSurfaceVariant
-                                    )
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
+    }
+}
+
+/**
+ * Trailing "+" affordance on the tab strip — opens the Sessions page to create
+ * or pick a session that is not currently among the open (MRU) tabs.
+ */
+@Composable
+private fun TabAddAffordance(onClick: () -> Unit) {
+    Box(
+        modifier = Modifier
+            .size(36.dp)
+            .clickable(onClick = onClick),
+        contentAlignment = Alignment.Center
+    ) {
+        Icon(
+            Icons.Default.Add,
+            contentDescription = stringResource(R.string.chat_select_or_create_session),
+            modifier = Modifier.size(18.dp),
+            tint = MaterialTheme.colorScheme.onSurfaceVariant
+        )
     }
 }
 

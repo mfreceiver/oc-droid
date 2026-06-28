@@ -4,12 +4,27 @@ import android.app.Application
 import android.os.Handler
 import android.os.Looper
 import android.webkit.WebView
+import com.yage.opencode_client.di.AppLifecycleMonitor
 import dagger.hilt.android.HiltAndroidApp
+import javax.inject.Inject
 
 @HiltAndroidApp
 class OpenCodeApp : Application() {
+    /**
+     * §15.2 / §18: injected so Hilt constructs the [AppLifecycleMonitor]
+     * singleton eagerly at Application creation. The monitor wires its own
+     * ActivityLifecycleCallbacks in its `init {}`; we just need to touch it
+     * here to force instantiation before any Activity starts.
+     */
+    @Inject
+    lateinit var appLifecycleMonitor: AppLifecycleMonitor
+
     override fun onCreate() {
         super.onCreate()
+        // §18.1: create the two notification channels up front (idempotent,
+        // wrapped in try/catch inside createChannels). Required before any
+        // notify() call, otherwise notifications silently no-op on API 26+.
+        AppLifecycleMonitor.createChannels(this)
         warmUpWebViewAfterLaunch()
     }
 

@@ -7,15 +7,22 @@ import com.yage.opencode_client.data.api.CommandInfo
 import com.yage.opencode_client.data.model.*
 import com.yage.opencode_client.data.repository.HostProfileStore
 import com.yage.opencode_client.data.repository.OpenCodeRepository
+import com.yage.opencode_client.di.AppLifecycleMonitor
 import com.yage.opencode_client.util.SettingsManager
 import com.yage.opencode_client.util.LanguageMode
 import com.yage.opencode_client.util.ThemeMode
 import com.yage.opencode_client.util.TrafficTracker
 import com.yage.opencode_client.ui.theme.MarkdownFontSizes
 import dagger.hilt.android.lifecycle.HiltViewModel
+import kotlinx.coroutines.CoroutineStart
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.FlowPreview
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.*
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.util.Locale
 import javax.inject.Inject
 
@@ -353,11 +360,13 @@ data class AppState(
 }
 
 @HiltViewModel
+@OptIn(FlowPreview::class)
 class MainViewModel @Inject constructor(
     internal val repository: OpenCodeRepository,
     internal val settingsManager: SettingsManager,
     private val hostProfileStore: HostProfileStore,
-    internal val trafficTracker: TrafficTracker
+    internal val trafficTracker: TrafficTracker,
+    private val appLifecycleMonitor: AppLifecycleMonitor
 ) : ViewModel() {
 
     private val _state = MutableStateFlow(AppState())
@@ -395,11 +404,222 @@ class MainViewModel @Inject constructor(
     }
 
     private var sseJob: Job? = null
-    private var pollJob: Job? = null
     private var lastHealthCheckTime = 0L
+
+    /**
+     * §15.1.4 streaming-watchdog: timestamp (epoch ms) of the last SSE event
+     * we processed for the current session. Updated inside
+     * [handleIncomingSseEvent] (alongside every `_state.update`) so the
+     * watchdog can tell "no delta for >5s while busy" apart from "actively
+     * streaming". Reset to `now` whenever a fallback reload fires so a slow
+     * server response does not loop the watchdog.
+     */
+    @Volatile private var lastSseProgressAtMs: Long = 0L
+
+    /**
+     * §15.2: guards the very first [AppLifecycleMonitor.isInForeground]
+     * emission. StateFlow always delivers its current value to a new
+     * collector, so without this flag the catch-up would fire spuriously on
+     * ViewModel construction (where there is no actual background→foreground
+     * transition to recover from). We treat the first emission as the
+     * baseline "current state" and only act on subsequent transitions, which
+     * matches the spec's "ON_START = 回前台" semantics.
+     */
+    @Volatile private var hasObservedForegroundState: Boolean = false
+
+    /**
+     * §15.1.4 watchdog job. Started when the current session transitions to
+     * busy (any -> busy), cancelled when it goes back to idle. Survives
+     * ON_STOP/ON_START because the foreground/background hook controls the
+     * SSE job, not the watchdog itself — but ON_STOP cancels the watchdog
+     * too (no point running it without an SSE feed to corroborate).
+     */
+    private var watchdogJob: Job? = null
+
+    /**
+     * §15.1 debounced message-refresh signal. SSE `message.updated` events
+     * for the current session push `Unit` here; a single coroutine debounces
+     * by 500ms then issues one [loadMessagesWithRetry]. `selectSession` and
+     * [sendMessage] bypass the trigger and call [loadMessages]/refresh
+     * directly so first-paint latency is unaffected. `replay=0` so a slow
+     * collector never re-replays old refresh ticks; `extraBufferCapacity=1`
+     * so [tryEmit] never drops+logs when the debounce is mid-coalesce.
+     */
+    private val messagesRefreshTrigger = MutableSharedFlow<Unit>(
+        replay = 0,
+        extraBufferCapacity = 1
+    )
 
     init {
         loadSettings()
+        // §15.2: foreground/background hook (N8 — onEach+launchIn, NOT a
+        // suspend `collect`, since `init` is synchronous and cannot block).
+        appLifecycleMonitor.isInForeground
+            .onEach { onForegroundChanged(it) }
+            .launchIn(viewModelScope)
+
+        // §15.1: single debounced message-refresh pipeline. Sibling events
+        // (message.updated bursts during streaming) coalesce into one reload.
+        // CoroutineStart.UNDISPATCHED ensures the SharedFlow subscription is
+        // registered synchronously inside `init`, before any caller can fire
+        // `messagesRefreshTrigger.tryEmit`. Without this, the very first
+        // message.updated event (arriving on the same dispatcher tick as
+        // ViewModel construction) would be emitted to an empty subscriber
+        // set with replay=0 and silently dropped.
+        viewModelScope.launch(start = CoroutineStart.UNDISPATCHED) {
+            messagesRefreshTrigger
+                .debounce(MESSAGE_REFRESH_DEBOUNCE_MS)
+                .collect {
+                    val sessionId = _state.value.currentSessionId ?: return@collect
+                    loadMessagesWithRetry(sessionId, resetLimit = false)
+                }
+        }
+
+        // §18.1: mirror state.error into the notification module so it can
+        // surface a system notification when we are in the background.
+        // distinctUntilChanged() so we only fire on transitions; the monitor
+        // applies its own "skip while in foreground" rule. UNDISPATCHED for
+        // the same reason as the refresh trigger — we want the subscription
+        // established before init returns.
+        viewModelScope.launch(start = CoroutineStart.UNDISPATCHED) {
+            _state
+                .map { it.error }
+                .distinctUntilChanged()
+                .collect { appLifecycleMonitor.onAppError(it) }
+        }
+    }
+
+    /**
+     * §15.2 / R-A: process foreground/background transitions.
+     *
+     * On **enter foreground** (ON_START): clear any stale streaming buffers
+     * (so a half-flushed part does not bleed into the reload), force a
+     * connection check (bypassing the 30s throttle), and reload the current
+     * session. N13: `currentSessionId?.let{}` null guard — draft mode or a
+     * freshly-closed last tab leaves it null, and a `GET /session/null/...`
+     * would 4xx.
+     *
+     * On **enter background** (ON_STOP): cancel the SSE feed (R-A: saves
+     * data, avoids half-open sockets; the §18 independent 30s poller takes
+     * over notification duty) and stop the streaming watchdog.
+     */
+    private fun onForegroundChanged(inForeground: Boolean) {
+        // §15.2: the first emission from AppLifecycleMonitor.isInForeground
+        // is the current state, not a transition. Skip catch-up logic so the
+        // ViewModel's very first subscribe does not spuriously reload (which
+        // would race with MainActivity's own LaunchedEffect testConnection
+        // and break tests that do not pre-mock checkHealth).
+        if (!hasObservedForegroundState) {
+            hasObservedForegroundState = true
+            return
+        }
+        if (inForeground) {
+            // Catch-up: wipe streaming state first so a stale partial does
+            // not overwrite the freshly-loaded snapshot.
+            _state.update {
+                it.copy(
+                    streamingPartTexts = emptyMap(),
+                    streamingReasoningPart = null
+                )
+            }
+            testConnection(force = true)
+            _state.value.currentSessionId?.let { loadMessages(it, resetLimit = true) }
+        } else {
+            sseJob?.cancel()
+            sseJob = null
+            stopStreamWatchdog()
+        }
+    }
+
+    /**
+     * §15.1.4: starts (or restarts) the streaming-watchdog. The watchdog
+     * polls every 5s while the current session is busy; if no SSE progress
+     * has been observed in the last 5s AND no reload is in flight, it kicks
+     * a [loadMessagesWithRetry] to recover from any dropped/invisible SSE
+     * path (the only fallback once 2s busy-polling is gone). Idempotent:
+     * calling twice re-launches a single job.
+     */
+    private fun startStreamWatchdog() {
+        watchdogJob?.cancel()
+        // Seed the timestamp so a fresh watchdog doesn't fire instantly when
+        // the previous run's last update is stale.
+        lastSseProgressAtMs = System.currentTimeMillis()
+        watchdogJob = viewModelScope.launch {
+            while (isActive) {
+                delay(WATCHDOG_INTERVAL_MS)
+                val snapshot = _state.value
+                val sessionId = snapshot.currentSessionId ?: continue
+                if (!snapshot.isCurrentSessionBusy) continue
+                if (snapshot.isLoadingMessages) continue
+                val now = System.currentTimeMillis()
+                if (now - lastSseProgressAtMs > WATCHDOG_STALE_MS) {
+                    lastSseProgressAtMs = now
+                    loadMessagesWithRetry(sessionId, resetLimit = false)
+                }
+            }
+        }
+    }
+
+    private fun stopStreamWatchdog() {
+        watchdogJob?.cancel()
+        watchdogJob = null
+    }
+
+    /**
+     * §Stage D (gpter 重要 #3): start the streaming watchdog when the CURRENT
+     * session is already busy but no SSE busy event will arrive to start it.
+     * This happens when the user selects an already-busy session, or after a
+     * foreground catch-up where the server does not replay a busy status on
+     * the fresh SSE connection. Without this, a silently-dropped SSE feed on
+     * such a session has no fallback. Idempotent: a no-op when the watchdog
+     * is already running, or when there is no current session / it is idle.
+     */
+    private fun maybeStartWatchdogForBusyCurrentSession() {
+        if (watchdogJob?.isActive == true) return
+        val current = _state.value.currentSessionId ?: return
+        if (_state.value.sessionStatuses[current]?.isBusy != true) return
+        startStreamWatchdog()
+    }
+
+    /**
+     * §Stage D (gpter 阻塞 #1): tear down any in-flight SSE feed and the
+     * streaming watchdog BEFORE the repository is reconfigured for a host /
+     * profile switch. Without this, the SSE job bound to the PREVIOUS host
+     * keeps delivering events into AppState while the new host's health probe
+     * is still in flight — those stale events (session/status/message/
+     * permission/question) would pollute the freshly-cleared state for the
+     * new profile. Also resets [lastSseProgressAtMs] so a stale timestamp
+     * from the old host cannot trip the next watchdog run.
+     */
+    private fun cancelSseAndWatchdogForReconfigure() {
+        sseJob?.cancel()
+        sseJob = null
+        stopStreamWatchdog()
+        lastSseProgressAtMs = 0L
+    }
+
+    /**
+     * §18.1 deep-link entry point invoked by [com.yage.opencode_client.MainActivity]
+     * when a notification tap carries [MainActivity.EXTRA_SESSION_ID]. If the
+     * session is already cached locally we just [selectSession]; otherwise we
+     * try a direct `getSession` fetch (works for sub-agent sessions too) and
+     * upsert before selecting. Failures are surfaced via [AppState.error]
+     * rather than silently dropping the navigation.
+     */
+    fun openSessionFromDeepLink(sessionId: String) {
+        viewModelScope.launch {
+            if (_state.value.sessions.none { it.id == sessionId }) {
+                val fetched = withContext(Dispatchers.IO) {
+                    runCatching { repository.getSession(sessionId).getOrNull() }.getOrNull()
+                }
+                if (fetched != null) {
+                    _state.update { st ->
+                        st.copy(sessions = upsertSession(st.sessions, fetched))
+                    }
+                }
+            }
+            selectSession(sessionId)
+        }
     }
 
     private fun loadSettings() {
@@ -407,6 +627,10 @@ class MainViewModel @Inject constructor(
     }
 
     fun configureServer(url: String, username: String? = null, password: String? = null) {
+        // §Stage D (gpter 阻塞 #1): cancel any in-flight SSE feed and watchdog
+        // BEFORE repository.configure, otherwise events from the previous
+        // credential/host keep landing in AppState during the new probe.
+        cancelSseAndWatchdogForReconfigure()
         settingsManager.serverUrl = url
         settingsManager.username = username
         settingsManager.password = password
@@ -472,6 +696,9 @@ class MainViewModel @Inject constructor(
     fun selectHostProfile(profileId: String) {
         viewModelScope.launch {
             val profile = hostProfileStore.select(profileId)
+            // §Stage D (gpter 阻塞 #1): SSE/watchdog cancellation is handled
+            // inside configureRepositoryForProfile() below (single authoritative
+            // point), so it fires before repository.configure runs.
             _state.update { it.copy(
                 currentSessionId = null,
                 messages = emptyList(),
@@ -529,6 +756,17 @@ class MainViewModel @Inject constructor(
     }
 
     private fun configureRepositoryForProfile(profile: HostProfile) {
+        // §Stage D (gpter 阻塞 #1, centralized): cancel any in-flight SSE feed
+        // and watchdog BEFORE repository.configure. This is the single
+        // authoritative cancellation point for all profile-based reconfigure
+        // paths (selectHostProfile / deleteHostProfile / testConnection), so a
+        // stale SSE job from the previous host cannot keep delivering events
+        // into AppState while the new host's health probe is in flight.
+        // configureServer() keeps its own call because it invokes
+        // repository.configure(...) directly rather than via this helper.
+        // Safe during init: sseJob / watchdogJob are null-initialized before
+        // the init block runs, and cancel() is null-safe.
+        cancelSseAndWatchdogForReconfigure()
         val password = profile.basicAuth?.passwordId?.let { settingsManager.basicAuthPassword(it) }
         repository.configure(profile.serverUrl, profile.basicAuth?.username, password)
     }
@@ -559,7 +797,6 @@ class MainViewModel @Inject constructor(
                     if (health.healthy) {
                         loadInitialData()
                         startSSE()
-                        startBusyPolling()
                     }
                 }
                 .onFailure { error ->
@@ -696,7 +933,12 @@ class MainViewModel @Inject constructor(
     }
 
     private fun loadSessionStatus() {
-        launchLoadSessionStatus(viewModelScope, repository, _state)
+        launchLoadSessionStatus(
+            scope = viewModelScope,
+            repository = repository,
+            state = _state,
+            onStatusesUpdated = ::maybeStartWatchdogForBusyCurrentSession
+        )
     }
 
     fun selectSession(sessionId: String) {
@@ -710,6 +952,14 @@ class MainViewModel @Inject constructor(
             previousSessionId != sessionId &&
             _state.value.tempClearedUnread.contains(previousSessionId) &&
             _state.value.sessionStatuses[previousSessionId]?.isBusy == true
+
+        // §15.1.4 (评审 Stage C #3): cancel the streaming watchdog BEFORE
+        // changing the current session so a stale `lastSseProgressAtMs` from
+        // the previous session cannot trip a redundant reload on the new
+        // session. The SSE machinery restarts the watchdog with a fresh
+        // timestamp via [onSessionBecameBusy] → [startStreamWatchdog] when
+        // the new session emits a busy status event.
+        stopStreamWatchdog()
 
         selectSessionState(_state, settingsManager, sessionId)
         // Look up the target session in the union of the cached sessions list
@@ -1309,12 +1559,6 @@ class MainViewModel @Inject constructor(
         _state.update { it.copy(filePathToShowInFiles = null, filePreviewOriginRoute = null) }
     }
 
-    /** Poll loadMessages every 2s when session is busy, as SSE fallback. */
-    private fun startBusyPolling() {
-        pollJob?.cancel()
-        pollJob = launchBusyPolling(viewModelScope, _state, ::loadMessages)
-    }
-
     private fun startSSE() {
         sseJob?.cancel()
         sseJob = launchSseCollection(viewModelScope, repository, _state, ::handleSSEEvent)
@@ -1327,17 +1571,43 @@ class MainViewModel @Inject constructor(
             onRefreshMessages = ::loadMessagesWithRetry,
             onRefreshSessions = ::loadSessions,
             onLoadPendingPermissions = ::loadPendingPermissions,
-            onNonFatalIssue = { message -> reportNonFatalIssue(TAG, message) }
+            onNonFatalIssue = { message -> reportNonFatalIssue(TAG, message) },
+            // §15.1: `message.updated` for the current session pushes into the
+            // debounced trigger (500ms coalescing) instead of issuing a reload
+            // per event. selectSession/sendMessage bypass this directly.
+            onMessagesRefreshTriggered = { messagesRefreshTrigger.tryEmit(Unit) },
+            // §15.1.4: any per-current-session SSE progress refreshes the
+            // watchdog's "last seen alive" timestamp.
+            onLastSseProgress = { lastSseProgressAtMs = System.currentTimeMillis() },
+            // §15.1.4 watchdog lifecycle: busy -> start (any -> busy counts),
+            // idle -> force-reload + cancel.
+            onSessionBecameBusy = { startStreamWatchdog() },
+            onSessionBecameIdle = { stopStreamWatchdog() }
         )
     }
 
     override fun onCleared() {
         sseJob?.cancel()
-        pollJob?.cancel()
+        watchdogJob?.cancel()
         super.onCleared()
     }
 
     private companion object {
         private const val TAG = "MainViewModel"
+
+        /**
+         * §15.1 `message.updated` coalesce window. A burst of streaming
+         * updates collapses into one reload after this quiet period.
+         */
+        private const val MESSAGE_REFRESH_DEBOUNCE_MS = 500L
+
+        /**
+         * §15.1.4 watchdog polling interval and "no progress" threshold.
+         * The watchdog wakes every [WATCHDOG_INTERVAL_MS]; if no SSE event
+         * has touched `lastSseProgressAtMs` within [WATCHDOG_STALE_MS] while
+         * the current session is busy, it kicks a fallback reload.
+         */
+        private const val WATCHDOG_INTERVAL_MS = 5_000L
+        private const val WATCHDOG_STALE_MS = 5_000L
     }
 }

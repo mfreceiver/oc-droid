@@ -154,12 +154,19 @@ internal fun launchLoadMoreSessions(
 internal fun launchLoadSessionStatus(
     scope: CoroutineScope,
     repository: OpenCodeRepository,
-    state: MutableStateFlow<AppState>
+    state: MutableStateFlow<AppState>,
+    onStatusesUpdated: () -> Unit = {}
 ) {
     scope.launch {
         repository.getSessionStatus()
             .onSuccess { statuses ->
                 state.update { it.copy(sessionStatuses = statuses) }
+                // §Stage D (gpter 重要 #3): surface the refresh so the caller
+                // can start the streaming watchdog when the CURRENT session is
+                // already busy but no SSE busy event will arrive (e.g. user
+                // selected a busy session, or catch-up after returning to
+                // foreground). The callback is responsible for its own dedup.
+                onStatusesUpdated()
             }
             .onFailure { error ->
                 reportNonFatalIssue("MainViewModel", "Failed to load session status", error)
@@ -181,11 +188,17 @@ internal fun selectSessionState(
     settingsManager.currentSessionId = sessionId
     val restoredDraft = settingsManager.getDraftText(sessionId)
     state.update {
+        // §15.2 (review B2): clear streaming buffers on session switch so a
+        // stale partial from the previous session cannot bleed into the new
+        // one and re-combine with fresh deltas (key collision on
+        // `${messageId}:${partId}` produced ghost/fragmented text).
         it.copy(
             currentSessionId = sessionId,
             messages = emptyList(),
             messageLimit = 30,
-            inputText = restoredDraft
+            inputText = restoredDraft,
+            streamingPartTexts = emptyMap(),
+            streamingReasoningPart = null
         )
     }
 }
@@ -469,12 +482,12 @@ internal fun launchSendMessage(
                 }
                 onSuccess?.invoke()
                 onRefreshSessions()
+                // §15.1 (review N6): the post-send 1200ms double-refresh is
+                // gone — SSE will deliver `message.created` / `message.updated`
+                // and the §15.1.4 watchdog covers any dropped event. The single
+                // immediate reload here is the legacy first-paint path that
+                // selectSession/sendMessage use to bypass the debounce.
                 onRefreshMessages(sessionId, true)
-                launch {
-                    delay(MainViewModelTimings.messageRefreshDelayMs)
-                    onRefreshSessions()
-                    onRefreshMessages(sessionId, false)
-                }
             }
             .onFailure { error ->
                 state.update { it.copy(error = errorMessageOrFallback(error, "Failed to send message")) }

@@ -85,6 +85,33 @@ class SettingsManager @Inject constructor(
         get() = ThemeMode.valueOf(encryptedPrefs.getString(KEY_THEME, ThemeMode.SYSTEM.name) ?: ThemeMode.SYSTEM.name)
         set(value) = encryptedPrefs.edit().putString(KEY_THEME, value.name).apply()
 
+    /**
+     * v2 字体脚手架（`docs/v2-redesign-plan.md` §20 / D5）。
+     *
+     * 4 键默认空字符串（= 系统字体）。本期只建存储 + 组装管线，不做 picker /
+     * 不打包字体资源。空 → [com.yage.opencode_client.ui.theme] 内的
+     * `resolveFontFamily` 回退到 `FontFamily.Default`；非空 → 作为系统字体族名
+     * 尝试加载（Android 对任意族名支持有限，评审已接受为已知偏差）。
+     *
+     * - [fontLatin] / [fontCJK]：作用于全应用 Typography（含顶栏、卡片等）。
+     * - [markdownFontLatin] / [markdownFontCJK]：作用于聊天 markdown 渲染。
+     */
+    var fontLatin: String
+        get() = encryptedPrefs.getString(KEY_FONT_LATIN, "") ?: ""
+        set(value) = encryptedPrefs.edit().putString(KEY_FONT_LATIN, value).apply()
+
+    var fontCJK: String
+        get() = encryptedPrefs.getString(KEY_FONT_CJK, "") ?: ""
+        set(value) = encryptedPrefs.edit().putString(KEY_FONT_CJK, value).apply()
+
+    var markdownFontLatin: String
+        get() = encryptedPrefs.getString(KEY_MARKDOWN_FONT_LATIN, "") ?: ""
+        set(value) = encryptedPrefs.edit().putString(KEY_MARKDOWN_FONT_LATIN, value).apply()
+
+    var markdownFontCJK: String
+        get() = encryptedPrefs.getString(KEY_MARKDOWN_FONT_CJK, "") ?: ""
+        set(value) = encryptedPrefs.edit().putString(KEY_MARKDOWN_FONT_CJK, value).apply()
+
     var languageMode: LanguageMode
         get() = LanguageMode.valueOf(encryptedPrefs.getString(KEY_LANGUAGE, LanguageMode.SYSTEM.name) ?: LanguageMode.SYSTEM.name)
         set(value) = encryptedPrefs.edit().putString(KEY_LANGUAGE, value.name).apply()
@@ -198,6 +225,10 @@ class SettingsManager @Inject constructor(
         private const val KEY_SESSION_DRAFTS = "session_drafts"
         private const val KEY_SESSION_AGENTS = "session_agents"
         private const val KEY_MARKDOWN_FONT_SIZES = "markdown_font_sizes_json"
+        private const val KEY_FONT_LATIN = "font_latin"
+        private const val KEY_FONT_CJK = "font_cjk"
+        private const val KEY_MARKDOWN_FONT_LATIN = "markdown_font_latin"
+        private const val KEY_MARKDOWN_FONT_CJK = "markdown_font_cjk"
         private const val KEY_OPEN_SESSION_IDS = "open_session_ids"
         private const val KEY_TRAFFIC_SENT = "traffic_sent"
         private const val KEY_TRAFFIC_RECEIVED = "traffic_received"

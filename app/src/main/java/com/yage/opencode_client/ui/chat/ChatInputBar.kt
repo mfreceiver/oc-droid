@@ -31,6 +31,7 @@ import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.ArrowUpward
 import androidx.compose.material.icons.filled.Circle
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.MoreHoriz
@@ -53,6 +54,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.asImageBitmap
@@ -72,6 +74,7 @@ import com.yage.opencode_client.data.model.ComposerImageAttachment
 import com.yage.opencode_client.data.model.PermissionRequest
 import com.yage.opencode_client.data.model.PermissionResponse
 import com.yage.opencode_client.ui.theme.StopRed
+import com.yage.opencode_client.ui.theme.opencode
 import kotlinx.coroutines.delay
 
 @Composable
@@ -115,15 +118,24 @@ internal fun ChatInputBar(
         }
     }
 
+    val oc = MaterialTheme.opencode
+    // §9: the primary button toggles between send (ArrowUpward) and stop while
+    // the agent is streaming; tapping stop delegates to onAbort.
+    val sendIcon = if (isBusy) Icons.Default.Stop else Icons.Default.ArrowUpward
+    val sendContentDescription = if (isBusy) stringResource(R.string.chat_interrupt_agent)
+    else stringResource(R.string.chat_send)
+
+    // §9: composer card — rounded 10, surface (bg-base), 2dp elevation.
     Surface(
         modifier = Modifier.fillMaxWidth().imePadding(),
-        color = MaterialTheme.colorScheme.surface
+        color = MaterialTheme.colorScheme.surface,
+        shape = RoundedCornerShape(10.dp),
+        shadowElevation = 2.dp
     ) {
-        Column(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 12.dp, vertical = 8.dp)
-        ) {
+        // Horizontal 16 inset lives on the Column so the status row, command
+        // panel, attachment strip, and editor all share one consistent side
+        // inset (the v2 composer spec's horizontal=16).
+        Column(modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp)) {
             if (composerStatus != null) {
                 QuietComposerStatus(
                     status = composerStatus,
@@ -144,18 +156,27 @@ internal fun ChatInputBar(
                 )
             }
 
+            if (imageAttachments.isNotEmpty()) {
+                ImageAttachmentStrip(
+                    attachments = imageAttachments,
+                    onRemoveImage = onRemoveImage,
+                    modifier = Modifier.padding(vertical = 4.dp)
+                )
+            }
+
+            // Editor row — §9: the card's shape/elevation come from the outer
+            // Surface; this Row only lays out the field + buttons (no clip /
+            // background). Field minHeight is 52dp.
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .clip(RoundedCornerShape(20.dp))
-                    .background(MaterialTheme.colorScheme.surfaceVariant)
-                    .padding(horizontal = 12.dp, vertical = 8.dp),
+                    .padding(vertical = 8.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Box(
                     modifier = Modifier
                         .weight(1f)
-                        .padding(end = 10.dp, top = 4.dp, bottom = 4.dp),
+                        .padding(end = 8.dp),
                     contentAlignment = Alignment.TopStart
                 ) {
                     if (text.isEmpty()) {
@@ -170,31 +191,51 @@ internal fun ChatInputBar(
                         onValueChange = onTextChange,
                         modifier = Modifier
                             .fillMaxWidth()
-                            .heightIn(min = 44.dp, max = 120.dp),
+                            .heightIn(min = 52.dp, max = 120.dp),
                         textStyle = LocalTextStyle.current.copy(color = MaterialTheme.colorScheme.onSurface),
                         cursorBrush = SolidColor(MaterialTheme.colorScheme.primary),
                         maxLines = 3
                     )
                 }
 
+                // §9: attachment "+" — 28×28 ghost (transparent bg), opens the
+                // image picker.
+                Box(
+                    modifier = Modifier
+                        .size(28.dp)
+                        .clickable(onClick = onAddImages),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Icon(
+                        Icons.Default.Add,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.size(18.dp)
+                    )
+                }
+
+                Spacer(modifier = Modifier.width(8.dp))
+
+                // §9: primary send / stop — 28×28, rounded 6, bg-contrast bottom,
+                // white icon, 1dp shadow; disabled at 0.5 alpha.
                 ChatPrimaryActionButton(
                     onClick = {
-                        handleComposerSend(
+                        if (isBusy) onAbort()
+                        else handleComposerSend(
                             text = text,
                             availableCommands = availableCommands,
                             onSendMessage = onSend,
                             onExecuteCommand = onExecuteCommand
                         )
                     },
-                    enabled = canSend,
-                    containerColor = MaterialTheme.colorScheme.primary,
+                    enabled = isBusy || canSend,
+                    containerColor = oc.bgContrast,
                     contentColor = Color.White,
                     dimWhenDisabled = true,
-                    icon = Icons.AutoMirrored.Filled.Send,
-                    contentDescription = stringResource(R.string.chat_send)
+                    icon = sendIcon,
+                    contentDescription = sendContentDescription
                 )
             }
-
         }
     }
 }
@@ -340,7 +381,7 @@ private fun QuietComposerStatus(
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .padding(horizontal = 4.dp, vertical = 6.dp),
+            .padding(vertical = 6.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
         if (isBusy) {
@@ -407,12 +448,14 @@ private fun ChatPrimaryActionButton(
     icon: ImageVector,
     contentDescription: String
 ) {
-    val effectiveAlpha = if (!enabled && dimWhenDisabled) 0.35f else 1f
+    // §9: 28×28, rounded 6, 1dp shadow, disabled alpha 0.5.
+    val effectiveAlpha = if (!enabled && dimWhenDisabled) 0.5f else 1f
     val interaction = remember { MutableInteractionSource() }
     Box(
         modifier = Modifier
-            .size(36.dp)
-            .clip(RoundedCornerShape(12.dp))
+            .size(28.dp)
+            .shadow(elevation = 1.dp, shape = RoundedCornerShape(6.dp))
+            .clip(RoundedCornerShape(6.dp))
             .background(containerColor.copy(alpha = effectiveAlpha))
             .clickable(
                 enabled = enabled,
@@ -430,7 +473,7 @@ private fun ChatPrimaryActionButton(
             icon,
             contentDescription = null,
             tint = contentColor,
-            modifier = Modifier.size(20.dp)
+            modifier = Modifier.size(16.dp)
         )
     }
 }

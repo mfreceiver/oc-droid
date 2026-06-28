@@ -3,6 +3,7 @@ package com.yage.opencode_client.data.repository
 import com.yage.opencode_client.data.api.*
 import com.yage.opencode_client.data.model.*
 import kotlinx.coroutines.flow.Flow
+import okhttp3.Cache
 import okhttp3.FormBody
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -11,6 +12,7 @@ import com.jakewharton.retrofit2.converter.kotlinx.serialization.asConverterFact
 import kotlinx.serialization.json.Json
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.logging.HttpLoggingInterceptor
+import java.io.File
 import java.util.Base64
 import java.security.SecureRandom
 import java.security.cert.X509Certificate
@@ -50,6 +52,39 @@ class OpenCodeRepository @Inject constructor(
         override fun getAcceptedIssuers(): Array<X509Certificate> = arrayOf()
     }
 
+    /**
+     * §16.1(a): OkHttp HTTP cache singleton.
+     *
+     * Lives as a `by lazy` field on the repository so it survives
+     * `rebuildClients()` / `configure()` (host switches) — OkHttp's
+     * `DiskLruCache` does NOT allow two `Cache` instances on the same
+     * directory (`cache is closed` crash), so we MUST NOT recreate it
+     * inside `buildOkHttpClient()`.
+     *
+     * Resolves the cache directory from `java.io.tmpdir` (on Android this is
+     * the app-private `/data/data/<pkg>/cache` dir, identical to
+     * `Context.cacheDir`). Returns null when the directory is unavailable so
+     * `buildOkHttpClient()` degrades gracefully (no cache) instead of
+     * crashing — preserving the spec's safety contract.
+     *
+     * IMPORTANT: declared BEFORE [okHttpClient] (and friends below) because
+     * the [okHttpClient] field initializer calls `buildOkHttpClient()`,
+     * which reads this delegate. Property initializers run top-to-bottom, so
+     * a `by lazy` declared after its first reader would still hold a null
+     * delegate backing field at construction time.
+     */
+    private val httpCache: Cache? by lazy {
+        val baseDir = System.getProperty("java.io.tmpdir")?.let(::File) ?: return@lazy null
+        if (!baseDir.exists() && !baseDir.mkdirs()) return@lazy null
+        // Silent degradation: if the cache dir is unwritable or the Cache
+        // constructor throws, the client simply runs without a cache. We do
+        // NOT android.util.Log here to keep this unit-testable without
+        // returnDefaultValues/mocking — the pre-existing repository had no
+        // Log usage and we preserve that invariant.
+        runCatching { Cache(File(baseDir, "okhttp"), HTTP_CACHE_SIZE_BYTES) }
+            .getOrNull()
+    }
+
     private var okHttpClient: OkHttpClient = buildOkHttpClient()
     private var retrofit: Retrofit = buildRetrofit()
     private var api: OpenCodeApi = retrofit.create(OpenCodeApi::class.java)
@@ -60,6 +95,10 @@ class OpenCodeRepository @Inject constructor(
             .apply {
                 sslSocketFactory(trustAllSslSocketFactory(), trustAllTrustManager)
                 hostnameVerifier(HostnameVerifier { _, _ -> true })
+                // §16.1(a): attach the singleton cache (if resolvable) so it
+                // is reused across host switches rather than rebuilt per
+                // client. See [httpCache] for singleton rationale.
+                httpCache?.let { cache(it) }
             }
             .addInterceptor(HttpLoggingInterceptor().apply {
                 level = HttpLoggingInterceptor.Level.BASIC
@@ -70,6 +109,31 @@ class OpenCodeRepository @Inject constructor(
                 // injection (used by global endpoints like session list / agents).
                 val skipDir = original.header(SKIP_DIR_HEADER) != null
                 val dir = currentDirectory
+                // §16.1(b) / §Stage D (gpter 阻塞 #2): cache-safety gate.
+                // OkHttp's cache key is URL+method+Vary and IGNORES
+                // Authorization / X-Opencode-Directory headers, so by default
+                // every request carries `Cache-Control: no-store` to forbid
+                // cross-user / cross-workdir pollution. Only 4 global
+                // read-only endpoints (health/providers/agent/commands) opt
+                // back into caching, AND only when NO Basic Auth is in effect:
+                // the interceptor injects `Authorization: Basic ...` for any
+                // profile with credentials, and since the cache key omits that
+                // header, caching under one credential would leak cached
+                // responses to a different credential against the same baseUrl.
+                // When auth is configured we fall back to the safe default
+                // (no-store for everything).
+                val u = username
+                val p = password
+                val hasAuth = u != null && p != null
+                // Exact-match the request path against the cache whitelist.
+                // We strip the configured baseUrl's path prefix first so the
+                // rule still holds when the API is deployed under a sub-path
+                // (e.g. http://host/opencode/agent → relativePath "/agent").
+                // Exact match (not endsWith) prevents future endpoints such as
+                // /session/{id}/agent from accidentally hitting the whitelist.
+                val relativePath = cacheRelativePath(original.url.encodedPath)
+                val cacheable = !hasAuth && original.method == "GET" &&
+                    relativePath in CACHEABLE_PATHS
                 val request = original.newBuilder()
                     .apply {
                         if (skipDir) {
@@ -81,12 +145,17 @@ class OpenCodeRepository @Inject constructor(
                             header(DIRECTORY_HEADER, dir)
                         }
                         // Basic Auth injection (unchanged behavior).
-                        val u = username
-                        val p = password
                         if (u != null && p != null) {
                             val credential = "$u:$p"
                             val encoded = Base64.getEncoder().encodeToString(credential.toByteArray())
                             header("Authorization", "Basic $encoded")
+                        }
+                        // §16.1(b): default-deny caching. Whitelisted global
+                        // endpoints omit this header so OkHttp may cache their
+                        // responses (subject to server ETag/Cache-Control — see
+                        // §16.1 ETag gating note in the redesign plan).
+                        if (!cacheable) {
+                            header("Cache-Control", "no-store")
                         }
                     }
                     .build()
@@ -442,8 +511,59 @@ class OpenCodeRepository @Inject constructor(
             .build()
     }
 
+    /**
+     * §Stage D (gpter 阻塞 #2): strips the configured baseUrl's path prefix
+     * from [requestPath] so the cache whitelist can EXACT-match the canonical
+     * endpoint shape even when the API is deployed behind a sub-path (e.g.
+     * baseUrl `http://host/opencode` + request `/opencode/agent` → `/agent`).
+     *
+     * Returns [requestPath] unchanged when the baseUrl has no path prefix,
+     * which keeps the bare-host deployment (the common case) on the same
+     * exact-match behavior. Uses simple string slicing (consistent with
+     * [buildRetrofit]'s `baseUrl.trimEnd('/') + "/"`) rather than okhttp's URL
+     * parser so the helper stays dependency-free and unit-testable.
+     */
+    private fun cacheRelativePath(requestPath: String): String {
+        val protocolEnd = baseUrl.indexOf("://")
+        val hostStart = if (protocolEnd >= 0) protocolEnd + 3 else 0
+        val pathStart = baseUrl.indexOf('/', hostStart)
+        val basePath = if (pathStart >= 0) baseUrl.substring(pathStart).trimEnd('/') else ""
+        return if (basePath.isNotEmpty() && requestPath.startsWith("$basePath/")) {
+            requestPath.removePrefix(basePath)
+        } else {
+            requestPath
+        }
+    }
+
     companion object {
         const val DEFAULT_SERVER = "http://localhost:4096"
+
+        // §16.1(a): HTTP cache size cap (50 MB) per the redesign plan.
+        private const val HTTP_CACHE_SIZE_BYTES = 50L * 1024 * 1024
+
+        /**
+         * §16.1(b) / §Stage D (gpter 阻塞 #2): relative request paths whose
+         * GET responses are eligible for OkHttp caching. These 4 endpoints are
+         * global / read-only / independent of user identity and workdir, so
+         * caching them cannot leak data across users or directories. All other
+         * endpoints (session, file, message, etc.) default to
+         * `Cache-Control: no-store`.
+         *
+         * EXACT-MATCHED against the request path after stripping the baseUrl
+         * prefix (see [cacheRelativePath]). Exact match — not `endsWith` — so
+         * future endpoints such as `/session/{id}/agent` cannot accidentally
+         * hit the whitelist. **New entries MUST be audited**: they are only
+         * safe to add if the endpoint is read-only AND carries no
+         * user/workdir-scoped data, AND the deployment never authenticates via
+         * Basic Auth (the interceptor forces no-store whenever credentials are
+         * configured).
+         */
+        private val CACHEABLE_PATHS = setOf(
+            "/global/health",
+            "/config/providers",
+            "/agent",
+            "/command",
+        )
 
         // Header injected to scope a request to a workdir directory.
         const val DIRECTORY_HEADER = "X-Opencode-Directory"

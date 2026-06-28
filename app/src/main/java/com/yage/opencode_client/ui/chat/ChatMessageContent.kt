@@ -1,16 +1,14 @@
 package com.yage.opencode_client.ui.chat
 
-import android.graphics.BitmapFactory
-import android.util.Base64
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Image
-import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
@@ -37,8 +35,6 @@ import androidx.compose.material.icons.filled.Psychology
 import androidx.compose.material.icons.filled.RadioButtonUnchecked
 import androidx.compose.material.icons.filled.Terminal
 import androidx.compose.material.icons.filled.Warning
-import androidx.compose.material3.Card
-import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
@@ -70,6 +66,9 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import com.mikepenz.markdown.compose.components.markdownComponents
+import com.mikepenz.markdown.compose.elements.highlightedCodeBlock
+import com.mikepenz.markdown.compose.elements.highlightedCodeFence
 import com.mikepenz.markdown.m3.Markdown
 import com.yage.opencode_client.R
 import com.yage.opencode_client.data.model.MessageWithParts
@@ -79,6 +78,7 @@ import com.yage.opencode_client.data.repository.OpenCodeRepository
 import com.yage.opencode_client.ui.theme.LocalMarkdownFontSizes
 import com.yage.opencode_client.ui.theme.markdownTypography
 import com.yage.opencode_client.ui.theme.markdownTypographyCompact
+import com.yage.opencode_client.ui.theme.opencode
 import com.yage.opencode_client.ui.util.DataUriImageTransformer
 import com.yage.opencode_client.ui.util.HttpImageHolder
 import com.yage.opencode_client.ui.util.MarkdownImageResolver
@@ -153,6 +153,11 @@ internal fun ChatMessageList(
         state = listState,
         modifier = Modifier.fillMaxSize(),
         reverseLayout = true,
+        // §4.1 v2 spacing: 16dp between turns (each item is one turn = one
+        // MessageRow). Combined with MessageRow's own vertical=4dp padding,
+        // adjacent turns sit ~24dp apart visually (4 + 16 + 4). Within a turn,
+        // per-part cards carry their own 2-4dp vertical padding.
+        verticalArrangement = Arrangement.spacedBy(16.dp),
         contentPadding = androidx.compose.foundation.layout.PaddingValues(vertical = 8.dp)
     ) {
         if (streamingReasoningPart != null) {
@@ -259,14 +264,28 @@ private fun MessageRow(
                 val (writeParts, readParts) = fileParts.partition { ToolCardClassifier.isWriteFileOperation(it) }
 
                 writeParts.forEach { writePart ->
-                    PatchCard(
-                        part = writePart,
-                        onFileClick = onFileClick,
-                        expandedParts = expandedParts,
-                        onToggleExpand = onToggleExpand,
-                        expandedKey = "${message.info.id}|${writePart.id}",
-                        modifier = Modifier.widthIn(max = MAX_CARD_WIDTH)
-                    )
+                    // §6 R-E: apply_patch is a single Part with an embedded
+                    // `files: List<FileChange>` — when it carries >1 file, render
+                    // a MultiFilePatchAccordion so every file gets its own row;
+                    // otherwise fall back to the single-file PatchCard. No callId
+                    // cross-Part matching (writeParts already aggregates).
+                    val writeFiles = writePart.files ?: emptyList()
+                    if (writeFiles.size > 1) {
+                        MultiFilePatchAccordion(
+                            parts = listOf(writePart),
+                            onFileClick = onFileClick,
+                            modifier = Modifier.widthIn(max = MAX_CARD_WIDTH)
+                        )
+                    } else {
+                        PatchCard(
+                            part = writePart,
+                            onFileClick = onFileClick,
+                            expandedParts = expandedParts,
+                            onToggleExpand = onToggleExpand,
+                            expandedKey = "${message.info.id}|${writePart.id}",
+                            modifier = Modifier.widthIn(max = MAX_CARD_WIDTH)
+                        )
+                    }
                 }
 
                 if (readParts.isNotEmpty()) {
@@ -350,11 +369,14 @@ private fun MessageRow(
             (timeInfo?.completed ?: timeInfo?.created)?.let(::formatHm)
         }
         if (footerText != null) {
+            // §4.4 v2 footer: labelSmall + faint color + top=4dp padding. The
+            // Column's horizontalAlignment (End for user, Start for assistant)
+            // already aligns the footer to the speaker's side.
             Text(
                 text = footerText,
                 style = MaterialTheme.typography.labelSmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f),
-                modifier = Modifier.padding(end = 4.dp, top = 2.dp)
+                color = MaterialTheme.opencode.faint,
+                modifier = Modifier.padding(end = 4.dp, top = 4.dp)
             )
         }
     }
@@ -403,35 +425,37 @@ private fun PartView(
             expandedKey = expandKey,
             modifier = Modifier.widthIn(max = MAX_CARD_WIDTH)
         )
-        part.isPatch && part.filePathsForNavigationFiltered.isNotEmpty() -> {
-            PatchCard(
-                part = part,
-                onFileClick = onFileClick,
-                expandedParts = expandedParts,
-                onToggleExpand = onToggleExpand,
-                expandedKey = expandKey,
-                modifier = Modifier.widthIn(max = MAX_CARD_WIDTH)
-            )
-        }
+        // Dead code removed (评审 Stage C #1): the previous
+        // `part.isPatch && part.filePathsForNavigationFiltered.isNotEmpty()`
+        // branch was unreachable here because [MessageRow]'s `isToolLike`
+        // check above already routes every such part into the buffered tool
+        // run (which renders PatchCard / MultiFilePatchAccordion from
+        // [writeParts]). Keeping this branch would risk silently sending a
+        // future reclassification straight into the single-file PatchCard and
+        // dropping the MultiFilePatchAccordion path for multi-file patches.
     }
 }
 
 @Composable
 private fun ImageFilePart(part: Part, modifier: Modifier = Modifier.fillMaxWidth()) {
-    val imageBitmap = remember(part.url) {
-        part.url?.decodeDataUriImage()?.asImageBitmap()
-    }
-    if (imageBitmap == null) {
+    // §16.3 (评审 Stage C #6): reuse [DataUriImageTransformer]'s LruCache so
+    // the same data-URI is decoded at most once across the chat surface and
+    // inline markdown. The transformer already handles memory caching and
+    // Compose-side `remember` keyed by URL — keeping a separate decoder here
+    // would silently bypass the cache and re-decode on every recomposition.
+    val imageData = part.url?.let { DataUriImageTransformer.transform(it) }
+    if (imageData == null) {
         FileAttachmentPart(part, modifier)
         return
     }
     Column(modifier = modifier.padding(vertical = 4.dp)) {
         Image(
-            bitmap = imageBitmap,
+            painter = imageData.painter,
             contentDescription = part.filename ?: "Attached image",
             modifier = Modifier
                 .fillMaxWidth()
-                .clip(RoundedCornerShape(12.dp)),
+                // §5.6 v2: markdown image radius = 4dp.
+                .clip(RoundedCornerShape(4.dp)),
             contentScale = ContentScale.FillWidth
         )
         part.filename?.let { filename ->
@@ -447,9 +471,11 @@ private fun ImageFilePart(part: Part, modifier: Modifier = Modifier.fillMaxWidth
 
 @Composable
 private fun FileAttachmentPart(part: Part, modifier: Modifier = Modifier.fillMaxWidth()) {
+    // §5.6 v2: layer01 chip at 6dp radius with accentText doc icon.
+    val oc = MaterialTheme.opencode
     Surface(
-        color = MaterialTheme.colorScheme.surfaceVariant,
-        shape = RoundedCornerShape(12.dp),
+        color = oc.layer01,
+        shape = RoundedCornerShape(6.dp),
         modifier = modifier.padding(vertical = 4.dp)
     ) {
         Row(
@@ -459,7 +485,7 @@ private fun FileAttachmentPart(part: Part, modifier: Modifier = Modifier.fillMax
             Icon(
                 imageVector = Icons.Default.Description,
                 contentDescription = null,
-                tint = MaterialTheme.colorScheme.primary,
+                tint = oc.accentText,
                 modifier = Modifier.size(16.dp)
             )
             Spacer(modifier = Modifier.width(8.dp))
@@ -472,16 +498,6 @@ private fun FileAttachmentPart(part: Part, modifier: Modifier = Modifier.fillMax
             )
         }
     }
-}
-
-private fun String.decodeDataUriImage(): android.graphics.Bitmap? {
-    val marker = ";base64,"
-    val markerIndex = indexOf(marker)
-    if (!startsWith("data:image/") || markerIndex < 0) return null
-    return runCatching {
-        val bytes = Base64.decode(substring(markerIndex + marker.length), Base64.DEFAULT)
-        BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
-    }.getOrNull()
 }
 
 /**
@@ -539,9 +555,12 @@ internal fun FileCard(
         else -> "Write file $basename"
     }
 
+    // §5.3 v2 file card: layer01 surface at 6dp with borderBase, accentText icon.
+    val oc = MaterialTheme.opencode
     Surface(
-        color = MaterialTheme.colorScheme.surfaceVariant,
-        shape = RoundedCornerShape(12.dp),
+        color = oc.layer01,
+        border = BorderStroke(1.dp, oc.borderBase),
+        shape = RoundedCornerShape(6.dp),
         modifier = modifier
             .padding(vertical = 4.dp)
             .testTag(tag)
@@ -563,7 +582,7 @@ internal fun FileCard(
                 imageVector = if (isDirectoryRead) Icons.Default.Folder else Icons.Default.Description,
                 contentDescription = iconDescription,
                 modifier = Modifier.size(16.dp),
-                tint = if (isReadOnlyFileTool) MaterialTheme.colorScheme.onSurfaceVariant else MaterialTheme.colorScheme.primary
+                tint = oc.accentText
             )
             Spacer(modifier = Modifier.width(8.dp))
             Text(
@@ -675,10 +694,15 @@ private fun ToolCallsRow(
 ) {
     val expandedKey = "${messageId}|${parts.first().id}"
     val expanded = expandedParts[expandedKey] ?: false
-    Card(
+    // §5.7 v2 tool-calls row: transparent surface + borderBase + 6dp radius
+    // (was surfaceVariant solid + 12dp). Keeps the merged "N tool calls" row
+    // visually aligned with the other v2 cards.
+    val oc = MaterialTheme.opencode
+    Surface(
         modifier = modifier.padding(vertical = 4.dp).testTag("toolcard.toolcalls"),
-        shape = RoundedCornerShape(12.dp),
-        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
+        shape = RoundedCornerShape(6.dp),
+        color = androidx.compose.ui.graphics.Color.Transparent,
+        border = BorderStroke(1.dp, oc.borderBase)
     ) {
         Column(modifier = Modifier.padding(12.dp)) {
             Row(
@@ -729,37 +753,35 @@ private fun TextPart(
     repository: OpenCodeRepository? = null,
     workspaceDirectory: String? = null
 ) {
-    val innerModifier = modifier.padding(12.dp)
     if (isUser) {
-        // Cap the user bubble at 80% of the row width so the assistant's reply
-        // (and the right gutter) keeps the chat from feeling wall-to-wall. The
-        // outer Column carries the 80% cap; the Surface + Row inside are
-        // wrap-content, so short prompts still render at their natural width
-        // and only long prompts hit the cap and wrap.
-        Column(modifier = modifier.fillMaxWidth(0.8f)) {
+        // §4.2 v2 user bubble: right-aligned, layer02 background, 10dp radius,
+        // padding 8x12, max ~82% of row width. No blue tint, no left bar — the
+        // muted neutral surface + right alignment is enough to distinguish the
+        // user's side from the assistant's full-width markdown. BoxWithConstraints
+        // gives us the precise 0.82 multiplier (short prompts stay natural-width
+        // via widthIn rather than being stretched to 82%).
+        val oc = MaterialTheme.opencode
+        BoxWithConstraints(modifier = modifier.fillMaxWidth()) {
+            val maxBubble = maxWidth * 0.82f
             Surface(
-                color = MaterialTheme.colorScheme.primary.copy(alpha = 0.10f),
-                shape = RoundedCornerShape(12.dp)
+                color = oc.layer02,
+                shape = RoundedCornerShape(10.dp),
+                modifier = Modifier
+                    .align(Alignment.CenterEnd)
+                    .widthIn(max = maxBubble)
             ) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Box(
-                        modifier = Modifier
-                            .width(3.dp)
-                            .fillMaxHeight()
-                            .background(MaterialTheme.colorScheme.primary)
+                SelectionContainer {
+                    Text(
+                        text = text,
+                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurface
                     )
-                    SelectionContainer {
-                        Text(
-                            text = text,
-                            modifier = Modifier.padding(12.dp),
-                            style = MaterialTheme.typography.bodyMedium,
-                            color = MaterialTheme.colorScheme.onSurface
-                        )
-                    }
                 }
             }
         }
     } else {
+        val innerModifier = modifier.padding(12.dp)
         if (repository != null) {
             ResolvedMarkdownText(
                 text = text,
@@ -772,7 +794,16 @@ private fun TextPart(
             val fontSizes = LocalMarkdownFontSizes.current
             SelectionContainer {
                 CompositionLocalProvider(LocalContentColor provides MaterialTheme.colorScheme.onSurface) {
-                    Markdown(content = normalizedText, typography = markdownTypography(fontSizes), modifier = innerModifier, imageTransformer = DataUriImageTransformer)
+                    Markdown(
+                        content = normalizedText,
+                        typography = markdownTypography(fontSizes),
+                        components = markdownComponents(
+                            codeBlock = highlightedCodeBlock,
+                            codeFence = highlightedCodeFence
+                        ),
+                        modifier = innerModifier,
+                        imageTransformer = DataUriImageTransformer
+                    )
                 }
             }
         }
@@ -809,6 +840,11 @@ private fun ResolvedMarkdownText(
             Markdown(
                 content = resolvedText ?: normalizedText,
                 typography = markdownTypography(fontSizes),
+                // §3.1 syntax highlighting via mikepenz code module + dev.snipme:highlights.
+                components = markdownComponents(
+                    codeBlock = highlightedCodeBlock,
+                    codeFence = highlightedCodeFence
+                ),
                 modifier = modifier,
                 imageTransformer = DataUriImageTransformer
             )
@@ -828,14 +864,15 @@ private fun ReasoningCard(
 ) {
     val expanded = expandedKey?.let { expandedParts[it] } ?: isStreaming
 
-    // Visually quiet: transparent container (vs ToolCard's surfaceVariant) and
-    // onSurfaceVariant label/icon so chain-of-thought reads as auxiliary context
-    // next to the more prominent tool/file cards. Kept compact (vertical 2dp,
-    // 8dp inner padding) so a long reasoning block doesn't dominate the row.
+    // §5.1 v2 reasoning card: transparent header (no surface tint) so the
+    // chain-of-thought reads as auxiliary context next to tool/file cards.
+    // The folding body uses layer01 (replacing the old surfaceVariant@50%
+    // panel) at v2's radius-md (6dp). Muted label/icon stay.
+    val oc = MaterialTheme.opencode
     Surface(
         modifier = modifier.padding(vertical = 2.dp),
-        shape = RoundedCornerShape(12.dp),
-        color = MaterialTheme.colorScheme.surface.copy(alpha = 0.4f)
+        shape = RoundedCornerShape(6.dp),
+        color = androidx.compose.ui.graphics.Color.Transparent
     ) {
         Column {
             Row(
@@ -873,19 +910,22 @@ private fun ReasoningCard(
                 // by overriding `body` when rendering, so it visually de-emphasizes
                 // chain-of-thought vs the main assistant reply.
                 val reasoningFontSizes = fontSizes.copy(body = fontSizes.reasoning)
-                // Wrap the expanded body in a rounded surfaceVariant panel so the
-                // chain-of-thought is visually framed as "thinking" content,
-                // distinct from the transparent header row above it.
+                // §5.1 v2: layer01 folding body at 6dp radius (was surfaceVariant@50% / 8dp).
                 Surface(
                     modifier = Modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = 4.dp),
-                    shape = RoundedCornerShape(8.dp),
-                    color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f)
+                    shape = RoundedCornerShape(6.dp),
+                    color = oc.layer01
                 ) {
                     SelectionContainer {
                         CompositionLocalProvider(LocalContentColor provides MaterialTheme.colorScheme.onSurfaceVariant) {
                             Markdown(
                                 content = normalizedText,
                                 typography = markdownTypography(reasoningFontSizes),
+                                // §3.1 syntax highlighting in reasoning blocks too.
+                                components = markdownComponents(
+                                    codeBlock = highlightedCodeBlock,
+                                    codeFence = highlightedCodeFence
+                                ),
                                 modifier = Modifier.padding(8.dp),
                                 imageTransformer = DataUriImageTransformer
                             )
@@ -996,17 +1036,23 @@ private fun SubAgentCard(
 
     val tagSuffix = sessionId?.let { ".$it" } ?: ""
 
+    // §5.5 v2 sub-agent card: neutral transparent surface + borderBase + 6dp
+    // radius (was primary@6% + primary@25% border + 12dp). Icon and @agentName
+    // badge keep accentText so the row stays identifiable as "a sub-task" even
+    // without the blue fill. Status icons use stateSuccessFg / stateDangerFg.
+    val oc = MaterialTheme.opencode
+    val statusDoneColor = oc.stateSuccessFg
+    val statusErrorColor = oc.stateDangerFg
+    val headerIconTint = if (isError) statusErrorColor else oc.accentText
+
     Surface(
         modifier = modifier
             .padding(vertical = 2.dp)
             .testTag("toolcard.subagent$tagSuffix")
             .then(if (canOpen) Modifier.clickable { onOpenSubAgent(sessionId!!) } else Modifier),
-        shape = RoundedCornerShape(12.dp),
-        color = MaterialTheme.colorScheme.primary.copy(alpha = 0.06f),
-        border = androidx.compose.foundation.BorderStroke(
-            width = 1.dp,
-            color = MaterialTheme.colorScheme.primary.copy(alpha = 0.25f)
-        )
+        shape = RoundedCornerShape(6.dp),
+        color = androidx.compose.ui.graphics.Color.Transparent,
+        border = BorderStroke(1.dp, oc.borderBase)
     ) {
         Column(modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
@@ -1014,23 +1060,25 @@ private fun SubAgentCard(
                     headerIcon,
                     contentDescription = null,
                     modifier = Modifier.size(14.dp),
-                    tint = MaterialTheme.colorScheme.primary
+                    tint = headerIconTint
                 )
                 Spacer(modifier = Modifier.width(6.dp))
                 Text(
                     text = headerTitle,
                     style = MaterialTheme.typography.labelMedium,
-                    color = MaterialTheme.colorScheme.primary,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
                     modifier = Modifier.weight(1f, fill = false)
                 )
                 if (subAgentName != null) {
                     Spacer(modifier = Modifier.width(6.dp))
+                    // @agentName in accentText so the sub-task stays identifiable
+                    // without the old blue fill (评审修正).
                     Text(
                         text = "@$subAgentName",
                         style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        color = oc.accentText,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis
                     )
@@ -1045,13 +1093,13 @@ private fun SubAgentCard(
                         Icons.Default.Warning,
                         contentDescription = "Sub-agent error",
                         modifier = Modifier.size(14.dp),
-                        tint = MaterialTheme.colorScheme.error
+                        tint = statusErrorColor
                     )
                     else -> Icon(
                         Icons.Default.CheckCircle,
                         contentDescription = "Sub-agent completed",
                         modifier = Modifier.size(14.dp),
-                        tint = MaterialTheme.colorScheme.primary
+                        tint = statusDoneColor
                     )
                 }
                 if (canOpen) {
@@ -1060,7 +1108,7 @@ private fun SubAgentCard(
                         Icons.Default.ChevronRight,
                         contentDescription = "Open sub-agent conversation",
                         modifier = Modifier.size(14.dp),
-                        tint = MaterialTheme.colorScheme.primary
+                        tint = oc.accentText
                     )
                 }
             }
@@ -1087,7 +1135,7 @@ private fun SubAgentCard(
                         Text(
                             text = "→$clickLabel",
                             style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.primary
+                            color = oc.accentText
                         )
                     }
                 }
@@ -1237,20 +1285,20 @@ private fun ToolCard(
     val firstFile = filePaths.firstOrNull()
     val displayName = if (toolName == "apply_patch") "patch" else toolName
 
-    val isReadOnlyTool = listOf("read_file", "read", "grep", "glob", "list", "webfetch", "task", "todoread")
-        .any { toolName.startsWith(it) }
-
     val icon = remember(toolName) { toolIcon(toolName) }
 
-    // Write/edit tools keep primary color so file mutations stay prominent;
-    // read-only tools use the softer onSurfaceVariant to recede visually.
-    val titleColor = if (isReadOnlyTool) MaterialTheme.colorScheme.onSurfaceVariant
-        else MaterialTheme.colorScheme.primary
+    // §5.2 v2 tool card: transparent surface + borderBase + 6dp radius (was
+    // surfaceVariant solid + 12dp). The icon classification (read/edit/bash/
+    // generic) is preserved, but the v2 neutral look means titles and icons
+    // read as muted; only the status indicator uses stateSuccessFg /
+    // stateDangerFg to encode tool outcome.
+    val oc = MaterialTheme.opencode
 
-    Card(
+    Surface(
         modifier = modifier.padding(vertical = 2.dp),
-        shape = RoundedCornerShape(12.dp),
-        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
+        shape = RoundedCornerShape(6.dp),
+        color = androidx.compose.ui.graphics.Color.Transparent,
+        border = BorderStroke(1.dp, oc.borderBase)
     ) {
         CompositionLocalProvider(LocalContentColor provides MaterialTheme.colorScheme.onSurfaceVariant) {
             Column(modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp)) {
@@ -1259,20 +1307,20 @@ private fun ToolCard(
                         icon,
                         contentDescription = null,
                         modifier = Modifier.size(14.dp),
-                        tint = if (isReadOnlyTool) MaterialTheme.colorScheme.onSurfaceVariant else MaterialTheme.colorScheme.primary
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant
                     )
                     Spacer(modifier = Modifier.width(6.dp))
                     Text(
                         text = displayName.ifEmpty { reason ?: "tool" },
                         style = MaterialTheme.typography.labelMedium,
-                        color = titleColor,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
                         modifier = Modifier.weight(1f, fill = false)
                     )
                     Spacer(modifier = Modifier.weight(1f))
-                    // Status indicator — spinner while running, check on completion,
-                    // warning on error. The icon stays put so the row doesn't shift.
+                    // §5.2 status indicator — spinner while running, stateSuccessFg
+                    // check on completion, stateDangerFg warning on error.
                     when {
                         isRunning -> CircularProgressIndicator(
                             modifier = Modifier.size(14.dp),
@@ -1282,13 +1330,13 @@ private fun ToolCard(
                             Icons.Default.Warning,
                             contentDescription = "Tool error",
                             modifier = Modifier.size(14.dp),
-                            tint = MaterialTheme.colorScheme.error
+                            tint = oc.stateDangerFg
                         )
                         else -> Icon(
                             Icons.Default.CheckCircle,
                             contentDescription = "Tool completed",
                             modifier = Modifier.size(14.dp),
-                            tint = MaterialTheme.colorScheme.primary
+                            tint = oc.stateSuccessFg
                         )
                     }
                     if (firstFile != null) {
@@ -1298,7 +1346,7 @@ private fun ToolCard(
                                 Icons.AutoMirrored.Filled.OpenInNew,
                                 contentDescription = stringResource(R.string.files_show_in_files),
                                 modifier = Modifier.size(14.dp),
-                                tint = MaterialTheme.colorScheme.primary
+                                tint = oc.accentText
                             )
                         }
                     }
@@ -1331,7 +1379,7 @@ private fun ToolCard(
                             Text(
                                 "Todo updated · $completed/${todos.size}",
                                 style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.primary
+                                color = oc.accentText
                             )
                         }
                     } else {
@@ -1367,7 +1415,7 @@ private fun ToolCard(
                                     text = path,
                                     style = MaterialTheme.typography.bodySmall,
                                     fontFamily = FontFamily.Monospace,
-                                    color = MaterialTheme.colorScheme.primary,
+                                    color = oc.accentText,
                                     modifier = Modifier.weight(1f)
                                 )
                                 IconButton(onClick = { onFileClick(path) }, modifier = Modifier.size(22.dp)) {
@@ -1375,7 +1423,7 @@ private fun ToolCard(
                                         Icons.AutoMirrored.Filled.OpenInNew,
                                         contentDescription = stringResource(R.string.files_show_in_files),
                                         modifier = Modifier.size(14.dp),
-                                        tint = MaterialTheme.colorScheme.primary
+                                        tint = oc.accentText
                                     )
                                 }
                             }
@@ -1439,12 +1487,17 @@ private fun PatchCard(
 
     val expanded = expandedParts[expandedKey] ?: false
 
+    // §5.4 v2 patch card: transparent surface + borderBase + 6dp radius (was
+    // surfaceVariant solid + 12dp). +N uses stateSuccessFg and -M uses
+    // stateDangerFg to encode diff direction via v2 status semantics.
+    val oc = MaterialTheme.opencode
     Surface(
         modifier = modifier
             .padding(vertical = 2.dp)
             .testTag("toolcard.patch.$basename"),
-        shape = RoundedCornerShape(12.dp),
-        color = MaterialTheme.colorScheme.surfaceVariant
+        shape = RoundedCornerShape(6.dp),
+        color = androidx.compose.ui.graphics.Color.Transparent,
+        border = BorderStroke(1.dp, oc.borderBase)
     ) {
         Column {
             Row(
@@ -1474,7 +1527,7 @@ private fun PatchCard(
                     Text(
                         text = "+$additions",
                         style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.primary,
+                        color = oc.stateSuccessFg,
                         fontFamily = FontFamily.Monospace
                     )
                 }
@@ -1483,7 +1536,7 @@ private fun PatchCard(
                     Text(
                         text = "-$deletions",
                         style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.error,
+                        color = oc.stateDangerFg,
                         fontFamily = FontFamily.Monospace
                     )
                 }
@@ -1517,7 +1570,7 @@ private fun PatchCard(
                                         Icons.AutoMirrored.Filled.OpenInNew,
                                         contentDescription = stringResource(R.string.files_show_in_files),
                                         modifier = Modifier.size(14.dp),
-                                        tint = MaterialTheme.colorScheme.primary
+                                        tint = oc.accentText
                                     )
                                 }
                             }

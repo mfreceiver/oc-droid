@@ -29,8 +29,8 @@ android {
         applicationId = "com.yage.opencode_client"
         minSdk = 26
         targetSdk = 34
-        versionCode = 17
-        versionName = "0.1.3"
+        versionCode = 18
+        versionName = "0.1.4"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         // Integration test credentials from .env (dynamic, not in code)
@@ -113,6 +113,8 @@ dependencies {
     
     implementation(libs.markdown.renderer)
     implementation(libs.markdown.renderer.m3)
+    // v2 §3.1: code-block syntax highlight (highlightedCodeBlock / highlightedCodeFence).
+    implementation(libs.markdown.renderer.code)
     implementation(libs.androidx.compose.material3.windowsizeclass)
     
     testImplementation(libs.junit)

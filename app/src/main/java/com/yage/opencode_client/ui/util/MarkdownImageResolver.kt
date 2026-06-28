@@ -1,6 +1,9 @@
 package com.yage.opencode_client.ui.util
 
 import com.yage.opencode_client.data.model.FileContent
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
 import java.nio.file.Paths
 
 object MarkdownImageResolver {
@@ -34,6 +37,25 @@ object MarkdownImageResolver {
         return normalized.joinToString("\n")
     }
 
+    /**
+     * §16.2 (parallel prefetch): resolve local-file image references in
+     * [text] to inline `data:` URIs by fetching their contents in parallel.
+     *
+     * Previously this looped sequentially over each match and awaited its
+     * `fetchContent` in turn, serializing N network/file round-trips. The
+     * rewrite splits the work into two passes:
+     *
+     *   1. Synchronous filter/normalize pass — no I/O, just decides which
+     *      matches are eligible (image extension, resolvable path) and
+     *      records the replacement metadata.
+     *   2. Concurrent fetch pass — `coroutineScope { pending.map { async { … } }.awaitAll() }`
+     *      so all eligible contents are fetched in parallel, then applies
+     *      the replacements in descending range order so earlier offsets
+     *      remain valid as the string is mutated.
+     *
+     * The downstream HTTPS-image prefetch path is handled separately by
+     * [HttpImageHolder.prefetch] (fire-and-forget, parallel by construction).
+     */
     suspend fun resolveImages(
         text: String,
         markdownFilePath: String? = null,
@@ -43,27 +65,44 @@ object MarkdownImageResolver {
         val matches = imagePattern.findAll(text).toList()
         if (matches.isEmpty()) return text
 
-        var result = text
-        for (match in matches.asReversed()) {
+        // Pass 1: filter + normalize (pure, no I/O).
+        data class PendingMatch(
+            val range: IntRange,
+            val alt: String,
+            val mimeType: String,
+            val path: String,
+        )
+        val pending = matches.mapNotNull { match ->
             val alt = match.groupValues[1]
             val rawUrl = match.groupValues[2].trim().trim('<', '>')
-            if (rawUrl.isEmpty() || rawUrl.startsWith("data:") || rawUrl.contains("://")) continue
-
-            val normalizedPath = normalizeImagePath(rawUrl, markdownFilePath, workspaceDirectory) ?: continue
+            if (rawUrl.isEmpty() || rawUrl.startsWith("data:") || rawUrl.contains("://")) return@mapNotNull null
+            val normalizedPath = normalizeImagePath(rawUrl, markdownFilePath, workspaceDirectory) ?: return@mapNotNull null
             val ext = normalizedPath.substringAfterLast('.', "").lowercase()
-            if (ext !in imageExtensions) continue
+            if (ext !in imageExtensions) return@mapNotNull null
+            PendingMatch(match.range, alt, mimeTypeForExtension(ext), normalizedPath)
+        }
+        if (pending.isEmpty()) return text
 
-            try {
-                val content = fetchContent(normalizedPath)
-                val base64Data = content.content?.takeIf { it.isNotBlank() } ?: continue
-                val mimeType = mimeTypeForExtension(ext)
-                val cleaned = base64Data.replace("\n", "").replace("\r", "").replace(" ", "")
-                result = result.replaceRange(match.range, "![${alt}](data:${mimeType};base64,${cleaned})")
-            } catch (_: Exception) {
-                continue
-            }
+        // Pass 2: parallel fetch. Failures of individual fetches collapse to
+        // null and the corresponding match is left unrewritten (its original
+        // markdown stays intact, matching the prior sequential behavior).
+        val fetched: List<Pair<PendingMatch, FileContent>?> = coroutineScope {
+            pending.map { pm ->
+                async {
+                    runCatching { pm to fetchContent(pm.path) }
+                        .getOrNull()
+                }
+            }.awaitAll()
         }
 
+        // Apply in reverse range order so prior offsets stay valid.
+        var result = text
+        for (entry in fetched.filterNotNull().sortedByDescending { it.first.range.first }) {
+            val (pm, content) = entry
+            val base64Data = content.content?.takeIf { it.isNotBlank() } ?: continue
+            val cleaned = base64Data.replace("\n", "").replace("\r", "").replace(" ", "")
+            result = result.replaceRange(pm.range, "![${pm.alt}](data:${pm.mimeType};base64,${cleaned})")
+        }
         return result
     }
 

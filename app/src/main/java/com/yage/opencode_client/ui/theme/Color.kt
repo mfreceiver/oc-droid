@@ -3,19 +3,24 @@ package com.yage.opencode_client.ui.theme
 import androidx.compose.ui.graphics.Color
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Material 3 color system — electric-blue identity.
+// Material 3 color system — v2 "oc-2" skin (global retheme, R-F).
 //
-// The brand reads as a single vivid electric blue across both themes (matching
-// the iOS client). Dynamic color (Material You) is intentionally OFF so the
-// brand stays identical on every device regardless of wallpaper. Everything is
-// expanded to a full M3 color scheme (primary/secondary/tertiary families,
-// neutral surface tonal steps, inverse + scrim) modeled on the x-liker theme.
+// Strategy (docs/v2-redesign-plan.md §2.1/§2.2): keep M3 ColorScheme as the
+// color carrier (avoid touching every `MaterialTheme.colorScheme.xxx` call
+// site), swap the values to v2 tokens. v2-specific semantics that M3 slots
+// can't express (layer-01/02/03, faint, code-accent, border-focus, state-*,
+// bg-contrast) live in [OpencodeColors], provided via [LocalOpencodeColors].
+//
+// Numeric values come from docs/opencode-web-style-reference.md §2.4. Brand
+// identity colors ([BrandPrimary] etc.) and functional diff colors
+// ([AddedLine] etc.) are intentionally kept unchanged.
 // ─────────────────────────────────────────────────────────────────────────────
 
 /**
- * Brand identity. [BrandPrimary] is the electric blue (#3B82F6) used directly by
- * UI accents (selected session chips, send affordances) and as the dark-theme
- * primary. [BrandGold] stays as the "AI is working / over budget" emphasis.
+ * Brand identity. Kept at the original electric blue for any UI that still
+ * references it directly. Note: v2's accent (`#3b5cf6`) is now exposed via
+ * [LightPrimary]/[DarkPrimary] and [OpencodeColors.accentText], NOT via this
+ * constant — decoupled so [BrandPrimary] stays a stable legacy reference.
  */
 val BrandPrimary = Color(0xFF3B82F6)
 val BrandGold = Color(0xFFD9A621)
@@ -27,14 +32,15 @@ val BrandGold = Color(0xFFD9A621)
  */
 val StopRed = Color(0xFFE5484D)
 
-// ========== Dark Theme ==========
-// Primary family — brand electric blue, with a deep container tint.
-val DarkPrimary = BrandPrimary
+// ========== Dark Theme (v2 oc-2 dark) ==========
+// Primary family — v2 accent (`#3b5cf6`). Container slots remain M3-derived
+// (v2 has no direct equivalent; kept consistent with primary hue).
+val DarkPrimary = Color(0xFF3B5CF6)
 val DarkOnPrimary = Color(0xFFFFFFFF)
 val DarkPrimaryContainer = Color(0xFF0A47A1)
 val DarkOnPrimaryContainer = Color(0xFFD3E4FF)
 
-// Secondary family — desaturated blue-gray neutral companion.
+// Secondary family — desaturated blue-gray neutral companion (unchanged).
 val DarkSecondary = Color(0xFFA5BEE0)
 val DarkOnSecondary = Color(0xFF0D2E50)
 val DarkSecondaryContainer = Color(0xFF264565)
@@ -46,93 +52,98 @@ val DarkOnTertiary = Color(0xFF3A2F00)
 val DarkTertiaryContainer = Color(0xFF534400)
 val DarkOnTertiaryContainer = Color(0xFFFFE08A)
 
-// Neutral family — near-black canvas with a faint cool tint.
-val DarkBackground = Color(0xFF0E1117)
-val DarkOnBackground = Color(0xFFE1E2E9)
-val DarkSurface = Color(0xFF131823)
-val DarkOnSurface = Color(0xFFE1E2E9)
-val DarkSurfaceVariant = Color(0xFF1E2433)
-val DarkOnSurfaceVariant = Color(0xFFC0C6D6)
+// Neutral family — v2 dark greys. bg-deep=#080808 / bg-base=#161616 /
+// layer-02=#2e2e2e / text-base=#fafafa / text-muted=#aeaeae / faint=#808080.
+val DarkBackground = Color(0xFF080808)
+val DarkOnBackground = Color(0xFFFAFAFA)
+val DarkSurface = Color(0xFF161616)
+val DarkOnSurface = Color(0xFFFAFAFA)
+val DarkSurfaceVariant = Color(0xFF2E2E2E)
+val DarkOnSurfaceVariant = Color(0xFFAEAEAE)
 
-val DarkOutline = Color(0xFF444B65)
-val DarkOutlineVariant = Color(0xFF2C3245)
+val DarkOutline = Color(0xFF808080)
+val DarkOutlineVariant = Color(0x14FFFFFF)
 
-// Error family.
-val DarkError = Color(0xFFFFB4AB)
-val DarkOnError = Color(0xFF690005)
-val DarkErrorContainer = Color(0xFF93000A)
+// Error family — v2 state-fg-danger (#f17471) / state-bg-danger (#461516).
+val DarkError = Color(0xFFF17471)
+val DarkOnError = Color(0xFFFFFFFF)
+val DarkErrorContainer = Color(0xFF461516)
 val DarkOnErrorContainer = Color(0xFFFFDAD6)
 
-// Surface tonal steps (dark: Lowest is darkest, Highest is lightest).
-val DarkSurfaceDim = Color(0xFF0A0D13)
+// Surface tonal steps — v2 dark grey ramp. layer-01=#242424 / layer-02=#2e2e2e
+// / layer-03=#3a3a3a / layer-04=#5c5c5c. Lowest/Bright kept M3-derived (no v2
+// equivalent; aligned to the same neutral axis).
+val DarkSurfaceDim = Color(0xFF080808)
 val DarkSurfaceBright = Color(0xFF2A2F3D)
 val DarkSurfaceContainerLowest = Color(0xFF0B0F15)
-val DarkSurfaceContainerLow = Color(0xFF12161F)
-val DarkSurfaceContainer = Color(0xFF161B26)
-val DarkSurfaceContainerHigh = Color(0xFF1B212C)
-val DarkSurfaceContainerHighest = Color(0xFF222838)
+val DarkSurfaceContainerLow = Color(0xFF242424)
+val DarkSurfaceContainer = Color(0xFF2E2E2E)
+val DarkSurfaceContainerHigh = Color(0xFF3A3A3A)
+val DarkSurfaceContainerHighest = Color(0xFF5C5C5C)
 
-// Inverse + scrim.
-val DarkInverseSurface = Color(0xFFE1E2E9)
-val DarkInverseOnSurface = Color(0xFF2E3138)
+// Inverse + scrim. v2 bg-contrast (send button) = #5c5c5c dark.
+val DarkInverseSurface = Color(0xFF5C5C5C)
+val DarkInverseOnSurface = Color(0xFFFFFFFF)
 val DarkInversePrimary = Color(0xFF1B5FD3)
 val DarkScrim = Color(0xFF000000)
 
-// ========== Light Theme ==========
-// Primary family — a deeper blue so text/icons stay legible on white surfaces.
-val LightPrimary = Color(0xFF1565C0)
+// ========== Light Theme (v2 oc-2 light) ==========
+// Primary family — v2 accent (#3b5cf6). Light text on accent stays white.
+val LightPrimary = Color(0xFF3B5CF6)
 val LightOnPrimary = Color(0xFFFFFFFF)
 val LightPrimaryContainer = Color(0xFFD7E3FF)
 val LightOnPrimaryContainer = Color(0xFF001A41)
 
-// Secondary family — blue-gray neutral.
+// Secondary family — blue-gray neutral (unchanged).
 val LightSecondary = Color(0xFF4F6079)
 val LightOnSecondary = Color(0xFFFFFFFF)
 val LightSecondaryContainer = Color(0xFFD3E4F8)
 val LightOnSecondaryContainer = Color(0xFF0A1D32)
 
-// Tertiary family — deep gold for light surfaces.
+// Tertiary family — deep gold for light surfaces (unchanged).
 val LightTertiary = Color(0xFF6E5500)
 val LightOnTertiary = Color(0xFFFFFFFF)
 val LightTertiaryContainer = Color(0xFFF9DC6E)
 val LightOnTertiaryContainer = Color(0xFF221A00)
 
-// Neutral family — cool off-white.
-val LightBackground = Color(0xFFF7F9FC)
-val LightOnBackground = Color(0xFF1A1C22)
-val LightSurface = Color(0xFFF7F9FC)
-val LightOnSurface = Color(0xFF1A1C22)
-val LightSurfaceVariant = Color(0xFFE0E2EC)
-val LightOnSurfaceVariant = Color(0xFF44474F)
+// Neutral family — v2 light greys. bg-deep=#fafafa / bg-base=#ffffff /
+// layer-02=#f2f2f2 / text-base=#161616 / text-muted=#5c5c5c / faint=#808080.
+val LightBackground = Color(0xFFFAFAFA)
+val LightOnBackground = Color(0xFF161616)
+val LightSurface = Color(0xFFFFFFFF)
+val LightOnSurface = Color(0xFF161616)
+val LightSurfaceVariant = Color(0xFFF2F2F2)
+val LightOnSurfaceVariant = Color(0xFF5C5C5C)
 
-val LightOutline = Color(0xFF74777F)
-val LightOutlineVariant = Color(0xFFC3C6D0)
+val LightOutline = Color(0xFF808080)
+val LightOutlineVariant = Color(0x14000000)
 
-// Error family.
-val LightError = Color(0xFFBA1A1A)
+// Error family — v2 state-fg-danger (#b82d35) / state-bg-danger (#fceceb).
+val LightError = Color(0xFFB82D35)
 val LightOnError = Color(0xFFFFFFFF)
-val LightErrorContainer = Color(0xFFFFDAD6)
+val LightErrorContainer = Color(0xFFFCECEB)
 val LightOnErrorContainer = Color(0xFF410002)
 
-// Surface tonal steps (light: Lowest is lightest, Highest is darkest).
-val LightSurfaceDim = Color(0xFFD6DAE0)
+// Surface tonal steps — v2 light grey ramp. layer-01=#fafafa / layer-02=#f2f2f2
+// / layer-03=#eeeeee / layer-04=#dbdbdb.
+val LightSurfaceDim = Color(0xFFFAFAFA)
 val LightSurfaceBright = Color(0xFFF7F9FC)
 val LightSurfaceContainerLowest = Color(0xFFFFFFFF)
-val LightSurfaceContainerLow = Color(0xFFF1F3F8)
-val LightSurfaceContainer = Color(0xFFEBEEF3)
-val LightSurfaceContainerHigh = Color(0xFFE5E8ED)
-val LightSurfaceContainerHighest = Color(0xFFDFE3E8)
+val LightSurfaceContainerLow = Color(0xFFFAFAFA)
+val LightSurfaceContainer = Color(0xFFF2F2F2)
+val LightSurfaceContainerHigh = Color(0xFFEEEEEE)
+val LightSurfaceContainerHighest = Color(0xFFDBDBDB)
 
-// Inverse + scrim.
-val LightInverseSurface = Color(0xFF2E3138)
-val LightInverseOnSurface = Color(0xFFEFF0F4)
+// Inverse + scrim. v2 bg-contrast (send button) = #242424 light.
+val LightInverseSurface = Color(0xFF242424)
+val LightInverseOnSurface = Color(0xFFFFFFFF)
 val LightInversePrimary = Color(0xFF9DB5F5)
 val LightScrim = Color(0xFF000000)
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Functional colors (diff viewer, git file status). These carry concrete
 // semantic meaning (added/removed/modified) and are intentionally NOT part of
-// the brand accent system.
+// the brand accent system. Unchanged by the v2 retheme.
 // ─────────────────────────────────────────────────────────────────────────────
 val AddedLine = Color(0xFFE8F5E9)
 val DeletedLine = Color(0xFFFFEBEE)

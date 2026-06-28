@@ -1,5 +1,6 @@
 package com.yage.opencode_client
 
+import android.content.Intent
 import android.os.Bundle
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
@@ -26,8 +27,6 @@ import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.LocalLifecycleOwner
-import androidx.lifecycle.Lifecycle
-import androidx.lifecycle.repeatOnLifecycle
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.yage.opencode_client.ui.MainViewModel
 import com.yage.opencode_client.ui.chat.ChatScreen
@@ -74,12 +73,30 @@ private const val EXTRA_TEST_PASSWORD = "test_password"
 @OptIn(ExperimentalMaterial3WindowSizeClassApi::class)
 @AndroidEntryPoint
 class MainActivity : AppCompatActivity() {
+
+    /**
+     * Reference to the Activity-scoped [MainViewModel], populated inside
+     * [onCreate]'s `setContent` block once Hilt constructs it. Held so that
+     * [onNewIntent] (which fires on warm-start deep links from §18
+     * notifications, with `launchMode="singleTop"`) can dispatch the session
+     * extra without re-entering `setContent`.
+     */
+    private var mainViewModel: MainViewModel? = null
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
         setContent {
             val viewModel: MainViewModel = hiltViewModel()
+            mainViewModel = viewModel
             val lifecycleOwner = LocalLifecycleOwner.current
+            // §18.1 cold-start deep link: if the launch Intent carries
+            // EXTRA_SESSION_ID (notification tap), route to the session once
+            // the VM is initialised. The extra is consumed (removed) so screen
+            // rotations do not re-trigger the navigation.
+            LaunchedEffect(Unit) {
+                handleSessionExtra(intent)
+            }
             LaunchedEffect(lifecycleOwner) {
                 // Debug-only credential injection: if the launch Intent carries
                 // test credentials (passed via `am start --es test_server_url ...`),
@@ -96,9 +113,15 @@ class MainActivity : AppCompatActivity() {
                         )
                     }
                 }
-                lifecycleOwner.lifecycle.repeatOnLifecycle(Lifecycle.State.STARTED) {
-                    viewModel.testConnection()
-                }
+                // §评审 Stage C #8: one-shot initial health check. The
+                // ON_START-driven catch-up is now owned exclusively by
+                // [AppLifecycleMonitor] (which routes through
+                // [MainViewModel.onForegroundChanged]). Calling testConnection()
+                // here once satisfies the cold-start path; the call's own
+                // 30s throttle makes any overlap with the foreground hook a
+                // no-op. Previously [repeatOnLifecycle(STARTED)] re-fired this
+                // on every ON_START, doubling the AppLifecycleMonitor path.
+                viewModel.testConnection()
             }
             val state by viewModel.state.collectAsStateWithLifecycle()
             LaunchedEffect(state.languageMode) {
@@ -130,6 +153,38 @@ class MainActivity : AppCompatActivity() {
                 }
             }
         }
+    }
+
+    /**
+     * §18.1 / N3: warm-start deep link. With `launchMode="singleTop"`, a
+     * notification tap while the Activity is already alive routes here instead
+     * of [onCreate]. We update the cached Intent (so subsequent reads see the
+     * new extras) and dispatch the session id to the VM. Idempotent — a null
+     * extra short-circuits.
+     */
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        handleSessionExtra(intent)
+    }
+
+    private fun handleSessionExtra(intent: Intent?) {
+        val sessionId = intent?.getStringExtra(EXTRA_SESSION_ID) ?: return
+        // Consume the extra so configuration changes (rotation) do not
+        // re-trigger the deep-link navigation.
+        intent.removeExtra(EXTRA_SESSION_ID)
+        mainViewModel?.openSessionFromDeepLink(sessionId)
+    }
+
+    companion object {
+        /**
+         * Intent extra carrying a session ID to deep-link into when the
+         * Activity is launched from a §18 notification tap. Defined here in
+         * the write-domain of Module A so [com.yage.opencode_client.di.AppLifecycleMonitor]
+         * (which builds the tap PendingIntent) and any deep-link entry point
+         * share a single source of truth.
+         */
+        const val EXTRA_SESSION_ID = "opencode_session_id"
     }
 }
 
@@ -346,17 +401,24 @@ private fun LandscapeSplitLayout(viewModel: MainViewModel) {
         VerticalDivider()
 
         // Right pane: Chat — 75%.
+        // §评审 Stage C #5: wrap in compactTypography so landscape matches
+        // [TabletLayout]'s compact density for the chat pane.
         Column(modifier = Modifier.weight(0.75f).fillMaxHeight()) {
-            ChatScreen(
-                viewModel = viewModel,
-                onNavigateToFiles = { path ->
-                    // Cache the path; no Files pane in landscape, so it will be
-                    // shown when the user returns to portrait PhoneLayout.
-                    viewModel.showFileInFiles(path, originRoute = Screen.Chat.route)
-                },
-                onNavigateToSettings = {},
-                showSettingsButton = false
-            )
+            MaterialTheme(
+                colorScheme = MaterialTheme.colorScheme,
+                typography = compactTypography(MaterialTheme.typography)
+            ) {
+                ChatScreen(
+                    viewModel = viewModel,
+                    onNavigateToFiles = { path ->
+                        // Cache the path; no Files pane in landscape, so it will be
+                        // shown when the user returns to portrait PhoneLayout.
+                        viewModel.showFileInFiles(path, originRoute = Screen.Chat.route)
+                    },
+                    onNavigateToSettings = {},
+                    showSettingsButton = false
+                )
+            }
         }
     }
 }

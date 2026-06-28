@@ -12,58 +12,215 @@ import com.mikepenz.markdown.m3.markdownTypography
 import kotlinx.serialization.Serializable
 
 /**
- * Per-level font sizes for Markdown rendering. Defaults approximate the current
- * [markdownTypographyCompact] visual output.
+ * Per-level font sizes for Markdown rendering.
+ *
+ * v2 对齐（`docs/v2-redesign-plan.md` §3）：h1=17 / h2=15 / h3=13 / h4-h6=13 /
+ * body=14 / code=13 / inlineCode=14 / quote=14 / reasoning=13。
  */
 @Serializable
 data class MarkdownFontSizes(
-    val h1: Float = 26f,
-    val h2: Float = 22f,
-    val h3: Float = 18f,
-    val h4: Float = 16f,
-    val h5: Float = 14f,
-    val h6: Float = 12f,
-    val body: Float = 14f,
-    val code: Float = 12f,
-    val inlineCode: Float = 14f,
-    val quote: Float = 12f,
+    val h1: Float = 17f,
+    val h2: Float = 15f,
+    val h3: Float = 13f,
+    val h4: Float = 13f,
+    val h5: Float = 13f,
+    val h6: Float = 13f,
+    val body: Float = 14f,        // 助手 markdown 正文（v2 14px）
+    val code: Float = 13f,        // 代码块（v2 13px）
+    val inlineCode: Float = 14f,  // 行内代码
+    val quote: Float = 14f,
     /**
      * Reasoning blocks use a deliberately smaller, subdued size to visually
      * de-emphasize chain-of-thought output versus the main assistant reply.
-     * Matches [code] / [quote] sizing for visual consistency with auxiliary text.
+     * v2: 13px / 行高 130%。
      */
-    val reasoning: Float = 12f,
+    val reasoning: Float = 13f,
 )
 
 /** CompositionLocal to provide [MarkdownFontSizes] through the tree. */
 val LocalMarkdownFontSizes = staticCompositionLocalOf { MarkdownFontSizes() }
 
-/** Markdown typography with per-level font sizes from [MarkdownFontSizes]. */
+/**
+ * CompositionLocal for the app-wide [FontFamily]. Defaults to
+ * [FontFamily.Default] (= system font) when no provider is present.
+ *
+ * v2 字体脚手架（`docs/v2-redesign-plan.md` §20 / D5）：[OpenCodeTheme] 读
+ * [com.yage.opencode_client.util.SettingsManager] 4 键（fontLatin/fontCJK/
+ * markdownFontLatin/markdownFontCJK），解析后经此 Local 下发。
+ *
+ * 所有 Typography slot 与 markdownTypography 默认从此处取 family，
+ * 不再硬编码 `FontFamily.Default`（评审 I5 审计清单）。
+ */
+val LocalAppFontFamily = staticCompositionLocalOf<FontFamily> { FontFamily.Default }
+
+/**
+ * Build the 15-slot M3 [Typography] using the given [family]. Used by
+ * [OpenCodeTheme] to inject the resolved font family (from settings) into
+ * every slot. v2 字号刻度（`docs/v2-redesign-plan.md` §3）：bodyLarge=14/21、
+ * bodyMedium=14/21、labelMedium=13/19、labelSmall=12/16、titleSmall=14/21。
+ *
+ * 审计：15 个 slot 全部用传入 [family]——无硬编码 [FontFamily.Default]。
+ */
+fun appTypography(family: FontFamily): Typography = Typography(
+    displayLarge = TextStyle(
+        fontFamily = family,
+        fontWeight = FontWeight.Bold,
+        fontSize = 32.sp,
+        lineHeight = 40.sp,
+        letterSpacing = (-0.25).sp,
+    ),
+    displayMedium = TextStyle(
+        fontFamily = family,
+        fontWeight = FontWeight.Bold,
+        fontSize = 28.sp,
+        lineHeight = 36.sp,
+        letterSpacing = (-0.25).sp,
+    ),
+    displaySmall = TextStyle(
+        fontFamily = family,
+        fontWeight = FontWeight.Bold,
+        fontSize = 24.sp,
+        lineHeight = 32.sp,
+    ),
+    headlineLarge = TextStyle(
+        fontFamily = family,
+        fontWeight = FontWeight.SemiBold,
+        fontSize = 24.sp,
+        lineHeight = 32.sp,
+    ),
+    headlineMedium = TextStyle(
+        fontFamily = family,
+        fontWeight = FontWeight.SemiBold,
+        fontSize = 20.sp,
+        lineHeight = 28.sp,
+    ),
+    headlineSmall = TextStyle(
+        fontFamily = family,
+        fontWeight = FontWeight.SemiBold,
+        fontSize = 18.sp,
+        lineHeight = 24.sp,
+    ),
+    titleLarge = TextStyle(
+        fontFamily = family,
+        fontWeight = FontWeight.Medium,
+        fontSize = 18.sp,
+        lineHeight = 24.sp,
+    ),
+    titleMedium = TextStyle(
+        fontFamily = family,
+        fontWeight = FontWeight.Medium,
+        fontSize = 16.sp,
+        lineHeight = 22.sp,
+        letterSpacing = 0.15.sp,
+    ),
+    titleSmall = TextStyle(
+        fontFamily = family,
+        fontWeight = FontWeight.Medium,
+        fontSize = 14.sp,
+        lineHeight = 21.sp,
+        letterSpacing = 0.1.sp,
+    ),
+    bodyLarge = TextStyle(
+        fontFamily = family,
+        fontWeight = FontWeight.Normal,
+        fontSize = 14.sp,
+        lineHeight = 21.sp,
+        letterSpacing = 0.5.sp,
+    ),
+    bodyMedium = TextStyle(
+        fontFamily = family,
+        fontWeight = FontWeight.Normal,
+        fontSize = 14.sp,
+        lineHeight = 21.sp,
+        letterSpacing = 0.25.sp,
+    ),
+    bodySmall = TextStyle(
+        fontFamily = family,
+        fontWeight = FontWeight.Normal,
+        fontSize = 12.sp,
+        lineHeight = 16.sp,
+        letterSpacing = 0.4.sp,
+    ),
+    labelLarge = TextStyle(
+        fontFamily = family,
+        fontWeight = FontWeight.Medium,
+        fontSize = 14.sp,
+        lineHeight = 20.sp,
+        letterSpacing = 0.1.sp,
+    ),
+    labelMedium = TextStyle(
+        fontFamily = family,
+        fontWeight = FontWeight.Medium,
+        fontSize = 13.sp,
+        lineHeight = 19.sp,
+        letterSpacing = 0.5.sp,
+    ),
+    labelSmall = TextStyle(
+        fontFamily = family,
+        fontWeight = FontWeight.Medium,
+        fontSize = 12.sp,
+        lineHeight = 16.sp,
+    ),
+)
+
+/**
+ * Fallback [Typography] using [FontFamily.Default]. Used when no
+ * [OpenCodeTheme] provider is active (e.g. previews, tests).
+ */
+val AppTypography: Typography = appTypography(FontFamily.Default)
+
+/**
+ * Backward-compatible alias. Existing references (`typography = Typography`)
+ * continue to work; [OpenCodeTheme] builds a family-aware copy via
+ * [appTypography] instead.
+ */
+val Typography: Typography = AppTypography
+
+/**
+ * Markdown typography with per-level font sizes from [MarkdownFontSizes].
+ *
+ * 字号按 v2 markdown.css（§3）：h1=17/h2=15/h3=13/h4-h6=13/body=14。
+ * 标题权重按 v2：h1/h2 = SemiBold (600)，h3 = Medium (500)。
+ *
+ * 字体 family 默认从 [LocalAppFontFamily] 取（评审 I5 审计：不硬编码
+ * [FontFamily.Default]）；`code`/`inlineCode` 固定用 [FontFamily.Monospace]。
+ */
 @Composable
-fun markdownTypography(sizes: MarkdownFontSizes) = markdownTypography(
-    h1 = TextStyle(fontSize = sizes.h1.sp, fontWeight = FontWeight.Bold),
-    h2 = TextStyle(fontSize = sizes.h2.sp, fontWeight = FontWeight.Bold),
-    h3 = TextStyle(fontSize = sizes.h3.sp, fontWeight = FontWeight.Bold),
-    h4 = TextStyle(fontSize = sizes.h4.sp, fontWeight = FontWeight.Bold),
-    h5 = TextStyle(fontSize = sizes.h5.sp, fontWeight = FontWeight.Bold),
-    h6 = TextStyle(fontSize = sizes.h6.sp, fontWeight = FontWeight.Bold),
-    text = TextStyle(fontSize = sizes.body.sp),
-    paragraph = TextStyle(fontSize = sizes.body.sp),
-    ordered = TextStyle(fontSize = sizes.body.sp),
-    bullet = TextStyle(fontSize = sizes.body.sp),
-    list = TextStyle(fontSize = sizes.body.sp),
-    table = TextStyle(fontSize = sizes.body.sp),
+fun markdownTypography(sizes: MarkdownFontSizes) = markdownTypography(sizes, LocalAppFontFamily.current)
+
+/**
+ * Explicit-family overload of [markdownTypography]. 便于预览/测试时绕过
+ * [LocalAppFontFamily]。同样标 `@Composable`——mikepenz 的 `markdownTypography`
+ * 构造器本身是 @Composable（读取 `LocalTextStyle` 等环境）。
+ */
+@Composable
+fun markdownTypography(
+    sizes: MarkdownFontSizes,
+    family: FontFamily,
+) = markdownTypography(
+    h1 = TextStyle(fontFamily = family, fontSize = sizes.h1.sp, fontWeight = FontWeight.SemiBold),
+    h2 = TextStyle(fontFamily = family, fontSize = sizes.h2.sp, fontWeight = FontWeight.SemiBold),
+    h3 = TextStyle(fontFamily = family, fontSize = sizes.h3.sp, fontWeight = FontWeight.Medium),
+    h4 = TextStyle(fontFamily = family, fontSize = sizes.h4.sp, fontWeight = FontWeight.Medium),
+    h5 = TextStyle(fontFamily = family, fontSize = sizes.h5.sp, fontWeight = FontWeight.Medium),
+    h6 = TextStyle(fontFamily = family, fontSize = sizes.h6.sp, fontWeight = FontWeight.Medium),
+    text = TextStyle(fontFamily = family, fontSize = sizes.body.sp),
+    paragraph = TextStyle(fontFamily = family, fontSize = sizes.body.sp),
+    ordered = TextStyle(fontFamily = family, fontSize = sizes.body.sp),
+    bullet = TextStyle(fontFamily = family, fontSize = sizes.body.sp),
+    list = TextStyle(fontFamily = family, fontSize = sizes.body.sp),
+    table = TextStyle(fontFamily = family, fontSize = sizes.body.sp),
     code = TextStyle(fontSize = sizes.code.sp, fontFamily = FontFamily.Monospace),
     inlineCode = TextStyle(fontSize = sizes.inlineCode.sp, fontFamily = FontFamily.Monospace),
-    quote = TextStyle(fontSize = sizes.quote.sp),
+    quote = TextStyle(fontFamily = family, fontSize = sizes.quote.sp),
 )
 
 /** Markdown typography with headers one size smaller than default. */
-@Composable
 @Deprecated(
     "Use LocalMarkdownFontSizes.current + markdownTypography(sizes) instead",
     ReplaceWith("markdownTypography(LocalMarkdownFontSizes.current)")
 )
+@Composable
 fun markdownTypographyCompact() = markdownTypography(
     h1 = MaterialTheme.typography.headlineLarge,
     h2 = MaterialTheme.typography.headlineMedium,
@@ -82,7 +239,12 @@ fun markdownTypographyCompact() = markdownTypography(
     table = MaterialTheme.typography.bodyLarge
 )
 
-/** Slightly smaller typography for Files and Chat columns in tablet layout. */
+/**
+ * Slightly smaller typography for Files and Chat columns in tablet layout.
+ *
+ * 审计（评审 I5）：[compactTypography] 不直接引用 [FontFamily.Default]——它
+ * 从 `base` 复制，自动继承 `base` 中已注入的 family（来自 [appTypography]）。
+ */
 fun compactTypography(base: Typography): Typography = base.copy(
     bodyLarge = base.bodyLarge.copy(fontSize = 12.sp, lineHeight = 18.sp),
     bodyMedium = base.bodyMedium.copy(fontSize = 11.sp, lineHeight = 16.sp),
@@ -93,112 +255,4 @@ fun compactTypography(base: Typography): Typography = base.copy(
     titleLarge = base.titleLarge.copy(fontSize = 16.sp, lineHeight = 22.sp),
     titleMedium = base.titleMedium.copy(fontSize = 14.sp, lineHeight = 20.sp),
     titleSmall = base.titleSmall.copy(fontSize = 12.sp, lineHeight = 18.sp)
-)
-
-/**
- * Full 15-slot Material 3 type scale. Sizes track the x-liker theme: a slightly
- * condensed display scale and readable body weights. [FontFamily.Default] is
- * used throughout so the system font (which on Android already ships a strong
- * sans-serif) carries the brand rather than a bespoke typeface.
- */
-val Typography = Typography(
-    displayLarge = TextStyle(
-        fontFamily = FontFamily.Default,
-        fontWeight = FontWeight.Bold,
-        fontSize = 32.sp,
-        lineHeight = 40.sp,
-        letterSpacing = (-0.25).sp,
-    ),
-    displayMedium = TextStyle(
-        fontFamily = FontFamily.Default,
-        fontWeight = FontWeight.Bold,
-        fontSize = 28.sp,
-        lineHeight = 36.sp,
-        letterSpacing = (-0.25).sp,
-    ),
-    displaySmall = TextStyle(
-        fontFamily = FontFamily.Default,
-        fontWeight = FontWeight.Bold,
-        fontSize = 24.sp,
-        lineHeight = 32.sp,
-    ),
-    headlineLarge = TextStyle(
-        fontFamily = FontFamily.Default,
-        fontWeight = FontWeight.SemiBold,
-        fontSize = 24.sp,
-        lineHeight = 32.sp,
-    ),
-    headlineMedium = TextStyle(
-        fontFamily = FontFamily.Default,
-        fontWeight = FontWeight.SemiBold,
-        fontSize = 20.sp,
-        lineHeight = 28.sp,
-    ),
-    headlineSmall = TextStyle(
-        fontFamily = FontFamily.Default,
-        fontWeight = FontWeight.SemiBold,
-        fontSize = 18.sp,
-        lineHeight = 24.sp,
-    ),
-    titleLarge = TextStyle(
-        fontFamily = FontFamily.Default,
-        fontWeight = FontWeight.Medium,
-        fontSize = 18.sp,
-        lineHeight = 24.sp,
-    ),
-    titleMedium = TextStyle(
-        fontFamily = FontFamily.Default,
-        fontWeight = FontWeight.Medium,
-        fontSize = 16.sp,
-        lineHeight = 22.sp,
-        letterSpacing = 0.15.sp,
-    ),
-    titleSmall = TextStyle(
-        fontFamily = FontFamily.Default,
-        fontWeight = FontWeight.Medium,
-        fontSize = 14.sp,
-        lineHeight = 20.sp,
-        letterSpacing = 0.1.sp,
-    ),
-    bodyLarge = TextStyle(
-        fontFamily = FontFamily.Default,
-        fontWeight = FontWeight.Normal,
-        fontSize = 16.sp,
-        lineHeight = 24.sp,
-        letterSpacing = 0.5.sp,
-    ),
-    bodyMedium = TextStyle(
-        fontFamily = FontFamily.Default,
-        fontWeight = FontWeight.Normal,
-        fontSize = 14.sp,
-        lineHeight = 20.sp,
-        letterSpacing = 0.25.sp,
-    ),
-    bodySmall = TextStyle(
-        fontFamily = FontFamily.Default,
-        fontWeight = FontWeight.Normal,
-        fontSize = 12.sp,
-        lineHeight = 16.sp,
-        letterSpacing = 0.4.sp,
-    ),
-    labelLarge = TextStyle(
-        fontFamily = FontFamily.Default,
-        fontWeight = FontWeight.Medium,
-        fontSize = 14.sp,
-        lineHeight = 20.sp,
-        letterSpacing = 0.1.sp,
-    ),
-    labelMedium = TextStyle(
-        fontFamily = FontFamily.Default,
-        fontWeight = FontWeight.Medium,
-        fontSize = 12.sp,
-        lineHeight = 16.sp,
-        letterSpacing = 0.5.sp,
-    ),
-    labelSmall = TextStyle(
-        fontFamily = FontFamily.Default,
-        fontWeight = FontWeight.Medium,
-        fontSize = 10.sp,
-        lineHeight = 14.sp,
-    ),
 )

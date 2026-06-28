@@ -16,6 +16,7 @@ import com.yage.opencode_client.data.model.HostProfile
 import com.yage.opencode_client.data.model.BasicAuthConfig
 import com.yage.opencode_client.data.repository.HostProfileStore
 import com.yage.opencode_client.data.repository.OpenCodeRepository
+import com.yage.opencode_client.di.AppLifecycleMonitor
 import com.yage.opencode_client.ui.AppState
 import com.yage.opencode_client.ui.MainViewModel
 import com.yage.opencode_client.ui.session.buildSessionTree
@@ -61,6 +62,7 @@ class MainViewModelTest {
     private lateinit var settingsManager: SettingsManager
     private lateinit var hostProfileStore: HostProfileStore
     private lateinit var trafficTracker: TrafficTracker
+    private lateinit var appLifecycleMonitor: AppLifecycleMonitor
 
     @Before
     fun setUp() {
@@ -74,6 +76,11 @@ class MainViewModelTest {
         settingsManager = mockk(relaxed = true)
         hostProfileStore = mockk(relaxed = true)
         trafficTracker = mockk(relaxed = true)
+        appLifecycleMonitor = mockk(relaxed = true)
+        // §15.2: MainViewModel.init subscribes to isInForeground via
+        // onEach{}.launchIn(viewModelScope). Hand back a real foreground
+        // StateFlow so the init-time subscription does not NPE.
+        every { appLifecycleMonitor.isInForeground } returns MutableStateFlow(true)
 
         val defaultProfile = HostProfile.defaultDirect("http://server.test")
         every { hostProfileStore.currentProfile() } returns defaultProfile
@@ -107,7 +114,7 @@ class MainViewModelTest {
     }
 
     private fun createViewModel(): MainViewModel {
-        return MainViewModel(repository, settingsManager, hostProfileStore, trafficTracker)
+        return MainViewModel(repository, settingsManager, hostProfileStore, trafficTracker, appLifecycleMonitor)
     }
 
     private fun updateState(viewModel: MainViewModel, transform: (AppState) -> AppState) {
@@ -546,6 +553,14 @@ class MainViewModelTest {
         val viewModel = createViewModel()
         updateState(viewModel) { it.copy(currentSessionId = "session-1") }
 
+        // §15.1: messagesRefreshTrigger is a SharedFlow whose debounce
+        // pipeline subscribes asynchronously (debounce wraps the source in
+        // a child coroutine). Run one dispatcher tick so the subscription
+        // is established before the SSE event arrives, otherwise the
+        // tryEmit() fired by handleSse would land on an empty subscriber
+        // set (replay=0) and silently drop.
+        advanceUntilIdle()
+
         handleSse(
             viewModel,
             SSEEvent(
@@ -557,6 +572,10 @@ class MainViewModelTest {
                 )
             )
         )
+        // §15.1: message.updated now goes through a debounced refresh trigger
+        // (500ms coalesce) followed by the standard retry delay (400ms) before
+        // loadMessages fires. Advance virtual time past both before asserting.
+        advanceTimeBy(1000)
         advanceUntilIdle()
 
         coVerify(exactly = 0) { repository.getSessions(any()) }

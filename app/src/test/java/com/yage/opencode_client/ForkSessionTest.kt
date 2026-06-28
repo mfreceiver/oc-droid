@@ -5,6 +5,7 @@ import com.yage.opencode_client.data.model.Session
 import com.yage.opencode_client.data.model.HostProfile
 import com.yage.opencode_client.data.repository.HostProfileStore
 import com.yage.opencode_client.data.repository.OpenCodeRepository
+import com.yage.opencode_client.di.AppLifecycleMonitor
 import com.yage.opencode_client.ui.AppState
 import com.yage.opencode_client.ui.MainViewModel
 import com.yage.opencode_client.util.SettingsManager
@@ -42,6 +43,7 @@ class ForkSessionTest {
     private lateinit var settingsManager: SettingsManager
     private lateinit var hostProfileStore: HostProfileStore
     private lateinit var trafficTracker: TrafficTracker
+    private lateinit var appLifecycleMonitor: AppLifecycleMonitor
 
     @Before
     fun setUp() {
@@ -55,6 +57,11 @@ class ForkSessionTest {
         settingsManager = mockk(relaxed = true)
         hostProfileStore = mockk(relaxed = true)
         trafficTracker = mockk(relaxed = true)
+        appLifecycleMonitor = mockk(relaxed = true)
+        // §15.2: MainViewModel.init subscribes to isInForeground via
+        // onEach{}.launchIn(viewModelScope). Hand back a real foreground
+        // StateFlow so the init-time subscription does not NPE.
+        every { appLifecycleMonitor.isInForeground } returns MutableStateFlow(true)
 
         val defaultProfile = HostProfile.defaultDirect("http://server.test")
         every { hostProfileStore.currentProfile() } returns defaultProfile
@@ -91,7 +98,7 @@ class ForkSessionTest {
     }
 
     private fun createViewModel(): MainViewModel {
-        return MainViewModel(repository, settingsManager, hostProfileStore, trafficTracker)
+        return MainViewModel(repository, settingsManager, hostProfileStore, trafficTracker, appLifecycleMonitor)
     }
 
     @Test
