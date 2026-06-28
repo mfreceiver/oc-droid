@@ -421,6 +421,17 @@ class MainViewModel @Inject constructor(
      * server response does not loop the watchdog.
      */
     @Volatile private var lastSseProgressAtMs: Long = 0L
+    /**
+     * §OOM/churn: throttle for the message.updated-driven full message reload.
+     * During a busy streaming session the server emits message.updated on every
+     * delta; reloading 30 messages × full tool output on each one caused a ~3s
+     * reload loop that churned the heap to OOM (ADB-confirmed). Live token text
+     * already arrives via streamingPartTexts (message.part.updated delta), so
+     * the full reload only needs to re-sync structure occasionally. Bounded here
+     * to once per [STREAMING_RELOAD_MIN_INTERVAL_MS]; resetLimit reloads (new
+     * message / busy→idle / first open) bypass this via their own call paths.
+     */
+    @Volatile private var lastStreamingReloadAt: Long = 0L
 
     /**
      * §15.2: guards the very first [AppLifecycleMonitor.isInForeground]
@@ -477,6 +488,17 @@ class MainViewModel @Inject constructor(
                 .debounce(MESSAGE_REFRESH_DEBOUNCE_MS)
                 .collect {
                     val sessionId = _state.value.currentSessionId ?: return@collect
+                    // §OOM/churn throttle: message.updated fires on every streaming
+                    // delta; without this guard the debounced reload loops every
+                    // few seconds, each loading 30 msgs × full tool output and
+                    // churning the heap to OOM. Live text comes via
+                    // streamingPartTexts; this reload only re-syncs structure, so
+                    // bounding it to once per STREAMING_RELOAD_MIN_INTERVAL_MS is
+                    // safe. Reset paths (created/idle/first-open) bypass this
+                    // collector entirely.
+                    val now = System.currentTimeMillis()
+                    if (now - lastStreamingReloadAt < STREAMING_RELOAD_MIN_INTERVAL_MS) return@collect
+                    lastStreamingReloadAt = now
                     loadMessagesWithRetry(sessionId, resetLimit = false)
                 }
         }
@@ -602,6 +624,9 @@ class MainViewModel @Inject constructor(
         sseJob = null
         stopStreamWatchdog()
         lastSseProgressAtMs = 0L
+        // Reset the streaming-reload throttle so the next session's first
+        // message.updated doesn't wait out the interval.
+        lastStreamingReloadAt = 0L
     }
 
     /**
@@ -1666,5 +1691,12 @@ class MainViewModel @Inject constructor(
         // recovers from genuine stalls, but cuts the worst-case reload rate
         // 12/min → 4/min. Full fix = cursor pagination + SSE-incremental trust.
         private const val WATCHDOG_STALE_MS = 15_000L
+        /**
+         * Minimum interval between message.updated-driven full message reloads.
+         * See [lastStreamingReloadAt]. Live token text arrives via
+         * streamingPartTexts, so a 10s structural re-sync is plenty; this bounds
+         * the heap churn that caused the ~3s reload-loop OOM.
+         */
+        private const val STREAMING_RELOAD_MIN_INTERVAL_MS = 10_000L
     }
 }
