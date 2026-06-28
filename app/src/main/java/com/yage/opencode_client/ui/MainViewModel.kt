@@ -761,6 +761,12 @@ class MainViewModel @Inject constructor(
             ) }
             settingsManager.currentSessionId = null
             settingsManager.openSessionIds = emptyList()
+            // §H3: clear the persisted workdir too — a path from host A is
+            // meaningless on host B (different machine/filesystem), and leaving
+            // it would let configureRepositoryForProfile restore it onto the new
+            // host. configureRepositoryForProfile (below) re-scopes to the
+            // (now-null) workdir, which is correct for a fresh host.
+            settingsManager.currentWorkdir = null
             configureRepositoryForProfile(profile)
             refreshHostProfileState()
             testConnection(force = true)
@@ -808,6 +814,15 @@ class MainViewModel @Inject constructor(
         cancelSseAndWatchdogForReconfigure()
         val password = profile.basicAuth?.passwordId?.let { settingsManager.basicAuthPassword(it) }
         repository.configure(profile.serverUrl, profile.basicAuth?.username, password)
+        // §H2: repository.configure() resets currentDirectory to null. Every
+        // reconfigure path (testConnection on cold start + each ON_START
+        // catch-up, selectHostProfile, deleteHostProfile) flows through here, so
+        // without restoring the persisted workdir afterwards, the connected
+        // project's directory context is lost and directory-scoped requests
+        // (file ops, slash commands) silently fall back to the server's default
+        // cwd. selectHostProfile clears currentWorkdir first (H3) so a host
+        // switch doesn't carry the previous host's path across.
+        settingsManager.currentWorkdir?.let { repository.setCurrentDirectory(it) }
     }
 
     fun getSavedConnectionSettings(): ConnectionFormSettings = ConnectionFormSettings(

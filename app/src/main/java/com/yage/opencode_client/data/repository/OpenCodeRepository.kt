@@ -636,11 +636,17 @@ class OpenCodeRepository @Inject constructor(
                         throw Exception("HTTP ${it.code}${if (it.message.isNotBlank()) " ${it.message}" else ""}: ${body.ifBlank { "(空响应体)" }}")
                     }
                 }
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                // Preserve structured concurrency — never swallow cancellation
+                // (ViewModel clear / scope cancel must propagate cleanly).
+                throw e
             } catch (e: Exception) {
-                // Enrich network/IO/SSL failures with type + message + cause so the
-                // UI surfaces something debuggable. OkHttp network errors often carry
-                // a null/empty message, which previously collapsed to a useless
-                // "Tunnel activation failed" fallback with no diagnostic value.
+                // HTTP failures already carry a clean "HTTP {code}: {body}"
+                // message from the !successful branch above — rethrow as-is to
+                // avoid a redundant "Exception: HTTP ..." double-wrap in the UI.
+                // Only enrich network/IO/SSL failures (which often have null or
+                // unhelpful messages) with type + message + cause.
+                if (e.message?.startsWith("HTTP ") == true) throw e
                 throw Exception(buildString {
                     append(e::class.simpleName ?: "Exception")
                     e.message?.takeIf { it.isNotBlank() }?.let { append(": ").append(it) }

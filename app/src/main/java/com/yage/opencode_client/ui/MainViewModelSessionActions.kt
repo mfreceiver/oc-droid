@@ -253,14 +253,39 @@ internal fun launchLoadMessages(
                     val inferredAgentName = lastAssistant?.info?.agent
                     val agentName = settingsManager?.getAgentForSession(sessionId) ?: inferredAgentName
                     state.update {
+                        // §preserveUnfetched (mirrors opencode-web reconcileFetched):
+                        // a periodic reload (resetLimit=false) fetches the latest
+                        // window but must NOT erase already-loaded older history
+                        // pages. When the fetched page is incomplete (nextCursor !=
+                        // null, i.e. more history exists), keep every local message
+                        // whose id is not in the fetched page AND whose created time
+                        // predates the fetched page's oldest — exactly the older
+                        // pages the user scrolled up to load. Without this the
+                        // periodic reload replaced `messages` wholesale while keeping
+                        // the old cursor, causing the 🔴 history-断层 the reviewers
+                        // flagged. Falls back to "keep all not-in-fetched" when
+                        // created times are unavailable.
+                        val fetchedIds = page.items.map { m -> m.info.id }.toHashSet()
+                        val oldestFetchedCreated = page.items
+                            .mapNotNull { m -> m.info.time?.created }
+                            .minOrNull()
+                        val mergedMessages = if (resetLimit) {
+                            page.items
+                        } else {
+                            val olderKept = it.messages.filter { m ->
+                                m.info.id !in fetchedIds && (oldestFetchedCreated == null ||
+                                    (m.info.time?.created ?: Long.MAX_VALUE) < oldestFetchedCreated)
+                            }
+                            olderKept + page.items
+                        }
                         it.copy(
-                            messages = page.items,
+                            messages = mergedMessages,
                             messageLimit = limit,
                             isLoadingMessages = false,
                             selectedAgentName = agentName ?: it.selectedAgentName,
                             // Only (re)seed the history cursor on a fresh open; a
                             // periodic reload must NOT clobber an existing cursor
-                            // (the user may have already loaded older pages).
+                            // (now safe because older history is preserved above).
                             olderMessagesCursor = if (resetLimit) page.nextCursor else it.olderMessagesCursor,
                             hasMoreMessages = if (resetLimit) (page.nextCursor != null) else it.hasMoreMessages
                         )
@@ -321,8 +346,12 @@ internal fun launchLoadMoreMessages(
     // both cellular blowup and OOM). Stops when there's no next cursor.
     val cursor = state.value.olderMessagesCursor
     if (cursor == null || !state.value.hasMoreMessages) return
+    // Atomic check-and-set (mirrors launchLoadMessages): set isLoadingMessages
+    // synchronously BEFORE launch so a rapid second loadMore (fast scroll /
+    // recomposition) can't pass the guard and fire a duplicate concurrent
+    // fetch of the same cursor page.
+    state.update { it.copy(isLoadingMessages = true) }
     scope.launch {
-        state.update { it.copy(isLoadingMessages = true) }
         repository.getMessagesPaged(sessionId, limit = 30, before = cursor)
             .onSuccess { page ->
                 if (sessionId == state.value.currentSessionId) {
