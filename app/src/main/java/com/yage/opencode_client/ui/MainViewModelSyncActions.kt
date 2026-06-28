@@ -44,23 +44,21 @@ internal fun launchSseCollection(
 }
 
 /**
- * Dispatches a single SSE event. Per §15 (15.1 / 15.1.4 / 15.3) and §18 (R-A)
- * review refinements:
+ * Dispatches a single SSE event. Per the SSE-trust model (mirrors opencode-web):
  *
- * - `message.updated` for the current session does NOT reload — opencode-web
- *   trusts SSE for live text and only reloads on structural events (created,
- *   session-idle, watchdog). We mirror that: live text comes via streamingPartTexts
- *   (populated by message.part.updated delta), structural sync via
- *   session.status transition + 15s watchdog.
+ * - `message.updated` for the current session does NOT reload — live text comes
+ *   via `streamingPartTexts` (populated by `message.part.updated` delta/full
+ *   text), and structural sync happens on `message.created` (which reloads).
  * - `message.part.updated` with empty delta but non-null ids (a part status
- *   flip) does NOT clear streaming buffers or reload — the watchdog
- *   (§15.1.4) catches up. Only a true `part.created` (ids null) wipes the
- *   streaming state and reloads.
- * - Every branch that touches the current session refreshes the watchdog's
- *   "last seen alive" timestamp via [onLastSseProgress].
- * - `session.status` transitions drive the watchdog lifecycle: any -> busy
- *   starts it (via [onSessionBecameBusy]); busy -> idle forces one final
- *   reload and cancels it (via [onSessionBecameIdle]).
+ *   flip) does NOT clear streaming buffers or reload. Only a true `part.created`
+ *   (ids null) wipes the streaming state and reloads.
+ * - `session.status` transitions only update the `sessionStatuses` map (busy/idle
+ *   badge). They do NOT reload or clear streaming buffers — the finalized turn
+ *   text is carried by `streamingPartTexts` until the next `message.created`
+ *   reload or a foreground catch-up reconciles the persisted message list.
+ * - There is no watchdog/idle-reload: a silently-stalled SSE feed recovers via
+ *   connection-level retry, a foreground transition (SSE restart), or the next
+ *   user action — matching opencode-web.
  */
 internal fun handleIncomingSseEvent(
     state: MutableStateFlow<AppState>,
@@ -68,10 +66,7 @@ internal fun handleIncomingSseEvent(
     onRefreshMessages: (String, Boolean) -> Unit,
     onRefreshSessions: () -> Unit,
     onLoadPendingPermissions: () -> Unit,
-    onNonFatalIssue: (String) -> Unit,
-    onLastSseProgress: () -> Unit,
-    onSessionBecameBusy: () -> Unit,
-    onSessionBecameIdle: () -> Unit
+    onNonFatalIssue: (String) -> Unit
 ) {
     when (event.payload.type) {
         "session.created" -> {
@@ -93,8 +88,6 @@ internal fun handleIncomingSseEvent(
         "session.status" -> {
             val statusEvent = parseSessionStatusEvent(event)
             if (statusEvent != null) {
-                val previousStatus = state.value.sessionStatuses[statusEvent.sessionId]
-                val wasBusy = previousStatus?.isBusy == true
                 state.update {
                     it.copy(
                         sessionStatuses = it.sessionStatuses + (statusEvent.sessionId to statusEvent.status)
@@ -115,28 +108,11 @@ internal fun handleIncomingSseEvent(
                         it.copy(tempClearedUnread = it.tempClearedUnread - statusEvent.sessionId)
                     }
                 }
-                if (statusEvent.sessionId == state.value.currentSessionId) {
-                    // §15.1.4 watchdog lifecycle:
-                    //  - any -> busy: start the watchdog so a 5s silent gap
-                    //    during streaming kicks a fallback reload.
-                    //  - busy -> idle: force one last reload to flush any
-                    //    tail events the server may have already persisted,
-                    //    then cancel the watchdog (no more streaming expected).
-                    if (statusEvent.status.isBusy) {
-                        onLastSseProgress()
-                        onSessionBecameBusy()
-                    } else {
-                        state.update {
-                            it.copy(
-                                streamingPartTexts = emptyMap(),
-                                streamingReasoningPart = null
-                            )
-                        }
-                        onLastSseProgress()
-                        onRefreshMessages(statusEvent.sessionId, false)
-                        onSessionBecameIdle()
-                    }
-                }
+                // SSE-trust model: session.status (busy/idle) only updates the
+                // status badge. It does NOT reload or clear streaming buffers.
+                // The finalized turn text is carried by streamingPartTexts
+                // until the next message.created reload or a foreground catch-up
+                // reconciles the persisted message list — mirroring opencode-web.
             } else {
                 onNonFatalIssue("Ignoring invalid session.status payload")
             }
@@ -144,7 +120,6 @@ internal fun handleIncomingSseEvent(
         "message.created" -> {
             val sessionId = event.payload.getString("sessionID")
             if (sessionId != null && sessionId == state.value.currentSessionId) {
-                onLastSseProgress()
                 onRefreshMessages(sessionId, true)
             } else if (sessionId != null) {
                 // Mark unread: an out-of-band message arrived for a session
@@ -153,26 +128,19 @@ internal fun handleIncomingSseEvent(
             }
         }
         "message.updated" -> {
-            // Only refresh the open session's watchdog. Do NOT reload: opencode-web
-            // trusts SSE for live text and does NOT issue a periodic reload on
-            // message.updated (verified in oc-ref/packages/app/src/context/server-sync.tsx).
-            // Live token text arrives via message.part.updated delta and is rendered
-            // in real-time through streamingPartTexts; structural sync is handled
-            // by session.status (busy→idle) + the 15s watchdog. Removing the periodic
-            // reload also eliminates the last OOM-churn source (30 msgs × full tool
-            // output every 10s) that survived the debounced throttle.
+            // No-op. opencode-web trusts SSE for live text and does NOT reload
+            // on message.updated: live token text arrives via message.part.updated
+            // delta and is rendered in real-time through streamingPartTexts;
+            // structural sync is handled by message.created (reload) and a
+            // foreground catch-up. Removing the periodic reload also eliminates
+            // the last OOM-churn source.
             //
             // Do NOT mark unread: message.updated fires for every streaming delta,
             // which would spam the unread badge.
-            val sessionId = event.payload.getString("sessionID")
-            if (sessionId != null && sessionId == state.value.currentSessionId) {
-                onLastSseProgress()
-            }
         }
         "message.part.updated" -> {
             val deltaEvent = parseMessagePartDeltaEvent(event) ?: return
             if (deltaEvent.sessionId == state.value.currentSessionId) {
-                onLastSseProgress()
                 val msgId = deltaEvent.messageId
                 val pId = deltaEvent.partId
                 if (msgId != null && pId != null) {
@@ -210,7 +178,8 @@ internal fun handleIncomingSseEvent(
                     }
                     // Else: ids present + both text & delta null/blank =
                     // part status flip. Do NOT clear streaming buffers and
-                    // do NOT reload — the §15.1.4 watchdog covers catch-up.
+                    // do NOT reload — a foreground catch-up or the next
+                    // message.created reconciles if needed.
                 } else {
                     // §15.1 (review B3): a true `part.created` (no message/part
                     // id yet) signals the start of a fresh streaming run —

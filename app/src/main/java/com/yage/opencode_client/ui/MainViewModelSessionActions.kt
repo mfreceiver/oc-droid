@@ -160,19 +160,12 @@ internal fun launchLoadMoreSessions(
 internal fun launchLoadSessionStatus(
     scope: CoroutineScope,
     repository: OpenCodeRepository,
-    state: MutableStateFlow<AppState>,
-    onStatusesUpdated: () -> Unit = {}
+    state: MutableStateFlow<AppState>
 ) {
     scope.launch {
         repository.getSessionStatus()
             .onSuccess { statuses ->
                 state.update { it.copy(sessionStatuses = statuses) }
-                // §Stage D (gpter 重要 #3): surface the refresh so the caller
-                // can start the streaming watchdog when the CURRENT session is
-                // already busy but no SSE busy event will arrive (e.g. user
-                // selected a busy session, or catch-up after returning to
-                // foreground). The callback is responsible for its own dedup.
-                onStatusesUpdated()
             }
             .onFailure { error ->
                 reportNonFatalIssue("MainViewModel", "Failed to load session status", error)
@@ -233,7 +226,7 @@ internal fun launchLoadMessages(
 ) {
     // Coalesce concurrent loads. ADB showed startup triggers message loads from
     // multiple paths (testConnection→loadSessions→onLoadMessages, ON_START
-    // catch-up, watchdog) within ~2.6s — 3 parallel fetches of the same large
+    // catch-up) within ~2.6s — 3 parallel fetches of the same large
     // chunked body that叠加 to OOM. The first load wins; concurrent ones skip.
     // The flag is set synchronously (before launch) to close the check-and-set
     // race window. Periodic reloads after the first completes still go through.
@@ -552,7 +545,7 @@ internal fun launchSendMessage(
                 onRefreshSessions()
                 // §15.1 (review N6): the post-send 1200ms double-refresh is
                 // gone — SSE will deliver `message.created` / `message.updated`
-                // and the §15.1.4 watchdog covers any dropped event. The single
+                // and a foreground catch-up covers any dropped event. The single
                 // immediate reload here is the legacy first-paint path that
                 // selectSession/sendMessage use to bypass the debounce.
                 onRefreshMessages(sessionId, true)

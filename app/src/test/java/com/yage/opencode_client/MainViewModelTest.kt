@@ -49,6 +49,7 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Rule
@@ -552,7 +553,7 @@ class MainViewModelTest {
     }
 
     @Test
-    fun `message updated SSE does NOT trigger message reload - only refreshes watchdog`() = runTest {
+    fun `message updated SSE does NOT trigger message reload`() = runTest {
         val viewModel = createViewModel()
         updateState(viewModel) { it.copy(currentSessionId = "session-1") }
 
@@ -572,7 +573,8 @@ class MainViewModelTest {
         // §C1 (0.1.13): message.updated no longer triggers a reload at all.
         // The periodic /message?limit=30 loop was the root cause of the OOM.
         // Live text arrives via streamingPartTexts (message.part.updated delta);
-        // structural sync happens on message.created / session.idle / watchdog.
+        // structural sync happens on message.created (reload) and foreground
+        // catch-up.
         advanceTimeBy(2000)
         advanceUntilIdle()
 
@@ -1033,7 +1035,7 @@ class MainViewModelTest {
                 )
             )
         )
-        coEvery { repository.getMessagesPaged("session-1", 30, any()) } returns Result.success(MessagesPage(messages, null))
+        coEvery { repository.getMessagesPaged("session-1", 2, any()) } returns Result.success(MessagesPage(messages, null))
 
         val viewModel = createViewModel()
         updateState(viewModel) { it.copy(currentSessionId = "session-1") }
@@ -1176,7 +1178,7 @@ class MainViewModelTest {
     @Test
     fun `handleSSEEvent missing delta clears streaming state and refreshes messages`() = runTest {
         val messages = listOf(MessageWithParts(info = Message(id = "a2", role = "assistant")))
-        coEvery { repository.getMessagesPaged("session-1", 30, any()) } returns Result.success(MessagesPage(messages, null))
+        coEvery { repository.getMessagesPaged("session-1", 2, any()) } returns Result.success(MessagesPage(messages, null))
         val viewModel = createViewModel()
         updateState(viewModel) {
             it.copy(
@@ -1229,18 +1231,19 @@ class MainViewModelTest {
     }
 
     @Test
-    fun `handleSSEEvent idle status clears streaming state and refreshes messages`() = runTest {
-        val messages = listOf(MessageWithParts(info = Message(id = "a1", role = "assistant")))
-        coEvery { repository.getMessagesPaged("session-1", 30, any()) } returns Result.success(MessagesPage(messages, null))
-        coEvery { repository.getSessions(100) } returns Result.success(
-            listOf(com.yage.opencode_client.data.model.Session(id = "session-1", directory = "/tmp/project"))
-        )
+    fun `handleSSEEvent idle status only updates status badge without clearing streaming or reloading`() = runTest {
+        // SSE-trust model (S1): session.status idle does NOT clear streaming
+        // buffers and does NOT reload. The finalized turn text is carried by
+        // streamingPartTexts until the next message.created reload or a
+        // foreground catch-up reconciles the persisted message list.
         val viewModel = createViewModel()
+        val streaming = mapOf("message-1:part-1" to "partial")
+        val reasoning = Part(id = "part-1", messageId = "message-1", sessionId = "session-1", type = "reasoning")
         updateState(viewModel) {
             it.copy(
                 currentSessionId = "session-1",
-                streamingPartTexts = mapOf("message-1:part-1" to "partial"),
-                streamingReasoningPart = Part(id = "part-1", messageId = "message-1", sessionId = "session-1", type = "reasoning")
+                streamingPartTexts = streaming,
+                streamingReasoningPart = reasoning
             )
         }
 
@@ -1264,9 +1267,15 @@ class MainViewModelTest {
         advanceTimeBy(1000)
         advanceUntilIdle()
 
-        assertTrue(viewModel.state.value.streamingPartTexts.isEmpty())
-        assertNull(viewModel.state.value.streamingReasoningPart)
-        assertEquals(messages, viewModel.state.value.messages)
+        // Status badge updated to idle...
+        val status = viewModel.state.value.sessionStatuses["session-1"]
+        assertNotNull(status)
+        assertFalse(status!!.isBusy)
+        // ...but streaming buffers are PRESERVED (SSE-trust: no idle clear)...
+        assertEquals(streaming, viewModel.state.value.streamingPartTexts)
+        assertSame(reasoning, viewModel.state.value.streamingReasoningPart)
+        // ...and no reload was issued.
+        coVerify(exactly = 0) { repository.getMessagesPaged(any(), any(), any()) }
     }
 
     @Test
@@ -1488,7 +1497,7 @@ class MainViewModelTest {
     @Test
     fun `handleSSEEvent message created refreshes messages for current session`() = runTest {
         val messages = listOf(MessageWithParts(info = Message(id = "m1", role = "assistant")))
-        coEvery { repository.getMessagesPaged("session-1", 30, any()) } returns Result.success(MessagesPage(messages, null))
+        coEvery { repository.getMessagesPaged("session-1", 2, any()) } returns Result.success(MessagesPage(messages, null))
         coEvery { repository.getSessions(100) } returns Result.success(
             listOf(com.yage.opencode_client.data.model.Session(id = "session-1", directory = "/tmp/project"))
         )
