@@ -181,19 +181,46 @@ class OpenCodeRepository @Inject constructor(
                 chain.proceed(request)
             }
             // Traffic accounting: record request body (sent) and response body
-            // (received) byte counts. contentLength() returns -1 for unknown
-            // lengths (chunked / SSE streams), which TrafficTracker.add skips,
-            // so streaming responses are intentionally under-counted.
+            // Traffic accounting: record request body (sent) and ACTUAL bytes
+            // read from the response body (received). The old impl read
+            // contentLength(), which is -1 for chunked responses — so the large
+            // chunked message responses (the very ones causing OOM) were counted
+            // as 0 received, making the traffic counter grossly under-report and
+            // hiding the real bandwidth. Now we wrap the body source with a
+            // counting ForwardingSource that reports the true byte total when the
+            // body is closed (after the converter has read it). SSE
+            // (text/event-stream) is still counted — its bytes are real too.
             .addInterceptor { chain ->
                 val request = chain.request()
                 val sentBytes = request.body?.contentLength() ?: 0L
+                val sent = if (sentBytes > 0L) sentBytes else 0L
                 val response = chain.proceed(request)
-                val receivedBytes = response.body?.contentLength() ?: 0L
-                trafficTracker.add(
-                    sent = if (sentBytes > 0L) sentBytes else 0L,
-                    received = if (receivedBytes > 0L) receivedBytes else 0L
-                )
-                response
+                val body = response.body
+                if (body == null) {
+                    trafficTracker.add(sent = sent, received = 0L)
+                    return@addInterceptor response
+                }
+                val counter = object : okio.ForwardingSource(body.source()) {
+                    var received = 0L
+                    override fun read(sink: okio.Buffer, byteCount: Long): Long {
+                        val read = super.read(sink, byteCount)
+                        if (read > 0L) received += read
+                        return read
+                    }
+                    override fun close() {
+                        // Body fully consumed (or abandoned) — report the true
+                        // byte count now. Called on whatever thread closes the
+                        // body; TrafficTracker.add is synchronized.
+                        trafficTracker.add(sent = sent, received = received)
+                        super.close()
+                    }
+                }
+                val countedBody = object : okhttp3.ResponseBody() {
+                    override fun contentType(): okhttp3.MediaType? = body.contentType()
+                    override fun contentLength(): Long = body.contentLength()
+                    override fun source(): okio.BufferedSource = counter.buffer()
+                }
+                response.newBuilder().body(countedBody).build()
             }
             // §OOM P0: response-size guard. The retrofit kotlinx-serialization
             // converter reads the WHOLE response body into a single String before
