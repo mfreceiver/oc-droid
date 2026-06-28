@@ -3,6 +3,7 @@ package com.yage.opencode_client.data.repository
 import com.yage.opencode_client.data.api.*
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import okio.buffer
 import com.yage.opencode_client.data.model.*
 import kotlinx.coroutines.flow.Flow
 import okhttp3.Cache
@@ -204,22 +205,57 @@ class OpenCodeRepository @Inject constructor(
             // crashing. Covers chunked (unknown length) responses too.
             .addInterceptor { chain ->
                 val response = chain.proceed(chain.request())
-                // §OOM P0: response-size guard. The retrofit kotlinx-serialization
-                // converter reads the WHOLE body into a single String before
-                // deserializing; a long session's getMessages can carry tens of
-                // MB of verbatim tool output, and a ~124MB body → a ~248MB char
-                // array that OOMs the 256MB heap. Aborting on Content-Length
-                // BEFORE the body is consumed prevents the allocation and closes
-                // the transfer early (saves cellular bandwidth too). getMessages
-                // responses carry Content-Length; chunked/unknown (-1) pass through.
-                val len = response.body?.contentLength() ?: -1L
+                val body = response.body ?: return@addInterceptor response
+                // §OOM P0: response-size guard. The kotlinx-serialization converter
+                // reads the WHOLE body into a String before parsing; a large
+                // getMessages (chunked, unknown-length, 30 msgs × full tool output)
+                // can be tens of MB and OOM the heap. ADB confirmed the OOM-time
+                // responses are unknown-length (chunked) — so a Content-Length-only
+                // check is insufficient. Strategy:
+                //  1. Skip SSE (text/event-stream) — it's consumed incrementally,
+                //     not buffered, so a byte cap would prematurely kill a long
+                //     stream; SSE events are individually tiny.
+                //  2. Fast path: known Content-Length within cap → pass through;
+                //     over cap → close + throw before reading.
+                //  3. Unknown length (-1, chunked): wrap the body source with a
+                //     LAZY counting ForwardingSource that throws mid-read past the
+                //     cap (no buffering, preserves streaming). This is the fix for
+                //     the confirmed chunked-bypass OOM.
+                val mediaType = body.contentType()
+                if (mediaType != null && mediaType.subtype.contains("event-stream")) {
+                    return@addInterceptor response
+                }
+                val len = body.contentLength()
+                if (len in 1..MAX_RESPONSE_BYTES) return@addInterceptor response
                 if (len > MAX_RESPONSE_BYTES) {
                     response.close()
                     throw java.io.IOException(
                         "Response too large (>${MAX_RESPONSE_BYTES / (1024 * 1024)}MB, Content-Length=$len): ${chain.request().url.encodedPath}"
                     )
                 }
-                response
+                // Unknown length: lazy counting source (throws past cap mid-read).
+                val original = body.source()
+                val counting = object : okio.ForwardingSource(original) {
+                    var total = 0L
+                    override fun read(sink: okio.Buffer, byteCount: Long): Long {
+                        val read = super.read(sink, byteCount)
+                        if (read > 0L) {
+                            total += read
+                            if (total > MAX_RESPONSE_BYTES) {
+                                throw java.io.IOException(
+                                    "Response too large (>${MAX_RESPONSE_BYTES / (1024 * 1024)}MB, streamed): ${chain.request().url.encodedPath}"
+                                )
+                            }
+                        }
+                        return read
+                    }
+                }
+                val limitedBody = object : okhttp3.ResponseBody() {
+                    override fun contentType(): okhttp3.MediaType? = body.contentType()
+                    override fun contentLength(): Long = body.contentLength()
+                    override fun source(): okio.BufferedSource = counting.buffer()
+                }
+                response.newBuilder().body(limitedBody).build()
             }
             .connectTimeout(15, java.util.concurrent.TimeUnit.SECONDS)
             .readTimeout(0, java.util.concurrent.TimeUnit.SECONDS)

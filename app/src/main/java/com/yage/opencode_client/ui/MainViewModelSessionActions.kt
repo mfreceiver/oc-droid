@@ -232,8 +232,15 @@ internal fun launchLoadMessages(
     resetLimit: Boolean = true,
     settingsManager: SettingsManager? = null
 ) {
+    // Coalesce concurrent loads. ADB showed startup triggers message loads from
+    // multiple paths (testConnection→loadSessions→onLoadMessages, ON_START
+    // catch-up, watchdog) within ~2.6s — 3 parallel fetches of the same large
+    // chunked body that叠加 to OOM. The first load wins; concurrent ones skip.
+    // The flag is set synchronously (before launch) to close the check-and-set
+    // race window. Periodic reloads after the first completes still go through.
+    if (state.value.isLoadingMessages) return
+    state.update { it.copy(isLoadingMessages = true) }
     scope.launch {
-        state.update { it.copy(isLoadingMessages = true) }
         val limit = if (resetLimit) 30 else state.value.messageLimit
         // §on-demand: cursor pagination. The first load (resetLimit) captures the
         // X-Next-Cursor for future loadMore; subsequent periodic reloads fetch the
