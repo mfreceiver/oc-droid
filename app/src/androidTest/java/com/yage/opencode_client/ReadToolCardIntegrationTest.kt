@@ -142,12 +142,14 @@ class ReadToolCardIntegrationTest {
                     streamingPartTexts = emptyMap(),
                     streamingReasoningPart = null,
                     isLoading = false,
-                    messageLimit = 200,
+                    hasMoreMessages = false,
                     repository = repository,
                     workspaceDirectory = null,
                     onLoadMore = {},
                     onFileClick = {},
-                    onOpenSubAgent = {}
+                    onOpenSubAgent = {},
+                    expandedParts = emptyMap(),
+                    onToggleExpand = { _, _ -> }
                 )
             }
         }

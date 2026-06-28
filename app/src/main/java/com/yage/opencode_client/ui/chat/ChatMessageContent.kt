@@ -93,7 +93,7 @@ internal fun ChatMessageList(
     streamingPartTexts: Map<String, String>,
     streamingReasoningPart: Part?,
     isLoading: Boolean,
-    messageLimit: Int,
+    hasMoreMessages: Boolean,
     repository: OpenCodeRepository,
     workspaceDirectory: String?,
     onLoadMore: () -> Unit,
@@ -130,11 +130,12 @@ internal fun ChatMessageList(
     // listState.layoutInfo *inside* derivedStateOf (rather than capturing it as
     // a local val outside) lets the snapshot system track the read so the
     // predicate actually re-evaluates on scroll. The param-dependent guards
-    // (isLoading / messages.size / messageLimit) live in the LaunchedEffect
+    // (isLoading / messages.size / hasMoreMessages) live in the LaunchedEffect
     // key, so pagination re-checks fire whenever they change. Dedup/continuation
-    // is safe: loadMoreMessages already guards on isLoadingMessages, and the
-    // messages.size >= messageLimit condition turns false once the server
-    // returns a short page.
+    // is safe: loadMoreMessages already guards on isLoadingMessages, and
+    // hasMoreMessages turns false once the server returns a short page (no
+    // nextCursor). Using hasMoreMessages (not a messageLimit threshold) means a
+    // small initial page (limit=2) can still trigger history loading on scroll.
     val nearTop = remember {
         derivedStateOf {
             val info = listState.layoutInfo
@@ -143,8 +144,8 @@ internal fun ChatMessageList(
             else (visible.maxOfOrNull { it.index } ?: 0) >= info.totalItemsCount - 3
         }
     }
-    LaunchedEffect(nearTop.value, isLoading, messages.size, messageLimit) {
-        if (!isLoading && messages.isNotEmpty() && messages.size >= messageLimit && nearTop.value) {
+    LaunchedEffect(nearTop.value, isLoading, messages.size, hasMoreMessages) {
+        if (!isLoading && messages.isNotEmpty() && hasMoreMessages && nearTop.value) {
             onLoadMore()
         }
     }
@@ -186,7 +187,7 @@ internal fun ChatMessageList(
                 onToggleExpand = onToggleExpand
             )
         }
-        if (isLoading && messages.size >= messageLimit) {
+        if (isLoading && messages.isNotEmpty() && hasMoreMessages) {
             item(key = "load-more-indicator") {
                 Box(
                     modifier = Modifier.fillMaxWidth().padding(16.dp),
