@@ -55,6 +55,10 @@ data class AppState(
     val sessionStatuses: Map<String, SessionStatus> = emptyMap(),
     val messages: List<MessageWithParts> = emptyList(),
     val messageLimit: Int = 30,
+    // §on-demand: cursor-based history paging. olderMessagesCursor is the opaque
+    // V1 cursor for fetching the next older page (null = no more / reset).
+    val olderMessagesCursor: String? = null,
+    val hasMoreMessages: Boolean = true,
     val isLoadingMessages: Boolean = false,
     val agents: List<AgentInfo> = emptyList(),
     val selectedAgentName: String = "build",
@@ -184,7 +188,7 @@ data class AppState(
         val hasMoreSessions: Boolean = true,
     val isLoadingMoreSessions: Boolean = false,
     val isRefreshingSessions: Boolean = false,
-        val messageLimit: Int = 30,
+    val messageLimit: Int = 30,
         val pendingPermissions: List<PermissionRequest> = emptyList(),
         val pendingQuestions: List<QuestionRequest> = emptyList()
     ) {

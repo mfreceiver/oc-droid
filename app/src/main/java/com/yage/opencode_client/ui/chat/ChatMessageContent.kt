@@ -874,10 +874,9 @@ private fun ReasoningCard(
 ) {
     val expanded = expandedKey?.let { expandedParts[it] } ?: isStreaming
 
-    // §5.1 v2 reasoning card: transparent header (no surface tint) so the
-    // chain-of-thought reads as auxiliary context next to tool/file cards.
-    // The folding body uses layer01 (replacing the old surfaceVariant@50%
-    // panel) at v2's radius-md (6dp). Muted label/icon stay.
+    // §5.1 v3 reasoning card: fully transparent, no icon, no tinted body.
+    // Reads as quiet auxiliary context — same visual weight as BasicTool.
+    // Outer borderBase provides containment; no layer01 panel.
     val oc = MaterialTheme.opencode
     Surface(
         modifier = modifier.padding(vertical = 1.dp),
@@ -890,13 +889,6 @@ private fun ReasoningCard(
                 modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 4.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                Icon(
-                    Icons.Default.Psychology,
-                    contentDescription = null,
-                    modifier = Modifier.size(14.dp),
-                    tint = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-                Spacer(modifier = Modifier.width(6.dp))
                 Text(
                     title ?: stringResource(R.string.chat_thinking),
                     style = MaterialTheme.typography.labelSmall,
@@ -921,11 +913,12 @@ private fun ReasoningCard(
                 // by overriding `body` when rendering, so it visually de-emphasizes
                 // chain-of-thought vs the main assistant reply.
                 val reasoningFontSizes = fontSizes.copy(body = fontSizes.reasoning)
-                // §5.1 v2: layer01 folding body at 6dp radius (was surfaceVariant@50% / 8dp).
+                // §5.1 v2: transparent folding body — no tinted panel, just the
+                // outer border provides containment. Matches BasicTool's flat style.
                 Surface(
                     modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 2.dp),
                     shape = RoundedCornerShape(6.dp),
-                    color = oc.layer01
+                    color = androidx.compose.ui.graphics.Color.Transparent
                 ) {
                     SelectionContainer {
                         CompositionLocalProvider(LocalContentColor provides MaterialTheme.colorScheme.onSurfaceVariant) {
@@ -1445,9 +1438,8 @@ private fun PatchCard(
 
     val expanded = expandedParts[expandedKey] ?: false
 
-    // §5.4 v2 patch card: transparent surface + borderBase + 6dp radius (was
-    // surfaceVariant solid + 12dp). +N uses stateSuccessFg and -M uses
-    // stateDangerFg to encode diff direction via v2 status semantics.
+    // §5.4 v3 patch card: fully transparent, diff stats desaturated to
+    // onSurfaceVariant (no green/red pop). Same visual weight as BasicTool.
     val oc = MaterialTheme.opencode
     Surface(
         modifier = modifier
@@ -1461,7 +1453,7 @@ private fun PatchCard(
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(horizontal = 8.dp, vertical = 6.dp),
+                    .padding(horizontal = 8.dp, vertical = 4.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Icon(
@@ -1480,21 +1472,16 @@ private fun PatchCard(
                     overflow = TextOverflow.Ellipsis,
                     modifier = Modifier.weight(1f, fill = false)
                 )
-                if (additions > 0) {
+                if (additions > 0 || deletions > 0) {
                     Spacer(modifier = Modifier.width(6.dp))
                     Text(
-                        text = "+$additions",
+                        text = buildString {
+                            if (additions > 0) append("+$additions")
+                            if (additions > 0 && deletions > 0) append(" ")
+                            if (deletions > 0) append("-$deletions")
+                        },
                         style = MaterialTheme.typography.labelSmall,
-                        color = oc.stateSuccessFg,
-                        fontFamily = FontFamily.Monospace
-                    )
-                }
-                if (deletions > 0) {
-                    Spacer(modifier = Modifier.width(4.dp))
-                    Text(
-                        text = "-$deletions",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = oc.stateDangerFg,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
                         fontFamily = FontFamily.Monospace
                     )
                 }

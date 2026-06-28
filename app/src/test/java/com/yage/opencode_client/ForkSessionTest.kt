@@ -4,6 +4,7 @@ import android.util.Log
 import com.yage.opencode_client.data.model.Session
 import com.yage.opencode_client.data.model.HostProfile
 import com.yage.opencode_client.data.repository.HostProfileStore
+import com.yage.opencode_client.data.repository.MessagesPage
 import com.yage.opencode_client.data.repository.OpenCodeRepository
 import com.yage.opencode_client.di.AppLifecycleMonitor
 import com.yage.opencode_client.ui.AppState
@@ -89,6 +90,7 @@ class ForkSessionTest {
         every { repository.connectSSE() } returns emptyFlow()
         coEvery { repository.getSessionStatus() } returns Result.success(emptyMap())
         coEvery { repository.getMessages(any(), any()) } returns Result.success(emptyList())
+        coEvery { repository.getMessagesPaged(any(), any(), any()) } returns Result.success(MessagesPage(emptyList(), null))
         coEvery { repository.getPendingPermissions() } returns Result.success(emptyList())
     }
 

@@ -31,6 +31,16 @@ import com.yage.opencode_client.util.TrafficTracker
  */
 private const val MAX_RESPONSE_BYTES = 32L * 1024 * 1024
 
+/**
+ * One page of cursor-paginated messages. [nextCursor] is the opaque V1 cursor
+ * (`X-Next-Cursor` response header) to pass as `before` for the next older
+ * page; null means no more history.
+ */
+data class MessagesPage(
+    val items: List<MessageWithParts>,
+    val nextCursor: String?
+)
+
 @Singleton
 class OpenCodeRepository @Inject constructor(
     private val trafficTracker: TrafficTracker
@@ -355,7 +365,32 @@ class OpenCodeRepository @Inject constructor(
     }
 
     suspend fun getMessages(sessionId: String, limit: Int? = null): Result<List<MessageWithParts>> =
-        runCatching { api.getMessages(sessionId, limit) }
+        runCatching {
+            val response = api.getMessages(sessionId, limit, before = null)
+            if (!response.isSuccessful) throw java.io.IOException("HTTP ${response.code()}")
+            response.body() ?: emptyList()
+        }
+
+    /**
+     * Cursor-paged message fetch (V1 route: cursor carried via the
+     * `X-Next-Cursor` response header + the `before` query param). Pass
+     * `before = null` for the first (latest) page; pass the previously returned
+     * [MessagesPage.nextCursor] to fetch the next older page. The server returns
+     * a bare `WithParts[]` array (V1 shape); the opaque cursor is read from the
+     * response header. This replaces the old `messageLimit += 30` full re-fetch
+     * anti-pattern that re-downloaded the entire growing window each loadMore.
+     */
+    suspend fun getMessagesPaged(
+        sessionId: String,
+        limit: Int? = null,
+        before: String? = null
+    ): Result<MessagesPage> = runCatching {
+        val response = api.getMessages(sessionId, limit, before)
+        if (!response.isSuccessful) throw java.io.IOException("HTTP ${response.code()}")
+        val items = response.body() ?: emptyList()
+        val nextCursor = response.headers()["X-Next-Cursor"]
+        MessagesPage(items = items, nextCursor = nextCursor)
+    }
 
     suspend fun sendMessage(
         sessionId: String,

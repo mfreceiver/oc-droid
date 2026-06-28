@@ -15,6 +15,7 @@ import com.yage.opencode_client.data.model.HealthResponse
 import com.yage.opencode_client.data.model.HostProfile
 import com.yage.opencode_client.data.model.BasicAuthConfig
 import com.yage.opencode_client.data.repository.HostProfileStore
+import com.yage.opencode_client.data.repository.MessagesPage
 import com.yage.opencode_client.data.repository.OpenCodeRepository
 import com.yage.opencode_client.di.AppLifecycleMonitor
 import com.yage.opencode_client.ui.AppState
@@ -111,6 +112,7 @@ class MainViewModelTest {
         coEvery { repository.getSessionsForDirectory(any(), any()) } returns Result.success(emptyList())
         coEvery { repository.getSessionStatus() } returns Result.success(emptyMap())
         coEvery { repository.getMessages(any(), any()) } returns Result.success(emptyList())
+        coEvery { repository.getMessagesPaged(any(), any(), any()) } returns Result.success(MessagesPage(emptyList(), null))
         coEvery { repository.getPendingPermissions() } returns Result.success(emptyList())
     }
 
@@ -544,7 +546,7 @@ class MainViewModelTest {
         advanceUntilIdle()
 
         coVerify(exactly = 0) { repository.getSessions(any()) }
-        coVerify(exactly = 0) { repository.getMessages(any(), any()) }
+        coVerify(exactly = 0) { repository.getMessagesPaged(any(), any(), any()) }
         // Order unchanged: no refresh-driven reordering
         assertEquals("session-1", viewModel.state.value.sessions.first().id)
     }
@@ -580,7 +582,7 @@ class MainViewModelTest {
         advanceUntilIdle()
 
         coVerify(exactly = 0) { repository.getSessions(any()) }
-        coVerify { repository.getMessages("session-1", 30) }
+        coVerify { repository.getMessagesPaged("session-1", 30, any()) }
     }
 
     @Test
@@ -747,7 +749,7 @@ class MainViewModelTest {
         )
         // Messages for the (temporarily-absent) current session are reloaded
         // so the user keeps their context.
-        coVerify(atLeast = 1) { repository.getMessages("session-not-in-list", any()) }
+        coVerify(atLeast = 1) { repository.getMessagesPaged("session-not-in-list", any(), any()) }
     }
 
     @Test
@@ -1036,7 +1038,7 @@ class MainViewModelTest {
                 )
             )
         )
-        coEvery { repository.getMessages("session-1", 30) } returns Result.success(messages)
+        coEvery { repository.getMessagesPaged("session-1", 30, any()) } returns Result.success(MessagesPage(messages, null))
 
         val viewModel = createViewModel()
         updateState(viewModel) { it.copy(currentSessionId = "session-1") }
@@ -1179,7 +1181,7 @@ class MainViewModelTest {
     @Test
     fun `handleSSEEvent missing delta clears streaming state and refreshes messages`() = runTest {
         val messages = listOf(MessageWithParts(info = Message(id = "a2", role = "assistant")))
-        coEvery { repository.getMessages("session-1", 30) } returns Result.success(messages)
+        coEvery { repository.getMessagesPaged("session-1", 30, any()) } returns Result.success(MessagesPage(messages, null))
         val viewModel = createViewModel()
         updateState(viewModel) {
             it.copy(
@@ -1234,7 +1236,7 @@ class MainViewModelTest {
     @Test
     fun `handleSSEEvent idle status clears streaming state and refreshes messages`() = runTest {
         val messages = listOf(MessageWithParts(info = Message(id = "a1", role = "assistant")))
-        coEvery { repository.getMessages("session-1", 30) } returns Result.success(messages)
+        coEvery { repository.getMessagesPaged("session-1", 30, any()) } returns Result.success(MessagesPage(messages, null))
         coEvery { repository.getSessions(100) } returns Result.success(
             listOf(com.yage.opencode_client.data.model.Session(id = "session-1", directory = "/tmp/project"))
         )
@@ -1491,7 +1493,7 @@ class MainViewModelTest {
     @Test
     fun `handleSSEEvent message created refreshes messages for current session`() = runTest {
         val messages = listOf(MessageWithParts(info = Message(id = "m1", role = "assistant")))
-        coEvery { repository.getMessages("session-1", 30) } returns Result.success(messages)
+        coEvery { repository.getMessagesPaged("session-1", 30, any()) } returns Result.success(MessagesPage(messages, null))
         coEvery { repository.getSessions(100) } returns Result.success(
             listOf(com.yage.opencode_client.data.model.Session(id = "session-1", directory = "/tmp/project"))
         )

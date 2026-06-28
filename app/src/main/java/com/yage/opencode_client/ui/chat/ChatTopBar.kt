@@ -364,7 +364,7 @@ internal fun ChatTopBar(
                                 showAgentDialog = false
                             },
                             shape = RoundedCornerShape(8.dp),
-                            color = if (isSelected) MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.4f)
+                            color = if (isSelected) MaterialTheme.colorScheme.surfaceVariant
                             else Color.Transparent,
                             modifier = Modifier.fillMaxWidth()
                         ) {
@@ -696,7 +696,7 @@ private fun ServerManagementDialog(
                         Surface(
                             onClick = { onSelectHost(profile.id) },
                             shape = RoundedCornerShape(8.dp),
-                            color = if (isSelected) MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.4f) else Color.Transparent,
+                            color = if (isSelected) MaterialTheme.colorScheme.surfaceVariant else Color.Transparent,
                             modifier = Modifier.fillMaxWidth()
                         ) {
                             Column(

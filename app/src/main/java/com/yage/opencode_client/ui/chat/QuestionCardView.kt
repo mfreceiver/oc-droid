@@ -42,7 +42,7 @@ fun QuestionCardView(
                 .padding(horizontal = 16.dp, vertical = 8.dp),
             shape = RoundedCornerShape(12.dp),
             colors = CardDefaults.cardColors(
-                containerColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.07f)
+                containerColor = MaterialTheme.colorScheme.surfaceVariant
             )
         ) {
             Row(
@@ -191,7 +191,7 @@ fun QuestionCardView(
             .padding(horizontal = 16.dp, vertical = 8.dp),
         shape = RoundedCornerShape(cornerRadius),
         colors = CardDefaults.cardColors(
-            containerColor = accent.copy(alpha = 0.07f)
+            containerColor = MaterialTheme.colorScheme.surfaceVariant
         )
     ) {
         Column(

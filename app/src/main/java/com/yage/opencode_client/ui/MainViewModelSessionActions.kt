@@ -235,18 +235,27 @@ internal fun launchLoadMessages(
     scope.launch {
         state.update { it.copy(isLoadingMessages = true) }
         val limit = if (resetLimit) 30 else state.value.messageLimit
-        repository.getMessages(sessionId, limit)
-            .onSuccess { messages ->
+        // §on-demand: cursor pagination. The first load (resetLimit) captures the
+        // X-Next-Cursor for future loadMore; subsequent periodic reloads fetch the
+        // latest window only and preserve the cursor so scrolled history stays
+        // loadable. Replaces the old `messageLimit += 30` full re-fetch.
+        repository.getMessagesPaged(sessionId, limit, before = null)
+            .onSuccess { page ->
                 if (sessionId == state.value.currentSessionId) {
-                    val lastAssistant = messages.lastOrNull { it.info.isAssistant }
+                    val lastAssistant = page.items.lastOrNull { it.info.isAssistant }
                     val inferredAgentName = lastAssistant?.info?.agent
                     val agentName = settingsManager?.getAgentForSession(sessionId) ?: inferredAgentName
                     state.update {
                         it.copy(
-                            messages = messages,
+                            messages = page.items,
                             messageLimit = limit,
                             isLoadingMessages = false,
-                            selectedAgentName = agentName ?: it.selectedAgentName
+                            selectedAgentName = agentName ?: it.selectedAgentName,
+                            // Only (re)seed the history cursor on a fresh open; a
+                            // periodic reload must NOT clobber an existing cursor
+                            // (the user may have already loaded older pages).
+                            olderMessagesCursor = if (resetLimit) page.nextCursor else it.olderMessagesCursor,
+                            hasMoreMessages = if (resetLimit) (page.nextCursor != null) else it.hasMoreMessages
                         )
                     }
                 } else {
@@ -299,25 +308,38 @@ internal fun launchLoadMoreMessages(
     sessionId: String
 ) {
     if (state.value.isLoadingMessages) return
-    // §OOM stopgap: cap accumulated limit. The proper fix is cursor-based
-    // pagination (prepend older pages without re-fetching the latest), but
-    // until that lands, bounding messageLimit prevents the O(n²) reload
-    // explosion where every watchdog/created reload re-downloads an ever
-    // larger message set (each carrying full tool outputs). 90 ≈ 3 pages.
-    val maxLimit = 90
-    val newLimit = minOf(state.value.messageLimit + 30, maxLimit)
-    if (newLimit == state.value.messageLimit) return  // already at cap, no more history
+    // §on-demand: cursor-based history paging. Fetch one older page via the V1
+    // `before` cursor and PREPEND it — no longer re-downloading the latest
+    // window with an ever-growing limit (the old O(n²) anti-pattern that caused
+    // both cellular blowup and OOM). Stops when there's no next cursor.
+    val cursor = state.value.olderMessagesCursor
+    if (cursor == null || !state.value.hasMoreMessages) return
     scope.launch {
         state.update { it.copy(isLoadingMessages = true) }
-        repository.getMessages(sessionId, newLimit)
-            .onSuccess { messages ->
+        repository.getMessagesPaged(sessionId, limit = 30, before = cursor)
+            .onSuccess { page ->
                 if (sessionId == state.value.currentSessionId) {
-                    state.update {
-                        it.copy(
-                            messages = messages,
-                            messageLimit = newLimit,
-                            isLoadingMessages = false
-                        )
+                    if (page.items.isNotEmpty()) {
+                        // De-dup by message id at the seam (the page boundary may
+                        // overlap the oldest already-loaded message by one).
+                        val existingIds = state.value.messages.map { it.info.id }.toHashSet()
+                        val older = page.items.filterNot { it.info.id in existingIds }
+                        state.update {
+                            it.copy(
+                                messages = older + it.messages,
+                                olderMessagesCursor = page.nextCursor,
+                                hasMoreMessages = page.nextCursor != null,
+                                isLoadingMessages = false
+                            )
+                        }
+                    } else {
+                        state.update {
+                            it.copy(
+                                olderMessagesCursor = page.nextCursor,
+                                hasMoreMessages = page.nextCursor != null,
+                                isLoadingMessages = false
+                            )
+                        }
                     }
                 } else {
                     state.update { it.copy(isLoadingMessages = false) }
@@ -326,8 +348,8 @@ internal fun launchLoadMoreMessages(
             .onFailure {
                 if (sessionId == state.value.currentSessionId) {
                     reportNonFatalIssue("MainViewModel", "Failed to load more messages")
-                    state.update { it.copy(isLoadingMessages = false) }
                 }
+                state.update { it.copy(isLoadingMessages = false) }
             }
     }
 }

@@ -50,8 +50,9 @@ interface OpenCodeApi {
     @GET("session/{id}/message")
     suspend fun getMessages(
         @Path("id") sessionId: String,
-        @Query("limit") limit: Int? = null
-    ): List<MessageWithParts>
+        @Query("limit") limit: Int? = null,
+        @Query("before") before: String? = null
+    ): retrofit2.Response<List<MessageWithParts>>
 
     @POST("session/{id}/prompt_async")
     suspend fun promptAsync(
