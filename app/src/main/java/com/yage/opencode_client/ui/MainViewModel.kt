@@ -1549,10 +1549,11 @@ class MainViewModel @Inject constructor(
 
     fun activateTunnelForCurrentHost() {
         val profile = hostProfileStore.currentProfile()
+        // The tunnel password is POSTed to the opencode server URL itself (the
+        // server acts as the tunnel gateway). Surface WHY activation can't
+        // proceed instead of silently returning — otherwise the user taps
+        // "Activate Tunnel" and nothing happens with no clue.
         val passwordId = profile.tunnelPasswordId
-        // Surface WHY activation can't proceed instead of silently returning —
-        // otherwise the user taps "Activate Tunnel" and nothing happens with no
-        // clue. The HTTP-failure path (below) already carries code+body detail.
         if (passwordId == null) {
             _state.update {
                 it.copy(

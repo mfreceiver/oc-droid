@@ -1,6 +1,8 @@
 package com.yage.opencode_client.data.repository
 
 import com.yage.opencode_client.data.api.*
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import com.yage.opencode_client.data.model.*
 import kotlinx.coroutines.flow.Flow
 import okhttp3.Cache
@@ -552,38 +554,40 @@ class OpenCodeRepository @Inject constructor(
      * Uses an independent OkHttpClient without any Basic Auth interceptor,
      * since tunnel authentication uses form-encoded POST (not HTTP Basic Auth).
      */
-    suspend fun activateTunnel(tunnelUrl: String, password: String): Result<Unit> = runCatching {
-        try {
-            val client = buildTunnelOkHttpClient()
-            val formBody = FormBody.Builder()
-                .add("persist_auth", "off")
-                .add("pw", password)
-                .build()
-            val request = okhttp3.Request.Builder()
-                .url(tunnelUrl)
-                .post(formBody)
-                .build()
-            val response = client.newCall(request).execute()
-            response.use {
-                if (!it.isSuccessful) {
-                    val body = it.body?.string().orEmpty()
-                    throw Exception("HTTP ${it.code}${if (it.message.isNotBlank()) " ${it.message}" else ""}: ${body.ifBlank { "(空响应体)" }}")
+    suspend fun activateTunnel(tunnelUrl: String, password: String): Result<Unit> = withContext(Dispatchers.IO) {
+        runCatching {
+            try {
+                val client = buildTunnelOkHttpClient()
+                val formBody = FormBody.Builder()
+                    .add("persist_auth", "off")
+                    .add("pw", password)
+                    .build()
+                val request = okhttp3.Request.Builder()
+                    .url(tunnelUrl)
+                    .post(formBody)
+                    .build()
+                val response = client.newCall(request).execute()
+                response.use {
+                    if (!it.isSuccessful) {
+                        val body = it.body?.string().orEmpty()
+                        throw Exception("HTTP ${it.code}${if (it.message.isNotBlank()) " ${it.message}" else ""}: ${body.ifBlank { "(空响应体)" }}")
+                    }
                 }
+            } catch (e: Exception) {
+                // Enrich network/IO/SSL failures with type + message + cause so the
+                // UI surfaces something debuggable. OkHttp network errors often carry
+                // a null/empty message, which previously collapsed to a useless
+                // "Tunnel activation failed" fallback with no diagnostic value.
+                throw Exception(buildString {
+                    append(e::class.simpleName ?: "Exception")
+                    e.message?.takeIf { it.isNotBlank() }?.let { append(": ").append(it) }
+                    e.cause?.let { c ->
+                        append(" ← ")
+                        append(c::class.simpleName ?: "")
+                        c.message?.takeIf { it.isNotBlank() }?.let { append(": ").append(it) }
+                    }
+                }, e)
             }
-        } catch (e: Exception) {
-            // Enrich network/IO/SSL failures with type + message + cause so the
-            // UI surfaces something debuggable. OkHttp network errors often carry
-            // a null/empty message, which previously collapsed to a useless
-            // "Tunnel activation failed" fallback with no diagnostic value.
-            throw Exception(buildString {
-                append(e::class.simpleName ?: "Exception")
-                e.message?.takeIf { it.isNotBlank() }?.let { append(": ").append(it) }
-                e.cause?.let { c ->
-                    append(" ← ")
-                    append(c::class.simpleName ?: "")
-                    c.message?.takeIf { it.isNotBlank() }?.let { append(": ").append(it) }
-                }
-            }, e)
         }
     }
 

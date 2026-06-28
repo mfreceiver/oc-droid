@@ -5,6 +5,7 @@ import android.os.Handler
 import android.os.Looper
 import android.webkit.WebView
 import com.yage.opencode_client.di.AppLifecycleMonitor
+import com.yage.opencode_client.util.CrashLogger
 import dagger.hilt.android.HiltAndroidApp
 import javax.inject.Inject
 
@@ -21,6 +22,10 @@ class OpenCodeApp : Application() {
 
     override fun onCreate() {
         super.onCreate()
+        // Install the crash logger FIRST so any crash (including early init)
+        // is persisted to a retrievable file (see CrashLogger). Must precede
+        // any code that could throw.
+        CrashLogger.install(this)
         // §18.1: create the two notification channels up front (idempotent,
         // wrapped in try/catch inside createChannels). Required before any
         // notify() call, otherwise notifications silently no-op on API 26+.
