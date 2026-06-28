@@ -30,10 +30,13 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.hilt.navigation.compose.hiltViewModel
 import com.yage.opencode_client.R
 import com.yage.opencode_client.data.model.MessageWithParts
 import com.yage.opencode_client.data.model.Part
 import com.yage.opencode_client.data.model.SessionStatus
+import com.yage.opencode_client.ui.files.FilesScreen
+import com.yage.opencode_client.ui.files.FilesViewModel
 import com.yage.opencode_client.ui.MainViewModel
 import kotlinx.coroutines.launch
 
@@ -41,11 +44,11 @@ import kotlinx.coroutines.launch
 @Composable
 fun ChatScreen(
     viewModel: MainViewModel,
-    onNavigateToFiles: (String) -> Unit = {},
     onNavigateToSettings: () -> Unit = {},
     showSettingsButton: Boolean = true
 ) {
     val state by viewModel.state.collectAsStateWithLifecycle()
+    var showFileBrowser by remember { mutableStateOf(false) }
     // #13: per-part expand/collapse state lives in its own StateFlow (not in
     // AppState) so toggling a card doesn't recompose the whole ChatScreen.
     val expandedParts by viewModel.expandedParts.collectAsStateWithLifecycle()
@@ -140,7 +143,13 @@ fun ChatScreen(
                 onNavigateToSettings = onNavigateToSettings,
                 onRefresh = { viewModel.refreshCurrentHost() },
                 onSelectHost = { viewModel.selectHostProfile(it) },
-                onActivateTunnel = { viewModel.activateTunnelForCurrentHost() }
+                onActivateTunnel = { viewModel.activateTunnelForCurrentHost() },
+                onNavigateToFiles = {
+                    state.currentSession?.directory?.let { dir ->
+                        viewModel.showFileInFiles(dir, "chat")
+                    }
+                    showFileBrowser = true
+                }
             )
         )
 
@@ -185,7 +194,10 @@ fun ChatScreen(
                     repository = viewModel.repository,
                     workspaceDirectory = state.currentSession?.directory,
                     onLoadMore = { viewModel.loadMoreMessages() },
-                    onFileClick = onNavigateToFiles,
+                    onFileClick = { path ->
+                        viewModel.showFileInFiles(path, "chat")
+                        showFileBrowser = true
+                    },
                     onOpenSubAgent = viewModel::openSubAgent,
                     expandedParts = expandedParts,
                     onToggleExpand = viewModel::togglePartExpand
@@ -254,6 +266,26 @@ fun ChatScreen(
                     onReject = { viewModel.rejectQuestion(question.id) }
                 )
             }
+    }
+
+    // File browser overlay — replaces the former Files tab. Opened via the
+    // folder icon in the session tab strip, or by tapping a file path in chat.
+    if (showFileBrowser) {
+        val filesViewModel: FilesViewModel = hiltViewModel()
+        Box(modifier = Modifier.fillMaxSize()) {
+            FilesScreen(
+                viewModel = filesViewModel,
+                pathToShow = state.filePathToShowInFiles,
+                sessionDirectory = state.currentSession?.directory,
+                onCloseFile = {
+                    viewModel.clearFileToShow()
+                    showFileBrowser = false
+                },
+                onFileClick = { path ->
+                    viewModel.showFileInFiles(path, "chat")
+                }
+            )
+        }
     }
 }
 

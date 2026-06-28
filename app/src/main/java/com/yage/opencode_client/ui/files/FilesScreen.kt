@@ -20,6 +20,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -45,7 +46,17 @@ fun FilesScreen(
         viewModel.syncPathToShow(pathToShow, sessionDirectory)
     }
 
-    Column(modifier = Modifier.fillMaxSize()) {
+    Column(modifier = Modifier
+        .fillMaxSize()
+        // §a11y-binder: the file tree generates a deep Compose semantics node
+        // tree. Android's accessibility service traverses it via binder (~300ms
+        // per traversal, 16-33KB each), producing massive binder floods
+        // (ADB-confirmed: BpBinder Large outgoing transaction every ~300ms).
+        // Clearing semantics at the root prevents the service from walking the
+        // tree; the top bar (back/refresh buttons) remain independently
+        // accessible via their own contentDescription.
+        .semantics { }
+    ) {
         if (state.selectedFilePath == null) {
             TopAppBar(
                 title = { Text(state.currentPath.ifEmpty { stringResource(R.string.files_title) }) },

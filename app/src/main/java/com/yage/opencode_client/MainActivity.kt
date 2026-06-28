@@ -60,8 +60,10 @@ sealed class Screen(
     object Settings : Screen("settings", R.string.nav_settings)
 }
 
-// Page order for the phone HorizontalPager: Chat → Sessions → Files → Settings.
-val screens = listOf(Screen.Chat, Screen.Sessions, Screen.Files, Screen.Settings)
+// Page order for the phone HorizontalPager: Chat → Sessions → Settings.
+// Files was removed from the swipeable pager (0.1.14) — it is now accessed via
+// the folder icon in the session tab strip.
+val screens = listOf(Screen.Chat, Screen.Sessions, Screen.Settings)
 
 // Debug-only Intent extra keys for injecting connection credentials at launch,
 // so automated UI tests can connect to a server without driving the Settings UI.
@@ -226,10 +228,6 @@ private fun PhoneLayout(viewModel: MainViewModel) {
             when (screens[page]) {
                 Screen.Chat -> ChatScreen(
                     viewModel = viewModel,
-                    onNavigateToFiles = { path ->
-                        viewModel.showFileInFiles(path, originRoute = Screen.Chat.route)
-                        switchToPage(screens.indexOf(Screen.Files))
-                    },
                     onNavigateToSettings = {
                         switchToPage(screens.indexOf(Screen.Settings))
                     },
@@ -239,26 +237,8 @@ private fun PhoneLayout(viewModel: MainViewModel) {
                     viewModel = viewModel,
                     onSwitchToChat = { switchToPage(screens.indexOf(Screen.Chat)) }
                 )
-                Screen.Files -> {
-                    val state by viewModel.state.collectAsStateWithLifecycle()
-                    val filesViewModel: FilesViewModel = hiltViewModel()
-                    FilesScreen(
-                        viewModel = filesViewModel,
-                        pathToShow = state.filePathToShowInFiles,
-                        sessionDirectory = state.currentSession?.directory,
-                        onCloseFile = {
-                            // If the file preview was opened from Chat, return
-                            // there after closing; otherwise stay on Files.
-                            val origin = state.filePreviewOriginRoute
-                            viewModel.clearFileToShow()
-                            if (origin == Screen.Chat.route) {
-                                switchToPage(screens.indexOf(Screen.Chat))
-                            }
-                        },
-                        onFileClick = { }
-                    )
-                }
                 Screen.Settings -> SettingsScreen(viewModel = viewModel)
+                Screen.Files -> { /* Files now rendered inline in ChatScreen */ }
             }
         }
     }
@@ -360,9 +340,6 @@ private fun TabletLayout(viewModel: MainViewModel) {
             ) {
                 ChatScreen(
                     viewModel = viewModel,
-                    onNavigateToFiles = { path ->
-                        viewModel.showFileInFiles(path)
-                    },
                     onNavigateToSettings = onOpenSettings,
                     showSettingsButton = false
                 )
@@ -410,11 +387,6 @@ private fun LandscapeSplitLayout(viewModel: MainViewModel) {
             ) {
                 ChatScreen(
                     viewModel = viewModel,
-                    onNavigateToFiles = { path ->
-                        // Cache the path; no Files pane in landscape, so it will be
-                        // shown when the user returns to portrait PhoneLayout.
-                        viewModel.showFileInFiles(path, originRoute = Screen.Chat.route)
-                    },
                     onNavigateToSettings = {},
                     showSettingsButton = false
                 )

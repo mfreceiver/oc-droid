@@ -30,6 +30,7 @@ import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Checklist
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.DonutLarge
+import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.SmartToy
 import androidx.compose.material3.AlertDialog
@@ -134,7 +135,9 @@ internal data class ChatTopBarActions(
      * Sessions-page navigation through [ChatScreen]) keep compiling; the
      * phone layout can opt in by passing a real callback.
      */
-    val onNavigateToSessions: () -> Unit = {}
+    val onNavigateToSessions: () -> Unit = {},
+    /** Folder icon left of the "+" — opens the current project's file browser. */
+    val onNavigateToFiles: () -> Unit = {} 
 )
 
 /**
@@ -445,6 +448,11 @@ private fun SessionTabStrip(
                 onClose = { actions.onCloseSession(session.id) }
             )
         }
+        if (state.currentSessionId != null) {
+            item(key = "tab_files") {
+                FilesButton(onClick = actions.onNavigateToFiles)
+            }
+        }
         item(key = "tab_new_session") {
             TabAddAffordance(onClick = actions.onNavigateToSessions)
         }
@@ -530,6 +538,28 @@ private fun TabAddAffordance(onClick: () -> Unit) {
         Icon(
             Icons.Default.Add,
             contentDescription = stringResource(R.string.chat_select_or_create_session),
+            modifier = Modifier.size(18.dp),
+            tint = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+    }
+}
+
+/**
+ * Folder icon on the session tab strip — opens the current connected project's
+ * file browser. Only shown when a session is active (the directory context is
+ * known). Styled as a quiet 36dp square icon matching the "+" affordance.
+ */
+@Composable
+private fun FilesButton(onClick: () -> Unit) {
+    Box(
+        modifier = Modifier
+            .size(36.dp)
+            .clickable(onClick = onClick),
+        contentAlignment = Alignment.Center
+    ) {
+        Icon(
+            Icons.Default.Folder,
+            contentDescription = stringResource(R.string.nav_files),
             modifier = Modifier.size(18.dp),
             tint = MaterialTheme.colorScheme.onSurfaceVariant
         )

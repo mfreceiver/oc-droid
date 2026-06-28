@@ -26,6 +26,7 @@ import javax.net.ssl.TrustManager
 import javax.net.ssl.X509TrustManager
 import javax.inject.Inject
 import javax.inject.Singleton
+import com.yage.opencode_client.util.TrafficLogger
 import com.yage.opencode_client.util.TrafficTracker
 
 /**
@@ -55,7 +56,8 @@ data class MessagesPage(
 
 @Singleton
 class OpenCodeRepository @Inject constructor(
-    private val trafficTracker: TrafficTracker
+    private val trafficTracker: TrafficTracker,
+    private val trafficLogger: TrafficLogger
 ) {
     private var baseUrl: String = DEFAULT_SERVER
     private var username: String? = null
@@ -201,12 +203,17 @@ class OpenCodeRepository @Inject constructor(
             // (text/event-stream) is still counted — its bytes are real too.
             .addInterceptor { chain ->
                 val request = chain.request()
+                val url = request.url.encodedPath
+                val method = request.method
                 val sentBytes = request.body?.contentLength() ?: 0L
                 val sent = if (sentBytes > 0L) sentBytes else 0L
+                val startTime = System.currentTimeMillis()
                 val response = chain.proceed(request)
+                val elapsed = System.currentTimeMillis() - startTime
                 val body = response.body
                 if (body == null) {
                     trafficTracker.add(sent = sent, received = 0L)
+                    trafficLogger.record(method, url, sent, 0L, elapsed)
                     return@addInterceptor response
                 }
                 val counter = object : okio.ForwardingSource(body.source()) {
@@ -217,10 +224,8 @@ class OpenCodeRepository @Inject constructor(
                         return read
                     }
                     override fun close() {
-                        // Body fully consumed (or abandoned) — report the true
-                        // byte count now. Called on whatever thread closes the
-                        // body; TrafficTracker.add is synchronized.
                         trafficTracker.add(sent = sent, received = received)
+                        trafficLogger.record(method, url, sent, received, elapsed)
                         super.close()
                     }
                 }
@@ -701,6 +706,11 @@ class OpenCodeRepository @Inject constructor(
             requestPath
         }
     }
+
+    // ---- Traffic debug ----
+
+    fun flushTrafficLog() = trafficLogger.flushToDisk()
+    fun dumpTrafficLog(): String = trafficLogger.dump()
 
     companion object {
         const val DEFAULT_SERVER = "http://localhost:4096"
