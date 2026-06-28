@@ -63,3 +63,63 @@ data class SessionStatus(
     val isBusy: Boolean get() = type == "busy"
     val isRetry: Boolean get() = type == "retry"
 }
+
+/**
+ * Minimal persisted projection of a [Session] used to seed the UI on cold
+ * start before the server list has loaded. Carries only the fields required
+ * to render tabs, the title, workdir grouping and MRU sorting — everything
+ * else (slug, projectId, share, revert, version) is left to server refresh.
+ *
+ * See [toCacheEntry]/[toSession] for the lossy mapping (non-cached Session
+ * fields default to null).
+ */
+@Serializable
+data class SessionCacheEntry(
+    val id: String,
+    val title: String? = null,
+    val directory: String,
+    val parentId: String? = null,
+    val timeCreated: Long? = null,
+    val timeUpdated: Long? = null,
+    val timeArchived: Long? = null,
+    val additions: Int? = null,
+    val deletions: Int? = null,
+    val files: Int? = null
+)
+
+/** Project a [Session] down to its cached metadata. */
+internal fun Session.toCacheEntry(): SessionCacheEntry = SessionCacheEntry(
+    id = id,
+    title = title,
+    directory = directory,
+    parentId = parentId,
+    timeCreated = time?.created,
+    timeUpdated = time?.updated,
+    timeArchived = time?.archived,
+    additions = summary?.additions,
+    deletions = summary?.deletions,
+    files = summary?.files
+)
+
+/**
+ * Reinflate a [Session] from a cached entry. Non-cached fields (slug,
+ * projectId, share, revert, version) default to null so the rendered card
+ * shows the cached title/directory/time/summary correctly; a subsequent
+ * server refresh replaces it with authoritative data.
+ */
+internal fun SessionCacheEntry.toSession(): Session = Session(
+    id = id,
+    directory = directory,
+    parentId = parentId,
+    title = title,
+    time = if (timeCreated != null || timeUpdated != null || timeArchived != null) {
+        Session.TimeInfo(created = timeCreated, updated = timeUpdated, archived = timeArchived)
+    } else {
+        null
+    },
+    summary = if (additions != null || deletions != null || files != null) {
+        Session.SummaryInfo(additions = additions, deletions = deletions, files = files)
+    } else {
+        null
+    }
+)

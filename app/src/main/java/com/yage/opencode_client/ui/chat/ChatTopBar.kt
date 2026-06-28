@@ -136,8 +136,6 @@ internal data class ChatTopBarActions(
      * phone layout can opt in by passing a real callback.
      */
     val onNavigateToSessions: () -> Unit = {},
-    /** Folder icon left of the "+" — opens the current project's file browser. */
-    val onNavigateToFiles: () -> Unit = {} 
 )
 
 /**
@@ -448,11 +446,6 @@ private fun SessionTabStrip(
                 onClose = { actions.onCloseSession(session.id) }
             )
         }
-        if (state.currentSessionId != null) {
-            item(key = "tab_files") {
-                FilesButton(onClick = actions.onNavigateToFiles)
-            }
-        }
         item(key = "tab_new_session") {
             TabAddAffordance(onClick = actions.onNavigateToSessions)
         }
@@ -538,28 +531,6 @@ private fun TabAddAffordance(onClick: () -> Unit) {
         Icon(
             Icons.Default.Add,
             contentDescription = stringResource(R.string.chat_select_or_create_session),
-            modifier = Modifier.size(18.dp),
-            tint = MaterialTheme.colorScheme.onSurfaceVariant
-        )
-    }
-}
-
-/**
- * Folder icon on the session tab strip — opens the current connected project's
- * file browser. Only shown when a session is active (the directory context is
- * known). Styled as a quiet 36dp square icon matching the "+" affordance.
- */
-@Composable
-private fun FilesButton(onClick: () -> Unit) {
-    Box(
-        modifier = Modifier
-            .size(36.dp)
-            .clickable(onClick = onClick),
-        contentAlignment = Alignment.Center
-    ) {
-        Icon(
-            Icons.Default.Folder,
-            contentDescription = stringResource(R.string.nav_files),
             modifier = Modifier.size(18.dp),
             tint = MaterialTheme.colorScheme.onSurfaceVariant
         )
@@ -872,28 +843,52 @@ internal fun ContextUsageRing(usage: AppState.ContextUsage?) {
 @Composable
 internal fun ChatEmptyState(
     isConnected: Boolean,
-    onConnect: () -> Unit
+    onConnect: () -> Unit,
+    isConnecting: Boolean = false,
+    connectionPhase: String? = null,
+    hostName: String = ""
 ) {
     Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
         Column(horizontalAlignment = Alignment.CenterHorizontally) {
-            Icon(
-                Icons.AutoMirrored.Filled.Chat,
-                contentDescription = null,
-                modifier = Modifier.size(64.dp),
-                tint = MaterialTheme.colorScheme.outline
-            )
-            Spacer(modifier = Modifier.height(16.dp))
-            Text(
-                if (isConnected) stringResource(R.string.chat_select_or_create_session) else stringResource(R.string.chat_connect_to_server),
-                style = MaterialTheme.typography.bodyLarge
-            )
-            Spacer(modifier = Modifier.height(8.dp))
-            if (!isConnected) {
-                Button(
-                    onClick = onConnect,
-                    modifier = Modifier.padding(horizontal = 24.dp, vertical = 12.dp)
-                ) {
-                    Text(stringResource(R.string.chat_connect))
+            if (isConnecting) {
+                // Cold-start reconnect in flight: show a spinner + phase text
+                // instead of the bare connect button. The button stays reserved
+                // for the truly-disconnected case below.
+                CircularProgressIndicator(
+                    modifier = Modifier.size(48.dp),
+                    strokeWidth = 4.dp
+                )
+                Spacer(modifier = Modifier.height(16.dp))
+                val phase = connectionPhase?.takeIf { it.isNotBlank() && it != "connecting" }
+                Text(
+                    text = if (phase != null) {
+                        "正在重连 $hostName… / $phase"
+                    } else {
+                        "正在重连 $hostName…"
+                    },
+                    style = MaterialTheme.typography.bodyLarge,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            } else {
+                Icon(
+                    Icons.AutoMirrored.Filled.Chat,
+                    contentDescription = null,
+                    modifier = Modifier.size(64.dp),
+                    tint = MaterialTheme.colorScheme.outline
+                )
+                Spacer(modifier = Modifier.height(16.dp))
+                Text(
+                    if (isConnected) stringResource(R.string.chat_select_or_create_session) else stringResource(R.string.chat_connect_to_server),
+                    style = MaterialTheme.typography.bodyLarge
+                )
+                Spacer(modifier = Modifier.height(8.dp))
+                if (!isConnected) {
+                    Button(
+                        onClick = onConnect,
+                        modifier = Modifier.padding(horizontal = 24.dp, vertical = 12.dp)
+                    ) {
+                        Text(stringResource(R.string.chat_connect))
+                    }
                 }
             }
         }

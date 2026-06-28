@@ -18,7 +18,9 @@ import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.FlowPreview
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.*
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.util.Locale
@@ -648,6 +650,11 @@ class MainViewModel @Inject constructor(
             ) }
             settingsManager.currentSessionId = null
             settingsManager.openSessionIds = emptyList()
+            // Clear the persisted session-metadata cache too: the previous
+            // host's sessions would otherwise re-seed AppState.sessions on the
+            // next cold start and pollute the new host's tab/title/workdir
+            // groups. loadSessions will repopulate the cache for the new host.
+            settingsManager.sessionCache = emptyList()
             // §H3: clear the persisted workdir too — a path from host A is
             // meaningless on host B (different machine/filesystem), and leaving
             // it would let configureRepositoryForProfile restore it onto the new
@@ -718,39 +725,80 @@ class MainViewModel @Inject constructor(
         password = settingsManager.password ?: ""
     )
 
-    fun testConnection(force: Boolean = false) {
+    fun testConnection(force: Boolean = false, retries: Int = 0) {
         val now = System.currentTimeMillis()
         if (!force && now - lastHealthCheckTime < 30_000) return
         lastHealthCheckTime = now
         viewModelScope.launch {
-            _state.update { it.copy(isConnecting = true, error = null, connectionPhase = null) }
+            _state.update { it.copy(isConnecting = true, error = null, connectionPhase = "connecting") }
             val profile = hostProfileStore.currentProfile()
             configureRepositoryForProfile(profile)
-            repository.checkHealth()                .onSuccess { health ->
+            // Retry loop: attempt 1 is always made; up to `retries` extra
+            // attempts follow on failure/unhealthy with exponential backoff
+            // (1s, 2s, 4s, ...). Default callers pass retries=0 (one-shot),
+            // preserving the original single-attempt semantics; only
+            // coldStartReconnect() opts into retries. isActive is checked so
+            // ViewModel cancellation aborts cleanly mid-backoff.
+            val maxAttempts = 1 + retries.coerceAtLeast(0)
+            var attempt = 0
+            var backoffMs = 1000L
+            while (isActive) {
+                attempt++
+                if (attempt > 1) {
                     _state.update {
-                        it.copy(
-                            isConnected = health.healthy,
-                            serverVersion = health.version,
-                            isConnecting = false,
-                            connectionPhase = if (health.healthy) "connected" else "health"
-                        )
-                    }
-                    if (health.healthy) {
-                        loadInitialData()
-                        startSSE()
+                        it.copy(connectionPhase = "reconnecting (attempt $attempt/$maxAttempts)")
                     }
                 }
-                .onFailure { error ->
+                val healthResult = repository.checkHealth()
+                if (healthResult.isSuccess) {
+                    val health = healthResult.getOrNull()
+                    if (health != null && health.healthy) {
+                        _state.update {
+                            it.copy(
+                                isConnected = true,
+                                serverVersion = health.version,
+                                isConnecting = false,
+                                connectionPhase = "connected"
+                            )
+                        }
+                        loadInitialData()
+                        startSSE()
+                        return@launch
+                    }
+                    // Healthy=false: surface the version if present but keep
+                    // retrying (server may still be coming up on cold start).
+                    if (health != null) {
+                        _state.update { it.copy(serverVersion = health.version) }
+                    }
+                }
+                if (attempt >= maxAttempts || !isActive) {
                     _state.update {
                         it.copy(
                             isConnected = false,
                             isConnecting = false,
-                            connectionPhase = "health",
-                            error = errorMessageOrFallback(error, "Connection failed")
+                            connectionPhase = "disconnected",
+                            error = healthResult.exceptionOrNull()?.let { e ->
+                                errorMessageOrFallback(e, "Connection failed")
+                            }
                         )
                     }
+                    return@launch
                 }
+                delay(backoffMs)
+                backoffMs *= 2
+            }
         }
+    }
+
+    /**
+     * Cold-start entry point: force a connection check with up to 3 retries
+     * (exponential backoff 1s/2s/4s) so a slow-to-wake server (common when
+     * the OpenCode server itself is bootstrapping) still comes up instead of
+     * stranding the user on the disconnected empty state. Used exclusively
+     * from [com.yage.opencode_client.MainActivity]'s cold-start LaunchedEffect.
+     */
+    fun coldStartReconnect() {
+        testConnection(force = true, retries = 3)
     }
 
     private fun loadInitialData() {
@@ -1527,6 +1575,18 @@ class MainViewModel @Inject constructor(
 
     fun clearFileToShow() {
         _state.update { it.copy(filePathToShowInFiles = null, filePreviewOriginRoute = null) }
+    }
+
+    /**
+     * Bug3: open the file browser for a specific connected project (workdir)
+     * from the Sessions screen. Scopes the repository to [workdir] (so
+     * getFileTree lists that project) WITHOUT the side effects of
+     * [createSessionInWorkdir] (no currentSessionId/draft/currentWorkdir reset),
+     * then seeds the preview path. The Sessions screen toggles its own overlay.
+     */
+    fun browseFilesInWorkdir(workdir: String) {
+        repository.setCurrentDirectory(workdir)
+        showFileInFiles(workdir, "sessions")
     }
 
     private fun startSSE() {

@@ -5,6 +5,7 @@ import android.content.SharedPreferences
 import android.util.Log
 import androidx.security.crypto.EncryptedSharedPreferences
 import androidx.security.crypto.MasterKey
+import com.yage.opencode_client.data.model.SessionCacheEntry
 import com.yage.opencode_client.ui.theme.MarkdownFontSizes
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.serialization.encodeToString
@@ -171,6 +172,29 @@ class SettingsManager @Inject constructor(
             encryptedPrefs.edit().putString(KEY_OPEN_SESSION_IDS, json).apply()
         }
 
+    /**
+     * Persisted projection of [com.yage.opencode_client.data.model.Session]
+     * metadata, used to seed [com.yage.opencode_client.ui.AppState.sessions]
+     * on cold start so tabs/title/workdir groups render instantly before the
+     * server list is fetched. Written only from `launchLoadSessions`
+     * onSuccess (bounded to open/current/workdir-relevant entries). A server
+     * refresh later replaces these with authoritative data.
+     */
+    var sessionCache: List<SessionCacheEntry>
+        get() {
+            val json = encryptedPrefs.getString(KEY_SESSION_CACHE, null) ?: return emptyList()
+            return try {
+                Json.decodeFromString<List<SessionCacheEntry>>(json)
+            } catch (e: Exception) {
+                Log.w(TAG, "Failed to parse session cache, using empty", e)
+                emptyList()
+            }
+        }
+        set(value) {
+            val json = Json.encodeToString(value)
+            encryptedPrefs.edit().putString(KEY_SESSION_CACHE, json).apply()
+        }
+
     fun getDraftText(sessionId: String): String {
         val json = encryptedPrefs.getString(KEY_SESSION_DRAFTS, null) ?: return ""
         return try {
@@ -251,6 +275,7 @@ class SettingsManager @Inject constructor(
         private const val KEY_MARKDOWN_FONT_LATIN = "markdown_font_latin"
         private const val KEY_MARKDOWN_FONT_CJK = "markdown_font_cjk"
         private const val KEY_OPEN_SESSION_IDS = "open_session_ids"
+        private const val KEY_SESSION_CACHE = "session_cache"
         private const val KEY_TRAFFIC_SENT = "traffic_sent"
         private const val KEY_TRAFFIC_RECEIVED = "traffic_received"
 

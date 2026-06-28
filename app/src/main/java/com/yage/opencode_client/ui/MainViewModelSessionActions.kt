@@ -3,6 +3,7 @@ package com.yage.opencode_client.ui
 import com.yage.opencode_client.data.model.ComposerImageAttachment
 import com.yage.opencode_client.data.model.Message
 import com.yage.opencode_client.data.model.Part
+import com.yage.opencode_client.data.model.toCacheEntry
 import com.yage.opencode_client.data.repository.OpenCodeRepository
 import com.yage.opencode_client.util.SettingsManager
 import kotlinx.coroutines.CoroutineScope
@@ -46,18 +47,29 @@ internal fun launchLoadSessions(
                         isRefreshingSessions = false
                     )
                 }
-                // Clean stale session IDs from openSessionIds after sessions are loaded.
-                // Q6: only clean when the FULL session list is loaded
-                // (!hasMoreSessions). getSessions() returns a single page; cleaning
-                // against a partial page would wipe tabs pointing to older sessions
-                // beyond the first page — making recent tabs vanish on every restart
-                // and forcing the user to reopen them from the Sessions page.
-                val loadedSessionIds = state.value.sessions.map { s -> s.id }.toSet()
-                val prevOpen = settingsManager.openSessionIds
-                val cleanedOpen = prevOpen.filter { it in loadedSessionIds }
-                if (cleanedOpen.size != prevOpen.size && !state.value.hasMoreSessions) {
-                    settingsManager.openSessionIds = cleanedOpen
-                    state.update { it.copy(openSessionIds = cleanedOpen) }
+                // Persist a BOUNDED session-metadata cache so the next cold
+                // start can reseed AppState.sessions instantly (tabs/title/
+                // workdir groups). Keep only entries the user actively cares
+                // about: open tabs, the current session, and the current
+                // workdir's root sessions (for the Sessions-screen grouping).
+                // Server refresh already replaced same-id entries above via
+                // mergeRefreshedSessionsPreservingLocalActivity; cached-only
+                // entries (server didn't return them) survive for open tabs.
+                run {
+                    val postState = state.value
+                    val openIds = postState.openSessionIds.toSet()
+                    val currentId = postState.currentSessionId
+                    val currentWorkdir = settingsManager.currentWorkdir
+                    val cache = postState.sessions
+                        .asSequence()
+                        .filter { s ->
+                            s.id in openIds ||
+                                s.id == currentId ||
+                                (currentWorkdir != null && s.parentId == null && s.directory == currentWorkdir)
+                        }
+                        .map { it.toCacheEntry() }
+                        .toList()
+                    settingsManager.sessionCache = cache
                 }
                 val currentId = state.value.currentSessionId
                 val refreshedSessions = state.value.sessions

@@ -1,5 +1,6 @@
 package com.yage.opencode_client.ui
 
+import com.yage.opencode_client.data.model.toSession
 import com.yage.opencode_client.data.repository.OpenCodeRepository
 import com.yage.opencode_client.data.repository.HostProfileStore
 import com.yage.opencode_client.util.SettingsManager
@@ -26,17 +27,28 @@ internal fun applySavedSettings(
     // and the connected project would "vanish" after restart).
     settingsManager.currentWorkdir?.let { repository.setCurrentDirectory(it) }
 
+    // Reuse the profile list once: it backs both AppState.hostProfiles and the
+    // cold-start connectionPhase decision below.
+    val profiles = hostProfileStore.profiles()
     state.update {
         it.copy(
             currentSessionId = settingsManager.currentSessionId,
             lastNavPage = settingsManager.lastNavPage,
-            hostProfiles = hostProfileStore.profiles(),
+            hostProfiles = profiles,
             currentHostProfileId = currentProfile.id,
             selectedAgentName = settingsManager.selectedAgentName ?: "build",
             themeMode = settingsManager.themeMode,
             languageMode = settingsManager.languageMode,
             markdownFontSizes = settingsManager.markdownFontSizes,
-            openSessionIds = settingsManager.openSessionIds
+            openSessionIds = settingsManager.openSessionIds,
+            // Seed sessions from the persisted metadata cache so tabs/title/
+            // workdir groups render instantly on cold start (before the server
+            // list loads). loadSessions replaces these with authoritative data.
+            sessions = settingsManager.sessionCache.map { entry -> entry.toSession() },
+            // Signal "reconnecting" immediately when a profile is configured so
+            // the empty-state UX can show a spinner instead of the bare connect
+            // button while coldStartReconnect() is in flight.
+            connectionPhase = if (profiles.isNotEmpty()) "reconnecting" else null
         )
     }
 }

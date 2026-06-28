@@ -118,12 +118,14 @@ class MainActivity : AppCompatActivity() {
                 // §评审 Stage C #8: one-shot initial health check. The
                 // ON_START-driven catch-up is now owned exclusively by
                 // [AppLifecycleMonitor] (which routes through
-                // [MainViewModel.onForegroundChanged]). Calling testConnection()
-                // here once satisfies the cold-start path; the call's own
+                // [MainViewModel.onForegroundChanged]). coldStartReconnect()
+                // satisfies the cold-start path with a small retry loop so a
+                // slow-to-wake server still comes up instead of stranding the
+                // user on the disconnected empty state. The call's own
                 // 30s throttle makes any overlap with the foreground hook a
                 // no-op. Previously [repeatOnLifecycle(STARTED)] re-fired this
                 // on every ON_START, doubling the AppLifecycleMonitor path.
-                viewModel.testConnection()
+                viewModel.coldStartReconnect()
             }
             val state by viewModel.state.collectAsStateWithLifecycle()
             LaunchedEffect(state.languageMode) {
@@ -151,7 +153,7 @@ class MainActivity : AppCompatActivity() {
                 when {
                     isTablet -> TabletLayout(viewModel = viewModel)
                     isLandscape && !tooNarrow -> LandscapeSplitLayout(viewModel = viewModel)
-                    else -> PhoneLayout(viewModel = viewModel)
+                    else -> PhoneLayout(viewModel = viewModel, initialPage = state.lastNavPage)
                 }
             }
         }
@@ -201,9 +203,19 @@ class MainActivity : AppCompatActivity() {
  * animate the pager to the target page.
  */
 @Composable
-private fun PhoneLayout(viewModel: MainViewModel) {
-    val pagerState = rememberPagerState(pageCount = { screens.size })
+private fun PhoneLayout(viewModel: MainViewModel, initialPage: Int = 0) {
+    val pagerState = rememberPagerState(
+        initialPage = initialPage.coerceIn(0, screens.lastIndex),
+        pageCount = { screens.size }
+    )
     val scope = rememberCoroutineScope()
+
+    // Persist the user's last-opened top-level page so the next cold start
+    // lands them back on it (SettingsManager.lastNavPage). setLastNavPage has
+    // a same-value no-op guard so this only writes on actual transitions.
+    LaunchedEffect(pagerState.currentPage) {
+        viewModel.setLastNavPage(pagerState.currentPage)
+    }
 
     fun switchToPage(page: Int) {
         scope.launch { pagerState.animateScrollToPage(page) }

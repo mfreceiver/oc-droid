@@ -146,12 +146,6 @@ fun ChatScreen(
                 onRefresh = { viewModel.refreshCurrentHost() },
                 onSelectHost = { viewModel.selectHostProfile(it) },
                 onActivateTunnel = { viewModel.activateTunnelForCurrentHost() },
-                onNavigateToFiles = {
-                    state.currentSession?.directory?.let { dir ->
-                        viewModel.showFileInFiles(dir, "chat")
-                    }
-                    showFileBrowser = true
-                }
             )
         )
 
@@ -184,6 +178,13 @@ fun ChatScreen(
             if (state.currentSessionId == null && !isDraft) {
                 ChatEmptyState(
                     isConnected = state.isConnected,
+                    isConnecting = state.isConnecting,
+                    connectionPhase = state.connectionPhase,
+                    hostName = state.currentHostProfile?.name
+                        ?: state.currentHostProfile?.serverUrl
+                            ?.substringAfter("://")
+                            ?.substringBefore("/")
+                            ?: "server",
                     onConnect = { viewModel.testConnection() }
                 )
             } else if (state.currentSessionId != null) {
