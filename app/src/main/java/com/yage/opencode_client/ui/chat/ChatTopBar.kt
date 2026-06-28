@@ -26,11 +26,12 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.Chat
-import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
+import androidx.compose.material.icons.automirrored.filled.List
 import androidx.compose.material.icons.filled.Checklist
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.Dns
 import androidx.compose.material.icons.filled.DonutLarge
-import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.SmartToy
 import androidx.compose.material3.AlertDialog
@@ -85,7 +86,6 @@ internal data class ChatTopBarState(
     val selectedAgentName: String,
     val contextUsage: AppState.ContextUsage?,
     val sessionTodos: List<TodoItem> = emptyList(),
-    val showSettingsButton: Boolean = true,
     val hostName: String = "",
     val isConnected: Boolean = false,
     val isConnecting: Boolean = false,
@@ -130,10 +130,11 @@ internal data class ChatTopBarActions(
     val onSelectHost: (String) -> Unit = {},
     val onActivateTunnel: () -> Unit = {},
     /**
-     * §17: opened by the trailing "+" affordance on the session tab strip.
-     * Defaults to a no-op so existing call sites (which do not wire a
-     * Sessions-page navigation through [ChatScreen]) keep compiling; the
-     * phone layout can opt in by passing a real callback.
+     * Primary Sessions-page entry point. Rendered as the [TopAppBar]
+     * `navigationIcon` (left of the title) — a list affordance. Defaults to a
+     * no-op so existing call sites keep compiling; the phone layout wires a
+     * real callback. (The former trailing "+" on the session tab strip has
+     * been removed in favour of this entry point.)
      */
     val onNavigateToSessions: () -> Unit = {},
 )
@@ -174,6 +175,18 @@ internal fun ChatTopBar(
     Column(modifier = modifier) {
     TopAppBar(
         windowInsets = TopAppBarDefaults.windowInsets,
+        navigationIcon = {
+            // Primary Sessions entry point — list affordance at the LEFT of
+            // the title. Replaces the former trailing "+" on the session tab
+            // strip as the canonical way to reach the Sessions destination.
+            IconButton(onClick = actions.onNavigateToSessions) {
+                Icon(
+                    Icons.AutoMirrored.Filled.List,
+                    contentDescription = stringResource(R.string.chat_action_sessions),
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+        },
         title = {
             when {
                 state.parentSessionId != null -> {
@@ -280,35 +293,24 @@ internal fun ChatTopBar(
                 }
             )
 
-            if (state.showSettingsButton) {
-                IconButton(
-                    onClick = actions.onNavigateToSettings,
-                    modifier = Modifier.size(36.dp)
-                ) {
-                    Icon(
-                        Icons.Default.Settings,
-                        contentDescription = stringResource(R.string.nav_settings),
-                        modifier = Modifier.size(20.dp),
-                        tint = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                }
-            }
-
-            // Server status indicator: dot only (no text). Slightly
-            // larger than the previous glyph so it remains tappable.
-            val dotColor = when {
+            // Server status indicator: an IconButton (Icons.Default.Dns)
+            // tinted to reflect the live connection state — the same colour
+            // logic the former status dot used. Tapping opens the existing
+            // ServerManagementDialog (host picker + refresh + tunnel + the
+            // "System Settings" navigation entry).
+            val serverIconTint = when {
                 state.isConnecting -> Color(0xFFFFA500)
                 state.isConnected -> Color(0xFF4CAF50)
                 state.connectionPhase == null -> MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.4f)
                 else -> Color(0xFFF44336)
             }
-            Box(
-                modifier = Modifier
-                    .clickable { showServerDialog = true }
-                    .padding(horizontal = 8.dp, vertical = 6.dp)
-                    .size(12.dp)
-                    .background(color = dotColor, shape = CircleShape)
-            )
+            IconButton(onClick = { showServerDialog = true }) {
+                Icon(
+                    Icons.Default.Dns,
+                    contentDescription = stringResource(R.string.chat_action_server),
+                    tint = serverIconTint
+                )
+            }
         }
     )
 
@@ -401,6 +403,10 @@ internal fun ChatTopBar(
             },
             onRefresh = { actions.onRefresh() },
             onActivateTunnel = { actions.onActivateTunnel() },
+            onNavigateToSettings = {
+                showServerDialog = false
+                actions.onNavigateToSettings()
+            },
             onDismiss = { showServerDialog = false }
         )
     }
@@ -417,12 +423,15 @@ private fun truncateTitle(value: String): String =
  * second row. Replaces the former title-slot dropdown switcher. Each tab shows
  * the (truncated) session title, an unread dot when the session received an
  * out-of-band message, and a close-X; the active session is highlighted with
- * the v2 accent color. A trailing "+" affordance opens the Sessions page
- * (create / pick another session).
+ * the v2 accent color.
  *
  * Per §17.2 the `openSessions` list is already filtered to root sessions
  * (parentId == null) by ChatScreen, so sub-agent sessions never appear here —
  * the tab strip and the title-slot breadcrumb (§8) coexist without conflict.
+ *
+ * The former trailing "+" affordance (which opened the Sessions page) has been
+ * removed: Sessions is now reached via the [TopAppBar]'s `navigationIcon`
+ * (left of the title).
  */
 @Composable
 private fun SessionTabStrip(
@@ -445,9 +454,6 @@ private fun SessionTabStrip(
                 onSelect = { actions.onSelectSession(session.id) },
                 onClose = { actions.onCloseSession(session.id) }
             )
-        }
-        item(key = "tab_new_session") {
-            TabAddAffordance(onClick = actions.onNavigateToSessions)
         }
     }
 }
@@ -513,27 +519,6 @@ private fun SessionTab(
                 tint = MaterialTheme.colorScheme.onSurfaceVariant
             )
         }
-    }
-}
-
-/**
- * Trailing "+" affordance on the tab strip — opens the Sessions page to create
- * or pick a session that is not currently among the open (MRU) tabs.
- */
-@Composable
-private fun TabAddAffordance(onClick: () -> Unit) {
-    Box(
-        modifier = Modifier
-            .size(36.dp)
-            .clickable(onClick = onClick),
-        contentAlignment = Alignment.Center
-    ) {
-        Icon(
-            Icons.Default.Add,
-            contentDescription = stringResource(R.string.chat_select_or_create_session),
-            modifier = Modifier.size(18.dp),
-            tint = MaterialTheme.colorScheme.onSurfaceVariant
-        )
     }
 }
 
@@ -674,6 +659,7 @@ private fun ServerManagementDialog(
     onSelectHost: (String) -> Unit,
     onRefresh: () -> Unit,
     onActivateTunnel: () -> Unit,
+    onNavigateToSettings: () -> Unit,
     onDismiss: () -> Unit
 ) {
     AlertDialog(
@@ -717,6 +703,46 @@ private fun ServerManagementDialog(
                                 )
                             }
                         }
+                    }
+                }
+
+                // System Settings navigation row — placed at the bottom of the
+                // dialog content. A trailing chevron makes the row read as a
+                // navigation affordance (vs. the selectable host rows above,
+                // which have no chevron). Tapping dismisses the dialog first
+                // so the host picker does not stay open over the Settings page.
+                Spacer(modifier = Modifier.height(8.dp))
+                Surface(
+                    onClick = onNavigateToSettings,
+                    shape = RoundedCornerShape(8.dp),
+                    color = Color.Transparent,
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 12.dp, vertical = 12.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Icon(
+                            Icons.Default.Settings,
+                            contentDescription = null,
+                            modifier = Modifier.size(18.dp),
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        Spacer(modifier = Modifier.width(12.dp))
+                        Text(
+                            text = stringResource(R.string.server_dialog_system_settings),
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onSurface,
+                            modifier = Modifier.weight(1f)
+                        )
+                        Icon(
+                            Icons.AutoMirrored.Filled.KeyboardArrowRight,
+                            contentDescription = null,
+                            modifier = Modifier.size(20.dp),
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
                     }
                 }
             }

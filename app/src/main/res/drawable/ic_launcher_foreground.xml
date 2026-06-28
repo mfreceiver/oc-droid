@@ -1,0 +1,76 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+
+    <!--
+        The logo artwork lives in its native 512x512 coordinate space.
+        The group maps 512-space into the adaptive icon's ~72x72 safe zone,
+        centered at (54,54):
+            point (256,256) -> 18 + 0.140625 * 256 = 18 + 36 = 54  (center)
+        0.140625 == 72/512.
+    -->
+    <group
+        android:name="logo"
+        android:scaleX="0.140625"
+        android:scaleY="0.140625"
+        android:translateX="18"
+        android:translateY="18">
+
+        <!-- White "O" frame: outer ring with a rectangular hole (even-odd fill). -->
+        <path
+            android:fillColor="#FFFFFFFF"
+            android:fillType="evenOdd"
+            android:pathData="M384,416 H128 V96 H384 V416 Z M320,160 H192 V352 H320 V160 Z" />
+
+        <!-- Gray rect inside the hole (lower half). -->
+        <path
+            android:fillColor="#5A5858"
+            android:pathData="M320,224 V352 H192 V224 H320 Z" />
+
+        <!-- Mascot rounded body (horizontal capsule). -->
+        <path
+            android:fillColor="#767272"
+            android:pathData="M176,82 A78,78 0 0,0 176,238 H336 A78,78 0 0,0 336,82 H176 Z" />
+
+        <!-- Eye outer rings (r=58). -->
+        <path
+            android:fillColor="#201D1D"
+            android:pathData="M134,160 a58,58 0 1,0 116,0 a58,58 0 1,0 -116,0 Z" />
+        <path
+            android:fillColor="#201D1D"
+            android:pathData="M262,160 a58,58 0 1,0 116,0 a58,58 0 1,0 -116,0 Z" />
+
+        <!-- Eye mid rings (r=34). -->
+        <path
+            android:fillColor="#454141"
+            android:pathData="M158,160 a34,34 0 1,0 68,0 a34,34 0 1,0 -68,0 Z" />
+        <path
+            android:fillColor="#454141"
+            android:pathData="M286,160 a34,34 0 1,0 68,0 a34,34 0 1,0 -68,0 Z" />
+
+        <!-- Eye inner pupils (r=16). -->
+        <path
+            android:fillColor="#131010"
+            android:pathData="M176,160 a16,16 0 1,0 32,0 a16,16 0 1,0 -32,0 Z" />
+        <path
+            android:fillColor="#131010"
+            android:pathData="M304,160 a16,16 0 1,0 32,0 a16,16 0 1,0 -32,0 Z" />
+
+        <!-- Nose: rounded rect (vertical capsule), x=236 y=130 w=40 h=60 rx=20. -->
+        <path
+            android:fillColor="#131010"
+            android:pathData="M256,130 A20,20 0 0,1 276,150 V170 A20,20 0 0,1 256,190 A20,20 0 0,1 236,170 V150 A20,20 0 0,1 256,130 Z" />
+
+        <!-- Highlight dots (r=8). -->
+        <path
+            android:fillColor="#AAA6A6"
+            android:pathData="M164,140 a8,8 0 1,0 16,0 a8,8 0 1,0 -16,0 Z" />
+        <path
+            android:fillColor="#AAA6A6"
+            android:pathData="M292,140 a8,8 0 1,0 16,0 a8,8 0 1,0 -16,0 Z" />
+
+    </group>
+</vector>

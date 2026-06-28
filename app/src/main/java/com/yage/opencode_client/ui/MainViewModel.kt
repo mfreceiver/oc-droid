@@ -514,6 +514,10 @@ class MainViewModel @Inject constructor(
                 _state.value.currentSessionId?.let { loadMessages(it, resetLimit = true) }
             }
         } else {
+            // Discard any in-progress draft before tearing down SSE so a
+            // backgrounded draft does not leak into the next foreground cycle
+            // (the user may have navigated to the app tray, swapped host, etc.).
+            clearDraftIfActive()
             sseJob?.cancel()
             sseJob = null
         }
@@ -1243,6 +1247,35 @@ class MainViewModel @Inject constructor(
                 .onSuccess { sessions ->
                     _state.update { it.copy(directorySessions = it.directorySessions + (workdir to sessions)) }
                 }
+        }
+    }
+
+    /**
+     * Discard an in-progress draft session (deferred-create mode entered via
+     * [createSessionInWorkdir]) whenever the user leaves the Chat screen or
+     * the app goes to background. No-op when there is no active draft, so it
+     * is safe to call from any navigation / lifecycle hook without disturbing
+     * real (already-created) sessions.
+     *
+     * The guard mirrors [sendMessage]'s draft branch precondition:
+     * `draftWorkdir != null && currentSessionId == null`. Once the draft has
+     * materialised into a real session (first send), `draftWorkdir` is null
+     * and this call does nothing.
+     */
+    fun clearDraftIfActive() {
+        val current = _state.value
+        if (current.draftWorkdir == null || current.currentSessionId != null) return
+        // Clear the persisted workdir too so a discarded draft doesn't leave
+        // the repository re-scoped to an abandoned project on resume/cold start
+        // (createSessionInWorkdir is the only writer of currentWorkdir). Real
+        // sessions are unaffected — the guard above is a no-op for them.
+        settingsManager.currentWorkdir = null
+        _state.update {
+            it.copy(
+                draftWorkdir = null,
+                inputText = "",
+                imageAttachments = emptyList()
+            )
         }
     }
 

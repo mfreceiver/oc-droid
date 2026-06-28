@@ -11,6 +11,7 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.CreateNewFolder
@@ -100,6 +101,17 @@ fun SessionsScreen(
             TopAppBar(
                 title = {
                     Text(stringResource(R.string.nav_sessions))
+                },
+                navigationIcon = {
+                    // Back to Chat (the destination-aware entry point). The
+                    // Sessions screen is no longer swipe-reachable — this is
+                    // the primary way back to the conversation.
+                    IconButton(onClick = onSwitchToChat) {
+                        Icon(
+                            Icons.AutoMirrored.Filled.ArrowBack,
+                            contentDescription = stringResource(R.string.common_back)
+                        )
+                    }
                 },
                 actions = {
                     // Connect-new-project affordance lives in the TopAppBar so
@@ -234,11 +246,16 @@ fun SessionsScreen(
                                 )
                             }
                             // Create-session affordance for this workdir. Tapping
-                            // it opens a fresh draft against this directory. The
-                            // user stays on the Sessions page to pick or compose.
+                            // it opens a fresh draft against this directory AND
+                            // jumps to Chat so the user lands in the composer
+                            // for the new (draft) session. The draft itself is
+                            // created by createSessionInWorkdir; the navigation
+                            // is wired here so SessionsScreen stays decoupled
+                            // from the Chat destination's internals.
                             IconButton(
                                 onClick = {
                                     viewModel.createSessionInWorkdir(workdir)
+                                    onSwitchToChat()
                                 },
                                 modifier = Modifier.size(32.dp)
                             ) {

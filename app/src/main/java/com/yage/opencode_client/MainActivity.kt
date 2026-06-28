@@ -6,15 +6,16 @@ import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.appcompat.app.AppCompatActivity
+import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.togetherWith
+import androidx.compose.foundation.background
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.statusBars
 import androidx.compose.foundation.layout.windowInsetsPadding
-import androidx.compose.foundation.pager.HorizontalPager
-import androidx.compose.foundation.pager.rememberPagerState
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material3.*
 import androidx.compose.material3.windowsizeclass.ExperimentalMaterial3WindowSizeClassApi
 import androidx.compose.material3.windowsizeclass.WindowWidthSizeClass
@@ -43,7 +44,7 @@ import javax.inject.Inject
 import kotlinx.coroutines.launch
 
 /**
- * Top-level screens shown in the phone HorizontalPager.
+ * Top-level screens shown in the phone navigation.
  *
  * `route` is retained as a stable identity string (also used to tag the origin
  * of a file-preview request via MainViewModel.showFileInFiles(originRoute=...)).
@@ -59,9 +60,9 @@ sealed class Screen(
     object Settings : Screen("settings", R.string.nav_settings)
 }
 
-// Page order for the phone HorizontalPager: Chat → Sessions → Settings.
+// Page order for the phone navigation: Chat → Sessions → Settings.
 // File browsing is reached from the Sessions screen (per-project folder button)
-// and via in-chat file-path taps — no longer a swipeable pager page.
+// and via in-chat file-path taps — not a top-level destination.
 val screens = listOf(Screen.Chat, Screen.Sessions, Screen.Settings)
 
 // Debug-only Intent extra keys for injecting connection credentials at launch,
@@ -185,39 +186,45 @@ class MainActivity : AppCompatActivity() {
 }
 
 /**
- * Phone layout: a full-screen HorizontalPager that swipes left/right between
- * the three top-level screens (Chat → Sessions → Settings).
+ * Phone layout: button-driven top-level navigation between Chat / Sessions /
+ * Settings, with a crossfade ([AnimatedContent]) between destinations.
  *
- * The previous bottom NavigationBar + NavHost stack has been replaced by the
- * pager. Each page renders its own TopAppBar showing the current screen name,
- * so no shared app bar or title dropdown is needed. Cross-page navigation
- * (e.g. tapping a file in Chat to open Files) is wired through callbacks that
- * animate the pager to the target page.
+ * The previous swipeable [HorizontalPager] has been replaced by explicit
+ * navigation callbacks (top-bar buttons + system back). Each page renders its
+ * own TopAppBar showing the current screen name (and a back arrow where
+ * applicable), so no shared app bar is needed. The project file-browser
+ * overlay is rendered ABOVE all destinations and is opaque so destination
+ * content does not bleed through.
  */
 @Composable
 private fun PhoneLayout(viewModel: MainViewModel, initialPage: Int = 0) {
-    val pagerState = rememberPagerState(
-        initialPage = initialPage.coerceIn(0, screens.lastIndex),
-        pageCount = { screens.size }
-    )
-    val scope = rememberCoroutineScope()
     val state by viewModel.state.collectAsStateWithLifecycle()
-
-    // Persist the user's last-opened top-level page so the next cold start
-    // lands them back on it (SettingsManager.lastNavPage). setLastNavPage has
-    // a same-value no-op guard so this only writes on actual transitions.
-    LaunchedEffect(pagerState.currentPage) {
-        viewModel.setLastNavPage(pagerState.currentPage)
+    var navPage by rememberSaveable {
+        mutableStateOf(initialPage.coerceIn(0, screens.lastIndex))
     }
 
     fun switchToPage(page: Int) {
-        scope.launch { pagerState.animateScrollToPage(page) }
+        val clamped = page.coerceIn(0, screens.lastIndex)
+        navPage = clamped
+        viewModel.setLastNavPage(clamped)
     }
 
-    // #12: System back returns to Chat from any non-Chat page. On the Chat page
-    // itself the handler is disabled, so back exits the app (expected). Landscape
-    // and tablet layouts have no pager, so back exits the app directly there.
-    BackHandler(enabled = pagerState.currentPage != screens.indexOf(Screen.Chat)) {
+    // Discard any in-progress draft session whenever the user navigates AWAY
+    // from the Chat destination. The effect fires on every navPage change
+    // (including transitions INTO Chat), but the guard inside
+    // clearDraftIfActive only acts on draftWorkdir!=null && currentSessionId==null,
+    // and reaching Chat is the desired outcome for a fresh draft — so the
+    // `if (navPage != Chat)` guard here makes transitioning into Chat a no-op.
+    LaunchedEffect(navPage) {
+        if (navPage != screens.indexOf(Screen.Chat)) {
+            viewModel.clearDraftIfActive()
+        }
+    }
+
+    // #12: System back returns to Chat from any non-Chat destination. On the
+    // Chat destination itself the handler is disabled, so back exits the app
+    // (expected).
+    BackHandler(enabled = navPage != screens.indexOf(Screen.Chat)) {
         switchToPage(screens.indexOf(Screen.Chat))
     }
 
@@ -225,12 +232,10 @@ private fun PhoneLayout(viewModel: MainViewModel, initialPage: Int = 0) {
         Scaffold(
             contentWindowInsets = WindowInsets(0, 0, 0, 0)
         ) { padding ->
-            HorizontalPager(
-                state = pagerState,
-                // Disable swipe while the project file browser is open so the
-                // user can't swipe to Chat with the overlay (and a re-scoped
-                // global currentDirectory) still active — prevents desync.
-                userScrollEnabled = !state.fileBrowserOpen,
+            AnimatedContent(
+                targetState = navPage,
+                transitionSpec = { fadeIn() togetherWith fadeOut() },
+                label = "phoneNav",
                 modifier = Modifier
                     .fillMaxSize()
                     .padding(padding)
@@ -241,26 +246,37 @@ private fun PhoneLayout(viewModel: MainViewModel, initialPage: Int = 0) {
                         onNavigateToSettings = {
                             switchToPage(screens.indexOf(Screen.Settings))
                         },
-                        showSettingsButton = false
+                        onNavigateToSessions = {
+                            switchToPage(screens.indexOf(Screen.Sessions))
+                        }
                     )
                     Screen.Sessions -> SessionsScreen(
                         viewModel = viewModel,
                         onSwitchToChat = { switchToPage(screens.indexOf(Screen.Chat)) }
                     )
-                    Screen.Settings -> SettingsScreen(viewModel = viewModel)
+                    Screen.Settings -> SettingsScreen(
+                        viewModel = viewModel,
+                        onBack = { switchToPage(screens.indexOf(Screen.Chat)) }
+                    )
                 }
             }
         }
 
         // Project file browser overlay — opened from the Sessions screen's
-        // per-workdir folder button. Rendered ABOVE the pager so it covers
-        // every page; the pager is swipe-disabled while open, so Chat can't be
-        // reached/interacted with during a browse (the global currentDirectory
-        // is temporarily re-scoped to fileBrowserWorkdir). Closing restores it.
+        // per-workdir folder button. Rendered ABOVE all destinations so it
+        // covers every page; while open the user can only interact with the
+        // overlay (system back closes it via the BackHandler below). The Box
+        // is given an opaque surface background so the destination
+        // underneath does not bleed through (FilesScreen's own root is
+        // transparent by design — opaqueness is the host's responsibility).
         if (state.fileBrowserOpen) {
             val filesViewModel: FilesViewModel = hiltViewModel()
             BackHandler { viewModel.closeFileBrowser() }
-            Box(modifier = Modifier.fillMaxSize()) {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .background(MaterialTheme.colorScheme.surface)
+            ) {
                 FilesScreen(
                     viewModel = filesViewModel,
                     pathToShow = state.filePathToShowInFiles,
@@ -272,3 +288,4 @@ private fun PhoneLayout(viewModel: MainViewModel, initialPage: Int = 0) {
         }
     }
 }
+

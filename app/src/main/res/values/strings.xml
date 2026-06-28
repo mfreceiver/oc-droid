@@ -167,4 +167,7 @@
     <string name="chat_command_undo">Undo the last change</string>
     <string name="chat_command_redo">Redo the last undone change</string>
     <string name="chat_command_no_session">Open or create a session before running /%1$s</string>
+    <string name="chat_action_sessions">Sessions</string>
+    <string name="chat_action_server">Server status</string>
+    <string name="server_dialog_system_settings">System Settings</string>
 </resources>

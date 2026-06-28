@@ -167,4 +167,7 @@
     <string name="chat_command_undo">撤销上一步</string>
     <string name="chat_command_redo">重做</string>
     <string name="chat_command_no_session">请先打开或创建会话再执行 /%1$s</string>
+    <string name="chat_action_sessions">会话</string>
+    <string name="chat_action_server">服务器状态</string>
+    <string name="server_dialog_system_settings">系统设置</string>
 </resources>

@@ -3,6 +3,7 @@ package com.yage.opencode_client.ui.chat
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
@@ -45,7 +46,7 @@ import kotlinx.coroutines.launch
 fun ChatScreen(
     viewModel: MainViewModel,
     onNavigateToSettings: () -> Unit = {},
-    showSettingsButton: Boolean = true
+    onNavigateToSessions: () -> Unit = {}
 ) {
     val state by viewModel.state.collectAsStateWithLifecycle()
     var showFileBrowser by remember { mutableStateOf(false) }
@@ -121,7 +122,6 @@ fun ChatScreen(
                 selectedAgentName = state.selectedAgentName,
                 contextUsage = cachedContextUsage,
                 sessionTodos = state.sessionTodos[state.currentSessionId ?: ""] ?: emptyList(),
-                showSettingsButton = showSettingsButton,
                 hostName = state.currentHostProfile?.name ?: "No Host",
                 isConnected = state.isConnected,
                 isConnecting = state.isConnecting,
@@ -143,6 +143,7 @@ fun ChatScreen(
                 onCloseSession = viewModel::closeSession,
                 onSelectAgent = viewModel::selectAgent,
                 onNavigateToSettings = onNavigateToSettings,
+                onNavigateToSessions = onNavigateToSessions,
                 onRefresh = { viewModel.refreshCurrentHost() },
                 onSelectHost = { viewModel.selectHostProfile(it) },
                 onActivateTunnel = { viewModel.activateTunnelForCurrentHost() },
@@ -273,10 +274,22 @@ fun ChatScreen(
     }
 
     // File browser overlay — opened by tapping a file path in chat (preview).
-    // (Project-level browsing lives on the Sessions screen now.)
+    // (Project-level browsing lives on the Sessions screen now.) The Box is
+    // given an opaque surface background so the chat content underneath does
+    // not bleed through (FilesScreen's own root is transparent by design —
+    // opaqueness is the host's responsibility).
     if (showFileBrowser) {
         val filesViewModel: FilesViewModel = hiltViewModel()
-        Box(modifier = Modifier.fillMaxSize()) {
+        // System back closes the in-chat file preview instead of exiting the
+        // app (the parent-session BackHandler at L104 is gated on parent!=null,
+        // and PhoneLayout's is disabled on the Chat destination, so without
+        // this a root-session file preview would back-exit the app).
+        BackHandler { showFileBrowser = false }
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .background(MaterialTheme.colorScheme.surface)
+        ) {
             FilesScreen(
                 viewModel = filesViewModel,
                 pathToShow = state.filePathToShowInFiles,
