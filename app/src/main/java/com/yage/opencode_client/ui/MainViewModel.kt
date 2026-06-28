@@ -547,7 +547,7 @@ class MainViewModel @Inject constructor(
 
     /** Q6: persist the phone pager page the user navigated to, so cold start lands there. */
     fun setLastNavPage(page: Int) {
-        val clamped = page.coerceIn(0, 3)
+        val clamped = page.coerceIn(0, 2)
         if (_state.value.lastNavPage == clamped) return
         settingsManager.lastNavPage = clamped
         _state.update { it.copy(lastNavPage = clamped) }
@@ -673,10 +673,41 @@ class MainViewModel @Inject constructor(
     }
 
     fun deleteHostProfile(profileId: String) {
+        // Detect deletion of the ACTIVE host: the new current host is then
+        // unrelated, so we must purge all per-host session/workdir state
+        // (mirrors selectHostProfile) — otherwise the old host's sessions/tabs/
+        // workdir leak into the new host (gpter review MAJOR).
+        val wasCurrent = profileId == _state.value.currentHostProfileId
         hostProfileStore.delete(profileId)
         val current = hostProfileStore.currentProfile()
         configureRepositoryForProfile(current)
         refreshHostProfileState()
+        if (wasCurrent) {
+            _state.update {
+                it.copy(
+                    currentSessionId = null,
+                    messages = emptyList(),
+                    partsByMessage = emptyMap(),
+                    sessionStatuses = emptyMap(),
+                    streamingPartTexts = emptyMap(),
+                    streamingReasoningPart = null,
+                    sessionTodos = emptyMap(),
+                    openSessionIds = emptyList(),
+                    unreadSessions = emptySet(),
+                    tempClearedUnread = emptySet(),
+                    lastViewedTime = emptyMap(),
+                    sessions = emptyList(),
+                    directorySessions = emptyMap(),
+                    draftWorkdir = null,
+                    availableCommands = emptyList()
+                )
+            }
+            settingsManager.currentSessionId = null
+            settingsManager.openSessionIds = emptyList()
+            settingsManager.sessionCache = emptyList()
+            settingsManager.currentWorkdir = null
+            testConnection(force = true)
+        }
     }
 
     fun importHostProfile(payload: String): Result<HostProfile> = runCatching {
@@ -1580,13 +1611,38 @@ class MainViewModel @Inject constructor(
     /**
      * Bug3: open the file browser for a specific connected project (workdir)
      * from the Sessions screen. Scopes the repository to [workdir] (so
-     * getFileTree lists that project) WITHOUT the side effects of
+     * getFileTree/getFileContent list that project) WITHOUT the side effects of
      * [createSessionInWorkdir] (no currentSessionId/draft/currentWorkdir reset),
      * then seeds the preview path. The Sessions screen toggles its own overlay.
+     *
+     * Directory coupling (gpter review): the file-content API has no per-call
+     * directory variant, so the browse must use the GLOBAL repository
+     * currentDirectory. To avoid desyncing an open Chat session (project A) when
+     * browsing project B, we SAVE the pre-browse directory here and RESTORE it
+     * in [restoreDirectoryAfterBrowse] when the overlay closes. The Sessions
+     * file overlay is full-screen, so Chat is not interactable during the browse
+     * (no concurrent access); on close the global directory is restored to A.
      */
+    private var browseSavedDirectory: String? = null
+    private var browseActive: Boolean = false
+
     fun browseFilesInWorkdir(workdir: String) {
+        if (!browseActive) {
+            browseSavedDirectory = repository.getCurrentDirectory()
+            browseActive = true
+        }
         repository.setCurrentDirectory(workdir)
         showFileInFiles(workdir, "sessions")
+    }
+
+    /** Restore the global currentDirectory to its pre-browse value. Call when
+     *  the Sessions file-browser overlay closes (onCloseFile / BackHandler). */
+    fun restoreDirectoryAfterBrowse() {
+        if (browseActive) {
+            repository.setCurrentDirectory(browseSavedDirectory)
+            browseSavedDirectory = null
+            browseActive = false
+        }
     }
 
     private fun startSSE() {

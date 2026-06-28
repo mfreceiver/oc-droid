@@ -272,8 +272,8 @@ fun ChatScreen(
             }
     }
 
-    // File browser overlay — replaces the former Files tab. Opened via the
-    // folder icon in the session tab strip, or by tapping a file path in chat.
+    // File browser overlay — opened by tapping a file path in chat (preview).
+    // (Project-level browsing lives on the Sessions screen now.)
     if (showFileBrowser) {
         val filesViewModel: FilesViewModel = hiltViewModel()
         Box(modifier = Modifier.fillMaxSize()) {

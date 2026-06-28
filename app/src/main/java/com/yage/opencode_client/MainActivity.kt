@@ -56,13 +56,12 @@ sealed class Screen(
 ) {
     object Chat : Screen("chat", R.string.nav_chat)
     object Sessions : Screen("sessions", R.string.nav_sessions)
-    object Files : Screen("files", R.string.nav_files)
     object Settings : Screen("settings", R.string.nav_settings)
 }
 
 // Page order for the phone HorizontalPager: Chat → Sessions → Settings.
-// Files was removed from the swipeable pager (0.1.14) — it is now accessed via
-// the folder icon in the session tab strip.
+// File browsing is reached from the Sessions screen (per-project folder button)
+// and via in-chat file-path taps — no longer a swipeable pager page.
 val screens = listOf(Screen.Chat, Screen.Sessions, Screen.Settings)
 
 // Debug-only Intent extra keys for injecting connection credentials at launch,
@@ -250,7 +249,6 @@ private fun PhoneLayout(viewModel: MainViewModel, initialPage: Int = 0) {
                     onSwitchToChat = { switchToPage(screens.indexOf(Screen.Chat)) }
                 )
                 Screen.Settings -> SettingsScreen(viewModel = viewModel)
-                Screen.Files -> { /* Files now rendered inline in ChatScreen */ }
             }
         }
     }

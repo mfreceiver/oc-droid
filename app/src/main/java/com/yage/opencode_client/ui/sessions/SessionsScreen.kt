@@ -334,7 +334,10 @@ fun SessionsScreen(
     // resolution. Back closes the overlay (instead of jumping to the Chat tab).
     if (showFileBrowser) {
         val filesViewModel: FilesViewModel = hiltViewModel()
-        BackHandler { showFileBrowser = false }
+        BackHandler {
+            viewModel.restoreDirectoryAfterBrowse()
+            showFileBrowser = false
+        }
         Box(modifier = Modifier.fillMaxSize()) {
             FilesScreen(
                 viewModel = filesViewModel,
@@ -342,6 +345,7 @@ fun SessionsScreen(
                 sessionDirectory = browsedWorkdir,
                 onCloseFile = {
                     viewModel.clearFileToShow()
+                    viewModel.restoreDirectoryAfterBrowse()
                     showFileBrowser = false
                 },
                 onFileClick = { path ->

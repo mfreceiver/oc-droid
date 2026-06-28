@@ -80,12 +80,12 @@ class SettingsManager @Inject constructor(
 
     /**
      * Index of the last-opened top-level page in the phone HorizontalPager
-     * (0=Chat, 1=Sessions, 2=Files, 3=Settings). Restored on cold start so the
-     * user lands back on the screen they last used instead of always Chat.
+     * (0=Chat, 1=Sessions, 2=Settings). Restored on cold start so the user
+     * lands back on the screen they last used instead of always Chat.
      */
     var lastNavPage: Int
-        get() = encryptedPrefs.getInt(KEY_LAST_NAV_PAGE, 0).coerceIn(0, 3)
-        set(value) = encryptedPrefs.edit().putInt(KEY_LAST_NAV_PAGE, value.coerceIn(0, 3)).apply()
+        get() = encryptedPrefs.getInt(KEY_LAST_NAV_PAGE, 0).coerceIn(0, 2)
+        set(value) = encryptedPrefs.edit().putInt(KEY_LAST_NAV_PAGE, value.coerceIn(0, 2)).apply()
 
     /**
      * The workdir (project directory) the user last connected to. Restored on
