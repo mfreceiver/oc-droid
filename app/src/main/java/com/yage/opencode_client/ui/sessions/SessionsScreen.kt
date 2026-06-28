@@ -1,6 +1,5 @@
 package com.yage.opencode_client.ui.sessions
 
-import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
@@ -26,13 +25,10 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
-import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.yage.opencode_client.R
 import com.yage.opencode_client.data.model.Session
 import com.yage.opencode_client.ui.MainViewModel
-import com.yage.opencode_client.ui.files.FilesScreen
-import com.yage.opencode_client.ui.files.FilesViewModel
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -49,10 +45,6 @@ fun SessionsScreen(
     // Locally-hidden workdirs (long-press → disconnect). UI-only; reset on refresh/re-enter tab.
     var hiddenWorkdirs by remember { mutableStateOf(setOf<String>()) }
     var pendingDisconnectWorkdir by remember { mutableStateOf<String?>(null) }
-    // Per-project file-browser overlay state (Bug3: file browsing moved here
-    // from the chat tab strip). browsedWorkdir scopes the repo + preview path.
-    var showFileBrowser by remember { mutableStateOf(false) }
-    var browsedWorkdir by remember { mutableStateOf<String?>(null) }
 
     // Derive recent sessions (root sessions: parentId == null, by time.updated desc, top 5).
     // Source merges the global sessions list with directorySessions (#10: prior
@@ -103,7 +95,6 @@ fun SessionsScreen(
         onSwitchToChat()
     }
 
-    Box(modifier = Modifier.fillMaxSize()) {
     Scaffold(
         topBar = {
             TopAppBar(
@@ -231,9 +222,7 @@ fun SessionsScreen(
                             // to this workdir and opens the file-browser overlay.
                             IconButton(
                                 onClick = {
-                                    browsedWorkdir = workdir
                                     viewModel.browseFilesInWorkdir(workdir)
-                                    showFileBrowser = true
                                 },
                                 modifier = Modifier.size(32.dp)
                             ) {
@@ -327,34 +316,6 @@ fun SessionsScreen(
             }
         )
     }
-
-    // Per-project file-browser overlay. browseFilesInWorkdir already scoped
-    // repository.currentDirectory to the clicked workdir; FilesScreen lists
-    // from there. sessionDirectory = browsedWorkdir drives preview-path
-    // resolution. Back closes the overlay (instead of jumping to the Chat tab).
-    if (showFileBrowser) {
-        val filesViewModel: FilesViewModel = hiltViewModel()
-        BackHandler {
-            viewModel.restoreDirectoryAfterBrowse()
-            showFileBrowser = false
-        }
-        Box(modifier = Modifier.fillMaxSize()) {
-            FilesScreen(
-                viewModel = filesViewModel,
-                pathToShow = state.filePathToShowInFiles,
-                sessionDirectory = browsedWorkdir,
-                onCloseFile = {
-                    viewModel.clearFileToShow()
-                    viewModel.restoreDirectoryAfterBrowse()
-                    showFileBrowser = false
-                },
-                onFileClick = { path ->
-                    viewModel.showFileInFiles(path, "sessions")
-                }
-            )
-        }
-    }
-    } // Box
 }
 
 @Composable

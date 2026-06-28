@@ -201,6 +201,7 @@ private fun PhoneLayout(viewModel: MainViewModel, initialPage: Int = 0) {
         pageCount = { screens.size }
     )
     val scope = rememberCoroutineScope()
+    val state by viewModel.state.collectAsStateWithLifecycle()
 
     // Persist the user's last-opened top-level page so the next cold start
     // lands them back on it (SettingsManager.lastNavPage). setLastNavPage has
@@ -220,28 +221,53 @@ private fun PhoneLayout(viewModel: MainViewModel, initialPage: Int = 0) {
         switchToPage(screens.indexOf(Screen.Chat))
     }
 
-    Scaffold(
-        contentWindowInsets = WindowInsets(0, 0, 0, 0)
-    ) { padding ->
-        HorizontalPager(
-            state = pagerState,
-            modifier = Modifier
-                .fillMaxSize()
-                .padding(padding)
-        ) { page ->
-            when (screens[page]) {
-                Screen.Chat -> ChatScreen(
-                    viewModel = viewModel,
-                    onNavigateToSettings = {
-                        switchToPage(screens.indexOf(Screen.Settings))
-                    },
-                    showSettingsButton = false
+    Box(modifier = Modifier.fillMaxSize()) {
+        Scaffold(
+            contentWindowInsets = WindowInsets(0, 0, 0, 0)
+        ) { padding ->
+            HorizontalPager(
+                state = pagerState,
+                // Disable swipe while the project file browser is open so the
+                // user can't swipe to Chat with the overlay (and a re-scoped
+                // global currentDirectory) still active — prevents desync.
+                userScrollEnabled = !state.fileBrowserOpen,
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(padding)
+            ) { page ->
+                when (screens[page]) {
+                    Screen.Chat -> ChatScreen(
+                        viewModel = viewModel,
+                        onNavigateToSettings = {
+                            switchToPage(screens.indexOf(Screen.Settings))
+                        },
+                        showSettingsButton = false
+                    )
+                    Screen.Sessions -> SessionsScreen(
+                        viewModel = viewModel,
+                        onSwitchToChat = { switchToPage(screens.indexOf(Screen.Chat)) }
+                    )
+                    Screen.Settings -> SettingsScreen(viewModel = viewModel)
+                }
+            }
+        }
+
+        // Project file browser overlay — opened from the Sessions screen's
+        // per-workdir folder button. Rendered ABOVE the pager so it covers
+        // every page; the pager is swipe-disabled while open, so Chat can't be
+        // reached/interacted with during a browse (the global currentDirectory
+        // is temporarily re-scoped to fileBrowserWorkdir). Closing restores it.
+        if (state.fileBrowserOpen) {
+            val filesViewModel: FilesViewModel = hiltViewModel()
+            BackHandler { viewModel.closeFileBrowser() }
+            Box(modifier = Modifier.fillMaxSize()) {
+                FilesScreen(
+                    viewModel = filesViewModel,
+                    pathToShow = state.filePathToShowInFiles,
+                    sessionDirectory = state.fileBrowserWorkdir,
+                    onCloseFile = { viewModel.closeFileBrowser() },
+                    onFileClick = { path -> viewModel.showFileInFiles(path, "sessions") }
                 )
-                Screen.Sessions -> SessionsScreen(
-                    viewModel = viewModel,
-                    onSwitchToChat = { switchToPage(screens.indexOf(Screen.Chat)) }
-                )
-                Screen.Settings -> SettingsScreen(viewModel = viewModel)
             }
         }
     }

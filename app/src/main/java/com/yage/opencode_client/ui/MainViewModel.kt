@@ -75,6 +75,14 @@ data class AppState(
     val markdownFontSizes: MarkdownFontSizes = MarkdownFontSizes(),
     val filePathToShowInFiles: String? = null,
     val filePreviewOriginRoute: String? = null,
+    // Bug3: project-level file browser opened from the Sessions screen. The
+    // overlay is rendered at the PhoneLayout ROOT (above the HorizontalPager)
+    // and the pager's userScrollEnabled is bound to !fileBrowserOpen, so Chat
+    // can't be swiped to / interacted with during a browse. This keeps the
+    // global currentDirectory (temporarily re-scoped to fileBrowserWorkdir)
+    // unambiguous — no desync.
+    val fileBrowserOpen: Boolean = false,
+    val fileBrowserWorkdir: String? = null,
     val streamingPartTexts: Map<String, String> = emptyMap(),
     val streamingReasoningPart: Part? = null,
     val sessionTodos: Map<String, List<TodoItem>> = emptyMap(),
@@ -1632,16 +1640,31 @@ class MainViewModel @Inject constructor(
             browseActive = true
         }
         repository.setCurrentDirectory(workdir)
-        showFileInFiles(workdir, "sessions")
+        _state.update {
+            it.copy(
+                filePathToShowInFiles = workdir,
+                filePreviewOriginRoute = "sessions",
+                fileBrowserOpen = true,
+                fileBrowserWorkdir = workdir
+            )
+        }
     }
 
-    /** Restore the global currentDirectory to its pre-browse value. Call when
-     *  the Sessions file-browser overlay closes (onCloseFile / BackHandler). */
-    fun restoreDirectoryAfterBrowse() {
+    /** Close the project file browser: restore the global currentDirectory to
+     *  its pre-browse value and hide the overlay. Called from PhoneLayout's
+     *  overlay close (onCloseFile / BackHandler). */
+    fun closeFileBrowser() {
         if (browseActive) {
             repository.setCurrentDirectory(browseSavedDirectory)
             browseSavedDirectory = null
             browseActive = false
+        }
+        _state.update {
+            it.copy(
+                fileBrowserOpen = false,
+                filePathToShowInFiles = null,
+                filePreviewOriginRoute = null
+            )
         }
     }
 
