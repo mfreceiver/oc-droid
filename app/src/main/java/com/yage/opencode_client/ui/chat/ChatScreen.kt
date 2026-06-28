@@ -181,7 +181,7 @@ fun ChatScreen(
                     streamingPartTexts = state.streamingPartTexts,
                     streamingReasoningPart = state.streamingReasoningPart,
                     isLoading = state.isLoadingMessages,
-                    messageLimit = state.messageLimit,
+                    messageLimit = 30,
                     repository = viewModel.repository,
                     workspaceDirectory = state.currentSession?.directory,
                     onLoadMore = { viewModel.loadMoreMessages() },

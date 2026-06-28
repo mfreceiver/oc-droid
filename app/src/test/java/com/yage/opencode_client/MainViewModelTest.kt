@@ -552,16 +552,10 @@ class MainViewModelTest {
     }
 
     @Test
-    fun `message updated SSE refreshes current messages only`() = runTest {
+    fun `message updated SSE does NOT trigger message reload - only refreshes watchdog`() = runTest {
         val viewModel = createViewModel()
         updateState(viewModel) { it.copy(currentSessionId = "session-1") }
 
-        // §15.1: messagesRefreshTrigger is a SharedFlow whose debounce
-        // pipeline subscribes asynchronously (debounce wraps the source in
-        // a child coroutine). Run one dispatcher tick so the subscription
-        // is established before the SSE event arrives, otherwise the
-        // tryEmit() fired by handleSse would land on an empty subscriber
-        // set (replay=0) and silently drop.
         advanceUntilIdle()
 
         handleSse(
@@ -575,14 +569,15 @@ class MainViewModelTest {
                 )
             )
         )
-        // §15.1: message.updated now goes through a debounced refresh trigger
-        // (500ms coalesce) followed by the standard retry delay (400ms) before
-        // loadMessages fires. Advance virtual time past both before asserting.
-        advanceTimeBy(1000)
+        // §C1 (0.1.13): message.updated no longer triggers a reload at all.
+        // The periodic /message?limit=30 loop was the root cause of the OOM.
+        // Live text arrives via streamingPartTexts (message.part.updated delta);
+        // structural sync happens on message.created / session.idle / watchdog.
+        advanceTimeBy(2000)
         advanceUntilIdle()
 
         coVerify(exactly = 0) { repository.getSessions(any()) }
-        coVerify { repository.getMessagesPaged("session-1", 30, any()) }
+        coVerify(exactly = 0) { repository.getMessagesPaged(any(), any(), any()) }
     }
 
     @Test

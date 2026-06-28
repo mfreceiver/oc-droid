@@ -30,7 +30,12 @@ internal data class MessagePartDeltaEvent(
     val messageId: String?,
     val partId: String?,
     val partType: String,
-    val delta: String?
+    val delta: String?,
+    /** Full accumulated text from the server's part object, when present.
+     *  More reliable than delta accumulation; the server can send this
+     *  intermittently as a sync point.  When non-null, replaces the
+     *  streaming text for this part entirely (overwriting prior deltas). */
+    val text: String? = null
 )
 
 internal fun errorMessageOrFallback(throwable: Throwable?, fallback: String): String {
@@ -149,12 +154,14 @@ internal fun parseMessagePartDeltaEvent(event: SSEEvent): MessagePartDeltaEvent?
     val messageId = (partObj?.get("messageID") as? JsonPrimitive)?.content
     val partId = (partObj?.get("id") as? JsonPrimitive)?.content
     val partType = (partObj?.get("type") as? JsonPrimitive)?.content ?: "text"
+    val partText = (partObj?.get("text") as? JsonPrimitive)?.content
     return MessagePartDeltaEvent(
         sessionId = sessionId,
         messageId = messageId,
         partId = partId,
         partType = partType,
-        delta = event.payload.getString("delta")
+        delta = event.payload.getString("delta"),
+        text = partText
     )
 }
 

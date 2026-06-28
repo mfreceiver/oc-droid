@@ -13,11 +13,11 @@ import javax.inject.Singleton
  * best-effort and does not require billing-grade atomicity, and concurrent
  * requests are rare enough that the occasional lost increment is acceptable.
  *
- * Totals are persisted to [SettingsManager] on every mutation so they survive
- * process restarts. Responses without a declared Content-Length (chunked / SSE
- * streams) report -1 and are intentionally NOT counted by the interceptor, so
- * actual wire usage is generally higher than what is displayed — streaming
- * responses are the main under-counted source.
+ * Persistence is batched: mutating on every HTTP response (the old behaviour)
+ * would write EncryptedSharedPreferences per request, each triggering crypto
+ * operations. Now we set a dirty flag and only flush at most once every
+ * [PERSIST_INTERVAL_MS] (2 s), which still survives most process deaths without
+ * meaningful data loss.
  */
 @Singleton
 class TrafficTracker @Inject constructor(
@@ -31,26 +31,49 @@ class TrafficTracker @Inject constructor(
     var totalBytesReceived: Long = settingsManager.trafficBytesReceived
         private set
 
+    @Volatile
+    private var dirty: Boolean = false
+
+    @Volatile
+    private var lastPersistTime: Long = 0L
+
     /**
      * Adds [sent] / [received] bytes to the running totals. Non-positive values
      * are skipped (OkHttp reports -1 for unknown content length, e.g. chunked
-     * SSE bodies — those cannot be counted reliably).
+     * bodies — those cannot be counted reliably).
      */
     fun add(sent: Long, received: Long) {
-        if (sent > 0L) totalBytesSent += sent
-        if (received > 0L) totalBytesReceived += received
-        if (sent > 0L || received > 0L) persist()
+        var changed = false
+        if (sent > 0L) { totalBytesSent += sent; changed = true }
+        if (received > 0L) { totalBytesReceived += received; changed = true }
+        if (changed) {
+            dirty = true
+            tryPersist()
+        }
     }
 
-    /** Zeros both counters and persists the reset. */
+    /** Zeros both counters and persists the reset immediately. */
     fun reset() {
         totalBytesSent = 0L
         totalBytesReceived = 0L
-        persist()
+        doPersist()
     }
 
-    private fun persist() {
+    private fun tryPersist() {
+        if (!dirty) return
+        val now = System.currentTimeMillis()
+        if (now - lastPersistTime < PERSIST_INTERVAL_MS) return
+        doPersist()
+    }
+
+    private fun doPersist() {
         settingsManager.trafficBytesSent = totalBytesSent
         settingsManager.trafficBytesReceived = totalBytesReceived
+        lastPersistTime = System.currentTimeMillis()
+        dirty = false
+    }
+
+    companion object {
+        private const val PERSIST_INTERVAL_MS = 2000L
     }
 }

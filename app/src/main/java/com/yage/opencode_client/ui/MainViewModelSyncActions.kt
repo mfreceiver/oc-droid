@@ -47,9 +47,11 @@ internal fun launchSseCollection(
  * Dispatches a single SSE event. Per §15 (15.1 / 15.1.4 / 15.3) and §18 (R-A)
  * review refinements:
  *
- * - `message.updated` for the current session no longer reloads directly; it
- *   pushes into the debounced [onMessagesRefreshTriggered] signal so a burst
- *   of updates coalesces into one reload.
+ * - `message.updated` for the current session does NOT reload — opencode-web
+ *   trusts SSE for live text and only reloads on structural events (created,
+ *   session-idle, watchdog). We mirror that: live text comes via streamingPartTexts
+ *   (populated by message.part.updated delta), structural sync via
+ *   session.status transition + 15s watchdog.
  * - `message.part.updated` with empty delta but non-null ids (a part status
  *   flip) does NOT clear streaming buffers or reload — the watchdog
  *   (§15.1.4) catches up. Only a true `part.created` (ids null) wipes the
@@ -67,7 +69,6 @@ internal fun handleIncomingSseEvent(
     onRefreshSessions: () -> Unit,
     onLoadPendingPermissions: () -> Unit,
     onNonFatalIssue: (String) -> Unit,
-    onMessagesRefreshTriggered: () -> Unit,
     onLastSseProgress: () -> Unit,
     onSessionBecameBusy: () -> Unit,
     onSessionBecameIdle: () -> Unit
@@ -152,44 +153,65 @@ internal fun handleIncomingSseEvent(
             }
         }
         "message.updated" -> {
-            // Only refresh the open session's messages. Do NOT mark unread:
-            // message.updated fires for every streaming delta/touch on the
-            // server (token appends, tool updates, status flips), which would
-            // spam the unread badge. Unread marking is reserved for
-            // message.created (a genuinely new message) — see the branch above.
+            // Only refresh the open session's watchdog. Do NOT reload: opencode-web
+            // trusts SSE for live text and does NOT issue a periodic reload on
+            // message.updated (verified in oc-ref/packages/app/src/context/server-sync.tsx).
+            // Live token text arrives via message.part.updated delta and is rendered
+            // in real-time through streamingPartTexts; structural sync is handled
+            // by session.status (busy→idle) + the 15s watchdog. Removing the periodic
+            // reload also eliminates the last OOM-churn source (30 msgs × full tool
+            // output every 10s) that survived the debounced throttle.
             //
-            // §15.1: instead of reloading per-event, push into the debounced
-            // trigger so a burst coalesces. selectSession/sendMessage bypass
-            // this path and call loadMessages directly.
+            // Do NOT mark unread: message.updated fires for every streaming delta,
+            // which would spam the unread badge.
             val sessionId = event.payload.getString("sessionID")
             if (sessionId != null && sessionId == state.value.currentSessionId) {
                 onLastSseProgress()
-                onMessagesRefreshTriggered()
             }
         }
         "message.part.updated" -> {
             val deltaEvent = parseMessagePartDeltaEvent(event) ?: return
             if (deltaEvent.sessionId == state.value.currentSessionId) {
                 onLastSseProgress()
-                if (
-                    deltaEvent.messageId != null &&
-                    deltaEvent.partId != null &&
-                    !deltaEvent.delta.isNullOrBlank()
-                ) {
-                    val key = "${deltaEvent.messageId}:${deltaEvent.partId}"
-                    val previousValue = state.value.streamingPartTexts[key] ?: ""
-                    state.update {
-                        it.copy(
-                            streamingPartTexts = it.streamingPartTexts + (key to (previousValue + deltaEvent.delta)),
-                            streamingReasoningPart = reasoningPartOrNull(
-                                partType = deltaEvent.partType,
-                                partId = deltaEvent.partId,
-                                messageId = deltaEvent.messageId,
-                                sessionId = deltaEvent.sessionId
-                            ) ?: it.streamingReasoningPart
-                        )
+                val msgId = deltaEvent.messageId
+                val pId = deltaEvent.partId
+                if (msgId != null && pId != null) {
+                    val key = "$msgId:$pId"
+                    val fullText = deltaEvent.text
+                    val delta = deltaEvent.delta
+                    if (!fullText.isNullOrBlank()) {
+                        // Server sent full accumulated text — use it as the
+                        // authoritative streaming value (replaces delta
+                        // accumulation, acts as a sync point).
+                        state.update {
+                            it.copy(
+                                streamingPartTexts = it.streamingPartTexts + (key to fullText),
+                                streamingReasoningPart = reasoningPartOrNull(
+                                    partType = deltaEvent.partType,
+                                    partId = pId,
+                                    messageId = msgId,
+                                    sessionId = deltaEvent.sessionId
+                                ) ?: it.streamingReasoningPart
+                            )
+                        }
+                    } else if (!delta.isNullOrBlank()) {
+                        val previousValue = state.value.streamingPartTexts[key] ?: ""
+                        state.update {
+                            it.copy(
+                                streamingPartTexts = it.streamingPartTexts + (key to (previousValue + delta)),
+                                streamingReasoningPart = reasoningPartOrNull(
+                                    partType = deltaEvent.partType,
+                                    partId = pId,
+                                    messageId = msgId,
+                                    sessionId = deltaEvent.sessionId
+                                ) ?: it.streamingReasoningPart
+                            )
+                        }
                     }
-                } else if (deltaEvent.messageId == null || deltaEvent.partId == null) {
+                    // Else: ids present + both text & delta null/blank =
+                    // part status flip. Do NOT clear streaming buffers and
+                    // do NOT reload — the §15.1.4 watchdog covers catch-up.
+                } else {
                     // §15.1 (review B3): a true `part.created` (no message/part
                     // id yet) signals the start of a fresh streaming run —
                     // clear any stale partials and reload so we render the
@@ -199,11 +221,6 @@ internal fun handleIncomingSseEvent(
                     }
                     onRefreshMessages(deltaEvent.sessionId, false)
                 }
-                // Else: ids present + empty delta = part status flip. Do
-                // NOT clear streaming buffers and do NOT pull — the §15.1.4
-                // watchdog covers catch-up. This was a hot path under the old
-                // 2s poll loop; running it on every flip would re-introduce
-                // redundant traffic.
             }
         }
         "permission.asked" -> {

@@ -201,7 +201,6 @@ internal fun selectSessionState(
         it.copy(
             currentSessionId = sessionId,
             messages = emptyList(),
-            messageLimit = 30,
             inputText = restoredDraft,
             streamingPartTexts = emptyMap(),
             streamingReasoningPart = null
@@ -241,12 +240,11 @@ internal fun launchLoadMessages(
     if (state.value.isLoadingMessages) return
     state.update { it.copy(isLoadingMessages = true) }
     scope.launch {
-        val limit = if (resetLimit) 30 else state.value.messageLimit
         // §on-demand: cursor pagination. The first load (resetLimit) captures the
         // X-Next-Cursor for future loadMore; subsequent periodic reloads fetch the
         // latest window only and preserve the cursor so scrolled history stays
-        // loadable. Replaces the old `messageLimit += 30` full re-fetch.
-        repository.getMessagesPaged(sessionId, limit, before = null)
+        // loadable.
+        repository.getMessagesPaged(sessionId, 30, before = null)
             .onSuccess { page ->
                 if (sessionId == state.value.currentSessionId) {
                     val lastAssistant = page.items.lastOrNull { it.info.isAssistant }
@@ -280,7 +278,6 @@ internal fun launchLoadMessages(
                         }
                         it.copy(
                             messages = mergedMessages,
-                            messageLimit = limit,
                             isLoadingMessages = false,
                             selectedAgentName = agentName ?: it.selectedAgentName,
                             // Only (re)seed the history cursor on a fresh open; a

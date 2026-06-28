@@ -54,7 +54,6 @@ data class AppState(
     val lastNavPage: Int = 0,
     val sessionStatuses: Map<String, SessionStatus> = emptyMap(),
     val messages: List<MessageWithParts> = emptyList(),
-    val messageLimit: Int = 30,
     // §on-demand: cursor-based history paging. olderMessagesCursor is the opaque
     // V1 cursor for fetching the next older page (null = no more / reset).
     val olderMessagesCursor: String? = null,
@@ -188,7 +187,6 @@ data class AppState(
         val hasMoreSessions: Boolean = true,
     val isLoadingMoreSessions: Boolean = false,
     val isRefreshingSessions: Boolean = false,
-    val messageLimit: Int = 30,
         val pendingPermissions: List<PermissionRequest> = emptyList(),
         val pendingQuestions: List<QuestionRequest> = emptyList()
     ) {
@@ -246,7 +244,6 @@ data class AppState(
             hasMoreSessions = hasMoreSessions,
             isLoadingMoreSessions = isLoadingMoreSessions,
             isRefreshingSessions = isRefreshingSessions,
-            messageLimit = messageLimit,
             pendingPermissions = pendingPermissions,
             pendingQuestions = pendingQuestions
         )
@@ -421,17 +418,6 @@ class MainViewModel @Inject constructor(
      * server response does not loop the watchdog.
      */
     @Volatile private var lastSseProgressAtMs: Long = 0L
-    /**
-     * §OOM/churn: throttle for the message.updated-driven full message reload.
-     * During a busy streaming session the server emits message.updated on every
-     * delta; reloading 30 messages × full tool output on each one caused a ~3s
-     * reload loop that churned the heap to OOM (ADB-confirmed). Live token text
-     * already arrives via streamingPartTexts (message.part.updated delta), so
-     * the full reload only needs to re-sync structure occasionally. Bounded here
-     * to once per [STREAMING_RELOAD_MIN_INTERVAL_MS]; resetLimit reloads (new
-     * message / busy→idle / first open) bypass this via their own call paths.
-     */
-    @Volatile private var lastStreamingReloadAt: Long = 0L
 
     /**
      * §15.2: guards the very first [AppLifecycleMonitor.isInForeground]
@@ -453,20 +439,6 @@ class MainViewModel @Inject constructor(
      */
     private var watchdogJob: Job? = null
 
-    /**
-     * §15.1 debounced message-refresh signal. SSE `message.updated` events
-     * for the current session push `Unit` here; a single coroutine debounces
-     * by 500ms then issues one [loadMessagesWithRetry]. `selectSession` and
-     * [sendMessage] bypass the trigger and call [loadMessages]/refresh
-     * directly so first-paint latency is unaffected. `replay=0` so a slow
-     * collector never re-replays old refresh ticks; `extraBufferCapacity=1`
-     * so [tryEmit] never drops+logs when the debounce is mid-coalesce.
-     */
-    private val messagesRefreshTrigger = MutableSharedFlow<Unit>(
-        replay = 0,
-        extraBufferCapacity = 1
-    )
-
     init {
         loadSettings()
         // §15.2: foreground/background hook (N8 — onEach+launchIn, NOT a
@@ -474,34 +446,6 @@ class MainViewModel @Inject constructor(
         appLifecycleMonitor.isInForeground
             .onEach { onForegroundChanged(it) }
             .launchIn(viewModelScope)
-
-        // §15.1: single debounced message-refresh pipeline. Sibling events
-        // (message.updated bursts during streaming) coalesce into one reload.
-        // CoroutineStart.UNDISPATCHED ensures the SharedFlow subscription is
-        // registered synchronously inside `init`, before any caller can fire
-        // `messagesRefreshTrigger.tryEmit`. Without this, the very first
-        // message.updated event (arriving on the same dispatcher tick as
-        // ViewModel construction) would be emitted to an empty subscriber
-        // set with replay=0 and silently dropped.
-        viewModelScope.launch(start = CoroutineStart.UNDISPATCHED) {
-            messagesRefreshTrigger
-                .debounce(MESSAGE_REFRESH_DEBOUNCE_MS)
-                .collect {
-                    val sessionId = _state.value.currentSessionId ?: return@collect
-                    // §OOM/churn throttle: message.updated fires on every streaming
-                    // delta; without this guard the debounced reload loops every
-                    // few seconds, each loading 30 msgs × full tool output and
-                    // churning the heap to OOM. Live text comes via
-                    // streamingPartTexts; this reload only re-syncs structure, so
-                    // bounding it to once per STREAMING_RELOAD_MIN_INTERVAL_MS is
-                    // safe. Reset paths (created/idle/first-open) bypass this
-                    // collector entirely.
-                    val now = System.currentTimeMillis()
-                    if (now - lastStreamingReloadAt < STREAMING_RELOAD_MIN_INTERVAL_MS) return@collect
-                    lastStreamingReloadAt = now
-                    loadMessagesWithRetry(sessionId, resetLimit = false)
-                }
-        }
 
         // §18.1: mirror state.error into the notification module so it can
         // surface a system notification when we are in the background.
@@ -624,9 +568,6 @@ class MainViewModel @Inject constructor(
         sseJob = null
         stopStreamWatchdog()
         lastSseProgressAtMs = 0L
-        // Reset the streaming-reload throttle so the next session's first
-        // message.updated doesn't wait out the interval.
-        lastStreamingReloadAt = 0L
     }
 
     /**
@@ -1248,7 +1189,6 @@ class MainViewModel @Inject constructor(
             it.copy(
                 currentSessionId = null,
                 messages = emptyList(),
-                messageLimit = 30,
                 inputText = "",
                 imageAttachments = emptyList(),
                 sessionTodos = emptyMap(),
@@ -1665,10 +1605,6 @@ class MainViewModel @Inject constructor(
             onLoadPendingPermissions = ::loadPendingPermissions,
             onNonFatalIssue = { message -> reportNonFatalIssue(TAG, message) },
             // §15.1: `message.updated` for the current session pushes into the
-            // debounced trigger (500ms coalescing) instead of issuing a reload
-            // per event. selectSession/sendMessage bypass this directly.
-            onMessagesRefreshTriggered = { messagesRefreshTrigger.tryEmit(Unit) },
-            // §15.1.4: any per-current-session SSE progress refreshes the
             // watchdog's "last seen alive" timestamp.
             onLastSseProgress = { lastSseProgressAtMs = System.currentTimeMillis() },
             // §15.1.4 watchdog lifecycle: busy -> start (any -> busy counts),
@@ -1688,12 +1624,6 @@ class MainViewModel @Inject constructor(
         private const val TAG = "MainViewModel"
 
         /**
-         * §15.1 `message.updated` coalesce window. A burst of streaming
-         * updates collapses into one reload after this quiet period.
-         */
-        private const val MESSAGE_REFRESH_DEBOUNCE_MS = 500L
-
-        /**
          * §15.1.4 watchdog polling interval and "no progress" threshold.
          * The watchdog wakes every [WATCHDOG_INTERVAL_MS]; if no SSE event
          * has touched `lastSseProgressAtMs` within [WATCHDOG_STALE_MS] while
@@ -1706,12 +1636,5 @@ class MainViewModel @Inject constructor(
         // recovers from genuine stalls, but cuts the worst-case reload rate
         // 12/min → 4/min. Full fix = cursor pagination + SSE-incremental trust.
         private const val WATCHDOG_STALE_MS = 15_000L
-        /**
-         * Minimum interval between message.updated-driven full message reloads.
-         * See [lastStreamingReloadAt]. Live token text arrives via
-         * streamingPartTexts, so a 10s structural re-sync is plenty; this bounds
-         * the heap churn that caused the ~3s reload-loop OOM.
-         */
-        private const val STREAMING_RELOAD_MIN_INTERVAL_MS = 10_000L
     }
 }

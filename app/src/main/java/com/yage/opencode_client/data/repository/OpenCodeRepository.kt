@@ -29,10 +29,19 @@ import javax.inject.Singleton
 import com.yage.opencode_client.util.TrafficTracker
 
 /**
- * Hard cap on any single HTTP response body (32 MB). See the §OOM P0 interceptor
- * in [OpenCodeRepository.buildOkHttpClient] for why this exists.
+ * Hard cap on any single HTTP response body (16 MB).
+ *
+ * Rationale (0.1.13, gpter review #5): on a 256 MB heap the kotlinx-serialization
+ * converter reads the whole body into a byte array, then decodes into a String
+ * (~2× memory), so a 32 MB cap can still allocate ~96 MB during conversion.
+ * 16 MB gives a ~48 MB worst-case allocation while still accommodating sessions
+ * with very large tool outputs.  Beyond 16 MB the server should use cursor
+ * pagination (which we already support), making this a signalling cap rather than
+ * an everyday limit.
+ *
+ * See the §OOM P0 interceptor in [OpenCodeRepository.buildOkHttpClient].
  */
-private const val MAX_RESPONSE_BYTES = 32L * 1024 * 1024
+private const val MAX_RESPONSE_BYTES = 16L * 1024 * 1024
 
 /**
  * One page of cursor-paginated messages. [nextCursor] is the opaque V1 cursor
