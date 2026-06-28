@@ -127,29 +127,12 @@ internal fun ChatMessageList(
         }
     }
 
-    // reverseLayout=true: highest index = visual top (oldest). Reading
-    // listState.layoutInfo *inside* derivedStateOf (rather than capturing it as
-    // a local val outside) lets the snapshot system track the read so the
-    // predicate actually re-evaluates on scroll. The param-dependent guards
-    // (isLoading / messages.size / hasMoreMessages) live in the LaunchedEffect
-    // key, so pagination re-checks fire whenever they change. Dedup/continuation
-    // is safe: loadMoreMessages already guards on isLoadingMessages, and
-    // hasMoreMessages turns false once the server returns a short page (no
-    // nextCursor). Using hasMoreMessages (not a messageLimit threshold) means a
-    // small initial page (limit=2) can still trigger history loading on scroll.
-    val nearTop = remember {
-        derivedStateOf {
-            val info = listState.layoutInfo
-            val visible = info.visibleItemsInfo
-            if (visible.isEmpty()) false
-            else (visible.maxOfOrNull { it.index } ?: 0) >= info.totalItemsCount - 3
-        }
-    }
-    LaunchedEffect(nearTop.value, isLoading, messages.size, hasMoreMessages) {
-        if (!isLoading && messages.isNotEmpty() && hasMoreMessages && nearTop.value) {
-            onLoadMore()
-        }
-    }
+    // History paging is manual (not scroll-triggered): on session open the
+    // latest 5 messages load; a "load more" button at the top (oldest end)
+    // fetches 5 older messages per click. This avoids the auto-loadMore loop
+    // that occurred when a scroll/nearTop trigger fired on the short initial
+    // page, and matches the product decision that most users rarely need deep
+    // history. Messages are not persisted — re-fetched fresh on each open.
 
     LazyColumn(
         state = listState,
@@ -189,13 +172,26 @@ internal fun ChatMessageList(
                 onToggleExpand = onToggleExpand
             )
         }
-        if (isLoading && messages.isNotEmpty() && hasMoreMessages) {
-            item(key = "load-more-indicator") {
+        if (messages.isNotEmpty() && hasMoreMessages) {
+            item(key = "load-more") {
+                // Manual history paging: click to fetch 5 older messages.
+                // Spinner while a fetch is in flight; otherwise a tappable label.
                 Box(
                     modifier = Modifier.fillMaxWidth().padding(16.dp),
                     contentAlignment = Alignment.Center
                 ) {
-                    CircularProgressIndicator(modifier = Modifier.size(24.dp))
+                    if (isLoading) {
+                        CircularProgressIndicator(modifier = Modifier.size(24.dp))
+                    } else {
+                        Text(
+                            text = "加载更多历史",
+                            style = MaterialTheme.typography.labelLarge,
+                            color = MaterialTheme.colorScheme.primary,
+                            modifier = Modifier
+                                .clickable(onClick = onLoadMore)
+                                .padding(horizontal = 16.dp, vertical = 8.dp)
+                        )
+                    }
                 }
             }
         }

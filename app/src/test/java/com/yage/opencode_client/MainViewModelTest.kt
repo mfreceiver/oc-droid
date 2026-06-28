@@ -1118,7 +1118,7 @@ class MainViewModelTest {
                 )
             )
         )
-        coEvery { repository.getMessagesPaged("session-1", 2, any()) } returns Result.success(MessagesPage(messages, null))
+        coEvery { repository.getMessagesPaged("session-1", 5, any()) } returns Result.success(MessagesPage(messages, null))
 
         val viewModel = createViewModel()
         updateState(viewModel) { it.copy(currentSessionId = "session-1") }
@@ -1317,7 +1317,7 @@ class MainViewModelTest {
     @Test
     fun `handleSSEEvent missing delta clears streaming state and refreshes messages`() = runTest {
         val messages = listOf(MessageWithParts(info = Message(id = "a2", role = "assistant")))
-        coEvery { repository.getMessagesPaged("session-1", 2, any()) } returns Result.success(MessagesPage(messages, null))
+        coEvery { repository.getMessagesPaged("session-1", 5, any()) } returns Result.success(MessagesPage(messages, null))
         val viewModel = createViewModel()
         updateState(viewModel) {
             it.copy(
@@ -1636,7 +1636,7 @@ class MainViewModelTest {
     @Test
     fun `handleSSEEvent message created refreshes messages for current session`() = runTest {
         val messages = listOf(MessageWithParts(info = Message(id = "m1", role = "assistant")))
-        coEvery { repository.getMessagesPaged("session-1", 2, any()) } returns Result.success(MessagesPage(messages, null))
+        coEvery { repository.getMessagesPaged("session-1", 5, any()) } returns Result.success(MessagesPage(messages, null))
         coEvery { repository.getSessions(100) } returns Result.success(
             listOf(com.yage.opencode_client.data.model.Session(id = "session-1", directory = "/tmp/project"))
         )
@@ -1669,7 +1669,7 @@ class MainViewModelTest {
         // else the partial overlay would mask the finalized part.text in the UI.
         val finalizedPart = Part(id = "p1", messageId = "m1", sessionId = "session-1", type = "text", text = "Hello world!")
         val messages = listOf(MessageWithParts(info = Message(id = "m1", role = "assistant"), parts = listOf(finalizedPart)))
-        coEvery { repository.getMessagesPaged("session-1", 2, any()) } returns Result.success(MessagesPage(messages, null))
+        coEvery { repository.getMessagesPaged("session-1", 5, any()) } returns Result.success(MessagesPage(messages, null))
 
         val viewModel = createViewModel()
         updateState(viewModel) {

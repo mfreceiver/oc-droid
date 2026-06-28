@@ -239,7 +239,7 @@ internal fun launchLoadMessages(
         // X-Next-Cursor for future loadMore; subsequent periodic reloads fetch the
         // latest window only and preserve the cursor so scrolled history stays
         // loadable.
-        repository.getMessagesPaged(sessionId, 2, before = null)
+        repository.getMessagesPaged(sessionId, 5, before = null)
             .onSuccess { page ->
                 if (sessionId == state.value.currentSessionId) {
                     val lastAssistant = page.items.lastOrNull { it.info.isAssistant }
@@ -368,7 +368,7 @@ internal fun launchLoadMoreMessages(
     // fetch of the same cursor page.
     state.update { it.copy(isLoadingMessages = true) }
     scope.launch {
-        repository.getMessagesPaged(sessionId, limit = 200, before = cursor)
+        repository.getMessagesPaged(sessionId, limit = 5, before = cursor)
             .onSuccess { page ->
                 if (sessionId == state.value.currentSessionId) {
                     if (page.items.isNotEmpty()) {
@@ -404,6 +404,10 @@ internal fun launchLoadMoreMessages(
                 if (sessionId == state.value.currentSessionId) {
                     reportNonFatalIssue("MainViewModel", "Failed to load more messages")
                 }
+                // Manual paging: no auto-retry/loop. Keep hasMoreMessages so the
+                // user can tap "load more" again (transient failures shouldn't
+                // permanently disable history). With limit=5 a page is tiny, so
+                // hitting the 16 MB response cap is essentially impossible.
                 state.update { it.copy(isLoadingMessages = false) }
             }
     }
