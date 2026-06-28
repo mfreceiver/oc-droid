@@ -1662,6 +1662,7 @@ class MainViewModel @Inject constructor(
         _state.update {
             it.copy(
                 fileBrowserOpen = false,
+                fileBrowserWorkdir = null,
                 filePathToShowInFiles = null,
                 filePreviewOriginRoute = null
             )
