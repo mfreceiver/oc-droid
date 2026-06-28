@@ -77,6 +77,15 @@ class SettingsManager @Inject constructor(
         get() = encryptedPrefs.getString(KEY_SESSION_ID, null)
         set(value) = encryptedPrefs.edit().putString(KEY_SESSION_ID, value).apply()
 
+    /**
+     * Index of the last-opened top-level page in the phone HorizontalPager
+     * (0=Chat, 1=Sessions, 2=Files, 3=Settings). Restored on cold start so the
+     * user lands back on the screen they last used instead of always Chat.
+     */
+    var lastNavPage: Int
+        get() = encryptedPrefs.getInt(KEY_LAST_NAV_PAGE, 0).coerceIn(0, 3)
+        set(value) = encryptedPrefs.edit().putInt(KEY_LAST_NAV_PAGE, value.coerceIn(0, 3)).apply()
+
     var selectedAgentName: String?
         get() = encryptedPrefs.getString(KEY_AGENT_NAME, null)
         set(value) = encryptedPrefs.edit().putString(KEY_AGENT_NAME, value).apply()
@@ -219,6 +228,7 @@ class SettingsManager @Inject constructor(
         private const val KEY_HOST_PROFILES = "host_profiles_json"
         private const val KEY_CURRENT_HOST_PROFILE_ID = "current_host_profile_id"
         private const val KEY_SESSION_ID = "session_id"
+        private const val KEY_LAST_NAV_PAGE = "last_nav_page"
         private const val KEY_AGENT_NAME = "agent_name"
         private const val KEY_THEME = "theme"
         private const val KEY_LANGUAGE = "language"

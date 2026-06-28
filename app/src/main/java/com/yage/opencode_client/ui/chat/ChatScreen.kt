@@ -162,7 +162,7 @@ fun ChatScreen(
                 .weight(1f)
                 .fillMaxWidth()
                 .then(if (isWide) Modifier.padding(8.dp) else Modifier),
-            color = if (isWide) MaterialTheme.colorScheme.surface else Color.Transparent,
+            color = if (isWide) MaterialTheme.colorScheme.surface else MaterialTheme.colorScheme.background,
             shape = cardShape,
             shadowElevation = if (isWide) 2.dp else 0.dp,
             tonalElevation = if (isWide) 1.dp else 0.dp

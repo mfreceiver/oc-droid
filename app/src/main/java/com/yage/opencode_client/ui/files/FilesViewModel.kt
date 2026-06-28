@@ -126,7 +126,7 @@ class FilesViewModel @Inject constructor(
 
     private suspend fun loadDirectoryPreview(path: String, relPath: String, isRefresh: Boolean = false) {
         repository.getFileTree(relPath)
-            .onSuccess { tree -> setDirectoryPreview(path, relPath, tree) }
+            .onSuccess { tree -> setDirectoryPreview(path, relPath, tree.filterNot { f -> f.name.startsWith(".") }) }
             .onFailure { throwable ->
                 _state.update {
                     it.copy(
@@ -144,7 +144,7 @@ class FilesViewModel @Inject constructor(
                 .onSuccess { tree ->
                     _state.update {
                         it.copy(
-                            files = tree,
+                            files = tree.filterNot { f -> f.name.startsWith(".") },
                             isLoading = false
                         )
                     }

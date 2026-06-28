@@ -50,6 +50,8 @@ data class AppState(
     val isRefreshingSessions: Boolean = false,
     val expandedSessionIds: Set<String> = emptySet(),
     val currentSessionId: String? = null,
+    // Q6: persisted last-opened phone pager page (0=Chat...3=Settings).
+    val lastNavPage: Int = 0,
     val sessionStatuses: Map<String, SessionStatus> = emptyMap(),
     val messages: List<MessageWithParts> = emptyList(),
     val messageLimit: Int = 30,
@@ -175,7 +177,7 @@ data class AppState(
 
     data class SessionState(
         val sessions: List<Session> = emptyList(),
-        val currentSessionId: String? = null,
+    val currentSessionId: String? = null,
         val sessionStatuses: Map<String, SessionStatus> = emptyMap(),
         val expandedSessionIds: Set<String> = emptySet(),
         val loadedSessionLimit: Int = MainViewModelTimings.sessionPageSize,
@@ -624,6 +626,14 @@ class MainViewModel @Inject constructor(
 
     private fun loadSettings() {
         applySavedSettings(repository, settingsManager, hostProfileStore, _state)
+    }
+
+    /** Q6: persist the phone pager page the user navigated to, so cold start lands there. */
+    fun setLastNavPage(page: Int) {
+        val clamped = page.coerceIn(0, 3)
+        if (_state.value.lastNavPage == clamped) return
+        settingsManager.lastNavPage = clamped
+        _state.update { it.copy(lastNavPage = clamped) }
     }
 
     fun configureServer(url: String, username: String? = null, password: String? = null) {
@@ -1522,9 +1532,28 @@ class MainViewModel @Inject constructor(
     fun activateTunnelForCurrentHost() {
         val profile = hostProfileStore.currentProfile()
         val passwordId = profile.tunnelPasswordId
-        if (passwordId == null) return
+        // Surface WHY activation can't proceed instead of silently returning —
+        // otherwise the user taps "Activate Tunnel" and nothing happens with no
+        // clue. The HTTP-failure path (below) already carries code+body detail.
+        if (passwordId == null) {
+            _state.update {
+                it.copy(
+                    tunnelActivationState = TunnelActivationState.Error("未设置隧道密码"),
+                    error = "隧道激活失败：未设置隧道认证密码。请在「服务器」设置中填写隧道密码并保存后再试。"
+                )
+            }
+            return
+        }
         val password = settingsManager.getTunnelPassword(passwordId)
-        if (password.isNullOrBlank()) return
+        if (password.isNullOrBlank()) {
+            _state.update {
+                it.copy(
+                    tunnelActivationState = TunnelActivationState.Error("隧道密码为空"),
+                    error = "隧道激活失败：已配置密码标识但存储为空（可能保存时未输入）。请重新输入隧道密码并保存。"
+                )
+            }
+            return
+        }
 
         _state.update { it.copy(tunnelActivationState = TunnelActivationState.Loading) }
         viewModelScope.launch {

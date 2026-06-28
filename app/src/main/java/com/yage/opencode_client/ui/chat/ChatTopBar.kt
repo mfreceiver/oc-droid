@@ -144,7 +144,7 @@ internal data class ChatTopBarActions(
  * title from pushing the actions cluster. Session switching lives in the
  * persistent second-row tab strip (§17, [SessionTabStrip]).
  */
-private val TITLE_SLOT_MAX_WIDTH = 240.dp
+private val TITLE_SLOT_MAX_WIDTH = 340.dp
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -207,7 +207,7 @@ internal fun ChatTopBar(
                             color = oc.faint
                         )
                         Text(
-                            text = truncateTitle(currentTitle),
+                            text = currentTitle,
                             style = MaterialTheme.typography.labelMedium,
                             color = MaterialTheme.colorScheme.onSurface,
                             maxLines = 1,
@@ -245,7 +245,7 @@ internal fun ChatTopBar(
                         modifier = Modifier.widthIn(max = TITLE_SLOT_MAX_WIDTH)
                     ) {
                         Text(
-                            text = truncateTitle(currentSession?.displayName ?: "—"),
+                            text = currentSession?.displayName ?: "—",
                             style = MaterialTheme.typography.titleLarge,
                             color = MaterialTheme.colorScheme.onSurface,
                             maxLines = 1,

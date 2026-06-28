@@ -218,12 +218,11 @@ fun SessionsScreen(
                                 )
                             }
                             // Create-session affordance for this workdir. Tapping
-                            // it opens a fresh draft against this directory and
-                            // jumps to the chat page so the user can compose.
+                            // it opens a fresh draft against this directory. The
+                            // user stays on the Sessions page to pick or compose.
                             IconButton(
                                 onClick = {
                                     viewModel.createSessionInWorkdir(workdir)
-                                    onSwitchToChat()
                                 },
                                 modifier = Modifier.size(32.dp)
                             ) {
@@ -298,9 +297,6 @@ fun SessionsScreen(
             onSelect = { path ->
                 showNewWorkdirDialog = false
                 viewModel.createSessionInWorkdir(path)
-                // Jump to the chat page so the user can immediately compose
-                // the first message that will materialise the draft session.
-                onSwitchToChat()
             }
         )
     }

@@ -86,6 +86,7 @@ fun DirectoryPickerSheet(
             .onSuccess { tree ->
                 entries = tree
                     .filter { it.isDirectory }
+                    .filterNot { it.name.startsWith(".") }
                     .sortedBy { it.name.lowercase() }
                 isLoading = false
             }

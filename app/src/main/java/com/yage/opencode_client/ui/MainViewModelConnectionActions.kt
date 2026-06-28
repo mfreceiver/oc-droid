@@ -25,6 +25,7 @@ internal fun applySavedSettings(
     state.update {
         it.copy(
             currentSessionId = settingsManager.currentSessionId,
+            lastNavPage = settingsManager.lastNavPage,
             hostProfiles = hostProfileStore.profiles(),
             currentHostProfileId = currentProfile.id,
             selectedAgentName = settingsManager.selectedAgentName ?: "build",

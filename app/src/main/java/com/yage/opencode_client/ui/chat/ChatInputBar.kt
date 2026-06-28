@@ -128,7 +128,7 @@ internal fun ChatInputBar(
     // §9: composer card — rounded 10, surface (bg-base), 2dp elevation.
     Surface(
         modifier = Modifier.fillMaxWidth().imePadding(),
-        color = MaterialTheme.colorScheme.surface,
+        color = oc.layer02,
         shape = RoundedCornerShape(10.dp),
         shadowElevation = 2.dp
     ) {

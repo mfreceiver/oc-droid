@@ -397,7 +397,17 @@ internal fun HostProfileEditorDialog(
                         tunnelEdited = true
                         tunnelPassword = it
                     },
-                    placeholder = { Text("（可选）") },
+                    placeholder = {
+                        // When a tunnel password is already stored for this host
+                        // (and the user hasn't started editing), show masked dots
+                        // so reopening the editor doesn't look like the credential
+                        // vanished. The field stays write-only (the actual password
+                        // is never echoed back), but the dots signal "data present".
+                        Text(
+                            if (initial.tunnelPasswordId != null && !tunnelEdited) "••••••••"
+                            else "（可选）"
+                        )
+                    },
                     singleLine = true,
                     modifier = Modifier.fillMaxWidth(),
                     visualTransformation = if (showTunnelPassword) VisualTransformation.None else PasswordVisualTransformation(),

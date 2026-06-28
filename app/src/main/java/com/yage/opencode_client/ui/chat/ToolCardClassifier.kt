@@ -56,6 +56,35 @@ object ToolCardClassifier {
      */
     val readToolPrefixes = listOf("read_file", "read")
 
+    // ── opencode-web paradigm classifiers ──────────────────────────────
+
+    /** Context tools: read-only file inspection (read/glob/grep/list). */
+    val contextToolPrefixes = listOf("read_file", "read", "glob", "grep", "list")
+
+    /** True for read-only context tools (not writes, not patches). */
+    fun isContextTool(part: Part): Boolean {
+        if (part.isPatch) return false
+        if (!part.isTool) return false
+        val tool = part.tool?.lowercase() ?: return false
+        if (writeFilePrefixes.any { tool.startsWith(it) }) return false
+        return contextToolPrefixes.any { tool.startsWith(it) }
+    }
+
+    /** Category of a context tool for grouping/counting in ContextToolGroup. */
+    enum class ContextCategory { READ, SEARCH, LIST }
+
+    fun contextToolCategory(part: Part): ContextCategory {
+        val tool = part.tool?.lowercase() ?: return ContextCategory.READ
+        return when {
+            tool.startsWith("glob") || tool.startsWith("grep") -> ContextCategory.SEARCH
+            tool.startsWith("list") -> ContextCategory.LIST
+            else -> ContextCategory.READ
+        }
+    }
+
+    fun isTodoWriteTool(part: Part): Boolean =
+        part.isTool && part.tool?.lowercase() == "todowrite"
+
     /**
      * True when this part is a `read` whose tool output reports a directory.
      * The server embeds `<type>directory</type>` in the read output for a folder

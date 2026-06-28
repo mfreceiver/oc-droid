@@ -19,6 +19,7 @@ import com.yage.opencode_client.data.repository.OpenCodeRepository
 import com.yage.opencode_client.di.AppLifecycleMonitor
 import com.yage.opencode_client.ui.AppState
 import com.yage.opencode_client.ui.MainViewModel
+import com.yage.opencode_client.ui.TunnelActivationState
 import com.yage.opencode_client.ui.session.buildSessionTree
 import com.yage.opencode_client.util.SettingsManager
 import com.yage.opencode_client.util.ThemeMode
@@ -1588,20 +1589,22 @@ class MainViewModelTest {
     }
 
     @Test
-    fun `activateTunnelForCurrentHost no-ops when profile has no tunnelPasswordId`() = runTest {
+    fun `activateTunnelForCurrentHost surfaces error when profile has no tunnelPasswordId`() = runTest {
         val viewModel = createViewModel()
         advanceUntilIdle()
 
-        val initialState = viewModel.state.value
         viewModel.activateTunnelForCurrentHost()
         advanceUntilIdle()
 
-        assertEquals(initialState, viewModel.state.value)
+        // Does not call the repository, but now surfaces a specific error so the
+        // user knows why activation did nothing (previously a silent no-op).
         coVerify(exactly = 0) { repository.activateTunnel(any(), any()) }
+        assertTrue(viewModel.state.value.tunnelActivationState is TunnelActivationState.Error)
+        assertNotNull(viewModel.state.value.error)
     }
 
     @Test
-    fun `activateTunnelForCurrentHost no-ops when tunnel password is empty`() = runTest {
+    fun `activateTunnelForCurrentHost surfaces error when tunnel password is empty`() = runTest {
         val profileWithTunnel = HostProfile.defaultDirect("http://server.test").copy(
             tunnelPasswordId = "profile-1"
         )
@@ -1615,6 +1618,8 @@ class MainViewModelTest {
         advanceUntilIdle()
 
         coVerify(exactly = 0) { repository.activateTunnel(any(), any()) }
+        assertTrue(viewModel.state.value.tunnelActivationState is TunnelActivationState.Error)
+        assertNotNull(viewModel.state.value.error)
     }
 
     @Test

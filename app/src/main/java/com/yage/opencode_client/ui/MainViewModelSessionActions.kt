@@ -45,10 +45,16 @@ internal fun launchLoadSessions(
                         isRefreshingSessions = false
                     )
                 }
-                // Clean stale session IDs from openSessionIds after sessions are loaded
+                // Clean stale session IDs from openSessionIds after sessions are loaded.
+                // Q6: only clean when the FULL session list is loaded
+                // (!hasMoreSessions). getSessions() returns a single page; cleaning
+                // against a partial page would wipe tabs pointing to older sessions
+                // beyond the first page — making recent tabs vanish on every restart
+                // and forcing the user to reopen them from the Sessions page.
                 val loadedSessionIds = state.value.sessions.map { s -> s.id }.toSet()
-                val cleanedOpen = settingsManager.openSessionIds.filter { it in loadedSessionIds }
-                if (cleanedOpen.size != settingsManager.openSessionIds.size) {
+                val prevOpen = settingsManager.openSessionIds
+                val cleanedOpen = prevOpen.filter { it in loadedSessionIds }
+                if (cleanedOpen.size != prevOpen.size && !state.value.hasMoreSessions) {
                     settingsManager.openSessionIds = cleanedOpen
                     state.update { it.copy(openSessionIds = cleanedOpen) }
                 }

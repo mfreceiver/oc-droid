@@ -213,6 +213,19 @@ internal fun ChatMessageList(
     }
 }
 
+/**
+ * Classification of a single tool/patch part for ordered rendering within a
+ * contiguous tool run. Built in a pure-data phase (no @Composable calls) so a
+ * local helper fun can buffer context tools; emitted afterwards in @Composable
+ * context. See [MessageRow].
+ */
+private sealed class ToolRenderItem {
+    data class ContextGroup(val parts: List<Part>) : ToolRenderItem()
+    data class SubAgent(val part: Part) : ToolRenderItem()
+    data class WritePatch(val part: Part) : ToolRenderItem()
+    data class Basic(val part: Part) : ToolRenderItem()
+}
+
 @Composable
 private fun MessageRow(
     message: MessageWithParts,
@@ -240,10 +253,13 @@ private fun MessageRow(
             val streamingText = streamingPartTexts["${message.info.id}:${part.id}"]
             val isToolLike = part.isTool || (part.isPatch && part.filePathsForNavigationFiltered.isNotEmpty())
             if (isToolLike) {
-                // Buffer a contiguous run of tool/patch parts, then split it via
-                // ToolCardClassifier into file ops (→ 2-column file-card grid) and
-                // everything else (→ a single merged "N tool calls" row). Layout-first
-                // near-time order: file cards cluster, other tools cluster.
+                // Buffer a contiguous run of tool/patch parts, then classify and
+                // render each according to the opencode-web paradigm:
+                //  - todowrite → hidden (todos live in the toolbar panel)
+                //  - task → SubAgentCard (the only bordered card)
+                //  - context tools (read/glob/grep/list) → ContextToolGroup
+                //  - write file ops → PatchCard / MultiFilePatchAccordion
+                //  - everything else → BasicTool (borderless single line)
                 val run = mutableListOf<Part>()
                 var j = i
                 while (j < message.parts.size) {
@@ -254,83 +270,77 @@ private fun MessageRow(
                     } else break
                 }
 
-                val (fileParts, otherParts) = ToolCardClassifier.split(run)
+                // Phase 1: classify the run into ordered render items, buffering
+                // consecutive context tools (read/glob/grep/list) into a single
+                // ContextGroup. Pure data ops only — no @Composable calls — so a
+                // local helper fun is legal (a @Composable local fun is not).
+                val items = mutableListOf<ToolRenderItem>()
+                var ctxBuffer = mutableListOf<Part>()
+                fun closeContext() {
+                    if (ctxBuffer.isNotEmpty()) {
+                        items.add(ToolRenderItem.ContextGroup(ctxBuffer.toList()))
+                        ctxBuffer = mutableListOf()
+                    }
+                }
+                for (p in run) {
+                    when {
+                        // Rule 1: todowrite → hidden (todos live in the toolbar panel)
+                        ToolCardClassifier.isTodoWriteTool(p) -> { /* no-op */ }
+                        // Rule 2: task (sub-agent) → SubAgentCard
+                        p.isSubAgentTask -> { closeContext(); items.add(ToolRenderItem.SubAgent(p)) }
+                        // Rule 3: context tools → buffer for grouping
+                        ToolCardClassifier.isContextTool(p) -> ctxBuffer.add(p)
+                        // Rule 6: write file ops → PatchCard / MultiFilePatchAccordion
+                        ToolCardClassifier.isWriteFileOperation(p) -> { closeContext(); items.add(ToolRenderItem.WritePatch(p)) }
+                        // Rules 4,5,7: bash/webfetch/websearch/other → BasicTool
+                        else -> { closeContext(); items.add(ToolRenderItem.Basic(p)) }
+                    }
+                }
+                closeContext()
 
-                // File operations split further into writes (-> stacked collapsible
-                // PatchCards with diff stats) and reads (-> the existing 2-column
-                // FileCard grid). Writes carry the visual weight of "the agent
-                // edited something" so they get the unified card skeleton; reads
-                // stay compact in the grid since they have no diff to summarize.
-                val (writeParts, readParts) = fileParts.partition { ToolCardClassifier.isWriteFileOperation(it) }
-
-                writeParts.forEach { writePart ->
-                    // §6 R-E: apply_patch is a single Part with an embedded
-                    // `files: List<FileChange>` — when it carries >1 file, render
-                    // a MultiFilePatchAccordion so every file gets its own row;
-                    // otherwise fall back to the single-file PatchCard. No callId
-                    // cross-Part matching (writeParts already aggregates).
-                    val writeFiles = writePart.files ?: emptyList()
-                    if (writeFiles.size > 1) {
-                        MultiFilePatchAccordion(
-                            parts = listOf(writePart),
-                            onFileClick = onFileClick,
+                // Phase 2: emit each item in @Composable context.
+                items.forEach { item ->
+                    when (item) {
+                        is ToolRenderItem.ContextGroup -> ContextToolGroup(
+                            parts = item.parts,
+                            expandedParts = expandedParts,
+                            onToggleExpand = onToggleExpand,
+                            messageId = message.info.id,
                             modifier = Modifier.widthIn(max = MAX_CARD_WIDTH)
                         )
-                    } else {
-                        PatchCard(
-                            part = writePart,
+                        is ToolRenderItem.SubAgent -> SubAgentCard(
+                            part = item.part,
+                            onOpenSubAgent = onOpenSubAgent,
+                            modifier = Modifier.widthIn(max = MAX_CARD_WIDTH)
+                        )
+                        is ToolRenderItem.WritePatch -> {
+                            val writeFiles = item.part.files ?: emptyList()
+                            if (writeFiles.size > 1) {
+                                MultiFilePatchAccordion(
+                                    parts = listOf(item.part),
+                                    onFileClick = onFileClick,
+                                    modifier = Modifier.widthIn(max = MAX_CARD_WIDTH)
+                                )
+                            } else {
+                                PatchCard(
+                                    part = item.part,
+                                    onFileClick = onFileClick,
+                                    expandedParts = expandedParts,
+                                    onToggleExpand = onToggleExpand,
+                                    expandedKey = "${message.info.id}|${item.part.id}",
+                                    modifier = Modifier.widthIn(max = MAX_CARD_WIDTH)
+                                )
+                            }
+                        }
+                        is ToolRenderItem.Basic -> BasicTool(
+                            part = item.part,
                             onFileClick = onFileClick,
                             expandedParts = expandedParts,
                             onToggleExpand = onToggleExpand,
-                            expandedKey = "${message.info.id}|${writePart.id}",
+                            expandedKey = "${message.info.id}|${item.part.id}",
                             modifier = Modifier.widthIn(max = MAX_CARD_WIDTH)
                         )
                     }
-                }
-
-                if (readParts.isNotEmpty()) {
-                    // Android can't nest LazyVGrid inside LazyColumn, so use the existing
-                    // chunked(2) + manual Row two-column layout (matches iPhone 2-up grid).
-                    readParts.chunked(2).forEach { chunk ->
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.spacedBy(8.dp)
-                        ) {
-                            chunk.forEach { p ->
-                                FileCard(
-                                    part = p,
-                                    onFileClick = onFileClick,
-                                    modifier = Modifier.weight(1f)
-                                )
-                            }
-                            if (chunk.size == 1) Spacer(modifier = Modifier.weight(1f))
-                        }
-                    }
-                }
-
-                // Sub-agent (`task`) cards render standalone so they stay visible
-                // and clickable even when bundled with other tools — burying them
-                // inside the collapsed "N tool calls" row would hide delegation
-                // events the user needs to see and tap into.
-                val (subAgentParts, plainToolParts) = otherParts.partition { it.isSubAgentTask }
-                subAgentParts.forEach { subPart ->
-                    SubAgentCard(
-                        part = subPart,
-                        onOpenSubAgent = onOpenSubAgent,
-                        modifier = Modifier.widthIn(max = MAX_CARD_WIDTH)
-                    )
-                }
-
-                if (plainToolParts.isNotEmpty()) {
-                    ToolCallsRow(
-                        parts = plainToolParts,
-                        onFileClick = onFileClick,
-                        onOpenSubAgent = onOpenSubAgent,
-                        messageId = message.info.id,
-                        expandedParts = expandedParts,
-                        onToggleExpand = onToggleExpand,
-                        modifier = Modifier.widthIn(max = MAX_CARD_WIDTH)
-                    )
                 }
 
                 i = j
@@ -975,23 +985,20 @@ private fun TodoListInline(
 
 /**
  * Card for `task` tool parts — sub-agent conversations spawned by the main
- * session. Renders under the unified collapsible-card skeleton:
+ * session. This is the **only** tool card that carries a border and background
+ * in the opencode-web paradigm (all other tools render as borderless single
+ * lines via [BasicTool] or [ContextToolGroup]).
  *
- *   [CallSplit/CheckCircle 14dp] 子任务[/完成]  @agentName  [status]  [>]
- *   ------------------------------------------------------------
- *   state.title (without the "(@xxx subagent)" suffix) + "→点击查看" link
+ * Single-line layout:
+ *   [spinner/Warning/—]  @agentName · description  [>]
+ *
+ * - running → spinner + agent name + description subtitle
+ * - done    → agent name + description (no status icon, no CheckCircle)
+ * - error   → Warning icon + agent name + description
  *
  * Tapping opens the child session in-place via [onOpenSubAgent]. When the
  * child session ID hasn't been assigned yet (task still running with no
  * metadata.sessionID), the card renders but is not clickable.
- *
- * Status mapping:
- *  - "running" → spinner (and CallSplit icon)
- *  - "error"   → Warning icon, red
- *  - other     → CheckCircle (and "子任务完成" title) when sessionId resolves
- *
- * Sub-agent display name is parsed from titles shaped like "(@planner subagent)"
- * or "Research (@research subagent)" and shown as the @name badge in the header.
  */
 @Composable
 private fun SubAgentCard(
@@ -1008,42 +1015,21 @@ private fun SubAgentCard(
     val subAgentName = remember(rawTitle, description) {
         parseSubAgentName(rawTitle) ?: parseSubAgentName(description)
     }
-    // Title with the "(@xxx subagent)" suffix stripped — that information lives
-    // in the @agentName badge in the header now, so the body shouldn't repeat it.
     val cleanTitle = remember(rawTitle, subAgentName) {
         stripSubAgentSuffix(rawTitle).ifBlank { description ?: rawTitle }
     }
 
-    // If the task tool's output carries a <task …> XML result, surface its
-    // state/result so a finished sub-agent reads as "completed" even before
-    // metadata.sessionID lands.
     val taskXml = remember(part.toolOutput) { parseTaskXml(part.toolOutput) }
 
     val status = part.stateDisplay
     val isRunning = status == "running" && taskXml?.state?.lowercase() != "completed"
     val isError = status == "error" || taskXml?.state?.lowercase() == "error"
-    val isDone = !isRunning && !isError &&
-        (sessionId != null || taskXml?.state?.lowercase() == "completed")
-
-    val headerTitle = when {
-        isDone -> stringResource(R.string.chat_sub_agent_done)
-        else -> stringResource(R.string.chat_sub_agent)
-    }
-    val headerIcon = if (isDone) Icons.Default.CheckCircle else Icons.AutoMirrored.Filled.CallSplit
 
     val canOpen = sessionId != null
-    val clickLabel = stringResource(R.string.chat_click_to_view)
-
     val tagSuffix = sessionId?.let { ".$it" } ?: ""
 
-    // §5.5 v2 sub-agent card: neutral transparent surface + borderBase + 6dp
-    // radius (was primary@6% + primary@25% border + 12dp). Icon and @agentName
-    // badge keep accentText so the row stays identifiable as "a sub-task" even
-    // without the blue fill. Status icons use stateSuccessFg / stateDangerFg.
     val oc = MaterialTheme.opencode
-    val statusDoneColor = oc.stateSuccessFg
     val statusErrorColor = oc.stateDangerFg
-    val headerIconTint = if (isError) statusErrorColor else oc.accentText
 
     Surface(
         modifier = modifier
@@ -1051,39 +1037,12 @@ private fun SubAgentCard(
             .testTag("toolcard.subagent$tagSuffix")
             .then(if (canOpen) Modifier.clickable { onOpenSubAgent(sessionId!!) } else Modifier),
         shape = RoundedCornerShape(6.dp),
-        color = androidx.compose.ui.graphics.Color.Transparent,
+        color = oc.layer02,
         border = BorderStroke(1.dp, oc.borderBase)
     ) {
-        Column(modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp)) {
+        Column(modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
-                Icon(
-                    headerIcon,
-                    contentDescription = null,
-                    modifier = Modifier.size(14.dp),
-                    tint = headerIconTint
-                )
-                Spacer(modifier = Modifier.width(6.dp))
-                Text(
-                    text = headerTitle,
-                    style = MaterialTheme.typography.labelMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier.weight(1f, fill = false)
-                )
-                if (subAgentName != null) {
-                    Spacer(modifier = Modifier.width(6.dp))
-                    // @agentName in accentText so the sub-task stays identifiable
-                    // without the old blue fill (评审修正).
-                    Text(
-                        text = "@$subAgentName",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = oc.accentText,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis
-                    )
-                }
-                Spacer(modifier = Modifier.weight(1f))
+                // Status icon: spinner while running, warning on error, nothing on done
                 when {
                     isRunning -> CircularProgressIndicator(
                         modifier = Modifier.size(14.dp),
@@ -1095,15 +1054,44 @@ private fun SubAgentCard(
                         modifier = Modifier.size(14.dp),
                         tint = statusErrorColor
                     )
-                    else -> Icon(
-                        Icons.Default.CheckCircle,
-                        contentDescription = "Sub-agent completed",
-                        modifier = Modifier.size(14.dp),
-                        tint = statusDoneColor
+                }
+                if (isRunning || isError) Spacer(modifier = Modifier.width(6.dp))
+
+                // Agent name in accent color
+                if (subAgentName != null) {
+                    Text(
+                        text = "@$subAgentName",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = oc.accentText,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
                     )
                 }
+
+                // Description as subtitle
+                val bodyTitle = cleanTitle.ifBlank { taskXml?.taskResult?.takeIf { it.isNotBlank() } }.orEmpty()
+                if (bodyTitle.isNotBlank()) {
+                    if (subAgentName != null) {
+                        Text(
+                            text = " · ",
+                            style = MaterialTheme.typography.labelMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                    Text(
+                        text = bodyTitle,
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.weight(1f)
+                    )
+                } else {
+                    Spacer(modifier = Modifier.weight(1f))
+                }
+
+                // Chevron to open sub-agent conversation
                 if (canOpen) {
-                    Spacer(modifier = Modifier.width(4.dp))
                     Icon(
                         Icons.Default.ChevronRight,
                         contentDescription = "Open sub-agent conversation",
@@ -1112,34 +1100,9 @@ private fun SubAgentCard(
                     )
                 }
             }
-            // Second line: task title (cleaned) + tap-to-view affordance. Hidden
-            // entirely when there's no title text to show (avoiding an empty row).
-            val bodyTitle = cleanTitle.ifBlank { taskXml?.taskResult?.takeIf { it.isNotBlank() } }.orEmpty()
-            if (bodyTitle.isNotBlank()) {
-                Row(
-                    modifier = Modifier
-                        .padding(top = 4.dp)
-                        .then(if (canOpen) Modifier.clickable { onOpenSubAgent(sessionId!!) } else Modifier),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Text(
-                        text = bodyTitle,
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        maxLines = 2,
-                        overflow = TextOverflow.Ellipsis,
-                        modifier = Modifier.weight(1f, fill = false)
-                    )
-                    if (isDone && canOpen) {
-                        Spacer(modifier = Modifier.width(6.dp))
-                        Text(
-                            text = "→$clickLabel",
-                            style = MaterialTheme.typography.labelSmall,
-                            color = oc.accentText
-                        )
-                    }
-                }
-            } else if (!isRunning && !isError && sessionId == null) {
+
+            // Waiting indicator when no session ID yet
+            if (!isRunning && !isError && sessionId == null) {
                 Text(
                     text = "waiting for sub-agent…",
                     style = MaterialTheme.typography.bodySmall,
@@ -1586,5 +1549,264 @@ private fun PatchCard(
                 }
             }
         }
+    }
+}
+
+// ── opencode-web paradigm: borderless single-line tool rows ──────────────
+
+/**
+ * Borderless single-line tool display for non-file-write, non-context, non-task
+ * tools (bash, webfetch, websearch, and everything else). Replaces the old
+ * bordered [ToolCard] and the merged [ToolCallsRow].
+ *
+ * Collapsed: `[chevron] [spinner] Title · subtitle`
+ * Expanded: indented output in monospace.
+ *
+ * - bash → "Shell · \<command\>", expandable to `$ <command>` + output
+ * - webfetch → "Web Fetch · \<url\>", never expandable
+ * - websearch → "Web Search · \<query\>", expandable to output
+ * - other → "Toolname · \<reason/inputSummary\>", expandable to output
+ */
+@Composable
+private fun BasicTool(
+    part: Part,
+    onFileClick: (String) -> Unit,
+    expandedParts: Map<String, Boolean>,
+    onToggleExpand: (String, Boolean) -> Unit,
+    expandedKey: String,
+    modifier: Modifier = Modifier.fillMaxWidth()
+) {
+    val toolName = part.tool ?: ""
+    val lowerTool = toolName.lowercase()
+    val status = part.stateDisplay
+    val isRunning = status == "running"
+    val isError = status == "error"
+    val expanded = expandedParts[expandedKey] ?: false
+
+    val oc = MaterialTheme.opencode
+
+    val isBash = lowerTool.startsWith("bash") || lowerTool.startsWith("terminal") ||
+        lowerTool.startsWith("cmd") || lowerTool.startsWith("shell")
+    val isWebFetch = lowerTool.startsWith("webfetch") || lowerTool.startsWith("web_fetch")
+    val isWebSearch = lowerTool.startsWith("websearch") || lowerTool.startsWith("web_search")
+
+    val title: String
+    val subtitle: String?
+    val canExpand: Boolean
+
+    when {
+        isBash -> {
+            title = "Shell"
+            subtitle = part.toolInputSummary?.take(80)
+            canExpand = true
+        }
+        isWebFetch -> {
+            title = "Web Fetch"
+            subtitle = part.toolInputSummary
+            canExpand = false
+        }
+        isWebSearch -> {
+            title = "Web Search"
+            subtitle = part.toolInputSummary
+            canExpand = true
+        }
+        else -> {
+            title = toolName.replaceFirstChar { c -> c.uppercase() }
+            subtitle = part.toolReason ?: part.toolInputSummary
+            canExpand = true
+        }
+    }
+
+    Column(modifier = modifier.padding(vertical = 2.dp)) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .then(
+                    if (canExpand) Modifier.clickable { onToggleExpand(expandedKey, expanded) }
+                    else Modifier
+                ),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            if (canExpand) {
+                Icon(
+                    if (expanded) Icons.Default.KeyboardArrowDown else Icons.Default.ChevronRight,
+                    contentDescription = if (expanded) "Collapse" else "Expand",
+                    modifier = Modifier.size(20.dp),
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f)
+                )
+                Spacer(modifier = Modifier.width(2.dp))
+            }
+            if (isRunning) {
+                CircularProgressIndicator(
+                    modifier = Modifier.size(14.dp),
+                    strokeWidth = 2.dp
+                )
+                Spacer(modifier = Modifier.width(4.dp))
+            }
+            Text(
+                text = title,
+                style = MaterialTheme.typography.labelMedium,
+                color = MaterialTheme.colorScheme.onSurface,
+                maxLines = 1
+            )
+            if (subtitle != null) {
+                Text(
+                    text = " · ",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Text(
+                    text = subtitle,
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f)
+                )
+            } else {
+                Spacer(modifier = Modifier.weight(1f))
+            }
+            if (isError) {
+                Icon(
+                    Icons.Default.Warning,
+                    contentDescription = "Tool error",
+                    modifier = Modifier.size(14.dp),
+                    tint = oc.stateDangerFg
+                )
+            }
+        }
+
+        // Expanded content
+        if (expanded && canExpand) {
+            Column(modifier = Modifier.padding(start = 12.dp, top = 4.dp)) {
+                // For bash: show `$ <command>` header
+                if (isBash) {
+                    val command = part.toolInputSummary
+                    if (!command.isNullOrEmpty()) {
+                        Text(
+                            text = "$ $command",
+                            style = MaterialTheme.typography.bodySmall,
+                            fontFamily = FontFamily.Monospace,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                }
+                // Show output
+                val output = part.toolOutput
+                if (!output.isNullOrEmpty()) {
+                    if (isBash) Spacer(modifier = Modifier.size(4.dp))
+                    Text(
+                        text = output,
+                        style = MaterialTheme.typography.bodySmall,
+                        fontFamily = FontFamily.Monospace,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            }
+        }
+    }
+}
+
+// ── opencode-web paradigm: merged context tool group ─────────────────────
+
+/**
+ * Collapsed single-line summary for a contiguous run of context tools
+ * (read / glob / grep / list). Replaces the old 2-column [FileCard] grid.
+ *
+ * Collapsed: `[spinner] Exploring · 3 reads, 2 searches` + chevron
+ * Expanded: each tool as an indented trigger row (title · subtitle).
+ */
+@Composable
+private fun ContextToolGroup(
+    parts: List<Part>,
+    expandedParts: Map<String, Boolean>,
+    onToggleExpand: (String, Boolean) -> Unit,
+    messageId: String,
+    modifier: Modifier = Modifier.fillMaxWidth()
+) {
+    val expandedKey = "${messageId}|ctx:${parts.first().id}"
+    val expanded = expandedParts[expandedKey] ?: false
+
+    val isRunning = parts.any { it.stateDisplay == "running" }
+
+    // Count by category
+    val readCount = parts.count { ToolCardClassifier.contextToolCategory(it) == ToolCardClassifier.ContextCategory.READ }
+    val searchCount = parts.count { ToolCardClassifier.contextToolCategory(it) == ToolCardClassifier.ContextCategory.SEARCH }
+    val listCount = parts.count { ToolCardClassifier.contextToolCategory(it) == ToolCardClassifier.ContextCategory.LIST }
+
+    val countParts = mutableListOf<String>()
+    if (readCount > 0) countParts.add("$readCount ${if (readCount == 1) "read" else "reads"}")
+    if (searchCount > 0) countParts.add("$searchCount ${if (searchCount == 1) "search" else "searches"}")
+    if (listCount > 0) countParts.add("$listCount ${if (listCount == 1) "list" else "lists"}")
+    val countText = countParts.joinToString(", ")
+
+    val stateWord = if (isRunning) "Exploring" else "Explored"
+
+    Column(modifier = modifier.padding(vertical = 2.dp)) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clickable { onToggleExpand(expandedKey, expanded) },
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            if (isRunning) {
+                CircularProgressIndicator(
+                    modifier = Modifier.size(14.dp),
+                    strokeWidth = 2.dp
+                )
+                Spacer(modifier = Modifier.width(4.dp))
+            }
+            Text(
+                text = "$stateWord · $countText",
+                style = MaterialTheme.typography.labelMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.weight(1f)
+            )
+            Icon(
+                if (expanded) Icons.Default.KeyboardArrowDown else Icons.Default.ChevronRight,
+                contentDescription = if (expanded) "Collapse" else "Expand",
+                modifier = Modifier.size(20.dp),
+                tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f)
+            )
+        }
+
+        if (expanded) {
+            Column(modifier = Modifier.padding(start = 12.dp, top = 4.dp)) {
+                for (part in parts) {
+                    val toolLabel = contextToolLabel(part)
+                    val subtitle = part.toolInputSummary
+                        ?: part.state?.pathFromInput
+                        ?: part.metadata?.path
+                        ?: ""
+                    Row(
+                        modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            text = "$toolLabel · $subtitle",
+                            style = MaterialTheme.typography.labelMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.weight(1f)
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+/** Human-readable label for a context tool in the expanded group view. */
+private fun contextToolLabel(part: Part): String {
+    val tool = part.tool?.lowercase() ?: ""
+    return when {
+        tool.startsWith("read") -> "Read"
+        tool.startsWith("glob") -> "Glob"
+        tool.startsWith("grep") -> "Grep"
+        tool.startsWith("list") -> "List"
+        else -> tool.replaceFirstChar { c -> c.uppercase() }
     }
 }
