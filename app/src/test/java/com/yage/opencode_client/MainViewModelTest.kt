@@ -1078,6 +1078,62 @@ class MainViewModelTest {
     }
 
     @Test
+    fun `handleSSEEvent message part delta accumulates into streamingPartTexts`() = runTest {
+        // message.part.delta is a distinct web event with top-level ids and a
+        // field-level delta. Phase 2 (S2) accumulates into streamingPartTexts
+        // keyed "$messageId:$partId" (the current UI contract). It must NOT
+        // reload and must ignore non-current sessions.
+        val viewModel = createViewModel()
+        updateState(viewModel) { it.copy(currentSessionId = "session-1") }
+
+        fun delta(d: String) = handleSse(
+            viewModel,
+            SSEEvent(
+                payload = SSEPayload(
+                    type = "message.part.delta",
+                    properties = buildJsonObject {
+                        put("sessionID", JsonPrimitive("session-1"))
+                        put("messageID", JsonPrimitive("message-1"))
+                        put("partID", JsonPrimitive("part-1"))
+                        put("field", JsonPrimitive("text"))
+                        put("delta", JsonPrimitive(d))
+                    }
+                )
+            )
+        )
+
+        delta("Hello")
+        delta(", world")
+
+        assertEquals("Hello, world", viewModel.state.value.streamingPartTexts["message-1:part-1"])
+        // No reload issued.
+        coVerify(exactly = 0) { repository.getMessagesPaged(any(), any(), any()) }
+    }
+
+    @Test
+    fun `handleSSEEvent message part delta is ignored for other sessions`() = runTest {
+        val viewModel = createViewModel()
+        updateState(viewModel) { it.copy(currentSessionId = "session-1") }
+
+        handleSse(
+            viewModel,
+            SSEEvent(
+                payload = SSEPayload(
+                    type = "message.part.delta",
+                    properties = buildJsonObject {
+                        put("sessionID", JsonPrimitive("session-other"))
+                        put("messageID", JsonPrimitive("message-1"))
+                        put("partID", JsonPrimitive("part-1"))
+                        put("delta", JsonPrimitive("ignored"))
+                    }
+                )
+            )
+        )
+
+        assertTrue(viewModel.state.value.streamingPartTexts.isEmpty())
+    }
+
+    @Test
     fun `handleSSEEvent session created prepends parsed session`() = runTest {
         val viewModel = createViewModel()
         updateState(viewModel) {

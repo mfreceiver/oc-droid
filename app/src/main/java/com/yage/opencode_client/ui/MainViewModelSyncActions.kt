@@ -192,6 +192,36 @@ internal fun handleIncomingSseEvent(
                 }
             }
         }
+        "message.part.delta" -> {
+            // Web has an independent `message.part.delta` event (distinct from
+            // `message.part.updated`): top-level { sessionID, messageID, partID,
+            // field, delta }, field-level incremental append. Without this
+            // handler, when the server emits this event the client loses all
+            // streaming text. Payload shape per opencode-web server-session.ts.
+            //
+            // Phase 2 scope (docs/architecture-v3-sse-trust.md §246): only
+            // accumulate into streamingPartTexts. Field-level in-place updates
+            // on the Part object are deferred to Phase 4 (needs field→property
+            // mapping). NOTE: the key is "$messageId:$partId" (the CURRENT UI
+            // contract at ChatMessageContent.kt:254), NOT bare partId — the
+            // latter is the Phase 4 target once streamingPartTexts is rekeyed.
+            val sessionId = event.payload.getString("sessionID") ?: return
+            if (sessionId != state.value.currentSessionId) return
+            val messageId = event.payload.getString("messageID") ?: return
+            val partId = event.payload.getString("partID") ?: return
+            // `field` defaults to "text"; Phase 2 ignores it (accumulates into
+            // the text overlay regardless) — field-specific handling is Phase 4.
+            @Suppress("UNUSED_VARIABLE")
+            val field = event.payload.getString("field") ?: "text"
+            val delta = event.payload.getString("delta")
+            if (!delta.isNullOrEmpty()) {
+                val key = "$messageId:$partId"
+                val previous = state.value.streamingPartTexts[key] ?: ""
+                state.update {
+                    it.copy(streamingPartTexts = it.streamingPartTexts + (key to (previous + delta)))
+                }
+            }
+        }
         "permission.asked" -> {
             onLoadPendingPermissions()
         }
