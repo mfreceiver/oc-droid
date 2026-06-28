@@ -2119,6 +2119,366 @@ class MainViewModelTest {
         assertTrue(viewModel.state.value.error!!.contains("network error"))
     }
 
+    // --- §Per-session message cache (LRU) ---
+
+    /**
+     * Cache (a): switching A→B→A restores A's messages without re-wiping.
+     *
+     * Setup: load A with [m_a1, m_a2]. Switch to B. Re-mock A's fetch to
+     * return ONLY [m_a1] (simulating the server returning a smaller window
+     * this time — the discriminating case). Switch back to A.
+     *
+     * Without the cache: cold load with resetLimit=true would produce
+     * state.messages = [m_a1] only (m_a2 lost).
+     *
+     * With the cache: state.messages still contains m_a2 because the cached
+     * window seeds it and the post-restore resetLimit=false merge keeps it
+     * via the §preserveUnfetched branch (m_a2.id ∉ fetchedIds).
+     */
+    @Test
+    fun `session switch A to B to A restores cached messages without re-wiping`() = runTest {
+        val sessionA = Session(id = "session-A", directory = "/tmp/a")
+        val sessionB = Session(id = "session-B", directory = "/tmp/b")
+        val aMessagesInitial = listOf(
+            MessageWithParts(info = Message(id = "m_a1", role = "user")),
+            MessageWithParts(info = Message(id = "m_a2", role = "assistant"))
+        )
+        val bMessages = listOf(MessageWithParts(info = Message(id = "m_b1", role = "user")))
+        // After A is cached, re-mock A to return only m_a1 — without the
+        // cache this would silently lose m_a2.
+        val aMessagesRefresh = listOf(MessageWithParts(info = Message(id = "m_a1", role = "user")))
+
+        coEvery { repository.getMessagesPaged("session-A", 5, any()) } returns
+            Result.success(MessagesPage(aMessagesInitial, null))
+        coEvery { repository.getMessagesPaged("session-B", 5, any()) } returns
+            Result.success(MessagesPage(bMessages, null))
+
+        val viewModel = createViewModel()
+        updateState(viewModel) { it.copy(sessions = listOf(sessionA, sessionB)) }
+
+        // Open A — populates the cache with [m_a1, m_a2].
+        viewModel.selectSession("session-A")
+        advanceUntilIdle()
+        assertEquals(
+            "A initial load",
+            listOf("m_a1", "m_a2"),
+            viewModel.state.value.messages.map { it.id }
+        )
+        assertEquals(1, viewModel.sessionWindowCacheSize())
+        assertNotNull(viewModel.peekSessionWindow("session-A"))
+
+        // Switch to B — A's window is captured into the cache on switch-away.
+        viewModel.selectSession("session-B")
+        advanceUntilIdle()
+        assertEquals(
+            "B initial load",
+            listOf("m_b1"),
+            viewModel.state.value.messages.map { it.id }
+        )
+        assertEquals(2, viewModel.sessionWindowCacheSize())
+
+        // Re-mock A: now the server "returns" only m_a1. Without the cache
+        // this would silently lose m_a2.
+        coEvery { repository.getMessagesPaged("session-A", 5, any()) } returns
+            Result.success(MessagesPage(aMessagesRefresh, null))
+
+        // Switch back to A — cached [m_a1, m_a2] should be restored and the
+        // post-restore merge keeps m_a2 (id ∉ fetchedIds).
+        viewModel.selectSession("session-A")
+        advanceUntilIdle()
+
+        val finalIds = viewModel.state.value.messages.map { it.id }
+        assertTrue(
+            "Cached m_a2 must survive the round-trip (got $finalIds)",
+            finalIds.contains("m_a2")
+        )
+        assertTrue(
+            "Fresh m_a1 must be present (got $finalIds)",
+            finalIds.contains("m_a1")
+        )
+    }
+
+    /**
+     * Cache (b): a loadMore (older page) result survives a switch round-trip.
+     *
+     * Setup: open A, get latest 2 + cursor; loadMore to get older 2; switch
+     * to B; switch back; verify the older 2 are still in state (the post-
+     * restore tail fetch only re-fetches the latest window — without the
+     * cache the older page would be gone).
+     */
+    @Test
+    fun `loadMore result survives a switch round-trip via the cache`() = runTest {
+        val sessionA = Session(id = "session-A", directory = "/tmp/a")
+        val sessionB = Session(id = "session-B", directory = "/tmp/b")
+        val aLatest = listOf(
+            MessageWithParts(info = Message(id = "m_latest1", role = "user")),
+            MessageWithParts(info = Message(id = "m_latest2", role = "assistant"))
+        )
+        val aOlder = listOf(
+            MessageWithParts(info = Message(id = "m_older1", role = "user")),
+            MessageWithParts(info = Message(id = "m_older2", role = "assistant"))
+        )
+
+        // mockk: when multiple stubs match a call, the LAST registered wins.
+        // Register the generic fallback FIRST so the specific stubs below
+        // override it (otherwise `any()` would shadow both specific matchers).
+        coEvery { repository.getMessagesPaged("session-A", 5, any()) } returns
+            Result.success(MessagesPage(aLatest, "cursor-1"))
+        // Initial open uses before=null.
+        coEvery { repository.getMessagesPaged("session-A", 5, null) } returns
+            Result.success(MessagesPage(aLatest, "cursor-1"))
+        // loadMore uses before="cursor-1" and returns the older page (no next).
+        coEvery { repository.getMessagesPaged("session-A", 5, "cursor-1") } returns
+            Result.success(MessagesPage(aOlder, null))
+        coEvery { repository.getMessagesPaged("session-B", 5, any()) } returns
+            Result.success(MessagesPage(emptyList(), null))
+
+        val viewModel = createViewModel()
+        updateState(viewModel) { it.copy(sessions = listOf(sessionA, sessionB)) }
+
+        viewModel.selectSession("session-A")
+        advanceUntilIdle()
+        assertEquals(listOf("m_latest1", "m_latest2"), viewModel.state.value.messages.map { it.id })
+        assertEquals("cursor-1", viewModel.state.value.olderMessagesCursor)
+
+        // Load the older page.
+        viewModel.loadMoreMessages()
+        advanceUntilIdle()
+        val afterMore = viewModel.state.value.messages.map { it.id }
+        assertEquals(listOf("m_older1", "m_older2", "m_latest1", "m_latest2"), afterMore)
+        assertNull(viewModel.state.value.olderMessagesCursor)
+        assertFalse(viewModel.state.value.hasMoreMessages)
+
+        // Snapshot the cached window — must mirror the post-loadMore state.
+        val cached = viewModel.peekSessionWindow("session-A")
+        assertNotNull("session-A must be cached after loadMore", cached)
+        assertEquals(4, cached!!.messages.size)
+        assertTrue(cached.messages.map { it.id }.contains("m_older1"))
+        assertTrue(cached.messages.map { it.id }.contains("m_older2"))
+
+        // Switch away and back. The post-restore fetch returns the latest 2
+        // again (matches the `any()` fallback), and the §preserveUnfetched
+        // merge keeps the cached older 2.
+        viewModel.selectSession("session-B")
+        advanceUntilIdle()
+        viewModel.selectSession("session-A")
+        advanceUntilIdle()
+
+        val finalIds = viewModel.state.value.messages.map { it.id }
+        assertTrue(
+            "Older messages must survive the round-trip via cache (got $finalIds)",
+            finalIds.contains("m_older1") && finalIds.contains("m_older2")
+        )
+        assertTrue(
+            "Latest messages must still be present (got $finalIds)",
+            finalIds.contains("m_latest1") && finalIds.contains("m_latest2")
+        )
+    }
+
+    /**
+     * Cache (c): bounded LRU evicts at capacity (12). Loading a 13th session
+     * evicts the least-recently-used (session-1, the first loaded). The most
+     * recently loaded (session-13) stays.
+     */
+    @Test
+    fun `session window cache evicts least-recently-used at capacity`() = runTest {
+        val viewModel = createViewModel()
+        // Pre-populate sessions so selectSession has something to find.
+        updateState(viewModel) {
+            it.copy(sessions = (1..13).map { i ->
+                Session(id = "session-$i", directory = "/tmp/$i")
+            })
+        }
+        // Each session returns one unique message so we can verify eviction.
+        for (i in 1..13) {
+            coEvery { repository.getMessagesPaged("session-$i", 5, any()) } returns
+                Result.success(
+                    MessagesPage(
+                        listOf(MessageWithParts(info = Message(id = "m-$i", role = "user"))),
+                        null
+                    )
+                )
+        }
+
+        // Open sessions 1..13 in order. Each loadMessages seeds the cache.
+        for (i in 1..13) {
+            updateState(viewModel) { it.copy(currentSessionId = "session-$i") }
+            viewModel.loadMessages("session-$i")
+            advanceUntilIdle()
+        }
+
+        assertEquals(
+            "Cache must be capped at SESSION_WINDOW_CACHE_CAPACITY (12)",
+            12,
+            viewModel.sessionWindowCacheSize()
+        )
+        assertNull(
+            "session-1 (LRU) must be evicted once session-13 lands",
+            viewModel.peekSessionWindow("session-1")
+        )
+        assertNotNull(
+            "session-13 (MRU) must be retained",
+            viewModel.peekSessionWindow("session-13")
+        )
+        assertNotNull(
+            "session-12 (second-newest) must be retained",
+            viewModel.peekSessionWindow("session-12")
+        )
+    }
+
+    /**
+     * Cache (d): switching to an already-cached session promotes it to MRU,
+     * so on a subsequent overflow eviction the just-visited session survives
+     * over a session loaded more recently but never revisited.
+     */
+    @Test
+    fun `restoring a cached session promotes it to most recently used`() = runTest {
+        val viewModel = createViewModel()
+        updateState(viewModel) {
+            it.copy(sessions = (1..13).map { i -> Session(id = "session-$i", directory = "/tmp/$i") })
+        }
+        for (i in 1..13) {
+            coEvery { repository.getMessagesPaged("session-$i", 5, any()) } returns
+                Result.success(MessagesPage(emptyList(), null))
+        }
+
+        // Load sessions 1..12 — fills the cache exactly to capacity.
+        for (i in 1..12) {
+            updateState(viewModel) { it.copy(currentSessionId = "session-$i") }
+            viewModel.loadMessages("session-$i")
+            advanceUntilIdle()
+        }
+        assertEquals(12, viewModel.sessionWindowCacheSize())
+        assertNotNull(viewModel.peekSessionWindow("session-1"))
+
+        // Re-visit session-1 to promote it to MRU.
+        updateState(viewModel) { it.copy(currentSessionId = "session-1") }
+        viewModel.loadMessages("session-1")
+        advanceUntilIdle()
+
+        // Load session-13 — overflows; evicts the new LRU (session-2), NOT
+        // session-1 (which is now MRU after the re-visit).
+        updateState(viewModel) { it.copy(currentSessionId = "session-13") }
+        viewModel.loadMessages("session-13")
+        advanceUntilIdle()
+
+        assertEquals(12, viewModel.sessionWindowCacheSize())
+        assertNotNull(
+            "session-1 (re-visited) must survive — re-visit promoted it to MRU",
+            viewModel.peekSessionWindow("session-1")
+        )
+        assertNull(
+            "session-2 (new LRU after session-1 promotion) must be evicted",
+            viewModel.peekSessionWindow("session-2")
+        )
+    }
+
+    /**
+     * Cache (e): host switch clears the cache (windows belong to the old host
+     * and would be invalid for the new host's sessions).
+     */
+    @Test
+    fun `selectHostProfile clears the per-session message cache`() = runTest {
+        val defaultProfile = HostProfile.defaultDirect("http://server.test")
+        val otherProfile = HostProfile.defaultDirect("http://other.test").copy(id = "other")
+        every { hostProfileStore.select("other") } returns otherProfile
+        every { hostProfileStore.currentProfile() } returns otherProfile
+        // selectHostProfile calls testConnection(force=true) which calls
+        // checkHealth. Make it FAIL so the post-health loadInitialData path
+        // (which would invoke further relaxed-mock returns and mis-cast) is
+        // skipped. The cache is cleared BEFORE testConnection runs, so this
+        // does not affect what we are asserting.
+        coEvery { repository.checkHealth() } returns Result.failure(IllegalStateException("offline"))
+
+        coEvery { repository.getMessagesPaged("session-A", 5, any()) } returns
+            Result.success(
+                MessagesPage(
+                    listOf(MessageWithParts(info = Message(id = "m_a1", role = "user"))),
+                    null
+                )
+            )
+
+        val viewModel = createViewModel()
+        updateState(viewModel) {
+            it.copy(
+                currentSessionId = "session-A",
+                sessions = listOf(Session(id = "session-A", directory = "/tmp/a"))
+            )
+        }
+        viewModel.loadMessages("session-A")
+        advanceUntilIdle()
+        assertEquals(1, viewModel.sessionWindowCacheSize())
+
+        viewModel.selectHostProfile("other")
+        advanceUntilIdle()
+
+        assertEquals(
+            "Host switch must clear the per-session message cache",
+            0,
+            viewModel.sessionWindowCacheSize()
+        )
+    }
+
+    // --- §Manual message refresh ---
+
+    @Test
+    fun `refreshCurrentSession is a no-op when no session is selected`() = runTest {
+        val viewModel = createViewModel()
+        // currentSessionId stays null from createViewModel().
+        viewModel.refreshCurrentSession()
+        advanceUntilIdle()
+
+        coVerify(exactly = 0) { repository.getMessagesPaged(any(), any(), any()) }
+    }
+
+    @Test
+    fun `refreshCurrentSession is a no-op while a load is in flight`() = runTest {
+        coEvery { repository.getMessagesPaged("session-A", 5, any()) } coAnswers {
+            delay(100)
+            Result.success(MessagesPage(emptyList(), null))
+        }
+        val viewModel = createViewModel()
+        updateState(viewModel) { it.copy(currentSessionId = "session-A") }
+
+        // Kick off a load; do NOT advance time so isLoadingMessages stays true.
+        viewModel.loadMessages("session-A")
+        // refreshCurrentSession must bail out (coalesce) — only one fetch total.
+        viewModel.refreshCurrentSession()
+        advanceUntilIdle()
+
+        coVerify(exactly = 1) { repository.getMessagesPaged("session-A", 5, any()) }
+    }
+
+    @Test
+    fun `refreshCurrentSession issues a non-destructive tail fetch`() = runTest {
+        // Pre-seed state with one older loaded message + cursor (simulating a
+        // user who has scrolled up). A non-destructive refresh (resetLimit=false)
+        // must keep that older message AND merge the fresh tail.
+        val older = Message(id = "m_older", role = "user")
+        val fresh = MessageWithParts(info = Message(id = "m_fresh", role = "assistant"))
+        coEvery { repository.getMessagesPaged("session-A", 5, any()) } returns
+            Result.success(MessagesPage(listOf(fresh), null))
+
+        val viewModel = createViewModel()
+        updateState(viewModel) {
+            it.copy(
+                currentSessionId = "session-A",
+                messages = listOf(older),
+                olderMessagesCursor = "cursor-1",
+                hasMoreMessages = true
+            )
+        }
+
+        viewModel.refreshCurrentSession()
+        advanceUntilIdle()
+
+        val ids = viewModel.state.value.messages.map { it.id }
+        assertTrue("Older message must survive non-destructive refresh (got $ids)", ids.contains("m_older"))
+        assertTrue("Fresh tail must be merged in (got $ids)", ids.contains("m_fresh"))
+        // Cursor preserved: refresh does not clobber existing paging state.
+        assertEquals("cursor-1", viewModel.state.value.olderMessagesCursor)
+    }
+
     @org.junit.After
     fun tearDown() {
         unmockkAll()

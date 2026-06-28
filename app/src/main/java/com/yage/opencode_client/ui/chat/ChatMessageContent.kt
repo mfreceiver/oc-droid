@@ -157,6 +157,9 @@ internal fun ChatMessageList(
                         text = streamingText,
                         title = streamingReasoningPart.toolReason,
                         isStreaming = true,
+                        expandedParts = expandedParts,
+                        onToggleExpand = onToggleExpand,
+                        expandedKey = "streaming|${streamingKey}",
                         modifier = Modifier.widthIn(max = MAX_CARD_WIDTH)
                     )
                 }
@@ -422,9 +425,24 @@ private fun PartView(
     when {
         part.isText -> {
             val textContent = streamingTextOverride ?: part.text ?: ""
-            // The transcript-leak guard only applies to assistant/system content.
-            // User messages that happen to quote <task_result> must always render.
-            if (isUser || !textContent.contains("<task_result>", ignoreCase = true)) {
+            // Detect background subagent task completion blocks injected as
+            // user-role text messages by the server (ops.prompt with <task> XML).
+            val taskXml = if (textContent.contains("<task", ignoreCase = true)) {
+                parseTaskXml(textContent)
+            } else null
+            if (taskXml != null && taskXml.state != null &&
+                (taskXml.state.equals("completed", ignoreCase = true) ||
+                    taskXml.state.equals("error", ignoreCase = true))
+            ) {
+                CompletedTaskCard(
+                    taskResult = taskXml,
+                    messageId = messageId,
+                    partId = part.id,
+                    expandedParts = expandedParts,
+                    onToggleExpand = onToggleExpand,
+                    modifier = Modifier.widthIn(max = MAX_CARD_WIDTH)
+                )
+            } else if (isUser || !textContent.contains("<task_result>", ignoreCase = true)) {
                 TextPart(
                     text = textContent,
                     isUser = isUser,
@@ -441,7 +459,7 @@ private fun PartView(
             expandedParts = expandedParts,
             onToggleExpand = onToggleExpand,
             expandedKey = expandKey,
-            modifier = modifier.widthIn(max = MAX_CARD_WIDTH)
+            modifier = Modifier.widthIn(max = MAX_CARD_WIDTH)
         )
         part.isImageAttachment -> ImageFilePart(part, modifier)
         part.isFile -> FileAttachmentPart(part, modifier)
@@ -891,7 +909,7 @@ private fun ReasoningCard(
     expandedKey: String? = null,
     modifier: Modifier = Modifier.fillMaxWidth()
 ) {
-    val expanded = expandedKey?.let { expandedParts[it] } ?: isStreaming
+    val expanded = expandedKey?.let { expandedParts[it] } ?: false
 
     // §5.1 v3 reasoning card: fully transparent, no icon, no tinted body.
     // Reads as quiet auxiliary context — same visual weight as BasicTool.
@@ -909,7 +927,7 @@ private fun ReasoningCard(
                     .fillMaxWidth()
                     .padding(horizontal = 8.dp, vertical = 4.dp)
                     .then(
-                        if (!isStreaming && expandedKey != null)
+                        if (expandedKey != null)
                             Modifier.clickable { onToggleExpand(expandedKey, expanded) }
                         else Modifier
                     ),
@@ -927,8 +945,20 @@ private fun ReasoningCard(
                     style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
-                Spacer(modifier = Modifier.weight(1f))
-                if (!isStreaming && expandedKey != null) {
+                if (isStreaming && !expanded && text.isNotBlank()) {
+                    Spacer(modifier = Modifier.width(4.dp))
+                    Text(
+                        text = text,
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.weight(1f)
+                    )
+                } else {
+                    Spacer(modifier = Modifier.weight(1f))
+                }
+                if (expandedKey != null) {
                     Icon(
                         if (expanded) Icons.Default.KeyboardArrowDown else Icons.Default.ChevronRight,
                         contentDescription = if (expanded) "Collapse" else "Expand",
@@ -937,7 +967,7 @@ private fun ReasoningCard(
                     )
                 }
             }
-            if ((expanded || isStreaming) && text.isNotBlank()) {
+            if (expanded && text.isNotBlank()) {
                 val normalizedText = remember(text) { MarkdownImageResolver.normalizeStandaloneImageBlocks(text) }
                 val fontSizes = LocalMarkdownFontSizes.current
                 // Reasoning text uses the smaller `reasoning` size (defaults to 12sp)
@@ -1896,6 +1926,79 @@ private fun ErrorCard(
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     softWrap = true
                 )
+            }
+        }
+    }
+}
+
+/**
+ * Compact card for background subagent task completion blocks that arrive as
+ * user-role text messages (server injects `<task>` XML via ops.prompt).
+ * Collapsed by default: icon + "Task completed" / "Task failed" + chevron.
+ * Tapping expands to show the task_result / task_error body.
+ */
+@Composable
+private fun CompletedTaskCard(
+    taskResult: TaskXmlResult,
+    messageId: String,
+    partId: String,
+    expandedParts: Map<String, Boolean>,
+    onToggleExpand: (String, Boolean) -> Unit,
+    modifier: Modifier = Modifier.fillMaxWidth()
+) {
+    val expandedKey = "task|${messageId}|${partId}"
+    val expanded = expandedParts[expandedKey] ?: false
+    val isError = taskResult.state.equals("error", ignoreCase = true)
+
+    val oc = MaterialTheme.opencode
+    Surface(
+        modifier = modifier.padding(vertical = 1.dp),
+        shape = RoundedCornerShape(6.dp),
+        color = Color.Transparent,
+        border = BorderStroke(1.dp, oc.borderBase)
+    ) {
+        Column(modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clickable { onToggleExpand(expandedKey, expanded) },
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Icon(
+                    if (isError) Icons.Default.ErrorOutline else Icons.Default.CheckCircle,
+                    contentDescription = null,
+                    modifier = Modifier.size(14.dp),
+                    tint = if (isError) oc.stateDangerFg else MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Spacer(modifier = Modifier.width(4.dp))
+                Text(
+                    text = stringResource(if (isError) R.string.task_failed else R.string.task_completed),
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurface,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+                Spacer(modifier = Modifier.weight(1f))
+                Icon(
+                    if (expanded) Icons.Default.KeyboardArrowDown else Icons.Default.ChevronRight,
+                    contentDescription = if (expanded) "Collapse" else "Expand",
+                    modifier = Modifier.size(18.dp),
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+            if (expanded) {
+                val bodyText = taskResult.taskResult ?: ""
+                if (bodyText.isNotBlank()) {
+                    Spacer(modifier = Modifier.size(4.dp))
+                    SelectionContainer {
+                        Text(
+                            text = bodyText,
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            softWrap = true
+                        )
+                    }
+                }
             }
         }
     }

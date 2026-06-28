@@ -144,7 +144,7 @@ fun ChatScreen(
                 onSelectAgent = viewModel::selectAgent,
                 onNavigateToSettings = onNavigateToSettings,
                 onNavigateToSessions = onNavigateToSessions,
-                onRefresh = { viewModel.refreshCurrentHost() },
+                onRefreshMessages = { viewModel.refreshCurrentSession() },
                 onSelectHost = { viewModel.selectHostProfile(it) },
                 onActivateTunnel = { viewModel.activateTunnelForCurrentHost() },
             )

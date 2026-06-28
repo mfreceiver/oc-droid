@@ -126,9 +126,15 @@ internal data class ChatTopBarActions(
     val onCloseSession: (String) -> Unit,
     val onSelectAgent: (String) -> Unit,
     val onNavigateToSettings: () -> Unit = {},
-    val onRefresh: () -> Unit = {},
     val onSelectHost: (String) -> Unit = {},
     val onActivateTunnel: () -> Unit = {},
+    /**
+     * §Manual message refresh for the current session (NON-destructive
+     * tail fetch — keeps scrolled-up history + cursor + streaming overlay).
+     * Wired to the ServerManagementDialog's "Refresh" button; the former
+     * host-health probe affordance is repurposed to refresh messages.
+     */
+    val onRefreshMessages: () -> Unit = {},
     /**
      * Primary Sessions-page entry point. Rendered as the [TopAppBar]
      * `navigationIcon` (left of the title) — a list affordance. Defaults to a
@@ -401,7 +407,7 @@ internal fun ChatTopBar(
                 actions.onSelectHost(profileId)
                 showServerDialog = false
             },
-            onRefresh = { actions.onRefresh() },
+            onRefresh = { actions.onRefreshMessages() },
             onActivateTunnel = { actions.onActivateTunnel() },
             onNavigateToSettings = {
                 showServerDialog = false
@@ -756,7 +762,7 @@ private fun ServerManagementDialog(
                 horizontalArrangement = Arrangement.spacedBy(4.dp)
             ) {
                 TextButton(onClick = onRefresh) {
-                    Text(stringResource(R.string.server_dialog_refresh))
+                    Text(stringResource(R.string.chat_action_refresh_messages))
                 }
                 if (showTunnelAuth) {
                     val isActivating = tunnelActivationState is TunnelActivationState.Loading

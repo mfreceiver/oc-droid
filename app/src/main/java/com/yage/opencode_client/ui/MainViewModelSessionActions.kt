@@ -236,7 +236,8 @@ internal fun launchLoadMessages(
     state: MutableStateFlow<AppState>,
     sessionId: String,
     resetLimit: Boolean = true,
-    settingsManager: SettingsManager? = null
+    settingsManager: SettingsManager? = null,
+    onCacheWindow: (sessionId: String, window: CachedSessionWindow) -> Unit = { _, _ -> }
 ) {
     // Coalesce concurrent loads. ADB showed startup triggers message loads from
     // multiple paths (testConnection→loadSessions→onLoadMessages, ON_START
@@ -318,6 +319,22 @@ internal fun launchLoadMessages(
                             hasMoreMessages = if (resetLimit) (page.nextCursor != null) else it.hasMoreMessages
                         )
                     }
+                    // §Per-session message cache (write): snapshot the freshly-
+                    // merged window so a return trip restores it instantly.
+                    // The post-restore fetch (resetLimit=false) will merge any
+                    // newer tail non-destructively on next open. Reads
+                    // state.value synchronously after the update above so the
+                    // snapshot matches the just-written state exactly.
+                    val postUpdate = state.value
+                    onCacheWindow(
+                        sessionId,
+                        CachedSessionWindow(
+                            messages = postUpdate.messages,
+                            partsByMessage = postUpdate.partsByMessage,
+                            olderMessagesCursor = postUpdate.olderMessagesCursor,
+                            hasMoreMessages = postUpdate.hasMoreMessages
+                        )
+                    )
                 } else {
                     state.update { it.copy(isLoadingMessages = false) }
                 }
@@ -365,7 +382,8 @@ internal fun launchLoadMoreMessages(
     scope: CoroutineScope,
     repository: OpenCodeRepository,
     state: MutableStateFlow<AppState>,
-    sessionId: String
+    sessionId: String,
+    onCacheWindow: (sessionId: String, window: CachedSessionWindow) -> Unit = { _, _ -> }
 ) {
     if (state.value.isLoadingMessages) return
     // §on-demand: cursor-based history paging. Fetch one older page via the V1
@@ -408,6 +426,24 @@ internal fun launchLoadMoreMessages(
                             )
                         }
                     }
+                    // §Per-session message cache (write): a loadMore result
+                    // expands the cached window — without this, switching away
+                    // and back would lose the older page the user just paged
+                    // in (the post-restore tail fetch only re-merges the latest
+                    // 5). Snapshot state.value synchronously after the update
+                    // above so the cached window reflects the prepended older
+                    // page exactly. (Both the empty-page and non-empty branches
+                    // update the cursor/hasMore, so we always re-snapshot.)
+                    val postMore = state.value
+                    onCacheWindow(
+                        sessionId,
+                        CachedSessionWindow(
+                            messages = postMore.messages,
+                            partsByMessage = postMore.partsByMessage,
+                            olderMessagesCursor = postMore.olderMessagesCursor,
+                            hasMoreMessages = postMore.hasMoreMessages
+                        )
+                    )
                 } else {
                     state.update { it.copy(isLoadingMessages = false) }
                 }

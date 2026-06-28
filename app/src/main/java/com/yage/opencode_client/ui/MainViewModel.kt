@@ -33,6 +33,23 @@ sealed class TunnelActivationState {
     data class Error(val message: String) : TunnelActivationState()
 }
 
+/**
+ * §Per-session message cache: a snapshot of the loaded window for a single
+ * session — the four pieces of message-state that [selectSessionState]
+ * otherwise wipes to empty on every switch. Restoring from this snapshot on
+ * return avoids the visible flicker + history re-fetch (the latest 5 only)
+ * that previously hit users on every A→B→A hop. Bounded LRU lives in
+ * [MainViewModel.sessionWindowCache]; the post-restore tail fetch
+ * (`loadMessages(resetLimit = false)`) still runs to merge fresh messages
+ * non-destructively, so a stale snapshot never hides new content.
+ */
+internal data class CachedSessionWindow(
+    val messages: List<Message>,
+    val partsByMessage: Map<String, List<Part>>,
+    val olderMessagesCursor: String?,
+    val hasMoreMessages: Boolean
+)
+
 data class ConnectionFormSettings(
     val serverUrl: String,
     val username: String,
@@ -427,6 +444,69 @@ class MainViewModel @Inject constructor(
         _expandedParts.value = emptyMap()
     }
 
+    /**
+     * §Per-session message cache (LRU): maps sessionId → the loaded message
+     * window ([CachedSessionWindow]) so switching A→B→A restores A's already-
+     * loaded history + cursor instantly instead of wiping to empty and re-
+     * fetching only the latest 5. Bounded to [SESSION_WINDOW_CACHE_CAPACITY]
+     * entries; overflow evicts the least-recently-used. Eviction just means
+     * "fall back to cold-load behavior" (empty + resetLimit=true) on next
+     * open — no data loss.
+     *
+     * Main-thread confined: all writers (`launchLoadMessages`,
+     * `launchLoadMoreMessages`, the switch-away capture in [selectSession])
+     * run on `viewModelScope` (Dispatchers.Main.immediate). LinkedHashMap is
+     * not thread-safe but every access here is on the main dispatcher, so no
+     * synchronization is needed. `accessOrder = true` makes both `get` and
+     * `put` promote the entry to MRU, which is what gives us LRU semantics
+     * (restore-on-switch counts as a "use" → cached sessions the user
+     * revisits stay warm).
+     */
+    private val sessionWindowCache: MutableMap<String, CachedSessionWindow> =
+        object : LinkedHashMap<String, CachedSessionWindow>(16, 0.75f, true) {
+            override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, CachedSessionWindow>?): Boolean =
+                size > SESSION_WINDOW_CACHE_CAPACITY
+        }
+
+    /** Test-only visibility into the cache size (for assertions). */
+    internal fun sessionWindowCacheSize(): Int = sessionWindowCache.size
+
+    /** Test-only visibility: returns the cached window for [sessionId] if any. */
+    internal fun peekSessionWindow(sessionId: String): CachedSessionWindow? =
+        sessionWindowCache[sessionId]
+
+    /**
+     * Writes [window] for [sessionId] into the LRU cache (overwriting any
+     * prior entry, promoting to MRU). Called from `launchLoadMessages` /
+     * `launchLoadMoreMessages` after a successful fetch+merge via the
+     * `onCacheWindow` callback.
+     */
+    private fun writeSessionWindow(sessionId: String, window: CachedSessionWindow) {
+        sessionWindowCache[sessionId] = window
+    }
+
+    /**
+     * Captures the CURRENT message state into the cache under [sessionId].
+     * Used by [selectSession] to write-back the outgoing session's latest
+     * view before switching away — this is what keeps the cache fresh vs
+     * SSE-driven message.updated / streaming mutations that bypassed the
+     * load callbacks. Reads only; never mutates [_state].
+     */
+    private fun captureCurrentSessionWindow(sessionId: String) {
+        val current = _state.value
+        sessionWindowCache[sessionId] = CachedSessionWindow(
+            messages = current.messages,
+            partsByMessage = current.partsByMessage,
+            olderMessagesCursor = current.olderMessagesCursor,
+            hasMoreMessages = current.hasMoreMessages
+        )
+    }
+
+    /** Drops the entire cache. Called on host switch / host delete (active). */
+    private fun clearSessionWindowCache() {
+        sessionWindowCache.clear()
+    }
+
     private var sseJob: Job? = null
     private var lastHealthCheckTime = 0L
 
@@ -667,6 +747,10 @@ class MainViewModel @Inject constructor(
                 draftWorkdir = null,
                 availableCommands = emptyList()
             ) }
+            // §Per-session message cache: cached windows belong to the previous
+            // host's sessions — they must not be restored onto the new host's
+            // unrelated sessions (different server, different message IDs).
+            clearSessionWindowCache()
             settingsManager.currentSessionId = null
             settingsManager.openSessionIds = emptyList()
             // Clear the persisted session-metadata cache too: the previous
@@ -721,6 +805,9 @@ class MainViewModel @Inject constructor(
                     availableCommands = emptyList()
                 )
             }
+            // §Per-session message cache: ditto — cached windows belong to the
+            // deleted (active) host and must not survive into its replacement.
+            clearSessionWindowCache()
             settingsManager.currentSessionId = null
             settingsManager.openSessionIds = emptyList()
             settingsManager.sessionCache = emptyList()
@@ -1002,7 +1089,37 @@ class MainViewModel @Inject constructor(
             _state.value.tempClearedUnread.contains(previousSessionId) &&
             _state.value.sessionStatuses[previousSessionId]?.isBusy == true
 
+        // §Per-session message cache (write-back): snapshot the OUTGOING
+        // session's currently-loaded view into the LRU before selectSessionState
+        // clears it. This is what makes the cache stay fresh vs SSE-driven
+        // message.updated / streaming mutations that bypass the load path —
+        // any state changes since the last load are captured here, so a return
+        // trip restores the up-to-the-second view (then the post-restore tail
+        // fetch merges any brand-new messages).
+        if (previousSessionId != null && previousSessionId != sessionId) {
+            captureCurrentSessionWindow(previousSessionId)
+        }
+
         selectSessionState(_state, settingsManager, sessionId)
+
+        // §Per-session message cache (restore): if the new session has a
+        // cached window, seed messages/parts/cursor/hasMore from it INSTEAD
+        // of leaving the empty list set by selectSessionState. The
+        // subsequent loadMessages below uses resetLimit=false on cache hit
+        // so the existing §preserveUnfetched merge logic keeps older loaded
+        // pages and merges the fresh tail non-destructively. On cache MISS
+        // we keep the prior behavior (empty + resetLimit=true cold load).
+        val cachedWindow = sessionWindowCache[sessionId]
+        if (cachedWindow != null) {
+            _state.update {
+                it.copy(
+                    messages = cachedWindow.messages,
+                    partsByMessage = cachedWindow.partsByMessage,
+                    olderMessagesCursor = cachedWindow.olderMessagesCursor,
+                    hasMoreMessages = cachedWindow.hasMoreMessages
+                )
+            }
+        }
         // Look up the target session in the union of the cached sessions list
         // and directorySessions (#10: a session surfaced for a connected
         // workdir may not yet be in the global list) so the parentId check
@@ -1027,7 +1144,12 @@ class MainViewModel @Inject constructor(
         // Sync the repository's workdir context to the selected session so that
         // directory-scoped requests (files, prompt, create) target the right cwd.
         syncCurrentDirectoryForSession(_state, repository, sessionId)
-        loadMessages(sessionId)
+        // §Per-session message cache: resetLimit=false on a cache hit so we
+        // don't wipe the messages we just restored — the existing
+        // §preserveUnfetched merge keeps older loaded pages and prepends the
+        // fresh latest-5 tail. On cache MISS, resetLimit=true cold-loads the
+        // latest 5 and seeds the cursor (the legacy behavior).
+        loadMessages(sessionId, resetLimit = cachedWindow == null)
         loadSessionStatus()
         loadChildSessions(sessionId)
         // Selecting a concrete session discards any in-progress draft.
@@ -1164,7 +1286,15 @@ class MainViewModel @Inject constructor(
     }
 
     fun loadMessages(sessionId: String, resetLimit: Boolean = true) {
-        launchLoadMessages(viewModelScope, repository, _state, sessionId, resetLimit, settingsManager)
+        launchLoadMessages(
+            scope = viewModelScope,
+            repository = repository,
+            state = _state,
+            sessionId = sessionId,
+            resetLimit = resetLimit,
+            settingsManager = settingsManager,
+            onCacheWindow = ::writeSessionWindow
+        )
     }
 
     /** Load messages with delay when triggered by SSE/send (server may need time to persist). */
@@ -1174,7 +1304,29 @@ class MainViewModel @Inject constructor(
 
     fun loadMoreMessages() {
         val sessionId = _state.value.currentSessionId ?: return
-        launchLoadMoreMessages(viewModelScope, repository, _state, sessionId)
+        launchLoadMoreMessages(
+            scope = viewModelScope,
+            repository = repository,
+            state = _state,
+            sessionId = sessionId,
+            onCacheWindow = ::writeSessionWindow
+        )
+    }
+
+    /**
+     * §Manual message refresh: forces a NON-destructive reload of the current
+     * session's tail. Distinct from [refreshCurrentHost] (which is a server-
+     * health probe). `resetLimit=false` keeps the user's scrolled-up loaded
+     * history pages + cursor and merges the fresh latest-5 tail via the
+     * §preserveUnfetched branch of [launchLoadMessages]; the streaming
+     * overlay is also preserved. No-op when no session is selected or a
+     * load is already in flight (the [AppState.isLoadingMessages] guard in
+     * launchLoadMessages coalesces concurrent triggers).
+     */
+    fun refreshCurrentSession() {
+        val sessionId = _state.value.currentSessionId ?: return
+        if (_state.value.isLoadingMessages) return
+        loadMessages(sessionId, resetLimit = false)
     }
 
     private fun loadAgents() {
@@ -1740,5 +1892,14 @@ class MainViewModel @Inject constructor(
          * which has no idle/foreground reload at all.
          */
         private const val FOREGROUND_RELOAD_MIN_INTERVAL_MS = 15_000L
+
+        /**
+         * §Per-session message cache capacity: max number of session windows
+         * kept in memory. ~12 covers the typical "open tabs" working set
+         * ([SettingsManager.openSessionIds] is itself capped at 8) plus a
+         * few recently-evicted tabs. Overflow evicts LRU; the evicted
+         * session simply cold-loads on next open (current pre-cache behavior).
+         */
+        private const val SESSION_WINDOW_CACHE_CAPACITY = 12
     }
 }

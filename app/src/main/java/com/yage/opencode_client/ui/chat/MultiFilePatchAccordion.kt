@@ -117,7 +117,10 @@ internal fun MultiFilePatchAccordion(
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(horizontal = 10.dp, vertical = 8.dp),
+                    .padding(horizontal = 10.dp, vertical = 4.dp)
+                    .clickable {
+                        expandedPaths = if (allExpanded) emptySet() else files.map { it.path }.toSet()
+                    },
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Icon(
@@ -154,16 +157,12 @@ internal fun MultiFilePatchAccordion(
                     )
                 }
                 Spacer(modifier = Modifier.weight(1f))
-                IconButton(onClick = {
-                    expandedPaths = if (allExpanded) emptySet() else files.map { it.path }.toSet()
-                }) {
-                    Icon(
-                        if (allExpanded) Icons.Default.KeyboardArrowDown else Icons.Default.ChevronRight,
-                        contentDescription = if (allExpanded) "Collapse all" else "Expand all",
-                        modifier = Modifier.size(20.dp),
-                        tint = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                }
+                Icon(
+                    if (allExpanded) Icons.Default.KeyboardArrowDown else Icons.Default.ChevronRight,
+                    contentDescription = if (allExpanded) "Collapse all" else "Expand all",
+                    modifier = Modifier.size(20.dp),
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant
+                )
             }
 
             // Per-file rows.

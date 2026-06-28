@@ -169,5 +169,8 @@
     <string name="chat_command_no_session">Open or create a session before running /%1$s</string>
     <string name="chat_action_sessions">Sessions</string>
     <string name="chat_action_server">Server status</string>
+    <string name="chat_action_refresh_messages">Refresh messages</string>
     <string name="server_dialog_system_settings">System Settings</string>
+    <string name="task_completed">Task completed</string>
+    <string name="task_failed">Task failed</string>
 </resources>
