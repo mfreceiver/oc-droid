@@ -50,6 +50,27 @@ internal data class CachedSessionWindow(
     val hasMoreMessages: Boolean
 )
 
+/**
+ * §Phase1C gap (断层) state. Set by [MainViewModel.catchUpAfterDisconnectOrForeground] * when a tail reload detects the pre-reload newest message [anchorNewestId] is
+ * NOT in the freshly-fetched latest window — meaning messages arrived during
+ * the disconnect that fall outside the 5-message tail. The user can then tap
+ * the gap divider to page older (loadMore-style) from [tailOldestCursor] until
+ * [anchorNewestId] reappears (gap closed, [open] = false).
+ *
+ * - [anchorNewestId]: pre-reload local newest message id (by time.created).
+ * - [tailOldestId]: the oldest id in the fetched tail window — the visual
+ *   seam where the gap divider is rendered (between this and older history).
+ * - [tailOldestCursor]: server cursor for paging OLDER from the tail's oldest
+ *   (the gap-closure direction). Updated as the user pages.
+ * - [open]: true while the gap is still unresolved.
+ */
+data class GapInfo(
+    val anchorNewestId: String,
+    val tailOldestId: String,
+    val tailOldestCursor: String?,
+    val open: Boolean = true
+)
+
 data class ConnectionFormSettings(
     val serverUrl: String,
     val username: String,
@@ -181,7 +202,21 @@ data class AppState(
      * derived so it can never drift out of sync.
      */
     val trafficSent: Long = 0L,
-    val trafficReceived: Long = 0L
+    val trafficReceived: Long = 0L,
+    /**
+     * §Phase1C: non-null when a tail reload detected messages may have arrived
+     * during a disconnect that fall outside the 5-message tail window. Drives
+     * the gap divider UI + user-triggered closure. Cleared on session switch,
+     * manual refresh (global cold-start), and cold start. See [GapInfo].
+     */
+    val gapInfo: GapInfo? = null,
+    /**
+     * §Phase1E: shown as a top banner after a long (>5min) background absence
+     * or process rebuild — "长时间未查看，仅显示最新内容 [点击重新加载全部会话]".
+     * Tapping the action triggers [MainViewModel.refreshCurrentSession] (global
+     * cold-start). Cleared once a normal load completes.
+     */
+    val staleNotice: Boolean = false
 ) {
     /** Combined sent + received traffic, derived so it never drifts. */
     val totalTrafficBytes: Long
@@ -534,6 +569,41 @@ class MainViewModel @Inject constructor(
      */
     @Volatile private var lastLoadAtMs: Long = 0L
 
+    /**
+     * §Phase1E: tracks whether the SSE feed has connected AT LEAST ONCE in this
+     * process. The catch-up trigger in [handleSSEEvent] runs on every
+     * `server.connected` EXCEPT the very first (cold start has no local
+     * history to diff). Unlike a counter, this flag fires for BOTH kinds of
+     * reconnect: [startSSE] foreground-initiated reconnects AND the in-flow
+     * `retryWhen` reconnects inside [SSEClient.connect] (which never call
+     * startSSE). A counter would miss the latter and silently skip catch-up
+     * after a watchdog / network-drop recovery — the scenario-3 path. Reset
+     * to false on host reconfigure (new server = fresh cold start).
+     */
+    @Volatile private var sseHasConnectedOnce: Boolean = false
+
+    /**
+     * §Phase1E: epoch ms of the last ON_STOP (enter background). Used by
+     * [onForegroundChanged] to bucket the foreground return into three tiers
+     * (<15s throttle / 15s–5min catch-up / >5min cold-start + stale notice).
+     */
+    @Volatile private var backgroundedAtMs: Long = 0L
+
+    /**
+     * §Phase1E: set by [onForegroundChanged] to suppress the catch-up that the
+     * SSE reconnect's `server.connected` would otherwise fire. The foreground
+     * path ALWAYS reconnects SSE (ON_STOP tore it down), so every ON_START
+     * delivers a `server.connected`. Without suppression this would (a) bypass
+     * the <15s throttle and (b) double-trigger catch-up in the 15s–5min tier.
+     * Semantics:
+     *   - <15s tier  → suppress (rely on the live SSE feed; a probe is unwanted)
+     *   - 15s–5min   → DON'T suppress (let server.connected drive the catch-up;
+     *                  this is the single catch-up entry point for this tier)
+     *   - >5min tier → suppress (performGlobalColdStartRefresh already loaded)
+     * Consumed (reset to false) in [handleSSEEvent] after the first connect.
+     */
+    @Volatile private var suppressNextConnectCatchUp: Boolean = false
+
     init {
         loadSettings()
         // §15.2: foreground/background hook (N8 — onEach+launchIn, NOT a
@@ -583,26 +653,52 @@ class MainViewModel @Inject constructor(
             return
         }
         if (inForeground) {
+            // §Phase1E (glm-1 🟠-1): clear any residual suppress flag FIRST. If
+            // a prior foreground cycle set it but the SSE reconnect's
+            // server.connected never arrived (e.g. health check failed mid-
+            // outage), the flag would otherwise linger and suppress the NEXT
+            // cycle's catch-up — permanently hiding messages. Each tier below
+            // re-sets it as needed; this reset guarantees no stale carry-over.
+            suppressNextConnectCatchUp = false
             testConnection(force = true)
+            // §Phase1E three-tier foreground return, bucketed by how long the
+            // app was backgrounded (backgroundedAtMs captured on ON_STOP):
+            //   <15s        → throttle: skip (rapid cycling, SSE resumes live)
+            //   15s–5min    → catch-up (limit=1 probe → tail reload + gap detect)
+            //   >5min       → global cold-start + stale notice banner
             val now = System.currentTimeMillis()
-            if (now - lastLoadAtMs >= FOREGROUND_RELOAD_MIN_INTERVAL_MS) {
-                lastLoadAtMs = now
-                // Catch-up: wipe streaming state first so a stale partial does
-                // not overwrite the freshly-loaded snapshot. Coupled to the
-                // reload below — see method doc.
-                _state.update {
-                    it.copy(
-                        streamingPartTexts = emptyMap(),
-                        streamingReasoningPart = null
-                    )
+            val bgGapMs = if (backgroundedAtMs > 0L) now - backgroundedAtMs else Long.MAX_VALUE
+            when {
+                bgGapMs < FOREGROUND_RELOAD_MIN_INTERVAL_MS -> {
+                    // Throttled: suppress the SSE reconnect's catch-up probe too
+                    // (rapid cycling — rely on the live feed once SSE reconnects).
+                    suppressNextConnectCatchUp = true
                 }
-                _state.value.currentSessionId?.let { loadMessages(it, resetLimit = true) }
+                bgGapMs <= LONG_ABSENCE_THRESHOLD_MS -> {
+                    // Medium absence: let the SSE reconnect's `server.connected`
+                    // drive the catch-up (single entry point — do NOT also call
+                    // catchUp here, that would double-trigger). Just stamp the
+                    // load timestamp; the gap-aware catch-up runs on reconnect.
+                    lastLoadAtMs = now
+                }
+                else -> {
+                    // Long absence: treat like a cold-start of the current
+                    // session and surface a "stale" banner whose action does a
+                    // full global refresh. Other sessions lazy-load on visit.
+                    // Suppress the reconnect catch-up — the cold-start reload
+                    // already fetches the authoritative latest window.
+                    lastLoadAtMs = now
+                    suppressNextConnectCatchUp = true
+                    _state.value.currentSessionId?.let { performGlobalColdStartRefresh(currentId = it) }
+                    _state.update { it.copy(staleNotice = true) }
+                }
             }
         } else {
             // Discard any in-progress draft before tearing down SSE so a
             // backgrounded draft does not leak into the next foreground cycle
             // (the user may have navigated to the app tray, swapped host, etc.).
             clearDraftIfActive()
+            backgroundedAtMs = System.currentTimeMillis()
             sseJob?.cancel()
             sseJob = null
         }
@@ -619,6 +715,11 @@ class MainViewModel @Inject constructor(
     private fun cancelSseForReconfigure() {
         sseJob?.cancel()
         sseJob = null
+        // §Phase1E: a host/profile switch is a fresh server — treat the next
+        // connect as a cold start (skip catch-up, the reconfigure path loads
+        // sessions/messages itself).
+        sseHasConnectedOnce = false
+        suppressNextConnectCatchUp = false
     }
 
     /**
@@ -1319,18 +1420,83 @@ class MainViewModel @Inject constructor(
     }
 
     /**
-     * §Manual message refresh: forces a NON-destructive reload of the current
-     * session's tail. `resetLimit=false` keeps the user's scrolled-up loaded
-     * history pages + cursor and merges the fresh latest-5 tail via the
-     * §preserveUnfetched branch of [launchLoadMessages]; the streaming
-     * overlay is also preserved. No-op when no session is selected or a
-     * load is already in flight (the [AppState.isLoadingMessages] guard in
-     * launchLoadMessages coalesces concurrent triggers).
+     * §Phase1D manual refresh = GLOBAL cold-start + lazy reload.
+     *
+     * Drops the entire in-memory message window cache ([sessionWindowCache]),
+     * clears streaming overlays + any open gap, then freshly loads the CURRENT
+     * session's latest-5 (authoritative snapshot). Other sessions are NOT
+     * re-fetched now — they lazy-load via the existing [selectSession]
+     * cache-miss path when the user next opens them. This is the user's escape
+     * hatch when they distrust the live SSE state: a deliberate "forget
+     * everything, start fresh" that only costs traffic for sessions actually
+     * revisited.
      */
     fun refreshCurrentSession() {
         val sessionId = _state.value.currentSessionId ?: return
         if (_state.value.isLoadingMessages) return
-        loadMessages(sessionId, resetLimit = false)
+        performGlobalColdStartRefresh(currentId = sessionId)
+    }
+
+    /**
+     * Shared global cold-start body used by both [refreshCurrentSession] and
+     * the long-absence foreground tier. Clears all per-session message state
+     * (cache + current view + gap + streaming) then cold-loads [currentId].
+     */
+    private fun performGlobalColdStartRefresh(currentId: String) {
+        // §Phase1E (glm-1 🟠-2): bail if a message load (e.g. an in-flight
+        // loadMore) is running. Without this guard the clear+loadMessages
+        // below would wipe messages, then loadMessages would no-op on the
+        // shared isLoadingMessages guard, leaving an empty list. The caller
+        // (refresh button or >5min tier) is user/initiated and idempotent —
+        // skipping here is safe; the banner/action remains for a retry.
+        if (_state.value.isLoadingMessages) return
+        clearSessionWindowCache()
+        _state.update {
+            it.copy(
+                streamingPartTexts = emptyMap(),
+                streamingReasoningPart = null,
+                gapInfo = null,
+                staleNotice = false,
+                messages = emptyList(),
+                partsByMessage = emptyMap(),
+                olderMessagesCursor = null,
+                hasMoreMessages = true
+            )
+        }
+        loadMessages(currentId, resetLimit = true)
+    }
+
+    /**
+     * §Phase1B/1C catch-up wrapper: probe the server's newest message id and
+     * only reload the 5-message tail if it changed; on reload, detect whether
+     * a gap (断层) opened and surface it via [AppState.gapInfo]. Used on SSE
+     * reconnect (not the first connect) and the 15s–5min foreground tier.
+     */
+    private fun catchUpAfterDisconnectOrForeground(sessionId: String) {
+        launchCatchUp(
+            scope = viewModelScope,
+            repository = repository,
+            state = _state,
+            sessionId = sessionId,
+            settingsManager = settingsManager,
+            onCacheWindow = ::writeSessionWindow
+        )
+    }
+
+    /**
+     * §Phase1C user-triggered gap closure: pages older from the gap boundary
+     * until the pre-reload newest id reappears (gap bridged) or history is
+     * exhausted. Bound to the gap divider's tap action.
+     */
+    fun closeGap() {
+        val sessionId = _state.value.currentSessionId ?: return
+        launchCloseGap(
+            scope = viewModelScope,
+            repository = repository,
+            state = _state,
+            sessionId = sessionId,
+            onCacheWindow = ::writeSessionWindow
+        )
     }
 
     private fun loadAgents() {
@@ -1867,6 +2033,24 @@ class MainViewModel @Inject constructor(
     }
 
     private fun handleSSEEvent(event: SSEEvent) {
+        // §Phase1E: every (re)connect's first frame is `server.connected`.
+        // Catch-up runs on every connect EXCEPT the very first process-time
+        // connect (cold start has no local history). [sseHasConnectedOnce]
+        // covers BOTH reconnect kinds: foreground startSSE reconnects AND
+        // in-flow retryWhen reconnects inside SSEClient.connect (a counter
+        // would miss the latter and silently skip catch-up after a watchdog /
+        // network-drop recovery). The foreground tiers set
+        // [suppressNextConnectCatchUp] to skip the probe for <15s (throttled)
+        // and >5min (cold-start already loaded) — consumed here (once) so only
+        // a genuine network-drop reconnect or the 15s–5min tier catches up.
+        if (event.payload.type == "server.connected") {
+            val suppress = suppressNextConnectCatchUp
+            suppressNextConnectCatchUp = false
+            if (sseHasConnectedOnce && !suppress) {
+                _state.value.currentSessionId?.let { catchUpAfterDisconnectOrForeground(it) }
+            }
+            sseHasConnectedOnce = true
+        }
         handleIncomingSseEvent(
             state = _state,
             event = event,
@@ -1892,6 +2076,14 @@ class MainViewModel @Inject constructor(
          * which has no idle/foreground reload at all.
          */
         private const val FOREGROUND_RELOAD_MIN_INTERVAL_MS = 15_000L
+
+        /**
+         * §Phase1E: background absence above this switches the foreground
+         * return from catch-up (probe + tail reload + gap detect) to a full
+         * global cold-start + stale-notice banner. 5 minutes — beyond this a
+         * manual gap closure is impractical and "history not important" wins.
+         */
+        private const val LONG_ABSENCE_THRESHOLD_MS = 5 * 60 * 1000L
 
         /**
          * §Per-session message cache capacity: max number of session windows

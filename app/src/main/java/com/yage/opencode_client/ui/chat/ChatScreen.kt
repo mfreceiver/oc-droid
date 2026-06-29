@@ -3,9 +3,12 @@ package com.yage.opencode_client.ui.chat
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
@@ -205,7 +208,21 @@ fun ChatScreen(
                     },
                     onOpenSubAgent = viewModel::openSubAgent,
                     expandedParts = expandedParts,
-                    onToggleExpand = viewModel::togglePartExpand
+                    onToggleExpand = viewModel::togglePartExpand,
+                    gapInfo = state.gapInfo,
+                    onCloseGap = viewModel::closeGap
+                )
+            }
+
+            // §Phase1E stale notice banner — shown after a long (>5min)
+            // background absence. Positioned at TopCenter alongside the error
+            // Snackbar but rendered first so the error (if any) stacks below.
+            if (state.staleNotice && state.currentSessionId != null) {
+                StaleNoticeBanner(
+                    onReload = { viewModel.refreshCurrentSession() },
+                    modifier = Modifier
+                        .align(Alignment.TopCenter)
+                        .padding(top = 8.dp, start = 16.dp, end = 16.dp)
                 )
             }
 
@@ -302,6 +319,50 @@ fun ChatScreen(
                     viewModel.showFileInFiles(path, "chat")
                 }
             )
+        }
+    }
+}
+
+/**
+ * §Phase1E stale notice banner — a top-aligned informational bar shown after
+ * the app returns from a long (>5min) background absence. Quiet Tech styling:
+ * neutral surfaceVariant background, thin borderBase outline, inline text
+ * button for the reload action. The banner is transient — tapping the action
+ * triggers a full cold-start refresh that clears [AppState.staleNotice].
+ */
+@Composable
+private fun StaleNoticeBanner(
+    onReload: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    Surface(
+        modifier = modifier,
+        shape = RoundedCornerShape(10.dp),
+        color = MaterialTheme.colorScheme.surfaceVariant,
+        border = BorderStroke(
+            1.dp,
+            MaterialTheme.colorScheme.outline.copy(alpha = 0.3f)
+        )
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 16.dp, vertical = 10.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text(
+                text = "长时间未查看，仅显示最新内容。",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.weight(1f)
+            )
+            TextButton(onClick = onReload) {
+                Text(
+                    text = "重新加载全部会话",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.primary
+                )
+            }
         }
     }
 }

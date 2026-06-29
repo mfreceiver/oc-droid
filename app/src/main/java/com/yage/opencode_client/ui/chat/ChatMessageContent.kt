@@ -1,8 +1,11 @@
 package com.yage.opencode_client.ui.chat
 
+import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
@@ -11,6 +14,7 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -78,6 +82,7 @@ import com.yage.opencode_client.data.model.Message
 import com.yage.opencode_client.data.model.Part
 import com.yage.opencode_client.data.model.TodoItem
 import com.yage.opencode_client.data.repository.OpenCodeRepository
+import com.yage.opencode_client.ui.GapInfo
 import com.yage.opencode_client.ui.theme.LocalMarkdownFontSizes
 import com.yage.opencode_client.ui.theme.markdownTypography
 import com.yage.opencode_client.ui.theme.markdownTypographyCompact
@@ -104,7 +109,9 @@ internal fun ChatMessageList(
     onFileClick: (String) -> Unit,
     onOpenSubAgent: (String) -> Unit,
     expandedParts: Map<String, Boolean>,
-    onToggleExpand: (String, Boolean) -> Unit
+    onToggleExpand: (String, Boolean) -> Unit,
+    gapInfo: GapInfo? = null,
+    onCloseGap: () -> Unit = {}
 ) {
     val listState = rememberLazyListState()
     var shouldAutoScroll by remember { mutableStateOf(true) }
@@ -165,7 +172,45 @@ internal fun ChatMessageList(
                 }
             }
         }
-        items(messages.reversed(), key = { it.id }) { message ->
+        // §Phase1C gap divider: when a gap is open, split the reversed message
+        // list so the divider renders at the seam between the new tail and the
+        // older local history. Messages are oldest-first; reversed for the
+        // LazyColumn (newest-first). tailOldestId is the oldest message in the
+        // fetched tail window — the divider goes AFTER it in oldest-first order,
+        // which means BEFORE it in the reversed (display) order.
+        val reversedMessages = messages.reversed()
+        val showGap = gapInfo != null && gapInfo.open
+        val gapInsertIndex = if (showGap) {
+            val idx = reversedMessages.indexOfFirst { it.id == gapInfo!!.tailOldestId }
+            if (idx >= 0) idx + 1 else -1
+        } else -1
+
+        val beforeGap = if (gapInsertIndex > 0) reversedMessages.subList(0, gapInsertIndex) else reversedMessages
+        val afterGap = if (gapInsertIndex > 0) reversedMessages.subList(gapInsertIndex, reversedMessages.size) else emptyList()
+
+        items(beforeGap, key = { it.id }) { message ->
+            MessageRow(
+                message = message,
+                parts = partsByMessage[message.id].orEmpty(),
+                streamingPartTexts = streamingPartTexts,
+                repository = repository,
+                workspaceDirectory = workspaceDirectory,
+                onFileClick = onFileClick,
+                onOpenSubAgent = onOpenSubAgent,
+                expandedParts = expandedParts,
+                onToggleExpand = onToggleExpand
+            )
+        }
+        if (gapInsertIndex > 0) {
+            item(key = "gap-divider") {
+                GapDivider(
+                    isLoading = isLoading,
+                    onClick = onCloseGap,
+                    modifier = Modifier.fillMaxWidth()
+                )
+            }
+        }
+        items(afterGap, key = { it.id }) { message ->
             MessageRow(
                 message = message,
                 parts = partsByMessage[message.id].orEmpty(),
@@ -214,6 +259,87 @@ internal fun ChatMessageList(
                     )
                 }
             }
+        }
+    }
+}
+
+/**
+ * §Phase1C gap (断层) divider — a clickable divider rendered at the seam
+ * between the local message history and the newly-fetched tail window when
+ * messages may have arrived during a disconnect. Quiet Tech styling: thin
+ * horizontal rule (borderBase) with centered text chip. Tap loads older
+ * messages to close the gap; loading state disables interaction and shows
+ * a spinner with "加载中…".
+ */
+@Composable
+private fun GapDivider(
+    isLoading: Boolean,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    val oc = MaterialTheme.opencode
+    val interactionSource = remember { MutableInteractionSource() }
+    val isPressed by interactionSource.collectIsPressedAsState()
+    val alpha by animateFloatAsState(
+        targetValue = if (isPressed) 0.6f else 1f,
+        label = "gap-divider-press"
+    )
+
+    Box(
+        modifier = modifier
+            .padding(horizontal = 16.dp, vertical = 8.dp)
+            .then(
+                if (!isLoading) {
+                    Modifier.clickable(
+                        interactionSource = interactionSource,
+                        indication = null,
+                        onClick = onClick
+                    )
+                } else Modifier
+            ),
+        contentAlignment = Alignment.Center
+    ) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            // Left rule
+            Surface(
+                modifier = Modifier.weight(1f).height(1.dp),
+                color = oc.borderBase
+            ) {}
+            // Center chip
+            Surface(
+                modifier = Modifier.padding(horizontal = 12.dp),
+                shape = RoundedCornerShape(6.dp),
+                color = Color.Transparent,
+                border = BorderStroke(1.dp, oc.borderBase)
+            ) {
+                Row(
+                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.Center
+                ) {
+                    if (isLoading) {
+                        CircularProgressIndicator(
+                            modifier = Modifier.size(12.dp),
+                            strokeWidth = 1.5.dp,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        Spacer(modifier = Modifier.width(6.dp))
+                    }
+                    Text(
+                        text = if (isLoading) "加载中…" else "可能有未加载的消息 · 点击加载",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = alpha)
+                    )
+                }
+            }
+            // Right rule
+            Surface(
+                modifier = Modifier.weight(1f).height(1.dp),
+                color = oc.borderBase
+            ) {}
         }
     }
 }

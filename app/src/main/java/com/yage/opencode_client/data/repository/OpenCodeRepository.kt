@@ -471,6 +471,20 @@ class OpenCodeRepository @Inject constructor(
         MessagesPage(items = items, nextCursor = nextCursor)
     }
 
+    /**
+     * §Phase1B lightweight tail probe: fetches only the single newest message
+     * id for [sessionId] (limit=1, desc default). Used by the catch-up path to
+     * decide whether a full latest-5 reload is warranted after a disconnect /
+     * foreground return — if the server's newest id equals the locally-known
+     * newest, the reload (and its 5-message payload) is skipped entirely.
+     * Returns null when the session has no messages.
+     */
+    suspend fun probeLatestMessageId(sessionId: String): Result<String?> = runCatching {
+        val response = api.getMessages(sessionId, limit = 1, before = null)
+        if (!response.isSuccessful) throw java.io.IOException("HTTP ${response.code()}")
+        response.body()?.firstOrNull()?.info?.id
+    }
+
     suspend fun sendMessage(
         sessionId: String,
         text: String,

@@ -2450,10 +2450,14 @@ class MainViewModelTest {
     }
 
     @Test
-    fun `refreshCurrentSession issues a non-destructive tail fetch`() = runTest {
-        // Pre-seed state with one older loaded message + cursor (simulating a
-        // user who has scrolled up). A non-destructive refresh (resetLimit=false)
-        // must keep that older message AND merge the fresh tail.
+    fun `refreshCurrentSession is a global cold-start that resets the current view`() = runTest {
+        // §Phase1D: manual refresh now means "distrust live state, start fresh"
+        // — it clears the entire in-memory window cache, drops the current
+        // session's loaded messages/cursor/gap, and reloads the authoritative
+        // latest window. Older scrolled-up history is NOT preserved (the user
+        // explicitly asked for a fresh snapshot); other sessions lazy-load on
+        // next visit. Pre-seed an older message + cursor + open gap to verify
+        // all are wiped.
         val older = Message(id = "m_older", role = "user")
         val fresh = MessageWithParts(info = Message(id = "m_fresh", role = "assistant"))
         coEvery { repository.getMessagesPaged("session-A", 5, any()) } returns
@@ -2465,7 +2469,10 @@ class MainViewModelTest {
                 currentSessionId = "session-A",
                 messages = listOf(older),
                 olderMessagesCursor = "cursor-1",
-                hasMoreMessages = true
+                hasMoreMessages = true,
+                gapInfo = com.yage.opencode_client.ui.GapInfo(
+                    anchorNewestId = "m_older", tailOldestId = "m_older", tailOldestCursor = "c", open = true
+                )
             )
         }
 
@@ -2473,10 +2480,12 @@ class MainViewModelTest {
         advanceUntilIdle()
 
         val ids = viewModel.state.value.messages.map { it.id }
-        assertTrue("Older message must survive non-destructive refresh (got $ids)", ids.contains("m_older"))
-        assertTrue("Fresh tail must be merged in (got $ids)", ids.contains("m_fresh"))
-        // Cursor preserved: refresh does not clobber existing paging state.
-        assertEquals("cursor-1", viewModel.state.value.olderMessagesCursor)
+        assertFalse("Older message is dropped on cold-start refresh (got $ids)", ids.contains("m_older"))
+        assertTrue("Fresh latest window is loaded (got $ids)", ids.contains("m_fresh"))
+        // Cursor reseeded from the fresh fetch (nextCursor=null → no more).
+        assertNull(viewModel.state.value.olderMessagesCursor)
+        // Gap wiped — a cold-start snapshot has no断层 reference.
+        assertNull(viewModel.state.value.gapInfo)
     }
 
     @org.junit.After

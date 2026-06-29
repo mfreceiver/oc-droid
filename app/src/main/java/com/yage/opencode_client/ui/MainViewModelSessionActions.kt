@@ -199,20 +199,26 @@ internal fun selectSessionState(
 
     settingsManager.currentSessionId = sessionId
     val restoredDraft = settingsManager.getDraftText(sessionId)
-    state.update {
-        // §15.2 (review B2): clear streaming buffers on session switch so a
-        // stale partial from the previous session cannot bleed into the new
-        // one and re-combine with fresh deltas (key collision on
-        // `${messageId}:${partId}` produced ghost/fragmented text).
-        it.copy(
-            currentSessionId = sessionId,
-            messages = emptyList(),
-            partsByMessage = emptyMap(),
-            inputText = restoredDraft,
-            streamingPartTexts = emptyMap(),
-            streamingReasoningPart = null
-        )
-    }
+        state.update {
+            // §15.2 (review B2): clear streaming buffers on session switch so a
+            // stale partial from the previous session cannot bleed into the new
+            // one and re-combine with fresh deltas (key collision on
+            // `${messageId}:${partId}` produced ghost/fragmented text).
+            // §Phase1C: also clear any open gap (断层) — it belonged to the
+            // previous session's tail and has no meaning in the new one.
+            // §Phase1E (glm-1 🟡-2): clear staleNotice too — opening a session
+            // is itself a fresh load, so the "long absence" banner is moot.
+            it.copy(
+                currentSessionId = sessionId,
+                messages = emptyList(),
+                partsByMessage = emptyMap(),
+                inputText = restoredDraft,
+                streamingPartTexts = emptyMap(),
+                streamingReasoningPart = null,
+                gapInfo = null,
+                staleNotice = false
+            )
+        }
 }
 
 /**
@@ -317,7 +323,13 @@ internal fun launchLoadMessages(
                             // periodic reload must NOT clobber an existing cursor
                             // (now safe because older history is preserved above).
                             olderMessagesCursor = if (resetLimit) page.nextCursor else it.olderMessagesCursor,
-                            hasMoreMessages = if (resetLimit) (page.nextCursor != null) else it.hasMoreMessages
+                            hasMoreMessages = if (resetLimit) (page.nextCursor != null) else it.hasMoreMessages,
+                            // §Phase1C (gpt-2 S1): a resetLimit=true reload is an
+                            // authoritative snapshot replace — any open gap
+                            // belonged to the previous window and is now stale
+                            // (anchor/tailOldest may no longer be present). Clear
+                            // it; a fresh gap can only re-open via launchCatchUp.
+                            gapInfo = if (resetLimit) null else it.gapInfo
                         )
                     }
                     // §Per-session message cache (write): snapshot the freshly-
@@ -376,6 +388,215 @@ internal fun launchLoadMessagesWithRetry(
         if (sessionId == state.value.currentSessionId) {
             onLoadMessages(sessionId, resetLimit)
         }
+    }
+}
+
+/**
+ * §Phase1B/1C catch-up: runs after a reconnect (server.connected, not the first
+ * connect) or a medium foreground return (15s–5min). Cheapest-first:
+ *
+ * 1. Record the pre-reload local newest message id by `time.created` (NOT list
+ *    position — `messages` is oldest-first, so we use max-by-created which is
+ *    order-independent and robust).
+ * 2. Probe the server's newest id (limit=1). If it equals the local newest,
+ *    nothing arrived during the outage → skip the reload entirely (the big
+ *    traffic saving). Any pre-existing open gap is preserved as-is.
+ * 3. Otherwise fetch the latest-5 and merge (resetLimit=false semantics: keep
+ *    older history + cursor + streaming overlay), then run gap detection:
+ *    if the anchor (pre-reload newest) is NOT in the fetched window, messages
+ *    arrived that fall outside the tail → set [GapInfo] so the UI shows a
+ *    tappable divider. Also clears `staleNotice` (a successful catch-up means
+ *    we're current again).
+ *
+ * Does NOT touch `olderMessagesCursor`/`hasMoreMessages` (resetLimit=false).
+ * No-op when a load is already in flight (coalesced with [launchLoadMessages]
+ * via the shared `isLoadingMessages` guard).
+ */
+internal fun launchCatchUp(
+    scope: CoroutineScope,
+    repository: OpenCodeRepository,
+    state: MutableStateFlow<AppState>,
+    sessionId: String,
+    settingsManager: SettingsManager? = null,
+    onCacheWindow: (sessionId: String, window: CachedSessionWindow) -> Unit = { _, _ -> }
+) {
+    // §Phase1B (gpt-2 S3 / glm-1 🟡-1): synchronous check-and-set (mirrors
+    // launchLoadMessages) to close the race where two concurrent catch-up
+    // triggers each pass the guard before either sets the flag, firing two
+    // probes / tail reloads. Reset on every exit path (skip / success / fail).
+    if (state.value.isLoadingMessages) return
+    state.update { it.copy(isLoadingMessages = true) }
+    scope.launch {
+        // Order-independent newest id (messages is oldest-first per ora-2).
+        val anchorNewestId = state.value.messages
+            .maxByOrNull { it.time?.created ?: -1L }?.id
+        val serverNewestId = repository.probeLatestMessageId(sessionId).getOrNull()
+
+        // No newer message on the server → skip the 5-message reload entirely.
+        // Preserve any already-open gap (it is still unresolved).
+        if (anchorNewestId != null && serverNewestId != null && anchorNewestId == serverNewestId) {
+            state.update { it.copy(isLoadingMessages = false) }
+            return@launch
+        }
+
+        repository.getMessagesPaged(sessionId, 5, before = null)
+            .onSuccess { page ->
+                if (sessionId != state.value.currentSessionId) {
+                    state.update { it.copy(isLoadingMessages = false) }
+                    return@onSuccess
+                }
+                // §preserveUnfetched merge (resetLimit=false): keep older loaded
+                // pages whose id is not in the fetched window and whose created
+                // time predates the fetched window's oldest. Mirrors
+                // launchLoadMessages; kept inline+commented to stay in sync.
+                val fetchedIds = page.items.map { m -> m.info.id }.toHashSet()
+                val oldestFetchedCreated = page.items
+                    .mapNotNull { m -> m.info.time?.created }
+                    .minOrNull()
+                val fetchedMessages = page.items.map { m -> m.info }
+                val fetchedParts = page.items.associate { m -> m.info.id to m.parts }
+                val olderKept = state.value.messages.filter { m ->
+                    m.id !in fetchedIds && (oldestFetchedCreated == null ||
+                        m.time?.created == null ||
+                        m.time.created < oldestFetchedCreated)
+                }
+                val olderKeptIds = olderKept.map { m -> m.id }.toHashSet()
+                val mergedMessages = olderKept + fetchedMessages
+                val mergedParts = state.value.partsByMessage.filterKeys { id -> id in olderKeptIds } + fetchedParts
+
+                // §Phase1C gap detection: anchor (pre-reload newest) not in the
+                // fetched window → messages arrived outside the 5-msg tail.
+                val tailOldestId = page.items
+                    .minByOrNull { it.info.time?.created ?: Long.MAX_VALUE }?.info?.id
+                val newGap = if (anchorNewestId != null && tailOldestId != null && anchorNewestId !in fetchedIds) {
+                    GapInfo(
+                        anchorNewestId = anchorNewestId,
+                        tailOldestId = tailOldestId,
+                        // Cursor pages OLDER from the tail's oldest — the closure direction.
+                        tailOldestCursor = page.nextCursor,
+                        open = true
+                    )
+                } else {
+                    null
+                }
+
+                val lastAssistant = page.items.lastOrNull { it.info.isAssistant }
+                val inferredAgentName = lastAssistant?.info?.agent
+                val agentName = settingsManager?.getAgentForSession(sessionId) ?: inferredAgentName
+
+                state.update {
+                    it.copy(
+                        messages = mergedMessages,
+                        partsByMessage = mergedParts,
+                        isLoadingMessages = false,
+                        selectedAgentName = agentName ?: it.selectedAgentName,
+                        // resetLimit=false: preserve streaming overlay + history cursor.
+                        olderMessagesCursor = it.olderMessagesCursor,
+                        hasMoreMessages = it.hasMoreMessages,
+                        gapInfo = newGap,
+                        staleNotice = false
+                    )
+                }
+                val postUpdate = state.value
+                onCacheWindow(
+                    sessionId,
+                    CachedSessionWindow(
+                        messages = postUpdate.messages,
+                        partsByMessage = postUpdate.partsByMessage,
+                        olderMessagesCursor = postUpdate.olderMessagesCursor,
+                        hasMoreMessages = postUpdate.hasMoreMessages
+                    )
+                )
+            }
+            .onFailure {
+                if (sessionId == state.value.currentSessionId) {
+                    reportNonFatalIssue("MainViewModel", "Catch-up tail reload failed")
+                }
+                state.update { it.copy(isLoadingMessages = false) }
+            }
+    }
+}
+
+/**
+ * §Phase1C user-triggered gap closure (loadMore-style). Pages OLDER from the
+ * gap's [GapInfo.tailOldestCursor] until the [GapInfo.anchorNewestId] reappears
+ * (gap closed → clear gapInfo) or the cursor is exhausted (give up, mark closed).
+ * Uses a SEPARATE cursor chain from [launchLoadMoreMessages] so the two paging
+ * anchors (gap boundary vs loaded-oldest) never pollute each other. Closure
+ * check runs on the RAW page (before dedup) since `before=` is inclusive and the
+ * anchor may sit at the page boundary.
+ */
+internal fun launchCloseGap(
+    scope: CoroutineScope,
+    repository: OpenCodeRepository,
+    state: MutableStateFlow<AppState>,
+    sessionId: String,
+    onCacheWindow: (sessionId: String, window: CachedSessionWindow) -> Unit = { _, _ -> }
+) {
+    val gap = state.value.gapInfo ?: return
+    if (!gap.open) return
+    if (state.value.isLoadingMessages) return
+    val cursor = gap.tailOldestCursor
+    if (cursor == null) {
+        // No more history to page — can't bridge; stop showing the divider.
+        state.update { it.copy(gapInfo = gap.copy(open = false)) }
+        return
+    }
+    state.update { it.copy(isLoadingMessages = true) }
+    scope.launch {
+        repository.getMessagesPaged(sessionId, limit = 5, before = cursor)
+            .onSuccess { page ->
+                if (sessionId != state.value.currentSessionId) {
+                    state.update { it.copy(isLoadingMessages = false) }
+                    return@onSuccess
+                }
+                // Closure check BEFORE dedup (raw page — `before=` is inclusive).
+                val closed = page.items.any { it.info.id == gap.anchorNewestId }
+                val existingIds = state.value.messages.map { it.id }.toHashSet()
+                val bridged = page.items.filterNot { it.info.id in existingIds }
+                val bridgedMessages = bridged.map { it.info }
+                val bridgedParts = bridged.associate { it.info.id to it.parts }
+                // §Phase1C (gpt-2 B2): the bridged page sits BETWEEN the anchor
+                // (older local history) and the tail's oldest — NOT at the list
+                // head. Insert it right before the tailOldestId position so the
+                // ascending-time order is preserved. The gap's lower boundary
+                // (tailOldestId) advances to the OLDEST id just loaded (the new
+                // seam between filled-gap and any still-missing range).
+                val newTailOldestId = bridged.minByOrNull { it.info.time?.created ?: Long.MAX_VALUE }?.info?.id
+                state.update {
+                    val insertIdx = it.messages.indexOfFirst { m -> m.id == gap.tailOldestId }
+                    val mergedMessages = if (insertIdx >= 0) {
+                        it.messages.subList(0, insertIdx) + bridgedMessages + it.messages.subList(insertIdx, it.messages.size)
+                    } else {
+                        bridgedMessages + it.messages
+                    }
+                    it.copy(
+                        messages = mergedMessages,
+                        partsByMessage = bridgedParts + it.partsByMessage,
+                        isLoadingMessages = false,
+                        gapInfo = if (closed) null else gap.copy(
+                            tailOldestId = newTailOldestId ?: gap.tailOldestId,
+                            tailOldestCursor = page.nextCursor
+                        )
+                    )
+                }
+                val postUpdate = state.value
+                onCacheWindow(
+                    sessionId,
+                    CachedSessionWindow(
+                        messages = postUpdate.messages,
+                        partsByMessage = postUpdate.partsByMessage,
+                        olderMessagesCursor = postUpdate.olderMessagesCursor,
+                        hasMoreMessages = postUpdate.hasMoreMessages
+                    )
+                )
+            }
+            .onFailure {
+                if (sessionId == state.value.currentSessionId) {
+                    reportNonFatalIssue("MainViewModel", "Gap closure fetch failed")
+                }
+                state.update { it.copy(isLoadingMessages = false) }
+            }
     }
 }
 

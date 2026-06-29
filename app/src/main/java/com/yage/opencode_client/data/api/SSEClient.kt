@@ -6,6 +6,8 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.callbackFlow
 import kotlinx.coroutines.flow.retryWhen
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.launch
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.sse.EventSource
@@ -13,6 +15,8 @@ import okhttp3.sse.EventSourceListener
 import okhttp3.sse.EventSources
 import kotlin.random.Random
 import java.util.Base64
+import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.AtomicLong
 
 /**
  * Raised after the SSE reconnection budget ([SSEClient.MAX_RETRY_ATTEMPTS]) is
@@ -34,6 +38,16 @@ class SSEClient(
         // §15.3: stop reconnecting after this many attempts and surface the
         // failure via [SSEConnectionExhausted] so the UI can warn the user.
         private const val MAX_RETRY_ATTEMPTS = 10L
+
+        // §Phase1A heartbeat watchdog: server (1.17.11) emits `server.heartbeat`
+        // as a DATA event every ~10s. OkHttp's onEvent fires for it, so a
+        // watchdog can reset a timer on every event (incl. heartbeat) and
+        // detect half-open connections that onFailure won't surface (mobile
+        // NAT timeouts, silent socket death). 30s = 3× heartbeat: tolerates
+        // missing 2 frames before declaring the link dead. cancel() triggers
+        // onFailure -> close -> the existing retryWhen backoff reconnects.
+        private const val HEARTBEAT_TIMEOUT_MS = 30_000L
+        private const val HEARTBEAT_CHECK_INTERVAL_MS = 5_000L
 
         // Reuse a single Json instance instead of allocating one per event.
         private val json = kotlinx.serialization.json.Json {
@@ -86,6 +100,14 @@ class SSEClient(
             }
             .build()
 
+        // §Phase1A: heartbeat bookkeeping shared between the onEvent callback
+        // (OkHttp EventSource thread) and the watchdog coroutine (flow scope).
+        // Atomic so visibility/atomicity is guaranteed without @Volatile (which
+        // cannot be applied to local captures). lastEventAt seeds to now so the
+        // very first check window isn't already "expired".
+        val lastEventAt = AtomicLong(System.currentTimeMillis())
+        val eventCount = AtomicInteger(0)
+
         val listener = object : EventSourceListener() {
             override fun onEvent(
                 eventSource: EventSource,
@@ -93,6 +115,10 @@ class SSEClient(
                 type: String?,
                 data: String
             ) {
+                // Any frame (including `server.heartbeat`) proves the link is
+                // alive — reset the watchdog clock and count it.
+                lastEventAt.set(System.currentTimeMillis())
+                eventCount.incrementAndGet()
                 if (data.isNotBlank() && data != "[DONE]") {
                     try {
                         val event = json.decodeFromString<SSEEvent>(data)
@@ -115,7 +141,31 @@ class SSEClient(
         val eventSource = EventSources.createFactory(okHttpClient)
             .newEventSource(request, listener)
 
+        // §Phase1A: half-open watchdog. Periodically checks elapsed time since
+        // the last received frame; if it exceeds HEARTBEAT_TIMEOUT_MS, cancel
+        // the eventSource (OkHttp triggers onFailure -> close -> retryWhen).
+        // Cold-start guard: while eventCount == 0 we are still waiting for the
+        // first frame (server.connected / heartbeat) — don't time out, the
+        // connect itself may legitimately take a few seconds. Body is wrapped
+        // so any exception is isolated and can never cancel the parent flow.
+        val watchdog = launch {
+            try {
+                while (isActive) {
+                    delay(HEARTBEAT_CHECK_INTERVAL_MS)
+                    if (eventCount.get() == 0) continue
+                    val elapsed = System.currentTimeMillis() - lastEventAt.get()
+                    if (elapsed >= HEARTBEAT_TIMEOUT_MS) {
+                        eventSource.cancel()
+                        break
+                    }
+                }
+            } catch (_: Throwable) {
+                // Isolated: a watchdog failure must not tear down the SSE flow.
+            }
+        }
+
         awaitClose {
+            watchdog.cancel()
             eventSource.cancel()
         }
     }
