@@ -1,6 +1,7 @@
 package com.yage.opencode_client.data.api
 
 import com.yage.opencode_client.data.model.SSEEvent
+import com.yage.opencode_client.util.DebugLog
 import kotlinx.coroutines.channels.awaitClose
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
@@ -67,6 +68,7 @@ class SSEClient(
                 // §15.3: budget exhausted — give up and let the custom
                 // exception propagate to the collector's catch handler so
                 // AppState.error reflects the "stale" banner.
+                DebugLog.e("SSE", "connection exhausted — giving up")
                 throw SSEConnectionExhausted()
             }
             val baseDelay = (INITIAL_RETRY_DELAY_MS * Math.pow(RETRY_MULTIPLIER, attempt.toDouble()))
@@ -77,6 +79,7 @@ class SSEClient(
             // the section header explicitly says "jitter ±30%".
             val jitterFactor = 1.0 + (Random.nextDouble() * 0.6 - 0.3)
             val delayMs = (baseDelay * jitterFactor).toLong().coerceAtLeast(1L)
+            DebugLog.i("SSE", "reconnect attempt #${attempt + 1} in ${delayMs}ms")
             delay(delayMs)
             true
         }
@@ -109,6 +112,10 @@ class SSEClient(
         val eventCount = AtomicInteger(0)
 
         val listener = object : EventSourceListener() {
+            override fun onOpen(eventSource: EventSource, response: okhttp3.Response) {
+                DebugLog.i("SSE", "connected")
+            }
+
             override fun onEvent(
                 eventSource: EventSource,
                 id: String?,
@@ -122,6 +129,7 @@ class SSEClient(
                 if (data.isNotBlank() && data != "[DONE]") {
                     try {
                         val event = json.decodeFromString<SSEEvent>(data)
+                        DebugLog.d("SSE", "event type=${event.payload.type} session=${event.payload.getString("sessionID") ?: "-"}")
                         trySend(Result.success(event))
                     } catch (_: Exception) {
                         // Skip malformed events silently
@@ -130,14 +138,25 @@ class SSEClient(
             }
 
             override fun onClosed(eventSource: EventSource) {
+                DebugLog.w("SSE", "closed/error: connection closed by server")
                 close(Exception("SSE connection closed by server"))
             }
 
             override fun onFailure(eventSource: EventSource, t: Throwable?, response: okhttp3.Response?) {
+                DebugLog.w("SSE", "closed/error: ${t?.message ?: "code=${response?.code}"}")
                 close(t ?: Exception("SSE connection failed"))
             }
         }
 
+        // Sanitize the URL for logging only: strip userinfo (user:pass@),
+        // query, and fragment so credentials never leak into the in-app log
+        // or Logcat. The actual connection still uses the real `$url` (the
+        // Request above was already built with it).
+        val sanitizedLogUrl = runCatching {
+            val uri = android.net.Uri.parse(url)
+            "${uri.scheme}://${uri.host}${if (uri.port != -1) ":${uri.port}" else ""}/global/event"
+        }.getOrNull() ?: "<redacted>/global/event"
+        DebugLog.i("SSE", "connecting to $sanitizedLogUrl")
         val eventSource = EventSources.createFactory(okHttpClient)
             .newEventSource(request, listener)
 
@@ -155,6 +174,7 @@ class SSEClient(
                     if (eventCount.get() == 0) continue
                     val elapsed = System.currentTimeMillis() - lastEventAt.get()
                     if (elapsed >= HEARTBEAT_TIMEOUT_MS) {
+                        DebugLog.w("SSE", "heartbeat watchdog timeout — forcing reconnect")
                         eventSource.cancel()
                         break
                     }

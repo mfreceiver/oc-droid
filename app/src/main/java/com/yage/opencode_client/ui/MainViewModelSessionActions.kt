@@ -5,6 +5,7 @@ import com.yage.opencode_client.data.model.Message
 import com.yage.opencode_client.data.model.Part
 import com.yage.opencode_client.data.model.toCacheEntry
 import com.yage.opencode_client.data.repository.OpenCodeRepository
+import com.yage.opencode_client.util.DebugLog
 import com.yage.opencode_client.util.SettingsManager
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.delay
@@ -251,7 +252,10 @@ internal fun launchLoadMessages(
     // chunked body that叠加 to OOM. The first load wins; concurrent ones skip.
     // The flag is set synchronously (before launch) to close the check-and-set
     // race window. Periodic reloads after the first completes still go through.
-    if (state.value.isLoadingMessages) return
+    if (state.value.isLoadingMessages) {
+        DebugLog.d("Sync", "launchLoadMessages skipped: isLoadingMessages already true")
+        return
+    }
     state.update { it.copy(isLoadingMessages = true) }
     scope.launch {
         // §on-demand: cursor pagination. The first load (resetLimit) captures the
@@ -260,10 +264,12 @@ internal fun launchLoadMessages(
         // loadable.
         repository.getMessagesPaged(sessionId, 5, before = null)
             .onSuccess { page ->
+                DebugLog.d("Sync", "fetched ${page.items.size} messages, newestId=${page.items.lastOrNull()?.info?.id ?: "-"}")
                 if (sessionId == state.value.currentSessionId) {
                     val lastAssistant = page.items.lastOrNull { it.info.isAssistant }
                     val inferredAgentName = lastAssistant?.info?.agent
                     val agentName = settingsManager?.getAgentForSession(sessionId) ?: inferredAgentName
+                    val beforeMergeSize = state.value.messages.size
                     state.update {
                         // §preserveUnfetched (mirrors opencode-web reconcileFetched):
                         // a periodic reload (resetLimit=false) fetches the latest
@@ -335,6 +341,7 @@ internal fun launchLoadMessages(
                             gapInfo = if (resetLimit) null else it.gapInfo
                         )
                     }
+                    DebugLog.d("Sync", "merged: before=$beforeMergeSize after=${state.value.messages.size}")
                     // §Per-session message cache (write): snapshot the freshly-
                     // merged window so a return trip restores it instantly.
                     // The post-restore fetch (resetLimit=false) will merge any
@@ -356,6 +363,7 @@ internal fun launchLoadMessages(
                 }
             }
             .onFailure { error ->
+                DebugLog.w("Sync", "loadMessages failed: ${errorMessageOrFallback(error, "unknown error")}")
                 if (sessionId == state.value.currentSessionId) {
                     state.update {
                         it.copy(
@@ -386,11 +394,14 @@ internal fun launchLoadMessagesWithRetry(
     resetLimit: Boolean = true,
     onLoadMessages: (String, Boolean) -> Unit
 ) {
+    DebugLog.d("Sync", "loadMessages scheduled: session=$sessionId resetLimit=$resetLimit")
     scope.launch {
         delay(MainViewModelTimings.messageRetryDelayMs)
-        if (sessionId == state.value.currentSessionId) {
-            onLoadMessages(sessionId, resetLimit)
+        if (sessionId != state.value.currentSessionId) {
+            DebugLog.d("Sync", "loadMessages dropped: session mismatch ($sessionId != ${state.value.currentSessionId})")
+            return@launch
         }
+        onLoadMessages(sessionId, resetLimit)
     }
 }
 

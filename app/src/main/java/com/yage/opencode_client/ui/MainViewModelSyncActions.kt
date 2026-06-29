@@ -6,6 +6,7 @@ import com.yage.opencode_client.data.model.Message
 import com.yage.opencode_client.data.model.SSEEvent
 import com.yage.opencode_client.data.model.TodoItem
 import com.yage.opencode_client.data.repository.OpenCodeRepository
+import com.yage.opencode_client.util.DebugLog
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -69,6 +70,7 @@ internal fun handleIncomingSseEvent(
     onLoadPendingPermissions: () -> Unit,
     onNonFatalIssue: (String) -> Unit
 ) {
+    DebugLog.d("Sync", "dispatch ${event.payload.type} session=${event.payload.getString("sessionID") ?: "-"} current=${state.value.currentSessionId}")
     when (event.payload.type) {
         "session.created" -> {
             val created = parseSessionCreatedEvent(event)
@@ -127,7 +129,9 @@ internal fun handleIncomingSseEvent(
                     statusEvent.sessionId == state.value.currentSessionId
                 ) {
                     val s = state.value
-                    if (s.streamingPartTexts.isNotEmpty() || s.streamingReasoningPart != null) {
+                    val shouldReload = s.streamingPartTexts.isNotEmpty() || s.streamingReasoningPart != null
+                    DebugLog.d("Sync", "session.status idle → ${if (shouldReload) "reload" else "no-op"}")
+                    if (shouldReload) {
                         onRefreshMessages(statusEvent.sessionId, true)
                     }
                 }
@@ -137,6 +141,8 @@ internal fun handleIncomingSseEvent(
         }
         "message.created" -> {
             val sessionId = event.payload.getString("sessionID")
+            val isCurrent = sessionId != null && sessionId == state.value.currentSessionId
+            DebugLog.i("Sync", "message.created: ${if (isCurrent) "reload current" else "mark unread"}")
             if (sessionId != null && sessionId == state.value.currentSessionId) {
                 onRefreshMessages(sessionId, true)
             } else if (sessionId != null) {
@@ -163,19 +169,16 @@ internal fun handleIncomingSseEvent(
                     lenientJson.decodeFromJsonElement<Message>(infoJson)
                 }.getOrNull()
                 if (updated != null && updated.id.isNotEmpty()) {
-                    // Folded into a single atomic update (no TOCTOU): if the id
-                    // isn't in the current view, return s unchanged.
+                    // Single O(n) scan inside the atomic update: `found` is set
+                    // during the same `map` pass that builds the replacement
+                    // list, so the patch decision and the found flag come from
+                    // one atomic pass (no TOCTOU, no second `.none{}` scan).
+                    var found = false
                     state.update { s ->
-                        if (s.messages.none { it.id == updated.id }) {
-                            s
-                        } else {
-                            s.copy(
-                                messages = s.messages.map {
-                                    if (it.id == updated.id) updated else it
-                                }
-                            )
-                        }
+                        val newMessages = s.messages.map { if (it.id == updated.id) { found = true; updated } else it }
+                        if (found) s.copy(messages = newMessages) else s
                     }
+                    DebugLog.d("Sync", "message.updated: ${if (found) "patched" else "not in list (no-op)"}")
                 }
             }
         }

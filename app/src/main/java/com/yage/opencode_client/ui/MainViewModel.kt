@@ -9,6 +9,7 @@ import com.yage.opencode_client.data.repository.HostProfileStore
 import com.yage.opencode_client.data.repository.OpenCodeRepository
 import com.yage.opencode_client.di.AppLifecycleMonitor
 import com.yage.opencode_client.util.SettingsManager
+import com.yage.opencode_client.util.DebugLog
 import com.yage.opencode_client.util.ThemeMode
 import com.yage.opencode_client.util.TrafficTracker
 import com.yage.opencode_client.ui.theme.MarkdownFontSizes
@@ -701,6 +702,7 @@ class MainViewModel @Inject constructor(
             // (the user may have navigated to the app tray, swapped host, etc.).
             clearDraftIfActive()
             backgroundedAtMs = System.currentTimeMillis()
+            DebugLog.i("SSE", "cancelSse (background)")
             sseJob?.cancel()
             sseJob = null
         }
@@ -715,6 +717,7 @@ class MainViewModel @Inject constructor(
      * the freshly-cleared state for the new profile.
      */
     private fun cancelSseForReconfigure() {
+        DebugLog.i("SSE", "cancelSse (reconfigure)")
         sseJob?.cancel()
         sseJob = null
         // §Phase1E: a host/profile switch is a fresh server — treat the next
@@ -2063,6 +2066,7 @@ class MainViewModel @Inject constructor(
     }
 
     private fun startSSE() {
+        DebugLog.i("SSE", "startSSE")
         sseJob?.cancel()
         sseJob = launchSseCollection(viewModelScope, repository, _state, ::handleSSEEvent)
     }
@@ -2081,7 +2085,9 @@ class MainViewModel @Inject constructor(
         if (event.payload.type == "server.connected") {
             val suppress = suppressNextConnectCatchUp
             suppressNextConnectCatchUp = false
-            if (sseHasConnectedOnce && !suppress) {
+            val doCatchUp = sseHasConnectedOnce && !suppress
+            DebugLog.i("SSE", "server.connected: sseHasConnectedOnce=$sseHasConnectedOnce suppress=$suppress → ${if (doCatchUp) "catch-up" else "skip"}")
+            if (doCatchUp) {
                 _state.value.currentSessionId?.let { catchUpAfterDisconnectOrForeground(it) }
             }
             sseHasConnectedOnce = true

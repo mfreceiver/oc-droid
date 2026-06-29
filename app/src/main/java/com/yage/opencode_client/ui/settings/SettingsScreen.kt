@@ -117,6 +117,10 @@ fun SettingsScreen(
             SettingsSectionDivider()
 
             AboutSection()
+
+            SettingsSectionDivider()
+
+            DebugLogSection()
         }
     }
 }
