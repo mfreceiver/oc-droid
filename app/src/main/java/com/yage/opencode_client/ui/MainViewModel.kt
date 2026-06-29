@@ -1142,8 +1142,9 @@ class MainViewModel @Inject constructor(
                 }
                 setInputText("")
                 viewModelScope.launch {
-                    val args = if (arguments.isBlank()) emptyMap() else mapOf("text" to arguments)
-                    repository.executeCommand(sessionId, cmd, args)
+                    // §fix(command-400): server 1.17.11 wants `arguments` as the
+                    // raw string, not a {"text": ...} object. Pass it directly.
+                    repository.executeCommand(sessionId, cmd, arguments)
                         .onFailure { error ->
                             _state.update {
                                 it.copy(error = errorMessageOrFallback(error, "Command /$cmd failed"))

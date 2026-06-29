@@ -248,8 +248,15 @@ data class RevertSessionRequest(
 data class CommandInfo(
     val name: String,
     val description: String? = null,
-    val agent: String? = null,
-    val hints: CommandHints? = null
+    val agent: String? = null
+    // §fix(command-recognition): the `hints` field is NOT declared here.
+    // server 1.17.11 returns `hints` as a JSON ARRAY of strings (e.g.
+    // ["$ARGUMENTS"]), but an earlier schema typed it as a CommandHints
+    // OBJECT. That type mismatch made kotlinx.serialization throw on every
+    // command entry → getCommands() failed → the client fell back to only the
+    // 4 hardcoded local commands, so user-added / custom commands never
+    // appeared in autocomplete. Since hints is unused client-side, we drop the
+    // field entirely; ignoreUnknownKeys=true skips the server's hints safely.
 )
 
 @kotlinx.serialization.Serializable
@@ -276,6 +283,10 @@ data class CommandHints(
 @kotlinx.serialization.Serializable
 data class CommandRequest(
     val command: String,
-    val arguments: Map<String, String> = emptyMap(),
+    // §fix(command-400): server 1.17.11 expects `arguments` as a JSON STRING
+    // (the raw argument text), not an object/map. Sending `{}` 400'd every
+    // server-forwarded slash command (/compact, /init, /review, …) with
+    // "Expected string, got {}". The empty default is valid (no arguments).
+    val arguments: String = "",
     val agent: String? = null
 )

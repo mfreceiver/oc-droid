@@ -583,7 +583,7 @@ class OpenCodeRepository @Inject constructor(
     suspend fun executeCommand(
         sessionId: String,
         command: String,
-        arguments: Map<String, String> = emptyMap(),
+        arguments: String = "",
         agent: String? = null
     ): Result<Unit> = runCatching {
         val response = api.executeCommand(
