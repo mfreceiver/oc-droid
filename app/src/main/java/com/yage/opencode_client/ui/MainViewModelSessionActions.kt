@@ -301,24 +301,27 @@ internal fun launchLoadMessages(
                             // keep parts for older-kept messages + add fetched parts
                             mergedParts = it.partsByMessage.filterKeys { id -> id in olderKeptIds } + fetchedParts
                         }
+                        // §append-safe (gpter BLOCKER): only drop the live
+                        // streaming overlay when the session is NOT actively
+                        // running. A resetLimit=true reload triggered while a
+                        // turn is still streaming — e.g. an append-send's post-
+                        // send refresh, or the appended user message's
+                        // `message.created` — must NOT erase the in-flight
+                        // assistant text: the fetched window may not yet hold
+                        // the finalized part.text, so streamingPartTexts is the
+                        // source of truth until the run settles. Once status
+                        // flips to idle the next resetLimit reload finalizes as
+                        // before (preserving the S1 finalization-boundary model).
+                        // Unknown status → finalize/clear (legacy behaviour).
+                        val streamingFinalized = it.sessionStatuses[sessionId]
+                            ?.let { st -> !st.isBusy && !st.isRetry } ?: true
                         it.copy(
                             messages = mergedMessages,
                             partsByMessage = mergedParts,
                             isLoadingMessages = false,
                             selectedAgentName = agentName ?: it.selectedAgentName,
-                            // §finalization-boundary (gpter BLOCKER): a resetLimit=true
-                            // reload fetches the AUTHORITATIVE latest window, so any
-                            // streaming overlay for those messages is now superseded.
-                            // Clear it so a stale partial (streamingPartTexts[partId])
-                            // cannot mask the finalized part.text in the UI. This is the
-                            // finalization boundary now that S1 removed the idle clear.
-                            // (resetLimit=false periodic reloads preserve the overlay
-                            // since they only fetch the latest window without finalizing
-                            // an in-flight turn.) Safe across callers: session-open and
-                            // foreground already wipe before load (redundant, harmless);
-                            // message.created / send first-paint are the intended clears.
-                            streamingPartTexts = if (resetLimit) emptyMap() else it.streamingPartTexts,
-                            streamingReasoningPart = if (resetLimit) null else it.streamingReasoningPart,
+                            streamingPartTexts = if (resetLimit && streamingFinalized) emptyMap() else it.streamingPartTexts,
+                            streamingReasoningPart = if (resetLimit && streamingFinalized) null else it.streamingReasoningPart,
                             // Only (re)seed the history cursor on a fresh open; a
                             // periodic reload must NOT clobber an existing cursor
                             // (now safe because older history is preserved above).
@@ -837,8 +840,12 @@ internal fun launchSendMessage(
         repository.sendMessage(sessionId, text, agent, model, attachments = attachments)
             .onSuccess {
                 state.update {
+                    // §append-safe (glmer MAJOR-1): inputText is cleared
+                    // synchronously at dispatch time, so do NOT touch it here —
+                    // wiping now would destroy a follow-up the user typed during
+                    // the in-flight prompt_async window (the core send-while-
+                    // running workflow).
                     it.copy(
-                        inputText = "",
                         error = null,
                         sessions = bumpSessionUpdated(it.sessions, sessionId, System.currentTimeMillis()),
                         sessionStatuses = it.sessionStatuses + (sessionId to com.yage.opencode_client.data.model.SessionStatus(type = "busy"))
@@ -854,7 +861,12 @@ internal fun launchSendMessage(
                 onRefreshMessages(sessionId, true)
             }
             .onFailure { error ->
-                state.update { it.copy(error = errorMessageOrFallback(error, "Failed to send message")) }
+                state.update { s ->
+                    // Restore the failed prompt only if the user has not typed
+                    // something new since the synchronous dispatch clear.
+                    val restored = if (s.inputText.isBlank()) text else s.inputText
+                    s.copy(error = errorMessageOrFallback(error, "Failed to send message"), inputText = restored)
+                }
             }
         onComplete?.invoke()
     }

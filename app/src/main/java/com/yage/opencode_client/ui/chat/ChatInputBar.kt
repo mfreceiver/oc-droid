@@ -119,10 +119,16 @@ internal fun ChatInputBar(
     }
 
     val oc = MaterialTheme.opencode
-    // §9: the primary button toggles between send (ArrowUpward) and stop while
-    // the agent is streaming; tapping stop delegates to onAbort.
-    val sendIcon = if (isBusy) Icons.Default.Stop else Icons.Default.ArrowUpward
-    val sendContentDescription = if (isBusy) stringResource(R.string.chat_interrupt_agent)
+    // §9: the primary button is SEND whenever there is something to send —
+    // including while the agent is running, so the user can append/steer a
+    // running turn (matches the official web/TUI behaviour: the server's
+    // `prompt_async` persists the message and the active run loop absorbs it
+    // on its next iteration). Only when the agent is busy AND the composer is
+    // empty does the button become STOP (one-tap abort); the status-row menu
+    // remains a second stop entry point while typing.
+    val canStop = isBusy && !canSend
+    val sendIcon = if (canStop) Icons.Default.Stop else Icons.Default.ArrowUpward
+    val sendContentDescription = if (canStop) stringResource(R.string.chat_interrupt_agent)
     else stringResource(R.string.chat_send)
 
     // §9: composer card — rounded 10, surface (bg-base), 2dp elevation.
@@ -220,15 +226,16 @@ internal fun ChatInputBar(
                 // white icon, 1dp shadow; disabled at 0.5 alpha.
                 ChatPrimaryActionButton(
                     onClick = {
-                        if (isBusy) onAbort()
+                        if (canStop) onAbort()
                         else handleComposerSend(
                             text = text,
                             availableCommands = availableCommands,
+                            allowCommand = !isBusy,
                             onSendMessage = onSend,
                             onExecuteCommand = onExecuteCommand
                         )
                     },
-                    enabled = isBusy || canSend,
+                    enabled = canStop || canSend,
                     containerColor = oc.bgContrast,
                     contentColor = Color.White,
                     dimWhenDisabled = true,
@@ -245,15 +252,22 @@ internal fun ChatInputBar(
  * dispatched via [onExecuteCommand] (and the typed text is parsed into
  * command name + argument string); anything else falls through to a normal
  * [onSendMessage].
+ *
+ * [allowCommand] gates command execution: while the agent is running we only
+ * ever append the (possibly `/`-prefixed) text as a normal prompt, never
+ * executing server commands mid-run (an untested path that could e.g. switch
+ * sessions under a live run). Mirrors the official client, which sends
+ * unconditionally and lets the server absorb the prompt.
  */
 private fun handleComposerSend(
     text: String,
     availableCommands: List<CommandInfo>,
+    allowCommand: Boolean,
     onSendMessage: () -> Unit,
-    onExecuteCommand: (String, String) -> Unit
+    onExecuteCommand: (command: String, arguments: String) -> Unit
 ) {
     val trimmed = text.trim()
-    if (trimmed.startsWith("/")) {
+    if (allowCommand && trimmed.startsWith("/")) {
         val withoutSlash = trimmed.removePrefix("/")
         val cmdName = withoutSlash.substringBefore(' ').lowercase()
         val args = withoutSlash.substringAfter(' ', "").trim()

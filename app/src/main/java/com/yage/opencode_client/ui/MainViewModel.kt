@@ -1687,6 +1687,14 @@ class MainViewModel @Inject constructor(
 
         _state.update { state -> state.copy(sendingSessionIds = state.sendingSessionIds + sessionId) }
 
+        // §append-safe (glmer MAJOR-1): clear the composer synchronously on
+        // dispatch so a follow-up typed during the in-flight prompt_async
+        // window is not wiped by a late onSuccess. The captured `text` is
+        // restored on failure (in launchSendMessage) only if the user has not
+        // typed something new in the meantime.
+        settingsManager.setDraftText(sessionId, "")
+        _state.update { it.copy(inputText = "") }
+
         val agent = _state.value.selectedAgentName
         val model: Message.ModelInfo? = null
         val currentSession = _state.value.currentSession
