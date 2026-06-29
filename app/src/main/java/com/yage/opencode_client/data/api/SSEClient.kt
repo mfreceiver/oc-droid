@@ -129,7 +129,17 @@ class SSEClient(
                 if (data.isNotBlank() && data != "[DONE]") {
                     try {
                         val event = json.decodeFromString<SSEEvent>(data)
-                        DebugLog.d("SSE", "event type=${event.payload.type} session=${event.payload.getString("sessionID") ?: "-"}")
+                        // Throttle per-token / periodic noise: message.part.delta
+                        // fires dozens-100s/sec during AI streaming and
+                        // server.heartbeat fires ~every 10s. Logging every one
+                        // floods the 1000-entry ring buffer and evicts the
+                        // valuable signal lines. Skip both — the watchdog
+                        // already tracks every frame via lastEventAt above, so
+                        // heartbeats still serve their liveness purpose.
+                        val type = event.payload.type
+                        if (type != "message.part.delta" && type != "server.heartbeat") {
+                            DebugLog.d("SSE", "event type=$type session=${event.payload.getString("sessionID") ?: "-"}")
+                        }
                         trySend(Result.success(event))
                     } catch (_: Exception) {
                         // Skip malformed events silently

@@ -24,7 +24,9 @@ import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Error
 import androidx.compose.material.icons.filled.Lock
+import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.Person
+import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Visibility
 import androidx.compose.material.icons.filled.VisibilityOff
 import androidx.compose.material3.Button
@@ -32,6 +34,8 @@ import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.FilterChip
+import androidx.compose.material3.FilterChipDefaults
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -382,9 +386,23 @@ internal fun AboutSection() {
 @Composable
 internal fun DebugLogSection() {
     val oc = MaterialTheme.opencode
-    val entries by DebugLog.entries.collectAsStateWithLifecycle()
+    val liveEntries by DebugLog.entries.collectAsStateWithLifecycle()
     val context = LocalContext.current
     var copied by remember { mutableStateOf(false) }
+
+    // A — Level filter. Default INFO+ hides the per-token DEBUG spam so the
+    // viewer surfaces decisions / lifecycle / failures instead of SSE noise.
+    var minLevel by remember { mutableStateOf(DebugLog.Level.INFO) }
+
+    // B — Pause freezes a snapshot so the list stops jumping while the user
+    // scrolls/copies. `frozen` is only read while paused.
+    var paused by remember { mutableStateOf(false) }
+    var frozen by remember { mutableStateOf<List<DebugLog.Entry>>(emptyList()) }
+
+    val displayed: List<DebugLog.Entry> = if (paused) frozen else liveEntries
+    val filtered = remember(displayed, minLevel) {
+        displayed.filter { it.level.ordinal >= minLevel.ordinal }
+    }
 
     // Reset the "已复制" indicator after 1.5 s.
     LaunchedEffect(copied) {
@@ -402,26 +420,61 @@ internal fun DebugLogSection() {
     ) {
         Column(modifier = Modifier.padding(16.dp)) {
             // ── Header row: title + count badge ──
+            // Show `${filtered.size}/${entries.size} 条` when a filter is
+            // active so the user understands how much is hidden; collapse to
+            // a plain total otherwise to stay visually quiet.
+            val countText = if (filtered.size == liveEntries.size) {
+                "${liveEntries.size} 条"
+            } else {
+                "${filtered.size}/${liveEntries.size} 条"
+            }
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                Text("调试日志", style = MaterialTheme.typography.titleMedium)
-                Text("${entries.size} 条", style = MaterialTheme.typography.labelSmall, color = oc.faint)
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text("调试日志", style = MaterialTheme.typography.titleMedium)
+                    if (paused) {
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text(
+                            "（已暂停）",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = oc.stateDangerFg
+                        )
+                    }
+                }
+                Text(countText, style = MaterialTheme.typography.labelSmall, color = oc.faint)
             }
 
             Spacer(modifier = Modifier.height(12.dp))
 
-            // ── Action buttons ──
+            // ── Level filter chips ──
+            // 全部 (DEBUG threshold) / INFO+ / WARN+. Selected chip uses the
+            // v2 accent token so the active state reads cleanly on surfaceVariant.
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                LevelChip("全部", DebugLog.Level.DEBUG, minLevel) { minLevel = it }
+                LevelChip("INFO+", DebugLog.Level.INFO, minLevel) { minLevel = it }
+                LevelChip("WARN+", DebugLog.Level.WARN, minLevel) { minLevel = it }
+            }
+
+            Spacer(modifier = Modifier.height(12.dp))
+
+            // ── Action buttons: 复制 / 暂停 / 清除 ──
+            // 复制 serializes the currently DISPLAYED + FILTERED list, so when
+            // paused+filtered the clipboard matches exactly what the user sees.
+            val sdf = remember { SimpleDateFormat("HH:mm:ss.SSS", Locale.US) }
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(8.dp)
             ) {
                 OutlinedButton(
                     onClick = {
-                        val sdf = SimpleDateFormat("HH:mm:ss.SSS", Locale.US)
-                        val text = entries.joinToString("\n") { e ->
+                        val text = filtered.joinToString("\n") { e ->
                             "[${sdf.format(e.timeMs)}] ${e.tag}/${e.level}: ${e.message}"
                         }
                         val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
@@ -433,6 +486,26 @@ internal fun DebugLogSection() {
                     Icon(Icons.Default.ContentCopy, contentDescription = null, modifier = Modifier.size(16.dp))
                     Spacer(modifier = Modifier.width(4.dp))
                     Text(if (copied) "已复制" else "复制")
+                }
+
+                OutlinedButton(
+                    onClick = {
+                        if (paused) {
+                            paused = false
+                        } else {
+                            frozen = liveEntries
+                            paused = true
+                        }
+                    },
+                    modifier = Modifier.weight(1f)
+                ) {
+                    Icon(
+                        if (paused) Icons.Default.PlayArrow else Icons.Default.Pause,
+                        contentDescription = null,
+                        modifier = Modifier.size(16.dp)
+                    )
+                    Spacer(modifier = Modifier.width(4.dp))
+                    Text(if (paused) "继续" else "暂停")
                 }
 
                 OutlinedButton(
@@ -453,7 +526,6 @@ internal fun DebugLogSection() {
             // SimpleDateFormat.format() on every recomposition. That was a
             // 10–50% CPU hotspot during high-frequency SSE streams while
             // Settings was open.
-            val sdf = remember { SimpleDateFormat("HH:mm:ss.SSS", Locale.US) }
             val logListState = rememberLazyListState()
             LazyColumn(
                 modifier = Modifier
@@ -461,12 +533,16 @@ internal fun DebugLogSection() {
                     .heightIn(max = 360.dp),
                 state = logListState
             ) {
-                if (entries.isEmpty()) {
+                if (filtered.isEmpty()) {
                     item {
-                        Text("（暂无日志）", color = oc.faint, style = MaterialTheme.typography.bodySmall)
+                        Text(
+                            if (liveEntries.isEmpty()) "（暂无日志）" else "（当前过滤下无日志）",
+                            color = oc.faint,
+                            style = MaterialTheme.typography.bodySmall
+                        )
                     }
                 }
-                items(items = entries, key = { entry -> entry.seq }) { entry ->
+                items(items = filtered, key = { entry -> entry.seq }) { entry ->
                     val levelColor = when (entry.level) {
                         DebugLog.Level.DEBUG -> oc.faint
                         DebugLog.Level.INFO -> MaterialTheme.colorScheme.onSurface
@@ -483,6 +559,29 @@ internal fun DebugLogSection() {
             }
         }
     }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun LevelChip(
+    label: String,
+    level: DebugLog.Level,
+    selected: DebugLog.Level,
+    onSelect: (DebugLog.Level) -> Unit
+) {
+    val oc = MaterialTheme.opencode
+    val isSelected = selected == level
+    FilterChip(
+        selected = isSelected,
+        onClick = { onSelect(level) },
+        label = { Text(label) },
+        colors = FilterChipDefaults.filterChipColors(
+            selectedContainerColor = MaterialTheme.colorScheme.surface,
+            selectedLabelColor = oc.accentText,
+            selectedLeadingIconColor = oc.accentText,
+            selectedTrailingIconColor = oc.accentText
+        )
+    )
 }
 
 @Composable

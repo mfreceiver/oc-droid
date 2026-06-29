@@ -70,7 +70,22 @@ internal fun handleIncomingSseEvent(
     onLoadPendingPermissions: () -> Unit,
     onNonFatalIssue: (String) -> Unit
 ) {
-    DebugLog.d("Sync", "dispatch ${event.payload.type} session=${event.payload.getString("sessionID") ?: "-"} current=${state.value.currentSessionId}")
+    // Throttle dispatch logging to preserve the 1000-entry ring buffer's signal:
+    // - server.heartbeat: periodic (~10s) noise, never logged.
+    // - message.part.delta: per-token noise during AI streaming. The ONLY
+    //   diagnostic signal is a session mismatch ("delta for X while viewing Y")
+    //   — when the delta's session IS the current one, streaming is expected
+    //   and logging every token floods the buffer. So log deltas only on
+    //   mismatch; skip matching-current deltas.
+    // - all other types: log as before (connection events, message.created,
+    //   reload decisions, etc. are the actual signal).
+    val type = event.payload.type
+    val evtSession = event.payload.getString("sessionID") ?: "-"
+    when {
+        type == "server.heartbeat" -> { /* skip — periodic noise */ }
+        type == "message.part.delta" && evtSession == state.value.currentSessionId -> { /* skip — expected streaming, not signal */ }
+        else -> DebugLog.d("Sync", "dispatch $type session=$evtSession current=${state.value.currentSessionId}")
+    }
     when (event.payload.type) {
         "session.created" -> {
             val created = parseSessionCreatedEvent(event)
