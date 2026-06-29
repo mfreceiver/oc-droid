@@ -43,7 +43,6 @@ import androidx.compose.ui.unit.dp
 import com.yage.opencode_client.R
 import com.yage.opencode_client.ui.AppState
 import com.yage.opencode_client.data.model.HostProfile
-import com.yage.opencode_client.util.LanguageMode
 import com.yage.opencode_client.util.ThemeMode
 
 @Composable
@@ -227,9 +226,7 @@ internal fun ServerConnectionSection(
 @Composable
 internal fun AppearanceSection(
     themeMode: ThemeMode,
-    languageMode: LanguageMode,
-    onThemeSelected: (ThemeMode) -> Unit,
-    onLanguageSelected: (LanguageMode) -> Unit
+    onThemeSelected: (ThemeMode) -> Unit
 ) {
     SectionHeader(title = stringResource(R.string.settings_appearance))
 
@@ -262,37 +259,6 @@ internal fun AppearanceSection(
                         ThemeMode.LIGHT -> stringResource(R.string.settings_theme_light)
                         ThemeMode.DARK -> stringResource(R.string.settings_theme_dark)
                         ThemeMode.SYSTEM -> stringResource(R.string.settings_follow_system)
-                    }
-                )
-            }
-        }
-    }
-
-    Spacer(modifier = Modifier.height(16.dp))
-    Text(stringResource(R.string.settings_language), style = MaterialTheme.typography.labelMedium)
-    Spacer(modifier = Modifier.height(8.dp))
-    val languages = LanguageMode.values()
-    SingleChoiceSegmentedButtonRow(modifier = Modifier.fillMaxWidth()) {
-        languages.forEachIndexed { index, mode ->
-            SegmentedButton(
-                selected = languageMode == mode,
-                onClick = { onLanguageSelected(mode) },
-                shape = SegmentedButtonDefaults.itemShape(index = index, count = languages.size),
-                icon = {},
-                colors = SegmentedButtonDefaults.colors(
-                    activeContainerColor = MaterialTheme.colorScheme.primary,
-                    activeContentColor = MaterialTheme.colorScheme.onPrimary,
-                    activeBorderColor = MaterialTheme.colorScheme.primary,
-                    inactiveContainerColor = MaterialTheme.colorScheme.surface,
-                    inactiveContentColor = MaterialTheme.colorScheme.onSurfaceVariant,
-                    inactiveBorderColor = MaterialTheme.colorScheme.outline
-                )
-            ) {
-                Text(
-                    when (mode) {
-                        LanguageMode.SYSTEM -> stringResource(R.string.settings_follow_system)
-                        LanguageMode.ENGLISH -> stringResource(R.string.settings_language_english)
-                        LanguageMode.CHINESE -> stringResource(R.string.settings_language_chinese)
                     }
                 )
             }
@@ -385,14 +351,6 @@ internal fun AboutSection() {
         // app/build.gradle.kts, so this always reflects the shipped version
         // without a hardcoded string to keep in sync.
         stringResource(R.string.settings_version, com.yage.opencode_client.BuildConfig.VERSION_NAME),
-        style = MaterialTheme.typography.bodySmall,
-        color = MaterialTheme.colorScheme.outline
-    )
-
-    Spacer(modifier = Modifier.height(8.dp))
-
-    Text(
-        stringResource(R.string.settings_about_description),
         style = MaterialTheme.typography.bodySmall,
         color = MaterialTheme.colorScheme.outline
     )

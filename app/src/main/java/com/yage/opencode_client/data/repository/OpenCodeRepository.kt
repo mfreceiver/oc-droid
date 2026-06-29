@@ -566,8 +566,8 @@ class OpenCodeRepository @Inject constructor(
     suspend fun getAgents(): Result<List<AgentInfo>> = runCatching { api.getAgents() }
 
     /**
-     * Lists the server-defined slash commands. Combined in the ViewModel with a
-     * small set of client-side commands (/clear, /compact, /undo, /redo) to
+     * Lists the server-defined slash commands. Combined in the ViewModel with
+     * a small set of client-side commands (/clear, /compact, /undo, /redo) to
      * drive the composer's `/`-autocomplete.
      */
     suspend fun getCommands(): Result<List<CommandInfo>> = runCatching { api.getCommands() }

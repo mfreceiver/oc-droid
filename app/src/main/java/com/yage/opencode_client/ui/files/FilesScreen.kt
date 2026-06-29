@@ -10,9 +10,7 @@ import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
-import androidx.compose.material3.Snackbar
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -25,6 +23,8 @@ import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.yage.opencode_client.R
+import com.yage.opencode_client.ui.common.AppToast
+import com.yage.opencode_client.ui.common.ToastSeverity
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -46,80 +46,80 @@ fun FilesScreen(
         viewModel.syncPathToShow(pathToShow, sessionDirectory)
     }
 
-    Column(modifier = Modifier
-        .fillMaxSize()
-        // §a11y-binder: the file tree generates a deep Compose semantics node
-        // tree. Android's accessibility service traverses it via binder (~300ms
-        // per traversal, 16-33KB each), producing massive binder floods
-        // (ADB-confirmed: BpBinder Large outgoing transaction every ~300ms).
-        // Clearing semantics at the root prevents the service from walking the
-        // tree; the top bar (back/refresh buttons) remain independently
-        // accessible via their own contentDescription.
-        .semantics { }
-    ) {
-        if (state.selectedFilePath == null) {
-            TopAppBar(
-                title = { Text(state.currentPath.ifEmpty { stringResource(R.string.files_title) }) },
-                navigationIcon = {
-                    if (state.currentPath.isNotEmpty()) {
-                        IconButton(onClick = viewModel::navigateUp) {
-                            Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = stringResource(R.string.common_back))
+    // The toast is rendered as a sibling overlay (NOT a child of the Column)
+    // so appearing/disappearing does not push the file tree vertically.
+    Box(modifier = Modifier.fillMaxSize()) {
+        Column(modifier = Modifier
+            .fillMaxSize()
+            // §a11y-binder: the file tree generates a deep Compose semantics node
+            // tree. Android's accessibility service traverses it via binder (~300ms
+            // per traversal, 16-33KB each), producing massive binder floods
+            // (ADB-confirmed: BpBinder Large outgoing transaction every ~300ms).
+            // Clearing semantics at the root prevents the service from walking the
+            // tree; the top bar (back/refresh buttons) remain independently
+            // accessible via their own contentDescription.
+            .semantics { }
+        ) {
+            if (state.selectedFilePath == null) {
+                TopAppBar(
+                    title = { Text(state.currentPath.ifEmpty { stringResource(R.string.files_title) }) },
+                    navigationIcon = {
+                        if (state.currentPath.isNotEmpty()) {
+                            IconButton(onClick = viewModel::navigateUp) {
+                                Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = stringResource(R.string.common_back))
+                            }
+                        }
+                    },
+                    actions = {
+                        IconButton(onClick = viewModel::refresh) {
+                            Icon(Icons.Default.Refresh, contentDescription = stringResource(R.string.common_refresh))
                         }
                     }
-                },
-                actions = {
-                    IconButton(onClick = viewModel::refresh) {
-                        Icon(Icons.Default.Refresh, contentDescription = stringResource(R.string.common_refresh))
+                )
+            }
+
+            when {
+                state.selectedFilePath != null && state.selectedFileContent != null -> {
+                    FilePreviewPane(
+                        path = state.selectedFilePath!!,
+                        fileContent = state.selectedFileContent!!,
+                        repository = viewModel.repository,
+                        sessionDirectory = sessionDirectory,
+                        isRefreshing = state.isPreviewRefreshing,
+                        onRefresh = { viewModel.refreshPreview(sessionDirectory) },
+                        onClose = {
+                            viewModel.closePreview()
+                            onCloseFile()
+                        }
+                    )
+                }
+
+                state.isLoading -> {
+                    Box(
+                        modifier = Modifier.fillMaxSize(),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        androidx.compose.material3.CircularProgressIndicator()
                     }
                 }
-            )
+
+                else -> {
+                    FileBrowserPane(
+                        files = state.files,
+                        fileStatuses = state.fileStatuses,
+                        onFileSelected = { file -> viewModel.selectFile(file, onFileClick) }
+                    )
+                }
+            }
         }
 
         state.error?.let { message ->
-            Snackbar(
-                modifier = Modifier.padding(16.dp),
-                action = {
-                    TextButton(onClick = viewModel::clearError) {
-                        Text(stringResource(R.string.common_dismiss))
-                    }
-                }
-            ) {
-                Text(message)
-            }
-        }
-
-        when {
-            state.selectedFilePath != null && state.selectedFileContent != null -> {
-                FilePreviewPane(
-                    path = state.selectedFilePath!!,
-                    fileContent = state.selectedFileContent!!,
-                    repository = viewModel.repository,
-                    sessionDirectory = sessionDirectory,
-                    isRefreshing = state.isPreviewRefreshing,
-                    onRefresh = { viewModel.refreshPreview(sessionDirectory) },
-                    onClose = {
-                        viewModel.closePreview()
-                        onCloseFile()
-                    }
-                )
-            }
-
-            state.isLoading -> {
-                Box(
-                    modifier = Modifier.fillMaxSize(),
-                    contentAlignment = Alignment.Center
-                ) {
-                    androidx.compose.material3.CircularProgressIndicator()
-                }
-            }
-
-            else -> {
-                FileBrowserPane(
-                    files = state.files,
-                    fileStatuses = state.fileStatuses,
-                    onFileSelected = { file -> viewModel.selectFile(file, onFileClick) }
-                )
-            }
+            AppToast(
+                message = message,
+                severity = ToastSeverity.Error,
+                modifier = Modifier.align(Alignment.TopCenter).padding(16.dp),
+                onDismiss = viewModel::clearError
+            )
         }
     }
 }

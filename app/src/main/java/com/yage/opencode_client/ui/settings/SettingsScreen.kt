@@ -103,9 +103,7 @@ fun SettingsScreen(
 
             AppearanceSection(
                 themeMode = state.themeMode,
-                languageMode = state.languageMode,
-                onThemeSelected = viewModel::setThemeMode,
-                onLanguageSelected = viewModel::setLanguageMode
+                onThemeSelected = viewModel::setThemeMode
             )
 
             SettingsSectionDivider()

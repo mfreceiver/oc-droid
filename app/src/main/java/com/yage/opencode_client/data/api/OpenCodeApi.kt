@@ -116,8 +116,9 @@ interface OpenCodeApi {
     /**
      * Lists commands supported by the server (e.g. /init, /review). Used by
      * the chat composer to drive `/`-command autocompletion. Combined with a
-     * small set of client-side commands (/clear, /compact, /undo, /redo) in
-     * the ViewModel before being exposed to the UI.
+     * single client-side command (`/clear`) plus a few client-known commands
+     * (/compact, /undo, /redo) in the ViewModel before being
+     * exposed to the UI.
      *
      * Marked Skip-Dir: the command list is global and not scoped to a workdir.
      */

@@ -15,7 +15,6 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.Snackbar
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -31,7 +30,6 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.RectangleShape
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.hilt.navigation.compose.hiltViewModel
@@ -42,6 +40,10 @@ import com.yage.opencode_client.data.model.SessionStatus
 import com.yage.opencode_client.ui.files.FilesScreen
 import com.yage.opencode_client.ui.files.FilesViewModel
 import com.yage.opencode_client.ui.MainViewModel
+import com.yage.opencode_client.ui.TUNNEL_SUCCESS_TOAST
+import com.yage.opencode_client.ui.TunnelActivationState
+import com.yage.opencode_client.ui.common.AppToast
+import com.yage.opencode_client.ui.common.ToastSeverity
 import kotlinx.coroutines.launch
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -139,7 +141,9 @@ fun ChatScreen(
                 parentSessionId = state.currentSession?.parentId,
                 parentSessionTitle = state.currentSession?.parentId?.let { pid ->
                     state.sessions.firstOrNull { it.id == pid }?.displayName
-                }
+                },
+                trafficSent = state.trafficSent,
+                trafficReceived = state.trafficReceived
             ),
             actions = ChatTopBarActions(
                 onSelectSession = viewModel::selectSession,
@@ -148,6 +152,7 @@ fun ChatScreen(
                 onNavigateToSettings = onNavigateToSettings,
                 onNavigateToSessions = onNavigateToSessions,
                 onRefreshMessages = { viewModel.refreshCurrentSession() },
+                onRefreshTrafficStats = viewModel::refreshTrafficStats,
                 onSelectHost = { viewModel.selectHostProfile(it) },
                 onActivateTunnel = { viewModel.activateTunnelForCurrentHost() },
             )
@@ -227,21 +232,22 @@ fun ChatScreen(
             }
 
             state.error?.let { error ->
-                // Toast/snackbar rendered at the TOP of the chat area so tunnel
+                // Toast rendered at the TOP of the chat area so tunnel
                 // activation feedback (and any other error) surfaces in the upper
                 // region of the interface instead of being buried at the bottom.
-                Snackbar(
+                // Severity follows the message identity, not tunnelActivationState
+                // (which is sticky and would poison subsequent errors as "Success").
+                val severity =
+                    if (error == TUNNEL_SUCCESS_TOAST) ToastSeverity.Success
+                    else ToastSeverity.Error
+                AppToast(
+                    message = error,
+                    severity = severity,
                     modifier = Modifier
                         .align(Alignment.TopCenter)
                         .padding(top = 8.dp, start = 16.dp, end = 16.dp, bottom = 16.dp),
-                    action = {
-                        TextButton(onClick = { viewModel.clearError() }) {
-                            Text(stringResource(R.string.common_dismiss))
-                        }
-                    }
-                ) {
-                    Text(error)
-                }
+                    onDismiss = { viewModel.clearError() }
+                )
             }
         }
 

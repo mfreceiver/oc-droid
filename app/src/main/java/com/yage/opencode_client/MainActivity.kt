@@ -87,6 +87,13 @@ class MainActivity : AppCompatActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        // Re-apply the locale policy (en→follow system, non-en→zh) before the
+        // first frame is composed AND on every Activity recreate, so a system
+        // language change while the app is backgrounded is reflected on the
+        // next onCreate. AppCompatDelegate is idempotent (no-op/recreate only
+        // when the locale actually changes), so this is safe to call every
+        // time. OpenCodeApp.onCreate also calls it for process start.
+        AppLocaleController.applySystemLocale()
         enableEdgeToEdge()
         setContent {
             val viewModel: MainViewModel = hiltViewModel()
@@ -128,9 +135,6 @@ class MainActivity : AppCompatActivity() {
                 viewModel.coldStartReconnect()
             }
             val state by viewModel.state.collectAsStateWithLifecycle()
-            LaunchedEffect(state.languageMode) {
-                AppLocaleController.apply(state.languageMode)
-            }
             val darkTheme = when (state.themeMode) {
                 ThemeMode.LIGHT -> false
                 ThemeMode.DARK -> true

@@ -28,12 +28,15 @@ import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.Chat
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.automirrored.filled.List
+import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Checklist
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Dns
 import androidx.compose.material.icons.filled.DonutLarge
+import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.SmartToy
+import androidx.compose.material.icons.filled.VpnKey
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
@@ -49,6 +52,7 @@ import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -118,7 +122,9 @@ internal data class ChatTopBarState(
      * "← <parentName>" affordance in place of the session dropdown.
      */
     val parentSessionId: String? = null,
-    val parentSessionTitle: String? = null
+    val parentSessionTitle: String? = null,
+    val trafficSent: Long = 0L,
+    val trafficReceived: Long = 0L,
 )
 
 internal data class ChatTopBarActions(
@@ -135,6 +141,12 @@ internal data class ChatTopBarActions(
      * host-health probe affordance is repurposed to refresh messages.
      */
     val onRefreshMessages: () -> Unit = {},
+    /**
+     * Refresh cumulative traffic counters (sent/received bytes) before the
+     * server popup renders them — otherwise the dialog shows stale `0 B`
+     * until the user visits Settings. Triggered when the popup opens.
+     */
+    val onRefreshTrafficStats: () -> Unit = {},
     /**
      * Primary Sessions-page entry point. Rendered as the [TopAppBar]
      * `navigationIcon` (left of the title) — a list affordance. Defaults to a
@@ -167,6 +179,13 @@ internal fun ChatTopBar(
     var showContextDialog by remember { mutableStateOf(false) }
     var showAgentDialog by remember { mutableStateOf(false) }
     var showServerDialog by remember { mutableStateOf(false) }
+
+    // Refresh traffic stats when the server popup opens so the dialog shows
+    // live sent/received bytes instead of stale `0 B` (refresh is otherwise
+    // only triggered from SettingsScreen).
+    LaunchedEffect(showServerDialog) {
+        if (showServerDialog) actions.onRefreshTrafficStats()
+    }
 
     // M3 TopAppBar replaces the former custom Surface+Row. The title slot
     // carries the session dropdown (or parent-back / draft affordance); the
@@ -403,6 +422,8 @@ internal fun ChatTopBar(
             currentHostProfileId = state.currentHostProfileId,
             tunnelActivationState = state.tunnelActivationState,
             showTunnelAuth = state.showTunnelAuth,
+            trafficSent = state.trafficSent,
+            trafficReceived = state.trafficReceived,
             onSelectHost = { profileId ->
                 actions.onSelectHost(profileId)
                 showServerDialog = false
@@ -662,12 +683,15 @@ private fun ServerManagementDialog(
     currentHostProfileId: String?,
     tunnelActivationState: TunnelActivationState,
     showTunnelAuth: Boolean,
+    trafficSent: Long,
+    trafficReceived: Long,
     onSelectHost: (String) -> Unit,
     onRefresh: () -> Unit,
     onActivateTunnel: () -> Unit,
     onNavigateToSettings: () -> Unit,
     onDismiss: () -> Unit
 ) {
+    val oc = MaterialTheme.opencode
     AlertDialog(
         onDismissRequest = onDismiss,
         title = { Text(stringResource(R.string.server_dialog_title)) },
@@ -675,118 +699,148 @@ private fun ServerManagementDialog(
             Column(
                 modifier = Modifier
                     .heightIn(max = 400.dp)
-                    .verticalScroll(rememberScrollState())
+                    .verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(4.dp)
             ) {
+                // --- Host profiles ---
                 if (hostProfiles.isEmpty()) {
                     Text(
                         stringResource(R.string.server_dialog_no_hosts),
                         style = MaterialTheme.typography.bodyMedium,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                        color = oc.faint
                     )
                 } else {
                     hostProfiles.forEach { profile ->
                         val isSelected = profile.id == currentHostProfileId
-                        Surface(
-                            onClick = { onSelectHost(profile.id) },
-                            shape = RoundedCornerShape(8.dp),
-                            color = if (isSelected) MaterialTheme.colorScheme.surfaceVariant else Color.Transparent,
-                            modifier = Modifier.fillMaxWidth()
-                        ) {
-                            Column(
-                                modifier = Modifier.padding(12.dp),
-                                verticalArrangement = Arrangement.spacedBy(2.dp)
+                        if (isSelected) {
+                            // Current host: non-clickable display only
+                            Surface(
+                                shape = RoundedCornerShape(8.dp),
+                                color = oc.layer02,
+                                modifier = Modifier.fillMaxWidth()
                             ) {
-                                Text(
-                                    text = profile.name,
-                                    style = MaterialTheme.typography.bodyMedium,
-                                    fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal,
-                                    color = if (isSelected) MaterialTheme.colorScheme.onPrimaryContainer else MaterialTheme.colorScheme.onSurface
-                                )
-                                Text(
-                                    text = profile.serverUrl,
-                                    style = MaterialTheme.typography.bodySmall,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                                )
+                                Row(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .padding(12.dp),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Column(
+                                        modifier = Modifier.weight(1f),
+                                        verticalArrangement = Arrangement.spacedBy(2.dp)
+                                    ) {
+                                        Text(
+                                            text = profile.name,
+                                            style = MaterialTheme.typography.bodyMedium,
+                                            fontWeight = FontWeight.Bold,
+                                            color = oc.accentText
+                                        )
+                                        Text(
+                                            text = profile.serverUrl,
+                                            style = MaterialTheme.typography.bodySmall,
+                                            color = oc.faint
+                                        )
+                                    }
+                                    Icon(
+                                        Icons.Filled.Check,
+                                        contentDescription = null,
+                                        modifier = Modifier.size(16.dp),
+                                        tint = oc.stateSuccessFg
+                                    )
+                                }
+                            }
+                        } else {
+                            // Other hosts: tappable to switch
+                            Surface(
+                                onClick = { onSelectHost(profile.id) },
+                                shape = RoundedCornerShape(8.dp),
+                                color = Color.Transparent,
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
+                                Column(
+                                    modifier = Modifier.padding(12.dp),
+                                    verticalArrangement = Arrangement.spacedBy(2.dp)
+                                ) {
+                                    Text(
+                                        text = profile.name,
+                                        style = MaterialTheme.typography.bodyMedium,
+                                        color = MaterialTheme.colorScheme.onSurface
+                                    )
+                                    Text(
+                                        text = profile.serverUrl,
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = oc.faint
+                                    )
+                                }
                             }
                         }
                     }
                 }
 
-                // System Settings navigation row — placed at the bottom of the
-                // dialog content. A trailing chevron makes the row read as a
-                // navigation affordance (vs. the selectable host rows above,
-                // which have no chevron). Tapping dismisses the dialog first
-                // so the host picker does not stay open over the Settings page.
+                // --- Traffic statistics ---
                 Spacer(modifier = Modifier.height(8.dp))
-                Surface(
-                    onClick = onNavigateToSettings,
-                    shape = RoundedCornerShape(8.dp),
-                    color = Color.Transparent,
-                    modifier = Modifier.fillMaxWidth()
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(16.dp)
                 ) {
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(horizontal = 12.dp, vertical = 12.dp),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
+                    Text(
+                        text = "↑ ${formatTrafficBytes(trafficSent)}",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = oc.faint
+                    )
+                    Text(
+                        text = "↓ ${formatTrafficBytes(trafficReceived)}",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = oc.faint
+                    )
+                }
+
+                // --- Action icon row: Settings / Refresh / Tunnel ---
+                Spacer(modifier = Modifier.height(4.dp))
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    IconButton(onClick = onNavigateToSettings) {
                         Icon(
                             Icons.Default.Settings,
-                            contentDescription = null,
-                            modifier = Modifier.size(18.dp),
-                            tint = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                        Spacer(modifier = Modifier.width(12.dp))
-                        Text(
-                            text = stringResource(R.string.server_dialog_system_settings),
-                            style = MaterialTheme.typography.bodyMedium,
-                            color = MaterialTheme.colorScheme.onSurface,
-                            modifier = Modifier.weight(1f)
-                        )
-                        Icon(
-                            Icons.AutoMirrored.Filled.KeyboardArrowRight,
-                            contentDescription = null,
-                            modifier = Modifier.size(20.dp),
-                            tint = MaterialTheme.colorScheme.onSurfaceVariant
+                            contentDescription = stringResource(R.string.server_dialog_system_settings),
+                            tint = oc.faint
                         )
                     }
-                }
-            }
-        },
-        // Bottom button row: Refresh + Activate Tunnel (secondary actions) share the
-        // dialog's action bar with the Done confirm button, matching Material 3 dialog
-        // conventions. dismissButton renders on the left, confirmButton on the right.
-        dismissButton = {
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(4.dp)
-            ) {
-                TextButton(onClick = onRefresh) {
-                    Text(stringResource(R.string.chat_action_refresh_messages))
-                }
-                if (showTunnelAuth) {
-                    val isActivating = tunnelActivationState is TunnelActivationState.Loading
-                    TextButton(
-                        onClick = onActivateTunnel,
-                        enabled = !isActivating
-                    ) {
-                        if (isActivating) {
-                            CircularProgressIndicator(
-                                modifier = Modifier.size(16.dp),
-                                strokeWidth = 2.dp
-                            )
-                        } else {
-                            Text(stringResource(R.string.server_dialog_activate_tunnel))
+                    IconButton(onClick = onRefresh) {
+                        Icon(
+                            Icons.Default.Refresh,
+                            contentDescription = stringResource(R.string.chat_action_refresh_messages),
+                            tint = oc.faint
+                        )
+                    }
+                    if (showTunnelAuth) {
+                        val isActivating = tunnelActivationState is TunnelActivationState.Loading
+                        IconButton(
+                            onClick = onActivateTunnel,
+                            enabled = !isActivating
+                        ) {
+                            if (isActivating) {
+                                CircularProgressIndicator(
+                                    modifier = Modifier.size(18.dp),
+                                    strokeWidth = 2.dp,
+                                    color = oc.faint
+                                )
+                            } else {
+                                Icon(
+                                    Icons.Default.VpnKey,
+                                    contentDescription = stringResource(R.string.server_dialog_activate_tunnel),
+                                    tint = oc.faint
+                                )
+                            }
                         }
                     }
                 }
             }
         },
-        confirmButton = {
-            TextButton(onClick = onDismiss) {
-                Text(stringResource(R.string.common_done))
-            }
-        }
+        // No confirm or dismiss buttons — tap scrim to dismiss
+        confirmButton = {}
     )
 }
 
@@ -838,6 +892,21 @@ private fun formatOptionalCount(value: Int?): String = value?.let(::formatCount)
  */
 private fun formatCountCompact(value: Int): String =
     if (value >= 1000) "${value / 1000}k" else value.toString()
+
+/**
+ * Format byte counts for the traffic stats display: < 1 KiB → bytes,
+ * < 1 MiB → KB, < 1 GiB → MB, otherwise GB. Locale.US enforces ASCII output.
+ */
+private fun formatTrafficBytes(bytes: Long): String {
+    val unit = 1024L
+    if (bytes < unit) return "$bytes B"
+    val kb = bytes.toDouble() / unit
+    if (kb < unit) return String.format(Locale.US, "%.1f KB", kb)
+    val mb = kb / unit
+    if (mb < unit) return String.format(Locale.US, "%.1f MB", mb)
+    val gb = mb / unit
+    return String.format(Locale.US, "%.2f GB", gb)
+}
 
 @Composable
 internal fun ContextUsageRing(usage: AppState.ContextUsage?) {

@@ -1048,7 +1048,7 @@ private fun ReasoningCard(
     // Outer borderBase provides containment; no layer01 panel.
     val oc = MaterialTheme.opencode
     Surface(
-        modifier = modifier.widthIn(max = 220.dp).padding(vertical = 1.dp),
+        modifier = modifier.padding(vertical = 1.dp),
         shape = RoundedCornerShape(6.dp),
         color = Color.Transparent,
         border = BorderStroke(1.dp, oc.borderBase)
@@ -1339,7 +1339,7 @@ private fun stripSubAgentSuffix(text: String?): String {
  * screens by left-aligning the agent's "side-channels" instead of stretching
  * them wall-to-wall. Matches iOS's compact card width.
  */
-private val MAX_CARD_WIDTH = 280.dp
+private val MAX_CARD_WIDTH = 220.dp
 
 
 
@@ -1510,7 +1510,7 @@ private fun ToolCard(
                         Icon(
                             if (expanded) Icons.Default.KeyboardArrowDown else Icons.Default.ChevronRight,
                             contentDescription = if (expanded) "Collapse" else "Expand",
-                            modifier = Modifier.size(20.dp),
+                            modifier = Modifier.size(18.dp),
                             tint = MaterialTheme.colorScheme.onSurfaceVariant
                         )
                     }
@@ -1824,7 +1824,7 @@ private fun BasicTool(
                 Icon(
                     if (expanded) Icons.Default.KeyboardArrowDown else Icons.Default.ChevronRight,
                     contentDescription = if (expanded) "Collapse" else "Expand",
-                    modifier = Modifier.size(20.dp),
+                    modifier = Modifier.size(18.dp),
                     tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f)
                 )
                 Spacer(modifier = Modifier.width(2.dp))
@@ -1976,7 +1976,7 @@ private fun ContextToolGroup(
             Icon(
                 if (expanded) Icons.Default.KeyboardArrowDown else Icons.Default.ChevronRight,
                 contentDescription = if (expanded) "Collapse" else "Expand",
-                modifier = Modifier.size(20.dp),
+                modifier = Modifier.size(18.dp),
                 tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f)
             )
         }

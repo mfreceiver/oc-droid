@@ -132,10 +132,6 @@ class SettingsManager @Inject constructor(
         get() = encryptedPrefs.getString(KEY_MARKDOWN_FONT_CJK, "") ?: ""
         set(value) = encryptedPrefs.edit().putString(KEY_MARKDOWN_FONT_CJK, value).apply()
 
-    var languageMode: LanguageMode
-        get() = LanguageMode.valueOf(encryptedPrefs.getString(KEY_LANGUAGE, LanguageMode.SYSTEM.name) ?: LanguageMode.SYSTEM.name)
-        set(value) = encryptedPrefs.edit().putString(KEY_LANGUAGE, value.name).apply()
-
     var markdownFontSizes: MarkdownFontSizes
         get() {
             val json = encryptedPrefs.getString(KEY_MARKDOWN_FONT_SIZES, null) ?: return MarkdownFontSizes()
@@ -266,7 +262,6 @@ class SettingsManager @Inject constructor(
         private const val KEY_CURRENT_WORKDIR = "current_workdir"
         private const val KEY_AGENT_NAME = "agent_name"
         private const val KEY_THEME = "theme"
-        private const val KEY_LANGUAGE = "language"
         private const val KEY_SESSION_DRAFTS = "session_drafts"
         private const val KEY_SESSION_AGENTS = "session_agents"
         private const val KEY_MARKDOWN_FONT_SIZES = "markdown_font_sizes_json"
@@ -286,10 +281,4 @@ class SettingsManager @Inject constructor(
 
 enum class ThemeMode {
     LIGHT, DARK, SYSTEM
-}
-
-enum class LanguageMode(val languageTag: String) {
-    SYSTEM(""),
-    ENGLISH("en"),
-    CHINESE("zh")
 }

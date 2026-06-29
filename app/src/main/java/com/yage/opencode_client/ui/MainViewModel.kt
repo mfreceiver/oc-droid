@@ -9,7 +9,6 @@ import com.yage.opencode_client.data.repository.HostProfileStore
 import com.yage.opencode_client.data.repository.OpenCodeRepository
 import com.yage.opencode_client.di.AppLifecycleMonitor
 import com.yage.opencode_client.util.SettingsManager
-import com.yage.opencode_client.util.LanguageMode
 import com.yage.opencode_client.util.ThemeMode
 import com.yage.opencode_client.util.TrafficTracker
 import com.yage.opencode_client.ui.theme.MarkdownFontSizes
@@ -25,6 +24,12 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.util.Locale
 import javax.inject.Inject
+
+/** Toast message shown on successful tunnel activation. ChatScreen compares
+ *  the current `error` against this to pick the Success severity — both the
+ *  success and error toasts ride the `error` field, so the message identity
+ *  (not the sticky tunnelActivationState) drives severity. */
+const val TUNNEL_SUCCESS_TOAST = "隧道激活成功"
 
 sealed class TunnelActivationState {
     data object Idle : TunnelActivationState()
@@ -109,7 +114,6 @@ data class AppState(
     val inputText: String = "",
     val error: String? = null,
     val themeMode: ThemeMode = ThemeMode.SYSTEM,
-    val languageMode: LanguageMode = LanguageMode.SYSTEM,
     val markdownFontSizes: MarkdownFontSizes = MarkdownFontSizes(),
     val filePathToShowInFiles: String? = null,
     val filePreviewOriginRoute: String? = null,
@@ -285,7 +289,6 @@ data class AppState(
     data class SettingsState(
         val error: String? = null,
         val themeMode: ThemeMode = ThemeMode.SYSTEM,
-        val languageMode: LanguageMode = LanguageMode.SYSTEM,
         val selectedAgentName: String = "build",
         val contextUsage: ContextUsage? = null,
         val agents: List<AgentInfo> = emptyList(),
@@ -347,7 +350,6 @@ data class AppState(
         get() = SettingsState(
             error = error,
             themeMode = themeMode,
-            languageMode = languageMode,
             selectedAgentName = selectedAgentName,
             contextUsage = contextUsage,
             agents = agents,
@@ -1833,11 +1835,6 @@ class MainViewModel @Inject constructor(
         _state.update { it.copy(themeMode = mode) }
     }
 
-    fun setLanguageMode(mode: LanguageMode) {
-        settingsManager.languageMode = mode
-        _state.update { it.copy(languageMode = mode) }
-    }
-
     fun setMarkdownFontSizes(sizes: MarkdownFontSizes) {
         settingsManager.markdownFontSizes = sizes
         _state.update { it.copy(markdownFontSizes = sizes) }
@@ -1969,7 +1966,7 @@ class MainViewModel @Inject constructor(
                     _state.update {
                         it.copy(
                             tunnelActivationState = TunnelActivationState.Success,
-                            error = "Tunnel activated"
+                            error = TUNNEL_SUCCESS_TOAST
                         )
                     }
                     Log.d(TAG, "Tunnel activated successfully for ${profile.serverUrl}")

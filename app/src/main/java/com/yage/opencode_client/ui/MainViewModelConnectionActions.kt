@@ -38,7 +38,6 @@ internal fun applySavedSettings(
             currentHostProfileId = currentProfile.id,
             selectedAgentName = settingsManager.selectedAgentName ?: "build",
             themeMode = settingsManager.themeMode,
-            languageMode = settingsManager.languageMode,
             markdownFontSizes = settingsManager.markdownFontSizes,
             openSessionIds = settingsManager.openSessionIds,
             // Seed sessions from the persisted metadata cache so tabs/title/
