@@ -420,7 +420,13 @@ internal fun launchLoadMessages(
                 .onSuccess { todos ->
                     state.update { it.copy(sessionTodos = it.sessionTodos + (sessionId to todos)) }
                 }
-        } catch (_: Exception) {}
+        } catch (e: Exception) {
+            // R-14: never swallow structured concurrency cancellation — re-throw
+            // so the parent coroutine scope (viewModelScope) tears down correctly
+            // when the ViewModel is cleared mid-load. Other failures stay silent
+            // (todos are progressive enhancement, see comment above).
+            if (e is kotlin.coroutines.cancellation.CancellationException) throw e
+        }
     }
 }
 

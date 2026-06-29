@@ -266,11 +266,13 @@ fun SessionsScreen(
                             // Browse files for this project (Bug3: relocated
                             // from the chat tab strip). Scopes the repository
                             // to this workdir and opens the file-browser overlay.
+                            // R-12 (WCAG 2.5.5): no explicit size override, so
+                            // the IconButton falls back to its 48dp default touch
+                            // target (the former 32dp was below the minimum).
                             IconButton(
                                 onClick = {
                                     viewModel.browseFilesInWorkdir(workdir)
-                                },
-                                modifier = Modifier.size(32.dp)
+                                }
                             ) {
                                 Icon(
                                     Icons.Default.Folder,
@@ -286,12 +288,12 @@ fun SessionsScreen(
                             // created by createSessionInWorkdir; the navigation
                             // is wired here so SessionsScreen stays decoupled
                             // from the Chat destination's internals.
+                            // R-12 (WCAG 2.5.5): 48dp default touch target (was 32dp).
                             IconButton(
                                 onClick = {
                                     viewModel.createSessionInWorkdir(workdir)
                                     onSwitchToChat()
-                                },
-                                modifier = Modifier.size(32.dp)
+                                }
                             ) {
                                 Icon(
                                     Icons.Default.Add,

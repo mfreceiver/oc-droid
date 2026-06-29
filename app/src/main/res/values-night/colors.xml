@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  R-13: dark-mode cold-start white flash. The base `values/colors.xml` pins
+  `window_background` to #FFFFFFFF, which the system uses for the starting
+  window background (android:windowBackground / android:colorBackground in
+  themes.xml). In dark mode that white starting window flashed for one frame
+  before Compose painted the dark surface. Overriding it here to match the v2
+  dark bg-deep (#080808 = Color.DarkBackground) eliminates the flash.
+-->
+<resources>
+    <color name="window_background">#FF080808</color>
+</resources>

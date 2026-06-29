@@ -1,9 +1,6 @@
 package com.yage.opencode_client
 
 import android.app.Application
-import android.os.Handler
-import android.os.Looper
-import android.webkit.WebView
 import com.yage.opencode_client.di.AppLifecycleMonitor
 import com.yage.opencode_client.util.AppLocaleController
 import com.yage.opencode_client.util.CrashLogger
@@ -35,20 +32,13 @@ class OpenCodeApp : Application() {
         // wrapped in try/catch inside createChannels). Required before any
         // notify() call, otherwise notifications silently no-op on API 26+.
         AppLifecycleMonitor.createChannels(this)
-        warmUpWebViewAfterLaunch()
-    }
-
-    private fun warmUpWebViewAfterLaunch() {
-        Handler(Looper.getMainLooper()).post {
-            runCatching {
-                warmedWebView = WebView(applicationContext).apply {
-                    loadUrl("about:blank")
-                }
-            }
-        }
-    }
-
-    companion object {
-        private var warmedWebView: WebView? = null
+        // R-06: the former warmUpWebViewAfterLaunch() pre-warmed a throwaway
+        // WebView on the main thread to prime the WebView singleton's class
+        // loader / JNI init (~50ms on cold start). Removed: that work ran on
+        // the main thread during Application onCreate (competing with startup
+        // latency budgets) and kept a leaked warmed instance around. The
+        // first real WebView (MarkdownWebPreviewPane) now pays the one-time
+        // init cost when the user actually opens a markdown web preview,
+        // which is an acceptable, lazy trade-off. See MarkdownWebPreviewPane.
     }
 }

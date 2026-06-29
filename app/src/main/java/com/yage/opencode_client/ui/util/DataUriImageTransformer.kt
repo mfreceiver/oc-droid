@@ -8,7 +8,7 @@ import android.util.LruCache
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.mutableStateMapOf
-import androidx.compose.runtime.remember
+import androidx.compose.runtime.produceState
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.asImageBitmap
@@ -71,14 +71,30 @@ object DataUriImageTransformer : ImageTransformer {
         if (dataMatch != null) {
             val mimeType = dataMatch.groupValues[1]
             if (!mimeType.startsWith("image/")) return null
-            // §16.3: combine Compose-level remember (cheap re-entry on the same
-            // Composable instance) with the file-level LruCache (cross-instance
-            // sharing). Keyed by hashCode() to avoid long base64 strings as keys.
-            return remember(link) {
-                val key = link.hashCode().toString()
-                dataUriBitmapCache.get(key)?.let(::bitmapToImageData)
-                    ?: decodeDataUri(dataMatch.groupValues[2], key)
+            // §16.3: cross-instance sharing keyed by hashCode() to avoid long
+            // base64 strings as LRU map keys.
+            val key = link.hashCode().toString()
+            // Fast path: a previous decode (this instance or another) already
+            // populated the process-level LRU. Returning synchronously here is
+            // cheap (map lookup) and main-thread-safe.
+            dataUriBitmapCache.get(key)?.let(::bitmapToImageData)?.let { return it }
+            // R-02b: cache miss. The former path decoded synchronously inside
+            // `remember{}`, i.e. BitmapFactory.decodeByteArray ran ON THE MAIN
+            // THREAD during composition — an ANR/OOM risk for large data-URI
+            // images embedded in markdown. produceState moves the decode to
+            // Dispatchers.Default: it returns null on the composing frame and
+            // writes the decoded ImageData once the background decode finishes;
+            // that state write recomposes this @Composable, at which point the
+            // fast path above (now a cache hit, because decodeDataUri populated
+            // the LRU) returns synchronously. The ImageTransformer contract
+            // (return ImageData? from a @Composable) is preserved, so the
+            // mikepenz markdown renderer needs no changes.
+            val pending = produceState<ImageData?>(initialValue = null, link) {
+                value = withContext(Dispatchers.Default) {
+                    decodeDataUri(dataMatch.groupValues[2], key)
+                }
             }
+            return pending.value
         }
 
         if (link.startsWith("https://") || link.startsWith("http://")) {

@@ -221,6 +221,21 @@ private fun MarkdownWebView(
                 webPreviewLog("update render length=${markdown.length} theme=$theme ready=$webContentReady")
                 webView.setBackgroundColor(webViewBackground)
                 webView.renderMarkdown(markdown, theme, fontSizes)
+            },
+            // R-05: the AndroidView leaves the composition (the Web Preview pane
+            // is closed / the parent disposes), explicitly tear the WebView down.
+            // Without this the Chromium renderer process + JS engine + DOM state
+            // leak across preview open/close cycles (each MarkdownWebPreviewPane
+            // departure would otherwise leave a live WebView referenced by its
+            // parent until GC). The sequence matches Android's recommended
+            // teardown order.
+            onRelease = { webView ->
+                webPreviewLog("onRelease — destroying WebView")
+                webView.stopLoading()
+                webView.loadUrl("about:blank")
+                webView.clearHistory()
+                webView.removeAllViews()
+                webView.destroy()
             }
         )
 
