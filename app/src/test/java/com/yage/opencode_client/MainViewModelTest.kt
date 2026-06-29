@@ -1452,11 +1452,15 @@ class MainViewModelTest {
     }
 
     @Test
-    fun `handleSSEEvent idle status only updates status badge without clearing streaming or reloading`() = runTest {
-        // SSE-trust model (S1): session.status idle does NOT clear streaming
-        // buffers and does NOT reload. The finalized turn text is carried by
-        // streamingPartTexts until the next message.created reload or a
-        // foreground catch-up reconciles the persisted message list.
+    fun `handleSSEEvent idle status finalizes streaming overlay via reload when overlay non-empty`() = runTest {
+        // §append-safe finalization (gpter MAJOR): the overlay-clear in
+        // launchLoadMessages is gated on !busy, so a reload that ran while busy
+        // preserves the overlay. When the CURRENT session then settles to idle
+        // with a still-live overlay, session.status idle triggers a resetLimit
+        // reload that reconciles against the now-persisted authoritative window
+        // and clears the overlay (status is now idle, so the gated clear runs).
+        val messages = listOf(MessageWithParts(info = Message(id = "a1", role = "assistant")))
+        coEvery { repository.getMessagesPaged("session-1", 5, any()) } returns Result.success(MessagesPage(messages, null))
         val viewModel = createViewModel()
         val streaming = mapOf("part-1" to "partial")
         val reasoning = Part(id = "part-1", messageId = "message-1", sessionId = "session-1", type = "reasoning")
@@ -1492,10 +1496,50 @@ class MainViewModelTest {
         val status = viewModel.state.value.sessionStatuses["session-1"]
         assertNotNull(status)
         assertFalse(status!!.isBusy)
-        // ...but streaming buffers are PRESERVED (SSE-trust: no idle clear)...
-        assertEquals(streaming, viewModel.state.value.streamingPartTexts)
-        assertSame(reasoning, viewModel.state.value.streamingReasoningPart)
-        // ...and no reload was issued.
+        // ...overlay cleared by the finalization reload...
+        assertTrue(viewModel.state.value.streamingPartTexts.isEmpty())
+        assertNull(viewModel.state.value.streamingReasoningPart)
+        // ...and a resetLimit reload was issued.
+        coVerify(atLeast = 1) { repository.getMessagesPaged("session-1", any(), any()) }
+    }
+
+    @Test
+    fun `handleSSEEvent idle status skips reload when streaming overlay already empty`() = runTest {
+        // §append-safe finalization: the idle reload is gated on a non-empty
+        // overlay to avoid redundant reloads. With no live overlay, idle only
+        // updates the status badge (SSE-trust model preserved).
+        val viewModel = createViewModel()
+        updateState(viewModel) {
+            it.copy(
+                currentSessionId = "session-1",
+                streamingPartTexts = emptyMap(),
+                streamingReasoningPart = null
+            )
+        }
+
+        handleSse(
+            viewModel,
+            SSEEvent(
+                payload = SSEPayload(
+                    type = "session.status",
+                    properties = buildJsonObject {
+                        put("sessionID", JsonPrimitive("session-1"))
+                        put(
+                            "status",
+                            buildJsonObject {
+                                put("type", JsonPrimitive("idle"))
+                            }
+                        )
+                    }
+                )
+            )
+        )
+        advanceTimeBy(1000)
+        advanceUntilIdle()
+
+        val status = viewModel.state.value.sessionStatuses["session-1"]
+        assertNotNull(status)
+        assertFalse(status!!.isBusy)
         coVerify(exactly = 0) { repository.getMessagesPaged(any(), any(), any()) }
     }
 

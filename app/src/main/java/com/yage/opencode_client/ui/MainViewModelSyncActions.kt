@@ -114,6 +114,23 @@ internal fun handleIncomingSseEvent(
                 // The finalized turn text is carried by streamingPartTexts
                 // until the next message.created reload or a foreground catch-up
                 // reconciles the persisted message list — mirroring opencode-web.
+                //
+                // §append-safe finalization (gpter MAJOR): the overlay-clear in
+                // launchLoadMessages is gated on !busy, so if the last reload
+                // happened while busy (overlay preserved), the overlay could
+                // linger after the run settles. When the CURRENT session goes
+                // idle with a non-empty overlay, reconcile against the now-
+                // persisted authoritative window (loadMessagesWithRetry delays
+                // internally so the server has time to persist the finalized
+                // part text; status is now idle so the gated clear will run).
+                if (statusEvent.status.isIdle &&
+                    statusEvent.sessionId == state.value.currentSessionId
+                ) {
+                    val s = state.value
+                    if (s.streamingPartTexts.isNotEmpty() || s.streamingReasoningPart != null) {
+                        onRefreshMessages(statusEvent.sessionId, true)
+                    }
+                }
             } else {
                 onNonFatalIssue("Ignoring invalid session.status payload")
             }

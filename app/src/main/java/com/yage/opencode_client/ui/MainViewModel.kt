@@ -1731,7 +1731,23 @@ class MainViewModel @Inject constructor(
                         dispatchSend()
                     }
                     .onFailure { error ->
-                        _state.update { it.copy(error = "Failed to restore session: ${errorMessageOrFallback(error, "unknown error")}") }
+                        // §append-safe (gpter MAJOR): the composer was cleared
+                        // synchronously at dispatch and sendingSessionIds was
+                        // locked. If the pre-send unarchive fails, NO send is
+                        // dispatched, so mirror the send-failure cleanup: unlock,
+                        // restore the captured prompt (only if the user hasn't
+                        // typed something new), and restore the draft — otherwise
+                        // the session would be permanently send-locked and the
+                        // text lost.
+                        _state.update { s ->
+                            val restored = if (s.inputText.isBlank()) text else s.inputText
+                            if (restored != s.inputText) settingsManager.setDraftText(sessionId, restored)
+                            s.copy(
+                                error = "Failed to restore session: ${errorMessageOrFallback(error, "unknown error")}",
+                                sendingSessionIds = s.sendingSessionIds - sessionId,
+                                inputText = restored
+                            )
+                        }
                     }
             }
             return
