@@ -3,6 +3,7 @@ package com.yage.opencode_client.ui
 import com.yage.opencode_client.data.model.ComposerImageAttachment
 import com.yage.opencode_client.data.model.Message
 import com.yage.opencode_client.data.model.Part
+import com.yage.opencode_client.data.model.Session
 import com.yage.opencode_client.data.model.toCacheEntry
 import com.yage.opencode_client.data.repository.OpenCodeRepository
 import com.yage.opencode_client.util.DebugLog
@@ -12,6 +13,46 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+
+/**
+ * Persist a bounded session-metadata cache to [SettingsManager.sessionCache]
+ * so the next cold start can reseed [AppState.sessions] instantly (tabs,
+ * title, workdir groups). Keeps only entries the user actively cares about:
+ * open tabs ([openIds]), the current session ([currentId]) and the current
+ * workdir's root sessions ([currentWorkdir]).
+ *
+ * Fix #5: previously written only inside [launchLoadSessions].onSuccess,
+ * which never re-runs on a plain `selectSession` (no message sent). After
+ * opening an existing conversation and restarting, the tab vanished because
+ * its Session metadata was missing from the cache. This helper is now also
+ * called from [MainViewModel.selectSession] and [MainViewModel.sendMessage]
+ * so opening/creating a conversation persists its metadata immediately.
+ *
+ * The filter matches the original inline logic: id in openIds, or id ==
+ * currentId, or (root session whose directory == currentWorkdir). Writes via
+ * the same plain prefs write as before (`.apply()` — async to disk, sync to
+ * memory); callers run on the main/coroutine context exactly like
+ * [launchLoadSessions] did, so no extra threading is required.
+ */
+internal fun persistSessionCache(
+    settingsManager: SettingsManager,
+    sessions: List<Session>,
+    openIds: List<String>,
+    currentId: String?,
+    currentWorkdir: String?
+) {
+    val openIdSet = openIds.toSet()
+    val cache = sessions
+        .asSequence()
+        .filter { s ->
+            s.id in openIdSet ||
+                s.id == currentId ||
+                (currentWorkdir != null && s.parentId == null && s.directory == currentWorkdir)
+        }
+        .map { it.toCacheEntry() }
+        .toList()
+    settingsManager.sessionCache = cache
+}
 
 internal fun launchLoadSessions(
     scope: CoroutineScope,
@@ -58,19 +99,13 @@ internal fun launchLoadSessions(
                 // entries (server didn't return them) survive for open tabs.
                 run {
                     val postState = state.value
-                    val openIds = postState.openSessionIds.toSet()
-                    val currentId = postState.currentSessionId
-                    val currentWorkdir = settingsManager.currentWorkdir
-                    val cache = postState.sessions
-                        .asSequence()
-                        .filter { s ->
-                            s.id in openIds ||
-                                s.id == currentId ||
-                                (currentWorkdir != null && s.parentId == null && s.directory == currentWorkdir)
-                        }
-                        .map { it.toCacheEntry() }
-                        .toList()
-                    settingsManager.sessionCache = cache
+                    persistSessionCache(
+                        settingsManager = settingsManager,
+                        sessions = postState.sessions,
+                        openIds = postState.openSessionIds,
+                        currentId = postState.currentSessionId,
+                        currentWorkdir = settingsManager.currentWorkdir
+                    )
                 }
                 val currentId = state.value.currentSessionId
                 val refreshedSessions = state.value.sessions

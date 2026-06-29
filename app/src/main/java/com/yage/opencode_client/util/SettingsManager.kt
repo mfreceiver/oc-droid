@@ -248,6 +248,47 @@ class SettingsManager @Inject constructor(
         encryptedPrefs.edit().putString(KEY_SESSION_AGENTS, Json.encodeToString(map)).apply()
     }
 
+    /**
+     * Hard reset: wipes EVERY persisted key EXCEPT the connection-credential
+     * keys and the per-host password secrets (basic-auth + tunnel), then leaves
+     * the encrypted prefs otherwise intact for those preserved entries.
+     *
+     * PRESERVED (the "server connection info + tunnel passwords" invariant):
+     *  - [KEY_SERVER_URL], [KEY_USERNAME], [KEY_PASSWORD] (legacy direct form)
+     *  - [KEY_HOST_PROFILES], [KEY_CURRENT_HOST_PROFILE_ID] (the host list +
+     *    the active profile id)
+     *  - per-host basic-auth passwords (`basic_auth_password_*`) — these back
+     *    [HostProfile.basicAuth.passwordId]; wiping them would silently break
+     *    every saved host's authentication on reconnect.
+     *  - per-host tunnel passwords (`tunnel_password_*`)
+     *
+     * WIPED: open tabs, session metadata cache, drafts, per-session agents,
+     * current session/workdir, nav page, theme + font preferences, traffic
+     * counters — everything not listed above.
+     *
+     * Implementation iterates the live key set and `.remove()`s each non-
+     * preserved key in a single batched edit. This deliberately avoids
+     * `.clear()` (which would also nuke the connection keys) and never touches
+     * the `basic_auth_password_*` / `tunnel_password_*` prefixes.
+     */
+    fun clearAllLocalData() {
+        val connectionKeys = setOf(
+            KEY_SERVER_URL,
+            KEY_USERNAME,
+            KEY_PASSWORD,
+            KEY_HOST_PROFILES,
+            KEY_CURRENT_HOST_PROFILE_ID
+        )
+        val e = encryptedPrefs.edit()
+        for (k in encryptedPrefs.all.keys) {
+            val preserved = k in connectionKeys ||
+                k.startsWith("basic_auth_password_") ||
+                k.startsWith("tunnel_password_")
+            if (!preserved) e.remove(k)
+        }
+        e.apply()
+    }
+
     companion object {
         private const val TAG = "SettingsManager"
         const val DEFAULT_SERVER = "http://localhost:4096"

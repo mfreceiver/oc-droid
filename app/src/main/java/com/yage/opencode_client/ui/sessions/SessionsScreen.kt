@@ -75,19 +75,46 @@ fun SessionsScreen(
     val workdirGroups = remember(state.sessions, state.directorySessions, hiddenWorkdirs, state.draftWorkdir) {
         val allSessions = (state.sessions + state.directorySessions.values.flatten())
             .distinctBy { it.id }
-        val sessionGroups = allSessions
-            .filter { it.parentId == null && it.directory !in hiddenWorkdirs }
-            .groupBy { it.directory }
-            .mapValues { (_, sessList) ->
-                sessList.sortedByDescending { it.time?.updated ?: 0L }
-            }
-            .toMutableMap()
-        state.draftWorkdir?.let { draft ->
-            if (draft !in sessionGroups && draft !in hiddenWorkdirs) {
-                sessionGroups[draft] = emptyList()
+        // Fix #6b: normalize directory keys (trim + strip surrounding slashes)
+        // so a web-created session whose directory differs only by a trailing
+        // or leading slash groups under the EXISTING project instead of
+        // spawning a hidden duplicate group. Normalization is applied
+        // consistently to the hiddenWorkdirs filter, the groupBy key, and the
+        // draft check. The representative ORIGINAL directory
+        // (keyToDisplayDir) is preserved for display and for VM calls
+        // (browseFilesInWorkdir / createSessionInWorkdir) which expect the
+        // un-normalized path.
+        val normalizedHidden = hiddenWorkdirs.mapTo(mutableSetOf()) { normalizeDirectory(it) }
+        val groupsByKey = LinkedHashMap<String, MutableList<Session>>()
+        val keyToDisplayDir = LinkedHashMap<String, String>()
+        for (s in allSessions) {
+            if (s.parentId != null) continue
+            val key = normalizeDirectory(s.directory)
+            if (key in normalizedHidden) continue
+            groupsByKey.getOrPut(key) { mutableListOf() }.add(s)
+            // Prefer an absolute-style (leading "/") representative for
+            // display; otherwise keep the first seen. Two sessions that
+            // normalize together usually differ only by surrounding slashes,
+            // so any pick is functionally equivalent for the VM's
+            // directory-scoped APIs.
+            val current = keyToDisplayDir[key]
+            if (current == null || (s.directory.startsWith('/') && !current.startsWith('/'))) {
+                keyToDisplayDir[key] = s.directory
             }
         }
-        sessionGroups.entries.sortedBy { it.key }
+        state.draftWorkdir?.let { draft ->
+            val key = normalizeDirectory(draft)
+            if (key !in groupsByKey && key !in normalizedHidden) {
+                groupsByKey[key] = mutableListOf()
+                keyToDisplayDir.putIfAbsent(key, draft)
+            }
+        }
+        // (displayDir, sessions), sorted by normalized key for stable ordering.
+        groupsByKey.entries
+            .map { (key, sessList) ->
+                (keyToDisplayDir[key] ?: key) to sessList.sortedByDescending { it.time?.updated ?: 0L }
+            }
+            .sortedBy { normalizeDirectory(it.first) }
     }
 
     // Navigate to Chat tab after selecting a session
@@ -169,7 +196,7 @@ fun SessionsScreen(
                     EmptyRow(stringResource(R.string.sessions_tab_no_workdirs))
                 }
             } else {
-                items(workdirGroups, key = { "workdir_${it.key}" }) { (workdir, sessionsInWorkdir) ->
+                items(workdirGroups, key = { "workdir_${normalizeDirectory(it.first)}" }) { (workdir, sessionsInWorkdir) ->
                     val isExpanded = expandedWorkdirs.contains(workdir)
                     val displayName = workdir.split("/").filter { it.isNotEmpty() }.lastOrNull()
                         ?: workdir
@@ -182,10 +209,17 @@ fun SessionsScreen(
                                 .fillMaxWidth()
                                 .combinedClickable(
                                     onClick = {
-                                        expandedWorkdirs = if (isExpanded) {
-                                            expandedWorkdirs - workdir
+                                        if (isExpanded) {
+                                            expandedWorkdirs = expandedWorkdirs - workdir
                                         } else {
-                                            expandedWorkdirs + workdir
+                                            expandedWorkdirs = expandedWorkdirs + workdir
+                                            // Fix #6c: re-fetch this project's directory
+                                            // sessions on expand so a conversation created
+                                            // elsewhere (web) — whose session.created SSE
+                                            // event was missed while backgrounded — appears
+                                            // without a full reconnect. Fire-and-forget; on
+                                            // failure the existing list is kept (onSuccess only).
+                                            viewModel.refreshDirectorySessions(workdir)
                                         }
                                     },
                                     onLongClick = { pendingDisconnectWorkdir = workdir }
@@ -431,3 +465,12 @@ private fun formatTime(epochMs: Long): String {
         ""
     }
 }
+
+/**
+ * Strip surrounding whitespace and slashes so directories that differ only by
+ * a leading or trailing "/" (common between phone- and web-created sessions)
+ * compare and group as equal. Fix #6b. Used only for grouping/membership keys
+ * in [SessionsScreen]; the representative ORIGINAL directory is preserved for
+ * display and VM calls.
+ */
+private fun normalizeDirectory(dir: String): String = dir.trim().trim('/')

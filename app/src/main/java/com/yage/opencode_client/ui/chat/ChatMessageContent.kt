@@ -84,6 +84,7 @@ import com.yage.opencode_client.data.model.Part
 import com.yage.opencode_client.data.model.TodoItem
 import com.yage.opencode_client.data.repository.OpenCodeRepository
 import com.yage.opencode_client.ui.GapInfo
+import com.yage.opencode_client.ui.theme.LocalIsDarkTheme
 import com.yage.opencode_client.ui.theme.LocalMarkdownFontSizes
 import com.yage.opencode_client.ui.theme.markdownTypography
 import com.yage.opencode_client.ui.theme.markdownTypographyCompact
@@ -1048,6 +1049,7 @@ private fun ReasoningCard(
     // Reads as quiet auxiliary context — same visual weight as BasicTool.
     // Outer borderBase provides containment; no layer01 panel.
     val oc = MaterialTheme.opencode
+    val isDark = LocalIsDarkTheme.current
     Surface(
         modifier = modifier.padding(vertical = 1.dp),
         shape = RoundedCornerShape(6.dp),
@@ -1076,7 +1078,7 @@ private fun ReasoningCard(
                 Text(
                     title ?: stringResource(R.string.chat_thinking),
                     style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                    color = if (isDark) Color.White else MaterialTheme.colorScheme.onSurfaceVariant
                 )
                 if (isStreaming && !expanded && text.isNotBlank()) {
                     Spacer(modifier = Modifier.width(4.dp))
@@ -1233,6 +1235,7 @@ private fun SubAgentCard(
 
     val oc = MaterialTheme.opencode
     val statusErrorColor = oc.stateDangerFg
+    val isDark = LocalIsDarkTheme.current
 
     Surface(
         modifier = modifier
@@ -1269,12 +1272,12 @@ private fun SubAgentCard(
                 }
                 if (isRunning || isError) Spacer(modifier = Modifier.width(4.dp))
 
-                // Agent name in per-agent tone color
+                // Agent name — white in dark theme, onSurface in light theme
                 if (subAgentName != null) {
                     Text(
                         text = "@$subAgentName",
                         style = MaterialTheme.typography.labelSmall,
-                        color = agentTone(subAgentName),
+                        color = if (isDark) Color.White else MaterialTheme.colorScheme.onSurface,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis
                     )
@@ -1691,7 +1694,7 @@ private fun PatchCard(
                     fontFamily = FontFamily.Monospace,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier.weight(1f, fill = false)
+                    modifier = Modifier.weight(1f)
                 )
                 if (additions > 0 || deletions > 0) {
                     Spacer(modifier = Modifier.width(6.dp))
@@ -1706,7 +1709,6 @@ private fun PatchCard(
                         fontFamily = FontFamily.Monospace
                     )
                 }
-                Spacer(modifier = Modifier.weight(1f))
                 Icon(
                     if (expanded) Icons.Default.KeyboardArrowDown else Icons.Default.ChevronRight,
                     contentDescription = if (expanded) "Collapse" else "Expand",

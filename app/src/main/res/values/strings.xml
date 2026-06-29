@@ -173,4 +173,11 @@
     <string name="server_dialog_system_settings">System Settings</string>
     <string name="task_completed">Task completed</string>
     <string name="task_failed">Task failed</string>
+    <string name="settings_danger_zone">Danger Zone</string>
+    <string name="settings_clear_local_data">Clear all local data</string>
+    <string name="settings_clear_local_data_title">Clear all local data?</string>
+    <string name="settings_clear_local_data_warning">Wipes local data and re-fetches from the server. Connection info and tunnel passwords are preserved.</string>
+    <string name="settings_clear_local_data_keeps">Kept: server connection info, host profiles, tunnel passwords.</string>
+    <string name="settings_clear_local_data_clears">Clears: open tabs, session cache, unsent drafts, current session/project, theme &amp; font preferences, traffic stats.</string>
+    <string name="settings_clear_local_data_irreversible">This action cannot be undone.</string>
 </resources>

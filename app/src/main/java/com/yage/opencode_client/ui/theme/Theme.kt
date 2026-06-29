@@ -11,6 +11,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.SideEffect
+import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalView
@@ -19,6 +20,17 @@ import androidx.compose.ui.text.font.Font
 import androidx.compose.ui.text.font.FontFamily
 import androidx.core.view.WindowCompat
 import com.yage.opencode_client.util.SettingsManager
+
+/**
+ * The resolved dark-theme state actually applied to the composition — i.e. the
+ * value [OpenCodeTheme] derives from its `darkTheme` parameter (system mode OR
+ * the explicit LIGHT/DARK override resolved in MainActivity from
+ * `state.themeMode`). Children should read [current] instead of calling
+ * isSystemInDarkTheme() so they honor a user's explicit theme override, not
+ * just the system value. Default is `false` (light) for safety in previews /
+ * before [OpenCodeTheme] provides a real value.
+ */
+val LocalIsDarkTheme = staticCompositionLocalOf { false }
 
 // Full Material 3 color schemes — v2 "oc-2" skin. Dynamic color (Material You)
 // is deliberately NOT used: the brand is a fixed electric blue across every
@@ -179,6 +191,7 @@ fun OpenCodeTheme(
         LocalMarkdownFontSizes provides markdownFontSizes,
         LocalOpencodeColors provides opencodeColors,
         LocalAppFontFamily provides appFontFamily,
+        LocalIsDarkTheme provides darkTheme,
     ) {
         MaterialTheme(
             colorScheme = colorScheme,

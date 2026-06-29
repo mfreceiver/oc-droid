@@ -695,6 +695,12 @@ class MainViewModel @Inject constructor(
                     lastLoadAtMs = now
                     suppressNextConnectCatchUp = true
                     _state.value.currentSessionId?.let { performGlobalColdStartRefresh(currentId = it) }
+                    // Note: testConnection(force=true) above already triggers
+                    // loadInitialData() on a healthy connection, which re-fetches
+                    // BOTH the global session list (loadSessions) and the
+                    // connected project's directory sessions (getSessionsForDirectory).
+                    // So cross-client/web conversations created during the absence
+                    // are surfaced by that path — no separate fetch needed here.
                     _state.update { it.copy(staleNotice = true) }
                 }
             }
@@ -1310,6 +1316,25 @@ class MainViewModel @Inject constructor(
             val updated = (listOf(sessionId) + settingsManager.openSessionIds).take(8)
             settingsManager.openSessionIds = updated
             _state.update { it.copy(openSessionIds = updated) }
+            // Fix #5: persist the newly-opened session's metadata into
+            // sessionCache so its tab survives a restart even when no message
+            // was ever sent. The cache is otherwise written only by
+            // launchLoadSessions.onSuccess, which does not re-run on a plain
+            // open — so without this, the tab's Session metadata was missing
+            // on cold start and ChatScreen's mapNotNull dropped the id.
+            // The session may currently live only in directorySessions (not yet
+            // promoted into the global list), so merge both sources (dedup by
+            // id) before persisting. Same plain prefs write as loadSessions.
+            val postState = _state.value
+            val sourceSessions = (postState.sessions + postState.directorySessions.values.flatten())
+                .distinctBy { it.id }
+            persistSessionCache(
+                settingsManager = settingsManager,
+                sessions = sourceSessions,
+                openIds = updated,
+                currentId = postState.currentSessionId,
+                currentWorkdir = settingsManager.currentWorkdir
+            )
         }
     }
 
@@ -1674,6 +1699,20 @@ class MainViewModel @Inject constructor(
                             )
                         }
                         settingsManager.currentSessionId = session.id
+                        // Fix #5: persist the freshly-created session's metadata
+                        // into sessionCache so its tab survives restart (mirrors
+                        // selectSession). The upsert above already added `session`
+                        // to state.sessions; loadSessions will later refresh the
+                        // cache authoritatively, but this guarantees the tab's
+                        // metadata is durable immediately after creation.
+                        val postState = _state.value
+                        persistSessionCache(
+                            settingsManager = settingsManager,
+                            sessions = postState.sessions,
+                            openIds = postState.openSessionIds,
+                            currentId = session.id,
+                            currentWorkdir = settingsManager.currentWorkdir
+                        )
                         dispatchSendMessage(session.id)
                     }
                     .onFailure { error ->
@@ -1951,6 +1990,63 @@ class MainViewModel @Inject constructor(
         refreshTrafficStats()
     }
 
+    /**
+     * Hard reset of ALL local data, then reconnect + re-fetch from the server.
+     *
+     * Wipes everything persisted by [SettingsManager] EXCEPT server connection
+     * info (server URL, basic-auth username/password, host profiles, current
+     * host id) and tunnel passwords — see [SettingsManager.clearAllLocalData]
+     * for the exact preservation contract. Then resets the in-memory
+     * [AppState] to a clean slate, preserving only the host-profile list +
+     * current id so the UI stays in a "reconnecting" state against the SAME
+     * server (no silent host switch), tears down in-flight SSE, and finally
+     * reconnects via [coldStartReconnect] which re-runs [loadInitialData] on a
+     * healthy connection.
+     *
+     * After this: theme/font revert to defaults, open tabs / session cache /
+     * drafts / current session+workdir are cleared, traffic counters are zeroed.
+     * The connected-project directory sessions are NOT re-fetched here
+     * (currentWorkdir is now null) — the user re-connects projects via the
+     * Sessions screen; the global server session list still loads fresh.
+     */
+    fun resetLocalDataAndResync() {
+        // 1. Wipe persisted local data (preserves connection + tunnel creds).
+        settingsManager.clearAllLocalData()
+        // 2. Zero the in-memory traffic tracker so its stale cumulative total
+        //    is not re-persisted on the next counted request (the persisted
+        //    traffic keys were already removed by clearAllLocalData above).
+        trafficTracker.reset()
+        // 3. Drop the per-session message-window cache (it belongs to the
+        //    wiped sessions and must not be restored onto fresh ones).
+        clearSessionWindowCache()
+        // 4. Tear down any in-flight SSE feed + reset reconnect flags so the
+        //    upcoming reconnect is treated as a genuine cold start (mirrors
+        //    selectHostProfile / reconfigure). Safe: cancel() is null-safe.
+        cancelSseForReconfigure()
+        // 5. Reset in-memory AppState to defaults, preserving only the host
+        //    profile list + current id. AppState() defaults clear: sessions,
+        //    directorySessions, messages, partsByMessage, openSessionIds,
+        //    currentSessionId, currentWorkdir, sessionTodos, childSessions,
+        //    drafts (inputText), unread/tempCleared, draftWorkdir, themeMode,
+        //    markdownFontSizes, selectedAgentName, traffic stats, streaming
+        //    state, file browser state, etc.
+        val keptHostProfiles = _state.value.hostProfiles
+        val keptHostProfileId = _state.value.currentHostProfileId
+        _state.update {
+            AppState(
+                hostProfiles = keptHostProfiles,
+                currentHostProfileId = keptHostProfileId,
+                isConnecting = true,
+                connectionPhase = "reconnecting"
+            )
+        }
+        // 6. Reconnect to the (preserved) current host profile and re-fetch.
+        //    coldStartReconnect → testConnection(force=true, retries=3); on
+        //    health success it calls configureRepositoryForProfile (currentWorkdir
+        //    is null so no project is re-scoped) → loadInitialData + startSSE.
+        coldStartReconnect()
+    }
+
     fun activateTunnelForCurrentHost() {
         val profile = hostProfileStore.currentProfile()
         // The tunnel password is POSTed to the opencode server URL itself (the
@@ -2041,7 +2137,13 @@ class MainViewModel @Inject constructor(
         repository.setCurrentDirectory(workdir)
         _state.update {
             it.copy(
-                filePathToShowInFiles = workdir,
+                // Fix #4: null here so FilesViewModel.syncPathToShow(null, ...)
+                // calls closePreview() and the normal loadFiles("") flow (scoped
+                // by the X-Opencode-Directory header set above) renders the
+                // clickable FileBrowserPane. Setting it to `workdir` misrouted
+                // the directory through the file-preview pipeline and rendered a
+                // plain-text directory dump instead of the clickable list.
+                filePathToShowInFiles = null,
                 filePreviewOriginRoute = "sessions",
                 fileBrowserOpen = true,
                 fileBrowserWorkdir = workdir
@@ -2065,6 +2167,30 @@ class MainViewModel @Inject constructor(
                 filePathToShowInFiles = null,
                 filePreviewOriginRoute = null
             )
+        }
+    }
+
+    /**
+     * On-demand re-fetch of a connected project's directory-scoped sessions.
+     *
+     * [loadInitialData] only refreshes [AppState.directorySessions] for the
+     * *current* workdir, so a non-current connected project's session list goes
+     * stale. Combined with missed `session.created` SSE events while the phone
+     * was backgrounded, a conversation created on the web would not appear
+     * under its project until a full reconnect. The Sessions screen calls this
+     * when the user EXPANDS a workdir group, so the freshest server list is
+     * rendered. Fire-and-forget: on success it REPLACES the workdir's entry in
+     * [AppState.directorySessions] (same semantics as loadInitialData's
+     * directory fetch); on failure it silently keeps the existing list
+     * (onSuccess only) — acceptable for a user-initiated refresh.
+     */
+    fun refreshDirectorySessions(workdir: String) {
+        if (workdir.isBlank()) return
+        viewModelScope.launch {
+            repository.getSessionsForDirectory(workdir)
+                .onSuccess { sessions ->
+                    _state.update { it.copy(directorySessions = it.directorySessions + (workdir to sessions)) }
+                }
         }
     }
 
