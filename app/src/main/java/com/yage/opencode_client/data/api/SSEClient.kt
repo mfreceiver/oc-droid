@@ -1,6 +1,7 @@
 package com.yage.opencode_client.data.api
 
 import com.yage.opencode_client.data.model.SSEEvent
+import com.yage.opencode_client.ui.NOISY_SSE_LOG_EVENTS
 import com.yage.opencode_client.util.DebugLog
 import kotlinx.coroutines.channels.awaitClose
 import kotlinx.coroutines.delay
@@ -137,7 +138,13 @@ class SSEClient(
                         // already tracks every frame via lastEventAt above, so
                         // heartbeats still serve their liveness purpose.
                         val type = event.payload.type
-                        if (type != "message.part.delta" && type != "server.heartbeat") {
+                        // Throttle noise that floods the 1000-entry ring buffer
+                        // and evicts signal: per-token deltas, periodic heartbeats,
+                        // reconnect bursts (server.connected), and server-internal
+                        // plugin/catalog/integration bursts (the latter fire in
+                        // large flurries when a run starts).
+                        val noisy = type in NOISY_SSE_LOG_EVENTS
+                        if (!noisy) {
                             DebugLog.d("SSE", "event type=$type session=${event.payload.getString("sessionID") ?: "-"}")
                         }
                         trySend(Result.success(event))

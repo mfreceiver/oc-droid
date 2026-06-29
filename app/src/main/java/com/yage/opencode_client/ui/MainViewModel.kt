@@ -182,8 +182,10 @@ data class AppState(
     /**
      * Sessions the user has opened (cleared the unread badge) and that are
      * still eligible to be *re-marked* unread if they remain busy when the
-     * user navigates away, or if a new message.created arrives for them while
-     * they are not the current session.
+     * user navigates away, or if a new out-of-band message arrives for them
+     * while they are not the current session (server 1.17.11+ surfaces new
+     * messages via `message.updated`; the message.created branch is retained
+     * only for forward-compat).
      *
      * A session leaves this set when the server reports it going idle
      * (busy -> idle) — at that point the in-flight task is complete and there
@@ -1292,9 +1294,10 @@ class MainViewModel @Inject constructor(
                 unreadSessions = withReMark.unreadSessions - sessionId,
                 lastViewedTime = withReMark.lastViewedTime + (sessionId to now),
                 // Track the newly-selected session as "temp-cleared" so a
-                // subsequent switch away (while busy) or a new message.created
-                // can re-mark it. The previous session stays in the set until
-                // the server reports it going idle (handled in SyncActions).
+                // subsequent switch away (while busy) or a new out-of-band
+                // message can re-mark it. The previous session stays in the
+                // set until the server reports it going idle (handled in
+                // SyncActions).
                 tempClearedUnread = withReMark.tempClearedUnread + sessionId
             )
         }

@@ -633,9 +633,12 @@ class MainViewModelTest {
     }
 
     @Test
-    fun `message updated SSE with info for unknown message is a no-op`() = runTest {
-        // S3 gate: a message.updated whose id is not in the current view is a
-        // no-op (no insert, no reload) — it will load via message.created later.
+    fun `message updated SSE for a non-current session is a no-op`() = runTest {
+        // Session guard: a message.updated whose sessionID is NOT the current
+        // session is a no-op (no patch, no insert, no reload) — it must not
+        // touch the current view. (Server 1.17.11+ emits message.updated for
+        // new messages; the current-session insert-if-absent path is covered
+        // by `message updated SSE inserts a new absent message and patches an existing one`.)
         val viewModel = createViewModel()
         updateState(viewModel) {
             it.copy(
@@ -650,6 +653,7 @@ class MainViewModelTest {
                 payload = SSEPayload(
                     type = "message.updated",
                     properties = buildJsonObject {
+                        put("sessionID", JsonPrimitive("session-other"))
                         put("info", buildJsonObject {
                             put("id", JsonPrimitive("not-loaded"))
                             put("role", JsonPrimitive("assistant"))
@@ -2530,6 +2534,159 @@ class MainViewModelTest {
         assertNull(viewModel.state.value.olderMessagesCursor)
         // Gap wiped — a cold-start snapshot has no断层 reference.
         assertNull(viewModel.state.value.gapInfo)
+    }
+
+    @Test
+    fun `session status busy for current session triggers reload`() = runTest {
+        // §cross-client-sync (server 1.17.11+): when the CURRENT session goes
+        // busy, a run just started — possibly because a message was sent from
+        // ANOTHER client (e.g. the web UI). The busy-current reload is the
+        // belt-and-suspenders that surfaces a cross-client-sent user message
+        // even if the corresponding message.updated event missed the local
+        // view. The overlay-clear in launchLoadMessages is gated on !busy, so
+        // this reload does NOT disrupt any in-flight streaming overlay.
+        coEvery { repository.getMessagesPaged("session-1", 5, any()) } returns
+            Result.success(MessagesPage(emptyList(), null))
+        val viewModel = createViewModel()
+        updateState(viewModel) { it.copy(currentSessionId = "session-1") }
+
+        handleSse(
+            viewModel,
+            SSEEvent(
+                payload = SSEPayload(
+                    type = "session.status",
+                    properties = buildJsonObject {
+                        put("sessionID", JsonPrimitive("session-1"))
+                        put(
+                            "status",
+                            buildJsonObject {
+                                put("type", JsonPrimitive("busy"))
+                            }
+                        )
+                    }
+                )
+            )
+        )
+        advanceTimeBy(1000)
+        advanceUntilIdle()
+
+        // Status badge updated to busy...
+        val status = viewModel.state.value.sessionStatuses["session-1"]
+        assertNotNull(status)
+        assertTrue(status!!.isBusy)
+        // ...and a reload was issued for the current session.
+        coVerify(atLeast = 1) { repository.getMessagesPaged("session-1", any(), any()) }
+
+        // (b) A busy transition on a NON-current session only updates the
+        // status badge — it must NOT trigger a reload (the user is not viewing
+        // that session).
+        val viewModel2 = createViewModel()
+        updateState(viewModel2) { it.copy(currentSessionId = "session-1") }
+
+        handleSse(
+            viewModel2,
+            SSEEvent(
+                payload = SSEPayload(
+                    type = "session.status",
+                    properties = buildJsonObject {
+                        put("sessionID", JsonPrimitive("session-other"))
+                        put(
+                            "status",
+                            buildJsonObject {
+                                put("type", JsonPrimitive("busy"))
+                            }
+                        )
+                    }
+                )
+            )
+        )
+        advanceTimeBy(1000)
+        advanceUntilIdle()
+
+        val statusOther = viewModel2.state.value.sessionStatuses["session-other"]
+        assertNotNull(statusOther)
+        assertTrue(statusOther!!.isBusy)
+        coVerify(exactly = 0) { repository.getMessagesPaged("session-other", any(), any()) }
+    }
+
+    @Test
+    fun `message updated SSE inserts a new absent message and patches an existing one`() = runTest {
+        // §cross-client-sync (server 1.17.11+): the server emits message.updated
+        // (not message.created) for NEW messages. When the message id is ABSENT
+        // from the local list, insert it (append — the list is oldest-first and
+        // the new message is the newest). When present, patch in place (not
+        // duplicated). Mirrors the oc-ref web client's patch-if-found +
+        // insert-if-absent handler (server-session.ts:706).
+        val existing = Message(id = "m_existing", role = "assistant", agent = "old")
+        val viewModel = createViewModel()
+        updateState(viewModel) {
+            it.copy(
+                currentSessionId = "session-1",
+                messages = listOf(existing)
+            )
+        }
+
+        // (a) ABSENT message → inserted at the tail (newest end).
+        handleSse(
+            viewModel,
+            SSEEvent(
+                payload = SSEPayload(
+                    type = "message.updated",
+                    properties = buildJsonObject {
+                        put("sessionID", JsonPrimitive("session-1"))
+                        put(
+                            "info",
+                            buildJsonObject {
+                                put("id", JsonPrimitive("msg_new"))
+                                put("sessionID", JsonPrimitive("session-1"))
+                                put("role", JsonPrimitive("user"))
+                            }
+                        )
+                    }
+                )
+            )
+        )
+        advanceUntilIdle()
+
+        val afterInsert = viewModel.state.value.messages
+        assertEquals(2, afterInsert.size)
+        assertEquals("m_existing", afterInsert[0].id)
+        assertEquals("msg_new", afterInsert[1].id)
+
+        // (b) EXISTING message → patched in place, NOT duplicated.
+        handleSse(
+            viewModel,
+            SSEEvent(
+                payload = SSEPayload(
+                    type = "message.updated",
+                    properties = buildJsonObject {
+                        put("sessionID", JsonPrimitive("session-1"))
+                        put(
+                            "info",
+                            buildJsonObject {
+                                put("id", JsonPrimitive("m_existing"))
+                                put("sessionID", JsonPrimitive("session-1"))
+                                put("role", JsonPrimitive("assistant"))
+                                put("agent", JsonPrimitive("updated"))
+                                put("finish", JsonPrimitive("stop"))
+                            }
+                        )
+                    }
+                )
+            )
+        )
+        advanceUntilIdle()
+
+        val afterPatch = viewModel.state.value.messages
+        // Still 2 — the existing id was patched in place, not appended again.
+        assertEquals(2, afterPatch.size)
+        assertEquals("m_existing", afterPatch[0].id)
+        assertEquals("updated", afterPatch[0].agent)
+        assertEquals("stop", afterPatch[0].finish)
+        assertEquals("msg_new", afterPatch[1].id)
+
+        // Patch/insert are pure state updates — no reload issued for either case.
+        coVerify(exactly = 0) { repository.getMessagesPaged(any(), any(), any()) }
     }
 
     @org.junit.After

@@ -104,7 +104,7 @@ internal data class ChatTopBarState(
      */
     val openSessions: List<Session> = emptyList(),
     /**
-     * Session IDs with unread activity (an out-of-band message.created arrived
+     * Session IDs with unread activity (an out-of-band message arrived
      * while the session was not the current one). Drives a small dot badge on
      * each row in the open-sessions dropdown. Projected from
      * [AppState.unreadSessions] by the caller.

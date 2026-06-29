@@ -312,13 +312,15 @@ internal fun launchLoadMessages(
                         // running. A resetLimit=true reload triggered while a
                         // turn is still streaming — e.g. an append-send's post-
                         // send refresh, or the appended user message's
-                        // `message.created` — must NOT erase the in-flight
-                        // assistant text: the fetched window may not yet hold
-                        // the finalized part.text, so streamingPartTexts is the
-                        // source of truth until the run settles. Once status
-                        // flips to idle the next resetLimit reload finalizes as
-                        // before (preserving the S1 finalization-boundary model).
-                        // Unknown status → finalize/clear (legacy behaviour).
+                        // `message.updated` (server 1.17.11+ emits message.updated,
+                        // not message.created, for new messages) — must NOT
+                        // erase the in-flight assistant text: the fetched window
+                        // may not yet hold the finalized part.text, so
+                        // streamingPartTexts is the source of truth until the
+                        // run settles. Once status flips to idle the next
+                        // resetLimit reload finalizes as before (preserving the
+                        // S1 finalization-boundary model). Unknown status →
+                        // finalize/clear (legacy behaviour).
                         val streamingFinalized = it.sessionStatuses[sessionId]
                             ?.let { st -> !st.isBusy && !st.isRetry } ?: true
                         it.copy(
@@ -865,7 +867,9 @@ internal fun launchSendMessage(
                 onSuccess?.invoke()
                 onRefreshSessions()
                 // §15.1 (review N6): the post-send 1200ms double-refresh is
-                // gone — SSE will deliver `message.created` / `message.updated`
+                // gone — SSE will deliver `message.updated` (server 1.17.11+
+                // emits message.updated, not message.created, for new messages;
+                // see the insert-if-absent handler in MainViewModelSyncActions)
                 // and a foreground catch-up covers any dropped event. The single
                 // immediate reload here is the legacy first-paint path that
                 // selectSession/sendMessage use to bypass the debounce.

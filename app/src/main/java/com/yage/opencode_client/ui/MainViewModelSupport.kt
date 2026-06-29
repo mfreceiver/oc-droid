@@ -11,6 +11,14 @@ import kotlinx.serialization.json.JsonPrimitive
 
 internal val lenientJson = Json { ignoreUnknownKeys = true }
 
+/** SSE event types that are pure noise in the debug log (high-frequency or
+ *  server-internal). Logging them floods the ring buffer and evicts signal.
+ *  NOTE: this affects ONLY logging — event handling/dispatch is unchanged. */
+internal val NOISY_SSE_LOG_EVENTS: Set<String> = setOf(
+    "message.part.delta", "server.heartbeat", "server.connected",
+    "plugin.added", "catalog.updated", "integration.updated"
+)
+
 internal object MainViewModelTimings {
     const val sessionPageSize = 10
     const val messageRetryDelayMs = 400L

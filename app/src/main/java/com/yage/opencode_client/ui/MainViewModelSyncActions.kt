@@ -50,14 +50,18 @@ internal fun launchSseCollection(
  *
  * - `message.updated` for the current session does NOT reload — live text comes
  *   via `streamingPartTexts` (populated by `message.part.updated` delta/full
- *   text), and structural sync happens on `message.created` (which reloads).
+ *   text). Structural sync is handled in-place: an existing message is patched,
+ *   and a NEW message (absent from the local list) is INSERTED (server 1.17.11+
+ *   emits `message.updated`, not `message.created`, for new messages; the oc-ref
+ *   web client does the same patch-if-found + insert-if-absent).
  * - `message.part.updated` with empty delta but non-null ids (a part status
  *   flip) does NOT clear streaming buffers or reload. Only a true `part.created`
  *   (ids null) wipes the streaming state and reloads.
  * - `session.status` transitions only update the `sessionStatuses` map (busy/idle
  *   badge). They do NOT reload or clear streaming buffers — the finalized turn
- *   text is carried by `streamingPartTexts` until the next `message.created`
- *   reload or a foreground catch-up reconciles the persisted message list.
+ *   text is carried by `streamingPartTexts` until a foreground catch-up
+ *   reconciles the persisted message list. (A busy transition on the CURRENT
+ *   session also triggers a debounced reload as the cross-client-sync fallback.)
  * - There is no watchdog/idle-reload: a silently-stalled SSE feed recovers via
  *   connection-level retry, a foreground transition (SSE restart), or the next
  *   user action — matching opencode-web.
@@ -70,21 +74,20 @@ internal fun handleIncomingSseEvent(
     onLoadPendingPermissions: () -> Unit,
     onNonFatalIssue: (String) -> Unit
 ) {
-    // Throttle dispatch logging to preserve the 1000-entry ring buffer's signal:
-    // - server.heartbeat: periodic (~10s) noise, never logged.
-    // - message.part.delta: per-token noise during AI streaming. The ONLY
-    //   diagnostic signal is a session mismatch ("delta for X while viewing Y")
-    //   — when the delta's session IS the current one, streaming is expected
-    //   and logging every token floods the buffer. So log deltas only on
-    //   mismatch; skip matching-current deltas.
-    // - all other types: log as before (connection events, message.created,
-    //   reload decisions, etc. are the actual signal).
+    // Throttle dispatch logging to preserve the 1000-entry ring buffer's signal.
+    // Skipped (noise): server.heartbeat (periodic), message.part.delta (per-token
+    // during streaming — its render IS the proof), server.connected (fires on
+    // every reconnect), and plugin.added / catalog.updated / integration.updated
+    // (server-internal bursts that fire in large flurries when a run starts,
+    // e.g. when another client sends a message). Logging-only — dispatch is
+    // unchanged. All other types (message.created/updated, session.*,
+    // permission/question, todo, connection) are logged — they are the actual
+    // sync signal.
     val type = event.payload.type
     val evtSession = event.payload.getString("sessionID") ?: "-"
-    when {
-        type == "server.heartbeat" -> { /* skip — periodic noise */ }
-        type == "message.part.delta" && evtSession == state.value.currentSessionId -> { /* skip — expected streaming, not signal */ }
-        else -> DebugLog.d("Sync", "dispatch $type session=$evtSession current=${state.value.currentSessionId}")
+    val noisy = type in NOISY_SSE_LOG_EVENTS
+    if (!noisy) {
+        DebugLog.d("Sync", "dispatch $type session=$evtSession current=${state.value.currentSessionId}")
     }
     when (event.payload.type) {
         "session.created" -> {
@@ -111,6 +114,23 @@ internal fun handleIncomingSseEvent(
                         sessionStatuses = it.sessionStatuses + (statusEvent.sessionId to statusEvent.status)
                     )
                 }
+                // §cross-client-sync: when the CURRENT session goes busy, a run
+                // just started — i.e. a message was sent, possibly from ANOTHER
+                // client (e.g. the web UI). This is a belt-and-suspenders reload
+                // that catches messages emitted before the message.updated
+                // insert-if-absent path (below) has run / before the local view
+                // is subscribed — the primary surfacing path is now message.updated
+                // insert-if-absent (mirrors the web client). Debounced via
+                // loadMessagesWithRetry's 400ms delay + isLoadingMessages
+                // coalescing; the user message is persisted server-side before
+                // the run starts. The overlay-clear in launchLoadMessages is
+                // gated on !busy, so this does NOT disrupt the streaming overlay.
+                if (statusEvent.status.isBusy &&
+                    statusEvent.sessionId == state.value.currentSessionId
+                ) {
+                    DebugLog.i("Sync", "session.status busy (current) → reload (cross-client message sync)")
+                    onRefreshMessages(statusEvent.sessionId, true)
+                }
                 // When a temp-cleared session finishes its in-flight work
                 // (busy -> idle) and is NOT the currently-open one, drop it
                 // from tempClearedUnread: there is no longer any pending work
@@ -127,10 +147,11 @@ internal fun handleIncomingSseEvent(
                     }
                 }
                 // SSE-trust model: session.status (busy/idle) only updates the
-                // status badge. It does NOT reload or clear streaming buffers.
-                // The finalized turn text is carried by streamingPartTexts
-                // until the next message.created reload or a foreground catch-up
-                // reconciles the persisted message list — mirroring opencode-web.
+                // status badge. It does NOT reload or clear streaming buffers
+                // (except the busy-current and idle-current finalization paths
+                // above). The finalized turn text is carried by
+                // streamingPartTexts until a foreground catch-up reconciles the
+                // persisted message list — mirroring opencode-web.
                 //
                 // §append-safe finalization (gpter MAJOR): the overlay-clear in
                 // launchLoadMessages is gated on !busy, so if the last reload
@@ -155,6 +176,12 @@ internal fun handleIncomingSseEvent(
             }
         }
         "message.created" -> {
+            // NOTE: server 1.17.11+ does NOT emit message.created (only
+            // message.updated / message.part.*). This branch is retained for
+            // FORWARD COMPATIBILITY if a future server version adds it; today
+            // it is effectively dead code. New messages are surfaced by the
+            // message.updated insert-if-absent path above and the
+            // session.status busy reload.
             val sessionId = event.payload.getString("sessionID")
             val isCurrent = sessionId != null && sessionId == state.value.currentSessionId
             DebugLog.i("Sync", "message.created: ${if (isCurrent) "reload current" else "mark unread"}")
@@ -172,10 +199,20 @@ internal fun handleIncomingSseEvent(
             // Server payload confirmed to carry a full { info: Message } object.
             // We replace the matching Message in the split `messages` store
             // (List<Message>); its parts live separately in partsByMessage and
-            // are NOT touched. If the message isn't in the current view it's a
-            // no-op (loaded later by message.created / loadMore). No reload,
-            // no unread marking (message.updated fires per streaming delta).
-            // Defensive session guard: only patch the current session's view.
+            // are NOT touched.
+            //
+            // §cross-client-sync (server 1.17.11+): the server emits
+            // `message.updated` (NOT `message.created`) for NEW messages. So
+            // when the message id is ABSENT from the local list we INSERT it
+            // (append — the list is oldest-first and the new message is the
+            // newest). This mirrors the oc-ref web client's
+            // patch-if-found + insert-if-absent handler. Subsequent updates for
+            // the same id find it in the list and patch in place, so this is a
+            // once-per-new-id op (no storm — pure state update, no I/O, no
+            // reload). The session.status busy → reload path is the parallel
+            // belt-and-suspenders for messages emitted before the local view
+            // is even subscribed.
+            // Defensive session guard: only touch the current session's view.
             val eventSessionId = event.payload.getString("sessionID")
             if (eventSessionId != null && eventSessionId != state.value.currentSessionId) return
             val infoJson = event.payload.getJsonObject("info")
@@ -186,14 +223,20 @@ internal fun handleIncomingSseEvent(
                 if (updated != null && updated.id.isNotEmpty()) {
                     // Single O(n) scan inside the atomic update: `found` is set
                     // during the same `map` pass that builds the replacement
-                    // list, so the patch decision and the found flag come from
-                    // one atomic pass (no TOCTOU, no second `.none{}` scan).
+                    // list, so the patch-vs-insert decision and the found flag
+                    // come from one atomic pass (no TOCTOU, no second `.none{}`
+                    // scan). When found, patch in place; when NOT found, append
+                    // (insert) the new message at the tail (oldest-first list).
                     var found = false
                     state.update { s ->
                         val newMessages = s.messages.map { if (it.id == updated.id) { found = true; updated } else it }
-                        if (found) s.copy(messages = newMessages) else s
+                        if (found) s.copy(messages = newMessages) else s.copy(messages = newMessages + updated)
                     }
-                    DebugLog.d("Sync", "message.updated: ${if (found) "patched" else "not in list (no-op)"}")
+                    if (found) {
+                        DebugLog.d("Sync", "message.updated: patched")
+                    } else {
+                        DebugLog.i("Sync", "message.updated: inserted (new message, absent from local list)")
+                    }
                 }
             }
         }
@@ -240,7 +283,7 @@ internal fun handleIncomingSseEvent(
                     // Else: ids present + both text & delta null/blank =
                     // part status flip. Do NOT clear streaming buffers and
                     // do NOT reload — a foreground catch-up or the next
-                    // message.created reconciles if needed.
+                    // message.updated / part.created reconciles if needed.
                 } else {
                     // §15.1 (review B3): a true `part.created` (no message/part
                     // id yet) signals the start of a fresh streaming run —
