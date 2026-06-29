@@ -32,6 +32,13 @@ data class HostProfile(
     val serverUrl: String,
     val basicAuth: BasicAuthConfig? = null,
     val tunnelPasswordId: String? = null,
+    /**
+     * R-01: per-host "接受不安全连接"开关。默认 false（仅信任系统证书），
+     * 设为 true 时该 host 的 REST/SSE/health/tunnel client 全部降级为 trust-all。
+     * 这是把原先全局硬编码的 trustAll 收紧为按 host 的显式、可审计的开关。
+     */
+    @SerialName("allowInsecureConnections")
+    val allowInsecureConnections: Boolean = false,
     val lastUsedAt: Long? = null
 ) {
     val displayName: String
@@ -66,14 +73,20 @@ data class HostProfileImportPayload(
     val version: Int? = null,
     val name: String,
     @SerialName("serverURL")
-    val serverUrl: String? = null
+    val serverUrl: String? = null,
+    @SerialName("allowInsecureConnections")
+    val allowInsecureConnections: Boolean = false
 ) {
     fun makeProfile(): HostProfile {
         val url = serverUrl?.trim().orEmpty()
         require(url.isNotEmpty()) {
             "Host profile requires serverURL (legacy SSH-only profiles are no longer supported)"
         }
-        return HostProfile(name = name, serverUrl = url)
+        return HostProfile(
+            name = name,
+            serverUrl = url,
+            allowInsecureConnections = allowInsecureConnections
+        )
     }
 }
 
@@ -82,13 +95,16 @@ data class HostProfileExportPayload(
     val version: Int = 1,
     val name: String,
     @SerialName("serverURL")
-    val serverUrl: String
+    val serverUrl: String,
+    @SerialName("allowInsecureConnections")
+    val allowInsecureConnections: Boolean = false
 ) {
     companion object {
         fun from(profile: HostProfile): HostProfileExportPayload {
             return HostProfileExportPayload(
                 name = profile.displayName,
-                serverUrl = profile.serverUrl
+                serverUrl = profile.serverUrl,
+                allowInsecureConnections = profile.allowInsecureConnections
             )
         }
     }
