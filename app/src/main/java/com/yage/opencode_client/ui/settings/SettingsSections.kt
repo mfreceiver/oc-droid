@@ -308,13 +308,14 @@ internal fun TrafficSection(
 private fun TrafficRow(label: String, bytes: Long) {
     Row(
         modifier = Modifier.fillMaxWidth(),
-        horizontalArrangement = Arrangement.SpaceBetween
+        horizontalArrangement = Arrangement.Center
     ) {
         Text(
             label,
             style = MaterialTheme.typography.bodyMedium,
             color = MaterialTheme.colorScheme.onSurfaceVariant
         )
+        Spacer(modifier = Modifier.width(8.dp))
         Text(
             formatBytes(bytes),
             style = MaterialTheme.typography.bodyMedium

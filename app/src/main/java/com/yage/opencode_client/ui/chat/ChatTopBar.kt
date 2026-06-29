@@ -125,6 +125,11 @@ internal data class ChatTopBarState(
     val parentSessionTitle: String? = null,
     val trafficSent: Long = 0L,
     val trafficReceived: Long = 0L,
+    /**
+     * OpenCode server version (populated on connect). Shown on each host row
+     * in [ServerManagementDialog] in place of the server URL.
+     */
+    val serverVersion: String? = null,
 )
 
 internal data class ChatTopBarActions(
@@ -424,6 +429,7 @@ internal fun ChatTopBar(
             showTunnelAuth = state.showTunnelAuth,
             trafficSent = state.trafficSent,
             trafficReceived = state.trafficReceived,
+            serverVersion = state.serverVersion,
             onSelectHost = { profileId ->
                 actions.onSelectHost(profileId)
                 showServerDialog = false
@@ -586,7 +592,7 @@ private fun ContextMenuButton(
                     Text(
                         if (usage != null) {
                             val pct = (usage.percentage * 100).toInt()
-                            "$pct% ${formatCountCompact(usage.totalTokens)}/${formatCountCompact(usage.contextLimit)}"
+                            "$pct% ${usage.totalTokens / 1000}/${usage.contextLimit / 1000}"
                         } else {
                             stringResource(R.string.chat_context)
                         }
@@ -664,7 +670,7 @@ private fun ContextUsageDialog(
                         ContextUsageRow(stringResource(R.string.chat_context_cached_write), formatOptionalCount(usage.cachedWriteTokens))
                     }
                     ContextUsageSection(stringResource(R.string.chat_context_cost)) {
-                        ContextUsageRow(stringResource(R.string.chat_context_cost), usage.cost?.let { "$" + String.format(Locale.US, "%.4f", it) } ?: stringResource(R.string.chat_context_no_cost))
+                        ContextUsageRow(stringResource(R.string.chat_context_cost), usage.cost?.let { "¥" + String.format(Locale.US, "%.4f", it) } ?: stringResource(R.string.chat_context_no_cost))
                     }
                 }
             }
@@ -685,6 +691,7 @@ private fun ServerManagementDialog(
     showTunnelAuth: Boolean,
     trafficSent: Long,
     trafficReceived: Long,
+    serverVersion: String?,
     onSelectHost: (String) -> Unit,
     onRefresh: () -> Unit,
     onActivateTunnel: () -> Unit,
@@ -735,11 +742,13 @@ private fun ServerManagementDialog(
                                             fontWeight = FontWeight.Bold,
                                             color = oc.accentText
                                         )
-                                        Text(
-                                            text = profile.serverUrl,
-                                            style = MaterialTheme.typography.bodySmall,
-                                            color = oc.faint
-                                        )
+                                        serverVersion?.let { version ->
+                                            Text(
+                                                text = "v$version",
+                                                style = MaterialTheme.typography.bodySmall,
+                                                color = oc.faint
+                                            )
+                                        }
                                     }
                                     Icon(
                                         Icons.Filled.Check,
@@ -766,11 +775,11 @@ private fun ServerManagementDialog(
                                         style = MaterialTheme.typography.bodyMedium,
                                         color = MaterialTheme.colorScheme.onSurface
                                     )
-                                    Text(
-                                        text = profile.serverUrl,
-                                        style = MaterialTheme.typography.bodySmall,
-                                        color = oc.faint
-                                    )
+                                    // Version is shown ONLY on the selected (current/connected)
+                                    // host row — it's a single global value for the connected
+                                    // server, so rendering it under non-current profiles would
+                                    // be misleading (would show the connected host's version
+                                    // for hosts we haven't probed).
                                 }
                             }
                         }
@@ -884,14 +893,6 @@ private fun ContextUsageRow(label: String, value: String) {
 private fun formatCount(value: Int): String = String.format(Locale.US, "%,d", value)
 
 private fun formatOptionalCount(value: Int?): String = value?.let(::formatCount) ?: "-"
-
-/**
- * Compact count for space-constrained badges: ≥1000 collapses to "{value/1000}k"
- * (113000 -> "113k"), smaller values render verbatim. Distinct from [formatCount]
- * (locale-grouped) which stays in use inside the detail dialog (#8).
- */
-private fun formatCountCompact(value: Int): String =
-    if (value >= 1000) "${value / 1000}k" else value.toString()
 
 /**
  * Format byte counts for the traffic stats display: < 1 KiB → bytes,

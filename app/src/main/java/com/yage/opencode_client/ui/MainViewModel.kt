@@ -853,7 +853,11 @@ class MainViewModel @Inject constructor(
                 sessions = emptyList(),
                 directorySessions = emptyMap(),
                 draftWorkdir = null,
-                availableCommands = emptyList()
+                availableCommands = emptyList(),
+                // Clear the (previous host's) probed server version so it is not
+                // shown under the new host before the new health check repopulates
+                // it (or, if the new connection fails, no stale version lingers).
+                serverVersion = null
             ) }
             // §Per-session message cache: cached windows belong to the previous
             // host's sessions — they must not be restored onto the new host's
@@ -910,7 +914,11 @@ class MainViewModel @Inject constructor(
                     sessions = emptyList(),
                     directorySessions = emptyMap(),
                     draftWorkdir = null,
-                    availableCommands = emptyList()
+                    availableCommands = emptyList(),
+                    // Clear the deleted (active) host's probed server version so
+                    // the replacement host doesn't display a stale version before
+                    // its own health check (or, on failed reconnect, at all).
+                    serverVersion = null
                 )
             }
             // §Per-session message cache: ditto — cached windows belong to the
@@ -1287,8 +1295,13 @@ class MainViewModel @Inject constructor(
                 tempClearedUnread = withReMark.tempClearedUnread + sessionId
             )
         }
-        if (targetSession?.parentId == null) {
-            val updated = (listOf(sessionId) + settingsManager.openSessionIds).distinct().take(8)
+        // Browser-tab semantics: a click on an already-open tab must NOT
+        // reorder it (keeps insertion order stable). The prepend only happens
+        // when the selected session is NOT yet in the list (e.g. a cold-start
+        // restoration of a persisted currentSessionId that has no open tab).
+        // New-session prepend (draft-send) is handled separately in sendMessage.
+        if (targetSession?.parentId == null && sessionId !in settingsManager.openSessionIds) {
+            val updated = (listOf(sessionId) + settingsManager.openSessionIds).take(8)
             settingsManager.openSessionIds = updated
             _state.update { it.copy(openSessionIds = updated) }
         }

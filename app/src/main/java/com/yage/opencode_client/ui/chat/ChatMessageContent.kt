@@ -34,6 +34,7 @@ import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Description
 import androidx.compose.material.icons.filled.FileOpen
 import androidx.compose.material.icons.filled.Folder
+import androidx.compose.material.icons.filled.ExpandLess
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.automirrored.filled.OpenInNew
 import androidx.compose.material.icons.filled.Psychology
@@ -1129,6 +1130,21 @@ private fun ReasoningCard(
                         }
                     }
                 }
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable { onToggleExpand(expandedKey!!, true) }
+                        .padding(top = 2.dp, bottom = 2.dp),
+                    horizontalArrangement = Arrangement.Center,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Icon(
+                        Icons.Default.ExpandLess,
+                        contentDescription = "Collapse",
+                        modifier = Modifier.size(14.dp),
+                        tint = oc.faint
+                    )
+                }
             }
         }
     }
@@ -1895,6 +1911,21 @@ private fun BasicTool(
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
                 }
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable { onToggleExpand(expandedKey, true) }
+                        .padding(top = 4.dp, bottom = 2.dp),
+                    horizontalArrangement = Arrangement.Center,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Icon(
+                        Icons.Default.ExpandLess,
+                        contentDescription = "Collapse",
+                        modifier = Modifier.size(14.dp),
+                        tint = oc.faint
+                    )
+                }
             }
         }
     }
@@ -2002,6 +2033,21 @@ private fun ContextToolGroup(
                             modifier = Modifier.weight(1f)
                         )
                     }
+                }
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable { onToggleExpand(expandedKey, true) }
+                        .padding(top = 2.dp, bottom = 2.dp),
+                    horizontalArrangement = Arrangement.Center,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Icon(
+                        Icons.Default.ExpandLess,
+                        contentDescription = "Collapse",
+                        modifier = Modifier.size(14.dp),
+                        tint = oc.faint
+                    )
                 }
             }
         }
@@ -2121,15 +2167,32 @@ private fun CompletedTaskCard(
             if (expanded) {
                 val bodyText = taskResult.taskResult ?: ""
                 if (bodyText.isNotBlank()) {
+                    val fontSizes = LocalMarkdownFontSizes.current
                     Spacer(modifier = Modifier.size(4.dp))
-                    SelectionContainer {
-                        Text(
-                            text = bodyText,
-                            style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            softWrap = true
-                        )
-                    }
+                    Markdown(
+                        content = bodyText,
+                        typography = markdownTypography(fontSizes),
+                        components = markdownComponents(
+                            codeBlock = highlightedCodeBlock,
+                            codeFence = highlightedCodeFence
+                        ),
+                        imageTransformer = DataUriImageTransformer
+                    )
+                }
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable { onToggleExpand(expandedKey, true) }
+                        .padding(top = 2.dp, bottom = 2.dp),
+                    horizontalArrangement = Arrangement.Center,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Icon(
+                        Icons.Default.ExpandLess,
+                        contentDescription = "Collapse",
+                        modifier = Modifier.size(14.dp),
+                        tint = oc.faint
+                    )
                 }
             }
         }

@@ -486,7 +486,7 @@ private fun ChatPrimaryActionButton(
         Icon(
             icon,
             contentDescription = null,
-            tint = contentColor,
+            tint = contentColor.copy(alpha = effectiveAlpha),
             modifier = Modifier.size(16.dp)
         )
     }

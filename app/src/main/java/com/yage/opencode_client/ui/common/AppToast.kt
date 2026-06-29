@@ -17,12 +17,14 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.unit.dp
 import com.yage.opencode_client.ui.theme.opencode
+import kotlinx.coroutines.delay
 
 enum class ToastSeverity { Success, Error, Info }
 
@@ -34,6 +36,20 @@ fun AppToast(
     onDismiss: (() -> Unit)? = null,
 ) {
     val oc = MaterialTheme.opencode
+
+    // 3s auto-dismiss, keyed on `message`: the timer restarts whenever the
+    // message VALUE changes (incl. null->msg after a clear). Note: if the exact
+    // same string re-fires while already visible (no clear between), StateFlow
+    // suppresses the equal update so the timer is NOT reset — acceptable, since
+    // the toast already shows the correct text (standard toast semantics).
+    // Tap-to-dismiss also routes through onDismiss; the callback is expected to
+    // be idempotent (typically a clear), so the two paths do not conflict.
+    if (onDismiss != null) {
+        LaunchedEffect(message) {
+            delay(3000)
+            onDismiss()
+        }
+    }
 
     val borderColor: Color
     val icon: ImageVector
@@ -69,7 +85,7 @@ fun AppToast(
                     if (onDismiss != null) Modifier.clickable { onDismiss() }
                     else Modifier
                 )
-                .padding(horizontal = 12.dp, vertical = 8.dp),
+                .padding(horizontal = 20.dp, vertical = 20.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
             Icon(

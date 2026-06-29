@@ -14,6 +14,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
@@ -44,6 +45,7 @@ import com.yage.opencode_client.ui.TUNNEL_SUCCESS_TOAST
 import com.yage.opencode_client.ui.TunnelActivationState
 import com.yage.opencode_client.ui.common.AppToast
 import com.yage.opencode_client.ui.common.ToastSeverity
+import com.yage.opencode_client.ui.theme.opencode
 import kotlinx.coroutines.launch
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -143,7 +145,8 @@ fun ChatScreen(
                     state.sessions.firstOrNull { it.id == pid }?.displayName
                 },
                 trafficSent = state.trafficSent,
-                trafficReceived = state.trafficReceived
+                trafficReceived = state.trafficReceived,
+                serverVersion = state.serverVersion
             ),
             actions = ChatTopBarActions(
                 onSelectSession = viewModel::selectSession,
@@ -157,6 +160,11 @@ fun ChatScreen(
                 onActivateTunnel = { viewModel.activateTunnelForCurrentHost() },
             )
         )
+
+        // Thin separator between the top bar (session tabs) and the chat area.
+        // On phone the chat-area Surface has 0dp shadow elevation, so without
+        // this divider the boundary reads as ambiguous.
+        HorizontalDivider(color = MaterialTheme.opencode.borderBase)
 
         // In draft mode (no session yet but a workdir has been chosen), the
         // chat area is intentionally empty — the user is mid-composition and
