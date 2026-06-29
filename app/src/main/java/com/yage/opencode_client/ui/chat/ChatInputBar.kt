@@ -49,6 +49,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -56,6 +57,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.vector.ImageVector
@@ -75,7 +77,9 @@ import com.yage.opencode_client.data.model.PermissionRequest
 import com.yage.opencode_client.data.model.PermissionResponse
 import com.yage.opencode_client.ui.theme.StopRed
 import com.yage.opencode_client.ui.theme.opencode
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.withContext
 
 @Composable
 internal fun ChatInputBar(
@@ -204,11 +208,14 @@ internal fun ChatInputBar(
                     )
                 }
 
-                // §9: attachment "+" — 28×28 ghost (transparent bg), opens the
-                // image picker.
+                // §9: attachment "+" — ghost (transparent bg), opens the image
+                // picker. R-12 (WCAG 2.5.5): the visual icon stays at 18dp but
+                // the touch target is enlarged to 48dp via an outer clickable
+                // Box, so the affordance is comfortably tappable. The icon is
+                // centered so the visual density of the composer is unchanged.
                 Box(
                     modifier = Modifier
-                        .size(28.dp)
+                        .size(48.dp)
                         .clickable(onClick = onAddImages),
                     contentAlignment = Alignment.Center
                 ) {
@@ -339,8 +346,19 @@ private fun ImageAttachmentStrip(
         horizontalArrangement = Arrangement.spacedBy(8.dp)
     ) {
         attachments.forEach { attachment ->
-            val bitmap = remember(attachment.id, attachment.thumbnailData) {
-                BitmapFactory.decodeByteArray(attachment.thumbnailData, 0, attachment.thumbnailData.size)?.asImageBitmap()
+            // R-02c: decode the attachment thumbnail off the main thread. Even
+            // though thumbnails are small, BitmapFactory.decodeByteArray is
+            // blocking native decode and does not belong on the UI thread.
+            // produceState returns null on the first frame; the state write
+            // after the background decode triggers recomposition so the Image
+            // renders once ready. (Same keyed-in-loop pattern as the former
+            // `remember`; stable attachment.id keys keep it correct.)
+            val bitmap by produceState<ImageBitmap?>(null, attachment.id, attachment.thumbnailData) {
+                value = withContext(Dispatchers.Default) {
+                    BitmapFactory.decodeByteArray(
+                        attachment.thumbnailData, 0, attachment.thumbnailData.size
+                    )?.asImageBitmap()
+                }
             }
             Box(
                 modifier = Modifier
@@ -349,26 +367,41 @@ private fun ImageAttachmentStrip(
                     .background(MaterialTheme.colorScheme.surfaceVariant)
             ) {
                 if (bitmap != null) {
+                    // Local val so Kotlin can smart-cast the delegated
+                    // produceState property (delegates cannot be smart-cast).
+                    val decoded = bitmap!!
                     Image(
-                        bitmap = bitmap,
+                        bitmap = decoded,
                         contentDescription = attachment.filename,
                         modifier = Modifier.fillMaxSize(),
                         contentScale = ContentScale.Crop
                     )
                 }
-                IconButton(
-                    onClick = { onRemoveImage(attachment.id) },
+                // R-12 (WCAG 2.5.5): 36dp touch target wrapping a compact 24dp
+                // scrim circle + 14dp X. The scrim stays small so it does not
+                // visually dominate the 64dp thumbnail; the larger hit box is
+                // centered over it. (Outer Box is the click target; inner Box
+                // carries the scrim background + icon — modifier-order safe.)
+                Box(
                     modifier = Modifier
                         .align(Alignment.TopEnd)
-                        .size(24.dp)
-                        .background(MaterialTheme.colorScheme.scrim.copy(alpha = 0.5f), CircleShape)
+                        .size(36.dp)
+                        .clickable { onRemoveImage(attachment.id) },
+                    contentAlignment = Alignment.Center
                 ) {
-                    Icon(
-                        imageVector = Icons.Default.Close,
-                        contentDescription = stringResource(R.string.chat_remove_image),
-                        tint = Color.White,
-                        modifier = Modifier.size(14.dp)
-                    )
+                    Box(
+                        modifier = Modifier
+                            .size(24.dp)
+                            .background(MaterialTheme.colorScheme.scrim.copy(alpha = 0.5f), CircleShape),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Close,
+                            contentDescription = stringResource(R.string.chat_remove_image),
+                            tint = Color.White,
+                            modifier = Modifier.size(14.dp)
+                        )
+                    }
                 }
             }
         }
@@ -462,15 +495,15 @@ private fun ChatPrimaryActionButton(
     icon: ImageVector,
     contentDescription: String
 ) {
-    // §9: 28×28, rounded 6, 1dp shadow, disabled alpha 0.5.
+    // §9: 28×28 visual (rounded 6, 1dp shadow, disabled alpha 0.5).
+    // R-12 (WCAG 2.5.5): the outer Box is a 48dp touch target (the highest-
+    // frequency button in the app), while the inner Box preserves the 28dp
+    // styled visual so the composer's compact density is unchanged.
     val effectiveAlpha = if (!enabled && dimWhenDisabled) 0.5f else 1f
     val interaction = remember { MutableInteractionSource() }
     Box(
         modifier = Modifier
-            .size(28.dp)
-            .shadow(elevation = 1.dp, shape = RoundedCornerShape(6.dp))
-            .clip(RoundedCornerShape(6.dp))
-            .background(containerColor.copy(alpha = effectiveAlpha))
+            .size(48.dp)
             .clickable(
                 enabled = enabled,
                 interactionSource = interaction,
@@ -483,12 +516,21 @@ private fun ChatPrimaryActionButton(
             },
         contentAlignment = Alignment.Center
     ) {
-        Icon(
-            icon,
-            contentDescription = null,
-            tint = contentColor.copy(alpha = effectiveAlpha),
-            modifier = Modifier.size(16.dp)
-        )
+        Box(
+            modifier = Modifier
+                .size(28.dp)
+                .shadow(elevation = 1.dp, shape = RoundedCornerShape(6.dp))
+                .clip(RoundedCornerShape(6.dp))
+                .background(containerColor.copy(alpha = effectiveAlpha)),
+            contentAlignment = Alignment.Center
+        ) {
+            Icon(
+                icon,
+                contentDescription = null,
+                tint = contentColor.copy(alpha = effectiveAlpha),
+                modifier = Modifier.size(16.dp)
+            )
+        }
     }
 }
 

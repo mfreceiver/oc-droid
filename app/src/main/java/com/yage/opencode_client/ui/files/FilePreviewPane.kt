@@ -21,6 +21,7 @@ import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Share
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -35,6 +36,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -61,6 +63,8 @@ import com.yage.opencode_client.ui.util.MarkdownImageResolver
 import java.io.File
 import kotlin.math.max
 import kotlin.math.min
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 
 private enum class MarkdownPreviewMode {
     Web,
@@ -84,9 +88,30 @@ internal fun FilePreviewPane(
     val previewKind = remember(path, fileContent.isBinary) {
         FilePreviewUtils.previewContentKind(path, fileContent.isBinary)
     }
-    val imagePayload = remember(path, content) {
-        if (previewKind == FilePreviewUtils.PreviewContentKind.IMAGE) decodeImagePayload(content) else null
+    // R-02a: decode base64 image payloads OFF the main thread. The former
+    // `remember(path, content){ decodeImagePayload(content) }` ran
+    // BitmapFactory.decodeByteArray synchronously on the UI thread — the root
+    // cause of preview ANRs and a major OOM source on large pasted images.
+    // produceState runs the decode on Dispatchers.Default and downsamples via
+    // inSampleSize so we never allocate a full-res bitmap for a multi-MB
+    // base64 blob. The state cycles Idle→Loading→Loaded/Failed; while Loading
+    // we render a spinner placeholder instead of falling through to
+    // PreviewPlainText (which would otherwise dump raw base64 text).
+    val imageState by produceState<ImageLoadState>(ImageLoadState.Idle, path, content, previewKind) {
+        value = if (previewKind == FilePreviewUtils.PreviewContentKind.IMAGE) {
+            ImageLoadState.Loading
+        } else {
+            ImageLoadState.NotImage
+        }
+        if (value is ImageLoadState.Loading) {
+            value = withContext(Dispatchers.Default) {
+                decodeImagePayloadSampled(content, targetPx = IMAGE_DECODE_TARGET_PX)
+                    ?.let(ImageLoadState::Loaded)
+                    ?: ImageLoadState.Failed
+            }
+        }
     }
+    val imagePayload = (imageState as? ImageLoadState.Loaded)?.payload
     var markdownPreviewMode by remember(path) { mutableStateOf(MarkdownPreviewMode.Web) }
     var modeMenuExpanded by remember { mutableStateOf(false) }
 
@@ -143,6 +168,11 @@ internal fun FilePreviewPane(
 
         when {
             imagePayload != null -> ImageViewer(bitmap = imagePayload.bitmap)
+            // R-02a: while the image is decoding (or failed to decode) keep the
+            // user on a spinner / placeholder. Without this guard the `when`
+            // would fall through to PreviewPlainText and dump the raw base64
+            // source onto the screen for one or more frames.
+            previewKind == FilePreviewUtils.PreviewContentKind.IMAGE -> ImageDecodePlaceholder()
             previewKind == FilePreviewUtils.PreviewContentKind.MARKDOWN -> when (markdownPreviewMode) {
                 MarkdownPreviewMode.Web -> MarkdownWebPreviewPane(
                     content = content,
@@ -318,7 +348,44 @@ private data class DecodedImagePayload(
     val bitmap: Bitmap
 )
 
-private fun decodeImagePayload(rawContent: String): DecodedImagePayload? {
+/**
+ * R-02a: tri-state for the async image decode driven by [produceState].
+ * - [Idle]: initial value before the producer first runs.
+ * - [NotImage]: the preview kind is not an image — render non-image branches.
+ * - [Loading]: decode in flight on Dispatchers.Default — render the placeholder.
+ * - [Loaded]: decode succeeded — render [ImageViewer].
+ * - [Failed]: decode returned null (corrupt / undecodable payload) — keep the
+ *   placeholder so we never fall through to raw-base64 text mode.
+ */
+private sealed interface ImageLoadState {
+    data object Idle : ImageLoadState
+    data object NotImage : ImageLoadState
+    data object Loading : ImageLoadState
+    data class Loaded(val payload: DecodedImagePayload) : ImageLoadState
+    data object Failed : ImageLoadState
+}
+
+/**
+ * Long-edge pixel budget for downsampled image decoding. 2048px matches the
+ * common GL texture max and keeps even a multi-megapixel paste well under
+ * ~16MB of bitmap memory on the decode path.
+ */
+private const val IMAGE_DECODE_TARGET_PX = 2048
+
+/**
+ * R-02a: decodes a base64 image payload off the main thread with two-pass
+ * sampling. The first pass reads only the image bounds ([BitmapFactory.Options]
+ * with [BitmapFactory.Options.inJustDecodeBounds] = true, no pixel allocation);
+ * [calcInSampleSize] then picks the smallest power-of-two sample that keeps the
+ * decoded long edge at or below [targetPx]; the second pass decodes the actual
+ * (downsampled) bitmap. This bounds peak memory regardless of source size.
+ *
+ * Multiple base64 candidate spellings are attempted (raw + whitespace/newline-
+ * stripped) because some server transports wrap or pad the payload. A candidate
+ * whose bounds probe reports non-positive dimensions is treated as corrupt and
+ * skipped (returns null if no candidate decodes).
+ */
+private suspend fun decodeImagePayloadSampled(rawContent: String, targetPx: Int): DecodedImagePayload? {
     val candidates = listOf(
         rawContent,
         rawContent.replace("\n", "").replace("\r", "").replace(" ", "")
@@ -330,11 +397,55 @@ private fun decodeImagePayload(rawContent: String): DecodedImagePayload? {
         } catch (_: IllegalArgumentException) {
             continue
         }
-        val bitmap = BitmapFactory.decodeByteArray(bytes, 0, bytes.size) ?: continue
+        // Pass 1: probe dimensions without allocating pixel memory.
+        val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)
+        val sample = calcInSampleSize(bounds.outWidth, bounds.outHeight, targetPx)
+        if (sample <= 0) continue // bounds probe failed (outWidth/outHeight <= 0): corrupt/unknown
+        // Pass 2: real decode at the computed sample size.
+        val decodeOpts = BitmapFactory.Options().apply { inSampleSize = sample }
+        val bitmap = BitmapFactory.decodeByteArray(bytes, 0, bytes.size, decodeOpts) ?: continue
         return DecodedImagePayload(bytes = bytes, bitmap = bitmap)
     }
 
     return null
+}
+
+/**
+ * Computes a power-of-two [BitmapFactory.Options.inSampleSize] so the decoded
+ * long edge is at most [target] pixels. Uses [Long] arithmetic throughout to
+ * avoid [Int] overflow on very large source dimensions (a pathological payload
+ * could report outWidth/outHeight near Int.MAX_VALUE, and the intermediate
+ * `(w/s)*(h/s)` product would otherwise overflow Int and produce a wrong —
+ * too small — sample size, causing an OOM on the second decode pass).
+ *
+ * Returns 0 for non-positive dimensions so the caller can treat the image as
+ * undecodable rather than attempting a full-resolution fallback decode.
+ */
+private fun calcInSampleSize(w: Int, h: Int, target: Int): Int {
+    if (w <= 0 || h <= 0 || target <= 0) return 0
+    var sample = 1
+    val longW = w.toLong()
+    val longH = h.toLong()
+    val longTarget = target.toLong()
+    while ((longW / sample) * (longH / sample) > longTarget * longTarget) {
+        sample *= 2
+    }
+    return sample
+}
+
+/**
+ * R-02a: placeholder rendered while [decodeImagePayloadSampled] is in flight
+ * (or after it failed). Keeps the pane off the raw-base64 text fallback.
+ */
+@Composable
+private fun ImageDecodePlaceholder() {
+    Box(
+        modifier = Modifier.fillMaxSize(),
+        contentAlignment = Alignment.Center
+    ) {
+        CircularProgressIndicator()
+    }
 }
 
 private fun shareImage(context: Context, path: String, bytes: ByteArray) {

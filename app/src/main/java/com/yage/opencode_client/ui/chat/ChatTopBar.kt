@@ -328,11 +328,18 @@ internal fun ChatTopBar(
             // logic the former status dot used. Tapping opens the existing
             // ServerManagementDialog (host picker + refresh + tunnel + the
             // "System Settings" navigation entry).
+            // R-24: the former hardcoded sRGB values (#FFA500 / #4CAF50 /
+            // #F44336) bypassed the theme, so they did not adapt to dark mode
+            // and clashed with the v2 palette. Now sourced from
+            // LocalOpencodeColors state-* tokens (which have explicit light +
+            // dark values), with M3 colorScheme.error as the connecting-state
+            // fallback for surfaces without an opencode provider.
+            val oc = MaterialTheme.opencode
             val serverIconTint = when {
-                state.isConnecting -> Color(0xFFFFA500)
-                state.isConnected -> Color(0xFF4CAF50)
+                state.isConnecting -> oc.stateInfoFg
+                state.isConnected -> oc.stateSuccessFg
                 state.connectionPhase == null -> MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.4f)
-                else -> Color(0xFFF44336)
+                else -> oc.stateDangerFg
             }
             IconButton(onClick = { showServerDialog = true }) {
                 Icon(
@@ -447,6 +454,18 @@ internal fun ChatTopBar(
 
 private const val SESSION_TITLE_MAX_CHARS = 15
 
+/**
+ * R-28: fixed currency symbol for the context-usage cost display.
+ *
+ * Confirmed with the user: this value is always CNY regardless of device
+ * locale (the upstream server reports cost in CNY), so we deliberately do NOT
+ * use NumberFormat.getCurrencyInstance(locale) — that would render "$" or
+ * "€" on non-CNY devices and mislead the user. Pinned to "¥" with the same
+ * 4-decimal formatting as before, so the visual is unchanged; the constant
+ * centralises the policy and documents why locale is intentionally ignored.
+ */
+private const val CURRENCY_SYMBOL = "¥"
+
 private fun truncateTitle(value: String): String =
     if (value.length <= SESSION_TITLE_MAX_CHARS) value
     else value.take(SESSION_TITLE_MAX_CHARS - 1) + "…"
@@ -535,13 +554,16 @@ private fun SessionTab(
             overflow = TextOverflow.Ellipsis
         )
         Spacer(modifier = Modifier.width(4.dp))
-        // Close affordance: a tight 20dp click target. Compose's clickable
-        // consumes the pointer event, so tapping the X fires onClose without
-        // also triggering the row's select clickable (standard nested-clickable
-        // behavior, same as a list row with a trailing IconButton).
+        // Close affordance. R-12 (WCAG 2.5.5): the visual X stays at 14dp but
+        // the touch target is enlarged to 44dp (AAA threshold) via an outer
+        // clickable Box — the former 20dp target was well under the minimum.
+        // Compose's clickable consumes the pointer event, so tapping the X
+        // fires onClose without also triggering the row's select clickable
+        // (standard nested-clickable behavior). The 44dp footprint makes the
+        // tab row slightly taller; acceptable for touch ergonomics.
         Box(
             modifier = Modifier
-                .size(20.dp)
+                .size(44.dp)
                 .clickable(onClick = onClose),
             contentAlignment = Alignment.Center
         ) {
@@ -575,12 +597,22 @@ private fun ContextMenuButton(
     Box {
         // The ring is the trigger; the previous standalone onClick (which opened
         // the context dialog directly) is removed — the dropdown is the anchor.
+        // R-12 (WCAG 2.5.5): enlarge the click target to 44dp (AAA threshold)
+        // while keeping the ring visual at its tuned 28dp size (ChatUiTuning).
+        // The ring is centered inside the larger transparent Surface so the
+        // visual density of the actions cluster is unchanged.
         Surface(
             onClick = onToggleExpand,
             shape = RoundedCornerShape(50),
-            color = Color.Transparent
+            color = Color.Transparent,
+            modifier = Modifier.size(44.dp)
         ) {
-            ContextUsageRing(usage = usage)
+            Box(
+                modifier = Modifier.fillMaxSize(),
+                contentAlignment = Alignment.Center
+            ) {
+                ContextUsageRing(usage = usage)
+            }
         }
         DropdownMenu(
             expanded = expanded,
@@ -670,7 +702,7 @@ private fun ContextUsageDialog(
                         ContextUsageRow(stringResource(R.string.chat_context_cached_write), formatOptionalCount(usage.cachedWriteTokens))
                     }
                     ContextUsageSection(stringResource(R.string.chat_context_cost)) {
-                        ContextUsageRow(stringResource(R.string.chat_context_cost), usage.cost?.let { "¥" + String.format(Locale.US, "%.4f", it) } ?: stringResource(R.string.chat_context_no_cost))
+                        ContextUsageRow(stringResource(R.string.chat_context_cost), usage.cost?.let { "$CURRENCY_SYMBOL${String.format(Locale.US, "%.4f", it)}" } ?: stringResource(R.string.chat_context_no_cost))
                     }
                 }
             }
