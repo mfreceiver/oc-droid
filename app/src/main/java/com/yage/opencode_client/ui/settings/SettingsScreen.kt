@@ -140,15 +140,15 @@ fun SettingsScreen(
 
             SettingsSectionDivider()
 
-            AboutSection()
-
-            SettingsSectionDivider()
-
             DebugLogSection()
 
             SettingsSectionDivider()
 
             DangerZoneSection(onClearLocalData = viewModel::resetLocalDataAndResync)
+
+            SettingsSectionDivider()
+
+            AboutSection()
         }
     }
 }

@@ -31,7 +31,6 @@ import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.Add
-import androidx.compose.material.icons.filled.ArrowUpward
 import androidx.compose.material.icons.filled.Circle
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.MoreHoriz
@@ -76,6 +75,7 @@ import com.yage.opencode_client.data.api.CommandInfo
 import com.yage.opencode_client.data.model.ComposerImageAttachment
 import com.yage.opencode_client.data.model.PermissionRequest
 import com.yage.opencode_client.data.model.PermissionResponse
+import com.yage.opencode_client.data.model.QuestionRequest
 import com.yage.opencode_client.ui.MainViewModel
 import com.yage.opencode_client.ui.theme.StopRed
 import com.yage.opencode_client.ui.theme.opencode
@@ -90,7 +90,15 @@ internal fun ChatInputBar(
     isBusy: Boolean,
     agentActivityText: String?,
     agentStartedAtMillis: Long?,
-    onAddImages: () -> Unit
+    onAddImages: () -> Unit,
+    // §#4: when a pending system question is active and the hoisted answers
+    // satisfy its requirements, the primary send button submits the question
+    // (via onSubmitQuestion) instead of dispatching a normal prompt. This
+    // routes the user's instinctive tap on the bottom button into
+    // viewModel.replyQuestion, mirroring QuestionCardView's own Submit.
+    pendingQuestion: QuestionRequest? = null,
+    questionAnswersValid: Boolean = false,
+    onSubmitQuestion: () -> Unit = {}
 ) {
     // §R-17 Stage 2: subscribe to composerFlow + settingsFlow directly so
     // typing (inputText mutation) only recomposes ChatInputBar, and streaming
@@ -111,7 +119,12 @@ internal fun ChatInputBar(
     val onAbort = viewModel::abortSession
     val onExecuteCommand = viewModel::executeCommand
 
-    val canSend = text.isNotBlank() || imageAttachments.isNotEmpty()
+    // §#4: canSend also covers the pending-question path — when a system
+    // question is open and its hoisted answers are valid, the primary button
+    // is enabled so the user can submit it from the bottom bar.
+    val canSend = text.isNotBlank() ||
+        imageAttachments.isNotEmpty() ||
+        (pendingQuestion != null && questionAnswersValid)
     val composerStatus = if (isBusy) agentActivityText ?: stringResource(R.string.chat_agent_running) else null
 
     // --- Slash-command autocomplete state ---
@@ -146,7 +159,9 @@ internal fun ChatInputBar(
     // empty does the button become STOP (one-tap abort); the status-row menu
     // remains a second stop entry point while typing.
     val canStop = isBusy && !canSend
-    val sendIcon = if (canStop) Icons.Default.Stop else Icons.Default.ArrowUpward
+    // §3b: paper-plane Send icon (more idiomatic than ArrowUpward). Stop state
+    // keeps the square Stop icon.
+    val sendIcon = if (canStop) Icons.Default.Stop else Icons.AutoMirrored.Filled.Send
     val sendContentDescription = if (canStop) stringResource(R.string.chat_interrupt_agent)
     else stringResource(R.string.chat_send)
     // §6: stop-tap guardrail — the primary button flips to STOP while the
@@ -199,12 +214,37 @@ internal fun ChatInputBar(
             // Editor row — §9: the card's shape/elevation come from the outer
             // Surface; this Row only lays out the field + buttons (no clip /
             // background). Field minHeight is 52dp.
+            // §3a: layout is now [+] [input weight(1f)] [send] — the attachment
+            // "+" sits to the LEFT of the field (external), matching the
+            // standard mobile composer affordance and freeing the right edge
+            // for the single primary action.
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
                     .padding(vertical = 8.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
+                // §9: attachment "+" — ghost (transparent bg), opens the image
+                // picker. R-12 (WCAG 2.5.5): the visual icon stays at 18dp but
+                // the touch target is enlarged to 48dp via an outer clickable
+                // Box, so the affordance is comfortably tappable. The icon is
+                // centered so the visual density of the composer is unchanged.
+                Box(
+                    modifier = Modifier
+                        .size(48.dp)
+                        .clickable(onClick = onAddImages),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Icon(
+                        Icons.Default.Add,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.size(18.dp)
+                    )
+                }
+
+                Spacer(modifier = Modifier.width(8.dp))
+
                 Box(
                     modifier = Modifier
                         .weight(1f)
@@ -230,39 +270,27 @@ internal fun ChatInputBar(
                     )
                 }
 
-                // §9: attachment "+" — ghost (transparent bg), opens the image
-                // picker. R-12 (WCAG 2.5.5): the visual icon stays at 18dp but
-                // the touch target is enlarged to 48dp via an outer clickable
-                // Box, so the affordance is comfortably tappable. The icon is
-                // centered so the visual density of the composer is unchanged.
-                Box(
-                    modifier = Modifier
-                        .size(48.dp)
-                        .clickable(onClick = onAddImages),
-                    contentAlignment = Alignment.Center
-                ) {
-                    Icon(
-                        Icons.Default.Add,
-                        contentDescription = null,
-                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                        modifier = Modifier.size(18.dp)
-                    )
-                }
-
-                Spacer(modifier = Modifier.width(8.dp))
-
                 // §9: primary send / stop — 28×28, rounded 6, bg-contrast bottom,
                 // white icon; disabled at 0.5 alpha.
+                // §#4: when a system question is pending and its hoisted answers
+                // are valid, the button submits the question instead of a normal
+                // send/stop. Question submit takes priority over a typed prompt
+                // (the question is the active modal interaction).
                 ChatPrimaryActionButton(
                     onClick = {
-                        if (canStop) showStopConfirm = true
-                        else handleComposerSend(
-                            text = text,
-                            availableCommands = availableCommands,
-                            allowCommand = !isBusy,
-                            onSendMessage = onSend,
-                            onExecuteCommand = onExecuteCommand
-                        )
+                        if (pendingQuestion != null && questionAnswersValid) {
+                            onSubmitQuestion()
+                        } else if (canStop) {
+                            showStopConfirm = true
+                        } else {
+                            handleComposerSend(
+                                text = text,
+                                availableCommands = availableCommands,
+                                allowCommand = !isBusy,
+                                onSendMessage = onSend,
+                                onExecuteCommand = onExecuteCommand
+                            )
+                        }
                     },
                     enabled = canStop || canSend,
                     containerColor = oc.bgContrast,

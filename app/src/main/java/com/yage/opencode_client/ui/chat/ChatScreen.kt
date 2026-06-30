@@ -20,6 +20,7 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -233,6 +234,31 @@ fun ChatScreen(
         )
     }
 
+    // §#4: hoist the current session's pending question + its answer snapshot
+    // here (root ChatScreen scope) so BOTH ChatInputBar (inside the chat
+    // Surface) and QuestionCardView (sibling of the Surface) can read/write
+    // the same state. The bottom ChatInputBar primary button submits the
+    // question via viewModel.replyQuestion, in lockstep with QuestionCardView's
+    // own Submit. questionAnswersValid requires EVERY sub-question to have an
+    // effective answer (matches the multi-tab Next→Submit flow: Submit only
+    // fires when all tabs are answered).
+    val pendingQuestion = remember(sessionList.pendingQuestions, chat.currentSessionId) {
+        sessionList.pendingQuestions.firstOrNull { it.sessionId == chat.currentSessionId }
+    }
+    var questionAnswers by remember { mutableStateOf<List<List<String>>>(emptyList()) }
+    LaunchedEffect(pendingQuestion?.id) {
+        // Reset hoisted answers whenever the active question changes
+        // (covers a new question arriving, or the current one being
+        // dismissed/resolved).
+        questionAnswers = emptyList()
+    }
+    val questionAnswersValid = pendingQuestion?.let { pq ->
+        pq.questions.isNotEmpty() &&
+            pq.questions.indices.all { i ->
+                i < questionAnswers.size && questionAnswers[i].isNotEmpty()
+            }
+    } ?: false
+
     Column(modifier = Modifier.fillMaxSize()) {
         ChatTopBar(
             state = topBarState,
@@ -330,7 +356,14 @@ fun ChatScreen(
                 isBusy = currentSessionIsRunning,
                 agentActivityText = currentActivity?.text,
                 agentStartedAtMillis = currentActivity?.startedAtMillis,
-                onAddImages = onAddImages
+                onAddImages = onAddImages,
+                pendingQuestion = pendingQuestion,
+                questionAnswersValid = questionAnswersValid,
+                onSubmitQuestion = {
+                    pendingQuestion?.let { pq ->
+                        viewModel.replyQuestion(pq.id, questionAnswers)
+                    }
+                }
             )
         }
             }
@@ -352,7 +385,12 @@ fun ChatScreen(
                 QuestionCardView(
                     question = question,
                     onReply = { answers, onError -> viewModel.replyQuestion(question.id, answers, onError) },
-                    onReject = { viewModel.rejectQuestion(question.id) }
+                    onReject = { viewModel.rejectQuestion(question.id) },
+                    // §#4: receive the live answer snapshot so the bottom-bar
+                    // primary button can submit the question in lockstep with
+                    // this card's own Submit. [questionAnswers] is the same
+                    // state fed into ChatInputBar above.
+                    onAnswersChange = { questionAnswers = it }
                 )
             }
     }

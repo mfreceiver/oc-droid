@@ -30,7 +30,14 @@ import com.yage.opencode_client.data.model.QuestionRequest
 fun QuestionCardView(
     question: QuestionRequest,
     onReply: (List<List<String>>, onError: () -> Unit) -> Unit,
-    onReject: () -> Unit
+    onReject: () -> Unit,
+    // §#4: hoisting hook — every time the user picks/toggles an option or
+    // edits custom text, QuestionCardView reports the EFFECTIVE answers
+    // snapshot (one List<String> per sub-question, uncommitted custom text
+    // treated as if committed) so ChatScreen can drive the bottom-bar primary
+    // button (enable + submit) in lockstep with the in-card Next/Submit flow.
+    // Default no-op keeps the call-site optional.
+    onAnswersChange: (List<List<String>>) -> Unit = {}
 ) {
     val count = question.questions.size
 
@@ -92,6 +99,37 @@ fun QuestionCardView(
 
     fun isSelected(option: QuestionOption): Boolean = currentAnswers.contains(option.label)
 
+    // §#4: compute the effective answer list for tab [index], treating any
+    // uncommitted-but-active custom text as if it had been committed (mirrors
+    // what next()/submit() would send through commitCustomIfNeeded). This lets
+    // the hoisted snapshot stay consistent with the in-card Submit path even
+    // while the user is still typing in the custom field.
+    fun effectiveAnswer(index: Int): List<String> {
+        val base = answers[index].toList()
+        if (customActive[index] && customTexts[index].isNotBlank()) {
+            val text = customTexts[index].trim()
+            return if (question.questions[index].allowMultiple) {
+                // Multiple: keep predefined-option selections, replace any
+                // prior custom entry with the current text.
+                val optionLabels = question.questions[index].options.map { it.label }.toSet()
+                val cleaned = base.filterTo(mutableListOf()) { optionLabels.contains(it) }
+                if (text.isNotEmpty() && !cleaned.contains(text)) cleaned.add(text)
+                cleaned
+            } else {
+                // Single: custom text supersedes any option selection.
+                if (text.isNotEmpty()) listOf(text) else emptyList()
+            }
+        }
+        return base
+    }
+
+    // §#4: push the full per-sub-question snapshot up to ChatScreen. Called
+    // after every answer mutation AND on first composition for this question
+    // id (so the hoisted state resets cleanly when a new question arrives).
+    fun reportAnswers() {
+        onAnswersChange(question.questions.indices.map { effectiveAnswer(it) })
+    }
+
     fun commitCustom() {
         val text = customTexts[currentTab].trim()
         isCustomEditing = false
@@ -118,6 +156,7 @@ fun QuestionCardView(
                 mutableStateListOf(text)
             }
         }
+        reportAnswers()
     }
 
     fun selectOption(option: QuestionOption) {
@@ -132,6 +171,7 @@ fun QuestionCardView(
             answers[currentTab].add(option.label)
             customActive[currentTab] = false
         }
+        reportAnswers()
     }
 
     fun activateCustom() {
@@ -140,6 +180,7 @@ fun QuestionCardView(
         if (!currentQuestion.allowMultiple) {
             answers[currentTab].clear()
         }
+        reportAnswers()
     }
 
     fun commitCustomIfNeeded() {
@@ -184,6 +225,13 @@ fun QuestionCardView(
             isCustomEditing = false
         }
     }
+
+    // §#4: on first composition for this question (and whenever a new question
+    // id arrives), push the all-empty initial snapshot up so ChatScreen's
+    // hoisted state resets in lockstep with the card's internal `remember(
+    // question.id)` state. Subsequent mutations are reported synchronously
+    // from selectOption / commitCustom / activateCustom above.
+    LaunchedEffect(question.id) { reportAnswers() }
 
     Card(
         modifier = Modifier
