@@ -19,13 +19,17 @@ import com.yage.opencode_client.data.repository.MessagesPage
 import com.yage.opencode_client.data.repository.OpenCodeRepository
 import com.yage.opencode_client.di.AppLifecycleMonitor
 import com.yage.opencode_client.ui.AppState
+import com.yage.opencode_client.ui.ChatState
 import com.yage.opencode_client.ui.ComposerState
 import com.yage.opencode_client.ui.ConnectionState
 import com.yage.opencode_client.ui.FileState
+import com.yage.opencode_client.ui.HostState
 import com.yage.opencode_client.ui.MainViewModel
+import com.yage.opencode_client.ui.SessionListState
 import com.yage.opencode_client.ui.SettingsState
 import com.yage.opencode_client.ui.TrafficState
 import com.yage.opencode_client.ui.TunnelActivationState
+import com.yage.opencode_client.ui.UnreadState
 import com.yage.opencode_client.ui.session.buildSessionTree
 import com.yage.opencode_client.util.SettingsManager
 import com.yage.opencode_client.util.ThemeMode
@@ -143,11 +147,11 @@ class MainViewModelTest {
         // driving production code correctly. (M2's connection/traffic slices
         // don't need this — no production read-site consumes them for a
         // decision the way composer is consumed by dispatchSendMessage.)
-        syncM3SlicesFromState(viewModel, newState)
+        syncAllSlicesFromState(viewModel, newState)
     }
 
     @Suppress("DEPRECATION", "UNCHECKED_CAST")
-    private fun syncM3SlicesFromState(viewModel: MainViewModel, state: AppState) {
+    private fun syncAllSlicesFromState(viewModel: MainViewModel, state: AppState) {
         // composer slice
         MainViewModel::class.java.getDeclaredField("_composerFlow").apply {
             isAccessible = true
@@ -178,6 +182,55 @@ class MainViewModelTest {
                 agents = state.agents,
                 providers = state.providers,
                 availableCommands = state.availableCommands
+            )
+        }
+        // §R-17 M4: chat/sessionList/unread/host slices
+        MainViewModel::class.java.getDeclaredField("_chatFlow").apply {
+            isAccessible = true
+            (get(viewModel) as MutableStateFlow<ChatState>).value = ChatState(
+                currentSessionId = state.currentSessionId,
+                messages = state.messages,
+                partsByMessage = state.partsByMessage,
+                streamingPartTexts = state.streamingPartTexts,
+                streamingReasoningPart = state.streamingReasoningPart,
+                olderMessagesCursor = state.olderMessagesCursor,
+                hasMoreMessages = state.hasMoreMessages,
+                isLoadingMessages = state.isLoadingMessages,
+                gapInfo = state.gapInfo,
+                staleNotice = state.staleNotice
+            )
+        }
+        MainViewModel::class.java.getDeclaredField("_sessionListFlow").apply {
+            isAccessible = true
+            (get(viewModel) as MutableStateFlow<SessionListState>).value = SessionListState(
+                sessions = state.sessions,
+                sessionStatuses = state.sessionStatuses,
+                expandedSessionIds = state.expandedSessionIds,
+                loadedSessionLimit = state.loadedSessionLimit,
+                hasMoreSessions = state.hasMoreSessions,
+                isLoadingMoreSessions = state.isLoadingMoreSessions,
+                isRefreshingSessions = state.isRefreshingSessions,
+                pendingPermissions = state.pendingPermissions,
+                pendingQuestions = state.pendingQuestions,
+                childSessions = state.childSessions,
+                directorySessions = state.directorySessions,
+                openSessionIds = state.openSessionIds,
+                sessionTodos = state.sessionTodos
+            )
+        }
+        MainViewModel::class.java.getDeclaredField("_unreadFlow").apply {
+            isAccessible = true
+            (get(viewModel) as MutableStateFlow<UnreadState>).value = UnreadState(
+                unreadSessions = state.unreadSessions,
+                tempClearedUnread = state.tempClearedUnread,
+                lastViewedTime = state.lastViewedTime
+            )
+        }
+        MainViewModel::class.java.getDeclaredField("_hostFlow").apply {
+            isAccessible = true
+            (get(viewModel) as MutableStateFlow<HostState>).value = HostState(
+                hostProfiles = state.hostProfiles,
+                currentHostProfileId = state.currentHostProfileId
             )
         }
     }
@@ -256,6 +309,54 @@ class MainViewModelTest {
         field.isAccessible = true
         @Suppress("UNCHECKED_CAST")
         val flow = field.get(viewModel) as MutableStateFlow<SettingsState>
+        flow.value = transform(flow.value)
+    }
+
+    /** §R-17 M4: write the chat slice directly. See [updateComposer]. */
+    private fun updateChat(
+        viewModel: MainViewModel,
+        transform: (ChatState) -> ChatState
+    ) {
+        val field = MainViewModel::class.java.getDeclaredField("_chatFlow")
+        field.isAccessible = true
+        @Suppress("UNCHECKED_CAST")
+        val flow = field.get(viewModel) as MutableStateFlow<ChatState>
+        flow.value = transform(flow.value)
+    }
+
+    /** §R-17 M4: write the session-list slice directly. See [updateComposer]. */
+    private fun updateSessionList(
+        viewModel: MainViewModel,
+        transform: (SessionListState) -> SessionListState
+    ) {
+        val field = MainViewModel::class.java.getDeclaredField("_sessionListFlow")
+        field.isAccessible = true
+        @Suppress("UNCHECKED_CAST")
+        val flow = field.get(viewModel) as MutableStateFlow<SessionListState>
+        flow.value = transform(flow.value)
+    }
+
+    /** §R-17 M4: write the unread slice directly. See [updateComposer]. */
+    private fun updateUnread(
+        viewModel: MainViewModel,
+        transform: (UnreadState) -> UnreadState
+    ) {
+        val field = MainViewModel::class.java.getDeclaredField("_unreadFlow")
+        field.isAccessible = true
+        @Suppress("UNCHECKED_CAST")
+        val flow = field.get(viewModel) as MutableStateFlow<UnreadState>
+        flow.value = transform(flow.value)
+    }
+
+    /** §R-17 M4: write the host slice directly. See [updateComposer]. */
+    private fun updateHost(
+        viewModel: MainViewModel,
+        transform: (HostState) -> HostState
+    ) {
+        val field = MainViewModel::class.java.getDeclaredField("_hostFlow")
+        field.isAccessible = true
+        @Suppress("UNCHECKED_CAST")
+        val flow = field.get(viewModel) as MutableStateFlow<HostState>
         flow.value = transform(flow.value)
     }
 

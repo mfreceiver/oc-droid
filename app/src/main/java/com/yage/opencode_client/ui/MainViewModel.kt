@@ -130,6 +130,69 @@ data class SettingsState(
 )
 
 /**
+ * §R-17 M4: chat-domain state slice (RFC §2.2). Authoritative storage lives in
+ * [MainViewModel._chatFlow]. The highest-frequency domain (SSE streaming deltas
+ * mutate streamingPartTexts/messages many times per second). `error` is
+ * intentionally NOT here — it is cross-domain and stays on `_state` (RFC §3.3,
+ * same call as M2/M3).
+ */
+data class ChatState(
+    val currentSessionId: String? = null,
+    val messages: List<Message> = emptyList(),
+    val partsByMessage: Map<String, List<Part>> = emptyMap(),
+    val streamingPartTexts: Map<String, String> = emptyMap(),
+    val streamingReasoningPart: Part? = null,
+    val olderMessagesCursor: String? = null,
+    val hasMoreMessages: Boolean = true,
+    val isLoadingMessages: Boolean = false,
+    val gapInfo: GapInfo? = null,
+    val staleNotice: Boolean = false
+)
+
+/**
+ * §R-17 M4: session-list-domain state slice (RFC §2.3). Authoritative storage
+ * lives in [MainViewModel._sessionListFlow]. Low-frequency (loadSessions /
+ * loadMore / SSE session.created/updated); isolating it stops SSE chat deltas
+ * from recomposing SessionsScreen.
+ */
+data class SessionListState(
+    val sessions: List<Session> = emptyList(),
+    val sessionStatuses: Map<String, SessionStatus> = emptyMap(),
+    val expandedSessionIds: Set<String> = emptySet(),
+    val loadedSessionLimit: Int = MainViewModelTimings.sessionPageSize,
+    val hasMoreSessions: Boolean = true,
+    val isLoadingMoreSessions: Boolean = false,
+    val isRefreshingSessions: Boolean = false,
+    val pendingPermissions: List<PermissionRequest> = emptyList(),
+    val pendingQuestions: List<QuestionRequest> = emptyList(),
+    val childSessions: Map<String, List<Session>> = emptyMap(),
+    val directorySessions: Map<String, List<Session>> = emptyMap(),
+    val openSessionIds: List<String> = emptyList(),
+    val sessionTodos: Map<String, List<TodoItem>> = emptyMap()
+)
+
+/**
+ * §R-17 M4: unread-domain state slice (RFC §2.7). Authoritative storage lives
+ * in [MainViewModel._unreadFlow]. Drives the unread badge; depends on session
+ * status + chat currentSessionId + foreground (cross-domain, see RFC §4).
+ */
+data class UnreadState(
+    val unreadSessions: Set<String> = emptySet(),
+    val tempClearedUnread: Set<String> = emptySet(),
+    val lastViewedTime: Map<String, Long> = emptyMap()
+)
+
+/**
+ * §R-17 M4: host-profile-domain state slice (RFC §2.8). Authoritative storage
+ * lives in [MainViewModel._hostFlow]. Very low write frequency (save/switch/
+ * import); consumed by ChatTopBar (server dialog) + SettingsScreen.
+ */
+data class HostState(
+    val hostProfiles: List<HostProfile> = emptyList(),
+    val currentHostProfileId: String? = null
+)
+
+/**
  * §Per-session message cache: a snapshot of the loaded window for a single
  * session — the four pieces of message-state that [selectSessionState]
  * otherwise wipes to empty on every switch. Restoring from this snapshot on
@@ -194,25 +257,38 @@ data class AppState(
     val isConnecting: Boolean = false,
     @Deprecated("mirror from connectionFlow; M4 removes AppState", level = DeprecationLevel.WARNING)
     val serverVersion: String? = null,
+    @Deprecated("mirror from M4 slice; M5 removes AppState", level = DeprecationLevel.WARNING)
     val sessions: List<Session> = emptyList(),
+    @Deprecated("mirror from M4 slice; M5 removes AppState", level = DeprecationLevel.WARNING)
     val loadedSessionLimit: Int = MainViewModelTimings.sessionPageSize,
+    @Deprecated("mirror from M4 slice; M5 removes AppState", level = DeprecationLevel.WARNING)
     val hasMoreSessions: Boolean = true,
+    @Deprecated("mirror from M4 slice; M5 removes AppState", level = DeprecationLevel.WARNING)
     val isLoadingMoreSessions: Boolean = false,
+    @Deprecated("mirror from M4 slice; M5 removes AppState", level = DeprecationLevel.WARNING)
     val isRefreshingSessions: Boolean = false,
+    @Deprecated("mirror from M4 slice; M5 removes AppState", level = DeprecationLevel.WARNING)
     val expandedSessionIds: Set<String> = emptySet(),
+    @Deprecated("mirror from M4 slice; M5 removes AppState", level = DeprecationLevel.WARNING)
     val currentSessionId: String? = null,
     // Q6: persisted last-opened phone pager page (0=Chat...3=Settings).
     val lastNavPage: Int = 0,
+    @Deprecated("mirror from M4 slice; M5 removes AppState", level = DeprecationLevel.WARNING)
     val sessionStatuses: Map<String, SessionStatus> = emptyMap(),
     // SSE-trust split store (S4): messages hold only Message metadata; parts
     // live separately keyed by message id (populated by API load). Live
     // streaming text is overlaid via streamingPartTexts (keyed by partId).
+    @Deprecated("mirror from M4 slice; M5 removes AppState", level = DeprecationLevel.WARNING)
     val messages: List<Message> = emptyList(),
+    @Deprecated("mirror from M4 slice; M5 removes AppState", level = DeprecationLevel.WARNING)
     val partsByMessage: Map<String, List<Part>> = emptyMap(),
     // §on-demand: cursor-based history paging. olderMessagesCursor is the opaque
     // V1 cursor for fetching the next older page (null = no more / reset).
+    @Deprecated("mirror from M4 slice; M5 removes AppState", level = DeprecationLevel.WARNING)
     val olderMessagesCursor: String? = null,
+    @Deprecated("mirror from M4 slice; M5 removes AppState", level = DeprecationLevel.WARNING)
     val hasMoreMessages: Boolean = true,
+    @Deprecated("mirror from M4 slice; M5 removes AppState", level = DeprecationLevel.WARNING)
     val isLoadingMessages: Boolean = false,
     @Deprecated("mirror from settingsFlow; M4 removes AppState", level = DeprecationLevel.WARNING)
     val agents: List<AgentInfo> = emptyList(),
@@ -220,7 +296,9 @@ data class AppState(
     val selectedAgentName: String = "build",
     @Deprecated("mirror from settingsFlow; M4 removes AppState", level = DeprecationLevel.WARNING)
     val providers: ProvidersResponse? = null,
+    @Deprecated("mirror from M4 slice; M5 removes AppState", level = DeprecationLevel.WARNING)
     val pendingPermissions: List<PermissionRequest> = emptyList(),
+    @Deprecated("mirror from M4 slice; M5 removes AppState", level = DeprecationLevel.WARNING)
     val pendingQuestions: List<QuestionRequest> = emptyList(),
     @Deprecated("mirror from composerFlow; M4 removes AppState", level = DeprecationLevel.WARNING)
     val inputText: String = "",
@@ -243,14 +321,19 @@ data class AppState(
     val fileBrowserOpen: Boolean = false,
     @Deprecated("mirror from fileFlow; M4 removes AppState", level = DeprecationLevel.WARNING)
     val fileBrowserWorkdir: String? = null,
+    @Deprecated("mirror from M4 slice; M5 removes AppState", level = DeprecationLevel.WARNING)
     val streamingPartTexts: Map<String, String> = emptyMap(),
+    @Deprecated("mirror from M4 slice; M5 removes AppState", level = DeprecationLevel.WARNING)
     val streamingReasoningPart: Part? = null,
+    @Deprecated("mirror from M4 slice; M5 removes AppState", level = DeprecationLevel.WARNING)
     val sessionTodos: Map<String, List<TodoItem>> = emptyMap(),
     @Deprecated("mirror from composerFlow; M4 removes AppState", level = DeprecationLevel.WARNING)
     val sendingSessionIds: Set<String> = emptySet(),
     @Deprecated("mirror from composerFlow; M4 removes AppState", level = DeprecationLevel.WARNING)
     val imageAttachments: List<ComposerImageAttachment> = emptyList(),
+    @Deprecated("mirror from M4 slice; M5 removes AppState", level = DeprecationLevel.WARNING)
     val hostProfiles: List<HostProfile> = emptyList(),
+    @Deprecated("mirror from M4 slice; M5 removes AppState", level = DeprecationLevel.WARNING)
     val currentHostProfileId: String? = null,
     @Deprecated("mirror from connectionFlow; M4 removes AppState", level = DeprecationLevel.WARNING)
     val connectionPhase: String? = null,
@@ -261,6 +344,7 @@ data class AppState(
      * after a session is selected via [MainViewModel.loadChildSessions]. Used
      * to render sub-agent cards and to support parent->child navigation.
      */
+    @Deprecated("mirror from M4 slice; M5 removes AppState", level = DeprecationLevel.WARNING)
     val childSessions: Map<String, List<Session>> = emptyMap(),
     /**
      * Per-directory root sessions, keyed by workdir path. Populated by
@@ -270,6 +354,7 @@ data class AppState(
      * separately from [sessions] so periodic global refreshes do not discard
      * it. [SessionsScreen] merges both for display.
      */
+    @Deprecated("mirror from M4 slice; M5 removes AppState", level = DeprecationLevel.WARNING)
     val directorySessions: Map<String, List<Session>> = emptyMap(),
     /**
      * Mirror of [SettingsManager.openSessionIds] (browser-tab style list of
@@ -278,6 +363,7 @@ data class AppState(
      * [SettingsManager] remains the persistent source of truth — this field
      * is the observable projection.
      */
+    @Deprecated("mirror from M4 slice; M5 removes AppState", level = DeprecationLevel.WARNING)
     val openSessionIds: List<String> = emptyList(),
     /**
      * Non-null when the user has entered "draft" (deferred-create) mode by
@@ -294,12 +380,14 @@ data class AppState(
      * selects/opens a session. Used as the basis for [unreadSessions].
      * Not currently persisted across restarts.
      */
+    @Deprecated("mirror from M4 slice; M5 removes AppState", level = DeprecationLevel.WARNING)
     val lastViewedTime: Map<String, Long> = emptyMap(),
     /**
      * Session IDs that have received SSE message updates more recently than
      * their [lastViewedTime] (and are not the currently-open session).
      * Drives the unread badge in the session lists. Cleared on open.
      */
+    @Deprecated("mirror from M4 slice; M5 removes AppState", level = DeprecationLevel.WARNING)
     val unreadSessions: Set<String> = emptySet(),
     /**
      * Sessions the user has opened (cleared the unread badge) and that are
@@ -315,6 +403,7 @@ data class AppState(
      * busy session = re-mark unread; session completes cleanly = do not"
      * behaviour.
      */
+    @Deprecated("mirror from M4 slice; M5 removes AppState", level = DeprecationLevel.WARNING)
     val tempClearedUnread: Set<String> = emptySet(),
     /**
      * Slash commands available in the composer. Merges a small set of
@@ -344,6 +433,7 @@ data class AppState(
      * the gap divider UI + user-triggered closure. Cleared on session switch,
      * manual refresh (global cold-start), and cold start. See [GapInfo].
      */
+    @Deprecated("mirror from M4 slice; M5 removes AppState", level = DeprecationLevel.WARNING)
     val gapInfo: GapInfo? = null,
     /**
      * §Phase1E: shown as a top banner after a long (>5min) background absence
@@ -351,6 +441,7 @@ data class AppState(
      * Tapping the action triggers [MainViewModel.refreshCurrentSession] (global
      * cold-start). Cleared once a normal load completes.
      */
+    @Deprecated("mirror from M4 slice; M5 removes AppState", level = DeprecationLevel.WARNING)
     val staleNotice: Boolean = false
 ) {
     /** Combined sent + received traffic, derived so it never drifts. */
@@ -604,6 +695,14 @@ class MainViewModel @Inject constructor(
     private val _fileFlow = MutableStateFlow(FileState())
     /** §R-17 M3: settings slice (RFC §2.4, minus cross-domain error). Authoritative storage. */
     private val _settingsFlow = MutableStateFlow(SettingsState())
+    /** §R-17 M4: chat slice (RFC §2.2). Authoritative storage. */
+    private val _chatFlow = MutableStateFlow(ChatState())
+    /** §R-17 M4: session-list slice (RFC §2.3). Authoritative storage. */
+    private val _sessionListFlow = MutableStateFlow(SessionListState())
+    /** §R-17 M4: unread slice (RFC §2.7). Authoritative storage. */
+    private val _unreadFlow = MutableStateFlow(UnreadState())
+    /** §R-17 M4: host slice (RFC §2.8). Authoritative storage. */
+    private val _hostFlow = MutableStateFlow(HostState())
 
     /** Read-only connection slice for direct subscription (M4 consumers). */
     val connectionFlow: StateFlow<ConnectionState> = _connectionFlow.asStateFlow()
@@ -615,6 +714,14 @@ class MainViewModel @Inject constructor(
     val fileFlow: StateFlow<FileState> = _fileFlow.asStateFlow()
     /** Read-only settings slice for direct subscription (M4 consumers). */
     val settingsFlow: StateFlow<SettingsState> = _settingsFlow.asStateFlow()
+    /** Read-only chat slice for direct subscription (M4 consumers). */
+    val chatFlow: StateFlow<ChatState> = _chatFlow.asStateFlow()
+    /** Read-only session-list slice for direct subscription (M4 consumers). */
+    val sessionListFlow: StateFlow<SessionListState> = _sessionListFlow.asStateFlow()
+    /** Read-only unread slice for direct subscription (M4 consumers). */
+    val unreadFlow: StateFlow<UnreadState> = _unreadFlow.asStateFlow()
+    /** Read-only host slice for direct subscription (M4 consumers). */
+    val hostFlow: StateFlow<HostState> = _hostFlow.asStateFlow()
 
     val state: StateFlow<AppState> = _state.asStateFlow()
 
@@ -704,6 +811,170 @@ class MainViewModel @Inject constructor(
             agents = next.agents,
             providers = next.providers,
             availableCommands = next.availableCommands
+        )
+    }
+
+    /** §R-17 M4: write the chat slice + mirror. See [writeConnection]. `error` stays on `_state`. */
+    @Suppress("DEPRECATION")
+    private fun writeChat(transform: (ChatState) -> ChatState) {
+        val next = transform(_chatFlow.value)
+        _chatFlow.value = next
+        _state.value = _state.value.copy(
+            currentSessionId = next.currentSessionId,
+            messages = next.messages,
+            partsByMessage = next.partsByMessage,
+            streamingPartTexts = next.streamingPartTexts,
+            streamingReasoningPart = next.streamingReasoningPart,
+            olderMessagesCursor = next.olderMessagesCursor,
+            hasMoreMessages = next.hasMoreMessages,
+            isLoadingMessages = next.isLoadingMessages,
+            gapInfo = next.gapInfo,
+            staleNotice = next.staleNotice
+        )
+    }
+
+    /** §R-17 M4: write the session-list slice + mirror. See [writeConnection]. */
+    @Suppress("DEPRECATION")
+    private fun writeSessionList(transform: (SessionListState) -> SessionListState) {
+        val next = transform(_sessionListFlow.value)
+        _sessionListFlow.value = next
+        _state.value = _state.value.copy(
+            sessions = next.sessions,
+            sessionStatuses = next.sessionStatuses,
+            expandedSessionIds = next.expandedSessionIds,
+            loadedSessionLimit = next.loadedSessionLimit,
+            hasMoreSessions = next.hasMoreSessions,
+            isLoadingMoreSessions = next.isLoadingMoreSessions,
+            isRefreshingSessions = next.isRefreshingSessions,
+            pendingPermissions = next.pendingPermissions,
+            pendingQuestions = next.pendingQuestions,
+            childSessions = next.childSessions,
+            directorySessions = next.directorySessions,
+            openSessionIds = next.openSessionIds,
+            sessionTodos = next.sessionTodos
+        )
+    }
+
+    /** §R-17 M4: write the unread slice + mirror. See [writeConnection]. */
+    @Suppress("DEPRECATION")
+    private fun writeUnread(transform: (UnreadState) -> UnreadState) {
+        val next = transform(_unreadFlow.value)
+        _unreadFlow.value = next
+        _state.value = _state.value.copy(
+            unreadSessions = next.unreadSessions,
+            tempClearedUnread = next.tempClearedUnread,
+            lastViewedTime = next.lastViewedTime
+        )
+    }
+
+    /** §R-17 M4: write the host slice + mirror. See [writeConnection]. */
+    @Suppress("DEPRECATION")
+    private fun writeHost(transform: (HostState) -> HostState) {
+        val next = transform(_hostFlow.value)
+        _hostFlow.value = next
+        _state.value = _state.value.copy(
+            hostProfiles = next.hostProfiles,
+            currentHostProfileId = next.currentHostProfileId
+        )
+    }
+
+    /**
+     * §R-17 M4: unified state write that propagates to EVERY slice.
+     *
+     * Replaces the legacy `updateState { ... }` for the many mixed-domain
+     * update sites (chat/session/unread/host and the cross-domain `error`).
+     * Writes `_state` (the AppState mirror) then synchronises ALL nine slices
+     * from the new mirror values.
+     *
+     * Isolation still works because `MutableStateFlow` only emits on
+     * `!equals` — a slice whose fields did not change is reassigned an
+     * structurally-equal value and its subscribers are NOT notified. So a
+     * `updateState { it.copy(isLoadingMessages = true) }` only emits on
+     * `_chatFlow` (and `_state`); `_sessionListFlow`/`_connectionFlow`/etc.
+     * reassigned equal values stay silent. This is what lets the legacy
+     * `updateState` sites drive the slices without per-site split-up, while
+     * still giving M4 consumers that subscribe to a single slice the same
+     * isolation they would get from per-slice writeXxx calls.
+     *
+     * The M2/M3 per-slice helpers (writeConnection/writeComposer/etc.) remain
+     * valid and PREFERRED for sites already using them; `updateState` is the
+     * catch-all for the remaining mixed/chat/session/unread/host updates and
+     * for any new code. M5 may later split these into per-slice writes for
+     * finer granularity, but functionally this is equivalent.
+     */
+    @Suppress("DEPRECATION")
+    private fun updateState(transform: (AppState) -> AppState) {
+        val next = transform(_state.value)
+        _state.value = next
+        // Sync every slice from the new AppState mirror. Each MutableStateFlow
+        // suppresses equal-value emissions, so only actually-changed slices
+        // notify their subscribers.
+        _connectionFlow.value = ConnectionState(
+            isConnected = next.isConnected,
+            isConnecting = next.isConnecting,
+            serverVersion = next.serverVersion,
+            connectionPhase = next.connectionPhase,
+            tunnelActivationState = next.tunnelActivationState
+        )
+        _trafficFlow.value = TrafficState(
+            trafficSent = next.trafficSent,
+            trafficReceived = next.trafficReceived
+        )
+        _composerFlow.value = ComposerState(
+            inputText = next.inputText,
+            imageAttachments = next.imageAttachments,
+            sendingSessionIds = next.sendingSessionIds,
+            draftWorkdir = next.draftWorkdir
+        )
+        _fileFlow.value = FileState(
+            filePathToShowInFiles = next.filePathToShowInFiles,
+            filePreviewOriginRoute = next.filePreviewOriginRoute,
+            fileBrowserOpen = next.fileBrowserOpen,
+            fileBrowserWorkdir = next.fileBrowserWorkdir
+        )
+        _settingsFlow.value = SettingsState(
+            themeMode = next.themeMode,
+            markdownFontSizes = next.markdownFontSizes,
+            selectedAgentName = next.selectedAgentName,
+            agents = next.agents,
+            providers = next.providers,
+            availableCommands = next.availableCommands
+        )
+        _chatFlow.value = ChatState(
+            currentSessionId = next.currentSessionId,
+            messages = next.messages,
+            partsByMessage = next.partsByMessage,
+            streamingPartTexts = next.streamingPartTexts,
+            streamingReasoningPart = next.streamingReasoningPart,
+            olderMessagesCursor = next.olderMessagesCursor,
+            hasMoreMessages = next.hasMoreMessages,
+            isLoadingMessages = next.isLoadingMessages,
+            gapInfo = next.gapInfo,
+            staleNotice = next.staleNotice
+        )
+        _sessionListFlow.value = SessionListState(
+            sessions = next.sessions,
+            sessionStatuses = next.sessionStatuses,
+            expandedSessionIds = next.expandedSessionIds,
+            loadedSessionLimit = next.loadedSessionLimit,
+            hasMoreSessions = next.hasMoreSessions,
+            isLoadingMoreSessions = next.isLoadingMoreSessions,
+            isRefreshingSessions = next.isRefreshingSessions,
+            pendingPermissions = next.pendingPermissions,
+            pendingQuestions = next.pendingQuestions,
+            childSessions = next.childSessions,
+            directorySessions = next.directorySessions,
+            openSessionIds = next.openSessionIds,
+            sessionTodos = next.sessionTodos
+        )
+        _unreadFlow.value = UnreadState(
+            unreadSessions = next.unreadSessions,
+            tempClearedUnread = next.tempClearedUnread,
+            lastViewedTime = next.lastViewedTime
+        )
+        _hostFlow.value = HostState(
+            hostProfiles = next.hostProfiles,
+            currentHostProfileId = next.currentHostProfileId
         )
     }
 
@@ -955,7 +1226,7 @@ class MainViewModel @Inject constructor(
                     // connected project's directory sessions (getSessionsForDirectory).
                     // So cross-client/web conversations created during the absence
                     // are surfaced by that path — no separate fetch needed here.
-                    _state.update { it.copy(staleNotice = true) }
+                    updateState { it.copy(staleNotice = true) }
                 }
             }
         } else {
@@ -1004,7 +1275,7 @@ class MainViewModel @Inject constructor(
                     runSuspendCatching { repository.getSession(sessionId).getOrNull() }.getOrNull()
                 }
                 if (fetched != null) {
-                    _state.update { st ->
+                    updateState { st ->
                         st.copy(sessions = upsertSession(st.sessions, fetched))
                     }
                 }
@@ -1022,7 +1293,7 @@ class MainViewModel @Inject constructor(
         val clamped = page.coerceIn(0, 2)
         if (_state.value.lastNavPage == clamped) return
         settingsManager.lastNavPage = clamped
-        _state.update { it.copy(lastNavPage = clamped) }
+        updateState { it.copy(lastNavPage = clamped) }
     }
 
     fun configureServer(url: String, username: String? = null, password: String? = null) {
@@ -1098,7 +1369,7 @@ class MainViewModel @Inject constructor(
             // §Stage D (gpter 阻塞 #1): SSE cancellation is handled
             // inside configureRepositoryForProfile() below (single authoritative
             // point), so it fires before repository.configure runs.
-            _state.update { it.copy(
+            updateState { it.copy(
                 currentSessionId = null,
                 messages = emptyList(),
                 partsByMessage = emptyMap(),
@@ -1124,7 +1395,7 @@ class MainViewModel @Inject constructor(
             // §R-17 M3 (RFC §4 strategy A): reset the composer + settings slices
             // that belong to the previous host. Intermediate state is legal
             // (empty sessions list; draft/commands briefly stale until these
-            // run, but _state.update above already flipped currentSessionId=null).
+            // run, but updateState above already flipped currentSessionId=null).
             writeComposer { it.copy(draftWorkdir = null) }
             writeSettings { it.copy(availableCommands = emptyList()) }
             // §R-17 M2 (RFC §4 strategy A): clear the (previous host's) probed
@@ -1174,7 +1445,7 @@ class MainViewModel @Inject constructor(
         configureRepositoryForProfile(current)
         refreshHostProfileState()
         if (wasCurrent) {
-            _state.update {
+            updateState {
                 it.copy(
                     currentSessionId = null,
                     messages = emptyList(),
@@ -1220,7 +1491,7 @@ class MainViewModel @Inject constructor(
     fun exportHostProfile(profile: HostProfile): String = hostProfileStore.exportJson(profile)
 
     private fun refreshHostProfileState() {
-        _state.update {
+        updateState {
             it.copy(
                 hostProfiles = hostProfileStore.profiles(),
                 currentHostProfileId = hostProfileStore.currentProfile().id
@@ -1269,7 +1540,7 @@ class MainViewModel @Inject constructor(
             // (RFC §4 strategy A): the two updates run back-to-back on the same
             // dispatcher; the intermediate state (error cleared, phase not yet
             // "connecting") is legal and transient.
-            _state.update { it.copy(error = null) }
+            updateState { it.copy(error = null) }
             writeConnection { it.copy(isConnecting = true, connectionPhase = "connecting") }
             val profile = hostProfileStore.currentProfile()
             configureRepositoryForProfile(profile)
@@ -1316,7 +1587,7 @@ class MainViewModel @Inject constructor(
                     // _connectionFlow. Intermediate state legal (error set
                     // before phase flips to "disconnected" — both still
                     // describe the same failure).
-                    _state.update {
+                    updateState {
                         it.copy(
                             error = healthResult.exceptionOrNull()?.let { e ->
                                 errorMessageOrFallback(e, "Connection failed")
@@ -1362,7 +1633,7 @@ class MainViewModel @Inject constructor(
             viewModelScope.launch {
                 repository.getSessionsForDirectory(workdir)
                     .onSuccess { sessions ->
-                        _state.update { it.copy(directorySessions = it.directorySessions + (workdir to sessions)) }
+                        updateState { it.copy(directorySessions = it.directorySessions + (workdir to sessions)) }
                     }
             }
         }
@@ -1440,7 +1711,7 @@ class MainViewModel @Inject constructor(
             }
             else -> {
                 val sessionId = _state.value.currentSessionId ?: run {
-                    _state.update {
+                    updateState {
                         it.copy(error = "Open or create a session before running /$cmd")
                     }
                     return
@@ -1451,7 +1722,7 @@ class MainViewModel @Inject constructor(
                     // raw string, not a {"text": ...} object. Pass it directly.
                     repository.executeCommand(sessionId, cmd, arguments)
                         .onFailure { error ->
-                            _state.update {
+                            updateState {
                                 it.copy(error = errorMessageOrFallback(error, "Command /$cmd failed"))
                             }
                         }
@@ -1523,7 +1794,7 @@ class MainViewModel @Inject constructor(
         // we keep the prior behavior (empty + resetLimit=true cold load).
         val cachedWindow = sessionWindowCache[sessionId]
         if (cachedWindow != null) {
-            _state.update {
+            updateState {
                 it.copy(
                     messages = cachedWindow.messages,
                     partsByMessage = cachedWindow.partsByMessage,
@@ -1546,7 +1817,7 @@ class MainViewModel @Inject constructor(
         // currentSession (which finds by id in sessions) would be null and
         // syncCurrentDirectoryForSession would drop the workdir.
         if (targetSession != null && _state.value.sessions.none { it.id == sessionId }) {
-            _state.update { it.copy(sessions = upsertSession(it.sessions, targetSession)) }
+            updateState { it.copy(sessions = upsertSession(it.sessions, targetSession)) }
         }
         // Reset the collapsible-card expansion state (#13): switching sessions
         // collapses all cards. Done here (not in selectSessionState / loadMessages)
@@ -1570,7 +1841,7 @@ class MainViewModel @Inject constructor(
         // transient navigations from within a parent conversation and must not
         // pollute the open-tabs list. Sub-agents are only reachable via SubAgentCard.
         val now = System.currentTimeMillis()
-        _state.update {
+        updateState {
             // Re-mark the previous session as unread if it was busy when the
             // user navigated away (its temp-cleared badge should resurface so
             // the user knows there is still in-flight activity to come back to).
@@ -1602,7 +1873,7 @@ class MainViewModel @Inject constructor(
         if (targetSession?.parentId == null && sessionId !in settingsManager.openSessionIds) {
             val updated = (listOf(sessionId) + settingsManager.openSessionIds).take(8)
             settingsManager.openSessionIds = updated
-            _state.update { it.copy(openSessionIds = updated) }
+            updateState { it.copy(openSessionIds = updated) }
             // Fix #5: persist the newly-opened session's metadata into
             // sessionCache so its tab survives a restart even when no message
             // was ever sent. The cache is otherwise written only by
@@ -1636,7 +1907,7 @@ class MainViewModel @Inject constructor(
             try {
                 repository.getChildren(sessionId)
                     .onSuccess { children ->
-                        _state.update { it.copy(childSessions = it.childSessions + (sessionId to children)) }
+                        updateState { it.copy(childSessions = it.childSessions + (sessionId to children)) }
                     }
                     .onFailure { error ->
                         reportNonFatalIssue(TAG, "Failed to load child sessions for $sessionId", error)
@@ -1676,10 +1947,10 @@ class MainViewModel @Inject constructor(
             // leave currentSession null. Surface the failure via the error
             // channel instead (same mechanism as testConnection failures).
             if (child != null) {
-                _state.update { state -> state.copy(sessions = upsertSession(state.sessions, child)) }
+                updateState { state -> state.copy(sessions = upsertSession(state.sessions, child)) }
                 selectSession(childSessionId)
             } else {
-                _state.update { it.copy(error = "子任务会话不可用") }
+                updateState { it.copy(error = "子任务会话不可用") }
             }
         }
     }
@@ -1705,7 +1976,7 @@ class MainViewModel @Inject constructor(
         val updated = settingsManager.openSessionIds.filter { it != sessionId }
         settingsManager.openSessionIds = updated
         val nextId = updated.firstOrNull()
-        _state.update { currentState ->
+        updateState { currentState ->
             val next = currentState.copy(
                 openSessionIds = updated,
                 unreadSessions = currentState.unreadSessions - sessionId
@@ -1793,7 +2064,7 @@ class MainViewModel @Inject constructor(
         // skipping here is safe; the banner/action remains for a retry.
         if (_state.value.isLoadingMessages) return
         clearSessionWindowCache()
-        _state.update {
+        updateState {
             it.copy(
                 streamingPartTexts = emptyMap(),
                 streamingReasoningPart = null,
@@ -1885,7 +2156,7 @@ class MainViewModel @Inject constructor(
         // Clear any previously selected session: draft mode shows an empty
         // chat page until the first message materialises the session.
         settingsManager.currentSessionId = null
-        _state.update {
+        updateState {
             it.copy(
                 currentSessionId = null,
                 messages = emptyList(),
@@ -1917,7 +2188,7 @@ class MainViewModel @Inject constructor(
         viewModelScope.launch {
             repository.getSessionsForDirectory(workdir)
                 .onSuccess { sessions ->
-                    _state.update { it.copy(directorySessions = it.directorySessions + (workdir to sessions)) }
+                    updateState { it.copy(directorySessions = it.directorySessions + (workdir to sessions)) }
                 }
         }
     }
@@ -1988,7 +2259,7 @@ class MainViewModel @Inject constructor(
             viewModelScope.launch {
                 repository.createSession(title = null)
                     .onSuccess { session ->
-                        _state.update { state ->
+                        updateState { state ->
                             val openIds = (listOf(session.id) + settingsManager.openSessionIds).distinct().take(8)
                             settingsManager.openSessionIds = openIds
                             val now = System.currentTimeMillis()
@@ -2030,7 +2301,7 @@ class MainViewModel @Inject constructor(
                         // mode and the untouched inputText remains editable. A
                         // retry is a fresh invoke that re-clears + re-launches.
                         writeComposer { it.copy(draftWorkdir = draftWorkdir) }
-                        _state.update {
+                        updateState {
                             it.copy(
                                 error = "Failed to create session in $draftWorkdir: ${error.message ?: "unknown error"}"
                             )
@@ -2096,7 +2367,7 @@ class MainViewModel @Inject constructor(
             viewModelScope.launch {
                 repository.updateSessionArchived(sessionId, -1L)
                     .onSuccess { updated ->
-                        _state.update { state ->
+                        updateState { state ->
                             state.copy(sessions = state.sessions.map { session -> if (session.id == sessionId) updated else session })
                         }
                         dispatchSend()
@@ -2115,7 +2386,7 @@ class MainViewModel @Inject constructor(
                         val currentInput = _composerFlow.value.inputText
                         val restored = if (currentInput.isBlank()) text else currentInput
                         if (restored != currentInput) settingsManager.setDraftText(sessionId, restored)
-                        _state.update { s ->
+                        updateState { s ->
                             s.copy(
                                 error = "Failed to restore session: ${errorMessageOrFallback(error, "unknown error")}"
                             )
@@ -2139,7 +2410,7 @@ class MainViewModel @Inject constructor(
         viewModelScope.launch {
             repository.abortSession(sessionId)
                 .onFailure { error ->
-                    _state.update { it.copy(error = errorMessageOrFallback(error, "Failed to abort session")) }
+                    updateState { it.copy(error = errorMessageOrFallback(error, "Failed to abort session")) }
                 }
         }
     }
@@ -2174,7 +2445,7 @@ class MainViewModel @Inject constructor(
                     // §R-17 M3: sessions/error → _state; inputText/imageAttachments
                     // → writeComposer. Intermediate state legal (sessions updated,
                     // composer not yet reset).
-                    _state.update { state ->
+                    updateState { state ->
                         state.copy(
                             sessions = state.sessions.map { session -> if (session.id == sessionId) updatedSession else session },
                             error = null
@@ -2191,7 +2462,7 @@ class MainViewModel @Inject constructor(
                     loadSessions()
                 }
                 .onFailure { error ->
-                    _state.update { it.copy(error = "Failed to edit message: ${errorMessageOrFallback(error, "unknown error")}") }
+                    updateState { it.copy(error = "Failed to edit message: ${errorMessageOrFallback(error, "unknown error")}") }
                 }
         }
     }
@@ -2203,7 +2474,7 @@ class MainViewModel @Inject constructor(
     }
 
     fun toggleSessionExpanded(sessionId: String) {
-        _state.update { state ->
+        updateState { state ->
             val next = if (state.expandedSessionIds.contains(sessionId)) {
                 state.expandedSessionIds - sessionId
             } else {
@@ -2227,12 +2498,12 @@ class MainViewModel @Inject constructor(
         viewModelScope.launch {
             repository.respondPermission(sessionId, permissionId, response)
                 .onSuccess {
-                    _state.update { it.copy(
+                    updateState { it.copy(
                         pendingPermissions = it.pendingPermissions.filter { p -> p.id != permissionId }
                     )}
                 }
                 .onFailure { error ->
-                    _state.update { it.copy(error = errorMessageOrFallback(error, "Failed to respond to permission")) }
+                    updateState { it.copy(error = errorMessageOrFallback(error, "Failed to respond to permission")) }
                 }
         }
     }
@@ -2241,7 +2512,7 @@ class MainViewModel @Inject constructor(
         viewModelScope.launch {
             repository.getPendingPermissions()
                 .onSuccess { permissions ->
-                    _state.update { it.copy(pendingPermissions = permissions) }
+                    updateState { it.copy(pendingPermissions = permissions) }
                 }
                 .onFailure { error ->
                     Log.w(TAG, "Failed to load permissions: ${error.message}")
@@ -2253,7 +2524,7 @@ class MainViewModel @Inject constructor(
         viewModelScope.launch {
             repository.getPendingQuestions()
                 .onSuccess { questions ->
-                    _state.update { it.copy(pendingQuestions = questions) }
+                    updateState { it.copy(pendingQuestions = questions) }
                 }
                 .onFailure { error ->
                     Log.w(TAG, "Failed to load questions: ${error.message}")
@@ -2265,7 +2536,7 @@ class MainViewModel @Inject constructor(
         viewModelScope.launch {
             repository.replyQuestion(requestId, answers)
                 .onSuccess {
-                    _state.update { currentState ->
+                    updateState { currentState ->
                         currentState.copy(pendingQuestions = currentState.pendingQuestions.filter { it.id != requestId })
                     }
                 }
@@ -2280,7 +2551,7 @@ class MainViewModel @Inject constructor(
         viewModelScope.launch {
             repository.rejectQuestion(requestId)
                 .onSuccess {
-                    _state.update { currentState ->
+                    updateState { currentState ->
                         currentState.copy(pendingQuestions = currentState.pendingQuestions.filter { it.id != requestId })
                     }
                 }
@@ -2291,7 +2562,7 @@ class MainViewModel @Inject constructor(
     }
 
     fun clearError() {
-        _state.update { it.copy(error = null) }
+        updateState { it.copy(error = null) }
     }
 
     /**
@@ -2361,7 +2632,7 @@ class MainViewModel @Inject constructor(
         val keptHostProfiles = _state.value.hostProfiles
         val keptHostProfileId = _state.value.currentHostProfileId
         @Suppress("DEPRECATION")
-        _state.update {
+        updateState {
             // §R-17 M2: connection/traffic fields left at their AppState
             // defaults — they are deprecated mirrors and the combine() in
             // `state` overwrites them from _connectionFlow / _trafficFlow
@@ -2411,7 +2682,7 @@ class MainViewModel @Inject constructor(
         if (passwordId == null) {
             // §R-17 M2: tunnelActivationState moved to _connectionFlow; error
             // stays on _state. Intermediate state legal.
-            _state.update {
+            updateState {
                 it.copy(error = "隧道激活失败：未设置隧道认证密码。请在「服务器」设置中填写隧道密码并保存后再试。")
             }
             writeConnection {
@@ -2421,7 +2692,7 @@ class MainViewModel @Inject constructor(
         }
         val password = settingsManager.getTunnelPassword(passwordId)
         if (password.isNullOrBlank()) {
-            _state.update {
+            updateState {
                 it.copy(error = "隧道激活失败：已配置密码标识但存储为空（可能保存时未输入）。请重新输入隧道密码并保存。")
             }
             writeConnection {
@@ -2434,7 +2705,7 @@ class MainViewModel @Inject constructor(
         viewModelScope.launch {
             repository.activateTunnel(profile.serverUrl, password, allowInsecure = profile.allowInsecureConnections)
                 .onSuccess {
-                    _state.update {
+                    updateState {
                         it.copy(error = TUNNEL_SUCCESS_TOAST)
                     }
                     writeConnection {
@@ -2448,7 +2719,7 @@ class MainViewModel @Inject constructor(
                     // "SSLPeerUnverifiedException: ..."). Surface that directly —
                     // no generic prefix that would double up the fallback string.
                     val msg = errorMessageOrFallback(error, "未知错误（无异常信息）")
-                    _state.update {
+                    updateState {
                         it.copy(error = "隧道激活失败：$msg")
                     }
                     writeConnection {
@@ -2545,7 +2816,7 @@ class MainViewModel @Inject constructor(
         viewModelScope.launch {
             repository.getSessionsForDirectory(workdir)
                 .onSuccess { sessions ->
-                    _state.update { it.copy(directorySessions = it.directorySessions + (workdir to sessions)) }
+                    updateState { it.copy(directorySessions = it.directorySessions + (workdir to sessions)) }
                 }
         }
     }
