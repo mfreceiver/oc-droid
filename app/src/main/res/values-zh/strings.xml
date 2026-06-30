@@ -137,6 +137,7 @@
     <string name="question_back">返回</string>
     <string name="question_next">下一步</string>
     <string name="question_submit">提交</string>
+    <string name="question_submit_failed">提交答案失败，请重试。</string>
     <string name="question_of">%1$d / %2$d</string>
     <string name="question_empty">（没有问题）</string>
     <string name="sessions_tab_recent">近期会话</string>

@@ -246,11 +246,25 @@ fun ChatScreen(
         sessionList.pendingQuestions.firstOrNull { it.sessionId == chat.currentSessionId }
     }
     var questionAnswers by remember { mutableStateOf<List<List<String>>>(emptyList()) }
+    // 🟠-1: surface bottom-bar question-submit failures to the user (the VM's
+    // replyQuestion only Log.w's + invokes onError; it does NOT write to
+    // AppState.error, and we can't modify MainViewModel this round). This local
+    // error string is rendered as an AppToast (which auto-dismisses after 3s).
+    var questionSubmitError by remember { mutableStateOf<String?>(null) }
+    // 🟠-2: in-flight guard for the bottom-bar question submit — prevents
+    // double-submits on slow networks (the in-card Submit already has its own
+    // isSending guard; this mirrors it for the bottom-bar path).
+    var isSubmittingQuestion by remember { mutableStateOf(false) }
     LaunchedEffect(pendingQuestion?.id) {
         // Reset hoisted answers whenever the active question changes
         // (covers a new question arriving, or the current one being
         // dismissed/resolved).
         questionAnswers = emptyList()
+        // 🟠-2: a question-id change (incl. →null on success/reject) means the
+        // in-flight request has resolved — release the guard. The success path
+        // has no onSuccess callback (replyQuestion only offers onError), so
+        // observing pendingQuestion becoming null is the success signal.
+        isSubmittingQuestion = false
     }
     val questionAnswersValid = pendingQuestion?.let { pq ->
         pq.questions.isNotEmpty() &&
@@ -345,6 +359,23 @@ fun ChatScreen(
                     onDismiss = { viewModel.clearError() }
                 )
             }
+
+            // 🟠-1: bottom-bar question-submit failure toast. AppToast
+            // auto-dismisses after 3s when onDismiss != null. Positioned at
+            // TopCenter alongside appStateError; the two are independent
+            // (replyQuestion does not write AppState.error), so simultaneous
+            // display is rare. Offset top so it stacks below a global error
+            // toast rather than overlapping it.
+            questionSubmitError?.let { error ->
+                AppToast(
+                    message = error,
+                    severity = ToastSeverity.Error,
+                    modifier = Modifier
+                        .align(Alignment.TopCenter)
+                        .padding(top = 72.dp, start = 16.dp, end = 16.dp),
+                    onDismiss = { questionSubmitError = null }
+                )
+            }
         }
 
         // Input bar is enabled whenever there is either a concrete session OR
@@ -359,9 +390,26 @@ fun ChatScreen(
                 onAddImages = onAddImages,
                 pendingQuestion = pendingQuestion,
                 questionAnswersValid = questionAnswersValid,
+                questionSubmitting = isSubmittingQuestion,
                 onSubmitQuestion = {
-                    pendingQuestion?.let { pq ->
-                        viewModel.replyQuestion(pq.id, questionAnswers)
+                    // 🟠-2: guard — if a submit is already in flight, ignore
+                    // the tap (the button is also disabled via canSend, but
+                    // this is the source-of-truth guard). Structured as a
+                    // positive if (not early-return) because onSubmitQuestion
+                    // is a param lambda — a bare `return` here would
+                    // non-locally return from the ChatScreen composable.
+                    if (!isSubmittingQuestion) {
+                        pendingQuestion?.let { pq ->
+                            isSubmittingQuestion = true
+                            // 🟠-1: onError surfaces the failure to the user.
+                            // replyQuestion has no onSuccess callback — success
+                            // is observed via LaunchedEffect(pendingQuestion?.id)
+                            // releasing the guard when the question is removed.
+                            viewModel.replyQuestion(pq.id, questionAnswers) {
+                                isSubmittingQuestion = false
+                                questionSubmitError = context.getString(R.string.question_submit_failed)
+                            }
+                        }
                     }
                 }
             )

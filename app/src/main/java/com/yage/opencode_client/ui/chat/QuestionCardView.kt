@@ -382,7 +382,19 @@ fun QuestionCardView(
                             Spacer(modifier = Modifier.height(6.dp))
                             OutlinedTextField(
                                 value = customText,
-                                onValueChange = { customTexts[currentTab] = it },
+                                // 🟠-3: report on every keystroke so the hoisted
+                                // snapshot (and thus the bottom-bar primary button)
+                                // reflects uncommitted custom text in real time.
+                                // effectiveAnswer() already treats active custom
+                                // text as if committed, so reportAnswers() after
+                                // the mutation yields the correct up-to-date
+                                // snapshot (previously only commitCustom on Done
+                                // reported, so the bottom bar sent a stale answer
+                                // if the user tapped it without pressing Done).
+                                onValueChange = {
+                                    customTexts[currentTab] = it
+                                    reportAnswers()
+                                },
                                 label = { Text(stringResource(R.string.question_custom_placeholder)) },
                                 singleLine = true,
                                 keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),

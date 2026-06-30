@@ -98,6 +98,11 @@ internal fun ChatInputBar(
     // viewModel.replyQuestion, mirroring QuestionCardView's own Submit.
     pendingQuestion: QuestionRequest? = null,
     questionAnswersValid: Boolean = false,
+    // 🟠-2: while a question submit is in flight (bottom-bar path), the
+    // primary button is disabled for the question branch to prevent
+    // double-submits on slow networks — mirrors the in-card Submit's isSending
+    // guard. A typed prompt / image attachments can still be sent normally.
+    questionSubmitting: Boolean = false,
     onSubmitQuestion: () -> Unit = {}
 ) {
     // §R-17 Stage 2: subscribe to composerFlow + settingsFlow directly so
@@ -122,9 +127,11 @@ internal fun ChatInputBar(
     // §#4: canSend also covers the pending-question path — when a system
     // question is open and its hoisted answers are valid, the primary button
     // is enabled so the user can submit it from the bottom bar.
+    // 🟠-2: the question branch is suppressed while a submit is in flight
+    // (questionSubmitting) so the button greys out and re-taps don't queue.
     val canSend = text.isNotBlank() ||
         imageAttachments.isNotEmpty() ||
-        (pendingQuestion != null && questionAnswersValid)
+        (pendingQuestion != null && questionAnswersValid && !questionSubmitting)
     val composerStatus = if (isBusy) agentActivityText ?: stringResource(R.string.chat_agent_running) else null
 
     // --- Slash-command autocomplete state ---
@@ -276,9 +283,13 @@ internal fun ChatInputBar(
                 // are valid, the button submits the question instead of a normal
                 // send/stop. Question submit takes priority over a typed prompt
                 // (the question is the active modal interaction).
+                // 🟠-2: skip the question branch entirely while a submit is in
+                // flight (button is also disabled via canSend, but this guard
+                // makes the click a guaranteed no-op even if text/images keep
+                // canSend true during the in-flight window).
                 ChatPrimaryActionButton(
                     onClick = {
-                        if (pendingQuestion != null && questionAnswersValid) {
+                        if (pendingQuestion != null && questionAnswersValid && !questionSubmitting) {
                             onSubmitQuestion()
                         } else if (canStop) {
                             showStopConfirm = true
