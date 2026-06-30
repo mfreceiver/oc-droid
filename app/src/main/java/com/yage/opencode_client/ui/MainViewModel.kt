@@ -16,20 +16,21 @@ import com.yage.opencode_client.util.MarkdownFontSizes
 import com.yage.opencode_client.util.runSuspendCatching
 import com.yage.opencode_client.ui.controller.ComposerCallbacks
 import com.yage.opencode_client.ui.controller.ComposerController
+import com.yage.opencode_client.ui.controller.ConnectionCoordinator
+import com.yage.opencode_client.ui.controller.ConnectionCoordinatorCallbacks
 import com.yage.opencode_client.ui.controller.ForegroundCatchUpCallbacks
 import com.yage.opencode_client.ui.controller.ForegroundCatchUpController
 import com.yage.opencode_client.ui.controller.HostProfileCallbacks
 import com.yage.opencode_client.ui.controller.HostProfileController
+import com.yage.opencode_client.ui.controller.SessionSyncCoordinator
+import com.yage.opencode_client.ui.controller.SessionSyncCoordinatorCallbacks
 import com.yage.opencode_client.ui.controller.SessionSwitcher
 import com.yage.opencode_client.ui.controller.SessionSwitcherCallbacks
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.FlowPreview
-import kotlinx.coroutines.Job
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.*
-import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.util.Locale
@@ -675,7 +676,7 @@ class MainViewModel @Inject constructor(
     private val hostProfileStore: HostProfileStore,
     internal val trafficTracker: TrafficTracker,
     private val appLifecycleMonitor: AppLifecycleMonitor
-) : ViewModel(), ForegroundCatchUpCallbacks, ComposerCallbacks, SessionSwitcherCallbacks, HostProfileCallbacks {
+) : ViewModel(), ForegroundCatchUpCallbacks, ComposerCallbacks, SessionSwitcherCallbacks, HostProfileCallbacks, ConnectionCoordinatorCallbacks, SessionSyncCoordinatorCallbacks {
 
     // §R-17 M2: _state keeps carrying every AppState field (the connection/
     // traffic ones are deprecated mirrors). The authoritative storage for
@@ -834,6 +835,40 @@ class MainViewModel @Inject constructor(
             hostProfileStore = hostProfileStore,
             repository = repository,
             settingsManager = settingsManager,
+            callbacks = this
+        )
+
+    /**
+     * R-16 M4: server connection lifecycle controller. Owns the SSE feed Job +
+     * the 30s health-check throttle + the testConnection/coldStartReconnect
+     * state machine + initial-data load orchestration + startSSE/cancelSse.
+     * Side effects (repository reconfigure, initial-data loaders, SSE event
+     * dispatch → SessionSyncCoordinator, catch-up reset) flow through
+     * [ConnectionCoordinatorCallbacks] which MainViewModel implements below.
+     */
+    private val connectionCoordinator: ConnectionCoordinator =
+        ConnectionCoordinator(
+            scope = viewModelScope,
+            state = _state,
+            connectionFlow = _connectionFlow,
+            settingsFlow = _settingsFlow,
+            slices = sliceFlows,
+            repository = repository,
+            settingsManager = settingsManager,
+            callbacks = this
+        )
+
+    /**
+     * R-16 M4: SSE event → AppState fold controller. Owns the handleSSEEvent
+     * dispatch (server.connected catch-up trigger + the message/session/status/
+     * part/permission/question/todo fold). Side effects (authoritative reload,
+     * permission refresh, catch-up probe, non-fatal logging) flow through
+     * [SessionSyncCoordinatorCallbacks] which MainViewModel implements below.
+     */
+    private val sessionSyncCoordinator: SessionSyncCoordinator =
+        SessionSyncCoordinator(
+            state = _state,
+            slices = sliceFlows,
             callbacks = this
         )
 
@@ -1148,8 +1183,11 @@ class MainViewModel @Inject constructor(
         sessionSwitcher.clearSessionWindowCache()
     }
 
-    private var sseJob: Job? = null
-    private var lastHealthCheckTime = 0L
+    // §R-16 M4: sseJob + lastHealthCheckTime moved to [connectionCoordinator].
+    // The SSE feed Job and the 30s health-check throttle anchor are now owned
+    // by the connection lifecycle controller; MainViewModel delegates via
+    // connectionCoordinator.startSSE / cancelSse / cancelSseForReconfigure /
+    // testConnection / coldStartReconnect.
 
     // §R-16 M1: the five @Volatile foreground catch-up fields
     // (hasObservedForegroundState / lastLoadAtMs / sseHasConnectedOnce /
@@ -1187,7 +1225,7 @@ class MainViewModel @Inject constructor(
     // private helper the inlined onForegroundChanged used to call directly.
     // ──────────────────────────────────────────────────────────────────────
 
-    override fun forceReconnect() = testConnection(force = true)
+    override fun forceReconnect() = connectionCoordinator.testConnection(force = true)
 
     override fun globalColdStartRefresh(currentId: String) = performGlobalColdStartRefresh(currentId = currentId)
 
@@ -1197,10 +1235,9 @@ class MainViewModel @Inject constructor(
 
     override fun clearDraft() = clearDraftIfActive()
 
-    override fun cancelSse() {
-        sseJob?.cancel()
-        sseJob = null
-    }
+    // R-16 M4: SSE feed cancellation delegated to [connectionCoordinator]
+    // (the sseJob now lives there).
+    override fun cancelSse() = connectionCoordinator.cancelSse()
 
     override fun catchUpAfterDisconnect(sessionId: String) =
         catchUpAfterDisconnectOrForeground(sessionId)
@@ -1268,16 +1305,12 @@ class MainViewModel @Inject constructor(
      * AppState while the new host's health probe is still in flight — those
      * stale events (session/status/message/permission/question) would pollute
      * the freshly-cleared state for the new profile.
+     *
+     * R-16 M4: delegated to [connectionCoordinator] (cancels the SSE feed +
+     * resets the catch-up state machine via the coordinator's callbacks, which
+     * route back to foregroundCatchUpController.onHostReconfigured).
      */
-    override fun cancelSseForReconfigure() {
-        DebugLog.i("SSE", "cancelSse (reconfigure)")
-        sseJob?.cancel()
-        sseJob = null
-        // §Phase1E: a host/profile switch is a fresh server — treat the next
-        // connect as a cold start (skip catch-up, the reconfigure path loads
-        // sessions/messages itself). R-16 M1: delegated to the controller.
-        foregroundCatchUpController.onHostReconfigured()
-    }
+    override fun cancelSseForReconfigure() = connectionCoordinator.cancelSseForReconfigure()
 
     // ──────────────────────────────────────────────────────────────────────
     // R-16 M3: HostProfileCallbacks implementation.
@@ -1296,6 +1329,61 @@ class MainViewModel @Inject constructor(
 
     override fun resetTrafficTracker() {
         trafficTracker.reset()
+    }
+
+    // ──────────────────────────────────────────────────────────────────────
+    // R-16 M4: ConnectionCoordinatorCallbacks implementation.
+    // The connection lifecycle (testConnection / coldStartReconnect / SSE
+    // start-stop / initial-data orchestration) lives in [connectionCoordinator];
+    // these are the orchestration hooks it calls back into for repository
+    // reconfiguration, the initial-data loaders it does NOT own, SSE event
+    // dispatch → SessionSyncCoordinator, and the catch-up state-machine reset.
+    //
+    // loadSessions / loadAgents / loadProviders / loadPendingQuestions satisfy
+    // the interface via their own `override` declarations (the existing
+    // loader implementations — MainViewModel still owns them). forceReconnect
+    // / cancelSse / cancelSseForReconfigure are shared with the Foreground /
+    // HostProfile callback interfaces (single override each).
+    // ──────────────────────────────────────────────────────────────────────
+
+    override fun configureRepositoryForCurrentProfile() {
+        hostProfileController.configureRepositoryForProfile(hostProfileStore.currentProfile())
+    }
+
+    override fun onSseEvent(event: SSEEvent) {
+        sessionSyncCoordinator.handleEvent(event)
+    }
+
+    override fun onHostReconfigured() {
+        foregroundCatchUpController.onHostReconfigured()
+    }
+
+    // ──────────────────────────────────────────────────────────────────────
+    // R-16 M4: SessionSyncCoordinatorCallbacks implementation.
+    // The SSE event → AppState fold lives in [sessionSyncCoordinator]; these
+    // are the side-effect hooks it calls back into for the foreground catch-up
+    // trigger (server.connected), authoritative message reloads, session-list
+    // refresh, permission refresh, and non-fatal payload logging.
+    // ──────────────────────────────────────────────────────────────────────
+
+    override fun onServerConnected() {
+        foregroundCatchUpController.onServerConnected()
+    }
+
+    override fun onRefreshMessages(sessionId: String, resetLimit: Boolean) {
+        loadMessagesWithRetry(sessionId, resetLimit)
+    }
+
+    override fun onRefreshSessions() {
+        loadSessions()
+    }
+
+    override fun onLoadPendingPermissions() {
+        loadPendingPermissions()
+    }
+
+    override fun onNonFatalIssue(message: String) {
+        reportNonFatalIssue(TAG, message)
     }
 
     /**
@@ -1374,83 +1462,11 @@ class MainViewModel @Inject constructor(
     fun getSavedConnectionSettings(): ConnectionFormSettings =
         hostProfileController.getSavedConnectionSettings()
 
+    // R-16 M4: delegated to [connectionCoordinator]. The full state machine
+    // (30s throttle, exponential-backoff retry, health probe, on-success
+    // loadInitialData + startSSE, on-failure error surface) now lives there.
     fun testConnection(force: Boolean = false, retries: Int = 0) {
-        val now = System.currentTimeMillis()
-        if (!force && now - lastHealthCheckTime < 30_000) return
-        lastHealthCheckTime = now
-        viewModelScope.launch {
-            // §R-17 M2: error stays on _state (consumed app-wide);
-            // connectionPhase/isConnecting moved to _connectionFlow. Atomicity
-            // (RFC §4 strategy A): the two updates run back-to-back on the same
-            // dispatcher; the intermediate state (error cleared, phase not yet
-            // "connecting") is legal and transient.
-            updateState { it.copy(error = null) }
-            writeConnection { it.copy(isConnecting = true, connectionPhase = "connecting") }
-            val profile = hostProfileStore.currentProfile()
-            hostProfileController.configureRepositoryForProfile(profile)
-            // Retry loop: attempt 1 is always made; up to `retries` extra
-            // attempts follow on failure/unhealthy with exponential backoff
-            // (1s, 2s, 4s, ...). Default callers pass retries=0 (one-shot),
-            // preserving the original single-attempt semantics; only
-            // coldStartReconnect() opts into retries. isActive is checked so
-            // ViewModel cancellation aborts cleanly mid-backoff.
-            val maxAttempts = 1 + retries.coerceAtLeast(0)
-            var attempt = 0
-            var backoffMs = 1000L
-            while (isActive) {
-                attempt++
-                if (attempt > 1) {
-                    writeConnection {
-                        it.copy(connectionPhase = "reconnecting (attempt $attempt/$maxAttempts)")
-                    }
-                }
-                val healthResult = repository.checkHealth()
-                if (healthResult.isSuccess) {
-                    val health = healthResult.getOrNull()
-                    if (health != null && health.healthy) {
-                        writeConnection {
-                            it.copy(
-                                isConnected = true,
-                                serverVersion = health.version,
-                                isConnecting = false,
-                                connectionPhase = "connected"
-                            )
-                        }
-                        loadInitialData()
-                        startSSE()
-                        return@launch
-                    }
-                    // Healthy=false: surface the version if present but keep
-                    // retrying (server may still be coming up on cold start).
-                    if (health != null) {
-                        writeConnection { it.copy(serverVersion = health.version) }
-                    }
-                }
-                if (attempt >= maxAttempts || !isActive) {
-                    // §R-17 M2: error on _state; connection fields on
-                    // _connectionFlow. Intermediate state legal (error set
-                    // before phase flips to "disconnected" — both still
-                    // describe the same failure).
-                    updateState {
-                        it.copy(
-                            error = healthResult.exceptionOrNull()?.let { e ->
-                                errorMessageOrFallback(e, "Connection failed")
-                            }
-                        )
-                    }
-                    writeConnection {
-                        it.copy(
-                            isConnected = false,
-                            isConnecting = false,
-                            connectionPhase = "disconnected"
-                        )
-                    }
-                    return@launch
-                }
-                delay(backoffMs)
-                backoffMs *= 2
-            }
-        }
+        connectionCoordinator.testConnection(force = force, retries = retries)
     }
 
     /**
@@ -1460,69 +1476,12 @@ class MainViewModel @Inject constructor(
      * stranding the user on the disconnected empty state. Used exclusively
      * from [com.yage.opencode_client.MainActivity]'s cold-start LaunchedEffect.
      */
-    override fun coldStartReconnect() {
-        testConnection(force = true, retries = 3)
-    }
+    override fun coldStartReconnect() = connectionCoordinator.coldStartReconnect()
 
-    override fun loadInitialData() {
-        loadSessions()
-        loadAgents()
-        loadProviders()
-        loadPendingQuestions()
-        loadCommands()
-        // Re-fetch the directory-scoped sessions for the restored workdir so the
-        // connected project's sessions reappear after restart (directorySessions
-        // is in-memory and otherwise empty until the user re-connects).
-        settingsManager.currentWorkdir?.let { workdir ->
-            viewModelScope.launch {
-                repository.getSessionsForDirectory(workdir)
-                    .onSuccess { sessions ->
-                        updateState { it.copy(directorySessions = it.directorySessions + (workdir to sessions)) }
-                    }
-            }
-        }
-    }
-
-    /**
-     * Best-effort fetch of the server-published slash commands. Merges the
-     * server list with a small set of client-side commands (/clear, /compact,
-     * /undo, /redo) so the composer's `/`-autocomplete surfaces both. Failures
-     * (older servers without GET /command, transient network errors) are
-     * swallowed: only the client-side commands remain available.
-     */
-    private fun loadCommands() {
-        viewModelScope.launch {
-            repository.getCommands()
-                .onSuccess { serverCommands ->
-                    writeSettings {
-                        it.copy(availableCommands = mergeCommands(localCommands(), serverCommands))
-                    }
-                }
-                .onFailure { error ->
-                    reportNonFatalIssue(TAG, "Failed to load commands", error)
-                    writeSettings { it.copy(availableCommands = localCommands()) }
-                }
-        }
-    }
-
-    private fun localCommands(): List<CommandInfo> = listOf(
-        CommandInfo(name = "clear", description = "Start a new session"),
-        CommandInfo(name = "compact", description = "Compact conversation history"),
-        CommandInfo(name = "undo", description = "Undo the last change"),
-        CommandInfo(name = "redo", description = "Redo the last undone change")
-    )
-
-    private fun mergeCommands(
-        local: List<CommandInfo>,
-        server: List<CommandInfo>
-    ): List<CommandInfo> {
-        // Server takes precedence on duplicates (its descriptions/hints are
-        // authoritative); local commands are appended only when the server did
-        // not also expose the same name.
-        val serverNames = server.mapTo(mutableSetOf()) { it.name.lowercase(Locale.getDefault()) }
-        val localOnly = local.filter { it.name.lowercase() !in serverNames }
-        return server + localOnly
-    }
+    // R-16 M4: delegated to [connectionCoordinator] (loadCommands / localCommands
+    // / mergeCommands moved there too; initial-data loaders route back through
+    // ConnectionCoordinatorCallbacks which MainViewModel implements below).
+    override fun loadInitialData() = connectionCoordinator.loadInitialData()
 
     /**
      * Routes a `/command arguments` invocation. Local commands that have
@@ -1575,7 +1534,8 @@ class MainViewModel @Inject constructor(
         }
     }
 
-    fun loadSessions() {
+    // R-16 M4: now also satisfies ConnectionCoordinatorCallbacks.loadSessions.
+    override fun loadSessions() {
         launchLoadSessions(
             scope = viewModelScope,
             repository = repository,
@@ -1845,7 +1805,8 @@ class MainViewModel @Inject constructor(
         )
     }
 
-    private fun loadAgents() {
+    // R-16 M4: now satisfies ConnectionCoordinatorCallbacks.loadAgents.
+    override fun loadAgents() {
         viewModelScope.launch {
             repository.getAgents()
                 .onSuccess { agents ->
@@ -1866,7 +1827,8 @@ class MainViewModel @Inject constructor(
         }
     }
 
-    private fun loadProviders() {
+    // R-16 M4: now satisfies ConnectionCoordinatorCallbacks.loadProviders.
+    override fun loadProviders() {
         launchLoadProviders(viewModelScope, repository, _state, _settingsFlow) { message, error ->
             reportNonFatalIssue(TAG, message, error)
         }
@@ -2238,7 +2200,8 @@ class MainViewModel @Inject constructor(
         }
     }
 
-    fun loadPendingQuestions() {
+    // R-16 M4: now also satisfies ConnectionCoordinatorCallbacks.loadPendingQuestions.
+    override fun loadPendingQuestions() {
         viewModelScope.launch {
             repository.getPendingQuestions()
                 .onSuccess { questions ->
@@ -2427,36 +2390,24 @@ class MainViewModel @Inject constructor(
         }
     }
 
-    override fun startSSE() {
-        DebugLog.i("SSE", "startSSE")
-        sseJob?.cancel()
-        sseJob = launchSseCollection(viewModelScope, repository, _state, ::handleSSEEvent)
-    }
+    // R-16 M4: delegated to [connectionCoordinator] (the sseJob + the SSE
+    // collection coroutine now live there; events route to SessionSyncCoordinator
+    // via ConnectionCoordinatorCallbacks.onSseEvent).
+    override fun startSSE() = connectionCoordinator.startSSE()
 
+    /**
+     * R-16 M4: delegated to [sessionSyncCoordinator]. Kept as a private method
+     * (NOT removed) so the reflection-based test helper `handleSse(...)` and
+     * any direct call sites keep resolving — the SSE event fold (server.connected
+     * catch-up trigger + the message/session/status/part/permission/question/todo
+     * dispatch) now lives in the coordinator.
+     */
     private fun handleSSEEvent(event: SSEEvent) {
-        // §Phase1E: every (re)connect's first frame is `server.connected`.
-        // Catch-up runs on every connect EXCEPT the very first process-time
-        // connect (cold start has no local history). The three-tier suppress /
-        // sseHasConnectedOnce state machine now lives in
-        // [foregroundCatchUpController] (R-16 M1); it calls back into
-        // [catchUpAfterDisconnectOrForeground] via [ForegroundCatchUpCallbacks]
-        // when a probe is actually warranted.
-        if (event.payload.type == "server.connected") {
-            foregroundCatchUpController.onServerConnected()
-        }
-        handleIncomingSseEvent(
-            state = _state,
-            event = event,
-            onRefreshMessages = ::loadMessagesWithRetry,
-            onRefreshSessions = ::loadSessions,
-            onLoadPendingPermissions = ::loadPendingPermissions,
-            onNonFatalIssue = { message -> reportNonFatalIssue(TAG, message) },
-            slices = sliceFlows,
-        )
+        sessionSyncCoordinator.handleEvent(event)
     }
 
     override fun onCleared() {
-        sseJob?.cancel()
+        connectionCoordinator.cancelSse()
         super.onCleared()
     }
 
