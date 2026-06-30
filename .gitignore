@@ -34,6 +34,7 @@
 
 # Secrets
 secrets.properties
+!app/src/test/resources/robolectric.properties
 google-services.json
 .env
 
