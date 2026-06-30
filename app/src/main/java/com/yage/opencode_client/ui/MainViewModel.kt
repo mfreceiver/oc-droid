@@ -14,6 +14,8 @@ import com.yage.opencode_client.util.ThemeMode
 import com.yage.opencode_client.util.TrafficTracker
 import com.yage.opencode_client.util.MarkdownFontSizes
 import com.yage.opencode_client.util.runSuspendCatching
+import com.yage.opencode_client.ui.controller.ForegroundCatchUpCallbacks
+import com.yage.opencode_client.ui.controller.ForegroundCatchUpController
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
@@ -667,7 +669,7 @@ class MainViewModel @Inject constructor(
     private val hostProfileStore: HostProfileStore,
     internal val trafficTracker: TrafficTracker,
     private val appLifecycleMonitor: AppLifecycleMonitor
-) : ViewModel() {
+) : ViewModel(), ForegroundCatchUpCallbacks {
 
     // §R-17 M2: _state keeps carrying every AppState field (the connection/
     // traffic ones are deprecated mirrors). The authoritative storage for
@@ -740,6 +742,21 @@ class MainViewModel @Inject constructor(
         unread = _unreadFlow,
         host = _hostFlow
     )
+
+    /**
+     * R-16 M1: foreground/background three-tier catch-up state machine, extracted
+     * from MainViewModel. Owns the 5 previously-@Volatile fields + the tier
+     * thresholds; side effects (testConnection / cold-start reload / SSE cancel /
+     * draft discard / catch-up probe) flow back through [ForegroundCatchUpCallbacks]
+     * which MainViewModel implements below — so the controller never holds a
+     * MainViewModel reference (R-16 §7.3 circular-dependency avoidance).
+     */
+    private val foregroundCatchUpController: ForegroundCatchUpController =
+        ForegroundCatchUpController(
+            appLifecycleMonitor = appLifecycleMonitor,
+            scope = viewModelScope,
+            callbacks = this
+        )
 
     val state: StateFlow<AppState> = _state.asStateFlow()
 
@@ -1098,67 +1115,20 @@ class MainViewModel @Inject constructor(
     private var sseJob: Job? = null
     private var lastHealthCheckTime = 0L
 
-    /**
-     * §15.2: guards the very first [AppLifecycleMonitor.isInForeground]
-     * emission. StateFlow always delivers its current value to a new
-     * collector, so without this flag the catch-up would fire spuriously on
-     * ViewModel construction (where there is no actual background→foreground
-     * transition to recover from). We treat the first emission as the
-     * baseline "current state" and only act on subsequent transitions, which
-     * matches the spec's "ON_START = 回前台" semantics.
-     */
-    @Volatile private var hasObservedForegroundState: Boolean = false
-
-    /**
-     * SSE-trust model: timestamp (epoch ms) of the most recent message load,
-     * used to throttle the foreground (ON_START) catch-up reload to at most
-     * once per [FOREGROUND_RELOAD_MIN_INTERVAL_MS]. Avoids re-downloading the
-     * latest message window on rapid background→foreground cycling.
-     */
-    @Volatile private var lastLoadAtMs: Long = 0L
-
-    /**
-     * §Phase1E: tracks whether the SSE feed has connected AT LEAST ONCE in this
-     * process. The catch-up trigger in [handleSSEEvent] runs on every
-     * `server.connected` EXCEPT the very first (cold start has no local
-     * history to diff). Unlike a counter, this flag fires for BOTH kinds of
-     * reconnect: [startSSE] foreground-initiated reconnects AND the in-flow
-     * `retryWhen` reconnects inside [SSEClient.connect] (which never call
-     * startSSE). A counter would miss the latter and silently skip catch-up
-     * after a watchdog / network-drop recovery — the scenario-3 path. Reset
-     * to false on host reconfigure (new server = fresh cold start).
-     */
-    @Volatile private var sseHasConnectedOnce: Boolean = false
-
-    /**
-     * §Phase1E: epoch ms of the last ON_STOP (enter background). Used by
-     * [onForegroundChanged] to bucket the foreground return into three tiers
-     * (<15s throttle / 15s–5min catch-up / >5min cold-start + stale notice).
-     */
-    @Volatile private var backgroundedAtMs: Long = 0L
-
-    /**
-     * §Phase1E: set by [onForegroundChanged] to suppress the catch-up that the
-     * SSE reconnect's `server.connected` would otherwise fire. The foreground
-     * path ALWAYS reconnects SSE (ON_STOP tore it down), so every ON_START
-     * delivers a `server.connected`. Without suppression this would (a) bypass
-     * the <15s throttle and (b) double-trigger catch-up in the 15s–5min tier.
-     * Semantics:
-     *   - <15s tier  → suppress (rely on the live SSE feed; a probe is unwanted)
-     *   - 15s–5min   → DON'T suppress (let server.connected drive the catch-up;
-     *                  this is the single catch-up entry point for this tier)
-     *   - >5min tier → suppress (performGlobalColdStartRefresh already loaded)
-     * Consumed (reset to false) in [handleSSEEvent] after the first connect.
-     */
-    @Volatile private var suppressNextConnectCatchUp: Boolean = false
+    // §R-16 M1: the five @Volatile foreground catch-up fields
+    // (hasObservedForegroundState / lastLoadAtMs / sseHasConnectedOnce /
+    // backgroundedAtMs / suppressNextConnectCatchUp) and the
+    // onForegroundChanged three-tier state machine moved to
+    // [foregroundCatchUpController]. MainViewModel now delegates via
+    // controller.onForegroundChanged / onServerConnected / onHostReconfigured
+    // and implements [ForegroundCatchUpCallbacks] for the side effects.
 
     init {
         loadSettings()
-        // §15.2: foreground/background hook (N8 — onEach+launchIn, NOT a
-        // suspend `collect`, since `init` is synchronous and cannot block).
-        appLifecycleMonitor.isInForeground
-            .onEach { onForegroundChanged(it) }
-            .launchIn(viewModelScope)
+        // §15.2: foreground/background hook now lives in
+        // [foregroundCatchUpController] (it subscribes to
+        // appLifecycleMonitor.isInForeground in its own init, launched into
+        // viewModelScope). §18.1 error-notification mirror stays here.
 
         // §18.1: mirror state.error into the notification module so it can
         // surface a system notification when we are in the background.
@@ -1174,90 +1144,32 @@ class MainViewModel @Inject constructor(
         }
     }
 
-    /**
-     * §15.2 / R-A: process foreground/background transitions.
-     *
-     * On **enter foreground** (ON_START): force a connection check (bypassing
-     * the 30s throttle), and — at most once per
-     * [FOREGROUND_RELOAD_MIN_INTERVAL_MS] — wipe stale streaming buffers and
-     * reload the current session. The wipe and reload are coupled: clearing the
-     * overlay without reloading would drop a finalized turn whose text lives
-     * only in `streamingPartTexts`, so both run together or neither does. N13:
-     * `currentSessionId?.let{}` null guard — draft mode or a freshly-closed
-     * last tab leaves it null.
-     *
-     * On **enter background** (ON_STOP): cancel the SSE feed (R-A: saves data,
-     * avoids half-open sockets; the §18 independent 30s poller takes over
-     * notification duty).
-     */
-    private fun onForegroundChanged(inForeground: Boolean) {
-        // §15.2: the first emission from AppLifecycleMonitor.isInForeground
-        // is the current state, not a transition. Skip catch-up logic so the
-        // ViewModel's very first subscribe does not spuriously reload (which
-        // would race with MainActivity's own LaunchedEffect testConnection
-        // and break tests that do not pre-mock checkHealth).
-        if (!hasObservedForegroundState) {
-            hasObservedForegroundState = true
-            return
-        }
-        if (inForeground) {
-            // §Phase1E (glm-1 🟠-1): clear any residual suppress flag FIRST. If
-            // a prior foreground cycle set it but the SSE reconnect's
-            // server.connected never arrived (e.g. health check failed mid-
-            // outage), the flag would otherwise linger and suppress the NEXT
-            // cycle's catch-up — permanently hiding messages. Each tier below
-            // re-sets it as needed; this reset guarantees no stale carry-over.
-            suppressNextConnectCatchUp = false
-            testConnection(force = true)
-            // §Phase1E three-tier foreground return, bucketed by how long the
-            // app was backgrounded (backgroundedAtMs captured on ON_STOP):
-            //   <15s        → throttle: skip (rapid cycling, SSE resumes live)
-            //   15s–5min    → catch-up (limit=1 probe → tail reload + gap detect)
-            //   >5min       → global cold-start + stale notice banner
-            val now = System.currentTimeMillis()
-            val bgGapMs = if (backgroundedAtMs > 0L) now - backgroundedAtMs else Long.MAX_VALUE
-            when {
-                bgGapMs < FOREGROUND_RELOAD_MIN_INTERVAL_MS -> {
-                    // Throttled: suppress the SSE reconnect's catch-up probe too
-                    // (rapid cycling — rely on the live feed once SSE reconnects).
-                    suppressNextConnectCatchUp = true
-                }
-                bgGapMs <= LONG_ABSENCE_THRESHOLD_MS -> {
-                    // Medium absence: let the SSE reconnect's `server.connected`
-                    // drive the catch-up (single entry point — do NOT also call
-                    // catchUp here, that would double-trigger). Just stamp the
-                    // load timestamp; the gap-aware catch-up runs on reconnect.
-                    lastLoadAtMs = now
-                }
-                else -> {
-                    // Long absence: treat like a cold-start of the current
-                    // session and surface a "stale" banner whose action does a
-                    // full global refresh. Other sessions lazy-load on visit.
-                    // Suppress the reconnect catch-up — the cold-start reload
-                    // already fetches the authoritative latest window.
-                    lastLoadAtMs = now
-                    suppressNextConnectCatchUp = true
-                    _state.value.currentSessionId?.let { performGlobalColdStartRefresh(currentId = it) }
-                    // Note: testConnection(force=true) above already triggers
-                    // loadInitialData() on a healthy connection, which re-fetches
-                    // BOTH the global session list (loadSessions) and the
-                    // connected project's directory sessions (getSessionsForDirectory).
-                    // So cross-client/web conversations created during the absence
-                    // are surfaced by that path — no separate fetch needed here.
-                    updateState { it.copy(staleNotice = true) }
-                }
-            }
-        } else {
-            // Discard any in-progress draft before tearing down SSE so a
-            // backgrounded draft does not leak into the next foreground cycle
-            // (the user may have navigated to the app tray, swapped host, etc.).
-            clearDraftIfActive()
-            backgroundedAtMs = System.currentTimeMillis()
-            DebugLog.i("SSE", "cancelSse (background)")
-            sseJob?.cancel()
-            sseJob = null
-        }
+    // ──────────────────────────────────────────────────────────────────────
+    // R-16 M1: ForegroundCatchUpCallbacks implementation.
+    // The three-tier state machine itself lives in [foregroundCatchUpController];
+    // these are the side-effect hooks it calls back into. Each maps 1:1 to the
+    // private helper the inlined onForegroundChanged used to call directly.
+    // ──────────────────────────────────────────────────────────────────────
+
+    override fun forceReconnect() = testConnection(force = true)
+
+    override fun globalColdStartRefresh(currentId: String) = performGlobalColdStartRefresh(currentId = currentId)
+
+    override fun setStaleNotice() {
+        updateState { it.copy(staleNotice = true) }
     }
+
+    override fun clearDraft() = clearDraftIfActive()
+
+    override fun cancelSse() {
+        sseJob?.cancel()
+        sseJob = null
+    }
+
+    override fun catchUpAfterDisconnect(sessionId: String) =
+        catchUpAfterDisconnectOrForeground(sessionId)
+
+    override fun currentSessionId(): String? = _state.value.currentSessionId
 
     /**
      * §Stage D (gpter 阻塞 #1): tear down any in-flight SSE feed BEFORE the
@@ -1273,9 +1185,8 @@ class MainViewModel @Inject constructor(
         sseJob = null
         // §Phase1E: a host/profile switch is a fresh server — treat the next
         // connect as a cold start (skip catch-up, the reconfigure path loads
-        // sessions/messages itself).
-        sseHasConnectedOnce = false
-        suppressNextConnectCatchUp = false
+        // sessions/messages itself). R-16 M1: delegated to the controller.
+        foregroundCatchUpController.onHostReconfigured()
     }
 
     /**
@@ -2856,23 +2767,13 @@ class MainViewModel @Inject constructor(
     private fun handleSSEEvent(event: SSEEvent) {
         // §Phase1E: every (re)connect's first frame is `server.connected`.
         // Catch-up runs on every connect EXCEPT the very first process-time
-        // connect (cold start has no local history). [sseHasConnectedOnce]
-        // covers BOTH reconnect kinds: foreground startSSE reconnects AND
-        // in-flow retryWhen reconnects inside SSEClient.connect (a counter
-        // would miss the latter and silently skip catch-up after a watchdog /
-        // network-drop recovery). The foreground tiers set
-        // [suppressNextConnectCatchUp] to skip the probe for <15s (throttled)
-        // and >5min (cold-start already loaded) — consumed here (once) so only
-        // a genuine network-drop reconnect or the 15s–5min tier catches up.
+        // connect (cold start has no local history). The three-tier suppress /
+        // sseHasConnectedOnce state machine now lives in
+        // [foregroundCatchUpController] (R-16 M1); it calls back into
+        // [catchUpAfterDisconnectOrForeground] via [ForegroundCatchUpCallbacks]
+        // when a probe is actually warranted.
         if (event.payload.type == "server.connected") {
-            val suppress = suppressNextConnectCatchUp
-            suppressNextConnectCatchUp = false
-            val doCatchUp = sseHasConnectedOnce && !suppress
-            DebugLog.i("SSE", "server.connected: sseHasConnectedOnce=$sseHasConnectedOnce suppress=$suppress → ${if (doCatchUp) "catch-up" else "skip"}")
-            if (doCatchUp) {
-                _state.value.currentSessionId?.let { catchUpAfterDisconnectOrForeground(it) }
-            }
-            sseHasConnectedOnce = true
+            foregroundCatchUpController.onServerConnected()
         }
         handleIncomingSseEvent(
             state = _state,
@@ -2893,21 +2794,10 @@ class MainViewModel @Inject constructor(
     private companion object {
         private const val TAG = "MainViewModel"
 
-        /**
-         * SSE-trust model: minimum interval between foreground (ON_START)
-         * catch-up message reloads. Avoids re-downloading the latest message
-         * window on rapid background→foreground cycling. Mirrors opencode-web,
-         * which has no idle/foreground reload at all.
-         */
-        private const val FOREGROUND_RELOAD_MIN_INTERVAL_MS = 15_000L
+        // R-16 M1: FOREGROUND_RELOAD_MIN_INTERVAL_MS (15s) and
+        // LONG_ABSENCE_THRESHOLD_MS (5min) moved to
+        // ForegroundCatchUpController.companion.
 
-        /**
-         * §Phase1E: background absence above this switches the foreground
-         * return from catch-up (probe + tail reload + gap detect) to a full
-         * global cold-start + stale-notice banner. 5 minutes — beyond this a
-         * manual gap closure is impractical and "history not important" wins.
-         */
-        private const val LONG_ABSENCE_THRESHOLD_MS = 5 * 60 * 1000L
 
         /**
          * §Per-session message cache capacity: max number of session windows
