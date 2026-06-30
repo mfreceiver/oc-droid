@@ -35,6 +35,8 @@
     <string name="settings_traffic_received">接收</string>
     <string name="settings_traffic_total">总计</string>
     <string name="settings_traffic_reset">重置</string>
+    <string name="settings_low_traffic">省流模式</string>
+    <string name="settings_low_traffic_summary">关闭实时 SSE 推送，改用轮询同步当前会话以节省流量。新消息可能会有短暂延迟。</string>
     <string name="host_profile_edit_icon">编辑</string>
     <string name="host_profile_test_icon">测试连接</string>
     <string name="host_profile_delete_confirm_title">删除配置</string>
@@ -152,6 +154,7 @@
     <string name="sessions_picker_empty">没有子目录</string>
     <string name="sessions_disconnect_workdir">取消连接</string>
     <string name="sessions_disconnect_confirm">取消连接此项目？</string>
+    <string name="sessions_archive_confirm">归档此会话？归档后将从列表隐藏。</string>
     <string name="server_dialog_title">服务器</string>
     <string name="server_dialog_no_hosts">未配置主机</string>
     <string name="server_dialog_refresh">刷新</string>

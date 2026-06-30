@@ -20,6 +20,7 @@ import com.yage.opencode_client.ui.UnreadState
 import com.yage.opencode_client.ui.syncSlicesFromAppState
 import io.mockk.unmockkAll
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.test.TestScope
 import kotlinx.serialization.json.JsonObjectBuilder
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.add
@@ -55,6 +56,7 @@ class SessionSyncCoordinatorTest {
     private lateinit var state: MutableStateFlow<AppState>
     private lateinit var slices: SliceFlows
     private lateinit var callbacks: RecordingSessionSyncCoordinatorCallbacks
+    private lateinit var scope: TestScope
     private lateinit var coordinator: SessionSyncCoordinator
 
     @Before
@@ -72,7 +74,8 @@ class SessionSyncCoordinatorTest {
             host = MutableStateFlow(HostState())
         )
         callbacks = RecordingSessionSyncCoordinatorCallbacks()
-        coordinator = SessionSyncCoordinator(state, slices, callbacks)
+        scope = TestScope()
+        coordinator = SessionSyncCoordinator(scope, state, slices, callbacks)
     }
 
     @After
@@ -439,7 +442,7 @@ class SessionSyncCoordinatorTest {
     // ── message.part.delta (web independent event) ──────────────────────────
 
     @Test
-    fun `message part delta accumulates into streamingPartTexts keyed by partId`() {
+    fun `message part delta leading edge writes immediately and trailing deltas coalesce into a 100ms batch`() {
         setCurrentSession("session-1")
 
         fun delta(d: String) = coordinator.handleEvent(event("message.part.delta") {
@@ -451,10 +454,105 @@ class SessionSyncCoordinatorTest {
         })
 
         delta("Hello")
-        delta(", world")
+        // §M5 leading edge: first delta renders immediately (zero-latency first token).
+        assertEquals("Hello", slices.chat.value.streamingPartTexts["part-1"])
 
-        assertEquals("Hello, world", slices.chat.value.streamingPartTexts["part-1"])
+        delta(", world")
+        delta("!")
+        // §M5 trailing coalesce: subsequent deltas buffer within the 100ms window
+        // — they do NOT each trigger a state write / Compose recomposition.
+        assertEquals("Hello", slices.chat.value.streamingPartTexts["part-1"])
+
+        // Advance virtual time past the DELTA_COALESCE_MS window → one batched flush.
+        scope.testScheduler.advanceUntilIdle()
+
+        assertEquals("Hello, world!", slices.chat.value.streamingPartTexts["part-1"])
         assertTrue(callbacks.onRefreshMessagesCalls.isEmpty())
+    }
+
+    @Test
+    fun `message part delta opens a fresh leading edge after the coalesce window flushes`() {
+        setCurrentSession("session-1")
+
+        fun delta(d: String) = coordinator.handleEvent(event("message.part.delta") {
+            put("sessionID", JsonPrimitive("session-1"))
+            put("messageID", JsonPrimitive("message-1"))
+            put("partID", JsonPrimitive("part-1"))
+            put("delta", JsonPrimitive(d))
+        })
+
+        delta("A")
+        delta("B")
+        scope.testScheduler.advanceUntilIdle()
+        assertEquals("AB", slices.chat.value.streamingPartTexts["part-1"])
+
+        // After the window closed, the next delta starts a new leading edge
+        // (writes immediately), then a new 100ms window opens.
+        delta("C")
+        assertEquals("ABC", slices.chat.value.streamingPartTexts["part-1"])
+        delta("D")
+        assertEquals("ABC", slices.chat.value.streamingPartTexts["part-1"])
+
+        scope.testScheduler.advanceUntilIdle()
+        assertEquals("ABCD", slices.chat.value.streamingPartTexts["part-1"])
+    }
+
+    @Test
+    fun `message part updated full text cancels a pending delta flush so the snapshot stays authoritative`() {
+        setCurrentSession("session-1")
+
+        fun delta(d: String) = coordinator.handleEvent(event("message.part.delta") {
+            put("sessionID", JsonPrimitive("session-1"))
+            put("messageID", JsonPrimitive("message-1"))
+            put("partID", JsonPrimitive("part-1"))
+            put("delta", JsonPrimitive(d))
+        })
+
+        delta("partial")
+        // Buffered delta that would corrupt the authoritative snapshot if flushed.
+        delta(" STALE")
+        assertEquals("partial", slices.chat.value.streamingPartTexts["part-1"])
+
+        // Authoritative full text supersedes the streaming accumulation for part-1.
+        coordinator.handleEvent(event("message.part.updated") {
+            put("sessionID", JsonPrimitive("session-1"))
+            put("part", buildJsonObject {
+                put("messageID", JsonPrimitive("message-1"))
+                put("id", JsonPrimitive("part-1"))
+                put("type", JsonPrimitive("text"))
+                put("text", JsonPrimitive("AUTHORITATIVE"))
+            })
+        })
+        assertEquals("AUTHORITATIVE", slices.chat.value.streamingPartTexts["part-1"])
+
+        // Advancing the scheduler must NOT re-inject the cancelled STALE buffer.
+        scope.testScheduler.advanceUntilIdle()
+        assertEquals("AUTHORITATIVE", slices.chat.value.streamingPartTexts["part-1"])
+    }
+
+    @Test
+    fun `message part created with null ids clears all pending delta buffers`() {
+        setCurrentSession("session-1")
+        seed { it.copy(streamingPartTexts = mapOf("part-1" to "partial")) }
+
+        coordinator.handleEvent(event("message.part.delta") {
+            put("sessionID", JsonPrimitive("session-1"))
+            put("messageID", JsonPrimitive("message-1"))
+            put("partID", JsonPrimitive("part-1"))
+            put("delta", JsonPrimitive(" MORE"))
+        })
+        assertEquals("partial MORE", slices.chat.value.streamingPartTexts["part-1"])
+
+        // part.created wipes the whole overlay → pending buffers must be dropped.
+        coordinator.handleEvent(event("message.part.updated") {
+            put("sessionID", JsonPrimitive("session-1"))
+            put("part", buildJsonObject { put("type", JsonPrimitive("text")) })
+        })
+
+        assertTrue(slices.chat.value.streamingPartTexts.isEmpty())
+        // Advancing time must not resurrect any buffered delta into the cleared overlay.
+        scope.testScheduler.advanceUntilIdle()
+        assertTrue(slices.chat.value.streamingPartTexts.isEmpty())
     }
 
     @Test

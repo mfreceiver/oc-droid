@@ -16,7 +16,11 @@ import com.yage.opencode_client.ui.reasoningPartOrNull
 import com.yage.opencode_client.ui.updateAndSync
 import com.yage.opencode_client.ui.upsertSession
 import com.yage.opencode_client.util.DebugLog
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.launch
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.decodeFromJsonElement
@@ -89,10 +93,21 @@ interface SessionSyncCoordinatorCallbacks {
  */
 @Suppress("DEPRECATION")
 internal class SessionSyncCoordinator(
+    private val scope: CoroutineScope,
     private val state: MutableStateFlow<AppState>,
     private val slices: SliceFlows,
     private val callbacks: SessionSyncCoordinatorCallbacks
 ) {
+    /**
+     * §M5 delta coalescing (docs/省流模式设计.md §4): per-partId trailing buffer
+     * and flush jobs. The leading-edge delta writes immediately; subsequent
+     * deltas within [DELTA_COALESCE_MS] are appended to [deltaBuffer] and
+     * flushed in one batch when the window expires — collapsing per-token
+     * Compose recompositions into one-per-window. Keyed by partId (matches
+     * streamingPartTexts rekeying, S4).
+     */
+    private val deltaBuffer = mutableMapOf<String, StringBuilder>()
+    private val flushJobs = mutableMapOf<String, Job>()
     /**
      * Entry point for every SSE event. Mirrors the pre-extraction
      * `MainViewModel.handleSSEEvent`: first the `server.connected` catch-up
@@ -315,7 +330,10 @@ internal class SessionSyncCoordinator(
                         if (!fullText.isNullOrBlank()) {
                             // Server sent full accumulated text — use it as the
                             // authoritative streaming value (replaces delta
-                            // accumulation, acts as a sync point).
+                            // accumulation, acts as a sync point). §M5: cancel any
+                            // pending delta flush so a stale buffered append can't
+                            // corrupt the authoritative snapshot after this write.
+                            cancelDeltaFlush(key)
                             state.updateAndSync(slices) {
                                 it.copy(
                                     streamingPartTexts = it.streamingPartTexts + (key to fullText),
@@ -351,7 +369,10 @@ internal class SessionSyncCoordinator(
                         // §15.1 (review B3): a true `part.created` (no message/part
                         // id yet) signals the start of a fresh streaming run —
                         // clear any stale partials and reload so we render the
-                        // server-authoritative snapshot.
+                        // server-authoritative snapshot. §M5: also drop all pending
+                        // delta buffers — the whole overlay is being wiped, so any
+                        // buffered tokens belong to the previous run.
+                        clearDeltaBuffers()
                         state.updateAndSync(slices) {
                             it.copy(streamingPartTexts = emptyMap(), streamingReasoningPart = null)
                         }
@@ -383,10 +404,25 @@ internal class SessionSyncCoordinator(
                 val delta = event.payload.getString("delta")
                 if (!delta.isNullOrEmpty()) {
                     val key = partId
-                    // Read previous inside the atomic update (TOCTOU-safe append).
-                    state.updateAndSync(slices) {
-                        val previous = it.streamingPartTexts[key].orEmpty()
-                        it.copy(streamingPartTexts = it.streamingPartTexts + (key to (previous + delta)))
+                    // §M5 delta coalescing (docs/省流模式设计.md §4): leading-edge
+                    // immediate + trailing 100ms coalesce per partId. The FIRST
+                    // delta for a partId writes straight to streamingPartTexts
+                    // (zero-latency first-token feel); subsequent deltas within
+                    // DELTA_COALESCE_MS are buffered and flushed in one batch,
+                    // collapsing per-token Compose recompositions into one-per-
+                    // window. Keyed by partId (S4: streamingPartTexts is rekeyed
+                    // from "msgId:partId" to partId, matching UI consumers).
+                    if (flushJobs[key]?.isActive != true) {
+                        // Leading edge: write now, then open the coalesce window.
+                        state.updateAndSync(slices) {
+                            val previous = it.streamingPartTexts[key].orEmpty()
+                            it.copy(streamingPartTexts = it.streamingPartTexts + (key to (previous + delta)))
+                        }
+                        scheduleDeltaFlush(key)
+                    } else {
+                        // Trailing coalesce: buffer; the pending DELTA_COALESCE_MS
+                        // flush will append the batch in one state write.
+                        deltaBuffer.getOrPut(key) { StringBuilder() }.append(delta)
                     }
                 }
             }
@@ -448,5 +484,78 @@ internal class SessionSyncCoordinator(
                 current.copy(unreadSessions = current.unreadSessions + sessionId)
             }
         }
+    }
+
+    // ── §M5 delta coalescing helpers (docs/省流模式设计.md §4) ────────────────
+
+    /**
+     * Opens (or reopens) the [DELTA_COALESCE_MS] trailing-coalesce window for
+     * [partId]. Scheduled on the leading-edge delta; while the launched job is
+     * alive, subsequent deltas append to [deltaBuffer] instead of writing.
+     */
+    private fun scheduleDeltaFlush(partId: String) {
+        // Defensive: a stale/completed entry should never coexist with a leading
+        // edge (the window self-clears on flush), but cancel anyway to avoid
+        // ever having two flush jobs racing for one partId.
+        flushJobs[partId]?.cancel()
+        flushJobs[partId] = scope.launch {
+            delay(DELTA_COALESCE_MS)
+            flushDeltaBuffer(partId)
+        }
+    }
+
+    /**
+     * Flushes [partId]'s buffered deltas into [AppState.streamingPartTexts] in
+     * a single atomic append (TOCTOU-safe). Self-removes from [flushJobs] /
+     * [deltaBuffer]. If the overlay was cleared mid-window (session switch /
+     * part.created / ViewModel reset wiped streamingPartTexts), the buffer is
+     * dropped — re-injecting stale tokens into the new view would render ghost
+     * text from the previous session.
+     */
+    private fun flushDeltaBuffer(partId: String) {
+        flushJobs.remove(partId)
+        val buffered = deltaBuffer.remove(partId)
+        if (buffered == null || buffered.isEmpty()) return
+        // Guard: the leading-edge value must still be present. An intervening
+        // overlay clear means the buffered text is stale → drop, don't append.
+        if (state.value.streamingPartTexts[partId] == null) return
+        val text = buffered.toString()
+        state.updateAndSync(slices) {
+            val previous = it.streamingPartTexts[partId].orEmpty()
+            it.copy(streamingPartTexts = it.streamingPartTexts + (partId to (previous + text)))
+        }
+    }
+
+    /**
+     * Cancels [partId]'s pending flush and drops its buffer. Called when an
+     * authoritative full-text `message.part.updated` supersedes the streaming
+     * accumulation for this partId (so a stale buffered append can't corrupt
+     * the snapshot after the authoritative write).
+     */
+    private fun cancelDeltaFlush(partId: String) {
+        flushJobs.remove(partId)?.cancel()
+        deltaBuffer.remove(partId)
+    }
+
+    /**
+     * Drops ALL pending delta buffers and cancels their flush jobs. Called when
+     * the whole streaming overlay is wiped (part.created now; session switch /
+     * SSE stop / ViewModel clear may be wired by the caller — see
+     * docs/省流模式设计.md §4.2). Safe to call repeatedly.
+     */
+    fun clearDeltaBuffers() {
+        flushJobs.values.forEach { it.cancel() }
+        flushJobs.clear()
+        deltaBuffer.clear()
+    }
+
+    companion object {
+        /**
+         * §M5 trailing-coalesce window (docs/省流模式设计.md §7). Leading-edge
+         * delta writes immediately; subsequent deltas within this window are
+         * batched into one flush → one Compose recomposition per window instead
+         * of one per token.
+         */
+        private const val DELTA_COALESCE_MS = 100L
     }
 }

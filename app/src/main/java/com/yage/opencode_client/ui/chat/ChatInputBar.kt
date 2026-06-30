@@ -220,7 +220,8 @@ internal fun ChatInputBar(
 
             // Editor row — §9: the card's shape/elevation come from the outer
             // Surface; this Row only lays out the field + buttons (no clip /
-            // background). Field minHeight is 52dp.
+            // background). Field minHeight is 24dp (single line); maxLines = 3
+            // lets it grow up to 3 lines.
             // §3a: layout is now [+] [input weight(1f)] [send] — the attachment
             // "+" sits to the LEFT of the field (external), matching the
             // standard mobile composer affordance and freeing the right edge
@@ -270,7 +271,7 @@ internal fun ChatInputBar(
                         onValueChange = onTextChange,
                         modifier = Modifier
                             .fillMaxWidth()
-                            .heightIn(min = 52.dp, max = 120.dp),
+                            .heightIn(min = 24.dp, max = 120.dp),
                         textStyle = LocalTextStyle.current.copy(color = MaterialTheme.colorScheme.onSurface),
                         cursorBrush = SolidColor(MaterialTheme.colorScheme.primary),
                         maxLines = 3

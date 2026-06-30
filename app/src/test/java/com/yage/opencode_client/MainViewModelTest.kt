@@ -1450,7 +1450,18 @@ class MainViewModelTest {
         )
 
         delta("Hello")
+        // §M5 leading edge: the first delta writes immediately (zero-latency
+        // first token). The trailing-coalesce window is now open.
+        assertEquals("Hello", viewModel.chatFlow.value.streamingPartTexts["part-1"])
+
         delta(", world")
+        // §M5 trailing coalesce: subsequent deltas buffer within the 100ms
+        // window — they do NOT each trigger a state write.
+        assertEquals("Hello", viewModel.chatFlow.value.streamingPartTexts["part-1"])
+
+        // Advance the virtual clock past DELTA_COALESCE_MS so the batched flush
+        // appends the buffered delta in one state write.
+        advanceUntilIdle()
 
         assertEquals("Hello, world", viewModel.chatFlow.value.streamingPartTexts["part-1"])
         // No reload issued.

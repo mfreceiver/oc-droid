@@ -84,6 +84,8 @@ fun SettingsScreen(
     }
 
     var showHostProfiles by remember { mutableStateOf(false) }
+    // 省流模式开关初始态从持久化读取；后续由 onCheckedChange 驱动本地状态。
+    var lowTrafficMode by remember { mutableStateOf(viewModel.isLowTrafficMode()) }
 
     if (showHostProfiles) {
         HostProfilesManagerScreen(
@@ -136,6 +138,17 @@ fun SettingsScreen(
                 sent = traffic.trafficSent,
                 received = traffic.trafficReceived,
                 onReset = viewModel::resetTrafficStats
+            )
+
+            SettingsSectionDivider()
+
+            LowTrafficSection(
+                enabled = lowTrafficMode,
+                onToggle = { enabled ->
+                    // 即时持久化（M3 守卫 + M1 轮询读最新值生效）；本地状态同步刷新。
+                    lowTrafficMode = enabled
+                    viewModel.onLowTrafficModeChanged(enabled)
+                }
             )
 
             SettingsSectionDivider()

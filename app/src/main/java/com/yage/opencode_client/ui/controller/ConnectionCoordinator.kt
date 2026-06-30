@@ -352,6 +352,14 @@ internal class ConnectionCoordinator(
      * free function.
      */
     fun startSSE() {
+        // 省流模式 M3（`docs/省流模式设计.md` §3）：省流模式下 SSE firehose 不
+        // 启动（实测 69MB/5min 流量大头），改由 LowTrafficPoller（M1）轮询驱动
+        // 当前 session 同步。关闭省流后下一次 startSSE 调用自然恢复实时推送。
+        // cancelSse 仍可正常调用（sseJob 为 null 时 no-op）。
+        if (settingsManager.lowTrafficMode) {
+            DebugLog.i("SSE", "startSSE skipped (low-traffic mode)")
+            return
+        }
         DebugLog.i("SSE", "startSSE")
         sseJob?.cancel()
         sseJob = launchSseCollection()

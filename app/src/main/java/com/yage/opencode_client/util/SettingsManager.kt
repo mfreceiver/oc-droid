@@ -105,6 +105,21 @@ class SettingsManager @Inject constructor(
         set(value) = encryptedPrefs.edit().putString(KEY_THEME, value.name).apply()
 
     /**
+     * 省流模式（low-traffic mode）总开关（`docs/省流模式设计.md` §3 M0）。
+     *
+     * 开启后：SSE 不启动（M3，`ConnectionCoordinator.startSSE` 守卫），改由
+     * `LowTrafficPoller`（M1，后续）轮询驱动当前 session 同步；关闭后下一次
+     * `startSSE` 调用自然恢复实时推送。模式切换只重载当前 session，不清其他
+     * session 缓存（§1.8 H）。
+     *
+     * 默认 false。在 [clearAllLocalData] 中加入保留白名单（reset 后保留用户
+     * 省流偏好，oracle S5）。
+     */
+    var lowTrafficMode: Boolean
+        get() = encryptedPrefs.getBoolean(KEY_LOW_TRAFFIC_MODE, false)
+        set(value) = encryptedPrefs.edit().putBoolean(KEY_LOW_TRAFFIC_MODE, value).apply()
+
+    /**
      * v2 字体脚手架（`docs/v2-redesign-plan.md` §20 / D5）。
      *
      * 4 键默认空字符串（= 系统字体）。本期只建存储 + 组装管线，不做 picker /
@@ -265,6 +280,10 @@ class SettingsManager @Inject constructor(
      * current session/workdir, nav page, theme + font preferences, traffic
      * counters — everything not listed above.
      *
+     * PRESERVED (additionally): [KEY_LOW_TRAFFIC_MODE] — the user's省流模式
+     * preference survives a local-data reset so they don't silently drop back
+     * to the high-traffic SSE firehose (oracle S5).
+     *
      * Implementation iterates the live key set and `.remove()`s each non-
      * preserved key in a single batched edit. This deliberately avoids
      * `.clear()` (which would also nuke the connection keys) and never touches
@@ -278,9 +297,12 @@ class SettingsManager @Inject constructor(
             KEY_HOST_PROFILES,
             KEY_CURRENT_HOST_PROFILE_ID
         )
+        // oracle S5: preserve the user's low-traffic-mode preference across a
+        // local-data reset so they don't silently drop back to the SSE firehose.
+        val preservedKeys = connectionKeys + KEY_LOW_TRAFFIC_MODE
         val e = encryptedPrefs.edit()
         for (k in encryptedPrefs.all.keys) {
-            val preserved = k in connectionKeys ||
+            val preserved = k in preservedKeys ||
                 k.startsWith("basic_auth_password_") ||
                 k.startsWith("tunnel_password_")
             if (!preserved) e.remove(k)
@@ -313,6 +335,7 @@ class SettingsManager @Inject constructor(
         private const val KEY_SESSION_CACHE = "session_cache"
         private const val KEY_TRAFFIC_SENT = "traffic_sent"
         private const val KEY_TRAFFIC_RECEIVED = "traffic_received"
+        private const val KEY_LOW_TRAFFIC_MODE = "low_traffic_mode"
 
         private fun basicAuthPasswordKey(passwordId: String): String = "basic_auth_password_$passwordId"
         private fun tunnelPasswordKey(id: String): String = "tunnel_password_$id"

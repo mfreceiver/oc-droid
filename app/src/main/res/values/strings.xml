@@ -35,6 +35,8 @@
     <string name="settings_traffic_received">Received</string>
     <string name="settings_traffic_total">Total</string>
     <string name="settings_traffic_reset">Reset</string>
+    <string name="settings_low_traffic">Low-Traffic Mode</string>
+    <string name="settings_low_traffic_summary">Disable the live SSE feed and sync the current session via polling to cut data usage. New messages may arrive with a short delay.</string>
     <string name="host_profile_edit_icon">Edit</string>
     <string name="host_profile_test_icon">Test connection</string>
     <string name="host_profile_delete_confirm_title">Delete profile</string>
@@ -152,6 +154,7 @@
     <string name="sessions_picker_empty">No subdirectories</string>
     <string name="sessions_disconnect_workdir">Disconnect</string>
     <string name="sessions_disconnect_confirm">Disconnect this project?</string>
+    <string name="sessions_archive_confirm">Archive this session? It will be hidden from the list.</string>
     <string name="server_dialog_title">Servers</string>
     <string name="server_dialog_no_hosts">No hosts configured</string>
     <string name="server_dialog_refresh">Refresh</string>

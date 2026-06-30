@@ -30,6 +30,8 @@ import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.FlowPreview
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -654,6 +656,7 @@ class MainViewModel @Inject constructor(
      */
     private val sessionSyncCoordinator: SessionSyncCoordinator =
         SessionSyncCoordinator(
+            scope = viewModelScope,
             state = _state,
             slices = sliceFlows,
             callbacks = this
@@ -1900,6 +1903,40 @@ class MainViewModel @Inject constructor(
         writeSettings { it.copy(themeMode = mode) }
     }
 
+    /**
+     * 省流模式当前值（`docs/省流模式设计.md` §3 M0）。供设置页 Switch 读取初始态。
+     */
+    fun isLowTrafficMode(): Boolean = settingsManager.lowTrafficMode
+
+    /**
+     * 省流模式切换入口（`docs/省流模式设计.md` §1.8 H / §3 M0）。
+     *
+     * 行为：
+     *  1. 立即持久化新值到 [settingsManager]（M3 的 `ConnectionCoordinator
+     *     .startSSE` 守卫、后续 M1 轮询都会读最新值，即时生效）。
+     *  2. 触发当前 session 重载（`resetLimit=true`），让用户立即看到省流/
+     *     实时模式的同步结果——但**不清 `sessionWindowCache` 中其他 session
+     *     的缓存**（dser 🟠-3）：只调用 [loadMessages]，不调用全局冷启动刷新。
+     *  3. 加 3s 防抖（`LOW_TRAFFIC_MODE_DEBOUNCE_MS`）避免快速来回切反噬省流
+     *     ——每次切换取消前一个待执行的 reload Job，重新计时。
+     *
+     * SSE 的启停由调用方按需触发（M3 守卫让省流模式下 startSSE no-op；关闭省流
+     * 后由连接流程的下次 startSSE 恢复），这里只负责持久化 + 当前 session reload。
+     */
+    private var lowTrafficModeReloadJob: Job? = null
+
+    fun onLowTrafficModeChanged(enabled: Boolean) {
+        settingsManager.lowTrafficMode = enabled
+        lowTrafficModeReloadJob?.cancel()
+        lowTrafficModeReloadJob = viewModelScope.launch {
+            delay(LOW_TRAFFIC_MODE_DEBOUNCE_MS)
+            val sessionId = _chatFlow.value.currentSessionId ?: return@launch
+            // §1.8 H: 只重载当前 session；不清其他 session 缓存（不调
+            // performGlobalColdStartRefresh / clearSessionWindowCache）。
+            loadMessages(sessionId, resetLimit = true)
+        }
+    }
+
     fun setMarkdownFontSizes(sizes: MarkdownFontSizes) {
         settingsManager.markdownFontSizes = sizes
         writeSettings { it.copy(markdownFontSizes = sizes) }
@@ -2144,6 +2181,9 @@ class MainViewModel @Inject constructor(
 
     private companion object {
         private const val TAG = "MainViewModel"
+
+        /** 省流模式切换后重载当前 session 的防抖（§1.8 H，避免快速来回切反噬省流）。 */
+        private const val LOW_TRAFFIC_MODE_DEBOUNCE_MS = 3000L
 
         // R-16 M1: FOREGROUND_RELOAD_MIN_INTERVAL_MS (15s) and
         // LONG_ABSENCE_THRESHOLD_MS (5min) moved to

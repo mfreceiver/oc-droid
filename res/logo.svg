@@ -1,0 +1,46 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512" fill="none">
+  <rect width="512" height="512" fill="#131010"/>
+
+  <path
+    fill-rule="evenodd"
+    clip-rule="evenodd"
+    d="M384 416H128V96H384V416ZM320 160H192V352H320V160Z"
+    fill="white"
+  />
+
+  <path d="M320 224V352H192V224H320Z" fill="#5A5858"/>
+
+  <g>
+    <path
+      d="M176 82
+         A78 78 0 0 0 176 238
+         H336
+         A78 78 0 0 0 336 82
+         H176Z"
+      fill="#767272"
+    />
+
+    <circle cx="192" cy="160" r="58" fill="#201D1D"/>
+    <circle cx="320" cy="160" r="58" fill="#201D1D"/>
+
+    <circle cx="192" cy="160" r="34" fill="#454141"/>
+    <circle cx="320" cy="160" r="34" fill="#454141"/>
+
+    <circle cx="192" cy="160" r="16" fill="#131010"/>
+    <circle cx="320" cy="160" r="16" fill="#131010"/>
+
+    <rect x="236" y="130" width="40" height="60" rx="20" fill="#131010"/>
+
+    <circle cx="172" cy="140" r="8" fill="#AAA6A6"/>
+    <circle cx="300" cy="140" r="8" fill="#AAA6A6"/>
+  </g>
+
+  <style>
+    @media (prefers-color-scheme: light) {
+      :root { filter: none; }
+    }
+    @media (prefers-color-scheme: dark) {
+      :root { filter: none; }
+    }
+  </style>
+</svg>

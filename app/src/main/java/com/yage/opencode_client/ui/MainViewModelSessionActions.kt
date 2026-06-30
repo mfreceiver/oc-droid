@@ -719,12 +719,17 @@ internal fun launchLoadMessagesWithRetry(
  * 2. Probe the server's newest id (limit=1). If it equals the local newest,
  *    nothing arrived during the outage → skip the reload entirely (the big
  *    traffic saving). Any pre-existing open gap is preserved as-is.
- * 3. Otherwise fetch the latest-5 and merge (resetLimit=false semantics: keep
- *    older history + cursor + streaming overlay), then run gap detection:
- *    if the anchor (pre-reload newest) is NOT in the fetched window, messages
- *    arrived that fall outside the tail → set [GapInfo] so the UI shows a
- *    tappable divider. Also clears `staleNotice` (a successful catch-up means
- *    we're current again).
+ * 3. Otherwise fetch the latest-4 (sentinel) and merge (resetLimit=false
+ *    semantics: keep older history + cursor + streaming overlay), then run
+ *    gap detection. §省流 M2 / gpter 致命#4 (sentinel off-by-one): reload
+ *    pulls 4 (3 display + 1 sentinel). If the anchor (pre-reload newest) is
+ *    anywhere in the fetched window — INCLUDING the 4th sentinel slot — the
+ *    tail is contiguous → no gap. This makes the "exactly N new" boundary
+ *    correct: when precisely 3 new messages arrived the anchor lands at the
+ *    sentinel (oldest) position and is still detected, avoiding a false gap.
+ *    If the anchor is NOT in the fetched window → messages arrived outside
+ *    the tail → set [GapInfo] so the UI shows a tappable divider. Also
+ *    clears `staleNotice` (a successful catch-up means we're current again).
  *
  * Does NOT touch `olderMessagesCursor`/`hasMoreMessages` (resetLimit=false).
  * No-op when a load is already in flight (coalesced with [launchLoadMessages]
@@ -763,7 +768,7 @@ internal fun launchCatchUp(
             return@launch
         }
 
-        repository.getMessagesPaged(sessionId, 5, before = null)
+        repository.getMessagesPaged(sessionId, 4, before = null)
             .onSuccess { page ->
                 if (sessionId != state.value.currentSessionId) {
                     state.updateAndSync(slices) { it.copy(isLoadingMessages = false) }
@@ -788,8 +793,11 @@ internal fun launchCatchUp(
                 val mergedMessages = olderKept + fetchedMessages
                 val mergedParts = state.value.partsByMessage.filterKeys { id -> id in olderKeptIds } + fetchedParts
 
-                // §Phase1C gap detection: anchor (pre-reload newest) not in the
-                // fetched window → messages arrived outside the 5-msg tail.
+                // §省流 M2 / gpter 致命#4 (sentinel gap detection): the anchor
+                // (pre-reload newest) ANYWHERE in the fetched 4-window — including
+                // the 4th sentinel slot — means the tail is contiguous → no gap.
+                // Fetching 4 (not 3) ensures the "exactly 3 new" boundary lands
+                // the anchor at the sentinel (oldest) position, still detected.
                 val tailOldestId = page.items
                     .minByOrNull { it.info.time?.created ?: Long.MAX_VALUE }?.info?.id
                 val newGap = if (anchorNewestId != null && tailOldestId != null && anchorNewestId !in fetchedIds) {
@@ -848,13 +856,33 @@ internal fun launchCatchUp(
 }
 
 /**
- * §Phase1C user-triggered gap closure (loadMore-style). Pages OLDER from the
- * gap's [GapInfo.tailOldestCursor] until the [GapInfo.anchorNewestId] reappears
- * (gap closed → clear gapInfo) or the cursor is exhausted (give up, mark closed).
+ * §省流 M2 default gap-closure step (messages per page) and the auto-closure
+ * budget cap. Auto-closure pages `step` messages at a time from the gap's
+ * [GapInfo.tailOldestCursor]; after [GAP_CLOSE_MAX_STEPS] pages without
+ * reaching the anchor it stops and leaves the gap hint (open [GapInfo]) for a
+ * manual tap, which re-enters [launchCloseGap] with a fresh budget.
+ */
+internal const val GAP_CLOSE_STEP_DEFAULT = 3
+internal const val GAP_CLOSE_MAX_STEPS = 5
+
+/**
+ * §Phase1C gap closure (loadMore-style), extended by §省流 M2.
+ *
+ * Pages OLDER from the gap's [GapInfo.tailOldestCursor] in steps of [step]
+ * messages until the [GapInfo.anchorNewestId] reappears (gap closed → clear
+ * gapInfo) or one of the stop conditions hits:
+ *  - cursor exhausted before the anchor → can't bridge → mark [GapInfo.open]
+ *    = false (hide divider).
+ *  - [maxSteps] pages fetched without finding the anchor → budget exhausted →
+ *    STOP auto-closure and leave [GapInfo] open so the UI keeps showing the
+ *    tappable divider; a manual tap re-enters this function with a fresh
+ *    budget (§省流 §1.4 "预算重置").
+ *
  * Uses a SEPARATE cursor chain from [launchLoadMoreMessages] so the two paging
  * anchors (gap boundary vs loaded-oldest) never pollute each other. Closure
- * check runs on the RAW page (before dedup) since `before=` is inclusive and the
- * anchor may sit at the page boundary.
+ * check runs on the RAW page (before dedup) since `before=` is inclusive and
+ * the anchor may sit at the page boundary. State is written progressively
+ * after each step so the divider follows the shrinking gap.
  */
 internal fun launchCloseGap(
     scope: CoroutineScope,
@@ -862,72 +890,97 @@ internal fun launchCloseGap(
     state: MutableStateFlow<AppState>,
     sessionId: String,
     onCacheWindow: (sessionId: String, window: CachedSessionWindow) -> Unit = { _, _ -> }
-, slices: SliceFlows? = null) {
+, slices: SliceFlows? = null,
+    // §省流 M2: parameterized step (default 3) replaces the old hardcoded
+    // limit=5. SSE-mode callers that omit it get step=3 (acceptable per design
+    // §1.4); 省流 callers pass step=3 explicitly.
+    step: Int = GAP_CLOSE_STEP_DEFAULT,
+    // §省流 M2: auto-closure budget cap. Default GAP_CLOSE_MAX_STEPS (=5).
+    // Pass 1 to force the legacy single-step-per-call behaviour.
+    maxSteps: Int = GAP_CLOSE_MAX_STEPS
+) {
 
-    val gap = state.value.gapInfo ?: return
-    if (!gap.open) return
+    val gap0 = state.value.gapInfo ?: return
+    if (!gap0.open) return
     if (state.value.isLoadingMessages) return
-    val cursor = gap.tailOldestCursor
-    if (cursor == null) {
+    if (step <= 0 || maxSteps <= 0) return // nothing to do; leave gap for manual
+    if (gap0.tailOldestCursor == null) {
         // No more history to page — can't bridge; stop showing the divider.
-        state.updateAndSync(slices) { it.copy(gapInfo = gap.copy(open = false)) }
+        state.updateAndSync(slices) { it.copy(gapInfo = gap0.copy(open = false)) }
         return
     }
     state.updateAndSync(slices) { it.copy(isLoadingMessages = true) }
     scope.launch {
-        repository.getMessagesPaged(sessionId, limit = 5, before = cursor)
-            .onSuccess { page ->
-                if (sessionId != state.value.currentSessionId) {
-                    state.updateAndSync(slices) { it.copy(isLoadingMessages = false) }
-                    return@onSuccess
-                }
-                // Closure check BEFORE dedup (raw page — `before=` is inclusive).
-                val closed = page.items.any { it.info.id == gap.anchorNewestId }
-                val existingIds = state.value.messages.map { it.id }.toHashSet()
-                val bridged = page.items.filterNot { it.info.id in existingIds }
-                val bridgedMessages = bridged.map { it.info }
-                val bridgedParts = bridged.associate { it.info.id to it.parts }
-                // §Phase1C (gpt-2 B2): the bridged page sits BETWEEN the anchor
-                // (older local history) and the tail's oldest — NOT at the list
-                // head. Insert it right before the tailOldestId position so the
-                // ascending-time order is preserved. The gap's lower boundary
-                // (tailOldestId) advances to the OLDEST id just loaded (the new
-                // seam between filled-gap and any still-missing range).
-                val newTailOldestId = bridged.minByOrNull { it.info.time?.created ?: Long.MAX_VALUE }?.info?.id
-                state.updateAndSync(slices) {
-                    val insertIdx = it.messages.indexOfFirst { m -> m.id == gap.tailOldestId }
-                    val mergedMessages = if (insertIdx >= 0) {
-                        it.messages.subList(0, insertIdx) + bridgedMessages + it.messages.subList(insertIdx, it.messages.size)
-                    } else {
-                        bridgedMessages + it.messages
+        var stepsTaken = 0
+        var gap = gap0
+        var cursor: String? = gap0.tailOldestCursor
+        while (true) {
+            if (sessionId != state.value.currentSessionId) break
+            val c = cursor
+            if (c == null) {
+                // History exhausted mid-walk without reaching the anchor →
+                // can't bridge; stop showing the divider.
+                state.updateAndSync(slices) { it.copy(gapInfo = it.gapInfo?.copy(open = false)) }
+                break
+            }
+            val page = repository.getMessagesPaged(sessionId, limit = step, before = c)
+                .getOrElse {
+                    if (sessionId == state.value.currentSessionId) {
+                        reportNonFatalIssue("MainViewModel", "Gap closure fetch failed")
                     }
-                    it.copy(
-                        messages = mergedMessages,
-                        partsByMessage = bridgedParts + it.partsByMessage,
-                        isLoadingMessages = false,
-                        gapInfo = if (closed) null else gap.copy(
-                            tailOldestId = newTailOldestId ?: gap.tailOldestId,
-                            tailOldestCursor = page.nextCursor
-                        )
-                    )
+                    state.updateAndSync(slices) { it.copy(isLoadingMessages = false) }
+                    return@launch
                 }
-                val postUpdate = state.value
-                onCacheWindow(
-                    sessionId,
-                    CachedSessionWindow(
-                        messages = postUpdate.messages,
-                        partsByMessage = postUpdate.partsByMessage,
-                        olderMessagesCursor = postUpdate.olderMessagesCursor,
-                        hasMoreMessages = postUpdate.hasMoreMessages
+            stepsTaken += 1
+            // Closure check BEFORE dedup (raw page — `before=` is inclusive).
+            val closed = page.items.any { it.info.id == gap.anchorNewestId }
+            val existingIds = state.value.messages.map { it.id }.toHashSet()
+            val bridged = page.items.filterNot { it.info.id in existingIds }
+            val bridgedMessages = bridged.map { it.info }
+            val bridgedParts = bridged.associate { it.info.id to it.parts }
+            // §Phase1C (gpt-2 B2): the bridged page sits BETWEEN the anchor
+            // (older local history) and the tail's oldest — NOT at the list
+            // head. Insert it right before the tailOldestId position so the
+            // ascending-time order is preserved. The gap's lower boundary
+            // (tailOldestId) advances to the OLDEST id just loaded (the new
+            // seam between filled-gap and any still-missing range).
+            val newTailOldestId = bridged.minByOrNull { it.info.time?.created ?: Long.MAX_VALUE }?.info?.id
+            state.updateAndSync(slices) {
+                val insertIdx = it.messages.indexOfFirst { m -> m.id == gap.tailOldestId }
+                val mergedMessages = if (insertIdx >= 0) {
+                    it.messages.subList(0, insertIdx) + bridgedMessages + it.messages.subList(insertIdx, it.messages.size)
+                } else {
+                    bridgedMessages + it.messages
+                }
+                it.copy(
+                    messages = mergedMessages,
+                    partsByMessage = bridgedParts + it.partsByMessage,
+                    gapInfo = if (closed) null else gap.copy(
+                        tailOldestId = newTailOldestId ?: gap.tailOldestId,
+                        tailOldestCursor = page.nextCursor
                     )
                 )
             }
-            .onFailure {
-                if (sessionId == state.value.currentSessionId) {
-                    reportNonFatalIssue("MainViewModel", "Gap closure fetch failed")
-                }
-                state.updateAndSync(slices) { it.copy(isLoadingMessages = false) }
-            }
+            if (closed) break
+            // Prepare the next iteration. Re-read the just-written gap so the
+            // divider advances; stop if state was unexpectedly cleared.
+            gap = state.value.gapInfo ?: break
+            cursor = page.nextCursor
+            // §省流 M2 budget cap: stop auto-closure after maxSteps and leave
+            // the gap hint open for a manual tap (fresh budget on re-entry).
+            if (stepsTaken >= maxSteps) break
+        }
+        state.updateAndSync(slices) { it.copy(isLoadingMessages = false) }
+        val postUpdate = state.value
+        onCacheWindow(
+            sessionId,
+            CachedSessionWindow(
+                messages = postUpdate.messages,
+                partsByMessage = postUpdate.partsByMessage,
+                olderMessagesCursor = postUpdate.olderMessagesCursor,
+                hasMoreMessages = postUpdate.hasMoreMessages
+            )
+        )
     }
 }
 

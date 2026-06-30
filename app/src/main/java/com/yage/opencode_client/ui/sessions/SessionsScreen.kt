@@ -1,9 +1,14 @@
 package com.yage.opencode_client.ui.sessions
 
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.LinearEasing
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
@@ -23,12 +28,14 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.yage.opencode_client.R
 import com.yage.opencode_client.data.model.Session
+import com.yage.opencode_client.data.model.SessionStatus
 import com.yage.opencode_client.ui.MainViewModel
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.map
@@ -72,6 +79,8 @@ fun SessionsScreen(
     // Locally-hidden workdirs (long-press → disconnect). UI-only; reset on refresh/re-enter tab.
     var hiddenWorkdirs by remember { mutableStateOf(setOf<String>()) }
     var pendingDisconnectWorkdir by remember { mutableStateOf<String?>(null) }
+    // M7: long-press a session card → archive confirmation dialog. Null = hidden.
+    var pendingArchiveSession by remember { mutableStateOf<Session?>(null) }
 
     // Derive recent sessions (root sessions: parentId == null, by time.updated desc, top 5).
     // Source merges the global sessions list with directorySessions (#10: prior
@@ -226,7 +235,9 @@ fun SessionsScreen(
                     SessionCard(
                         session = session,
                         isUnread = session.id in unreadSessions,
-                        onClick = { onSessionClick(session.id) }
+                        status = sessionListState.sessionStatuses[session.id],
+                        onClick = { onSessionClick(session.id) },
+                        onLongClick = { pendingArchiveSession = session }
                     )
                 }
             }
@@ -362,7 +373,11 @@ fun SessionsScreen(
                                     SessionCard(
                                         session = session,
                                         isUnread = session.id in unreadSessions,
-                                        onClick = { onSessionClick(session.id) }
+                                        status = sessionListState.sessionStatuses[session.id],
+                                        onClick = { onSessionClick(session.id) },
+                                        onLongClick = { pendingArchiveSession = session },
+                                        onArchive = { pendingArchiveSession = session },
+                                        showWorkdir = false
                                     )
                                 }
                             }
@@ -406,6 +421,37 @@ fun SessionsScreen(
         )
     }
 
+    // --- M7: Archive session confirmation dialog ---
+    // Long-pressing a session card sets pendingArchiveSession; confirming calls
+    // viewModel.archiveSession(id), which PATCHes session/{id} with the current
+    // timestamp. The server-returned Session (time.archived > 0 ⇒ isArchived)
+    // replaces the local copy, so the derivedStateOf filters (!it.isArchived)
+    // in recentSessions / workdirGroups drop it from the list automatically.
+    pendingArchiveSession?.let { session ->
+        AlertDialog(
+            onDismissRequest = { pendingArchiveSession = null },
+            title = { Text(stringResource(R.string.sessions_archive)) },
+            text = {
+                Text(stringResource(R.string.sessions_archive_confirm) + "\n\n" + session.displayName)
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        viewModel.archiveSession(session.id)
+                        pendingArchiveSession = null
+                    }
+                ) {
+                    Text(stringResource(R.string.sessions_archive))
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { pendingArchiveSession = null }) {
+                    Text(stringResource(R.string.common_cancel))
+                }
+            }
+        )
+    }
+
     // --- Directory picker (modal bottom sheet) for connecting a new project ---
     if (showNewWorkdirDialog) {
         DirectoryPickerSheet(
@@ -443,9 +489,19 @@ private fun SectionHeader(icon: androidx.compose.ui.graphics.vector.ImageVector,
 }
 
 @Composable
-private fun SessionCard(session: Session, isUnread: Boolean = false, onClick: () -> Unit) {
-    val dirBasename = session.directory.split("/").filter { it.isNotEmpty() }.lastOrNull()
-        ?: session.directory
+private fun SessionCard(
+    session: Session,
+    isUnread: Boolean = false,
+    status: SessionStatus? = null,
+    onClick: () -> Unit,
+    onLongClick: () -> Unit = {},
+    onArchive: (() -> Unit)? = null,
+    // When true (default), the session's workdir basename is shown in the
+    // subtitle. The connected-projects expanded list passes false because the
+    // enclosing group header already conveys the workdir; the top cross-workdir
+    // "recent sessions" list keeps it (its items can come from any project).
+    showWorkdir: Boolean = true
+) {
     // Prefer the latest message time (time.updated); fall back to time.created.
     val updatedText = (session.time?.updated?.takeIf { it > 0L } ?: session.time?.created?.takeIf { it > 0L })
         ?.let { formatTime(it) }
@@ -454,7 +510,10 @@ private fun SessionCard(session: Session, isUnread: Boolean = false, onClick: ()
         modifier = Modifier
             .fillMaxWidth()
             .padding(horizontal = 8.dp, vertical = 4.dp)
-            .clickable(onClick = onClick),
+            .combinedClickable(
+                onClick = onClick,
+                onLongClick = onLongClick
+            ),
         elevation = CardDefaults.elevatedCardElevation(defaultElevation = 1.dp)
     ) {
         Column(modifier = Modifier.padding(12.dp)) {
@@ -465,6 +524,24 @@ private fun SessionCard(session: Session, isUnread: Boolean = false, onClick: ()
                     color = MaterialTheme.colorScheme.onSurface,
                     modifier = Modifier.weight(1f)
                 )
+                // 归档 button on the right edge of the title row. Only rendered
+                // where a handler is supplied (connected-projects expanded list);
+                // omitted from the top "recent sessions" list.
+                if (onArchive != null) {
+                    TextButton(
+                        onClick = onArchive,
+                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp)
+                    ) {
+                        Text(
+                            text = stringResource(R.string.sessions_archive),
+                            style = MaterialTheme.typography.labelSmall
+                        )
+                    }
+                }
+                // M6: status indicator. busy → pulsing orange dot, retry → solid
+                // red dot, idle/none → nothing (avoid visual noise). Rendered
+                // before the unread dot so both can coexist on the right edge.
+                SessionStatusDot(status)
                 if (isUnread) {
                     // Small primary-colored unread dot on the right edge.
                     Box(
@@ -479,19 +556,22 @@ private fun SessionCard(session: Session, isUnread: Boolean = false, onClick: ()
                 }
             }
             Spacer(modifier = Modifier.height(2.dp))
-            Row(verticalAlignment = Alignment.CenterVertically) {
+            // Subtitle: the last-updated time always; the workdir basename only
+            // when showWorkdir is true (the connected-projects group omits it
+            // because its header already shows the workdir). Empty when there is
+            // neither a workdir nor a timestamp.
+            val subtitleParts = buildList {
+                if (showWorkdir) {
+                    session.directory.split("/").filter { it.isNotEmpty() }.lastOrNull()?.let { add(it) }
+                }
+                if (updatedText != null) add(updatedText)
+            }
+            if (subtitleParts.isNotEmpty()) {
                 Text(
-                    text = dirBasename,
+                    text = subtitleParts.joinToString("  •  "),
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
-                if (updatedText != null) {
-                    Text(
-                        text = "  •  $updatedText",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                }
             }
         }
     }
@@ -504,6 +584,47 @@ private fun EmptyRow(text: String) {
         style = MaterialTheme.typography.bodySmall,
         color = MaterialTheme.colorScheme.onSurfaceVariant,
         modifier = Modifier.padding(horizontal = 24.dp, vertical = 12.dp)
+    )
+}
+
+/**
+ * M6: Small (~8dp) status indicator rendered on the right edge of a session
+ * card's title row, just before the unread dot. Mapping (per 省流模式设计 M6):
+ * - busy → orange dot with a gentle alpha pulse (visually signals "working").
+ *   A pulse is used instead of the spec's "rotation" because rotation is
+ *   imperceptible on a featureless circle; pulsing is the conventional
+ *   busy/live idiom and reads at 8dp.
+ * - retry → solid red dot (no animation; distinguishes it from busy).
+ * - idle / null → nothing rendered (avoids noise per the spec's suggestion).
+ */
+@Composable
+private fun SessionStatusDot(status: SessionStatus?) {
+    if (status == null || status.isIdle) return
+    val color = when {
+        status.isBusy -> Color(0xFFFFA000) // amber/orange — readable on card surface
+        status.isRetry -> Color(0xFFE53935) // red — retry/error semantics
+        else -> return
+    }
+    // busy pulses alpha 0.4 ↔ 1.0; retry stays solid.
+    val alpha = if (status.isBusy) {
+        val transition = rememberInfiniteTransition(label = "busyPulse")
+        transition.animateFloat(
+            initialValue = 0.4f,
+            targetValue = 1f,
+            animationSpec = infiniteRepeatable(
+                animation = tween(durationMillis = 800, easing = LinearEasing),
+                repeatMode = RepeatMode.Reverse
+            ),
+            label = "busyPulseAlpha"
+        ).value
+    } else {
+        1f
+    }
+    Box(
+        modifier = Modifier
+            .padding(start = 8.dp)
+            .size(8.dp)
+            .background(color = color.copy(alpha = alpha), shape = CircleShape)
     )
 }
 
