@@ -122,6 +122,9 @@ dependencies {
     testImplementation(libs.kotlinx.coroutines.test)
     testImplementation(libs.turbine)
     testImplementation(libs.okhttp.mockwebserver)
+    // R-01 SSL 行为测试：HandshakeCertificates / HeldCertificate 用来给 MockWebServer
+    // 起自签名 HTTPS，验证 allowInsecureConnections=true/false 的双分支行为。
+    testImplementation(libs.okhttp.tls)
     
     androidTestImplementation(libs.androidx.junit)
     androidTestImplementation(libs.androidx.espresso.core)

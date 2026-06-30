@@ -31,6 +31,8 @@ import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 import okhttp3.mockwebserver.MockResponse
 import okhttp3.mockwebserver.MockWebServer
+import okhttp3.tls.HandshakeCertificates
+import okhttp3.tls.HeldCertificate
 import org.junit.After
 import org.junit.Assert.*
 import org.junit.Before
@@ -890,5 +892,105 @@ class OpenCodeRepositoryTest {
         val request = server.takeRequest()
         assertEquals("/workdir/project", request.getHeader("X-Opencode-Directory"))
         assertEquals("Basic YWxpY2U6c2VjcmV0", request.getHeader("Authorization"))
+    }
+
+    // --- R-01: SSL / allowInsecureConnections behavior ---
+    //
+    // SslConfig / sslConfigFor / applySsl 在生产代码里是 private sealed interface，
+    // 直接单元测不到；通过 HTTPS MockWebServer（自签名证书）做行为级验证，是最能
+    // 防回归的方式：未来 R-18 拆分 Repository 时，只要这两条用例仍绿，就证明
+    // "默认 trustAll" 没有被误重新引入。
+    //
+    // 双分支契约：
+    //   - allowInsecureConnections=false（默认）→ SystemDefault TLS，仅信任系统证书，
+    //     对自签名证书必须失败（SSLHandshakeException / 封装为 Result.failure）。
+    //   - allowInsecureConnections=true → TrustAll（trustAllTrustManager + 全放行
+    //     hostnameVerifier），对自签名证书必须成功。
+
+    /**
+     * 起一个 HTTPS MockWebServer，使用内存生成的自签名证书（CN=localhost + SAN
+     * localhost）。客户端用系统信任库验证时会失败；用 trust-all 时会通过。
+     * 调用方负责 `shutdown()`。
+     */
+    private fun startHttpsMockServer(): MockWebServer {
+        val heldCertificate = HeldCertificate.Builder()
+            .addSubjectAlternativeName("localhost")
+            .build()
+        val serverHandshakeCertificates = HandshakeCertificates.Builder()
+            .heldCertificate(heldCertificate)
+            .build()
+        val httpsServer = MockWebServer()
+        httpsServer.useHttps(serverHandshakeCertificates.sslSocketFactory(), false)
+        httpsServer.start()
+        return httpsServer
+    }
+
+    @Test
+    fun `checkHealth fails over HTTPS with self-signed cert when allowInsecure is disabled`() = runBlocking {
+        val httpsServer = startHttpsMockServer()
+        try {
+            // 默认 SystemDefault TLS：仅信任系统证书，自签名 cert 必须握手失败。
+            repository.configure(
+                baseUrl = httpsServer.url("/").toString().trimEnd('/'),
+                allowInsecureConnections = false
+            )
+            httpsServer.enqueue(
+                MockResponse()
+                    .setBody("""{"healthy": true, "version": "1.0.0"}""")
+                    .setHeader("Content-Type", "application/json")
+            )
+
+            val result = repository.checkHealth()
+
+            assertTrue(
+                "default TLS (SystemDefault) must reject self-signed cert, got $result",
+                result.isFailure
+            )
+            // SSLHandshakeException extends IOException；OkHttp 在握手层抛出后由
+            // runSuspendCatching 包装为 Result.failure(IOException)。断言异常类型
+            // 是 IOException（或其子类），不绑死到具体 SSL 实现，避免 JVM/平台差异。
+            val ex = result.exceptionOrNull()
+            assertNotNull(ex)
+            assertTrue(
+                "expected SSL/IO handshake failure, got ${ex?.javaClass?.name}: ${ex?.message}",
+                ex is java.io.IOException
+            )
+        } finally {
+            httpsServer.shutdown()
+        }
+    }
+
+    @Test
+    fun `checkHealth succeeds over HTTPS with self-signed cert when allowInsecure is enabled`() = runBlocking {
+        val httpsServer = startHttpsMockServer()
+        try {
+            // TrustAll：trustAllTrustManager + hostnameVerifier 全放行，自签名 cert
+            // 必须握手成功并完成请求。
+            repository.configure(
+                baseUrl = httpsServer.url("/").toString().trimEnd('/'),
+                allowInsecureConnections = true
+            )
+            httpsServer.enqueue(
+                MockResponse()
+                    .setBody("""{"healthy": true, "version": "1.0.0"}""")
+                    .setHeader("Content-Type", "application/json")
+            )
+
+            val result = repository.checkHealth()
+
+            assertTrue(
+                "trust-all (allowInsecure=true) must accept self-signed cert, got $result",
+                result.isSuccess
+            )
+            val health = result.getOrThrow()
+            assertTrue(health.healthy)
+            assertEquals("1.0.0", health.version)
+
+            // 验证确实走了 HTTPS（而非被降级到 HTTP）。
+            val request = httpsServer.takeRequest()
+            assertEquals("GET /global/health HTTP/1.1", request.requestLine)
+        } finally {
+            httpsServer.shutdown()
+        }
     }
 }
