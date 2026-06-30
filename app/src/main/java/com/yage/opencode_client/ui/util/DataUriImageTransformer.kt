@@ -55,6 +55,62 @@ private val dataUriBitmapCache = object : LruCache<String, Bitmap>(16 * 1024 * 1
     override fun sizeOf(key: String, value: Bitmap): Int = value.byteCount
 }
 
+/**
+ * R-02: long-edge decode target for sampled image decoding in this file.
+ * Matches [com.yage.opencode_client.ui.files.IMAGE_DECODE_TARGET_PX] (2048):
+ * the chat/markdown image render target is `fillMaxWidth` of a phone-width
+ * column, so 2048 px on the long edge is far above display density — sampling
+ * to this cap has no visible effect but bounds peak bitmap memory regardless
+ * of source resolution (data-URI pastes, large HTTP attachments, cached disk
+ * files). Defined here as a private copy rather than referenced cross-package
+ * to keep `ui/util` decoupled from `ui/files`.
+ */
+private const val IMAGE_DECODE_TARGET_PX = 2048
+
+/**
+ * R-02: two-pass sampled decode of an in-memory image byte array. Pass 1
+ * probes dimensions with [BitmapFactory.Options.inJustDecodeBounds] = true
+ * (no pixel allocation); [calcInSampleSize] then picks the smallest
+ * power-of-two sample keeping the long edge ≤ [targetPx]; pass 2 decodes the
+ * actual downsampled bitmap. Bounds peak memory regardless of source size.
+ *
+ * Returns null if the bounds probe reports non-positive dimensions (corrupt /
+ * unknown format), matching the previous `decodeByteArray` null-on-failure
+ * contract.
+ */
+private fun decodeSampled(bytes: ByteArray, targetPx: Int = IMAGE_DECODE_TARGET_PX): Bitmap? {
+    val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+    BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)
+    if (bounds.outWidth <= 0 || bounds.outHeight <= 0) return null
+    val sample = calcInSampleSize(bounds.outWidth, bounds.outHeight, targetPx)
+    if (sample <= 0) return null
+    val decodeOpts = BitmapFactory.Options().apply { inSampleSize = sample }
+    return BitmapFactory.decodeByteArray(bytes, 0, bytes.size, decodeOpts)
+}
+
+/**
+ * Computes a power-of-two [BitmapFactory.Options.inSampleSize] so the decoded
+ * long edge is at most [target] pixels. Uses [Long] arithmetic throughout to
+ * avoid [Int] overflow on very large source dimensions (a pathological payload
+ * could report outWidth/outHeight near Int.MAX_VALUE, and the intermediate
+ * `(w/s)*(h/s)` product would otherwise overflow Int and produce a wrong —
+ * too small — sample size, causing an OOM on the second decode pass).
+ *
+ * Returns 0 for non-positive dimensions so the caller can treat the image as
+ * undecodable rather than attempting a full-resolution fallback decode.
+ */
+private fun calcInSampleSize(w: Int, h: Int, target: Int): Int {
+    if (w <= 0 || h <= 0 || target <= 0) return 0
+    var sample = 1
+    val longW = w.toLong()
+    val longH = h.toLong()
+    val longT = target.toLong()
+    while ((longW / sample) * (longH / sample) > longT * longT) {
+        sample *= 2
+    }
+    return sample
+}
+
 internal fun bitmapToImageData(bitmap: Bitmap): ImageData = ImageData(
     painter = BitmapPainter(bitmap.asImageBitmap()),
     contentDescription = null,
@@ -112,7 +168,10 @@ object DataUriImageTransformer : ImageTransformer {
     private fun decodeDataUri(base64: String, cacheKey: String): ImageData? {
         return try {
             val bytes = Base64.decode(base64, Base64.DEFAULT)
-            val bitmap = BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
+            // R-02: sampled decode (inJustDecodeBounds + inSampleSize) so a
+            // multi-MB pasted data-URI image does not allocate a full-res
+            // bitmap. See [decodeSampled] / [calcInSampleSize].
+            val bitmap = decodeSampled(bytes)
             if (bitmap != null) {
                 dataUriBitmapCache.put(cacheKey, bitmap)
                 bitmapToImageData(bitmap)
@@ -275,7 +334,9 @@ object HttpImageHolder {
                     }
                 }
                 val bitmap = withContext(Dispatchers.IO) {
-                    BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
+                    // R-02: sampled decode — bounds peak bitmap memory for
+                    // large HTTP attachments (see [decodeSampled]).
+                    decodeSampled(bytes)
                 }
                 if (bitmap != null) {
                     putBitmap(url, bitmap)
@@ -295,7 +356,10 @@ object HttpImageHolder {
         try {
             val bytes = withContext(Dispatchers.IO) { file.readBytes() }
             val bitmap = withContext(Dispatchers.IO) {
-                BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
+                // R-02: sampled decode — a cached multi-MB image should not
+                // be re-decoded at full resolution on every cache miss
+                // (see [decodeSampled]).
+                decodeSampled(bytes)
             }
             if (bitmap != null) {
                 putBitmap(url, bitmap)
