@@ -432,7 +432,18 @@ fun ChatScreen(
             ?.let { question ->
                 QuestionCardView(
                     question = question,
-                    onReply = { answers, onError -> viewModel.replyQuestion(question.id, answers, onError) },
+                    onReply = { answers, onError ->
+                        // §momo 🟡-1: card Submit also flips isSubmittingQuestion so the
+                        // bottom-bar primary button is disabled in lockstep — unifies the
+                        // two guards against cross-path double-submit. onError resets both
+                        // (card's isSending via onError, isSubmittingQuestion here); success
+                        // → pendingQuestion→null → LaunchedEffect above resets.
+                        isSubmittingQuestion = true
+                        viewModel.replyQuestion(question.id, answers) {
+                            isSubmittingQuestion = false
+                            onError()
+                        }
+                    },
                     onReject = { viewModel.rejectQuestion(question.id) },
                     // §#4: receive the live answer snapshot so the bottom-bar
                     // primary button can submit the question in lockstep with
