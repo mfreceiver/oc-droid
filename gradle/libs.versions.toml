@@ -25,6 +25,11 @@ kotlinxCoroutinesTest = "1.7.3"
 turbine = "1.0.0"
 markdownRenderer = "0.39.0"
 material3WindowSizeClass = "1.2.0"
+# R-21 SettingsManager 单测需要真 EncryptedSharedPreferences（依赖 AndroidKeyStore +
+# Tink），Robolectric 提供可在 JVM 跑的 AndroidKeyStore shadow 与 framework 资源。
+robolectric = "4.13"
+# R-21: Robolectric 测试用 ApplicationProvider 取 Context（androidx.test:core）
+androidxTestCore = "1.7.0"
 
 [libraries]
 androidx-core-ktx = { group = "androidx.core", name = "core-ktx", version.ref = "coreKtx" }
@@ -72,6 +77,10 @@ androidx-compose-material3-windowsizeclass = { group = "androidx.compose.materia
 mockk = { group = "io.mockk", name = "mockk", version.ref = "mockk" }
 kotlinx-coroutines-test = { group = "org.jetbrains.kotlinx", name = "kotlinx-coroutines-test", version.ref = "kotlinxCoroutinesTest" }
 turbine = { group = "app.cash.turbine", name = "turbine", version.ref = "turbine" }
+# R-21: SettingsManager 单测需 Robolectric 跑真 EncryptedSharedPreferences
+robolectric = { group = "org.robolectric", name = "robolectric", version.ref = "robolectric" }
+# R-21: ApplicationProvider.getApplicationContext — Robolectric 测试取 Context 用
+androidx-test-core = { group = "androidx.test", name = "core", version.ref = "androidxTestCore" }
 
 [plugins]
 android-application = { id = "com.android.application", version.ref = "agp" }
