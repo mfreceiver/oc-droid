@@ -163,20 +163,35 @@ fun ChatScreen(
         }
     }
 
+    // R-17 M1 R1: wrap ChatTopBarActions in remember so the actions instance
+    // (and its lambda / method-reference fields) stays referentially stable
+    // across recompositions. Without this the actions argument was a fresh
+    // instance on every recomposition and defeated the topBarState
+    // derivedStateOf — ChatTopBar recomposed regardless of whether topBarState
+    // had changed. Keys: viewModel is a @Stable hilt single-instance VM (stable
+    // for the screen's lifetime); onNavigateToSettings / onNavigateToSessions
+    // are nav lambdas sourced from the parent, listed as keys so a new parent
+    // identity re-builds the actions bundle. The VM method references and the
+    // wrapping lambdas only capture viewModel (itself stable), so they do not
+    // need to be keys.
+    val topBarActions = remember(viewModel, onNavigateToSettings, onNavigateToSessions) {
+        ChatTopBarActions(
+            onSelectSession = viewModel::selectSession,
+            onCloseSession = viewModel::closeSession,
+            onSelectAgent = viewModel::selectAgent,
+            onNavigateToSettings = onNavigateToSettings,
+            onNavigateToSessions = onNavigateToSessions,
+            onRefreshMessages = { viewModel.refreshCurrentSession() },
+            onRefreshTrafficStats = viewModel::refreshTrafficStats,
+            onSelectHost = { viewModel.selectHostProfile(it) },
+            onActivateTunnel = { viewModel.activateTunnelForCurrentHost() },
+        )
+    }
+
     Column(modifier = Modifier.fillMaxSize()) {
         ChatTopBar(
             state = topBarState,
-            actions = ChatTopBarActions(
-                onSelectSession = viewModel::selectSession,
-                onCloseSession = viewModel::closeSession,
-                onSelectAgent = viewModel::selectAgent,
-                onNavigateToSettings = onNavigateToSettings,
-                onNavigateToSessions = onNavigateToSessions,
-                onRefreshMessages = { viewModel.refreshCurrentSession() },
-                onRefreshTrafficStats = viewModel::refreshTrafficStats,
-                onSelectHost = { viewModel.selectHostProfile(it) },
-                onActivateTunnel = { viewModel.activateTunnelForCurrentHost() },
-            )
+            actions = topBarActions
         )
 
         // Thin separator between the top bar (session tabs) and the chat area.

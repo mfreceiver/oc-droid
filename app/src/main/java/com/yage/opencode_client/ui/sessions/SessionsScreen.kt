@@ -133,6 +133,13 @@ fun SessionsScreen(
         }
     }
 
+    // R-17 M1 (gpt-1): project state.unreadSessions to a locally-stable value
+    // so Lazy item lambdas (recent + workdir session cards) read a snapshot
+    // slice instead of touching the global AppState on every recomposition.
+    val unreadSessions by remember {
+        derivedStateOf { state.unreadSessions }
+    }
+
     // Navigate to Chat tab after selecting a session
     fun onSessionClick(sessionId: String) {
         viewModel.selectSession(sessionId)
@@ -193,7 +200,7 @@ fun SessionsScreen(
                 items(recentSessions, key = { it.id }) { session ->
                     SessionCard(
                         session = session,
-                        isUnread = session.id in state.unreadSessions,
+                        isUnread = session.id in unreadSessions,
                         onClick = { onSessionClick(session.id) }
                     )
                 }
@@ -329,7 +336,7 @@ fun SessionsScreen(
                                 sessionsInWorkdir.forEach { session ->
                                     SessionCard(
                                         session = session,
-                                        isUnread = session.id in state.unreadSessions,
+                                        isUnread = session.id in unreadSessions,
                                         onClick = { onSessionClick(session.id) }
                                     )
                                 }
