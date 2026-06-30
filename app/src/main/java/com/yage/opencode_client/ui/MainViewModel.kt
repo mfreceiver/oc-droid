@@ -78,6 +78,58 @@ data class TrafficState(
 }
 
 /**
+ * §R-17 M3: composer-domain state slice. Authoritative storage lives in
+ * [MainViewModel._composerFlow]. Field set strictly follows RFC R-17 §2.5.
+ *
+ * This is the highest-frequency slice (`inputText` mutates on every keystroke)
+ * and the primary reason M3 exists: once M4 consumers subscribe to
+ * `composerFlow` directly instead of reading `state.inputText`, keystrokes no
+ * longer recompose ChatTopBar.
+ *
+ * Write atomicity (RFC §4 strategy A): same model as [ConnectionState] —
+ * every mutation goes through [MainViewModel.writeComposer], which writes the
+ * slice AND the `_state` mirror in one synchronous call. No dispatcher batch
+ * reliance (RFC §9.2).
+ */
+data class ComposerState(
+    val inputText: String = "",
+    val imageAttachments: List<ComposerImageAttachment> = emptyList(),
+    val sendingSessionIds: Set<String> = emptySet(),
+    val draftWorkdir: String? = null
+)
+
+/**
+ * §R-17 M3: file-browser-domain state slice. Authoritative storage lives in
+ * [MainViewModel._fileFlow]. Field set strictly follows RFC R-17 §2.6.
+ * Consumed only by FilesScreen + PhoneLayout overlay; isolating it prevents
+ * file-open/close from recomposing unrelated subscribers.
+ */
+data class FileState(
+    val filePathToShowInFiles: String? = null,
+    val filePreviewOriginRoute: String? = null,
+    val fileBrowserOpen: Boolean = false,
+    val fileBrowserWorkdir: String? = null
+)
+
+/**
+ * §R-17 M3: settings/global-preference state slice. Authoritative storage
+ * lives in [MainViewModel._settingsFlow]. Field set strictly follows RFC
+ * R-17 §2.4 EXCEPT `error`, which is cross-domain and stays on `_state` (see
+ * RFC §3.3 — same call as M2 keeping `error` on `_state`).
+ *
+ * `availableCommands` is a connect-time / host-switch config (not live state)
+ * but RFC §2.4 groups it here rather than under composer.
+ */
+data class SettingsState(
+    val themeMode: ThemeMode = ThemeMode.SYSTEM,
+    val markdownFontSizes: MarkdownFontSizes = MarkdownFontSizes(),
+    val selectedAgentName: String = "build",
+    val agents: List<AgentInfo> = emptyList(),
+    val providers: ProvidersResponse? = null,
+    val availableCommands: List<CommandInfo> = emptyList()
+)
+
+/**
  * §Per-session message cache: a snapshot of the loaded window for a single
  * session — the four pieces of message-state that [selectSessionState]
  * otherwise wipes to empty on every switch. Restoring from this snapshot on
@@ -162,16 +214,24 @@ data class AppState(
     val olderMessagesCursor: String? = null,
     val hasMoreMessages: Boolean = true,
     val isLoadingMessages: Boolean = false,
+    @Deprecated("mirror from settingsFlow; M4 removes AppState", level = DeprecationLevel.WARNING)
     val agents: List<AgentInfo> = emptyList(),
+    @Deprecated("mirror from settingsFlow; M4 removes AppState", level = DeprecationLevel.WARNING)
     val selectedAgentName: String = "build",
+    @Deprecated("mirror from settingsFlow; M4 removes AppState", level = DeprecationLevel.WARNING)
     val providers: ProvidersResponse? = null,
     val pendingPermissions: List<PermissionRequest> = emptyList(),
     val pendingQuestions: List<QuestionRequest> = emptyList(),
+    @Deprecated("mirror from composerFlow; M4 removes AppState", level = DeprecationLevel.WARNING)
     val inputText: String = "",
     val error: String? = null,
+    @Deprecated("mirror from settingsFlow; M4 removes AppState", level = DeprecationLevel.WARNING)
     val themeMode: ThemeMode = ThemeMode.SYSTEM,
+    @Deprecated("mirror from settingsFlow; M4 removes AppState", level = DeprecationLevel.WARNING)
     val markdownFontSizes: MarkdownFontSizes = MarkdownFontSizes(),
+    @Deprecated("mirror from fileFlow; M4 removes AppState", level = DeprecationLevel.WARNING)
     val filePathToShowInFiles: String? = null,
+    @Deprecated("mirror from fileFlow; M4 removes AppState", level = DeprecationLevel.WARNING)
     val filePreviewOriginRoute: String? = null,
     // Bug3: project-level file browser opened from the Sessions screen. The
     // overlay is rendered at the PhoneLayout ROOT (above the HorizontalPager)
@@ -179,12 +239,16 @@ data class AppState(
     // can't be swiped to / interacted with during a browse. This keeps the
     // global currentDirectory (temporarily re-scoped to fileBrowserWorkdir)
     // unambiguous — no desync.
+    @Deprecated("mirror from fileFlow; M4 removes AppState", level = DeprecationLevel.WARNING)
     val fileBrowserOpen: Boolean = false,
+    @Deprecated("mirror from fileFlow; M4 removes AppState", level = DeprecationLevel.WARNING)
     val fileBrowserWorkdir: String? = null,
     val streamingPartTexts: Map<String, String> = emptyMap(),
     val streamingReasoningPart: Part? = null,
     val sessionTodos: Map<String, List<TodoItem>> = emptyMap(),
+    @Deprecated("mirror from composerFlow; M4 removes AppState", level = DeprecationLevel.WARNING)
     val sendingSessionIds: Set<String> = emptySet(),
+    @Deprecated("mirror from composerFlow; M4 removes AppState", level = DeprecationLevel.WARNING)
     val imageAttachments: List<ComposerImageAttachment> = emptyList(),
     val hostProfiles: List<HostProfile> = emptyList(),
     val currentHostProfileId: String? = null,
@@ -219,10 +283,11 @@ data class AppState(
      * Non-null when the user has entered "draft" (deferred-create) mode by
      * invoking [MainViewModel.createSessionInWorkdir]. The repository's
      * current directory has been set to this workdir, but no POST /session
-     * has been issued. The first [MainViewModel.sendMessage] will create
-     * the session on demand and clear this field. Selecting/creating any
+     * has been issued. The first [MainViewModel.sendMessage] will create the
+     * session on demand and clear this field. Selecting/creating any
      * other session or switching host discards the draft.
      */
+    @Deprecated("mirror from composerFlow; M4 removes AppState", level = DeprecationLevel.WARNING)
     val draftWorkdir: String? = null,
     /**
      * Per-session last-viewed epoch millis. Updated whenever the user
@@ -257,6 +322,7 @@ data class AppState(
      * server-published list (GET /command). Populated by
      * [MainViewModel.loadCommands] on connect.
      */
+    @Deprecated("mirror from settingsFlow; M4 removes AppState", level = DeprecationLevel.WARNING)
     val availableCommands: List<CommandInfo> = emptyList(),
     /**
      * Cumulative HTTP traffic counters mirrored from [TrafficTracker] for the
@@ -532,11 +598,23 @@ class MainViewModel @Inject constructor(
     private val _connectionFlow = MutableStateFlow(ConnectionState())
     /** §R-17 M2: traffic-domain slice (RFC §2.9). Authoritative storage. */
     private val _trafficFlow = MutableStateFlow(TrafficState())
+    /** §R-17 M3: composer-domain slice (RFC §2.5). Authoritative storage. */
+    private val _composerFlow = MutableStateFlow(ComposerState())
+    /** §R-17 M3: file-browser slice (RFC §2.6). Authoritative storage. */
+    private val _fileFlow = MutableStateFlow(FileState())
+    /** §R-17 M3: settings slice (RFC §2.4, minus cross-domain error). Authoritative storage. */
+    private val _settingsFlow = MutableStateFlow(SettingsState())
 
     /** Read-only connection slice for direct subscription (M4 consumers). */
     val connectionFlow: StateFlow<ConnectionState> = _connectionFlow.asStateFlow()
     /** Read-only traffic slice for direct subscription (M4 consumers). */
     val trafficFlow: StateFlow<TrafficState> = _trafficFlow.asStateFlow()
+    /** Read-only composer slice for direct subscription (M4 consumers). */
+    val composerFlow: StateFlow<ComposerState> = _composerFlow.asStateFlow()
+    /** Read-only file slice for direct subscription (M4 consumers). */
+    val fileFlow: StateFlow<FileState> = _fileFlow.asStateFlow()
+    /** Read-only settings slice for direct subscription (M4 consumers). */
+    val settingsFlow: StateFlow<SettingsState> = _settingsFlow.asStateFlow()
 
     val state: StateFlow<AppState> = _state.asStateFlow()
 
@@ -573,6 +651,59 @@ class MainViewModel @Inject constructor(
         _state.value = _state.value.copy(
             trafficSent = next.trafficSent,
             trafficReceived = next.trafficReceived
+        )
+    }
+
+    /**
+     * §R-17 M3: write the composer slice atomically and mirror it onto the
+     * deprecated AppState fields in `_state`. See [writeConnection] for the
+     * synchronous-mirror rationale (RFC §4 strategy A, RFC §9.2). ALWAYS use
+     * this instead of `_composerFlow.update { ... }` on its own.
+     */
+    @Suppress("DEPRECATION")
+    private fun writeComposer(transform: (ComposerState) -> ComposerState) {
+        val next = transform(_composerFlow.value)
+        _composerFlow.value = next
+        _state.value = _state.value.copy(
+            inputText = next.inputText,
+            imageAttachments = next.imageAttachments,
+            sendingSessionIds = next.sendingSessionIds,
+            draftWorkdir = next.draftWorkdir
+        )
+    }
+
+    /**
+     * §R-17 M3: write the file slice atomically and mirror it onto the
+     * deprecated AppState fields in `_state`. See [writeConnection].
+     */
+    @Suppress("DEPRECATION")
+    private fun writeFile(transform: (FileState) -> FileState) {
+        val next = transform(_fileFlow.value)
+        _fileFlow.value = next
+        _state.value = _state.value.copy(
+            filePathToShowInFiles = next.filePathToShowInFiles,
+            filePreviewOriginRoute = next.filePreviewOriginRoute,
+            fileBrowserOpen = next.fileBrowserOpen,
+            fileBrowserWorkdir = next.fileBrowserWorkdir
+        )
+    }
+
+    /**
+     * §R-17 M3: write the settings slice atomically and mirror it onto the
+     * deprecated AppState fields in `_state`. `error` is NOT here — it stays
+     * on `_state` (cross-domain, RFC §3.3). See [writeConnection].
+     */
+    @Suppress("DEPRECATION")
+    private fun writeSettings(transform: (SettingsState) -> SettingsState) {
+        val next = transform(_settingsFlow.value)
+        _settingsFlow.value = next
+        _state.value = _state.value.copy(
+            themeMode = next.themeMode,
+            markdownFontSizes = next.markdownFontSizes,
+            selectedAgentName = next.selectedAgentName,
+            agents = next.agents,
+            providers = next.providers,
+            availableCommands = next.availableCommands
         )
     }
 
@@ -883,7 +1014,7 @@ class MainViewModel @Inject constructor(
     }
 
     private fun loadSettings() {
-        applySavedSettings(repository, settingsManager, hostProfileStore, _state, _connectionFlow)
+        applySavedSettings(repository, settingsManager, hostProfileStore, _state, _connectionFlow, _settingsFlow)
     }
 
     /** Q6: persist the phone pager page the user navigated to, so cold start lands there. */
@@ -985,14 +1116,17 @@ class MainViewModel @Inject constructor(
                 tempClearedUnread = emptySet(),
                 lastViewedTime = emptyMap(),
                 sessions = emptyList(),
-                directorySessions = emptyMap(),
-                draftWorkdir = null,
-                availableCommands = emptyList()
-                // §R-17 M2: serverVersion moved to _connectionFlow below (the
-                // rest of the connection slice — isConnected/isConnecting/
-                // connectionPhase — is overwritten by the subsequent
-                // testConnection(force=true), exactly as before).
+                directorySessions = emptyMap()
+                // §R-17 M2: serverVersion moved to writeConnection below.
+                // §R-17 M3: draftWorkdir → writeComposer, availableCommands →
+                // writeSettings (both reset to defaults, mirrors kept in sync).
             ) }
+            // §R-17 M3 (RFC §4 strategy A): reset the composer + settings slices
+            // that belong to the previous host. Intermediate state is legal
+            // (empty sessions list; draft/commands briefly stale until these
+            // run, but _state.update above already flipped currentSessionId=null).
+            writeComposer { it.copy(draftWorkdir = null) }
+            writeSettings { it.copy(availableCommands = emptyList()) }
             // §R-17 M2 (RFC §4 strategy A): clear the (previous host's) probed
             // server version so it is not shown under the new host before the
             // new health check repopulates it (or, if the new connection fails,
@@ -1054,12 +1188,15 @@ class MainViewModel @Inject constructor(
                     tempClearedUnread = emptySet(),
                     lastViewedTime = emptyMap(),
                     sessions = emptyList(),
-                    directorySessions = emptyMap(),
-                    draftWorkdir = null,
-                    availableCommands = emptyList()
-                    // §R-17 M2: serverVersion moved to _connectionFlow below.
+                    directorySessions = emptyMap()
+                    // §R-17 M2: serverVersion moved to writeConnection below.
+                    // §R-17 M3: draftWorkdir → writeComposer, availableCommands →
+                    // writeSettings (below).
                 )
             }
+            // §R-17 M3 (RFC §4 strategy A): reset composer + settings slices.
+            writeComposer { it.copy(draftWorkdir = null) }
+            writeSettings { it.copy(availableCommands = emptyList()) }
             // §R-17 M2 (RFC §4 strategy A): clear the deleted (active) host's
             // probed server version so the replacement host doesn't display a
             // stale version before its own health check (or, on failed
@@ -1242,13 +1379,13 @@ class MainViewModel @Inject constructor(
         viewModelScope.launch {
             repository.getCommands()
                 .onSuccess { serverCommands ->
-                    _state.update {
+                    writeSettings {
                         it.copy(availableCommands = mergeCommands(localCommands(), serverCommands))
                     }
                 }
                 .onFailure { error ->
                     reportNonFatalIssue(TAG, "Failed to load commands", error)
-                    _state.update { it.copy(availableCommands = localCommands()) }
+                    writeSettings { it.copy(availableCommands = localCommands()) }
                 }
         }
     }
@@ -1375,7 +1512,7 @@ class MainViewModel @Inject constructor(
             captureCurrentSessionWindow(previousSessionId)
         }
 
-        selectSessionState(_state, settingsManager, sessionId)
+        selectSessionState(_state, settingsManager, sessionId, _composerFlow)
 
         // §Per-session message cache (restore): if the new session has a
         // cached window, seed messages/parts/cursor/hasMore from it INSTEAD
@@ -1443,7 +1580,6 @@ class MainViewModel @Inject constructor(
                 it
             }
             withReMark.copy(
-                draftWorkdir = null,
                 unreadSessions = withReMark.unreadSessions - sessionId,
                 lastViewedTime = withReMark.lastViewedTime + (sessionId to now),
                 // Track the newly-selected session as "temp-cleared" so a
@@ -1454,6 +1590,10 @@ class MainViewModel @Inject constructor(
                 tempClearedUnread = withReMark.tempClearedUnread + sessionId
             )
         }
+        // §R-17 M3 (RFC §4 strategy A): draftWorkdir cleared via the composer
+        // slice. Selecting a real session discards any in-progress draft.
+        // Intermediate state legal (unread updated, draft briefly non-null).
+        writeComposer { it.copy(draftWorkdir = null) }
         // Browser-tab semantics: a click on an already-open tab must NOT
         // reorder it (keeps insertion order stable). The prepend only happens
         // when the selected session is NOT yet in the list (e.g. a cold-start
@@ -1572,13 +1712,20 @@ class MainViewModel @Inject constructor(
             )
             if (isCurrent && nextId == null) {
                 settingsManager.currentSessionId = null
-                next.copy(currentSessionId = null, messages = emptyList(), partsByMessage = emptyMap(), inputText = "")
+                next.copy(currentSessionId = null, messages = emptyList(), partsByMessage = emptyMap())
             } else {
                 // Keep currentSessionId pointing at the closed session for now;
                 // selectSession(nextId) below performs the switch (and saves the
                 // closed session's draft via the explicit setDraftText above).
                 next
             }
+        }
+        // §R-17 M3 (RFC §4 strategy A): when the last open session is closed,
+        // clear the composer inputText via the composer slice. Runs only in the
+        // same `isCurrent && nextId == null` branch above; intermediate state
+        // legal (inputText briefly retains its value until this line).
+        if (isCurrent && nextId == null) {
+            writeComposer { it.copy(inputText = "") }
         }
         if (isCurrent && nextId != null) {
             selectSession(nextId)
@@ -1590,6 +1737,7 @@ class MainViewModel @Inject constructor(
             scope = viewModelScope,
             repository = repository,
             state = _state,
+            settingsFlow = _settingsFlow,
             sessionId = sessionId,
             resetLimit = resetLimit,
             settingsManager = settingsManager,
@@ -1671,6 +1819,7 @@ class MainViewModel @Inject constructor(
             scope = viewModelScope,
             repository = repository,
             state = _state,
+            settingsFlow = _settingsFlow,
             sessionId = sessionId,
             settingsManager = settingsManager,
             onCacheWindow = ::writeSessionWindow
@@ -1697,13 +1846,13 @@ class MainViewModel @Inject constructor(
         viewModelScope.launch {
             repository.getAgents()
                 .onSuccess { agents ->
-                    val currentAgent = _state.value.selectedAgentName
+                    val currentAgent = _settingsFlow.value.selectedAgentName
                     val validAgent = if (agents.none { it.name == currentAgent }) {
                         "build"
                     } else {
                         currentAgent
                     }
-                    _state.update { it.copy(agents = agents, selectedAgentName = validAgent) }
+                    writeSettings { it.copy(agents = agents, selectedAgentName = validAgent) }
                     if (validAgent != currentAgent) {
                         settingsManager.selectedAgentName = validAgent
                     }
@@ -1715,7 +1864,7 @@ class MainViewModel @Inject constructor(
     }
 
     private fun loadProviders() {
-        launchLoadProviders(viewModelScope, repository, _state) { message, error ->
+        launchLoadProviders(viewModelScope, repository, _state, _settingsFlow) { message, error ->
             reportNonFatalIssue(TAG, message, error)
         }
     }
@@ -1741,11 +1890,18 @@ class MainViewModel @Inject constructor(
                 currentSessionId = null,
                 messages = emptyList(),
                 partsByMessage = emptyMap(),
-                inputText = "",
-                imageAttachments = emptyList(),
                 sessionTodos = emptyMap(),
                 streamingPartTexts = emptyMap(),
-                streamingReasoningPart = null,
+                streamingReasoningPart = null
+            )
+        }
+        // §R-17 M3 (RFC §4 strategy A): composer slice — enter draft mode
+        // (draftWorkdir=workdir) and reset input/attachments. Intermediate state
+        // legal (chat fields cleared above; composer flipped below).
+        writeComposer {
+            it.copy(
+                inputText = "",
+                imageAttachments = emptyList(),
                 draftWorkdir = workdir
             )
         }
@@ -1786,7 +1942,7 @@ class MainViewModel @Inject constructor(
         // (createSessionInWorkdir is the only writer of currentWorkdir). Real
         // sessions are unaffected — the guard above is a no-op for them.
         settingsManager.currentWorkdir = null
-        _state.update {
+        writeComposer {
             it.copy(
                 draftWorkdir = null,
                 inputText = "",
@@ -1828,7 +1984,7 @@ class MainViewModel @Inject constructor(
             // second time and create duplicate sessions. The local draftWorkdir
             // captured above is used inside the coroutine. A second invoke now
             // reads draftWorkdir=null → existingSessionId=null → early return.
-            _state.update { it.copy(draftWorkdir = null) }
+            writeComposer { it.copy(draftWorkdir = null) }
             viewModelScope.launch {
                 repository.createSession(title = null)
                     .onSuccess { session ->
@@ -1839,12 +1995,15 @@ class MainViewModel @Inject constructor(
                             state.copy(
                                 sessions = upsertSession(state.sessions, session),
                                 currentSessionId = session.id,
-                                draftWorkdir = null,
                                 openSessionIds = openIds,
                                 unreadSessions = state.unreadSessions - session.id,
                                 lastViewedTime = state.lastViewedTime + (session.id to now)
                             )
                         }
+                        // §R-17 M3: draftWorkdir mirror was cleared above; keep
+                        // the slice consistent (no-op semantically, but avoids
+                        // slice/mirror drift if the slice was touched elsewhere).
+                        writeComposer { it.copy(draftWorkdir = null) }
                         settingsManager.currentSessionId = session.id
                         // Fix #5: persist the freshly-created session's metadata
                         // into sessionCache so its tab survives restart (mirrors
@@ -1863,16 +2022,16 @@ class MainViewModel @Inject constructor(
                         dispatchSendMessage(session.id)
                     }
                     .onFailure { error ->
+                        // §R-17 M3: draftWorkdir → writeComposer, error → _state.
+                        // Restore draft mode so the user can retry. draftWorkdir
+                        // was synchronously cleared before launch to guard
+                        // against double-tap; on failure we put it back (the
+                        // captured local above) so the composer stays in draft
+                        // mode and the untouched inputText remains editable. A
+                        // retry is a fresh invoke that re-clears + re-launches.
+                        writeComposer { it.copy(draftWorkdir = draftWorkdir) }
                         _state.update {
                             it.copy(
-                                // Restore draft mode so the user can retry.
-                                // draftWorkdir was synchronously cleared before
-                                // launch to guard against double-tap; on failure
-                                // we put it back (the captured local above) so
-                                // the composer stays in draft mode and the
-                                // untouched inputText remains editable. A retry
-                                // is a fresh invoke that re-clears + re-launches.
-                                draftWorkdir = draftWorkdir,
                                 error = "Failed to create session in $draftWorkdir: ${error.message ?: "unknown error"}"
                             )
                         }
@@ -1887,12 +2046,16 @@ class MainViewModel @Inject constructor(
     }
 
     private fun dispatchSendMessage(sessionId: String) {
-        if (_state.value.sendingSessionIds.contains(sessionId)) return
-        val text = _state.value.inputText.trim()
-        val attachments = _state.value.imageAttachments
+        // §R-17 M3: read composer slice directly (authoritative; the AppState
+        // mirror is kept in sync by writeComposer but reading the slice avoids
+        // the @Deprecated mirror warning inside the VM).
+        val composer = _composerFlow.value
+        if (composer.sendingSessionIds.contains(sessionId)) return
+        val text = composer.inputText.trim()
+        val attachments = composer.imageAttachments
         if (text.isEmpty() && attachments.isEmpty()) return
 
-        _state.update { state -> state.copy(sendingSessionIds = state.sendingSessionIds + sessionId) }
+        writeComposer { state -> state.copy(sendingSessionIds = state.sendingSessionIds + sessionId) }
 
         // §append-safe (glmer MAJOR-1): clear the composer synchronously on
         // dispatch so a follow-up typed during the in-flight prompt_async
@@ -1900,9 +2063,9 @@ class MainViewModel @Inject constructor(
         // restored on failure (in launchSendMessage) only if the user has not
         // typed something new in the meantime.
         settingsManager.setDraftText(sessionId, "")
-        _state.update { it.copy(inputText = "") }
+        writeComposer { it.copy(inputText = "") }
 
-        val agent = _state.value.selectedAgentName
+        val agent = _settingsFlow.value.selectedAgentName
         val model: Message.ModelInfo? = null
         val currentSession = _state.value.currentSession
 
@@ -1911,6 +2074,7 @@ class MainViewModel @Inject constructor(
                 scope = viewModelScope,
                 repository = repository,
                 state = _state,
+                composerFlow = _composerFlow,
                 sessionId = sessionId,
                 text = text,
                 attachments = attachments,
@@ -1920,10 +2084,10 @@ class MainViewModel @Inject constructor(
                 onRefreshSessions = ::loadSessions,
                 onSuccess = {
                     settingsManager.setDraftText(sessionId, "")
-                    _state.update { it.copy(imageAttachments = emptyList()) }
+                    writeComposer { it.copy(imageAttachments = emptyList()) }
                 },
                 onComplete = {
-                    _state.update { state -> state.copy(sendingSessionIds = state.sendingSessionIds - sessionId) }
+                    writeComposer { state -> state.copy(sendingSessionIds = state.sendingSessionIds - sessionId) }
                 }
             )
         }
@@ -1946,12 +2110,19 @@ class MainViewModel @Inject constructor(
                         // typed something new), and restore the draft — otherwise
                         // the session would be permanently send-locked and the
                         // text lost.
+                        // §R-17 M3: read composer slice for the restore-decision;
+                        // dispatch error → _state, composer fields → writeComposer.
+                        val currentInput = _composerFlow.value.inputText
+                        val restored = if (currentInput.isBlank()) text else currentInput
+                        if (restored != currentInput) settingsManager.setDraftText(sessionId, restored)
                         _state.update { s ->
-                            val restored = if (s.inputText.isBlank()) text else s.inputText
-                            if (restored != s.inputText) settingsManager.setDraftText(sessionId, restored)
                             s.copy(
-                                error = "Failed to restore session: ${errorMessageOrFallback(error, "unknown error")}",
-                                sendingSessionIds = s.sendingSessionIds - sessionId,
+                                error = "Failed to restore session: ${errorMessageOrFallback(error, "unknown error")}"
+                            )
+                        }
+                        writeComposer { c ->
+                            c.copy(
+                                sendingSessionIds = c.sendingSessionIds - sessionId,
                                 inputText = restored
                             )
                         }
@@ -1974,19 +2145,19 @@ class MainViewModel @Inject constructor(
     }
 
     fun setInputText(text: String) {
-        _state.update { it.copy(inputText = text) }
+        writeComposer { it.copy(inputText = text) }
         _state.value.currentSessionId?.let { settingsManager.setDraftText(it, text) }
     }
 
     fun addImageAttachments(attachments: List<ComposerImageAttachment>) {
         if (attachments.isEmpty()) return
-        _state.update { state ->
+        writeComposer { state ->
             state.copy(imageAttachments = (state.imageAttachments + attachments).take(4))
         }
     }
 
     fun removeImageAttachment(id: String) {
-        _state.update { state ->
+        writeComposer { state ->
             state.copy(imageAttachments = state.imageAttachments.filterNot { it.id == id })
         }
     }
@@ -2000,12 +2171,19 @@ class MainViewModel @Inject constructor(
         viewModelScope.launch {
             repository.revertSession(sessionId, messageId)
                 .onSuccess { updatedSession ->
+                    // §R-17 M3: sessions/error → _state; inputText/imageAttachments
+                    // → writeComposer. Intermediate state legal (sessions updated,
+                    // composer not yet reset).
                     _state.update { state ->
                         state.copy(
                             sessions = state.sessions.map { session -> if (session.id == sessionId) updatedSession else session },
-                            inputText = draft,
-                            imageAttachments = emptyList(),
                             error = null
+                        )
+                    }
+                    writeComposer { c ->
+                        c.copy(
+                            inputText = draft,
+                            imageAttachments = emptyList()
                         )
                     }
                     settingsManager.setDraftText(sessionId, draft)
@@ -2020,7 +2198,7 @@ class MainViewModel @Inject constructor(
 
     fun selectAgent(agentName: String) {
         settingsManager.selectedAgentName = agentName
-        _state.update { it.copy(selectedAgentName = agentName) }
+        writeSettings { it.copy(selectedAgentName = agentName) }
         _state.value.currentSessionId?.let { settingsManager.setAgentForSession(it, agentName) }
     }
 
@@ -2037,12 +2215,12 @@ class MainViewModel @Inject constructor(
 
     fun setThemeMode(mode: ThemeMode) {
         settingsManager.themeMode = mode
-        _state.update { it.copy(themeMode = mode) }
+        writeSettings { it.copy(themeMode = mode) }
     }
 
     fun setMarkdownFontSizes(sizes: MarkdownFontSizes) {
         settingsManager.markdownFontSizes = sizes
-        _state.update { it.copy(markdownFontSizes = sizes) }
+        writeSettings { it.copy(markdownFontSizes = sizes) }
     }
 
     fun respondPermission(sessionId: String, permissionId: String, response: PermissionResponse) {
@@ -2207,6 +2385,15 @@ class MainViewModel @Inject constructor(
             ConnectionState(isConnecting = true, connectionPhase = "reconnecting")
         }
         writeTraffic { TrafficState() }
+        // §R-17 M3: also reset the composer/file/settings slices — the old
+        // AppState() constructor zeroed their mirror fields, so without these
+        // the slices would keep their pre-reset values (input text, file
+        // browser, agent/theme/commands) while the mirrors flipped to defaults,
+        // i.e. slice/mirror drift. Intermediate state legal (mirrors already
+        // defaulted above; slices reset here).
+        writeComposer { ComposerState() }
+        writeFile { FileState() }
+        writeSettings { SettingsState() }
         // 6. Reconnect to the (preserved) current host profile and re-fetch.
         //    coldStartReconnect → testConnection(force=true, retries=3); on
         //    health success it calls configureRepositoryForProfile (currentWorkdir
@@ -2273,11 +2460,11 @@ class MainViewModel @Inject constructor(
     }
 
     fun showFileInFiles(path: String, originRoute: String? = null) {
-        _state.update { it.copy(filePathToShowInFiles = path, filePreviewOriginRoute = originRoute) }
+        writeFile { it.copy(filePathToShowInFiles = path, filePreviewOriginRoute = originRoute) }
     }
 
     fun clearFileToShow() {
-        _state.update { it.copy(filePathToShowInFiles = null, filePreviewOriginRoute = null) }
+        writeFile { it.copy(filePathToShowInFiles = null, filePreviewOriginRoute = null) }
     }
 
     /**
@@ -2304,7 +2491,7 @@ class MainViewModel @Inject constructor(
             browseActive = true
         }
         repository.setCurrentDirectory(workdir)
-        _state.update {
+        writeFile {
             it.copy(
                 // Fix #4: null here so FilesViewModel.syncPathToShow(null, ...)
                 // calls closePreview() and the normal loadFiles("") flow (scoped
@@ -2329,7 +2516,7 @@ class MainViewModel @Inject constructor(
             browseSavedDirectory = null
             browseActive = false
         }
-        _state.update {
+        writeFile {
             it.copy(
                 fileBrowserOpen = false,
                 fileBrowserWorkdir = null,

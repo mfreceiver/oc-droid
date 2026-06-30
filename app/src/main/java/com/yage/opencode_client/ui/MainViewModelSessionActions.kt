@@ -15,6 +15,55 @@ import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 
 /**
+ * §R-17 M3: top-level mirror writers for the composer/settings slices. These
+ * duplicate the field lists of [MainViewModel.writeComposer] /
+ * [MainViewModel.writeSettings] because the `launch*` helpers in this file
+ * are free functions that receive `state: MutableStateFlow<AppState>` (plus
+ * the slice flow) and cannot call the VM's private `writeXxx` members. Using
+ * these helpers keeps the deprecated AppState mirror fields in sync with the
+ * authoritative slice flows from every write site — a hard requirement so M4
+ * can flip consumers to the slices without drift surfacing. M4 (AppState
+ * retirement) removes both these helpers and the mirrors together.
+ *
+ * Semantics mirror [MainViewModel.writeConnection] (M2): write the slice
+ * first, then overwrite the mirror fields on `state` synchronously — no
+ * dispatcher batch reliance (RFC §4 strategy A, §9.2).
+ */
+@Suppress("DEPRECATION")
+internal fun applyComposerSlice(
+    state: MutableStateFlow<AppState>,
+    composerFlow: MutableStateFlow<ComposerState>,
+    transform: (ComposerState) -> ComposerState
+) {
+    val next = transform(composerFlow.value)
+    composerFlow.value = next
+    state.value = state.value.copy(
+        inputText = next.inputText,
+        imageAttachments = next.imageAttachments,
+        sendingSessionIds = next.sendingSessionIds,
+        draftWorkdir = next.draftWorkdir
+    )
+}
+
+@Suppress("DEPRECATION")
+internal fun applySettingsSlice(
+    state: MutableStateFlow<AppState>,
+    settingsFlow: MutableStateFlow<SettingsState>,
+    transform: (SettingsState) -> SettingsState
+) {
+    val next = transform(settingsFlow.value)
+    settingsFlow.value = next
+    state.value = state.value.copy(
+        themeMode = next.themeMode,
+        markdownFontSizes = next.markdownFontSizes,
+        selectedAgentName = next.selectedAgentName,
+        agents = next.agents,
+        providers = next.providers,
+        availableCommands = next.availableCommands
+    )
+}
+
+/**
  * Persist a bounded session-metadata cache to [SettingsManager.sessionCache]
  * so the next cold start can reseed [AppState.sessions] instantly (tabs,
  * title, workdir groups). Keeps only entries the user actively cares about:
@@ -225,10 +274,14 @@ internal fun launchLoadSessionStatus(
 internal fun selectSessionState(
     state: MutableStateFlow<AppState>,
     settingsManager: SettingsManager,
-    sessionId: String
+    sessionId: String,
+    composerFlow: MutableStateFlow<ComposerState>
 ) {
     val oldSessionId = state.value.currentSessionId
-    val currentInputText = state.value.inputText
+    // §R-17 M3: read composer slice directly (authoritative; mirror is kept in
+    // sync by applyComposerSlice but reading the slice avoids the @Deprecated
+    // mirror warning inside the VM-side helpers).
+    val currentInputText = composerFlow.value.inputText
     if (oldSessionId != null) {
         settingsManager.setDraftText(oldSessionId, currentInputText)
     }
@@ -244,17 +297,19 @@ internal fun selectSessionState(
             // previous session's tail and has no meaning in the new one.
             // §Phase1E (glm-1 🟡-2): clear staleNotice too — opening a session
             // is itself a fresh load, so the "long absence" banner is moot.
+            // §R-17 M3: inputText moved to applyComposerSlice below.
             it.copy(
                 currentSessionId = sessionId,
                 messages = emptyList(),
                 partsByMessage = emptyMap(),
-                inputText = restoredDraft,
                 streamingPartTexts = emptyMap(),
                 streamingReasoningPart = null,
                 gapInfo = null,
                 staleNotice = false
             )
         }
+        // §R-17 M3: restore the selected session's draft into the composer slice.
+        applyComposerSlice(state, composerFlow) { it.copy(inputText = restoredDraft) }
 }
 
 /**
@@ -279,7 +334,10 @@ internal fun launchLoadMessages(
     sessionId: String,
     resetLimit: Boolean = true,
     settingsManager: SettingsManager? = null,
-    onCacheWindow: (sessionId: String, window: CachedSessionWindow) -> Unit = { _, _ -> }
+    onCacheWindow: (sessionId: String, window: CachedSessionWindow) -> Unit = { _, _ -> },
+    // §R-17 M3: optional settings slice (see launchCatchUp). Defaults null so
+    // legacy test callers keep compiling; production passes _settingsFlow.
+    settingsFlow: MutableStateFlow<SettingsState>? = null
 ) {
     // Coalesce concurrent loads. ADB showed startup triggers message loads from
     // multiple paths (testConnection→loadSessions→onLoadMessages, ON_START
@@ -378,6 +436,12 @@ internal fun launchLoadMessages(
                             gapInfo = if (resetLimit) null else it.gapInfo
                         )
                     }
+                    // §R-17 M3: also sync the settings slice so direct-subscription
+                    // consumers see the same agent. No-op when settingsFlow is null
+                    // (legacy test path); the AppState mirror above is always written.
+                    if (agentName != null && settingsFlow != null) {
+                        settingsFlow.value = settingsFlow.value.copy(selectedAgentName = agentName)
+                    }
                     DebugLog.d("Sync", "merged: before=$beforeMergeSize after=${state.value.messages.size}")
                     // §Per-session message cache (write): snapshot the freshly-
                     // merged window so a return trip restores it instantly.
@@ -475,7 +539,12 @@ internal fun launchCatchUp(
     state: MutableStateFlow<AppState>,
     sessionId: String,
     settingsManager: SettingsManager? = null,
-    onCacheWindow: (sessionId: String, window: CachedSessionWindow) -> Unit = { _, _ -> }
+    onCacheWindow: (sessionId: String, window: CachedSessionWindow) -> Unit = { _, _ -> },
+    // §R-17 M3: optional settings slice for direct-subscription consumers.
+    // Defaults to null so legacy test callers (CatchUpGapTest) keep compiling;
+    // when null, selectedAgentName is written only to the AppState mirror
+    // (production callers pass _settingsFlow so the slice stays in sync).
+    settingsFlow: MutableStateFlow<SettingsState>? = null
 ) {
     // §Phase1B (gpt-2 S3 / glm-1 🟡-1): synchronous check-and-set (mirrors
     // launchLoadMessages) to close the race where two concurrent catch-up
@@ -553,6 +622,12 @@ internal fun launchCatchUp(
                         gapInfo = newGap,
                         staleNotice = false
                     )
+                }
+                // §R-17 M3: also sync the settings slice so direct-subscription
+                // consumers see the same agent. No-op when settingsFlow is null
+                // (legacy test path); the AppState mirror above is always written.
+                if (agentName != null && settingsFlow != null) {
+                    settingsFlow.value = settingsFlow.value.copy(selectedAgentName = agentName)
                 }
                 val postUpdate = state.value
                 onCacheWindow(
@@ -744,12 +819,14 @@ internal fun launchLoadProviders(
     scope: CoroutineScope,
     repository: OpenCodeRepository,
     state: MutableStateFlow<AppState>,
+    settingsFlow: MutableStateFlow<SettingsState>,
     onNonFatalError: (String, Throwable?) -> Unit
 ) {
     scope.launch {
         repository.getProviders()
             .onSuccess { providers ->
-                state.update { it.copy(providers = providers) }
+                // §R-17 M3: providers lives on the settings slice.
+                applySettingsSlice(state, settingsFlow) { it.copy(providers = providers) }
             }
             .onFailure { error ->
                 onNonFatalError("Failed to load providers", error)
@@ -880,6 +957,7 @@ internal fun launchSendMessage(
     scope: CoroutineScope,
     repository: OpenCodeRepository,
     state: MutableStateFlow<AppState>,
+    composerFlow: MutableStateFlow<ComposerState>,
     sessionId: String,
     text: String,
     attachments: List<ComposerImageAttachment> = emptyList(),
@@ -917,12 +995,16 @@ internal fun launchSendMessage(
                 onRefreshMessages(sessionId, true)
             }
             .onFailure { error ->
+                // §R-17 M3: read composer slice for the restore-decision; error
+                // → _state, inputText → composer slice (mirror kept in sync).
+                // Restore the failed prompt only if the user has not typed
+                // something new since the synchronous dispatch clear.
+                val currentInput = composerFlow.value.inputText
+                val restored = if (currentInput.isBlank()) text else currentInput
                 state.update { s ->
-                    // Restore the failed prompt only if the user has not typed
-                    // something new since the synchronous dispatch clear.
-                    val restored = if (s.inputText.isBlank()) text else s.inputText
-                    s.copy(error = errorMessageOrFallback(error, "Failed to send message"), inputText = restored)
+                    s.copy(error = errorMessageOrFallback(error, "Failed to send message"))
                 }
+                applyComposerSlice(state, composerFlow) { it.copy(inputText = restored) }
             }
         onComplete?.invoke()
     }

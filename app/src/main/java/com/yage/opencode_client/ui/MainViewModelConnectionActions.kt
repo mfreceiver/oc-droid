@@ -14,7 +14,8 @@ internal fun applySavedSettings(
     settingsManager: SettingsManager,
     hostProfileStore: HostProfileStore,
     state: MutableStateFlow<AppState>,
-    connectionFlow: MutableStateFlow<ConnectionState>
+    connectionFlow: MutableStateFlow<ConnectionState>,
+    settingsFlow: MutableStateFlow<SettingsState>
 ) {
     val currentProfile = hostProfileStore.currentProfile()
     val password = currentProfile.basicAuth?.passwordId?.let { settingsManager.basicAuthPassword(it) }
@@ -38,15 +39,25 @@ internal fun applySavedSettings(
             lastNavPage = settingsManager.lastNavPage,
             hostProfiles = profiles,
             currentHostProfileId = currentProfile.id,
-            selectedAgentName = settingsManager.selectedAgentName ?: "build",
-            themeMode = settingsManager.themeMode,
-            markdownFontSizes = settingsManager.markdownFontSizes,
             openSessionIds = settingsManager.openSessionIds,
             // Seed sessions from the persisted metadata cache so tabs/title/
             // workdir groups render instantly on cold start (before the server
             // list loads). loadSessions replaces these with authoritative data.
             sessions = settingsManager.sessionCache.map { entry -> entry.toSession() }
             // §R-17 M2: connectionPhase moved to connectionFlow below.
+            // §R-17 M3: selectedAgentName/themeMode/markdownFontSizes moved to
+            // settingsFlow below.
+        )
+    }
+    // §R-17 M3 (RFC §4 strategy A): seed the settings slice + mirror from
+    // persisted prefs. Runs synchronously alongside the _state.update above;
+    // intermediate state legal.
+    val seedAgent = settingsManager.selectedAgentName ?: "build"
+    applySettingsSlice(state, settingsFlow) {
+        it.copy(
+            selectedAgentName = seedAgent,
+            themeMode = settingsManager.themeMode,
+            markdownFontSizes = settingsManager.markdownFontSizes
         )
     }
     // §R-17 M2 (RFC §4 strategy A): write the connection slice AND mirror it

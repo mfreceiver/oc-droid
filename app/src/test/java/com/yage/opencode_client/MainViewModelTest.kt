@@ -19,8 +19,11 @@ import com.yage.opencode_client.data.repository.MessagesPage
 import com.yage.opencode_client.data.repository.OpenCodeRepository
 import com.yage.opencode_client.di.AppLifecycleMonitor
 import com.yage.opencode_client.ui.AppState
+import com.yage.opencode_client.ui.ComposerState
 import com.yage.opencode_client.ui.ConnectionState
+import com.yage.opencode_client.ui.FileState
 import com.yage.opencode_client.ui.MainViewModel
+import com.yage.opencode_client.ui.SettingsState
 import com.yage.opencode_client.ui.TrafficState
 import com.yage.opencode_client.ui.TunnelActivationState
 import com.yage.opencode_client.ui.session.buildSessionTree
@@ -128,7 +131,55 @@ class MainViewModelTest {
         field.isAccessible = true
         @Suppress("UNCHECKED_CAST")
         val flow = field.get(viewModel) as MutableStateFlow<AppState>
-        flow.value = transform(flow.value)
+        val newState = transform(flow.value)
+        flow.value = newState
+        // §R-17 M3: production code reads the composer/file/settings SLICES
+        // (e.g. dispatchSendMessage reads _composerFlow.value.inputText), not
+        // the AppState mirrors. Without syncing the slices here, a test that
+        // does `updateState { copy(inputText = "hi") }` followed by
+        // `viewModel.sendMessage()` would see an empty slice and the send would
+        // no-op. Mirror the new AppState values back into the three slices so
+        // the legacy `updateState { copy(<m3 field> = ...) }` calls keep
+        // driving production code correctly. (M2's connection/traffic slices
+        // don't need this — no production read-site consumes them for a
+        // decision the way composer is consumed by dispatchSendMessage.)
+        syncM3SlicesFromState(viewModel, newState)
+    }
+
+    @Suppress("DEPRECATION", "UNCHECKED_CAST")
+    private fun syncM3SlicesFromState(viewModel: MainViewModel, state: AppState) {
+        // composer slice
+        MainViewModel::class.java.getDeclaredField("_composerFlow").apply {
+            isAccessible = true
+            (get(viewModel) as MutableStateFlow<ComposerState>).value = ComposerState(
+                inputText = state.inputText,
+                imageAttachments = state.imageAttachments,
+                sendingSessionIds = state.sendingSessionIds,
+                draftWorkdir = state.draftWorkdir
+            )
+        }
+        // file slice
+        MainViewModel::class.java.getDeclaredField("_fileFlow").apply {
+            isAccessible = true
+            (get(viewModel) as MutableStateFlow<FileState>).value = FileState(
+                filePathToShowInFiles = state.filePathToShowInFiles,
+                filePreviewOriginRoute = state.filePreviewOriginRoute,
+                fileBrowserOpen = state.fileBrowserOpen,
+                fileBrowserWorkdir = state.fileBrowserWorkdir
+            )
+        }
+        // settings slice
+        MainViewModel::class.java.getDeclaredField("_settingsFlow").apply {
+            isAccessible = true
+            (get(viewModel) as MutableStateFlow<SettingsState>).value = SettingsState(
+                themeMode = state.themeMode,
+                markdownFontSizes = state.markdownFontSizes,
+                selectedAgentName = state.selectedAgentName,
+                agents = state.agents,
+                providers = state.providers,
+                availableCommands = state.availableCommands
+            )
+        }
     }
 
     /**
@@ -161,6 +212,50 @@ class MainViewModelTest {
         field.isAccessible = true
         @Suppress("UNCHECKED_CAST")
         val flow = field.get(viewModel) as MutableStateFlow<TrafficState>
+        flow.value = transform(flow.value)
+    }
+
+    /**
+     * §R-17 M3: write the composer slice directly. See [updateConnection] for
+     * rationale. NOTE: writing the slice alone does NOT update the AppState
+     * mirror on `_state` — production code always uses `writeComposer` (which
+     * mirrors), but this raw helper is for tests that specifically want to
+     * drive the slice. For tests that need `state.value.<composer field>` to
+     * reflect the change, prefer [updateState] (which writes `_state` and is
+     * what the reflection-based assertions read).
+     */
+    private fun updateComposer(
+        viewModel: MainViewModel,
+        transform: (ComposerState) -> ComposerState
+    ) {
+        val field = MainViewModel::class.java.getDeclaredField("_composerFlow")
+        field.isAccessible = true
+        @Suppress("UNCHECKED_CAST")
+        val flow = field.get(viewModel) as MutableStateFlow<ComposerState>
+        flow.value = transform(flow.value)
+    }
+
+    /** §R-17 M3: write the file slice directly. See [updateComposer]. */
+    private fun updateFile(
+        viewModel: MainViewModel,
+        transform: (FileState) -> FileState
+    ) {
+        val field = MainViewModel::class.java.getDeclaredField("_fileFlow")
+        field.isAccessible = true
+        @Suppress("UNCHECKED_CAST")
+        val flow = field.get(viewModel) as MutableStateFlow<FileState>
+        flow.value = transform(flow.value)
+    }
+
+    /** §R-17 M3: write the settings slice directly. See [updateComposer]. */
+    private fun updateSettings(
+        viewModel: MainViewModel,
+        transform: (SettingsState) -> SettingsState
+    ) {
+        val field = MainViewModel::class.java.getDeclaredField("_settingsFlow")
+        field.isAccessible = true
+        @Suppress("UNCHECKED_CAST")
+        val flow = field.get(viewModel) as MutableStateFlow<SettingsState>
         flow.value = transform(flow.value)
     }
 
