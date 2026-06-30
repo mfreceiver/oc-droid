@@ -67,3 +67,8 @@ ENV/
 
 # Local Markdown Web Preview fixtures copied from iOS for manual Android rendering tests
 docs/ios_markdown_preview_fixtures/
+
+# BEGIN oh-my-opencode-slim worktrees
+.slim/worktrees/
+.slim/worktrees.json
+# END oh-my-opencode-slim worktrees

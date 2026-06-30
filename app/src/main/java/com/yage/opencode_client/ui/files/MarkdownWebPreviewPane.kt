@@ -44,8 +44,8 @@ import com.yage.opencode_client.R
 import com.yage.opencode_client.BuildConfig
 import com.yage.opencode_client.data.repository.OpenCodeRepository
 import com.yage.opencode_client.ui.theme.LocalMarkdownFontSizes
-import com.yage.opencode_client.ui.theme.MarkdownFontSizes
 import com.yage.opencode_client.ui.theme.markdownTypography
+import com.yage.opencode_client.util.MarkdownFontSizes
 import com.yage.opencode_client.ui.util.DataUriImageTransformer
 import com.yage.opencode_client.ui.util.MarkdownImageResolver
 import org.json.JSONObject
@@ -139,7 +139,7 @@ private fun ResolvedMarkdownWebPreview(
 @Composable
 private fun MarkdownWebView(
     markdown: String,
-    fontSizes: com.yage.opencode_client.ui.theme.MarkdownFontSizes = com.yage.opencode_client.ui.theme.MarkdownFontSizes(),
+    fontSizes: MarkdownFontSizes = MarkdownFontSizes(),
     onRenderError: (String) -> Unit,
     onOpenNative: () -> Unit,
     onOpenSource: () -> Unit

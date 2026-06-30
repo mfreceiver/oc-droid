@@ -20,7 +20,8 @@ internal fun applySavedSettings(
     repository.configure(
         baseUrl = currentProfile.serverUrl,
         username = currentProfile.basicAuth?.username,
-        password = password
+        password = password,
+        allowInsecureConnections = currentProfile.allowInsecureConnections
     )
     // Restore the last connected workdir so the repository is re-scoped to the
     // same project on cold start (currentDirectory is otherwise in-memory only

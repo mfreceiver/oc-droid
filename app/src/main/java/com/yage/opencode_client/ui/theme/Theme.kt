@@ -19,7 +19,12 @@ import androidx.compose.ui.text.font.DeviceFontFamilyName
 import androidx.compose.ui.text.font.Font
 import androidx.compose.ui.text.font.FontFamily
 import androidx.core.view.WindowCompat
+import com.yage.opencode_client.util.MarkdownFontSizes
 import com.yage.opencode_client.util.SettingsManager
+import dagger.hilt.EntryPoint
+import dagger.hilt.InstallIn
+import dagger.hilt.android.EntryPointAccessors
+import dagger.hilt.components.SingletonComponent
 
 /**
  * The resolved dark-theme state actually applied to the composition — i.e. the
@@ -140,23 +145,18 @@ fun OpenCodeTheme(
     val colorScheme = if (darkTheme) DarkColorScheme else LightColorScheme
     val opencodeColors = if (darkTheme) DarkOpencodeColors else LightOpencodeColors
 
-    // v2 §20 / D5 font scaffold: read the 4 font keys from SettingsManager and
-    // assemble a FontFamily. Defaults are empty (= system font). The
-    // SettingsManager instance here is constructed via the Application context
-    // and cached with `remember` so the (relatively expensive) encrypted-prefs
-    // initialization happens once per Activity, not per recomposition. The
-    // underlying SharedPreferences file is shared with the Hilt @Singleton
-    // instance, so writes from elsewhere are observed on next read.
+    // v2 §20 / D5 font scaffold: read the 4 font keys from the Hilt singleton
+    // [SettingsManager] and assemble a FontFamily. Defaults are empty (=
+    // system font).
     //
-    // TODO(评审 Stage C #4): this constructs a SECOND [SettingsManager] that
-    // bypasses the Hilt @Singleton graph. We cannot reach the Hilt instance
-    // from this top-level @Composable (it lives outside any @HiltViewModel /
-    // entry-point scope), so the encrypted-prefs init runs again per Activity
-    // reconstruction. A future refactor should expose [SettingsManager] via a
-    // Hilt entry point (or hoist this read into MainViewModel and pass the
-    // resolved FontFamily down) so the Compose tree reuses the singleton.
-    val context = LocalContext.current
-    val settings = remember(context) { SettingsManager(context) }
+    // R-11: previously this constructed a SECOND [SettingsManager] via
+    // `SettingsManager(context)`, bypassing the Hilt @Singleton graph and
+    // re-running encrypted-prefs init per Activity reconstruction. Now we
+    // resolve the Hilt singleton through a Hilt @EntryPoint (this Composable
+    // lives outside any @HiltViewModel scope), so the Compose tree reuses the
+    // singleton. (Reactive hoisting of font state is R-17 RFC scope, NOT done
+    // here — this change only eliminates the second instance.)
+    val settings = rememberSettingsManager()
     val appFontFamily = remember(
         settings.fontLatin,
         settings.fontCJK,
@@ -204,5 +204,41 @@ fun OpenCodeTheme(
                 content()
             }
         }
+    }
+}
+
+/**
+ * R-11: Hilt entryPoint that exposes the singleton [SettingsManager] to
+ * top-level Composables (which live outside any @HiltViewModel scope). Used by
+ * [rememberSettingsManager] so [OpenCodeTheme] reads font preferences from the
+ * same Hilt singleton the rest of the app uses, instead of constructing a
+ * second [SettingsManager] that bypasses the DI graph.
+ *
+ * [SettingsManager] is already `@Singleton @Inject constructor`-annotated, so
+ * Hilt auto-provides it; this entry point only adds a resolution path from
+ * non-Hilt Compose code (no [dagger.hilt.android.HiltAndroidApp]-scoped owner
+ * is available at the theme level).
+ */
+@EntryPoint
+@InstallIn(SingletonComponent::class)
+interface SettingsManagerEntryPoint {
+    fun settingsManager(): SettingsManager
+}
+
+/**
+ * R-11: resolves the Hilt singleton [SettingsManager] for use in a Composable.
+ * `context.applicationContext` is the Hilt-attached owner (the Application is
+ * `@HiltAndroidApp`), so [EntryPointAccessors.fromApplication] can return the
+ * singleton. Cached with `remember(context)` so the entry-point lookup runs
+ * once per Activity.
+ */
+@Composable
+private fun rememberSettingsManager(): SettingsManager {
+    val context = LocalContext.current
+    return remember(context) {
+        EntryPointAccessors.fromApplication(
+            context.applicationContext,
+            SettingsManagerEntryPoint::class.java
+        ).settingsManager()
     }
 }

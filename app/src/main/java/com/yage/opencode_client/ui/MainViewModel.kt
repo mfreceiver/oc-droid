@@ -12,7 +12,7 @@ import com.yage.opencode_client.util.SettingsManager
 import com.yage.opencode_client.util.DebugLog
 import com.yage.opencode_client.util.ThemeMode
 import com.yage.opencode_client.util.TrafficTracker
-import com.yage.opencode_client.ui.theme.MarkdownFontSizes
+import com.yage.opencode_client.util.MarkdownFontSizes
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
@@ -779,7 +779,7 @@ class MainViewModel @Inject constructor(
         settingsManager.serverUrl = url
         settingsManager.username = username
         settingsManager.password = password
-        repository.configure(url, username, password)
+        repository.configure(url, username, password, allowInsecureConnections = currentHostProfile().allowInsecureConnections)
     }
 
     fun getHostProfiles(): List<HostProfile> = hostProfileStore.profiles()
@@ -971,7 +971,7 @@ class MainViewModel @Inject constructor(
         // runs, and cancel() is null-safe.
         cancelSseForReconfigure()
         val password = profile.basicAuth?.passwordId?.let { settingsManager.basicAuthPassword(it) }
-        repository.configure(profile.serverUrl, profile.basicAuth?.username, password)
+        repository.configure(profile.serverUrl, profile.basicAuth?.username, password, allowInsecureConnections = profile.allowInsecureConnections)
         // §H2: repository.configure() resets currentDirectory to null. Every
         // reconfigure path (testConnection on cold start + each ON_START
         // catch-up, selectHostProfile, deleteHostProfile) flows through here, so
@@ -2076,7 +2076,7 @@ class MainViewModel @Inject constructor(
 
         _state.update { it.copy(tunnelActivationState = TunnelActivationState.Loading) }
         viewModelScope.launch {
-            repository.activateTunnel(profile.serverUrl, password)
+            repository.activateTunnel(profile.serverUrl, password, allowInsecure = profile.allowInsecureConnections)
                 .onSuccess {
                     _state.update {
                         it.copy(

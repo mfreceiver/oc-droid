@@ -1,7 +1,6 @@
 package com.yage.opencode_client.data.api
 
 import com.yage.opencode_client.data.model.SSEEvent
-import com.yage.opencode_client.ui.NOISY_SSE_LOG_EVENTS
 import com.yage.opencode_client.util.DebugLog
 import kotlinx.coroutines.channels.awaitClose
 import kotlinx.coroutines.delay

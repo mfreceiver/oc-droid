@@ -11,13 +11,9 @@ import kotlinx.serialization.json.JsonPrimitive
 
 internal val lenientJson = Json { ignoreUnknownKeys = true }
 
-/** SSE event types that are pure noise in the debug log (high-frequency or
- *  server-internal). Logging them floods the ring buffer and evicts signal.
- *  NOTE: this affects ONLY logging — event handling/dispatch is unchanged. */
-internal val NOISY_SSE_LOG_EVENTS: Set<String> = setOf(
-    "message.part.delta", "server.heartbeat", "server.connected",
-    "plugin.added", "catalog.updated", "integration.updated"
-)
+// R-09: NOISY_SSE_LOG_EVENTS 已下沉到 data/api/SseLogFilter.kt（消除 data 层对 ui
+// 层的反向依赖）。UI 侧使用处（MainViewModelSyncActions）改为正向 import
+// com.yage.opencode_client.data.api.NOISY_SSE_LOG_EVENTS。
 
 internal object MainViewModelTimings {
     const val sessionPageSize = 10

@@ -6,7 +6,6 @@ import android.util.Log
 import androidx.security.crypto.EncryptedSharedPreferences
 import androidx.security.crypto.MasterKey
 import com.yage.opencode_client.data.model.SessionCacheEntry
-import com.yage.opencode_client.ui.theme.MarkdownFontSizes
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json

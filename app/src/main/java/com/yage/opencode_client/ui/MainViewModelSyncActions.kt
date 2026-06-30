@@ -2,6 +2,7 @@ package com.yage.opencode_client.ui
 
 import android.util.Log
 
+import com.yage.opencode_client.data.api.NOISY_SSE_LOG_EVENTS
 import com.yage.opencode_client.data.model.Message
 import com.yage.opencode_client.data.model.SSEEvent
 import com.yage.opencode_client.data.model.TodoItem
