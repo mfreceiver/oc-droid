@@ -19,6 +19,7 @@ import com.yage.opencode_client.ui.TrafficState
 import com.yage.opencode_client.ui.TunnelActivationState
 import com.yage.opencode_client.ui.UnreadState
 import com.yage.opencode_client.ui.syncSlicesFromAppState
+import com.yage.opencode_client.ui.util.HttpImageHolder
 import com.yage.opencode_client.util.SettingsManager
 import io.mockk.coEvery
 import io.mockk.coVerify
@@ -109,11 +110,16 @@ class HostProfileControllerTest {
         )
         // Default store seeding; tests re-stub as needed (last stub wins).
         seedStore(listOf(profileA, profileB), currentId = "p-A")
+        // #12: HttpImageHolder 是 object 单例，跨单测会残留 allowInsecure 状态——
+        // 每个用例前重置为默认 (false)，确保 updateSsl 的 effective/no-op 行为确定。
+        HttpImageHolder.resetTestState()
     }
 
     @After
     fun tearDown() {
         unmockkAll()
+        // #12: 同样在 teardown 重置，避免单例状态泄漏到同 JVM 内其它测试类。
+        HttpImageHolder.resetTestState()
     }
 
     /** Re-stubs store.profiles()/currentProfile() to deterministic fixtures. */
@@ -254,6 +260,8 @@ class HostProfileControllerTest {
         assertEquals(1, callbacks.forceReconnectCalls)
         // configureRepositoryForProfile cancels SSE once.
         assertEquals(1, callbacks.cancelSseForReconfigureCalls)
+        // #12: image client 的 TLS 信任策略也同步切到 trust-all（与 REST/SSE 对称）。
+        assertEquals(true, HttpImageHolder.lastUpdateSslAllowInsecure)
     }
 
     @Test
@@ -284,6 +292,58 @@ class HostProfileControllerTest {
         verify(exactly = 0) { repository.configure(any(), any(), any(), any()) }
         assertEquals(0, callbacks.forceReconnectCalls)
         assertEquals(0, callbacks.cancelSseForReconfigureCalls)
+    }
+
+    @Test
+    fun `saveHostProfile of active host reconfigures and force-reconnects when allowInsecure is toggled off`() {
+        // #12 对称覆盖（R-01 "OFF 零回归" 核心承诺）：当前 host 初始
+        // allowInsecure=true，保存改为 false → 必须重配 REST/SSE/image client
+        // 并强制重连，使新的 TLS 信任策略即时生效——与 ON 路径完全对称。
+        seedStore(listOf(profileA, profileB), currentId = "p-B") // profileB 当前且 allowInsecure=true
+        seed { it.copy(currentHostProfileId = "p-B") }
+        val toggledOff = profileB.copy(allowInsecureConnections = false) // true → false
+
+        controller.saveHostProfile(toggledOff, basicAuthEdited = false)
+
+        // 重配为 allowInsecure=false（切回系统信任）。
+        verify { repository.configure(toggledOff.serverUrl, any(), any(), false) }
+        assertEquals(1, callbacks.forceReconnectCalls)
+        assertEquals(1, callbacks.cancelSseForReconfigureCalls)
+        // #12: image client 信任策略同步切回 system trust。
+        assertEquals(false, HttpImageHolder.lastUpdateSslAllowInsecure)
+    }
+
+    @Test
+    fun `saveHostProfile of active host does NOT reconfigure when allowInsecure stays true`() {
+        // #12 对称覆盖：当前 host 已 allowInsecure=true，保存仍 true（仅改 name）
+        // → 不应触发重配/重连，与现有 unchanged(false→false) 用例对称。
+        seedStore(listOf(profileA, profileB), currentId = "p-B")
+        seed { it.copy(currentHostProfileId = "p-B") }
+        val renamed = profileB.copy(name = "Renamed B") // allowInsecure 保持 true
+
+        controller.saveHostProfile(renamed, basicAuthEdited = false)
+
+        verify(exactly = 0) { repository.configure(any(), any(), any(), any()) }
+        assertEquals(0, callbacks.forceReconnectCalls)
+        assertEquals(0, callbacks.cancelSseForReconfigureCalls)
+        // 未走 configureRepositoryForProfile → updateSsl 不应被调用（钩子保持 null）。
+        assertNull(HttpImageHolder.lastUpdateSslAllowInsecure)
+    }
+
+    // ── #12: HttpImageHolder.updateSsl sync verification ───────────────────
+
+    @Test
+    fun `selectHostProfile propagates the selected host allowInsecure flag to HttpImageHolder`() {
+        // #12: selectHostProfile(profileB allowInsecure=true) 走
+        // configureRepositoryForProfile → HttpImageHolder.updateSsl(true)，
+        // 保证自签名 HTTPS markdown 图片在 trust-all toggle ON 时可加载。
+        every { store.select("p-B") } returns profileB
+        every { settingsManager.basicAuthPassword("p-B") } returns "secret-b"
+
+        controller.selectHostProfile("p-B")
+        runPending()
+
+        assertEquals(true, HttpImageHolder.lastUpdateSslAllowInsecure)
     }
 
     // ── duplicateHostProfile ───────────────────────────────────────────────
@@ -468,6 +528,8 @@ class HostProfileControllerTest {
         verify { settingsManager.username = "mu" }
         verify { settingsManager.password = "mp" }
         verify { repository.configure("http://manual:4096", "mu", "mp", profileB.allowInsecureConnections) }
+        // #12: configureServer 也把信任策略同步给 image client（与 REST/SSE 对称）。
+        assertEquals(true, HttpImageHolder.lastUpdateSslAllowInsecure)
     }
 
     @Test

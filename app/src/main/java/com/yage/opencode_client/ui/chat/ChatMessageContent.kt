@@ -95,6 +95,7 @@ import com.yage.opencode_client.ui.util.DataUriImageTransformer
 import com.yage.opencode_client.ui.util.HttpImageHolder
 import com.yage.opencode_client.ui.util.MarkdownImageResolver
 import kotlinx.coroutines.flow.collect
+import kotlinx.coroutines.flow.drop
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -147,6 +148,16 @@ internal fun ChatMessageList(
     // null). Before opening a sub-session the user's last scroll offset in the
     // parent is recorded here; returning to the parent restores it instead of
     // jumping to the latest message.
+    //
+    // 🟡 Lifecycle constraint (glmer 🟡-6): this cache is bound to the
+    // ChatMessageList composable staying in composition. It is NOT persisted
+    // across process death or full ChatScreen disposal (e.g. navigation away
+    // from the chat tab, config change without saved-state handling). That is
+    // acceptable for the parent→sub→parent restore use-case; cross-process
+    // restoration is handled by the server-side message list re-fetch + the
+    // `shouldAutoScroll = true` fresh-open fallback. Capacity is bounded by
+    // MAX_SAVED_SESSIONS (LRU eviction of the oldest insertion) to avoid
+    // unbounded growth for heavy users that open many sub-sessions.
     val savedPositions = remember { mutableStateMapOf<String, Pair<Int, Int>>() }
     // Session id for which we still owe a scroll-position restore once its
     // messages have materialised. Set synchronously on session enter, consumed
@@ -172,13 +183,43 @@ internal fun ChatMessageList(
     // session id. There is no "before session change" hook in Compose, so a
     // reactive mirror is the simplest robust way to ensure the latest offset
     // is on file the instant the user navigates into a sub-session.
+    //
+    // 🔴 Race fix (glmer 🔴-1 + kimo 🔴-1): when `sessionId` changes this
+    // LaunchedEffect re-launches, and `snapshotFlow` emits its *current* value
+    // on the first collection — which is still the *previous* session's scroll
+    // position (the listState hasn't moved yet). Writing that stale position to
+    // `savedPositions[newSessionId]` clobbered the new session's true history,
+    // so parent→sub→parent returned to the sub-session's position instead of
+    // the parent's. Two guards fix this:
+    //   (1) `.drop(1)` — skip the first emit on each (re)launch, so the stale
+    //       position carried over from the previous session is never recorded
+    //       against the new sessionId.
+    //   (2) `pendingRestoreSession == sessionId` — skip writes while a restore
+    //       is in flight. The contentVersion effect performs a programmatic
+    //       `scrollToItem` to apply the saved position; those synthetic scroll
+    //       events must NOT be recorded as user positions. The effect clears
+    //       `pendingRestoreSession` once restore completes, after which real
+    //       user scrolls resume being mirrored. Belt-and-suspenders with (1).
+    // The "same-session streaming follow-to-bottom" semantic is preserved —
+    // real user scrolls in the active session keep updating the cached offset.
     LaunchedEffect(listState, sessionId) {
         if (sessionId == null) return@LaunchedEffect
         snapshotFlow {
             listState.firstVisibleItemIndex to listState.firstVisibleItemScrollOffset
-        }.collect { pos ->
-            savedPositions[sessionId] = pos
         }
+            .drop(1)
+            .collect { pos ->
+                // Guard (2): restore-in-flight → don't record programmatic scrolls.
+                if (pendingRestoreSession == sessionId) return@collect
+                savedPositions[sessionId] = pos
+                // 🟡 LRU cap: evict the oldest insertion when over capacity.
+                // SnapshotStateMap preserves insertion order, so the first key
+                // is the oldest entry. Bounded growth for heavy sub-session use.
+                while (savedPositions.size > MAX_SAVED_SESSIONS) {
+                    val oldest = savedPositions.keys.firstOrNull() ?: break
+                    savedPositions.remove(oldest)
+                }
+            }
     }
 
     // #3 — on session enter, decide intent: a "return" (saved position exists)
@@ -1465,6 +1506,25 @@ private fun MarkdownComponentModel.codeText(): String {
 }
 
 /**
+ * Extracts the optional language tag from a fenced code block
+ * [MarkdownComponentModel] (e.g. `kotlin` from ``` ```kotlin ```). Returns the
+ * empty string for indented code blocks (no fence) or fences that omit the
+ * language. Used by [WrappedCodeBlock] (#9 option 2) to render a language
+ * badge in the top-right corner of the card — recovering a hint of the
+ * metadata that mikepenz's `MarkdownHighlightedCodeFence` would have surfaced
+ * via syntax highlighting.
+ */
+private fun MarkdownComponentModel.codeFenceLanguage(): String {
+    val raw = content.subSequence(node.startOffset, node.endOffset).toString()
+    val first = raw.substringBefore('\n', "").trimStart()
+    val isFenceStart = first.startsWith("```") || first.startsWith("~~~")
+    if (!isFenceStart) return ""
+    // Strip the fence marker (3+ chars of ` or ~), then trim whitespace/quotes.
+    val markerEnd = first.takeWhile { it == '`' || it == '~' }.length
+    return first.substring(markerEnd).trim().substringBefore(' ').ifBlank { "" }
+}
+
+/**
  * #9 — code block / code fence renderer that wraps long lines instead of
  * scrolling horizontally. Replaces mikepenz's [highlightedCodeBlock] /
  * [highlightedCodeFence], whose inner [Text] is wrapped in a
@@ -1475,10 +1535,23 @@ private fun MarkdownComponentModel.codeText(): String {
  * next line instead of being clipped or pushed off-screen. The muted layer02
  * background + borderBase outline matches the Quiet Tech card styling used by
  * the other tool cards. Content stays selectable.
+ *
+ * Mix-approach investigation (#9 step 1): mikepenz's highlighted renderers
+ * `MarkdownHighlightedCodeFence` / `MarkdownHighlightedCodeBlock` /
+ * `MarkdownHighlightedCode` only accept `(content, node/language, style,
+ * Highlights.Builder, showLineNumbers, Composer, ints)` — there is **no
+ * `Modifier` parameter** on any public signature, and the horizontal scroll is
+ * baked into the internal `MarkdownCodeBackground` layout. So it is impossible
+ * to keep syntax highlighting while overriding the scroll behaviour without
+ * forking the library. Per spec we therefore fall back to option 2: keep the
+ * wrapping renderer but surface the fence's language tag as a small badge in
+ * the top-right corner (see [codeFenceLanguage]), recovering a hint of the
+ * metadata that the highlighted variant would have communicated visually.
  */
 @Composable
 private fun WrappedCodeBlock(model: MarkdownComponentModel) {
     val code = remember(model) { model.codeText() }
+    val language = remember(model) { model.codeFenceLanguage() }
     val oc = MaterialTheme.opencode
     Surface(
         modifier = Modifier.fillMaxWidth(),
@@ -1486,16 +1559,41 @@ private fun WrappedCodeBlock(model: MarkdownComponentModel) {
         color = oc.layer02,
         border = BorderStroke(1.dp, oc.borderBase)
     ) {
-        SelectionContainer {
-            Text(
-                text = code,
-                modifier = Modifier.padding(8.dp),
-                style = MaterialTheme.typography.bodySmall,
-                fontFamily = FontFamily.Monospace,
-                color = MaterialTheme.colorScheme.onSurface,
-                softWrap = true,
-                overflow = TextOverflow.Visible
-            )
+        Box(modifier = Modifier.fillMaxWidth()) {
+            SelectionContainer {
+                Text(
+                    text = code,
+                    // top padding is enlarged when the badge is present so the
+                    // first code line does not slide under the overlay label.
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(
+                            start = 8.dp,
+                            end = 8.dp,
+                            top = if (language.isNotBlank()) 18.dp else 8.dp,
+                            bottom = 8.dp
+                        ),
+                    style = MaterialTheme.typography.bodySmall,
+                    fontFamily = FontFamily.Monospace,
+                    color = MaterialTheme.colorScheme.onSurface,
+                    softWrap = true,
+                    overflow = TextOverflow.Visible
+                )
+            }
+            if (language.isNotBlank()) {
+                // Badge sits outside SelectionContainer so it is NOT part of
+                // the copied code text — selecting & copying the block yields
+                // the raw code without any "kotlin" prefix contamination.
+                Text(
+                    text = language,
+                    modifier = Modifier
+                        .align(Alignment.TopEnd)
+                        .padding(horizontal = 6.dp, vertical = 2.dp),
+                    style = MaterialTheme.typography.labelSmall,
+                    fontFamily = FontFamily.Monospace,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
         }
     }
 }
@@ -1507,6 +1605,16 @@ private fun WrappedCodeBlock(model: MarkdownComponentModel) {
  * them wall-to-wall. Matches iOS's compact card width.
  */
 private val MAX_CARD_WIDTH = 220.dp
+
+/**
+ * 🟡 (glmer 🟡-6) Maximum number of per-session scroll positions retained in
+ * `savedPositions` inside [ChatMessageList]. The cache is keyed by sessionId
+ * and lives for the lifetime of the ChatMessageList composable; without a cap
+ * a user that opens many sub-sessions would accumulate entries forever. When
+ * the cap is exceeded the oldest insertion is evicted (LRU). 30 is comfortably
+ * above typical agent-task fan-out while bounding memory to a few KB.
+ */
+private const val MAX_SAVED_SESSIONS = 30
 
 
 
@@ -1868,16 +1976,25 @@ private fun PatchCard(
             if (expanded) {
                 Column(modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp)) {
                     if (allPaths.isNotEmpty()) {
+                        // #8 (glmer 🟠-1) — apply `wrappablePath()` + softWrap so
+                        // long file paths wrap at path separators instead of
+                        // being clipped, matching ToolCard (~line 1737) and
+                        // ContextToolGroup (~line 2179). PatchCard is NOT inside
+                        // any SelectionContainer (verified — same as ToolCard),
+                        // so the inserted ZWSPs do not contaminate clipboard
+                        // copies; ZWSP-in-selection trade-off is moot here.
                         allPaths.forEach { path ->
                             Row(
                                 modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp),
                                 verticalAlignment = Alignment.CenterVertically
                             ) {
                                 Text(
-                                    text = path,
+                                    text = path.wrappablePath(),
                                     style = MaterialTheme.typography.bodySmall,
                                     fontFamily = FontFamily.Monospace,
                                     color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    softWrap = true,
+                                    overflow = TextOverflow.Visible,
                                     modifier = Modifier.weight(1f)
                                 )
                                 IconButton(onClick = { onFileClick(path) }, modifier = Modifier.size(22.dp)) {
@@ -1892,10 +2009,12 @@ private fun PatchCard(
                         }
                     } else if (primaryPath != null) {
                         Text(
-                            text = primaryPath,
+                            text = primaryPath.wrappablePath(),
                             style = MaterialTheme.typography.bodySmall,
                             fontFamily = FontFamily.Monospace,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            softWrap = true,
+                            overflow = TextOverflow.Visible
                         )
                     }
                 }

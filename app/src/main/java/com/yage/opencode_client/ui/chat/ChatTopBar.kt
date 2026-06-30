@@ -980,11 +980,15 @@ internal fun ContextUsageRing(usage: ContextUsage?) {
     //   0.25 ..< 0.50         → green
     //   0.50 ..< 0.75         → orange
     //   >= 0.75               → error (red)
+    // R-24: colours come from theme tokens so they adapt to light/dark. Green
+    // → stateSuccessFg, orange → stateWarningFg (both have explicit light +
+    // dark values in OpencodeColors); red/blue reuse M3 colorScheme.
+    val oc = MaterialTheme.opencode
     val ringColor = when {
         usage == null -> MaterialTheme.colorScheme.onSurfaceVariant
         usage.percentage >= 0.75f -> MaterialTheme.colorScheme.error
-        usage.percentage >= 0.50f -> Color(0xFFFF9800)
-        usage.percentage >= 0.25f -> Color(0xFF4CAF50)
+        usage.percentage >= 0.50f -> oc.stateWarningFg
+        usage.percentage >= 0.25f -> oc.stateSuccessFg
         else -> MaterialTheme.colorScheme.primary
     }
     val trackColor = MaterialTheme.colorScheme.onSurfaceVariant.copy(

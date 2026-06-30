@@ -52,6 +52,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -154,7 +155,7 @@ internal fun ChatInputBar(
     // a confirm dialog instead of aborting immediately. The explicit menu item
     // in QuietComposerStatus stays a direct abort (that is an intentional
     // menu action, no second confirmation needed).
-    var showStopConfirm by remember { mutableStateOf(false) }
+    var showStopConfirm by rememberSaveable { mutableStateOf(false) }
 
     // §9: composer card — rounded 10, surface (bg-base), 2dp elevation.
     Surface(
@@ -251,7 +252,7 @@ internal fun ChatInputBar(
                 Spacer(modifier = Modifier.width(8.dp))
 
                 // §9: primary send / stop — 28×28, rounded 6, bg-contrast bottom,
-                // white icon, 1dp shadow; disabled at 0.5 alpha.
+                // white icon; disabled at 0.5 alpha.
                 ChatPrimaryActionButton(
                     onClick = {
                         if (canStop) showStopConfirm = true
@@ -278,19 +279,22 @@ internal fun ChatInputBar(
             if (showStopConfirm) {
                 AlertDialog(
                     onDismissRequest = { showStopConfirm = false },
-                    title = { Text("停止运行？") },
-                    text = { Text("当前任务将被中断，已发送的内容无法撤回。") },
+                    title = { Text(stringResource(R.string.chat_stop_confirm_title)) },
+                    text = { Text(stringResource(R.string.chat_stop_confirm_message)) },
                     confirmButton = {
                         TextButton(onClick = {
                             onAbort()
                             showStopConfirm = false
                         }) {
-                            Text("停止", color = MaterialTheme.colorScheme.error)
+                            Text(
+                                stringResource(R.string.chat_stop),
+                                color = MaterialTheme.colorScheme.error
+                            )
                         }
                     },
                     dismissButton = {
                         TextButton(onClick = { showStopConfirm = false }) {
-                            Text("取消")
+                            Text(stringResource(R.string.common_cancel))
                         }
                     }
                 )

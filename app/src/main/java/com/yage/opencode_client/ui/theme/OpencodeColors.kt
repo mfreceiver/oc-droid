@@ -43,6 +43,9 @@ data class OpencodeColors(
     val stateDangerFg: Color,
     val stateInfoBg: Color,
     val stateInfoFg: Color,
+    // #11: 圆环警告阶段前景（ContextUsageRing 50%–75% 阶段，及未来 warning 徽章）。
+    // 与 stateSuccessFg/stateDangerFg 同位语义——明暗双套，避免硬编码 sRGB。
+    val stateWarningFg: Color,
     // 发送按钮底（bg-contrast）
     val bgContrast: Color,
 
@@ -99,6 +102,9 @@ internal val LightOpencodeColors = OpencodeColors(
     stateDangerFg = Color(0xFFB82D35),
     stateInfoBg = Color(0xFFECF1FE),
     stateInfoFg = Color(0xFF2C47C8),
+    // #11: 浅色警告前景——暖橙偏深（提亮策略下避免纯 #FF9800 过饱和），与
+    // stateSuccessFg(#198B43) / stateDangerFg(#B82D35) 同阶「深前景」风格一致。
+    stateWarningFg = Color(0xFFB07000),
     bgContrast = Color(0xFF242424),
 
     // R-27 浅色：保留原 AgentTone/Color.kt 顶层硬编码值，迁移来源可追溯。
@@ -163,6 +169,10 @@ internal val DarkOpencodeColors = OpencodeColors(
     stateDangerFg = Color(0xFFF17471),
     stateInfoBg = Color(0xFF1B2852),
     stateInfoFg = Color(0xFF2C47C8),
+    // #11: 深色警告前景——柔亮橙（orange 300 阶），与 stateSuccessFg(#6BD586) /
+    // stateDangerFg(#F17471) 同阶「亮前景」风格一致；复用 modifiedFile 暗色值，
+    // 在 DarkBackground #080808 上保证 ≥ 3:1 图形对比度（R-27 提亮策略）。
+    stateWarningFg = Color(0xFFFFB74D),
     bgContrast = Color(0xFF5C5C5C),
 
     // R-27 深色：在 DarkBackground #080808 上保证 ≥ 3:1 图形对比度。原则：

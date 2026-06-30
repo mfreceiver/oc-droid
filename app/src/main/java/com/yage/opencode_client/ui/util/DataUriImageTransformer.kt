@@ -5,6 +5,7 @@ import android.graphics.BitmapFactory
 import android.util.Base64
 import android.util.Log
 import android.util.LruCache
+import androidx.annotation.VisibleForTesting
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.mutableIntStateOf
@@ -264,6 +265,16 @@ object HttpImageHolder {
     @Volatile
     private var imageHttpClient: OkHttpClient = newImageHttpClient(allowInsecure = false)
 
+    /**
+     * #12 测试钩子（@VisibleForTesting）：记录最近一次 [updateSsl] 调用传入的
+     * allowInsecure 值——无论该次调用是否实际触发 client 重建（no-op 也记录）。
+     * 仅供 [com.yage.opencode_client.ui.controller.HostProfileControllerTest]
+     * 断言 "controller 确实把信任策略同步到了 image client"；生产行为从不读取
+     * 此字段。通过 [resetTestState] 重置。
+     */
+    @VisibleForTesting
+    internal var lastUpdateSslAllowInsecure: Boolean? = null
+
     private fun newImageHttpClient(allowInsecure: Boolean): OkHttpClient =
         OkHttpClient.Builder()
             .apply { applySsl(sslConfigFactory.sslConfigFor(allowInsecure)) }
@@ -284,9 +295,29 @@ object HttpImageHolder {
      */
     @Synchronized
     fun updateSsl(allowInsecure: Boolean) {
+        // #12 测试钩子：记录每次调用（含 no-op），供单测断言 controller→image
+        // client 的信任策略同步。赋值开销可忽略，不影响生产行为。
+        lastUpdateSslAllowInsecure = allowInsecure
         if (allowInsecure == imageAllowInsecure) return
         imageAllowInsecure = allowInsecure
         imageHttpClient = newImageHttpClient(allowInsecure)
+    }
+
+    /**
+     * #12 测试钩子（@VisibleForTesting）：把单例的可变 SSL 状态
+     * （[imageAllowInsecure] / [imageHttpClient] / [lastUpdateSslAllowInsecure]）
+     * 重置为进程启动初值（allowInsecure=false），避免 object 单例在跨单测间
+     * 残留状态污染——例如前一个用例把 toggle 置 true 后，本用例的
+     * `updateSsl(true)` 会变成 no-op 而无法验证"调用事实"。仅供
+     * [com.yage.opencode_client.ui.controller.HostProfileControllerTest] 的
+     * @Before/@After 调用。
+     */
+    @VisibleForTesting
+    @Synchronized
+    fun resetTestState() {
+        imageAllowInsecure = false
+        imageHttpClient = newImageHttpClient(allowInsecure = false)
+        lastUpdateSslAllowInsecure = null
     }
 
     private val diskCacheDir: File? by lazy {
