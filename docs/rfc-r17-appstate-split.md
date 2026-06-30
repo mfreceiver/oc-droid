@@ -428,15 +428,29 @@ internal fun ChatTopBar(
 
 **不做的**：不创建新 StateFlow，不拆字段。
 
+### 实施偏离记录（2026-06-30）：M2 同步镜像替代 combine+stateIn
+
+> 本节是 2026-06-30 M2 落地后的实施纪要，**修正/补充**下方原 M2 段落及全篇中涉及 `combine(...).stateIn()` 的描述（见 §6 M2 步骤 2/4 注记、§6 M4 line 469、§9.1 line 582/585、§9.4 line 606）。下方 M2 原段落保留**设计意图**不删，仅加注记指向本节。
+
+- **偏离**：M2 未采用 `val state = combine(_state, _connectionFlow, _trafficFlow) { ... }.stateIn(viewModelScope, SharingStarted.Eagerly, AppState())`，改用**同步镜像**——`state = _state.asStateFlow()`（同步视图），并由 `MainViewModel.writeConnection` / `writeTraffic` 两个 private helper 在**同一次同步调用**里写 slice（`_connectionFlow`/`_trafficFlow`）+ 镜像到 `_state` 的 deprecated 字段。
+- **原因**：`combine+stateIn` 在 `StandardTestDispatcher`（`MainDispatcherRule` 默认）下异步传播——上游 `MutableStateFlow.value =` 是同步的，但 `stateIn` 的收集协程需 dispatcher 调度才把 combine 结果写回缓存。首跑实测 13 个测试失败，根因是 MainViewModelTest 中 ~60 处"`updateState{...}` 写 `_state` 后**立即同步**读 `viewModel.state.value.xxx`"的既有模式；这些读在 combine 方案下拿到的是初始 `AppState()`，断言全部失配。改同步镜像后 `state.value` 与 `_state` 同步一致，零测试改动即全绿。
+- **§9.2 风险规避**：同步镜像反而**规避**了 RFC §9.2 警告的 `Dispatchers.Main.immediate` batch 风险——`writeConnection` 在调用线程内连续完成两次 `MutableStateFlow.value =` 赋值，**无 dispatcher 调度、无 frame 边界**，两个值取自同一个 `next: ConnectionState`，组合天然合法。不依赖任何 batch 保证。
+- **代价**：M2 的"隔离重组"性能收益**推迟到 M4**。M2 已暴露 `connectionFlow`/`trafficFlow` 只读 StateFlow，但当前**无消费方直接订阅**（ChatTopBar/ChatScreen/SettingsScreen 仍从 `state` 读 mirror 字段）；由于 mirror 仍写在 `_state` 上，connection/traffic 变化仍会触发所有 `state` 订阅者重组（与拆 Flow 前等价）。真正的隔离收益要等 M4 把消费方切换到直接订阅 slice Flow、且 mirror 字段随 AppState 退役后才兑现。
+- **对 M3-M4 的指引**：
+  1. **延续同步镜像模式**直到 AppState 退役。M3 拆 `composerFlow`/`fileFlow`/`settingsFlow` 时，照搬 `writeXxx` helper 模式（同步写 slice + `_state` mirror），不要切回 `combine+stateIn`——否则会重演 M2 的测试时序失败。
+  2. **M4 消费方切换时的顺序敏感性**：当消费方改为直接订阅 `connectionFlow`（不再读 `_state` mirror）时，注意 `resetLocalDataAndResync` 等多 slice 重置场景——当前实现里 `_state.update { AppState(...) }`（mirror 先清空）与 `writeConnection { ConnectionState(...) }`（slice 后重置）的顺序，对**直接 slice 订阅方不安全**（slice 订阅方会先看到 mirror 变空、稍后才看到 slice 重置）。M4 切换时应调整为"**先 writeConnection（slice 先变）再 `_state.update`（mirror 后变）**"，使 slice 订阅方始终先观测到权威值。
+  3. **AppState 退役后可重新评估 combine**：本偏离仅针对"M2-M3 过渡期 `_state` 仍是权威存储、消费方仍读 mirror"的阶段。M4/M5 当 AppState mirror 字段删除、`_state` 退化为非 connection/traffic 存储后，可重新考虑用 `combine` 派生调试快照（§9.1 用途）——届时已无"同步读 state.value"的测试约束。
+  4. **§6 M4 line 469 / §9.1 line 582/585 / §9.4 line 606 的 combine 描述不受本偏离影响**：那些是 M4+ "AppState 退役后的调试快照"用途，与 M2 的 `state` 实现是不同对象，设计仍然有效。
+
 ### Milestone 2（connectionFlow + trafficFlow 率先拆分）
 
 **目标**：验证"拆 Flow"方案的可行性，从小 Flow（2-5 字段）入手。
 
 **改造内容**：
 1. 新增 `connectionFlow` (`MutableStateFlow<ConnectionState>`) 和 `trafficFlow` (`MutableStateFlow<TrafficState>`)
-2. 改造所有 `_state.update { copy(isConnected=..., isConnecting=...) }` → `_connectionFlow.update { copy(...) }`
-3. 改造消费端（ChatTopBar server icon, ChatScreen 空态）从 `connectionFlow` 读取
-4. `AppState` 中对应字段**保留但不写入**（仅从 connectionFlow mirror，用于兼容旧消费方和测试），标记 `@Deprecated` 
+2. 改造所有 `_state.update { copy(isConnected=..., isConnecting=...) }` → `_connectionFlow.update { copy(...) }`（实际实施改为 `writeConnection { copy(...) }` 同步镜像，见上方「实施偏离记录」）
+3. 改造消费端（ChatTopBar server icon, ChatScreen 空态）从 `connectionFlow` 读取（实际实施 M2 阶段**保留**消费端从 `state` 读 mirror，未切换到直接订阅 slice Flow；推迟到 M4，见上方「实施偏离记录」代价项）
+4. `AppState` 中对应字段**保留但不写入**（仅从 connectionFlow mirror，用于兼容旧消费方和测试），标记 `@Deprecated` （实际实施 mirror 由 `writeConnection`/`writeTraffic` 同步写入 `_state`，非 combine overlay，见上方「实施偏离记录」）
 5. 改造测试：`updateState()` 反射 helper 改为同时可写 `_connectionFlow`
 
 **验收标准**：
@@ -631,3 +645,4 @@ Week 7-8: R-17 M4-M5 (chat/sessionList/unread/host 拆分) + R-16 测试补齐
 | 版本 | 日期 | 修订内容 |
 |---|---|---|
 | v1.0 | 2026-06-30 | 初稿：完整分组蓝图、派生决策、原子性分析、迁移路径、测试改造方案 |
+| v1.1 | 2026-06-30 | M2 实施偏离记录：`state` 放弃 `combine+stateIn`，改用 `writeConnection`/`writeTraffic` 同步镜像（规避 §9.2 batch 风险 + 维持测试同步读语义）；M2 原段落 step 2/3/4 加注记指向偏离记录。M3-M4 指引：延续同步镜像、注意 resetLocalDataAndResync 顺序敏感性 |

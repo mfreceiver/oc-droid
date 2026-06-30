@@ -125,11 +125,17 @@ data class AppState(
     // §R-17 M2: connection/traffic fields below are deprecated mirrors. The
     // authoritative storage is MainViewModel._connectionFlow / _trafficFlow;
     // this AppState keeps the fields only so legacy consumers and reflection-
-    // based tests keep compiling. `viewModel.state` is now produced via
-    // `combine(_state, _connectionFlow, _trafficFlow)` in MainViewModel, which
-    // overwrites these mirror fields on every emit, so writes to them on
-    // `_state` are effectively no-ops. They will be removed in M4 together
-    // with the rest of AppState.
+    // based tests keep compiling. `viewModel.state` is `_state.asStateFlow()`
+    // (a SYNCHRONOUS view — NOT a combine() chain; see the design note in
+    // docs/rfc-r17-appstate-split.md §6 「实施偏离记录」 for why combine+
+    // stateIn was rejected). These mirror fields are kept in sync with the
+    // slices by `MainViewModel.writeConnection` / `writeTraffic`, which in a
+    // single synchronous call write the slice AND `_state.value.copy(...)`
+    // over these fields — so `state.value` is consistent immediately after
+    // every write, with no dispatcher batch reliance (RFC §9.2). They will be
+    // removed in M4 together with the rest of AppState; once the mirrors are
+    // gone and no test/consumer reads `state.value.<conn/traffic>` directly,
+    // `state` can be reconsidered as a combine() of the slices.
     @Deprecated("mirror from connectionFlow; M4 removes AppState", level = DeprecationLevel.WARNING)
     val isConnected: Boolean = false,
     @Deprecated("mirror from connectionFlow; M4 removes AppState", level = DeprecationLevel.WARNING)

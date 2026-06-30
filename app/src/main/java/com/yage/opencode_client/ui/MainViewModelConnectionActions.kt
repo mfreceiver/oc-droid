@@ -67,13 +67,20 @@ internal fun applySavedSettings(
 
 /**
  * §R-17 M2: this helper is currently DEAD CODE (no callers in main or test).
- * Its connection-field writes (isConnecting / isConnected / serverVersion)
- * target the deprecated AppState mirrors and would be silently overwritten
- * by MainViewModel.state's combine() overlay even if it were called. Kept
- * only as a reference of the legacy single-shot connection flow; do NOT
- * revive without routing the connection fields through [ConnectionState] /
- * MainViewModel._connectionFlow. @Suppress keeps the legacy mirror writes
- * warning-clean until the helper is deleted or rewritten.
+ *
+ * M2 does NOT use combine() for `MainViewModel.state` — `state` is
+ * `_state.asStateFlow()` and the deprecated AppState connection fields are
+ * kept in sync with the slice via `writeConnection` (which writes BOTH the
+ * slice and `_state` mirror in one synchronous call). Because this helper
+ * only writes the AppState mirror via the raw `state` parameter (it has no
+ * access to `writeConnection` / the slice flow), reviving it as-is would
+ * leave `MainViewModel._connectionFlow` stale while the mirror flickers —
+ * the slice/mirror would drift apart.
+ *
+ * Do NOT revive without routing the connection-field writes through
+ * `MainViewModel.writeConnection` (or equivalently accepting the slice flow
+ * and mirroring back to `_state`). @Suppress("DEPRECATION") keeps the legacy
+ * mirror writes warning-clean until the helper is deleted or rewritten.
  */
 @Suppress("DEPRECATION")
 internal fun launchConnectionTest(
