@@ -83,7 +83,9 @@ import com.yage.opencode_client.data.model.Message
 import com.yage.opencode_client.data.model.Part
 import com.yage.opencode_client.data.model.TodoItem
 import com.yage.opencode_client.data.repository.OpenCodeRepository
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.yage.opencode_client.ui.GapInfo
+import com.yage.opencode_client.ui.MainViewModel
 import com.yage.opencode_client.ui.theme.LocalIsDarkTheme
 import com.yage.opencode_client.ui.theme.LocalMarkdownFontSizes
 import com.yage.opencode_client.ui.theme.markdownTypography
@@ -99,22 +101,42 @@ import java.util.Locale
 
 @Composable
 internal fun ChatMessageList(
-    messages: List<Message>,
-    partsByMessage: Map<String, List<Part>>,
-    streamingPartTexts: Map<String, String>,
-    streamingReasoningPart: Part?,
-    isLoading: Boolean,
-    hasMoreMessages: Boolean,
-    repository: OpenCodeRepository,
-    workspaceDirectory: String?,
-    onLoadMore: () -> Unit,
-    onFileClick: (String) -> Unit,
-    onOpenSubAgent: (String) -> Unit,
-    expandedParts: Map<String, Boolean>,
-    onToggleExpand: (String, Boolean) -> Unit,
-    gapInfo: GapInfo? = null,
-    onCloseGap: () -> Unit = {}
+    viewModel: MainViewModel,
+    onFileClick: (String) -> Unit
 ) {
+    // §R-17 Stage 2: subscribe to chatFlow + sessionListFlow directly so SSE
+    // streaming deltas (streamingPartTexts mutation) only recompose this list,
+    // and typing (composerFlow) / connection / settings changes do NOT. The
+    // messages/streaming/parts params were previously List/Map (unstable in
+    // Compose) passed from ChatScreen's AppState read, which forced a
+    // recomposition on every AppState emission. Reading from the slice Flows
+    // here lets the runtime skip this composable when neither slice emits.
+    val chatState by viewModel.chatFlow.collectAsStateWithLifecycle()
+    val sessionListState by viewModel.sessionListFlow.collectAsStateWithLifecycle()
+    val expandedParts by viewModel.expandedParts.collectAsStateWithLifecycle()
+
+    // visibleMessages is a cross-slice derived value: the revert message id
+    // lives on the Session (sessionListFlow) but the messages list lives on
+    // chatFlow. Recompute only when either input changes (remember key).
+    val currentSession = sessionListState.sessions.find { it.id == chatState.currentSessionId }
+    val messages: List<Message> = remember(chatState.messages, currentSession?.revert?.messageId) {
+        val revertMessageId = currentSession?.revert?.messageId
+        val reverted = if (revertMessageId == null) chatState.messages else chatState.messages.filter { it.id < revertMessageId }
+        reverted.filter { !it.isToolRole }
+    }
+    val partsByMessage: Map<String, List<Part>> = chatState.partsByMessage
+    val streamingPartTexts: Map<String, String> = chatState.streamingPartTexts
+    val streamingReasoningPart: Part? = chatState.streamingReasoningPart
+    val isLoading: Boolean = chatState.isLoadingMessages
+    val hasMoreMessages: Boolean = chatState.hasMoreMessages
+    val gapInfo: GapInfo? = chatState.gapInfo
+    val repository: OpenCodeRepository = viewModel.repository
+    val workspaceDirectory: String? = currentSession?.directory
+    val onLoadMore: () -> Unit = viewModel::loadMoreMessages
+    val onOpenSubAgent: (String) -> Unit = viewModel::openSubAgent
+    val onToggleExpand: (String, Boolean) -> Unit = viewModel::togglePartExpand
+    val onCloseGap: () -> Unit = viewModel::closeGap
+
     val listState = rememberLazyListState()
     var shouldAutoScroll by remember { mutableStateOf(true) }
     val contentVersion = remember(messages, partsByMessage, streamingPartTexts, streamingReasoningPart, isLoading) {

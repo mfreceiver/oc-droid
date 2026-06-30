@@ -58,9 +58,9 @@ fun ChatScreen(
 ) {
     val state by viewModel.state.collectAsStateWithLifecycle()
     var showFileBrowser by remember { mutableStateOf(false) }
-    // #13: per-part expand/collapse state lives in its own StateFlow (not in
-    // AppState) so toggling a card doesn't recompose the whole ChatScreen.
-    val expandedParts by viewModel.expandedParts.collectAsStateWithLifecycle()
+    // §R-17 Stage 2: expandedParts collect moved INTO ChatMessageList (it now
+    // subscribes to viewModel.expandedParts directly), so ChatScreen no longer
+    // needs to observe it — toggling a card recomposes only ChatMessageList.
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     val imagePickerLauncher = rememberLauncherForActivityResult(
@@ -69,6 +69,20 @@ fun ChatScreen(
         scope.launch {
             viewModel.addImageAttachments(loadImageAttachments(context, uris))
         }
+    }
+
+    // §R-17 Stage 2: stable lambda references so ChatMessageList / ChatInputBar
+    // (which now collect their own slices) can be SKIPPED by the Compose runtime
+    // when their slice inputs are unchanged. Without this, a fresh lambda
+    // identity on every ChatScreen recomposition would force both children to
+    // recompose regardless of slice state. showFileBrowser is a
+    // remember{mutableStateOf} delegate whose setter is referentially stable,
+    // so capturing it inside remember(viewModel) is safe.
+    val onChatFileClick: (String) -> Unit = remember(viewModel) {
+        { path -> viewModel.showFileInFiles(path, "chat"); showFileBrowser = true }
+    }
+    val onAddImages: () -> Unit = remember(imagePickerLauncher) {
+        { imagePickerLauncher.launch("image/*") }
     }
 
     // Cache last non-null contextUsage so the ring stays visible during streaming
@@ -239,24 +253,8 @@ fun ChatScreen(
                 )
             } else if (state.currentSessionId != null) {
                 ChatMessageList(
-                    messages = state.visibleMessages,
-                    partsByMessage = state.partsByMessage,
-                    streamingPartTexts = state.streamingPartTexts,
-                    streamingReasoningPart = state.streamingReasoningPart,
-                    isLoading = state.isLoadingMessages,
-                    hasMoreMessages = state.hasMoreMessages,
-                    repository = viewModel.repository,
-                    workspaceDirectory = state.currentSession?.directory,
-                    onLoadMore = { viewModel.loadMoreMessages() },
-                    onFileClick = { path ->
-                        viewModel.showFileInFiles(path, "chat")
-                        showFileBrowser = true
-                    },
-                    onOpenSubAgent = viewModel::openSubAgent,
-                    expandedParts = expandedParts,
-                    onToggleExpand = viewModel::togglePartExpand,
-                    gapInfo = state.gapInfo,
-                    onCloseGap = viewModel::closeGap
+                    viewModel = viewModel,
+                    onFileClick = onChatFileClick
                 )
             }
 
@@ -297,20 +295,11 @@ fun ChatScreen(
         // materialise the session).
         if (state.currentSessionId != null || state.draftWorkdir != null) {
             ChatInputBar(
-                text = state.inputText,
+                viewModel = viewModel,
                 isBusy = currentSessionIsRunning,
                 agentActivityText = currentActivity?.text,
                 agentStartedAtMillis = currentActivity?.startedAtMillis,
-                imageAttachments = state.imageAttachments,
-                onTextChange = viewModel::setInputText,
-                onSend = { viewModel.sendMessage() },
-                onAddImages = { imagePickerLauncher.launch("image/*") },
-                onRemoveImage = viewModel::removeImageAttachment,
-                onAbort = { viewModel.abortSession() },
-                availableCommands = state.availableCommands,
-                onExecuteCommand = { command, arguments ->
-                    viewModel.executeCommand(command, arguments)
-                }
+                onAddImages = onAddImages
             )
         }
             }

@@ -75,27 +75,41 @@ import com.yage.opencode_client.data.api.CommandInfo
 import com.yage.opencode_client.data.model.ComposerImageAttachment
 import com.yage.opencode_client.data.model.PermissionRequest
 import com.yage.opencode_client.data.model.PermissionResponse
+import com.yage.opencode_client.ui.MainViewModel
 import com.yage.opencode_client.ui.theme.StopRed
 import com.yage.opencode_client.ui.theme.opencode
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
 
 @Composable
 internal fun ChatInputBar(
-    text: String,
+    viewModel: MainViewModel,
     isBusy: Boolean,
     agentActivityText: String?,
     agentStartedAtMillis: Long?,
-    imageAttachments: List<ComposerImageAttachment>,
-    onTextChange: (String) -> Unit,
-    onSend: () -> Unit,
-    onAddImages: () -> Unit,
-    onRemoveImage: (String) -> Unit,
-    onAbort: () -> Unit,
-    availableCommands: List<CommandInfo> = emptyList(),
-    onExecuteCommand: (command: String, arguments: String) -> Unit = { _, _ -> }
+    onAddImages: () -> Unit
 ) {
+    // §R-17 Stage 2: subscribe to composerFlow + settingsFlow directly so
+    // typing (inputText mutation) only recomposes ChatInputBar, and streaming
+    // / session-list / connection changes do NOT recompose it. Previously these
+    // arrived as @Composable parameters (text: String was stable, but
+    // imageAttachments: List / availableCommands: List were unstable → Compose
+    // could not skip ChatInputBar on unrelated AppState changes). Reading them
+    // from the slice Flow here lets the Compose runtime skip this composable
+    // whenever neither slice emits.
+    val composerState by viewModel.composerFlow.collectAsStateWithLifecycle()
+    val settingsState by viewModel.settingsFlow.collectAsStateWithLifecycle()
+    val text = composerState.inputText
+    val imageAttachments = composerState.imageAttachments
+    val availableCommands = settingsState.availableCommands
+    val onTextChange = viewModel::setInputText
+    val onSend = viewModel::sendMessage
+    val onRemoveImage = viewModel::removeImageAttachment
+    val onAbort = viewModel::abortSession
+    val onExecuteCommand = viewModel::executeCommand
+
     val canSend = text.isNotBlank() || imageAttachments.isNotEmpty()
     val composerStatus = if (isBusy) agentActivityText ?: stringResource(R.string.chat_agent_running) else null
 
