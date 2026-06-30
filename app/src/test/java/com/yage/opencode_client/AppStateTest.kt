@@ -1,17 +1,33 @@
 package com.yage.opencode_client
 
 import com.yage.opencode_client.ui.AppState
+import com.yage.opencode_client.ui.computeContextUsage
+import com.yage.opencode_client.ui.currentSession
+import com.yage.opencode_client.ui.currentSessionStatus
 import com.yage.opencode_client.data.model.*
 import com.yage.opencode_client.util.ThemeMode
 import org.junit.Assert.*
 import org.junit.Test
 
+/**
+ * §R-17 M5.1 (glmer 🟠#1): the AppState-derived getters
+ * (`visibleMessages` / `contextUsage` / `currentSession` / `currentSessionStatus`
+ * / `isCurrentSessionBusy` / `canLoadMoreSessions` / `visibleAgents`) were a
+ * verbatim duplicate of the top-level functions in [AppStateDerived] and are
+ * being deleted. These tests now exercise the top-level functions directly
+ * (constructing their inputs from an AppState fixture) — semantically
+ * equivalent, but they cover the code path production actually uses.
+ *
+ * The AppState data-class field defaults / setters (mirror fields retained as a
+ * synced cache, per M5) are still covered by the `AppState default values` /
+ * `filePathToShowInFiles` / `filePreviewOriginRoute` cases.
+ */
 class AppStateTest {
-    
+
     @Test
     fun `AppState default values`() {
         val state = AppState()
-        
+
         assertFalse(state.isConnected)
         assertFalse(state.isConnecting)
         assertNull(state.serverVersion)
@@ -32,7 +48,8 @@ class AppStateTest {
         assertEquals(ThemeMode.SYSTEM, state.themeMode)
         assertNull(state.filePathToShowInFiles)
         assertNull(state.filePreviewOriginRoute)
-        assertTrue(state.canLoadMoreSessions)
+        // canLoadMoreSessions is now an inline derivation (was an AppState getter).
+        assertTrue(state.hasMoreSessions && !state.isLoadingMoreSessions)
     }
 
     @Test
@@ -55,72 +72,72 @@ class AppStateTest {
         val state = AppState(filePathToShowInFiles = "src/main.kt")
         assertNull(state.filePreviewOriginRoute)
     }
-    
+
     @Test
     fun `currentSession returns correct session`() {
         val session1 = Session(id = "s1", directory = "/project1")
         val session2 = Session(id = "s2", directory = "/project2")
-        
+
         val state = AppState(
             sessions = listOf(session1, session2),
             currentSessionId = "s2"
         )
-        
-        assertEquals(session2, state.currentSession)
+
+        assertEquals(session2, currentSession(state.sessions, state.currentSessionId))
     }
-    
+
     @Test
     fun `currentSession returns null when no session selected`() {
         val session1 = Session(id = "s1", directory = "/project1")
-        
+
         val state = AppState(
             sessions = listOf(session1),
             currentSessionId = null
         )
-        
-        assertNull(state.currentSession)
+
+        assertNull(currentSession(state.sessions, state.currentSessionId))
     }
-    
+
     @Test
     fun `currentSessionStatus returns correct status`() {
         val status1 = SessionStatus(type = "idle")
         val status2 = SessionStatus(type = "busy")
-        
+
         val state = AppState(
             sessionStatuses = mapOf("s1" to status1, "s2" to status2),
             currentSessionId = "s2"
         )
-        
-        assertEquals(status2, state.currentSessionStatus)
+
+        assertEquals(status2, currentSessionStatus(state.sessionStatuses, state.currentSessionId))
     }
-    
+
     @Test
     fun `isCurrentSessionBusy returns true when busy`() {
         val state = AppState(
             sessionStatuses = mapOf("s1" to SessionStatus(type = "busy")),
             currentSessionId = "s1"
         )
-        
-        assertTrue(state.isCurrentSessionBusy)
+
+        assertTrue(currentSessionStatus(state.sessionStatuses, state.currentSessionId)?.isBusy == true)
     }
-    
+
     @Test
     fun `isCurrentSessionBusy returns false when idle`() {
         val state = AppState(
             sessionStatuses = mapOf("s1" to SessionStatus(type = "idle")),
             currentSessionId = "s1"
         )
-        
-        assertFalse(state.isCurrentSessionBusy)
+
+        assertFalse(currentSessionStatus(state.sessionStatuses, state.currentSessionId)?.isBusy == true)
     }
-    
+
     @Test
     fun `isCurrentSessionBusy returns false when no status`() {
         val state = AppState(currentSessionId = "s1")
-        
-        assertFalse(state.isCurrentSessionBusy)
+
+        assertFalse(currentSessionStatus(state.sessionStatuses, state.currentSessionId)?.isBusy == true)
     }
-    
+
     @Test
     fun `visibleAgents filters correctly`() {
         val agents = listOf(
@@ -129,12 +146,15 @@ class AppStateTest {
             AgentInfo(name = "SubAgent", mode = "subagent", hidden = false),
             AgentInfo(name = "Visible2", mode = "all", hidden = false)
         )
-        
+
         val state = AppState(agents = agents)
-        
-        assertEquals(2, state.visibleAgents.size)
-        assertEquals("Visible1", state.visibleAgents[0].name)
-        assertEquals("Visible2", state.visibleAgents[1].name)
+        // visibleAgents is now an inline derivation (was an AppState getter);
+        // ChatScreen uses settings.agents.filter { it.isVisible } directly.
+        val visible = state.agents.filter { it.isVisible }
+
+        assertEquals(2, visible.size)
+        assertEquals("Visible1", visible[0].name)
+        assertEquals("Visible2", visible[1].name)
     }
 
     private fun makeProviders(vararg models: Triple<String, String, String?>): ProvidersResponse {
@@ -179,21 +199,21 @@ class AppStateTest {
     @Test
     fun `contextUsage returns null when no messages`() {
         val state = AppState()
-        assertNull(state.contextUsage)
+        assertNull(computeContextUsage(state.messages, state.providers))
     }
 
     @Test
     fun `contextUsage returns null when no assistant messages`() {
         val userMessage = Message(id = "msg-1", role = "user")
         val state = AppState(messages = listOf(userMessage))
-        assertNull(state.contextUsage)
+        assertNull(computeContextUsage(state.messages, state.providers))
     }
 
     @Test
     fun `contextUsage returns null when assistant has no tokens`() {
         val message = Message(id = "msg-1", role = "assistant", tokens = null)
         val state = AppState(messages = listOf(message))
-        assertNull(state.contextUsage)
+        assertNull(computeContextUsage(state.messages, state.providers))
     }
 
     @Test
@@ -205,7 +225,7 @@ class AppStateTest {
             model = Message.ModelInfo("openai", "gpt-4")
         )
         val state = AppState(messages = listOf(message))
-        assertNull(state.contextUsage)
+        assertNull(computeContextUsage(state.messages, state.providers))
     }
 
     @Test
@@ -216,7 +236,7 @@ class AppStateTest {
             tokens = Message.TokenInfo(total = 50000)
         )
         val state = AppState(messages = listOf(message))
-        assertNull(state.contextUsage)
+        assertNull(computeContextUsage(state.messages, state.providers))
     }
 
     @Test
@@ -241,25 +261,25 @@ class AppStateTest {
             )
         )
         val state = AppState(messages = listOf(message), providers = providers)
-        assertNull(state.contextUsage)
+        assertNull(computeContextUsage(state.messages, state.providers))
     }
 
     @Test
     fun `contextUsage returns null when context limit is zero`() {
         val state = makeContextUsageState(totalTokens = 50000, contextLimit = 0)
-        assertNull(state.contextUsage)
+        assertNull(computeContextUsage(state.messages, state.providers))
     }
 
     @Test
     fun `contextUsage returns null when context limit is null`() {
         val state = makeContextUsageState(totalTokens = 50000, contextLimit = null)
-        assertNull(state.contextUsage)
+        assertNull(computeContextUsage(state.messages, state.providers))
     }
 
     @Test
     fun `contextUsage calculates correct percentage`() {
         val state = makeContextUsageState(totalTokens = 64000, contextLimit = 128000)
-        val usage = state.contextUsage
+        val usage = computeContextUsage(state.messages, state.providers)
 
         assertNotNull(usage)
         assertEquals(0.5f, usage!!.percentage, 0.001f)
@@ -288,7 +308,7 @@ class AppStateTest {
                 )
             )
         )
-        val usage = AppState(messages = listOf(message), providers = providers).contextUsage
+        val usage = computeContextUsage(listOf(message), providers)
 
         assertNotNull(usage)
         assertEquals(0.5f, usage!!.percentage, 0.001f)
@@ -297,7 +317,7 @@ class AppStateTest {
     @Test
     fun `contextUsage clamps percentage to 1f`() {
         val state = makeContextUsageState(totalTokens = 200000, contextLimit = 128000)
-        val usage = state.contextUsage
+        val usage = computeContextUsage(state.messages, state.providers)
 
         assertNotNull(usage)
         assertEquals(1.0f, usage!!.percentage, 0.001f)
@@ -335,7 +355,7 @@ class AppStateTest {
             messages = listOf(oldAssistant, userMsg, newAssistant),
             providers = providers
         )
-        val usage = state.contextUsage
+        val usage = computeContextUsage(state.messages, state.providers)
 
         assertNotNull(usage)
         assertEquals(90000, usage!!.totalTokens)
@@ -375,10 +395,7 @@ class AppStateTest {
             )
         )
 
-        val usage = AppState(
-            messages = listOf(usableAssistant, emptyTokenAssistant),
-            providers = providers
-        ).contextUsage
+        val usage = computeContextUsage(listOf(usableAssistant, emptyTokenAssistant), providers)
 
         assertNotNull(usage)
         assertEquals(90000, usage!!.totalTokens)
@@ -387,13 +404,13 @@ class AppStateTest {
     @Test
     fun `contextUsage near thresholds`() {
         val lowUsage = makeContextUsageState(totalTokens = 60000, contextLimit = 128000)
-        assertTrue(lowUsage.contextUsage!!.percentage < 0.7f)
+        assertTrue(computeContextUsage(lowUsage.messages, lowUsage.providers)!!.percentage < 0.7f)
 
         val midUsage = makeContextUsageState(totalTokens = 100000, contextLimit = 128000)
-        val midPct = midUsage.contextUsage!!.percentage
+        val midPct = computeContextUsage(midUsage.messages, midUsage.providers)!!.percentage
         assertTrue(midPct >= 0.7f && midPct < 0.9f)
 
         val highUsage = makeContextUsageState(totalTokens = 120000, contextLimit = 128000)
-        assertTrue(highUsage.contextUsage!!.percentage >= 0.9f)
+        assertTrue(computeContextUsage(highUsage.messages, highUsage.providers)!!.percentage >= 0.9f)
     }
 }

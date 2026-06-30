@@ -52,6 +52,8 @@ import com.yage.opencode_client.ui.visibleMessages
 import com.yage.opencode_client.ui.common.AppToast
 import com.yage.opencode_client.ui.common.ToastSeverity
 import com.yage.opencode_client.ui.theme.opencode
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -62,9 +64,16 @@ fun ChatScreen(
     onNavigateToSessions: () -> Unit = {}
 ) {
     // §R-17 M5: AppState no longer carries the per-domain mirror fields.
-    // ChatScreen reads the authoritative slice flows directly. `appState` still
-    // carries the cross-domain `error` / `lastNavPage` that remain on AppState.
-    val appState by viewModel.state.collectAsStateWithLifecycle()
+    // ChatScreen reads the authoritative slice flows directly. The only AppState
+    // field still consumed here is the cross-domain `error`.
+    // §R-17 M5.1 (kimo 🟠#1): subscribe ONLY to error (map+distinctUntilChanged)
+    // instead of the whole AppState — the mirror double-write makes `_state` emit
+    // on every keystroke / SSE delta, which would recompose ChatScreen each time
+    // and cancel the slice-migration recomposition-isolation gains.
+    val appStateError by viewModel.state
+        .map { it.error }
+        .distinctUntilChanged()
+        .collectAsStateWithLifecycle(initialValue = null)
     val connection by viewModel.connectionFlow.collectAsStateWithLifecycle()
     val traffic by viewModel.trafficFlow.collectAsStateWithLifecycle()
     val composer by viewModel.composerFlow.collectAsStateWithLifecycle()
@@ -292,7 +301,7 @@ fun ChatScreen(
                 )
             }
 
-            appState.error?.let { error ->
+            appStateError?.let { error ->
                 // Toast rendered at the TOP of the chat area so tunnel
                 // activation feedback (and any other error) surfaces in the upper
                 // region of the interface instead of being buried at the bottom.

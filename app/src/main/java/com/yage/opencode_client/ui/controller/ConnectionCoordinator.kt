@@ -143,6 +143,12 @@ internal class ConnectionCoordinator(
      * strategy A — single-threaded, Main.immediate call sites; no dispatcher
      * batch reliance). Byte-for-byte copy of MainViewModel.writeConnection — the
      * connection-flow object is the SAME instance passed in by MainViewModel.
+     *
+     * §R-17 M5.1 (kimo 🟠#2) THREAD-SAFETY: the slice-write + AppState-mirror-write
+     * is only consistent because every call site runs on `Dispatchers.Main.immediate`.
+     * MUST be invoked on `Dispatchers.Main.immediate`; a background-thread call
+     * would break slice↔mirror consistency. (Same constraint as
+     * [MainViewModel.writeConnection] / [updateState] above.)
      */
     private fun writeConnection(transform: (ConnectionState) -> ConnectionState) {
         val next = transform(connectionFlow.value)

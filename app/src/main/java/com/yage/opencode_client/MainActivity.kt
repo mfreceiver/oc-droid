@@ -29,6 +29,8 @@ import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.map
 import com.yage.opencode_client.ui.MainViewModel
 import com.yage.opencode_client.ui.chat.ChatScreen
 import com.yage.opencode_client.ui.files.FilesScreen
@@ -134,7 +136,16 @@ class MainActivity : AppCompatActivity() {
                 // on every ON_START, doubling the AppLifecycleMonitor path.
                 viewModel.coldStartReconnect()
             }
-            val state by viewModel.state.collectAsStateWithLifecycle()
+            // §R-17 M5.1 (kimo 🟠#1): subscribe ONLY to lastNavPage instead of the
+            // whole AppState. The mirror double-write makes `_state` emit on every
+            // keystroke / SSE delta; a full collect here would recompose this root
+            // composable each time, cancelling the slice-migration gains. The
+            // distinctUntilChanged + map keeps this composable inert unless the
+            // nav page actually changes.
+            val lastNavPage by viewModel.state
+                .map { it.lastNavPage }
+                .distinctUntilChanged()
+                .collectAsStateWithLifecycle(initialValue = 0)
             val settings by viewModel.settingsFlow.collectAsStateWithLifecycle()
             val darkTheme = when (settings.themeMode) {
                 ThemeMode.LIGHT -> false
@@ -152,7 +163,7 @@ class MainActivity : AppCompatActivity() {
                 darkTheme = darkTheme,
                 markdownFontSizes = settings.markdownFontSizes
             ) {
-                PhoneLayout(viewModel = viewModel, initialPage = state.lastNavPage)
+                PhoneLayout(viewModel = viewModel, initialPage = lastNavPage)
             }
         }
     }

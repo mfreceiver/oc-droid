@@ -452,221 +452,7 @@ data class AppState(
      */
     @Deprecated("mirror from M4 slice; M5 removes AppState", level = DeprecationLevel.WARNING)
     val staleNotice: Boolean = false
-) {
-    /** Combined sent + received traffic, derived so it never drifts. */
-    val totalTrafficBytes: Long
-        get() = trafficSent + trafficReceived
-
-    data class ContextUsage(
-        val percentage: Float,
-        val totalTokens: Int,
-        val contextLimit: Int,
-        val providerId: String? = null,
-        val modelId: String? = null,
-        val inputTokens: Int? = null,
-        val outputTokens: Int? = null,
-        val reasoningTokens: Int? = null,
-        val cachedReadTokens: Int? = null,
-        val cachedWriteTokens: Int? = null,
-        val cost: Double? = null
-    )
-
-    data class ConnectionState(
-        val isConnected: Boolean = false,
-        val isConnecting: Boolean = false,
-        val serverVersion: String? = null
-    )
-
-    data class SessionState(
-        val sessions: List<Session> = emptyList(),
-    val currentSessionId: String? = null,
-        val sessionStatuses: Map<String, SessionStatus> = emptyMap(),
-        val expandedSessionIds: Set<String> = emptySet(),
-        val loadedSessionLimit: Int = MainViewModelTimings.sessionPageSize,
-        val hasMoreSessions: Boolean = true,
-    val isLoadingMoreSessions: Boolean = false,
-    val isRefreshingSessions: Boolean = false,
-        val pendingPermissions: List<PermissionRequest> = emptyList(),
-        val pendingQuestions: List<QuestionRequest> = emptyList()
-    ) {
-        val currentSession: Session?
-            get() = sessions.find { it.id == currentSessionId }
-
-        val currentSessionStatus: SessionStatus?
-            get() = currentSessionId?.let { sessionStatuses[it] }
-
-        val isCurrentSessionBusy: Boolean
-            get() = currentSessionStatus?.isBusy == true
-
-        val canLoadMoreSessions: Boolean
-            get() = hasMoreSessions && !isLoadingMoreSessions
-    }
-
-    data class ChatState(
-        val messages: List<Message> = emptyList(),
-        val partsByMessage: Map<String, List<Part>> = emptyMap(),
-        val streamingPartTexts: Map<String, String> = emptyMap(),
-        val streamingReasoningPart: Part? = null,
-        val isLoadingMessages: Boolean = false,
-        val inputText: String = "",
-        val imageAttachments: List<ComposerImageAttachment> = emptyList()
-    )
-
-    data class FileUiState(
-        val filePathToShowInFiles: String? = null,
-        val filePreviewOriginRoute: String? = null
-    )
-
-    data class SettingsState(
-        val error: String? = null,
-        val themeMode: ThemeMode = ThemeMode.SYSTEM,
-        val selectedAgentName: String = "build",
-        val contextUsage: ContextUsage? = null,
-        val agents: List<AgentInfo> = emptyList(),
-        val providers: ProvidersResponse? = null
-    )
-
-    val connectionState: ConnectionState
-        get() = ConnectionState(
-            isConnected = isConnected,
-            isConnecting = isConnecting,
-            serverVersion = serverVersion
-        )
-
-    val sessionState: SessionState
-        get() = SessionState(
-            sessions = sessions,
-            currentSessionId = currentSessionId,
-            sessionStatuses = sessionStatuses,
-            expandedSessionIds = expandedSessionIds,
-            loadedSessionLimit = loadedSessionLimit,
-            hasMoreSessions = hasMoreSessions,
-            isLoadingMoreSessions = isLoadingMoreSessions,
-            isRefreshingSessions = isRefreshingSessions,
-            pendingPermissions = pendingPermissions,
-            pendingQuestions = pendingQuestions
-        )
-
-    val chatState: ChatState
-        get() = ChatState(
-            messages = visibleMessages,
-            partsByMessage = partsByMessage,
-            streamingPartTexts = streamingPartTexts,
-            streamingReasoningPart = streamingReasoningPart,
-            isLoadingMessages = isLoadingMessages,
-            inputText = inputText,
-            imageAttachments = imageAttachments
-        )
-
-    val visibleMessages: List<Message>
-        get() {
-            val revertMessageId = currentSession?.revert?.messageId
-            val reverted = if (revertMessageId == null) {
-                messages
-            } else {
-                messages.filter { message -> message.id < revertMessageId }
-            }
-            // Filter out system / tool / environment messages — only user and
-            // assistant messages are shown in the chat transcript.
-            return reverted.filter { !it.isToolRole }
-        }
-
-    val fileUiState: FileUiState
-        get() = FileUiState(
-            filePathToShowInFiles = filePathToShowInFiles,
-            filePreviewOriginRoute = filePreviewOriginRoute
-        )
-
-    val settingsState: SettingsState
-        get() = SettingsState(
-            error = error,
-            themeMode = themeMode,
-            selectedAgentName = selectedAgentName,
-            contextUsage = contextUsage,
-            agents = agents,
-            providers = providers
-        )
-
-    val currentSession: Session?
-        get() = sessions.find { it.id == currentSessionId }
-
-    val currentHostProfile: HostProfile?
-        get() = hostProfiles.find { it.id == currentHostProfileId }
-
-    val currentSessionStatus: SessionStatus?
-        get() = currentSessionId?.let { sessionStatuses[it] }
-
-    val isCurrentSessionBusy: Boolean
-        get() = currentSessionStatus?.isBusy == true
-
-    val canLoadMoreSessions: Boolean
-        get() = hasMoreSessions && !isLoadingMoreSessions
-
-    val visibleAgents: List<AgentInfo>
-        get() = agents.filter { it.isVisible }
-
-    val contextUsage: ContextUsage?
-        get() {
-            val lastAssistant = messages.lastOrNull { it.isAssistant && tokenTotal(it.tokens) != null }
-                ?: return logContextUsageUnavailable("no assistant message with usable tokens; messages=${messages.size}")
-            val tokens = lastAssistant.tokens
-                ?: return logContextUsageUnavailable("latest assistant has no tokens; messages=${messages.size}")
-            val total = tokenTotal(tokens)
-                ?: return logContextUsageUnavailable("assistant tokens have no usable totals; tokens=$tokens")
-            val model = lastAssistant.resolvedModel
-                ?: return logContextUsageUnavailable("assistant message has no resolved model; message=${lastAssistant.id}")
-            val key = "${model.providerId}/${model.modelId}"
-            val index = providers?.providers?.flatMap { provider ->
-                provider.models.flatMap { (modelKey, providerModel) ->
-                    listOfNotNull(
-                        "${provider.id}/$modelKey" to providerModel,
-                        providerModel.id.takeIf { it.isNotEmpty() }?.let { "${provider.id}/$it" to providerModel },
-                        providerModel.resolvedProviderId?.let { resolvedProvider ->
-                            providerModel.id.takeIf { it.isNotEmpty() }?.let { modelId -> "$resolvedProvider/$modelId" to providerModel }
-                        }
-                    )
-                }
-            }?.toMap() ?: emptyMap()
-            val providerModel = index[key] ?: index.entries
-                .filter { it.key.substringAfter('/') == model.modelId }
-                .takeIf { it.size == 1 }
-                ?.first()
-                ?.value
-            val limit = providerModel?.limit?.context
-                ?: return logContextUsageUnavailable("no context limit for $key; providerModelKeys=${index.keys.take(12)}")
-            if (limit <= 0) return logContextUsageUnavailable("non-positive context limit for $key: $limit")
-            return ContextUsage(
-                percentage = (total.toFloat() / limit.toFloat()).coerceIn(0f, 1f),
-                totalTokens = total,
-                contextLimit = limit,
-                providerId = model.providerId,
-                modelId = model.modelId,
-                inputTokens = tokens.input,
-                outputTokens = tokens.output,
-                reasoningTokens = tokens.reasoning,
-                cachedReadTokens = tokens.cache?.read,
-                cachedWriteTokens = tokens.cache?.write,
-                cost = lastAssistant.cost
-            )
-        }
-
-    private fun logContextUsageUnavailable(reason: String): ContextUsage? {
-        runCatching { Log.d("AppState", "contextUsage unavailable: $reason") }
-        return null
-    }
-
-    private fun tokenTotal(tokens: Message.TokenInfo?): Int? {
-        if (tokens == null) return null
-        tokens.total?.takeIf { it > 0 }?.let { return it }
-        return listOfNotNull(
-            tokens.input,
-            tokens.output,
-            tokens.reasoning,
-            tokens.cache?.read,
-            tokens.cache?.write
-        ).sum().takeIf { it > 0 }
-    }
-}
+)
 
 @HiltViewModel
 @OptIn(FlowPreview::class)
@@ -882,6 +668,15 @@ class MainViewModel @Inject constructor(
      * that still read `state.value.<field>` (and CatchUpGapTest) see consistent
      * values without a stale window. A follow-up that migrates those reads to
      * slices can drop the mirror write.
+     *
+     * §R-17 M5.1 (kimo 🟠#2) THREAD-SAFETY: the slice-write + AppState-mirror-write
+     * is only consistent because every call site runs on `Dispatchers.Main.immediate`
+     * (single-threaded). The same constraint applies to every `writeXxx` helper
+     * (writeTraffic/writeComposer/writeFile/writeSettings/writeChat/writeSessionList/
+     * writeUnread/writeHost — "See [writeConnection]") and to [updateState] /
+     * `updateAndSync`. MUST be invoked on `Dispatchers.Main.immediate`; a
+     * background-thread call would let a concurrent writer interleave between the
+     * slice write and the mirror write, breaking slice↔mirror consistency.
      */
     @Suppress("DEPRECATION")
     private fun writeConnection(transform: (ConnectionState) -> ConnectionState) {
@@ -1010,12 +805,17 @@ class MainViewModel @Inject constructor(
     }
 
     /**
-     * §R-17 M4: unified state write that propagates to EVERY slice.
+     * §R-17 M4→M5: unified state write that propagates to EVERY slice.
      *
-     * Replaces the legacy `updateState { ... }` for the many mixed-domain
-     * update sites (chat/session/unread/host and the cross-domain `error`).
-     * Writes `_state` (the AppState mirror) then synchronises ALL nine slices
-     * from the new mirror values.
+     * Catch-all for the many mixed-domain update sites
+     * (chat/session/unread/host and the cross-domain `error`). Builds a
+     * TRANSIENT [AppState] aggregate from the authoritative slice values
+     * (see [aggregateFromSlices]), applies the legacy `{ it.copy(...) }`
+     * transform against it, then writes the result back to `_state` AND
+     * re-syncs every slice from it via [syncSlicesFromAppState]. `_state` thus
+     * stays a synchronised mirror of the slices (retained because the free
+     * helpers in MainViewModelSessionActions still read `state.value.<field>`,
+     * and CatchUpGapTest's null-slices path — see M5.2 tech debt).
      *
      * Isolation still works because `MutableStateFlow` only emits on
      * `!equals` — a slice whose fields did not change is reassigned an
@@ -1027,93 +827,36 @@ class MainViewModel @Inject constructor(
      * still giving M4 consumers that subscribe to a single slice the same
      * isolation they would get from per-slice writeXxx calls.
      *
-     * The M2/M3 per-slice helpers (writeConnection/writeComposer/etc.) remain
-     * valid and PREFERRED for sites already using them; `updateState` is the
-     * catch-all for the remaining mixed/chat/session/unread/host updates and
-     * for any new code. M5 may later split these into per-slice writes for
-     * finer granularity, but functionally this is equivalent.
+     * §R-17 M5.1 (kimo 🟠#2) THREAD-SAFETY: the aggregate→transform→write→sync
+     * sequence is NOT atomic. It is only safe because every call site runs on
+     * `Dispatchers.Main.immediate` (single-threaded). Calling this (or
+     * [writeConnection]/[writeComposer]/.../`updateAndSync`) from a background
+     * thread would let a concurrent writer interleave between the aggregate
+     * read and the slice/mirror write, breaking slice↔mirror consistency. MUST
+     * be invoked on `Dispatchers.Main.immediate`.
      */
     @Suppress("DEPRECATION")
     private fun updateState(transform: (AppState) -> AppState) {
-        // §R-17 M5: the slices are the authoritative store. updateState builds a
-        // TRANSIENT AppState aggregate from the slice values (+ the persisted
-        // error/lastNavPage from _state), applies the legacy `{ it.copy(...) }`
-        // transform against it, then pushes the result back to the slices via
-        // syncSlicesFromAppState. Only the cross-domain error/lastNavPage are
-        // persisted on _state — the per-domain mirror fields are no longer
-        // stored (no reader consumes them). MutableStateFlow suppresses
-        // equal-value emissions, so only actually-changed slices notify.
         val before = aggregateFromSlices(_state.value)
         val after = transform(before)
-        // §R-17 M5: slices are the authoritative store (the aggregate is built
-        // from them above). State is kept in sync so the free helpers in
-        // MainViewModelSessionActions that still read `state.value.<field>`
-        // (and the legacy CatchUpGapTest null-slices path) keep working — a
-        // follow-up can migrate those reads to slices and then state can slim
-        // to just error/lastNavPage.
         _state.value = after
         syncSlicesFromAppState(after, sliceFlows)
     }
 
     /**
-     * §R-17 M5: builds a transient [AppState] snapshot from the authoritative
+     * §R-17 M5→M5.1: builds a transient [AppState] snapshot from the authoritative
      * slice values, carrying over the persisted [AppState.error] /
      * [AppState.lastNavPage] from [seed]. Used by [updateState] so the legacy
      * `(AppState) -> AppState` transforms keep compiling/working against the
      * slice-derived values without each call site needing a per-slice rewrite.
+     *
+     * §R-17 M5.1 (glmer 🟠#2): delegates to the single field list in the
+     * top-level [com.yage.opencode_client.ui.aggregateFromSlices] (the same one
+     * the free helpers' `updateAndSync` uses), so the slice→AppState mapping
+     * lives in exactly one place instead of being hand-synced here.
      */
-    @Suppress("DEPRECATION")
-    private fun aggregateFromSlices(seed: AppState): AppState = seed.copy(
-        isConnected = _connectionFlow.value.isConnected,
-        isConnecting = _connectionFlow.value.isConnecting,
-        serverVersion = _connectionFlow.value.serverVersion,
-        connectionPhase = _connectionFlow.value.connectionPhase,
-        tunnelActivationState = _connectionFlow.value.tunnelActivationState,
-        trafficSent = _trafficFlow.value.trafficSent,
-        trafficReceived = _trafficFlow.value.trafficReceived,
-        inputText = _composerFlow.value.inputText,
-        imageAttachments = _composerFlow.value.imageAttachments,
-        sendingSessionIds = _composerFlow.value.sendingSessionIds,
-        draftWorkdir = _composerFlow.value.draftWorkdir,
-        filePathToShowInFiles = _fileFlow.value.filePathToShowInFiles,
-        filePreviewOriginRoute = _fileFlow.value.filePreviewOriginRoute,
-        fileBrowserOpen = _fileFlow.value.fileBrowserOpen,
-        fileBrowserWorkdir = _fileFlow.value.fileBrowserWorkdir,
-        themeMode = _settingsFlow.value.themeMode,
-        markdownFontSizes = _settingsFlow.value.markdownFontSizes,
-        selectedAgentName = _settingsFlow.value.selectedAgentName,
-        agents = _settingsFlow.value.agents,
-        providers = _settingsFlow.value.providers,
-        availableCommands = _settingsFlow.value.availableCommands,
-        currentSessionId = _chatFlow.value.currentSessionId,
-        messages = _chatFlow.value.messages,
-        partsByMessage = _chatFlow.value.partsByMessage,
-        streamingPartTexts = _chatFlow.value.streamingPartTexts,
-        streamingReasoningPart = _chatFlow.value.streamingReasoningPart,
-        olderMessagesCursor = _chatFlow.value.olderMessagesCursor,
-        hasMoreMessages = _chatFlow.value.hasMoreMessages,
-        isLoadingMessages = _chatFlow.value.isLoadingMessages,
-        gapInfo = _chatFlow.value.gapInfo,
-        staleNotice = _chatFlow.value.staleNotice,
-        sessions = _sessionListFlow.value.sessions,
-        sessionStatuses = _sessionListFlow.value.sessionStatuses,
-        expandedSessionIds = _sessionListFlow.value.expandedSessionIds,
-        loadedSessionLimit = _sessionListFlow.value.loadedSessionLimit,
-        hasMoreSessions = _sessionListFlow.value.hasMoreSessions,
-        isLoadingMoreSessions = _sessionListFlow.value.isLoadingMoreSessions,
-        isRefreshingSessions = _sessionListFlow.value.isRefreshingSessions,
-        pendingPermissions = _sessionListFlow.value.pendingPermissions,
-        pendingQuestions = _sessionListFlow.value.pendingQuestions,
-        childSessions = _sessionListFlow.value.childSessions,
-        directorySessions = _sessionListFlow.value.directorySessions,
-        openSessionIds = _sessionListFlow.value.openSessionIds,
-        sessionTodos = _sessionListFlow.value.sessionTodos,
-        unreadSessions = _unreadFlow.value.unreadSessions,
-        tempClearedUnread = _unreadFlow.value.tempClearedUnread,
-        lastViewedTime = _unreadFlow.value.lastViewedTime,
-        hostProfiles = _hostFlow.value.hostProfiles,
-        currentHostProfileId = _hostFlow.value.currentHostProfileId
-    )
+    private fun aggregateFromSlices(seed: AppState): AppState =
+        aggregateFromSlices(sliceFlows, seed)
 
     /**
      * Expansion state for the four collapsible card types (ToolCallsRow,

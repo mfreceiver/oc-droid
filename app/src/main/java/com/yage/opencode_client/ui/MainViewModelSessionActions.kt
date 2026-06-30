@@ -174,12 +174,20 @@ internal fun aggregateFromSlices(slices: SliceFlows, seed: AppState): AppState =
 /**
  * §R-17 Stage 1→M5: applies a legacy `(AppState) -> AppState` transform against
  * a TRANSIENT aggregate built from the authoritative slices, then pushes the
- * result back to the slices via [syncSlicesFromAppState]. Only the cross-domain
- * error/lastNavPage are persisted on the AppState flow — the per-domain mirror
- * fields are no longer stored (no reader consumes them). `slices` is nullable so
- * legacy callers that invoke helpers without a SliceFlows instance keep
- * compiling (the null path just applies the transform to the persisted AppState,
- * covering only error/lastNavPage). Single-threaded (Main.immediate).
+ * result back to the slices via [syncSlicesFromAppState]. The full `after`
+ * AppState is also written back to the flow so `_state` stays a synchronised
+ * mirror of the slices (the free helpers here still read `state.value.<field>`,
+ * and CatchUpGapTest uses the null-slices path — see M5.2 tech debt). `slices`
+ * is nullable so legacy callers that invoke helpers without a SliceFlows
+ * instance keep compiling (the null path just applies the transform to the
+ * persisted AppState).
+ *
+ * §R-17 M5.1 (kimo 🟠#2) THREAD-SAFETY: the aggregate→transform→write→sync
+ * sequence is NOT atomic. It is only safe because every call site runs on
+ * `Dispatchers.Main.immediate` (single-threaded). Calling this from a
+ * background thread would let a concurrent writer interleave between the
+ * aggregate read and the slice/mirror write, breaking slice↔mirror
+ * consistency. MUST be invoked on `Dispatchers.Main.immediate`.
  */
 @Suppress("DEPRECATION")
 internal fun MutableStateFlow<AppState>.updateAndSync(
