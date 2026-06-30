@@ -14,6 +14,8 @@ import com.yage.opencode_client.util.ThemeMode
 import com.yage.opencode_client.util.TrafficTracker
 import com.yage.opencode_client.util.MarkdownFontSizes
 import com.yage.opencode_client.util.runSuspendCatching
+import com.yage.opencode_client.ui.controller.ComposerCallbacks
+import com.yage.opencode_client.ui.controller.ComposerController
 import com.yage.opencode_client.ui.controller.ForegroundCatchUpCallbacks
 import com.yage.opencode_client.ui.controller.ForegroundCatchUpController
 import dagger.hilt.android.lifecycle.HiltViewModel
@@ -669,7 +671,7 @@ class MainViewModel @Inject constructor(
     private val hostProfileStore: HostProfileStore,
     internal val trafficTracker: TrafficTracker,
     private val appLifecycleMonitor: AppLifecycleMonitor
-) : ViewModel(), ForegroundCatchUpCallbacks {
+) : ViewModel(), ForegroundCatchUpCallbacks, ComposerCallbacks {
 
     // §R-17 M2: _state keeps carrying every AppState field (the connection/
     // traffic ones are deprecated mirrors). The authoritative storage for
@@ -693,6 +695,26 @@ class MainViewModel @Inject constructor(
     private val _trafficFlow = MutableStateFlow(TrafficState())
     /** §R-17 M3: composer-domain slice (RFC §2.5). Authoritative storage. */
     private val _composerFlow = MutableStateFlow(ComposerState())
+    /**
+     * Expansion state for the four collapsible card types (ToolCallsRow,
+     * ReasoningCard, ToolCard, PatchCard). Kept in a dedicated StateFlow
+     * (NOT inside [AppState]) so toggling a card only recomposes the
+     * subscribers of this flow (the individual cards), not the whole
+     * ChatScreen. Key format: `"${messageId}|${partKey}"` (constructed by
+     * the card layer; this VM does not parse keys).
+     *
+     * Cleared on session switch via [clearExpandedParts] (called from
+     * [selectSession]) so switching conversations resets all cards to their
+     * default collapsed state. loadMore / loadMessages deliberately do NOT
+     * clear it — the user's in-progress expand state must survive history
+     * pagination.
+     *
+     * Moved up from its previous position (was after _state builder) so it is
+     * initialized before [composerController] which receives it by reference
+     * (R-16 M2).
+     */
+    private val _expandedParts = MutableStateFlow<Map<String, Boolean>>(emptyMap())
+    val expandedParts: StateFlow<Map<String, Boolean>> = _expandedParts.asStateFlow()
     /** §R-17 M3: file-browser slice (RFC §2.6). Authoritative storage. */
     private val _fileFlow = MutableStateFlow(FileState())
     /** §R-17 M3: settings slice (RFC §2.4, minus cross-domain error). Authoritative storage. */
@@ -755,6 +777,21 @@ class MainViewModel @Inject constructor(
         ForegroundCatchUpController(
             appLifecycleMonitor = appLifecycleMonitor,
             scope = viewModelScope,
+            callbacks = this
+        )
+
+    /**
+     * R-16 M2: composer-domain state mutation controller. Owns the write path
+     * for inputText / imageAttachments / draftWorkdir on [_composerFlow], and
+     * for collapsible-card expansion state on [_expandedParts]. Side effects
+     * (SettingsManager draft/workdir persistence) flow through
+     * [ComposerCallbacks] which MainViewModel implements below.
+     */
+    private val composerController: ComposerController =
+        ComposerController(
+            state = _state,
+            composerFlow = _composerFlow,
+            expandedParts = _expandedParts,
             callbacks = this
         )
 
@@ -1027,21 +1064,15 @@ class MainViewModel @Inject constructor(
      * clear it — the user's in-progress expand state must survive history
      * pagination.
      */
-    private val _expandedParts = MutableStateFlow<Map<String, Boolean>>(emptyMap())
-    val expandedParts: StateFlow<Map<String, Boolean>> = _expandedParts.asStateFlow()
 
-    // currentValue is the card's *actually displayed* expansion state
-    // (expandedParts[key] ?: per-card-default), supplied by the caller. The
-    // previous signature read current[key] ?: false here, which mismatched the
-    // cards' display default (running tool default=true): the first tap on a
-    // default-expanded card wrote true → no visible change (#13/#16). Passing
-    // the displayed value makes the toggle always invert what the user sees.
+    // R-16 M2: delegated to [composerController].
     fun togglePartExpand(key: String, currentValue: Boolean) {
-        _expandedParts.update { current -> current + (key to !currentValue) }
+        composerController.togglePartExpand(key, currentValue)
     }
 
+    // R-16 M2: delegated to [composerController].
     internal fun clearExpandedParts() {
-        _expandedParts.value = emptyMap()
+        composerController.clearExpandedParts()
     }
 
     /**
@@ -1170,6 +1201,20 @@ class MainViewModel @Inject constructor(
         catchUpAfterDisconnectOrForeground(sessionId)
 
     override fun currentSessionId(): String? = _state.value.currentSessionId
+
+    // ──────────────────────────────────────────────────────────────────────
+    // R-16 M2: ComposerCallbacks implementation.
+    // The composer state mutation logic lives in [composerController]; these
+    // are the side-effect hooks it calls back into for SettingsManager writes.
+    // ──────────────────────────────────────────────────────────────────────
+
+    override fun saveDraft(sessionId: String, text: String) {
+        settingsManager.setDraftText(sessionId, text)
+    }
+
+    override fun clearPersistedWorkdir() {
+        settingsManager.currentWorkdir = null
+    }
 
     /**
      * §Stage D (gpter 阻塞 #1): tear down any in-flight SSE feed BEFORE the
@@ -2141,21 +2186,9 @@ class MainViewModel @Inject constructor(
      * materialised into a real session (first send), `draftWorkdir` is null
      * and this call does nothing.
      */
+    // R-16 M2: delegated to [composerController].
     fun clearDraftIfActive() {
-        val current = _state.value
-        if (current.draftWorkdir == null || current.currentSessionId != null) return
-        // Clear the persisted workdir too so a discarded draft doesn't leave
-        // the repository re-scoped to an abandoned project on resume/cold start
-        // (createSessionInWorkdir is the only writer of currentWorkdir). Real
-        // sessions are unaffected — the guard above is a no-op for them.
-        settingsManager.currentWorkdir = null
-        writeComposer {
-            it.copy(
-                draftWorkdir = null,
-                inputText = "",
-                imageAttachments = emptyList()
-            )
-        }
+        composerController.clearDraftIfActive()
     }
 
     fun forkSession(sessionId: String, messageId: String?) {
@@ -2352,22 +2385,19 @@ class MainViewModel @Inject constructor(
         }
     }
 
+    // R-16 M2: delegated to [composerController].
     fun setInputText(text: String) {
-        writeComposer { it.copy(inputText = text) }
-        _state.value.currentSessionId?.let { settingsManager.setDraftText(it, text) }
+        composerController.setInputText(text)
     }
 
+    // R-16 M2: delegated to [composerController].
     fun addImageAttachments(attachments: List<ComposerImageAttachment>) {
-        if (attachments.isEmpty()) return
-        writeComposer { state ->
-            state.copy(imageAttachments = (state.imageAttachments + attachments).take(4))
-        }
+        composerController.addImageAttachments(attachments)
     }
 
+    // R-16 M2: delegated to [composerController].
     fun removeImageAttachment(id: String) {
-        writeComposer { state ->
-            state.copy(imageAttachments = state.imageAttachments.filterNot { it.id == id })
-        }
+        composerController.removeImageAttachment(id)
     }
 
     fun editFromMessage(messageId: String) {
