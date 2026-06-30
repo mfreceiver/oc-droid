@@ -41,6 +41,43 @@ sealed class TunnelActivationState {
 }
 
 /**
+ * §R-17 M2: connection-domain state slice. Authoritative storage lives in
+ * [MainViewModel._connectionFlow] (a dedicated `MutableStateFlow`); the
+ * overlapping fields on [AppState] are deprecated mirrors kept only for
+ * source/test compatibility until M4 retires them. Field set strictly
+ * follows RFC R-17 §2.1.
+ *
+ * Write atomicity (RFC §4, strategy A): every mutation goes through a single
+ * `writeConnection { ... }` (or a sequence of them where each
+ * intermediate state is a legal UI state — never a `isConnected=true` paired
+ * with a null `connectionPhase`). Do NOT rely on `Dispatchers.Main.immediate`
+ * batching across separate `update` calls.
+ */
+data class ConnectionState(
+    val isConnected: Boolean = false,
+    val isConnecting: Boolean = false,
+    val serverVersion: String? = null,
+    val connectionPhase: String? = null,
+    val tunnelActivationState: TunnelActivationState = TunnelActivationState.Idle
+)
+
+/**
+ * §R-17 M2: traffic-domain state slice. Authoritative storage lives in
+ * [MainViewModel._trafficFlow]. Field set strictly follows RFC R-17 §2.9.
+ * Only written by [MainViewModel.refreshTrafficStats] and read by the server
+ * management dialog (ChatTopBar) — isolating it avoids recomposing unrelated
+ * subscribers each time the counter is refreshed.
+ */
+data class TrafficState(
+    val trafficSent: Long = 0L,
+    val trafficReceived: Long = 0L
+) {
+    /** Combined sent + received traffic, derived so it never drifts. */
+    val totalTrafficBytes: Long
+        get() = trafficSent + trafficReceived
+}
+
+/**
  * §Per-session message cache: a snapshot of the loaded window for a single
  * session — the four pieces of message-state that [selectSessionState]
  * otherwise wipes to empty on every switch. Restoring from this snapshot on
@@ -85,8 +122,19 @@ data class ConnectionFormSettings(
 )
 
 data class AppState(
+    // §R-17 M2: connection/traffic fields below are deprecated mirrors. The
+    // authoritative storage is MainViewModel._connectionFlow / _trafficFlow;
+    // this AppState keeps the fields only so legacy consumers and reflection-
+    // based tests keep compiling. `viewModel.state` is now produced via
+    // `combine(_state, _connectionFlow, _trafficFlow)` in MainViewModel, which
+    // overwrites these mirror fields on every emit, so writes to them on
+    // `_state` are effectively no-ops. They will be removed in M4 together
+    // with the rest of AppState.
+    @Deprecated("mirror from connectionFlow; M4 removes AppState", level = DeprecationLevel.WARNING)
     val isConnected: Boolean = false,
+    @Deprecated("mirror from connectionFlow; M4 removes AppState", level = DeprecationLevel.WARNING)
     val isConnecting: Boolean = false,
+    @Deprecated("mirror from connectionFlow; M4 removes AppState", level = DeprecationLevel.WARNING)
     val serverVersion: String? = null,
     val sessions: List<Session> = emptyList(),
     val loadedSessionLimit: Int = MainViewModelTimings.sessionPageSize,
@@ -134,7 +182,9 @@ data class AppState(
     val imageAttachments: List<ComposerImageAttachment> = emptyList(),
     val hostProfiles: List<HostProfile> = emptyList(),
     val currentHostProfileId: String? = null,
+    @Deprecated("mirror from connectionFlow; M4 removes AppState", level = DeprecationLevel.WARNING)
     val connectionPhase: String? = null,
+    @Deprecated("mirror from connectionFlow; M4 removes AppState", level = DeprecationLevel.WARNING)
     val tunnelActivationState: TunnelActivationState = TunnelActivationState.Idle,
     /**
      * Sub-agent (child) sessions keyed by parent session ID. Populated lazily
@@ -208,8 +258,13 @@ data class AppState(
      * (e.g. when Settings opens) rather than on every request, to avoid
      * recomposing the whole app on each network call. [totalTrafficBytes] is
      * derived so it can never drift out of sync.
+     *
+     * §R-17 M2: these are deprecated mirrors; authoritative storage is
+     * [MainViewModel._trafficFlow]. M4 removes AppState.
      */
+    @Deprecated("mirror from trafficFlow; M4 removes AppState", level = DeprecationLevel.WARNING)
     val trafficSent: Long = 0L,
+    @Deprecated("mirror from trafficFlow; M4 removes AppState", level = DeprecationLevel.WARNING)
     val trafficReceived: Long = 0L,
     /**
      * §Phase1C: non-null when a tail reload detected messages may have arrived
@@ -451,8 +506,69 @@ class MainViewModel @Inject constructor(
     private val appLifecycleMonitor: AppLifecycleMonitor
 ) : ViewModel() {
 
+    // §R-17 M2: _state keeps carrying every AppState field (the connection/
+    // traffic ones are deprecated mirrors). The authoritative storage for
+    // the connection/traffic domains lives in _connectionFlow / _trafficFlow
+    // (independent MutableStateFlows so M4 consumers can subscribe to them
+    // directly and skip the AppState-level recompositions). `state` stays a
+    // synchronous view over `_state` (NOT a combine()/stateIn chain) so that
+    // every `_state` / slice write is immediately observable on
+    // `state.value` — this preserves the synchronous read-after-write
+    // semantics the existing test-suite (and a few non-coroutine call sites)
+    // rely on. combine()+stateIn() would propagate changes asynchronously
+    // (only advanced on the test dispatcher) and broke ~60 tests that read
+    // `state.value` right after `updateState { ... }`. The slices are kept
+    // in sync with the mirrors via the [writeConnection] / [writeTraffic]
+    // helpers, which mutate both atomically from the caller's thread.
     private val _state = MutableStateFlow(AppState())
+
+    /** §R-17 M2: connection-domain slice (RFC §2.1). Authoritative storage. */
+    private val _connectionFlow = MutableStateFlow(ConnectionState())
+    /** §R-17 M2: traffic-domain slice (RFC §2.9). Authoritative storage. */
+    private val _trafficFlow = MutableStateFlow(TrafficState())
+
+    /** Read-only connection slice for direct subscription (M4 consumers). */
+    val connectionFlow: StateFlow<ConnectionState> = _connectionFlow.asStateFlow()
+    /** Read-only traffic slice for direct subscription (M4 consumers). */
+    val trafficFlow: StateFlow<TrafficState> = _trafficFlow.asStateFlow()
+
     val state: StateFlow<AppState> = _state.asStateFlow()
+
+    /**
+     * §R-17 M2: write the connection slice atomically and mirror it onto the
+     * deprecated AppState fields in `_state`, so `state.value` stays
+     * consistent synchronously (RFC §4 strategy A — single-threaded,
+     * Main.immediate call sites; no dispatcher batch reliance). ALWAYS use
+     * this instead of `_connectionFlow.update { ... }` on its own, otherwise
+     * the AppState mirror drifts out of sync until a consumer re-reads the
+     * slice directly.
+     */
+    @Suppress("DEPRECATION")
+    private fun writeConnection(transform: (ConnectionState) -> ConnectionState) {
+        val next = transform(_connectionFlow.value)
+        _connectionFlow.value = next
+        _state.value = _state.value.copy(
+            isConnected = next.isConnected,
+            isConnecting = next.isConnecting,
+            serverVersion = next.serverVersion,
+            connectionPhase = next.connectionPhase,
+            tunnelActivationState = next.tunnelActivationState
+        )
+    }
+
+    /**
+     * §R-17 M2: write the traffic slice atomically and mirror it onto the
+     * deprecated AppState fields in `_state`. See [writeConnection].
+     */
+    @Suppress("DEPRECATION")
+    private fun writeTraffic(transform: (TrafficState) -> TrafficState) {
+        val next = transform(_trafficFlow.value)
+        _trafficFlow.value = next
+        _state.value = _state.value.copy(
+            trafficSent = next.trafficSent,
+            trafficReceived = next.trafficReceived
+        )
+    }
 
     /**
      * Expansion state for the four collapsible card types (ToolCallsRow,
@@ -761,7 +877,7 @@ class MainViewModel @Inject constructor(
     }
 
     private fun loadSettings() {
-        applySavedSettings(repository, settingsManager, hostProfileStore, _state)
+        applySavedSettings(repository, settingsManager, hostProfileStore, _state, _connectionFlow)
     }
 
     /** Q6: persist the phone pager page the user navigated to, so cold start lands there. */
@@ -865,12 +981,20 @@ class MainViewModel @Inject constructor(
                 sessions = emptyList(),
                 directorySessions = emptyMap(),
                 draftWorkdir = null,
-                availableCommands = emptyList(),
-                // Clear the (previous host's) probed server version so it is not
-                // shown under the new host before the new health check repopulates
-                // it (or, if the new connection fails, no stale version lingers).
-                serverVersion = null
+                availableCommands = emptyList()
+                // §R-17 M2: serverVersion moved to _connectionFlow below (the
+                // rest of the connection slice — isConnected/isConnecting/
+                // connectionPhase — is overwritten by the subsequent
+                // testConnection(force=true), exactly as before).
             ) }
+            // §R-17 M2 (RFC §4 strategy A): clear the (previous host's) probed
+            // server version so it is not shown under the new host before the
+            // new health check repopulates it (or, if the new connection fails,
+            // no stale version lingers). Intermediate state here is legal: an
+            // empty `_state` paired with the old host's isConnected/Phase only
+            // briefly renders the empty-state spinner before testConnection
+            // rewrites the slice.
+            writeConnection { it.copy(serverVersion = null) }
             // §Per-session message cache: cached windows belong to the previous
             // host's sessions — they must not be restored onto the new host's
             // unrelated sessions (different server, different message IDs).
@@ -926,13 +1050,15 @@ class MainViewModel @Inject constructor(
                     sessions = emptyList(),
                     directorySessions = emptyMap(),
                     draftWorkdir = null,
-                    availableCommands = emptyList(),
-                    // Clear the deleted (active) host's probed server version so
-                    // the replacement host doesn't display a stale version before
-                    // its own health check (or, on failed reconnect, at all).
-                    serverVersion = null
+                    availableCommands = emptyList()
+                    // §R-17 M2: serverVersion moved to _connectionFlow below.
                 )
             }
+            // §R-17 M2 (RFC §4 strategy A): clear the deleted (active) host's
+            // probed server version so the replacement host doesn't display a
+            // stale version before its own health check (or, on failed
+            // reconnect, at all). Intermediate state is legal (see selectHostProfile).
+            writeConnection { it.copy(serverVersion = null) }
             // §Per-session message cache: ditto — cached windows belong to the
             // deleted (active) host and must not survive into its replacement.
             clearSessionWindowCache()
@@ -995,7 +1121,13 @@ class MainViewModel @Inject constructor(
         if (!force && now - lastHealthCheckTime < 30_000) return
         lastHealthCheckTime = now
         viewModelScope.launch {
-            _state.update { it.copy(isConnecting = true, error = null, connectionPhase = "connecting") }
+            // §R-17 M2: error stays on _state (consumed app-wide);
+            // connectionPhase/isConnecting moved to _connectionFlow. Atomicity
+            // (RFC §4 strategy A): the two updates run back-to-back on the same
+            // dispatcher; the intermediate state (error cleared, phase not yet
+            // "connecting") is legal and transient.
+            _state.update { it.copy(error = null) }
+            writeConnection { it.copy(isConnecting = true, connectionPhase = "connecting") }
             val profile = hostProfileStore.currentProfile()
             configureRepositoryForProfile(profile)
             // Retry loop: attempt 1 is always made; up to `retries` extra
@@ -1010,7 +1142,7 @@ class MainViewModel @Inject constructor(
             while (isActive) {
                 attempt++
                 if (attempt > 1) {
-                    _state.update {
+                    writeConnection {
                         it.copy(connectionPhase = "reconnecting (attempt $attempt/$maxAttempts)")
                     }
                 }
@@ -1018,7 +1150,7 @@ class MainViewModel @Inject constructor(
                 if (healthResult.isSuccess) {
                     val health = healthResult.getOrNull()
                     if (health != null && health.healthy) {
-                        _state.update {
+                        writeConnection {
                             it.copy(
                                 isConnected = true,
                                 serverVersion = health.version,
@@ -1033,18 +1165,26 @@ class MainViewModel @Inject constructor(
                     // Healthy=false: surface the version if present but keep
                     // retrying (server may still be coming up on cold start).
                     if (health != null) {
-                        _state.update { it.copy(serverVersion = health.version) }
+                        writeConnection { it.copy(serverVersion = health.version) }
                     }
                 }
                 if (attempt >= maxAttempts || !isActive) {
+                    // §R-17 M2: error on _state; connection fields on
+                    // _connectionFlow. Intermediate state legal (error set
+                    // before phase flips to "disconnected" — both still
+                    // describe the same failure).
                     _state.update {
                         it.copy(
-                            isConnected = false,
-                            isConnecting = false,
-                            connectionPhase = "disconnected",
                             error = healthResult.exceptionOrNull()?.let { e ->
                                 errorMessageOrFallback(e, "Connection failed")
                             }
+                        )
+                    }
+                    writeConnection {
+                        it.copy(
+                            isConnected = false,
+                            isConnecting = false,
+                            connectionPhase = "disconnected"
                         )
                     }
                     return@launch
@@ -1971,13 +2111,16 @@ class MainViewModel @Inject constructor(
     }
 
     /**
-     * Mirrors the latest [TrafficTracker] totals into [AppState] so the Settings
-     * page renders current figures. Called on-demand (e.g. when Settings opens)
-     * rather than on every request, to avoid global recomposition per network
-     * call — the counter itself accumulates continuously in the background.
+     * Mirrors the latest [TrafficTracker] totals into [_trafficFlow] so the
+     * Settings page (and any other consumer) renders current figures. Called
+     * on-demand (e.g. when Settings opens) rather than on every request, to
+     * avoid global recomposition per network call — the counter itself
+     * accumulates continuously in the background.
+     *
+     * §R-17 M2: writes the dedicated [_trafficFlow] slice instead of AppState.
      */
     fun refreshTrafficStats() {
-        _state.update {
+        writeTraffic {
             it.copy(
                 trafficSent = trafficTracker.totalBytesSent,
                 trafficReceived = trafficTracker.totalBytesReceived
@@ -2033,14 +2176,31 @@ class MainViewModel @Inject constructor(
         //    state, file browser state, etc.
         val keptHostProfiles = _state.value.hostProfiles
         val keptHostProfileId = _state.value.currentHostProfileId
+        @Suppress("DEPRECATION")
         _state.update {
+            // §R-17 M2: connection/traffic fields left at their AppState
+            // defaults — they are deprecated mirrors and the combine() in
+            // `state` overwrites them from _connectionFlow / _trafficFlow
+            // (reset just below). Keeping them out of the constructor call
+            // avoids touching deprecated parameters.
             AppState(
                 hostProfiles = keptHostProfiles,
-                currentHostProfileId = keptHostProfileId,
-                isConnecting = true,
-                connectionPhase = "reconnecting"
+                currentHostProfileId = keptHostProfileId
             )
         }
+        // §R-17 M2: reset the connection + traffic slices to match the
+        // "isConnecting / reconnecting, traffic zeroed" semantics the old
+        // monolithic AppState() constructor provided. Atomicity (RFC §4
+        // strategy A): each intermediate state is legal (empty sessions list
+        // with a "reconnecting" badge). trafficTracker.reset() already ran
+        // above, so mirroring 0/0 here keeps the slice consistent with the
+        // tracker (otherwise combine would keep showing the stale pre-reset
+        // totals until the next refreshTrafficStats call — a behaviour
+        // regression vs. the old constructor-default zeroing).
+        writeConnection {
+            ConnectionState(isConnecting = true, connectionPhase = "reconnecting")
+        }
+        writeTraffic { TrafficState() }
         // 6. Reconnect to the (preserved) current host profile and re-fetch.
         //    coldStartReconnect → testConnection(force=true, retries=3); on
         //    health success it calls configureRepositoryForProfile (currentWorkdir
@@ -2056,34 +2216,36 @@ class MainViewModel @Inject constructor(
         // "Activate Tunnel" and nothing happens with no clue.
         val passwordId = profile.tunnelPasswordId
         if (passwordId == null) {
+            // §R-17 M2: tunnelActivationState moved to _connectionFlow; error
+            // stays on _state. Intermediate state legal.
             _state.update {
-                it.copy(
-                    tunnelActivationState = TunnelActivationState.Error("未设置隧道密码"),
-                    error = "隧道激活失败：未设置隧道认证密码。请在「服务器」设置中填写隧道密码并保存后再试。"
-                )
+                it.copy(error = "隧道激活失败：未设置隧道认证密码。请在「服务器」设置中填写隧道密码并保存后再试。")
+            }
+            writeConnection {
+                it.copy(tunnelActivationState = TunnelActivationState.Error("未设置隧道密码"))
             }
             return
         }
         val password = settingsManager.getTunnelPassword(passwordId)
         if (password.isNullOrBlank()) {
             _state.update {
-                it.copy(
-                    tunnelActivationState = TunnelActivationState.Error("隧道密码为空"),
-                    error = "隧道激活失败：已配置密码标识但存储为空（可能保存时未输入）。请重新输入隧道密码并保存。"
-                )
+                it.copy(error = "隧道激活失败：已配置密码标识但存储为空（可能保存时未输入）。请重新输入隧道密码并保存。")
+            }
+            writeConnection {
+                it.copy(tunnelActivationState = TunnelActivationState.Error("隧道密码为空"))
             }
             return
         }
 
-        _state.update { it.copy(tunnelActivationState = TunnelActivationState.Loading) }
+        writeConnection { it.copy(tunnelActivationState = TunnelActivationState.Loading) }
         viewModelScope.launch {
             repository.activateTunnel(profile.serverUrl, password, allowInsecure = profile.allowInsecureConnections)
                 .onSuccess {
                     _state.update {
-                        it.copy(
-                            tunnelActivationState = TunnelActivationState.Success,
-                            error = TUNNEL_SUCCESS_TOAST
-                        )
+                        it.copy(error = TUNNEL_SUCCESS_TOAST)
+                    }
+                    writeConnection {
+                        it.copy(tunnelActivationState = TunnelActivationState.Success)
                     }
                     Log.d(TAG, "Tunnel activated successfully for ${profile.serverUrl}")
                 }
@@ -2094,10 +2256,10 @@ class MainViewModel @Inject constructor(
                     // no generic prefix that would double up the fallback string.
                     val msg = errorMessageOrFallback(error, "未知错误（无异常信息）")
                     _state.update {
-                        it.copy(
-                            tunnelActivationState = TunnelActivationState.Error(msg),
-                            error = "隧道激活失败：$msg"
-                        )
+                        it.copy(error = "隧道激活失败：$msg")
+                    }
+                    writeConnection {
+                        it.copy(tunnelActivationState = TunnelActivationState.Error(msg))
                     }
                     Log.e(TAG, "Tunnel activation failed", error)
                 }

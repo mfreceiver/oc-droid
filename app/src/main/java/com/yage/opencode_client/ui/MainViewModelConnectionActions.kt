@@ -13,7 +13,8 @@ internal fun applySavedSettings(
     repository: OpenCodeRepository,
     settingsManager: SettingsManager,
     hostProfileStore: HostProfileStore,
-    state: MutableStateFlow<AppState>
+    state: MutableStateFlow<AppState>,
+    connectionFlow: MutableStateFlow<ConnectionState>
 ) {
     val currentProfile = hostProfileStore.currentProfile()
     val password = currentProfile.basicAuth?.passwordId?.let { settingsManager.basicAuthPassword(it) }
@@ -44,15 +45,37 @@ internal fun applySavedSettings(
             // Seed sessions from the persisted metadata cache so tabs/title/
             // workdir groups render instantly on cold start (before the server
             // list loads). loadSessions replaces these with authoritative data.
-            sessions = settingsManager.sessionCache.map { entry -> entry.toSession() },
-            // Signal "reconnecting" immediately when a profile is configured so
-            // the empty-state UX can show a spinner instead of the bare connect
-            // button while coldStartReconnect() is in flight.
-            connectionPhase = if (profiles.isNotEmpty()) "reconnecting" else null
+            sessions = settingsManager.sessionCache.map { entry -> entry.toSession() }
+            // §R-17 M2: connectionPhase moved to connectionFlow below.
         )
     }
+    // §R-17 M2 (RFC §4 strategy A): write the connection slice AND mirror it
+    // onto the deprecated AppState field synchronously (MainViewModel.state is
+    // a direct view over `state`; without this mirror the legacy
+    // `state.value.connectionPhase` readers — incl. reflection-based tests —
+    // would not observe the change until a coroutine dispatch). The two
+    // writes are back-to-back on the same (Main.immediate) thread; the
+    // intermediate state is legal.
+    // Signal "reconnecting" immediately when a profile is configured so the
+    // empty-state UX can show a spinner instead of the bare connect button
+    // while coldStartReconnect() is in flight.
+    val connectionPhase = if (profiles.isNotEmpty()) "reconnecting" else null
+    connectionFlow.update { it.copy(connectionPhase = connectionPhase) }
+    @Suppress("DEPRECATION")
+    state.update { it.copy(connectionPhase = connectionPhase) }
 }
 
+/**
+ * §R-17 M2: this helper is currently DEAD CODE (no callers in main or test).
+ * Its connection-field writes (isConnecting / isConnected / serverVersion)
+ * target the deprecated AppState mirrors and would be silently overwritten
+ * by MainViewModel.state's combine() overlay even if it were called. Kept
+ * only as a reference of the legacy single-shot connection flow; do NOT
+ * revive without routing the connection fields through [ConnectionState] /
+ * MainViewModel._connectionFlow. @Suppress keeps the legacy mirror writes
+ * warning-clean until the helper is deleted or rewritten.
+ */
+@Suppress("DEPRECATION")
 internal fun launchConnectionTest(
     scope: CoroutineScope,
     repository: OpenCodeRepository,

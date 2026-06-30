@@ -19,7 +19,9 @@ import com.yage.opencode_client.data.repository.MessagesPage
 import com.yage.opencode_client.data.repository.OpenCodeRepository
 import com.yage.opencode_client.di.AppLifecycleMonitor
 import com.yage.opencode_client.ui.AppState
+import com.yage.opencode_client.ui.ConnectionState
 import com.yage.opencode_client.ui.MainViewModel
+import com.yage.opencode_client.ui.TrafficState
 import com.yage.opencode_client.ui.TunnelActivationState
 import com.yage.opencode_client.ui.session.buildSessionTree
 import com.yage.opencode_client.util.SettingsManager
@@ -126,6 +128,39 @@ class MainViewModelTest {
         field.isAccessible = true
         @Suppress("UNCHECKED_CAST")
         val flow = field.get(viewModel) as MutableStateFlow<AppState>
+        flow.value = transform(flow.value)
+    }
+
+    /**
+     * §R-17 M2: write the connection slice directly. Mirrors [updateState] for
+     * the now-separated [ConnectionState] flow. Use this (NOT
+     * `updateState { copy(isConnected=...) }`) when a test needs to seed
+     * connection fields — writing them via `updateState` is a silent no-op
+     * because `viewModel.state` overlays `_connectionFlow` on top of `_state`.
+     */
+    private fun updateConnection(
+        viewModel: MainViewModel,
+        transform: (ConnectionState) -> ConnectionState
+    ) {
+        val field = MainViewModel::class.java.getDeclaredField("_connectionFlow")
+        field.isAccessible = true
+        @Suppress("UNCHECKED_CAST")
+        val flow = field.get(viewModel) as MutableStateFlow<ConnectionState>
+        flow.value = transform(flow.value)
+    }
+
+    /**
+     * §R-17 M2: write the traffic slice directly. See [updateConnection] for
+     * rationale.
+     */
+    private fun updateTraffic(
+        viewModel: MainViewModel,
+        transform: (TrafficState) -> TrafficState
+    ) {
+        val field = MainViewModel::class.java.getDeclaredField("_trafficFlow")
+        field.isAccessible = true
+        @Suppress("UNCHECKED_CAST")
+        val flow = field.get(viewModel) as MutableStateFlow<TrafficState>
         flow.value = transform(flow.value)
     }
 
