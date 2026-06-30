@@ -18,6 +18,8 @@ import com.yage.opencode_client.ui.controller.ComposerCallbacks
 import com.yage.opencode_client.ui.controller.ComposerController
 import com.yage.opencode_client.ui.controller.ForegroundCatchUpCallbacks
 import com.yage.opencode_client.ui.controller.ForegroundCatchUpController
+import com.yage.opencode_client.ui.controller.SessionSwitcher
+import com.yage.opencode_client.ui.controller.SessionSwitcherCallbacks
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
@@ -671,7 +673,7 @@ class MainViewModel @Inject constructor(
     private val hostProfileStore: HostProfileStore,
     internal val trafficTracker: TrafficTracker,
     private val appLifecycleMonitor: AppLifecycleMonitor
-) : ViewModel(), ForegroundCatchUpCallbacks, ComposerCallbacks {
+) : ViewModel(), ForegroundCatchUpCallbacks, ComposerCallbacks, SessionSwitcherCallbacks {
 
     // §R-17 M2: _state keeps carrying every AppState field (the connection/
     // traffic ones are deprecated mirrors). The authoritative storage for
@@ -792,6 +794,23 @@ class MainViewModel @Inject constructor(
             state = _state,
             composerFlow = _composerFlow,
             expandedParts = _expandedParts,
+            callbacks = this
+        )
+
+    /**
+     * R-16 M2b: session-switching state machine controller. Owns the
+     * [selectSession] flow (8 steps) + the per-session message-window LRU
+     * cache. Side effects (SettingsManager draft/openSessionIds persistence,
+     * repository directory sync / message / status / child-session loads,
+     * sessionCache persistence) flow through [SessionSwitcherCallbacks] which
+     * MainViewModel implements below.
+     */
+    private val sessionSwitcher: SessionSwitcher =
+        SessionSwitcher(
+            state = _state,
+            composerFlow = _composerFlow,
+            expandedParts = _expandedParts,
+            slices = sliceFlows,
             callbacks = this
         )
 
@@ -1075,72 +1094,35 @@ class MainViewModel @Inject constructor(
         composerController.clearExpandedParts()
     }
 
-    /**
-     * §Per-session message cache (LRU): maps sessionId → the loaded message
-     * window ([CachedSessionWindow]) so switching A→B→A restores A's already-
-     * loaded history + cursor instantly instead of wiping to empty and re-
-     * fetching only the latest 5. Bounded to [SESSION_WINDOW_CACHE_CAPACITY]
-     * entries; overflow evicts the least-recently-used. Eviction just means
-     * "fall back to cold-load behavior" (empty + resetLimit=true) on next
-     * open — no data loss.
-     *
-     * Main-thread confined: all writers (`launchLoadMessages`,
-     * `launchLoadMoreMessages`, the switch-away capture in [selectSession])
-     * run on `viewModelScope` (Dispatchers.Main.immediate). LinkedHashMap is
-     * not thread-safe but every access here is on the main dispatcher, so no
-     * synchronization is needed. `accessOrder = true` makes both `get` and
-     * `put` promote the entry to MRU, which is what gives us LRU semantics
-     * (restore-on-switch counts as a "use" → cached sessions the user
-     * revisits stay warm).
-     */
-    private val sessionWindowCache: MutableMap<String, CachedSessionWindow> =
-        object : LinkedHashMap<String, CachedSessionWindow>(16, 0.75f, true) {
-            override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, CachedSessionWindow>?): Boolean =
-                size > SESSION_WINDOW_CACHE_CAPACITY
-        }
+    // R-16 M2b: sessionWindowCache + all cache helpers (captureCurrentSessionWindow,
+    // writeSessionWindow, peekSessionWindow, clearSessionWindowCache,
+    // sessionWindowCacheSize) moved to [sessionSwitcher]. The thin wrappers
+    // below delegate to the controller so existing callers (loadMessages,
+    // loadMoreMessages, catchUp, closeGap via onCacheWindow; host switch /
+    // delete / reset via clearSessionWindowCache; tests via peekSessionWindow /
+    // sessionWindowCacheSize) keep working unchanged.
 
     /** Test-only visibility into the cache size (for assertions). */
-    internal fun sessionWindowCacheSize(): Int = sessionWindowCache.size
+    internal fun sessionWindowCacheSize(): Int = sessionSwitcher.sessionWindowCacheSize()
 
     /**
      * Test-only visibility: returns the cached window for [sessionId] if any.
-     * TRUE read-only — iterates entries instead of `get` so it does NOT
-     * promote the entry to most-recently-used (the cache is access-ordered,
-     * so a plain `sessionWindowCache[sessionId]` would skew eviction order).
+     * Delegates to [sessionSwitcher] — TRUE read-only (does NOT promote to MRU).
      */
     internal fun peekSessionWindow(sessionId: String): CachedSessionWindow? =
-        sessionWindowCache.entries.firstOrNull { it.key == sessionId }?.value
+        sessionSwitcher.peekSessionWindow(sessionId)
 
     /**
-     * Writes [window] for [sessionId] into the LRU cache (overwriting any
-     * prior entry, promoting to MRU). Called from `launchLoadMessages` /
-     * `launchLoadMoreMessages` after a successful fetch+merge via the
-     * `onCacheWindow` callback.
+     * Writes [window] for [sessionId] into the LRU cache. Called from
+     * launchLoadMessages / launchLoadMoreMessages via the `onCacheWindow` callback.
      */
     private fun writeSessionWindow(sessionId: String, window: CachedSessionWindow) {
-        sessionWindowCache[sessionId] = window
+        sessionSwitcher.writeSessionWindow(sessionId, window)
     }
 
-    /**
-     * Captures the CURRENT message state into the cache under [sessionId].
-     * Used by [selectSession] to write-back the outgoing session's latest
-     * view before switching away — this is what keeps the cache fresh vs
-     * SSE-driven message.updated / streaming mutations that bypassed the
-     * load callbacks. Reads only; never mutates [_state].
-     */
-    private fun captureCurrentSessionWindow(sessionId: String) {
-        val current = _state.value
-        sessionWindowCache[sessionId] = CachedSessionWindow(
-            messages = current.messages,
-            partsByMessage = current.partsByMessage,
-            olderMessagesCursor = current.olderMessagesCursor,
-            hasMoreMessages = current.hasMoreMessages
-        )
-    }
-
-    /** Drops the entire cache. Called on host switch / host delete (active). */
+    /** Drops the entire cache. Called on host switch / host delete / reset. */
     private fun clearSessionWindowCache() {
-        sessionWindowCache.clear()
+        sessionSwitcher.clearSessionWindowCache()
     }
 
     private var sseJob: Job? = null
@@ -1215,6 +1197,46 @@ class MainViewModel @Inject constructor(
     override fun clearPersistedWorkdir() {
         settingsManager.currentWorkdir = null
     }
+
+    // ──────────────────────────────────────────────────────────────────────
+    // R-16 M2b: SessionSwitcherCallbacks implementation.
+    // The session-switch flow lives in [sessionSwitcher.switchTo]; these are
+    // the side-effect hooks it calls back into for SettingsManager / repository
+    // / persistence operations. Each maps 1:1 to the original inline call in
+    // the pre-extraction selectSession.
+    // ──────────────────────────────────────────────────────────────────────
+
+    // Note: saveDraft(sessionId, text) is shared with ComposerCallbacks —
+    // both interfaces declare the same method, so a single override satisfies both.
+
+    override fun getDraft(sessionId: String): String = settingsManager.getDraftText(sessionId)
+
+    override fun setCurrentSessionId(sessionId: String?) {
+        settingsManager.currentSessionId = sessionId
+    }
+
+    override fun setOpenSessionIds(ids: List<String>) {
+        settingsManager.openSessionIds = ids
+    }
+
+    override fun persistSessionCache(sessions: List<Session>, openIds: List<String>, currentId: String?) {
+        persistSessionCache(
+            settingsManager = settingsManager,
+            sessions = sessions,
+            openIds = openIds,
+            currentId = currentId,
+            currentWorkdir = settingsManager.currentWorkdir
+        )
+    }
+
+    override fun syncCurrentDirectory(directory: String?) {
+        repository.setCurrentDirectory(directory)
+    }
+
+    // Note: loadChildSessions, loadMessages, and loadSessionStatus are
+    // implemented as override methods on the existing MainViewModel functions
+    // (see their declarations below) — adding `override` to the existing
+    // method satisfies the interface without creating a separate delegation.
 
     /**
      * §Stage D (gpter 阻塞 #1): tear down any in-flight SSE feed BEFORE the
@@ -1713,7 +1735,7 @@ class MainViewModel @Inject constructor(
             settingsManager = settingsManager,
             onSelectSession = ::selectSession,
             onLoadSessionStatus = ::loadSessionStatus,
-            onLoadMessages = { sessionId -> loadMessages(sessionId) },
+            onLoadMessages = { sessionId -> loadMessages(sessionId, resetLimit = true) },
             slices = sliceFlows,
         )
     }
@@ -1728,7 +1750,7 @@ class MainViewModel @Inject constructor(
         )
     }
 
-    private fun loadSessionStatus() {
+    override fun loadSessionStatus() {
         launchLoadSessionStatus(
             scope = viewModelScope,
             repository = repository,
@@ -1737,140 +1759,14 @@ class MainViewModel @Inject constructor(
         )
     }
 
+    /**
+     * R-16 M2b: the full 8-step session-switch flow now lives in
+     * [sessionSwitcher.switchTo]. This is a thin public wrapper that preserves
+     * the existing API for all callers (loadSessions callback, openSubAgent,
+     * openSessionFromDeepLink, sendMessage draft creation, tests, etc.).
+     */
     fun selectSession(sessionId: String) {
-        // Capture the previously-selected session BEFORE selectSessionState
-        // overwrites currentSessionId. Used below to decide whether the
-        // session the user is leaving should be re-marked unread: if it was
-        // temp-cleared (user had viewed it) and is still busy, background
-        // activity may still produce output the user cares about — re-mark it.
-        val previousSessionId = _state.value.currentSessionId
-        val previousWasBusyAndCleared = previousSessionId != null &&
-            previousSessionId != sessionId &&
-            _state.value.tempClearedUnread.contains(previousSessionId) &&
-            _state.value.sessionStatuses[previousSessionId]?.isBusy == true
-
-        // §Per-session message cache (write-back): snapshot the OUTGOING
-        // session's currently-loaded view into the LRU before selectSessionState
-        // clears it. This is what makes the cache stay fresh vs SSE-driven
-        // message.updated / streaming mutations that bypass the load path —
-        // any state changes since the last load are captured here, so a return
-        // trip restores the up-to-the-second view (then the post-restore tail
-        // fetch merges any brand-new messages).
-        if (previousSessionId != null && previousSessionId != sessionId) {
-            captureCurrentSessionWindow(previousSessionId)
-        }
-
-        selectSessionState(_state, settingsManager, sessionId, _composerFlow, sliceFlows)
-
-        // §Per-session message cache (restore): if the new session has a
-        // cached window, seed messages/parts/cursor/hasMore from it INSTEAD
-        // of leaving the empty list set by selectSessionState. The
-        // subsequent loadMessages below uses resetLimit=false on cache hit
-        // so the existing §preserveUnfetched merge logic keeps older loaded
-        // pages and merges the fresh tail non-destructively. On cache MISS
-        // we keep the prior behavior (empty + resetLimit=true cold load).
-        val cachedWindow = sessionWindowCache[sessionId]
-        if (cachedWindow != null) {
-            updateState {
-                it.copy(
-                    messages = cachedWindow.messages,
-                    partsByMessage = cachedWindow.partsByMessage,
-                    olderMessagesCursor = cachedWindow.olderMessagesCursor,
-                    hasMoreMessages = cachedWindow.hasMoreMessages
-                )
-            }
-        }
-        // Look up the target session in the union of the cached sessions list
-        // and directorySessions (#10: a session surfaced for a connected
-        // workdir may not yet be in the global list) so the parentId check
-        // below is unambiguous, and so a directory-only session can be upserted
-        // into state.sessions before syncCurrentDirectoryForSession reads it.
-        // openSubAgent upserts children into sessions first so this lookup also
-        // succeeds for sub-agents.
-        val targetSession = (_state.value.sessions + _state.value.directorySessions.values.flatten())
-            .firstOrNull { it.id == sessionId }
-        // #10: if the session is currently only in directorySessions (not yet
-        // in the global sessions list), upsert it now. Without this,
-        // currentSession (which finds by id in sessions) would be null and
-        // syncCurrentDirectoryForSession would drop the workdir.
-        if (targetSession != null && _state.value.sessions.none { it.id == sessionId }) {
-            updateState { it.copy(sessions = upsertSession(it.sessions, targetSession)) }
-        }
-        // Reset the collapsible-card expansion state (#13): switching sessions
-        // collapses all cards. Done here (not in selectSessionState / loadMessages)
-        // so history pagination (loadMore) preserves the user's in-progress
-        // expand state within the same session.
-        clearExpandedParts()
-        // Sync the repository's workdir context to the selected session so that
-        // directory-scoped requests (files, prompt, create) target the right cwd.
-        syncCurrentDirectoryForSession(_state, repository, sessionId)
-        // §Per-session message cache: resetLimit=false on a cache hit so we
-        // don't wipe the messages we just restored — the existing
-        // §preserveUnfetched merge keeps older loaded pages and prepends the
-        // fresh latest-5 tail. On cache MISS, resetLimit=true cold-loads the
-        // latest 5 and seeds the cursor (the legacy behavior).
-        loadMessages(sessionId, resetLimit = cachedWindow == null)
-        loadSessionStatus()
-        loadChildSessions(sessionId)
-        // Selecting a concrete session discards any in-progress draft.
-        // Update openSessionIds + unread tracking + lastViewedTime. Skip the
-        // openSessionIds prepend for sub-agents (parentId != null): they are
-        // transient navigations from within a parent conversation and must not
-        // pollute the open-tabs list. Sub-agents are only reachable via SubAgentCard.
-        val now = System.currentTimeMillis()
-        updateState {
-            // Re-mark the previous session as unread if it was busy when the
-            // user navigated away (its temp-cleared badge should resurface so
-            // the user knows there is still in-flight activity to come back to).
-            val withReMark = if (previousWasBusyAndCleared) {
-                it.copy(unreadSessions = it.unreadSessions + previousSessionId!!)
-            } else {
-                it
-            }
-            withReMark.copy(
-                unreadSessions = withReMark.unreadSessions - sessionId,
-                lastViewedTime = withReMark.lastViewedTime + (sessionId to now),
-                // Track the newly-selected session as "temp-cleared" so a
-                // subsequent switch away (while busy) or a new out-of-band
-                // message can re-mark it. The previous session stays in the
-                // set until the server reports it going idle (handled in
-                // SyncActions).
-                tempClearedUnread = withReMark.tempClearedUnread + sessionId
-            )
-        }
-        // §R-17 M3 (RFC §4 strategy A): draftWorkdir cleared via the composer
-        // slice. Selecting a real session discards any in-progress draft.
-        // Intermediate state legal (unread updated, draft briefly non-null).
-        writeComposer { it.copy(draftWorkdir = null) }
-        // Browser-tab semantics: a click on an already-open tab must NOT
-        // reorder it (keeps insertion order stable). The prepend only happens
-        // when the selected session is NOT yet in the list (e.g. a cold-start
-        // restoration of a persisted currentSessionId that has no open tab).
-        // New-session prepend (draft-send) is handled separately in sendMessage.
-        if (targetSession?.parentId == null && sessionId !in settingsManager.openSessionIds) {
-            val updated = (listOf(sessionId) + settingsManager.openSessionIds).take(8)
-            settingsManager.openSessionIds = updated
-            updateState { it.copy(openSessionIds = updated) }
-            // Fix #5: persist the newly-opened session's metadata into
-            // sessionCache so its tab survives a restart even when no message
-            // was ever sent. The cache is otherwise written only by
-            // launchLoadSessions.onSuccess, which does not re-run on a plain
-            // open — so without this, the tab's Session metadata was missing
-            // on cold start and ChatScreen's mapNotNull dropped the id.
-            // The session may currently live only in directorySessions (not yet
-            // promoted into the global list), so merge both sources (dedup by
-            // id) before persisting. Same plain prefs write as loadSessions.
-            val postState = _state.value
-            val sourceSessions = (postState.sessions + postState.directorySessions.values.flatten())
-                .distinctBy { it.id }
-            persistSessionCache(
-                settingsManager = settingsManager,
-                sessions = sourceSessions,
-                openIds = updated,
-                currentId = postState.currentSessionId,
-                currentWorkdir = settingsManager.currentWorkdir
-            )
-        }
+        sessionSwitcher.switchTo(sessionId)
     }
 
     /**
@@ -1879,7 +1775,7 @@ class MainViewModel @Inject constructor(
      * `children` endpoint, test mocks) are swallowed silently — the sub-agent
      * cards simply fall back to the in-stream tool state.
      */
-    fun loadChildSessions(sessionId: String) {
+    override fun loadChildSessions(sessionId: String) {
         viewModelScope.launch {
             try {
                 repository.getChildren(sessionId)
@@ -1980,7 +1876,7 @@ class MainViewModel @Inject constructor(
         }
     }
 
-    fun loadMessages(sessionId: String, resetLimit: Boolean = true) {
+    override fun loadMessages(sessionId: String, resetLimit: Boolean) {
         launchLoadMessages(
             scope = viewModelScope,
             repository = repository,
@@ -1993,6 +1889,13 @@ class MainViewModel @Inject constructor(
             slices = sliceFlows,
         )
     }
+
+    /**
+     * Convenience overload preserving the pre-M2b single-arg call convention
+     * (`loadMessages(sessionId)`). Kotlin does not allow default parameter
+     * values on override methods, so this thin wrapper supplies the default.
+     */
+    fun loadMessages(sessionId: String) = loadMessages(sessionId, resetLimit = true)
 
     /** Load messages with delay when triggered by SSE/send (server may need time to persist). */
     private fun loadMessagesWithRetry(sessionId: String, resetLimit: Boolean = true) {
@@ -2425,7 +2328,7 @@ class MainViewModel @Inject constructor(
                         )
                     }
                     settingsManager.setDraftText(sessionId, draft)
-                    loadMessages(sessionId)
+                    loadMessages(sessionId, resetLimit = true)
                     loadSessions()
                 }
                 .onFailure { error ->
@@ -2828,14 +2731,7 @@ class MainViewModel @Inject constructor(
         // LONG_ABSENCE_THRESHOLD_MS (5min) moved to
         // ForegroundCatchUpController.companion.
 
-
-        /**
-         * §Per-session message cache capacity: max number of session windows
-         * kept in memory. ~12 covers the typical "open tabs" working set
-         * ([SettingsManager.openSessionIds] is itself capped at 8) plus a
-         * few recently-evicted tabs. Overflow evicts LRU; the evicted
-         * session simply cold-loads on next open (current pre-cache behavior).
-         */
-        private const val SESSION_WINDOW_CACHE_CAPACITY = 12
+        // R-16 M2b: SESSION_WINDOW_CACHE_CAPACITY moved to
+        // SessionSwitcher.companion (the cache now lives there).
     }
 }
