@@ -40,7 +40,15 @@ fun SessionsScreen(
     viewModel: MainViewModel,
     onSwitchToChat: () -> Unit = {}
 ) {
-    val state by viewModel.state.collectAsStateWithLifecycle()
+    // §R-17 Stage 3: subscribe to the relevant slice Flows directly instead
+    // of the whole-app AppState. SessionsScreen only cares about the session
+    // list (sessionListFlow), the draft workdir marker (composerFlow — the
+    // draft is composer-domain state per RFC §2.5), and the unread badge set
+    // (unreadFlow). Subscribing to slices means SSE chat deltas / typing /
+    // connection changes no longer recompose this screen.
+    val sessionListState by viewModel.sessionListFlow.collectAsStateWithLifecycle()
+    val composerState by viewModel.composerFlow.collectAsStateWithLifecycle()
+    val unread by viewModel.unreadFlow.collectAsStateWithLifecycle()
     var showNewWorkdirDialog by remember { mutableStateOf(false) }
     var expandedWorkdirs by remember { mutableStateOf(setOf<String>()) }
     // Locally-hidden workdirs (long-press → disconnect). UI-only; reset on refresh/re-enter tab.
@@ -52,15 +60,14 @@ fun SessionsScreen(
     // conversations discovered for a connected workdir that may not yet appear
     // in the global list), deduplicated by id so a session present in both
     // stores is only rendered once.
-    // R-17 M1: derive recentSessions via remembered derivedStateOf instead of
-    // key-based remember. The lambda reads state.sessions / state.directory
-    // Sessions (State slices) and only re-emits when the structural result
-    // changes, so an SSE token delta (which mutates streamingPartTexts etc.)
-    // recomputes the block but yields an equal list and the LazyColumn items
-    // are skipped.
+    // R-17 Stage 3: reads come from sessionListState (a slice Flow), so only
+    // session-list mutations re-emit. The remembered derivedStateOf still
+    // suppresses structurally-equal results, so an unrelated sessionStatuses
+    // tweak recomputes the block but yields an equal list and the LazyColumn
+    // items are skipped.
     val recentSessions by remember {
         derivedStateOf {
-            (state.sessions + state.directorySessions.values.flatten())
+            (sessionListState.sessions + sessionListState.directorySessions.values.flatten())
                 .distinctBy { it.id }
                 .filter { it.parentId == null && !it.isArchived }
                 .sortedByDescending { it.time?.updated ?: 0L }
@@ -76,19 +83,20 @@ fun SessionsScreen(
     // no session has been POSTed yet) is appended with an empty session list
     // so the in-progress "connect" is visible alongside connected projects.
     //
-    // Source merges state.sessions with state.directorySessions (#10) so a
-    // workdir that has only been discovered via the directory-scoped fetch
-    // (and not yet promoted into the global list by a periodic refresh) still
-    // shows its sessions here. Deduplicated by id to avoid double-rendering.
+    // Source merges sessionListState.sessions with sessionListState.directory
+    // Sessions (#10) so a workdir that has only been discovered via the
+    // directory-scoped fetch (and not yet promoted into the global list by a
+    // periodic refresh) still shows its sessions here. Deduplicated by id to
+    // avoid double-rendering.
     val workdirGroups by remember {
-        // R-17 M1: derivedStateOf auto-tracks every State read inside the
-        // block (state.sessions / state.directorySessions / state.draftWorkdir
-        // / hiddenWorkdirs) and only notifies downstream when the resulting
-        // list changes structurally. SSE token deltas leave sessions /
-        // directorySessions untouched, so the equal result is suppressed and
-        // the workdir LazyColumn is not recomposed.
+        // R-17 Stage 3: derivedStateOf auto-tracks every State read inside the
+        // block (sessionListState.sessions / sessionListState.directorySessions
+        // / composerState.draftWorkdir / hiddenWorkdirs) and only notifies
+        // downstream when the resulting list changes structurally. SSE chat
+        // deltas / typing no longer touch the session-list slice, so the equal
+        // result is suppressed and the workdir LazyColumn is not recomposed.
         derivedStateOf {
-        val allSessions = (state.sessions + state.directorySessions.values.flatten())
+        val allSessions = (sessionListState.sessions + sessionListState.directorySessions.values.flatten())
             .distinctBy { it.id }
         // Fix #6b: normalize directory keys (trim + strip surrounding slashes)
         // so a web-created session whose directory differs only by a trailing
@@ -117,7 +125,7 @@ fun SessionsScreen(
                 keyToDisplayDir[key] = s.directory
             }
         }
-        state.draftWorkdir?.let { draft ->
+        composerState.draftWorkdir?.let { draft ->
             val key = normalizeDirectory(draft)
             if (key !in groupsByKey && key !in normalizedHidden) {
                 groupsByKey[key] = mutableListOf()
@@ -133,12 +141,11 @@ fun SessionsScreen(
         }
     }
 
-    // R-17 M1 (gpt-1): project state.unreadSessions to a locally-stable value
-    // so Lazy item lambdas (recent + workdir session cards) read a snapshot
-    // slice instead of touching the global AppState on every recomposition.
-    val unreadSessions by remember {
-        derivedStateOf { state.unreadSessions }
-    }
+    // R-17 Stage 3: unread is now a dedicated slice Flow (unreadFlow), so the
+    // value is already locally-stable — no derivedStateOf wrapper needed.
+    // Lazy item lambdas (recent + workdir session cards) capture this snapshot
+    // value directly.
+    val unreadSessions = unread.unreadSessions
 
     // Navigate to Chat tab after selecting a session
     fun onSessionClick(sessionId: String) {
@@ -223,7 +230,7 @@ fun SessionsScreen(
                     val isExpanded = expandedWorkdirs.contains(workdir)
                     val displayName = workdir.split("/").filter { it.isNotEmpty() }.lastOrNull()
                         ?: workdir
-                    val isDraft = workdir == state.draftWorkdir && sessionsInWorkdir.isEmpty()
+                    val isDraft = workdir == composerState.draftWorkdir && sessionsInWorkdir.isEmpty()
 
                     Column(modifier = Modifier.fillMaxWidth()) {
                         // Workdir header row (click = expand/collapse, long-click = disconnect)

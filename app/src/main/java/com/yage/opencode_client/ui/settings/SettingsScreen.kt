@@ -50,7 +50,21 @@ fun SettingsScreen(
     viewModel: MainViewModel,
     onBack: (() -> Unit)? = null
 ) {
+    // §R-17 Stage 3: subscribe to the relevant slice Flows directly so the
+    // host-profile picker / theme picker / traffic counters no longer
+    // recompose on every AppState emission (SSE deltas, typing, session
+    // switches, etc.). `state` is retained ONLY for the
+    // ConnectionProfileSection call below, which reads state.isConnected /
+    // state.serverVersion (connection-domain fields). That composable's
+    // AppState-typed parameter is exercised verbatim by
+    // SettingsSectionsInstrumentedTest, so migrating it would require editing
+    // the instrumented test — explicitly out of scope for Stage 3 (the slice
+    // itself, connectionFlow, already has both fields; the cleanup is left
+    // for a later stage that can touch tests).
     val state by viewModel.state.collectAsStateWithLifecycle()
+    val host by viewModel.hostFlow.collectAsStateWithLifecycle()
+    val settings by viewModel.settingsFlow.collectAsStateWithLifecycle()
+    val traffic by viewModel.trafficFlow.collectAsStateWithLifecycle()
 
     // Refresh traffic counters once when the Settings screen enters
     // composition so the displayed totals reflect the latest background
@@ -65,8 +79,8 @@ fun SettingsScreen(
     if (showHostProfiles) {
         HostProfilesManagerScreen(
             viewModel = viewModel,
-            profiles = state.hostProfiles,
-            currentProfileId = state.currentHostProfileId,
+            profiles = host.hostProfiles,
+            currentProfileId = host.currentHostProfileId,
             onBack = { showHostProfiles = false }
         )
         return
@@ -95,7 +109,7 @@ fun SettingsScreen(
                 .padding(16.dp)
         ) {
             ConnectionProfileSection(
-                profile = state.hostProfiles.firstOrNull { it.id == state.currentHostProfileId } ?: viewModel.currentHostProfile(),
+                profile = host.hostProfiles.firstOrNull { it.id == host.currentHostProfileId } ?: viewModel.currentHostProfile(),
                 state = state,
                 onManageProfiles = { showHostProfiles = true }
             )
@@ -103,15 +117,15 @@ fun SettingsScreen(
             SettingsSectionDivider()
 
             AppearanceSection(
-                themeMode = state.themeMode,
+                themeMode = settings.themeMode,
                 onThemeSelected = viewModel::setThemeMode
             )
 
             SettingsSectionDivider()
 
             TrafficSection(
-                sent = state.trafficSent,
-                received = state.trafficReceived,
+                sent = traffic.trafficSent,
+                received = traffic.trafficReceived,
                 onReset = viewModel::resetTrafficStats
             )
 
