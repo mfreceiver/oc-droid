@@ -42,7 +42,11 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.yage.opencode_client.R
 import com.yage.opencode_client.data.model.BasicAuthConfig
 import com.yage.opencode_client.data.model.HostProfile
+import com.yage.opencode_client.ui.ConnectionState
 import com.yage.opencode_client.ui.MainViewModel
+import com.yage.opencode_client.util.ThemeMode
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.map
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -50,21 +54,26 @@ fun SettingsScreen(
     viewModel: MainViewModel,
     onBack: (() -> Unit)? = null
 ) {
-    // §R-17 Stage 3: subscribe to the relevant slice Flows directly so the
-    // host-profile picker / theme picker / traffic counters no longer
-    // recompose on every AppState emission (SSE deltas, typing, session
-    // switches, etc.). `state` is retained ONLY for the
-    // ConnectionProfileSection call below, which reads state.isConnected /
-    // state.serverVersion (connection-domain fields). That composable's
-    // AppState-typed parameter is exercised verbatim by
-    // SettingsSectionsInstrumentedTest, so migrating it would require editing
-    // the instrumented test — explicitly out of scope for Stage 3 (the slice
-    // itself, connectionFlow, already has both fields; the cleanup is left
-    // for a later stage that can touch tests).
-    val state by viewModel.state.collectAsStateWithLifecycle()
+    // §R-17 Stage 3 (+ follow-up debt cleanup): subscribe to the relevant
+    // slice Flows directly so the host-profile picker / theme picker / traffic
+    // counters / connection badge no longer recompose on every AppState
+    // emission (SSE deltas, typing, session switches, etc.). The whole-app
+    // `viewModel.state` subscription has been removed entirely.
+    //
+    // Field-level subscriptions (.map { it.field }.distinctUntilChanged()) are
+    // used where a single field is read off a multi-field slice, so an
+    // unrelated sibling-field mutation does NOT retrigger this screen. Concret
+    // -ly: settingsFlow also carries agents/providers/selectedAgentName/
+    // availableCommands, none of which SettingsScreen reads — so themeMode is
+    // projected to a field Flow. hostFlow / trafficFlow / connectionFlow are
+    // consumed whole because every field on those small slices is read here.
     val host by viewModel.hostFlow.collectAsStateWithLifecycle()
-    val settings by viewModel.settingsFlow.collectAsStateWithLifecycle()
+    val themeMode by viewModel.settingsFlow
+        .map { it.themeMode }
+        .distinctUntilChanged()
+        .collectAsStateWithLifecycle(initialValue = ThemeMode.SYSTEM)
     val traffic by viewModel.trafficFlow.collectAsStateWithLifecycle()
+    val connection by viewModel.connectionFlow.collectAsStateWithLifecycle()
 
     // Refresh traffic counters once when the Settings screen enters
     // composition so the displayed totals reflect the latest background
@@ -110,14 +119,14 @@ fun SettingsScreen(
         ) {
             ConnectionProfileSection(
                 profile = host.hostProfiles.firstOrNull { it.id == host.currentHostProfileId } ?: viewModel.currentHostProfile(),
-                state = state,
+                connectionState = connection,
                 onManageProfiles = { showHostProfiles = true }
             )
 
             SettingsSectionDivider()
 
             AppearanceSection(
-                themeMode = settings.themeMode,
+                themeMode = themeMode,
                 onThemeSelected = viewModel::setThemeMode
             )
 

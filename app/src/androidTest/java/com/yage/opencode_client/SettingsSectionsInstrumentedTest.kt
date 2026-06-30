@@ -5,7 +5,7 @@ import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onNodeWithText
 import com.yage.opencode_client.data.model.HostProfile
-import com.yage.opencode_client.ui.AppState
+import com.yage.opencode_client.ui.ConnectionState
 import com.yage.opencode_client.ui.settings.AboutSection
 import com.yage.opencode_client.ui.settings.ConnectionProfileSection
 import com.yage.opencode_client.ui.settings.HostProfileDetailDialog
@@ -29,7 +29,7 @@ class SettingsSectionsInstrumentedTest {
             MaterialTheme {
                 ConnectionProfileSection(
                     profile = profile,
-                    state = AppState(isConnected = true, serverVersion = "1.0.0"),
+                    connectionState = ConnectionState(isConnected = true, serverVersion = "1.0.0"),
                     onManageProfiles = {}
                 )
             }

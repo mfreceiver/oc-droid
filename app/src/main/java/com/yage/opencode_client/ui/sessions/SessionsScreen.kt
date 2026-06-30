@@ -30,6 +30,8 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.yage.opencode_client.R
 import com.yage.opencode_client.data.model.Session
 import com.yage.opencode_client.ui.MainViewModel
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.map
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -40,15 +42,31 @@ fun SessionsScreen(
     viewModel: MainViewModel,
     onSwitchToChat: () -> Unit = {}
 ) {
-    // §R-17 Stage 3: subscribe to the relevant slice Flows directly instead
-    // of the whole-app AppState. SessionsScreen only cares about the session
-    // list (sessionListFlow), the draft workdir marker (composerFlow — the
-    // draft is composer-domain state per RFC §2.5), and the unread badge set
-    // (unreadFlow). Subscribing to slices means SSE chat deltas / typing /
-    // connection changes no longer recompose this screen.
+    // §R-17 Stage 3 (+ follow-up debt cleanup): subscribe to the relevant
+    // slice Flows directly instead of the whole-app AppState. SessionsScreen
+    // only cares about the session list (sessionListFlow, consumed whole since
+    // it reads sessions + directorySessions), the draft workdir marker, and the
+    // unread badge set.
+    //
+    // Field-level subscriptions (.map { it.field }.distinctUntilChanged()) are
+    // used for draftWorkdir / unreadSessions: draftWorkdir lives on the
+    // composer slice alongside the high-frequency inputText (mutates on every
+    // keystroke), and unreadSessions lives on the unread slice alongside
+    // tempClearedUnread / lastViewedTime (mutated on session switches).
+    // Projecting to the single read field means typing / session-switch no
+    // longer recompose this screen. (S1 runtime impact is currently zero —
+    // HorizontalPager was replaced with explicit nav so SessionsScreen is not
+    // kept hot during chat typing — but the field-level subscription is still
+    // the cleaner, more precise model.)
     val sessionListState by viewModel.sessionListFlow.collectAsStateWithLifecycle()
-    val composerState by viewModel.composerFlow.collectAsStateWithLifecycle()
-    val unread by viewModel.unreadFlow.collectAsStateWithLifecycle()
+    val draftWorkdir by viewModel.composerFlow
+        .map { it.draftWorkdir }
+        .distinctUntilChanged()
+        .collectAsStateWithLifecycle(initialValue = null)
+    val unreadSessions by viewModel.unreadFlow
+        .map { it.unreadSessions }
+        .distinctUntilChanged()
+        .collectAsStateWithLifecycle(initialValue = emptySet())
     var showNewWorkdirDialog by remember { mutableStateOf(false) }
     var expandedWorkdirs by remember { mutableStateOf(setOf<String>()) }
     // Locally-hidden workdirs (long-press → disconnect). UI-only; reset on refresh/re-enter tab.
@@ -91,10 +109,11 @@ fun SessionsScreen(
     val workdirGroups by remember {
         // R-17 Stage 3: derivedStateOf auto-tracks every State read inside the
         // block (sessionListState.sessions / sessionListState.directorySessions
-        // / composerState.draftWorkdir / hiddenWorkdirs) and only notifies
-        // downstream when the resulting list changes structurally. SSE chat
-        // deltas / typing no longer touch the session-list slice, so the equal
-        // result is suppressed and the workdir LazyColumn is not recomposed.
+        // / draftWorkdir / hiddenWorkdirs) and only notifies downstream when
+        // the resulting list changes structurally. SSE chat deltas / typing
+        // no longer touch any of these (draftWorkdir is a field-level Flow),
+        // so the equal result is suppressed and the workdir LazyColumn is not
+        // recomposed.
         derivedStateOf {
         val allSessions = (sessionListState.sessions + sessionListState.directorySessions.values.flatten())
             .distinctBy { it.id }
@@ -125,7 +144,7 @@ fun SessionsScreen(
                 keyToDisplayDir[key] = s.directory
             }
         }
-        composerState.draftWorkdir?.let { draft ->
+        draftWorkdir?.let { draft ->
             val key = normalizeDirectory(draft)
             if (key !in groupsByKey && key !in normalizedHidden) {
                 groupsByKey[key] = mutableListOf()
@@ -141,11 +160,10 @@ fun SessionsScreen(
         }
     }
 
-    // R-17 Stage 3: unread is now a dedicated slice Flow (unreadFlow), so the
-    // value is already locally-stable — no derivedStateOf wrapper needed.
-    // Lazy item lambdas (recent + workdir session cards) capture this snapshot
-    // value directly.
-    val unreadSessions = unread.unreadSessions
+    // R-17 Stage 3: unreadSessions is a field-level slice Flow (above), so the
+    // value is already locally-stable — no derivedStateOf wrapper needed. Lazy
+    // item lambdas (recent + workdir session cards) capture this snapshot value
+    // directly.
 
     // Navigate to Chat tab after selecting a session
     fun onSessionClick(sessionId: String) {
@@ -230,7 +248,7 @@ fun SessionsScreen(
                     val isExpanded = expandedWorkdirs.contains(workdir)
                     val displayName = workdir.split("/").filter { it.isNotEmpty() }.lastOrNull()
                         ?: workdir
-                    val isDraft = workdir == composerState.draftWorkdir && sessionsInWorkdir.isEmpty()
+                    val isDraft = workdir == draftWorkdir && sessionsInWorkdir.isEmpty()
 
                     Column(modifier = Modifier.fillMaxWidth()) {
                         // Workdir header row (click = expand/collapse, long-click = disconnect)

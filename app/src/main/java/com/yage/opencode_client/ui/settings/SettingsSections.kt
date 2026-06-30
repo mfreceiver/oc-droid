@@ -17,24 +17,16 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.CheckCircle
-import androidx.compose.material.icons.filled.Cloud
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Delete
-import androidx.compose.material.icons.filled.Error
-import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.Pause
-import androidx.compose.material.icons.filled.Person
 import androidx.compose.material.icons.filled.PlayArrow
-import androidx.compose.material.icons.filled.Visibility
-import androidx.compose.material.icons.filled.VisibilityOff
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
-import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.FilterChipDefaults
@@ -60,12 +52,10 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontFamily
-import androidx.compose.ui.text.input.PasswordVisualTransformation
-import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.yage.opencode_client.R
-import com.yage.opencode_client.ui.AppState
+import com.yage.opencode_client.ui.ConnectionState
 import com.yage.opencode_client.data.model.HostProfile
 import com.yage.opencode_client.ui.theme.opencode
 import com.yage.opencode_client.util.DebugLog
@@ -77,7 +67,7 @@ import java.util.Locale
 @Composable
 internal fun ConnectionProfileSection(
     profile: HostProfile,
-    state: AppState,
+    connectionState: ConnectionState,
     onManageProfiles: () -> Unit
 ) {
     SectionHeader(title = stringResource(R.string.settings_connection_profile))
@@ -99,7 +89,11 @@ internal fun ConnectionProfileSection(
                 // the right of the profile row. The Test Connection action lives
                 // on the per-row icons inside Manage Connections now, so it is
                 // intentionally not duplicated here.
-                if (state.isConnected) {
+                //
+                // §R-17 Stage 3 follow-up: reads isConnected / serverVersion
+                // from the connection-domain slice (ConnectionState) instead of
+                // the whole-app AppState.
+                if (connectionState.isConnected) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Icon(
                             Icons.Default.CheckCircle,
@@ -113,7 +107,7 @@ internal fun ConnectionProfileSection(
                             style = MaterialTheme.typography.labelMedium,
                             color = MaterialTheme.colorScheme.primary
                         )
-                        state.serverVersion?.let { version ->
+                        connectionState.serverVersion?.let { version ->
                             Text(
                                 " (v$version)",
                                 style = MaterialTheme.typography.labelSmall,
@@ -131,121 +125,6 @@ internal fun ConnectionProfileSection(
                 modifier = Modifier.fillMaxWidth()
             ) {
                 Text(stringResource(R.string.settings_manage_profiles))
-            }
-        }
-    }
-}
-
-@Composable
-internal fun ServerConnectionSection(
-    serverUrl: String,
-    username: String,
-    password: String,
-    showPassword: Boolean,
-    isTesting: Boolean,
-    state: AppState,
-    testResult: TestResult?,
-    onServerUrlChange: (String) -> Unit,
-    onUsernameChange: (String) -> Unit,
-    onPasswordChange: (String) -> Unit,
-    onTogglePasswordVisibility: () -> Unit,
-    onTestConnection: () -> Unit,
-    onSave: () -> Unit
-) {
-    SectionHeader(title = stringResource(R.string.settings_server_connection))
-
-    OutlinedTextField(
-        value = serverUrl,
-        onValueChange = onServerUrlChange,
-        label = { Text(stringResource(R.string.settings_server_url)) },
-        placeholder = { Text("http://localhost:4096") },
-        modifier = Modifier.fillMaxWidth(),
-        singleLine = true,
-        leadingIcon = { Icon(Icons.Default.Cloud, contentDescription = null) }
-    )
-
-    Spacer(modifier = Modifier.height(12.dp))
-
-    OutlinedTextField(
-        value = username,
-        onValueChange = onUsernameChange,
-        label = { Text(stringResource(R.string.settings_username_optional)) },
-        modifier = Modifier.fillMaxWidth(),
-        singleLine = true,
-        leadingIcon = { Icon(Icons.Default.Person, contentDescription = null) }
-    )
-
-    Spacer(modifier = Modifier.height(12.dp))
-
-    OutlinedTextField(
-        value = password,
-        onValueChange = onPasswordChange,
-        label = { Text(stringResource(R.string.settings_password_optional)) },
-        modifier = Modifier.fillMaxWidth(),
-        singleLine = true,
-        visualTransformation = if (showPassword) VisualTransformation.None else PasswordVisualTransformation(),
-        trailingIcon = {
-            IconButton(onClick = onTogglePasswordVisibility) {
-                Icon(
-                    if (showPassword) Icons.Default.VisibilityOff else Icons.Default.Visibility,
-                    contentDescription = if (showPassword) stringResource(R.string.settings_hide_password) else stringResource(R.string.settings_show_password)
-                )
-            }
-        },
-        leadingIcon = { Icon(Icons.Default.Lock, contentDescription = null) }
-    )
-
-    Spacer(modifier = Modifier.height(16.dp))
-
-    Row(
-        modifier = Modifier.fillMaxWidth(),
-        horizontalArrangement = Arrangement.spacedBy(8.dp)
-    ) {
-        Button(
-            onClick = onTestConnection,
-            enabled = serverUrl.isNotBlank() && !isTesting
-        ) {
-            if (isTesting) {
-                CircularProgressIndicator(
-                    modifier = Modifier.size(16.dp),
-                    strokeWidth = 2.dp
-                )
-                Spacer(modifier = Modifier.width(8.dp))
-            }
-            Text(stringResource(R.string.settings_test_connection))
-        }
-
-        OutlinedButton(
-            onClick = onSave,
-            enabled = serverUrl.isNotBlank()
-        ) {
-            Text(stringResource(R.string.settings_save))
-        }
-    }
-
-    testResult?.let { ResultCard(result = it) }
-
-    if (state.isConnected) {
-        Spacer(modifier = Modifier.height(12.dp))
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            Icon(
-                Icons.Default.CheckCircle,
-                contentDescription = null,
-                tint = MaterialTheme.colorScheme.primary,
-                modifier = Modifier.size(20.dp)
-            )
-            Spacer(modifier = Modifier.width(8.dp))
-            Text(
-                stringResource(R.string.settings_connected),
-                style = MaterialTheme.typography.bodyMedium,
-                color = MaterialTheme.colorScheme.primary
-            )
-            state.serverVersion?.let { version ->
-                Text(
-                    " (v$version)",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.outline
-                )
             }
         }
     }
@@ -683,53 +562,8 @@ internal fun SectionHeader(title: String) {
 }
 
 @Composable
-private fun ResultCard(result: TestResult) {
-    Spacer(modifier = Modifier.height(12.dp))
-    Card(
-        colors = CardDefaults.cardColors(
-            containerColor = if (result.success) {
-                MaterialTheme.colorScheme.primaryContainer
-            } else {
-                MaterialTheme.colorScheme.errorContainer
-            }
-        )
-    ) {
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(12.dp),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Icon(
-                if (result.success) Icons.Default.Check else Icons.Default.Error,
-                contentDescription = null,
-                tint = if (result.success) {
-                    MaterialTheme.colorScheme.onPrimaryContainer
-                } else {
-                    MaterialTheme.colorScheme.onErrorContainer
-                }
-            )
-            Spacer(modifier = Modifier.width(8.dp))
-            Text(
-                result.message,
-                color = if (result.success) {
-                    MaterialTheme.colorScheme.onPrimaryContainer
-                } else {
-                    MaterialTheme.colorScheme.onErrorContainer
-                }
-            )
-        }
-    }
-}
-
-@Composable
 internal fun SettingsSectionDivider() {
     Spacer(modifier = Modifier.height(32.dp))
     HorizontalDivider()
     Spacer(modifier = Modifier.height(32.dp))
 }
-
-internal data class TestResult(
-    val success: Boolean,
-    val message: String
-)
