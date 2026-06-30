@@ -150,7 +150,7 @@ internal class SessionSyncCoordinator(
         val evtSession = event.payload.getString("sessionID") ?: "-"
         val noisy = type in NOISY_SSE_LOG_EVENTS
         if (!noisy) {
-            DebugLog.d("Sync", "dispatch $type session=$evtSession current=${state.value.currentSessionId}")
+            DebugLog.d("Sync", "dispatch $type session=$evtSession current=${slices.chat.value.currentSessionId}")
         }
         when (event.payload.type) {
             "session.created" -> {
@@ -189,7 +189,7 @@ internal class SessionSyncCoordinator(
                     // the run starts. The overlay-clear in launchLoadMessages is
                     // gated on !busy, so this does NOT disrupt the streaming overlay.
                     if (statusEvent.status.isBusy &&
-                        statusEvent.sessionId == state.value.currentSessionId
+                        statusEvent.sessionId == slices.chat.value.currentSessionId
                     ) {
                         DebugLog.i("Sync", "session.status busy (current) → reload (cross-client message sync)")
                         callbacks.onRefreshMessages(statusEvent.sessionId, true)
@@ -202,8 +202,8 @@ internal class SessionSyncCoordinator(
                     // was busy), keep the badge so the user still knows there was
                     // activity — the user opening the session will clear it.
                     if (!statusEvent.status.isBusy &&
-                        statusEvent.sessionId != state.value.currentSessionId &&
-                        state.value.tempClearedUnread.contains(statusEvent.sessionId)
+                        statusEvent.sessionId != slices.chat.value.currentSessionId &&
+                        slices.unread.value.tempClearedUnread.contains(statusEvent.sessionId)
                     ) {
                         state.updateAndSync(slices) {
                             it.copy(tempClearedUnread = it.tempClearedUnread - statusEvent.sessionId)
@@ -225,7 +225,7 @@ internal class SessionSyncCoordinator(
                     // internally so the server has time to persist the finalized
                     // part text; status is now idle so the gated clear will run).
                     if (statusEvent.status.isIdle &&
-                        statusEvent.sessionId == state.value.currentSessionId
+                        statusEvent.sessionId == slices.chat.value.currentSessionId
                     ) {
                         val s = state.value
                         val shouldReload = s.streamingPartTexts.isNotEmpty() || s.streamingReasoningPart != null
@@ -246,9 +246,9 @@ internal class SessionSyncCoordinator(
                 // message.updated insert-if-absent path above and the
                 // session.status busy reload.
                 val sessionId = event.payload.getString("sessionID")
-                val isCurrent = sessionId != null && sessionId == state.value.currentSessionId
+                val isCurrent = sessionId != null && sessionId == slices.chat.value.currentSessionId
                 DebugLog.i("Sync", "message.created: ${if (isCurrent) "reload current" else "mark unread"}")
-                if (sessionId != null && sessionId == state.value.currentSessionId) {
+                if (sessionId != null && sessionId == slices.chat.value.currentSessionId) {
                     callbacks.onRefreshMessages(sessionId, true)
                 } else if (sessionId != null) {
                     // Mark unread: an out-of-band message arrived for a session
@@ -277,7 +277,7 @@ internal class SessionSyncCoordinator(
                 // is even subscribed.
                 // Defensive session guard: only touch the current session's view.
                 val eventSessionId = event.payload.getString("sessionID")
-                if (eventSessionId != null && eventSessionId != state.value.currentSessionId) return
+                if (eventSessionId != null && eventSessionId != slices.chat.value.currentSessionId) return
                 val infoJson = event.payload.getJsonObject("info")
                 if (infoJson != null) {
                     val updated = runCatching {
@@ -305,7 +305,7 @@ internal class SessionSyncCoordinator(
             }
             "message.part.updated" -> {
                 val deltaEvent = parseMessagePartDeltaEvent(event) ?: return
-                if (deltaEvent.sessionId == state.value.currentSessionId) {
+                if (deltaEvent.sessionId == slices.chat.value.currentSessionId) {
                     val msgId = deltaEvent.messageId
                     val pId = deltaEvent.partId
                     if (msgId != null && pId != null) {
@@ -372,7 +372,7 @@ internal class SessionSyncCoordinator(
                 // Keyed by bare partId (S4: streamingPartTexts is rekeyed from
                 // "msgId:partId" to partId, matching the UI consumers).
                 val sessionId = event.payload.getString("sessionID") ?: return
-                if (sessionId != state.value.currentSessionId) return
+                if (sessionId != slices.chat.value.currentSessionId) return
                 // messageID required for a well-formed delta event (validation guard).
                 event.payload.getString("messageID") ?: return
                 val partId = event.payload.getString("partID") ?: return

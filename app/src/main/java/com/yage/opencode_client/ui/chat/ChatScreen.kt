@@ -44,6 +44,11 @@ import com.yage.opencode_client.ui.files.FilesViewModel
 import com.yage.opencode_client.ui.MainViewModel
 import com.yage.opencode_client.ui.TUNNEL_SUCCESS_TOAST
 import com.yage.opencode_client.ui.TunnelActivationState
+import com.yage.opencode_client.ui.computeContextUsage
+import com.yage.opencode_client.ui.currentHostProfile
+import com.yage.opencode_client.ui.currentSession
+import com.yage.opencode_client.ui.currentSessionStatus
+import com.yage.opencode_client.ui.visibleMessages
 import com.yage.opencode_client.ui.common.AppToast
 import com.yage.opencode_client.ui.common.ToastSeverity
 import com.yage.opencode_client.ui.theme.opencode
@@ -56,7 +61,19 @@ fun ChatScreen(
     onNavigateToSettings: () -> Unit = {},
     onNavigateToSessions: () -> Unit = {}
 ) {
-    val state by viewModel.state.collectAsStateWithLifecycle()
+    // §R-17 M5: AppState no longer carries the per-domain mirror fields.
+    // ChatScreen reads the authoritative slice flows directly. `appState` still
+    // carries the cross-domain `error` / `lastNavPage` that remain on AppState.
+    val appState by viewModel.state.collectAsStateWithLifecycle()
+    val connection by viewModel.connectionFlow.collectAsStateWithLifecycle()
+    val traffic by viewModel.trafficFlow.collectAsStateWithLifecycle()
+    val composer by viewModel.composerFlow.collectAsStateWithLifecycle()
+    val file by viewModel.fileFlow.collectAsStateWithLifecycle()
+    val settings by viewModel.settingsFlow.collectAsStateWithLifecycle()
+    val chat by viewModel.chatFlow.collectAsStateWithLifecycle()
+    val sessionList by viewModel.sessionListFlow.collectAsStateWithLifecycle()
+    val unread by viewModel.unreadFlow.collectAsStateWithLifecycle()
+    val host by viewModel.hostFlow.collectAsStateWithLifecycle()
     var showFileBrowser by remember { mutableStateOf(false) }
     // §R-17 Stage 2: expandedParts collect moved INTO ChatMessageList (it now
     // subscribes to viewModel.expandedParts directly), so ChatScreen no longer
@@ -85,26 +102,30 @@ fun ChatScreen(
         { imagePickerLauncher.launch("image/*") }
     }
 
+    // Cross-slice derived views (R-17 M5: moved out of the AppState getters).
+    val curSession = currentSession(sessionList.sessions, chat.currentSessionId)
+    val curSessionStatus = currentSessionStatus(sessionList.sessionStatuses, chat.currentSessionId)
     // Cache last non-null contextUsage so the ring stays visible during streaming
-    var cachedContextUsage by remember { mutableStateOf(state.contextUsage) }
-    state.contextUsage?.let { cachedContextUsage = it }
-    val currentSessionIsRunning = state.currentSessionStatus?.let { it.isBusy || it.isRetry } == true ||
-        state.currentSessionId?.let { it in state.sendingSessionIds } == true
+    val computedContextUsage = computeContextUsage(chat.messages, settings.providers)
+    var cachedContextUsage by remember { mutableStateOf(computedContextUsage) }
+    computedContextUsage?.let { cachedContextUsage = it }
+    val currentSessionIsRunning = curSessionStatus?.let { it.isBusy || it.isRetry } == true ||
+        chat.currentSessionId?.let { it in composer.sendingSessionIds } == true
     val currentActivity = remember(
-        state.currentSessionId,
-        state.currentSessionStatus,
-        state.visibleMessages,
-        state.partsByMessage,
-        state.streamingReasoningPart,
-        state.streamingPartTexts,
+        chat.currentSessionId,
+        curSessionStatus,
+        chat.messages,
+        chat.partsByMessage,
+        chat.streamingReasoningPart,
+        chat.streamingPartTexts,
     ) {
         currentSessionActivity(
-            sessionId = state.currentSessionId,
-            status = state.currentSessionStatus,
-            messages = state.visibleMessages,
-            partsByMessage = state.partsByMessage,
-            streamingReasoningPart = state.streamingReasoningPart,
-            streamingPartTexts = state.streamingPartTexts,
+            sessionId = chat.currentSessionId,
+            status = curSessionStatus,
+            messages = visibleMessages(chat.messages, curSession),
+            partsByMessage = chat.partsByMessage,
+            streamingReasoningPart = chat.streamingReasoningPart,
+            streamingPartTexts = chat.streamingPartTexts,
         )
     }
 
@@ -114,7 +135,7 @@ fun ChatScreen(
     // from #12) so it wins dispatch priority while a child session is open.
     // lastParent caches the most recent non-null parentId so the back callback
     // still resolves the right target even if state recomposes mid-press.
-    val parent = state.currentSession?.parentId
+    val parent = curSession?.parentId
     var lastParent by remember { mutableStateOf<String?>(null) }
     if (parent != null) lastParent = parent
     BackHandler(enabled = parent != null) { lastParent?.let { viewModel.selectSession(it) } }
@@ -135,44 +156,45 @@ fun ChatScreen(
     // forces this block to re-evaluate, but the resulting ChatTopBarState is
     // structurally equal to the previous one (data-class equals) — so
     // derivedStateOf suppresses the change and ChatTopBar is skipped.
+    val curHostProfile = currentHostProfile(host.hostProfiles, host.currentHostProfileId)
     val topBarState by remember {
         derivedStateOf {
             // Resolve openSessionIds to actual Session objects for the
             // top-bar tab strip. Filtered to root sessions (parentId == null)
             // so sub-agents never duplicate the title-slot breadcrumb.
-            val resolvedOpenSessions = state.openSessionIds
-                .mapNotNull { id -> state.sessions.find { it.id == id } }
+            val resolvedOpenSessions = sessionList.openSessionIds
+                .mapNotNull { id -> sessionList.sessions.find { it.id == id } }
                 .filter { it.parentId == null }
             ChatTopBarState(
-                sessions = state.sessions,
-                currentSessionId = state.currentSessionId,
-                sessionStatuses = state.sessionStatuses,
-                hasMoreSessions = state.hasMoreSessions,
-                isLoadingMoreSessions = state.isLoadingMoreSessions,
-                isRefreshingSessions = state.isRefreshingSessions,
-                expandedSessionIds = state.expandedSessionIds,
-                agents = state.visibleAgents,
-                selectedAgentName = state.selectedAgentName,
+                sessions = sessionList.sessions,
+                currentSessionId = chat.currentSessionId,
+                sessionStatuses = sessionList.sessionStatuses,
+                hasMoreSessions = sessionList.hasMoreSessions,
+                isLoadingMoreSessions = sessionList.isLoadingMoreSessions,
+                isRefreshingSessions = sessionList.isRefreshingSessions,
+                expandedSessionIds = sessionList.expandedSessionIds,
+                agents = settings.agents.filter { it.isVisible },
+                selectedAgentName = settings.selectedAgentName,
                 contextUsage = cachedContextUsage,
-                sessionTodos = state.sessionTodos[state.currentSessionId ?: ""] ?: emptyList(),
-                hostName = state.currentHostProfile?.name ?: "No Host",
-                isConnected = state.isConnected,
-                isConnecting = state.isConnecting,
-                connectionPhase = state.connectionPhase,
-                hostProfiles = state.hostProfiles,
-                currentHostProfileId = state.currentHostProfileId,
-                tunnelActivationState = state.tunnelActivationState,
-                showTunnelAuth = (state.currentHostProfile?.tunnelPasswordId != null),
+                sessionTodos = sessionList.sessionTodos[chat.currentSessionId ?: ""] ?: emptyList(),
+                hostName = curHostProfile?.name ?: "No Host",
+                isConnected = connection.isConnected,
+                isConnecting = connection.isConnecting,
+                connectionPhase = connection.connectionPhase,
+                hostProfiles = host.hostProfiles,
+                currentHostProfileId = host.currentHostProfileId,
+                tunnelActivationState = connection.tunnelActivationState,
+                showTunnelAuth = (curHostProfile?.tunnelPasswordId != null),
                 openSessions = resolvedOpenSessions,
-                unreadSessions = state.unreadSessions,
-                draftWorkdir = state.draftWorkdir,
-                parentSessionId = state.currentSession?.parentId,
-                parentSessionTitle = state.currentSession?.parentId?.let { pid ->
-                    state.sessions.firstOrNull { it.id == pid }?.displayName
+                unreadSessions = unread.unreadSessions,
+                draftWorkdir = composer.draftWorkdir,
+                parentSessionId = curSession?.parentId,
+                parentSessionTitle = curSession?.parentId?.let { pid ->
+                    sessionList.sessions.firstOrNull { it.id == pid }?.displayName
                 },
-                trafficSent = state.trafficSent,
-                trafficReceived = state.trafficReceived,
-                serverVersion = state.serverVersion
+                trafficSent = traffic.trafficSent,
+                trafficReceived = traffic.trafficReceived,
+                serverVersion = connection.serverVersion
             )
         }
     }
@@ -237,21 +259,21 @@ fun ChatScreen(
             tonalElevation = if (isWide) 1.dp else 0.dp
         ) {
             Column(modifier = Modifier.fillMaxSize()) {
-        Box(modifier = Modifier.weight(1f)) {
-            val isDraft = state.draftWorkdir != null && state.currentSessionId == null
-            if (state.currentSessionId == null && !isDraft) {
+            Box(modifier = Modifier.weight(1f)) {
+            val isDraft = composer.draftWorkdir != null && chat.currentSessionId == null
+            if (chat.currentSessionId == null && !isDraft) {
                 ChatEmptyState(
-                    isConnected = state.isConnected,
-                    isConnecting = state.isConnecting,
-                    connectionPhase = state.connectionPhase,
-                    hostName = state.currentHostProfile?.name
-                        ?: state.currentHostProfile?.serverUrl
+                    isConnected = connection.isConnected,
+                    isConnecting = connection.isConnecting,
+                    connectionPhase = connection.connectionPhase,
+                    hostName = curHostProfile?.name
+                        ?: curHostProfile?.serverUrl
                             ?.substringAfter("://")
                             ?.substringBefore("/")
                             ?: "server",
                     onConnect = { viewModel.testConnection() }
                 )
-            } else if (state.currentSessionId != null) {
+            } else if (chat.currentSessionId != null) {
                 ChatMessageList(
                     viewModel = viewModel,
                     onFileClick = onChatFileClick
@@ -261,7 +283,7 @@ fun ChatScreen(
             // §Phase1E stale notice banner — shown after a long (>5min)
             // background absence. Positioned at TopCenter alongside the error
             // Snackbar but rendered first so the error (if any) stacks below.
-            if (state.staleNotice && state.currentSessionId != null) {
+            if (chat.staleNotice && chat.currentSessionId != null) {
                 StaleNoticeBanner(
                     onReload = { viewModel.refreshCurrentSession() },
                     modifier = Modifier
@@ -270,7 +292,7 @@ fun ChatScreen(
                 )
             }
 
-            state.error?.let { error ->
+            appState.error?.let { error ->
                 // Toast rendered at the TOP of the chat area so tunnel
                 // activation feedback (and any other error) surfaces in the upper
                 // region of the interface instead of being buried at the bottom.
@@ -293,7 +315,7 @@ fun ChatScreen(
         // Input bar is enabled whenever there is either a concrete session OR
         // a draft workdir (so the user can type the first message that will
         // materialise the session).
-        if (state.currentSessionId != null || state.draftWorkdir != null) {
+        if (chat.currentSessionId != null || composer.draftWorkdir != null) {
             ChatInputBar(
                 viewModel = viewModel,
                 isBusy = currentSessionIsRunning,
@@ -305,7 +327,7 @@ fun ChatScreen(
             }
         }
 
-        state.pendingPermissions.firstOrNull()?.let { permission ->
+        sessionList.pendingPermissions.firstOrNull()?.let { permission ->
             ChatPermissionCard(
                 permission = permission,
                 onRespond = { response ->
@@ -314,8 +336,8 @@ fun ChatScreen(
             )
         }
 
-        state.pendingQuestions
-            .filter { it.sessionId == state.currentSessionId }
+        sessionList.pendingQuestions
+            .filter { it.sessionId == chat.currentSessionId }
             .firstOrNull()
             ?.let { question ->
                 QuestionCardView(
@@ -345,8 +367,8 @@ fun ChatScreen(
         ) {
             FilesScreen(
                 viewModel = filesViewModel,
-                pathToShow = state.filePathToShowInFiles,
-                sessionDirectory = state.currentSession?.directory,
+                pathToShow = file.filePathToShowInFiles,
+                sessionDirectory = curSession?.directory,
                 onCloseFile = {
                     viewModel.clearFileToShow()
                     showFileBrowser = false

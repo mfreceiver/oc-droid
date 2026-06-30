@@ -8,6 +8,7 @@ import com.yage.opencode_client.data.repository.MessagesPage
 import com.yage.opencode_client.data.repository.OpenCodeRepository
 import com.yage.opencode_client.di.AppLifecycleMonitor
 import com.yage.opencode_client.ui.AppState
+import com.yage.opencode_client.ui.ChatState
 import com.yage.opencode_client.ui.MainViewModel
 import com.yage.opencode_client.util.SettingsManager
 import com.yage.opencode_client.util.ThemeMode
@@ -158,6 +159,14 @@ class ForkSessionTest {
         @Suppress("UNCHECKED_CAST")
         val stateFlow = field.get(viewModel) as MutableStateFlow<AppState>
         stateFlow.value = stateFlow.value.copy(currentSessionId = "parent-1")
+        // §R-17 M5: updateState aggregates from the slices, so seed the chat
+        // slice's currentSessionId too (otherwise the aggregate reads null and
+        // the post-fork assertion on state.value.currentSessionId fails).
+        val chatField = MainViewModel::class.java.getDeclaredField("_chatFlow")
+        chatField.isAccessible = true
+        @Suppress("UNCHECKED_CAST")
+        val chatFlow = chatField.get(viewModel) as MutableStateFlow<ChatState>
+        chatFlow.value = chatFlow.value.copy(currentSessionId = "parent-1")
 
         viewModel.forkSession("parent-1", "msg-99")
         advanceUntilIdle()

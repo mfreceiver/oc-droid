@@ -2,6 +2,7 @@ package com.yage.opencode_client.ui.controller
 
 import com.yage.opencode_client.data.model.ComposerImageAttachment
 import com.yage.opencode_client.ui.AppState
+import com.yage.opencode_client.ui.ChatState
 import com.yage.opencode_client.ui.ComposerState
 import kotlinx.coroutines.flow.MutableStateFlow
 import org.junit.Assert.assertEquals
@@ -18,10 +19,15 @@ import org.junit.Test
  * clearDraftIfActive / togglePartExpand / clearExpandedParts) and asserted
  * via the [RecordingComposerCallbacks] spy + direct flow reads. Follows the
  * [ForegroundCatchUpControllerTest] pattern from M1.
+ *
+ * R-17 M5: the controller reads currentSessionId from [chatFlow] (slice) but
+ * still mirrors composer writes onto [appState] (the free helpers read
+ * `state.value.draftWorkdir`), so both are exercised.
  */
 class ComposerControllerTest {
 
     private lateinit var appState: MutableStateFlow<AppState>
+    private lateinit var chatFlow: MutableStateFlow<ChatState>
     private lateinit var composerFlow: MutableStateFlow<ComposerState>
     private lateinit var expandedParts: MutableStateFlow<Map<String, Boolean>>
     private lateinit var callbacks: RecordingComposerCallbacks
@@ -30,12 +36,14 @@ class ComposerControllerTest {
     @Before
     fun setUp() {
         appState = MutableStateFlow(AppState())
+        chatFlow = MutableStateFlow(ChatState())
         composerFlow = MutableStateFlow(ComposerState())
         expandedParts = MutableStateFlow(emptyMap())
         callbacks = RecordingComposerCallbacks()
         controller = ComposerController(
             state = appState,
             composerFlow = composerFlow,
+            chatFlow = chatFlow,
             expandedParts = expandedParts,
             callbacks = callbacks
         )
@@ -44,16 +52,15 @@ class ComposerControllerTest {
     // ── setInputText ───────────────────────────────────────────────────────
 
     @Test
-    fun `setInputText updates composer slice and AppState mirror`() {
+    fun `setInputText updates the composer slice`() {
         controller.setInputText("hello world")
 
         assertEquals("hello world", composerFlow.value.inputText)
-        assertEquals("hello world", appState.value.inputText)
     }
 
     @Test
     fun `setInputText saves draft for active session`() {
-        appState.value = appState.value.copy(currentSessionId = "s1")
+        chatFlow.value = chatFlow.value.copy(currentSessionId = "s1")
 
         controller.setInputText("draft text")
 
@@ -64,7 +71,7 @@ class ComposerControllerTest {
 
     @Test
     fun `setInputText does not save draft when no session is active`() {
-        appState.value = appState.value.copy(currentSessionId = null)
+        chatFlow.value = chatFlow.value.copy(currentSessionId = null)
 
         controller.setInputText("no session")
 
@@ -95,8 +102,6 @@ class ComposerControllerTest {
         assertEquals(2, composerFlow.value.imageAttachments.size)
         assertEquals("img1", composerFlow.value.imageAttachments[0].id)
         assertEquals("img2", composerFlow.value.imageAttachments[1].id)
-        // AppState mirror must be in sync
-        assertEquals(2, appState.value.imageAttachments.size)
     }
 
     @Test
@@ -134,8 +139,6 @@ class ComposerControllerTest {
 
         assertEquals(1, composerFlow.value.imageAttachments.size)
         assertEquals("keep", composerFlow.value.imageAttachments.single().id)
-        // AppState mirror must be in sync
-        assertEquals(1, appState.value.imageAttachments.size)
     }
 
     @Test
@@ -153,12 +156,8 @@ class ComposerControllerTest {
 
     @Test
     fun `clearDraftIfActive clears composer when draftWorkdir is set and no session`() {
-        // Must sync BOTH AppState AND composerFlow, because writeComposer
-        // overwrites all four mirror fields from the slice. If draftWorkdir is
-        // only in appState but not in composerFlow, any intervening writeComposer
-        // (e.g. setInputText) resets appState.draftWorkdir to null.
-        appState.value = appState.value.copy(draftWorkdir = "/tmp/proj", currentSessionId = null)
         composerFlow.value = composerFlow.value.copy(draftWorkdir = "/tmp/proj")
+        chatFlow.value = chatFlow.value.copy(currentSessionId = null)
         controller.setInputText("draft content")
 
         controller.clearDraftIfActive()
@@ -167,13 +166,12 @@ class ComposerControllerTest {
         assertEquals("", composerFlow.value.inputText)
         assertTrue(composerFlow.value.imageAttachments.isEmpty())
         assertEquals(1, callbacks.clearPersistedWorkdirCalls)
-        // AppState mirror synced
-        assertEquals(null, appState.value.draftWorkdir)
     }
 
     @Test
     fun `clearDraftIfActive is no-op when draftWorkdir is null`() {
-        appState.value = appState.value.copy(draftWorkdir = null, currentSessionId = null)
+        composerFlow.value = composerFlow.value.copy(draftWorkdir = null)
+        chatFlow.value = chatFlow.value.copy(currentSessionId = null)
         controller.setInputText("not a draft")
 
         controller.clearDraftIfActive()
@@ -185,14 +183,13 @@ class ComposerControllerTest {
 
     @Test
     fun `clearDraftIfActive is no-op when session is active (real session)`() {
-        // Sync both state and slice
-        appState.value = appState.value.copy(draftWorkdir = "/tmp/proj", currentSessionId = "s1")
         composerFlow.value = composerFlow.value.copy(draftWorkdir = "/tmp/proj")
+        chatFlow.value = chatFlow.value.copy(currentSessionId = "s1")
 
         controller.clearDraftIfActive()
 
         // Should NOT clear — currentSessionId != null means the draft has materialised
-        assertEquals("/tmp/proj", appState.value.draftWorkdir)
+        assertEquals("/tmp/proj", composerFlow.value.draftWorkdir)
         assertEquals(0, callbacks.clearPersistedWorkdirCalls)
     }
 

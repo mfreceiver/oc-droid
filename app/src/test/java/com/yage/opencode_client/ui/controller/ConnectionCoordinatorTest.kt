@@ -17,6 +17,7 @@ import com.yage.opencode_client.ui.SettingsState
 import com.yage.opencode_client.ui.SliceFlows
 import com.yage.opencode_client.ui.TrafficState
 import com.yage.opencode_client.ui.UnreadState
+import com.yage.opencode_client.ui.syncSlicesFromAppState
 import com.yage.opencode_client.util.SettingsManager
 import io.mockk.coEvery
 import io.mockk.coVerify
@@ -127,6 +128,12 @@ class ConnectionCoordinatorTest {
         scope.testScheduler.advanceUntilIdle()
     }
 
+    // R-17 M5: seed AppState then propagate to slices (controllers read/write slices).
+    private fun seed(transform: (AppState) -> AppState) {
+        state.value = transform(state.value)
+        syncSlicesFromAppState(state.value, slices)
+    }
+
     // ── testConnection: 30s health-check throttle ──────────────────────────
 
     @Test
@@ -194,8 +201,8 @@ class ConnectionCoordinatorTest {
         assertEquals("connected", connectionFlow.value.connectionPhase)
         assertEquals("9.9", connectionFlow.value.serverVersion)
         // Mirrors on AppState too.
-        assertTrue(state.value.isConnected)
-        assertEquals("9.9", state.value.serverVersion)
+        assertTrue(slices.connection.value.isConnected)
+        assertEquals("9.9", slices.connection.value.serverVersion)
         // loadInitialData fan-out (loaders + loadCommands).
         assertEquals(1, callbacks.loadSessionsCalls)
         assertEquals(1, callbacks.loadAgentsCalls)
@@ -248,7 +255,7 @@ class ConnectionCoordinatorTest {
 
     @Test
     fun `testConnection on healthy clears the prior error`() {
-        state.value = state.value.copy(error = "stale")
+        seed { it.copy(error = "stale") }
         coEvery { repository.checkHealth() } returns Result.success(HealthResponse(healthy = true, version = "1.0"))
         every { repository.connectSSE() } returns flowOf()
         coEvery { repository.getCommands() } returns Result.success(emptyList())
@@ -309,7 +316,7 @@ class ConnectionCoordinatorTest {
         assertTrue("undo" in names)
         assertTrue("redo" in names)
         // Mirrored onto AppState.
-        assertEquals(settingsFlow.value.availableCommands, state.value.availableCommands)
+        assertEquals(settingsFlow.value.availableCommands, slices.settings.value.availableCommands)
     }
 
     @Test
@@ -350,7 +357,7 @@ class ConnectionCoordinatorTest {
         coordinator.loadInitialData()
         runPending()
 
-        assertEquals(dirSessions, state.value.directorySessions["/persisted/proj"])
+        assertEquals(dirSessions, slices.sessionList.value.directorySessions["/persisted/proj"])
     }
 
     @Test

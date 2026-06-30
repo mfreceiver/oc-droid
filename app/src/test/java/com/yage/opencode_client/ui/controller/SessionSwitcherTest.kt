@@ -7,6 +7,7 @@ import com.yage.opencode_client.ui.AppState
 import com.yage.opencode_client.ui.CachedSessionWindow
 import com.yage.opencode_client.ui.ComposerState
 import com.yage.opencode_client.ui.SliceFlows
+import com.yage.opencode_client.ui.syncSlicesFromAppState
 import kotlinx.coroutines.flow.MutableStateFlow
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -68,18 +69,29 @@ class SessionSwitcherTest {
         )
     }
 
+    /**
+     * Seeds AppState then propagates to the slices (the switcher reads/writes
+     * slices). R-17 M5: controllers no longer read the AppState mirror.
+     */
+    private fun seed(transform: (AppState) -> AppState) {
+        state.value = transform(state.value)
+        syncSlicesFromAppState(state.value, slices)
+    }
+
     // ── Step 1: LRU write-back of outgoing session ─────────────────────────
 
     @Test
     fun `switchTo captures outgoing session window into cache`() {
-        state.value = state.value.copy(
+        seed {
+            it.copy(
             currentSessionId = "session-A",
             sessions = listOf(
                 Session(id = "session-A", directory = "/tmp/a"),
                 Session(id = "session-B", directory = "/tmp/b")
             ),
             messages = listOf(Message(id = "m1", role = "user"))
-        )
+            )
+        }
 
         switcher.switchTo("session-B")
 
@@ -91,11 +103,13 @@ class SessionSwitcherTest {
 
     @Test
     fun `switchTo does NOT capture when switching to same session`() {
-        state.value = state.value.copy(
+        seed {
+            it.copy(
             currentSessionId = "session-A",
             sessions = listOf(Session(id = "session-A", directory = "/tmp/a")),
             messages = listOf(Message(id = "m1", role = "user"))
-        )
+            )
+        }
 
         switcher.switchTo("session-A")
 
@@ -108,10 +122,12 @@ class SessionSwitcherTest {
     @Test
     fun `switchTo saves old draft and restores new draft`() {
         callbacks.drafts["s2"] = "draft-for-s2"
-        state.value = state.value.copy(
+        seed {
+            it.copy(
             currentSessionId = "s1",
             sessions = listOf(Session(id = "s1", directory = "/d"), Session(id = "s2", directory = "/d"))
-        )
+            )
+        }
         composerFlow.value = composerFlow.value.copy(inputText = "old draft text")
 
         switcher.switchTo("s2")
@@ -128,10 +144,12 @@ class SessionSwitcherTest {
 
     @Test
     fun `switchTo does not save draft when no previous session`() {
-        state.value = state.value.copy(
+        seed {
+            it.copy(
             currentSessionId = null,
             sessions = listOf(Session(id = "s1", directory = "/d"))
-        )
+            )
+        }
 
         switcher.switchTo("s1")
 
@@ -142,10 +160,12 @@ class SessionSwitcherTest {
 
     @Test
     fun `switchTo restores cached window on cache hit`() {
-        state.value = state.value.copy(
+        seed {
+            it.copy(
             currentSessionId = null,
             sessions = listOf(Session(id = "s1", directory = "/d"))
-        )
+            )
+        }
         val cachedMessages = listOf(Message(id = "cached-m1", role = "user"))
         switcher.writeSessionWindow("s1", CachedSessionWindow(
             messages = cachedMessages,
@@ -156,17 +176,19 @@ class SessionSwitcherTest {
 
         switcher.switchTo("s1")
 
-        assertEquals("cached-m1", state.value.messages[0].id)
-        assertEquals("cursor-abc", state.value.olderMessagesCursor)
-        assertTrue(state.value.hasMoreMessages)
+        assertEquals("cached-m1", slices.chat.value.messages[0].id)
+        assertEquals("cursor-abc", slices.chat.value.olderMessagesCursor)
+        assertTrue(slices.chat.value.hasMoreMessages)
     }
 
     @Test
     fun `switchTo loads messages with resetLimit=true on cache miss`() {
-        state.value = state.value.copy(
+        seed {
+            it.copy(
             currentSessionId = null,
             sessions = listOf(Session(id = "s1", directory = "/d"))
-        )
+            )
+        }
 
         switcher.switchTo("s1")
 
@@ -177,10 +199,12 @@ class SessionSwitcherTest {
 
     @Test
     fun `switchTo loads messages with resetLimit=false on cache hit`() {
-        state.value = state.value.copy(
+        seed {
+            it.copy(
             currentSessionId = null,
             sessions = listOf(Session(id = "s1", directory = "/d"))
-        )
+            )
+        }
         switcher.writeSessionWindow("s1", CachedSessionWindow(
             messages = emptyList(), partsByMessage = emptyMap(),
             olderMessagesCursor = null, hasMoreMessages = false
@@ -197,15 +221,17 @@ class SessionSwitcherTest {
     @Test
     fun `switchTo upserts directory-only session into sessions list`() {
         val dirSession = Session(id = "dir-only", directory = "/tmp/proj")
-        state.value = state.value.copy(
+        seed {
+            it.copy(
             currentSessionId = null,
             sessions = emptyList(),
             directorySessions = mapOf("/tmp/proj" to listOf(dirSession))
-        )
+            )
+        }
 
         switcher.switchTo("dir-only")
 
-        assertTrue("directory-only session upserted into sessions", state.value.sessions.any { it.id == "dir-only" })
+        assertTrue("directory-only session upserted into sessions", slices.sessionList.value.sessions.any { it.id == "dir-only" })
     }
 
     // ── Step 5: expanded parts reset ────────────────────────────────────────
@@ -213,10 +239,12 @@ class SessionSwitcherTest {
     @Test
     fun `switchTo clears expanded parts`() {
         expandedParts.value = mapOf("msg1|key1" to true, "msg2|key2" to false)
-        state.value = state.value.copy(
+        seed {
+            it.copy(
             currentSessionId = null,
             sessions = listOf(Session(id = "s1", directory = "/d"))
-        )
+            )
+        }
 
         switcher.switchTo("s1")
 
@@ -227,10 +255,12 @@ class SessionSwitcherTest {
 
     @Test
     fun `switchTo syncs directory to selected session`() {
-        state.value = state.value.copy(
+        seed {
+            it.copy(
             currentSessionId = null,
             sessions = listOf(Session(id = "s1", directory = "/home/user/proj"))
-        )
+            )
+        }
 
         switcher.switchTo("s1")
 
@@ -242,10 +272,12 @@ class SessionSwitcherTest {
 
     @Test
     fun `switchTo triggers loadMessages loadSessionStatus loadChildSessions`() {
-        state.value = state.value.copy(
+        seed {
+            it.copy(
             currentSessionId = null,
             sessions = listOf(Session(id = "s1", directory = "/d"))
-        )
+            )
+        }
 
         switcher.switchTo("s1")
 
@@ -258,23 +290,26 @@ class SessionSwitcherTest {
 
     @Test
     fun `switchTo marks new session as temp-cleared and removes from unread`() {
-        state.value = state.value.copy(
+        seed {
+            it.copy(
             currentSessionId = null,
             unreadSessions = setOf("s1"),
             sessions = listOf(Session(id = "s1", directory = "/d"))
-        )
+            )
+        }
         nowMs = 50_000L
 
         switcher.switchTo("s1")
 
-        assertFalse("selected session removed from unread", state.value.unreadSessions.contains("s1"))
-        assertTrue("selected session added to tempClearedUnread", state.value.tempClearedUnread.contains("s1"))
-        assertEquals(50_000L, state.value.lastViewedTime["s1"])
+        assertFalse("selected session removed from unread", slices.unread.value.unreadSessions.contains("s1"))
+        assertTrue("selected session added to tempClearedUnread", slices.unread.value.tempClearedUnread.contains("s1"))
+        assertEquals(50_000L, slices.unread.value.lastViewedTime["s1"])
     }
 
     @Test
     fun `switchTo re-marks previous busy+cleared session as unread`() {
-        state.value = state.value.copy(
+        seed {
+            it.copy(
             currentSessionId = "old-busy",
             sessions = listOf(
                 Session(id = "old-busy", directory = "/d"),
@@ -282,19 +317,21 @@ class SessionSwitcherTest {
             ),
             tempClearedUnread = setOf("old-busy"),
             sessionStatuses = mapOf("old-busy" to SessionStatus(type = "busy"))
-        )
+            )
+        }
 
         switcher.switchTo("new-target")
 
         assertTrue(
             "previous busy+cleared session re-marked as unread",
-            state.value.unreadSessions.contains("old-busy")
+            slices.unread.value.unreadSessions.contains("old-busy")
         )
     }
 
     @Test
     fun `switchTo does NOT re-mark previous idle session as unread`() {
-        state.value = state.value.copy(
+        seed {
+            it.copy(
             currentSessionId = "old-idle",
             sessions = listOf(
                 Session(id = "old-idle", directory = "/d"),
@@ -302,19 +339,21 @@ class SessionSwitcherTest {
             ),
             tempClearedUnread = setOf("old-idle"),
             sessionStatuses = mapOf("old-idle" to SessionStatus(type = "idle"))
-        )
+            )
+        }
 
         switcher.switchTo("new-target")
 
         assertFalse(
             "previous idle session NOT re-marked as unread",
-            state.value.unreadSessions.contains("old-idle")
+            slices.unread.value.unreadSessions.contains("old-idle")
         )
     }
 
     @Test
     fun `switchTo does NOT re-mark previous session if not temp-cleared`() {
-        state.value = state.value.copy(
+        seed {
+            it.copy(
             currentSessionId = "old-not-cleared",
             sessions = listOf(
                 Session(id = "old-not-cleared", directory = "/d"),
@@ -322,13 +361,14 @@ class SessionSwitcherTest {
             ),
             tempClearedUnread = emptySet(),
             sessionStatuses = mapOf("old-not-cleared" to SessionStatus(type = "busy"))
-        )
+            )
+        }
 
         switcher.switchTo("new-target")
 
         assertFalse(
             "previous session without tempCleared NOT re-marked",
-            state.value.unreadSessions.contains("old-not-cleared")
+            slices.unread.value.unreadSessions.contains("old-not-cleared")
         )
     }
 
@@ -336,88 +376,100 @@ class SessionSwitcherTest {
 
     @Test
     fun `switchTo discards draftWorkdir on select`() {
-        state.value = state.value.copy(
+        seed {
+            it.copy(
             currentSessionId = null,
             sessions = listOf(Session(id = "s1", directory = "/d"))
-        )
+            )
+        }
         composerFlow.value = composerFlow.value.copy(draftWorkdir = "/tmp/draft")
 
         switcher.switchTo("s1")
 
         assertNull("draftWorkdir cleared", composerFlow.value.draftWorkdir)
-        assertNull("draftWorkdir cleared in state mirror", state.value.draftWorkdir)
+        assertNull("draftWorkdir cleared in state mirror", slices.composer.value.draftWorkdir)
     }
 
     // ── Step 8c: openSessionIds prepend ─────────────────────────────────────
 
     @Test
     fun `switchTo prepends new session to openSessionIds`() {
-        state.value = state.value.copy(
+        seed {
+            it.copy(
             currentSessionId = null,
             openSessionIds = listOf("existing-1", "existing-2"),
             sessions = listOf(Session(id = "new-tab", directory = "/d"))
-        )
+            )
+        }
 
         switcher.switchTo("new-tab")
 
-        assertEquals(listOf("new-tab", "existing-1", "existing-2"), state.value.openSessionIds)
+        assertEquals(listOf("new-tab", "existing-1", "existing-2"), slices.sessionList.value.openSessionIds)
         assertEquals(1, callbacks.setOpenSessionIdsCalls.size)
         assertEquals(listOf("new-tab", "existing-1", "existing-2"), callbacks.setOpenSessionIdsCalls[0])
     }
 
     @Test
     fun `switchTo does NOT prepend already-open session`() {
-        state.value = state.value.copy(
+        seed {
+            it.copy(
             currentSessionId = null,
             openSessionIds = listOf("already-open", "other"),
             sessions = listOf(Session(id = "already-open", directory = "/d"))
-        )
+            )
+        }
 
         switcher.switchTo("already-open")
 
         // openSessionIds should be unchanged (no reorder, no duplicate)
-        assertEquals(listOf("already-open", "other"), state.value.openSessionIds)
+        assertEquals(listOf("already-open", "other"), slices.sessionList.value.openSessionIds)
         assertTrue("no setOpenSessionIds call", callbacks.setOpenSessionIdsCalls.isEmpty())
     }
 
     @Test
     fun `switchTo does NOT prepend sub-agent sessions`() {
         val childSession = Session(id = "child-1", directory = "/d", parentId = "parent-1")
-        state.value = state.value.copy(
+        seed {
+            it.copy(
             currentSessionId = null,
             openSessionIds = emptyList(),
             sessions = listOf(childSession)
-        )
+            )
+        }
 
         switcher.switchTo("child-1")
 
         // Sub-agents (parentId != null) should not pollute openSessionIds
-        assertTrue("sub-agent not prepended", state.value.openSessionIds.isEmpty())
+        assertTrue("sub-agent not prepended", slices.sessionList.value.openSessionIds.isEmpty())
     }
 
     @Test
     fun `switchTo caps openSessionIds at 8`() {
-        state.value = state.value.copy(
+        seed {
+            it.copy(
             currentSessionId = null,
             openSessionIds = (1..8).map { "existing-$it" },
             sessions = listOf(Session(id = "new-tab", directory = "/d"))
-        )
+            )
+        }
 
         switcher.switchTo("new-tab")
 
-        assertEquals(8, state.value.openSessionIds.size)
-        assertEquals("new-tab", state.value.openSessionIds[0])
+        assertEquals(8, slices.sessionList.value.openSessionIds.size)
+        assertEquals("new-tab", slices.sessionList.value.openSessionIds[0])
     }
 
     // ── Step 8d: persistSessionCache ────────────────────────────────────────
 
     @Test
     fun `switchTo persists session cache when opening new tab`() {
-        state.value = state.value.copy(
+        seed {
+            it.copy(
             currentSessionId = null,
             openSessionIds = emptyList(),
             sessions = listOf(Session(id = "s1", directory = "/d"))
-        )
+            )
+        }
 
         switcher.switchTo("s1")
 
@@ -429,11 +481,13 @@ class SessionSwitcherTest {
 
     @Test
     fun `switchTo does NOT persist cache when session already open`() {
-        state.value = state.value.copy(
+        seed {
+            it.copy(
             currentSessionId = null,
             openSessionIds = listOf("s1"),
             sessions = listOf(Session(id = "s1", directory = "/d"))
-        )
+            )
+        }
 
         switcher.switchTo("s1")
 
@@ -444,10 +498,12 @@ class SessionSwitcherTest {
 
     @Test
     fun `LRU cache evicts at capacity 12`() {
-        state.value = state.value.copy(
+        seed {
+            it.copy(
             currentSessionId = null,
             sessions = (1..13).map { Session(id = "s$it", directory = "/d") }
-        )
+            )
+        }
 
         // Open sessions 1..12 — each populates the cache via loadMessages' callback.
         // But since we're using RecordingCallbacks (which doesn't actually call
@@ -488,13 +544,15 @@ class SessionSwitcherTest {
 
     @Test
     fun `switchTo calls saveDraft before setCurrentSessionId before loadMessages`() {
-        state.value = state.value.copy(
+        seed {
+            it.copy(
             currentSessionId = "old",
             sessions = listOf(
                 Session(id = "old", directory = "/d"),
                 Session(id = "new", directory = "/d")
             )
-        )
+            )
+        }
         composerFlow.value = composerFlow.value.copy(inputText = "text")
 
         switcher.switchTo("new")

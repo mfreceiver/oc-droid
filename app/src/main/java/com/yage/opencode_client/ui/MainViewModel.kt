@@ -796,6 +796,7 @@ class MainViewModel @Inject constructor(
         ComposerController(
             state = _state,
             composerFlow = _composerFlow,
+            chatFlow = _chatFlow,
             expandedParts = _expandedParts,
             callbacks = this
         )
@@ -875,13 +876,12 @@ class MainViewModel @Inject constructor(
     val state: StateFlow<AppState> = _state.asStateFlow()
 
     /**
-     * §R-17 M2: write the connection slice atomically and mirror it onto the
-     * deprecated AppState fields in `_state`, so `state.value` stays
-     * consistent synchronously (RFC §4 strategy A — single-threaded,
-     * Main.immediate call sites; no dispatcher batch reliance). ALWAYS use
-     * this instead of `_connectionFlow.update { ... }` on its own, otherwise
-     * the AppState mirror drifts out of sync until a consumer re-reads the
-     * slice directly.
+     * §R-17 M2→M5: write the connection slice AND mirror it onto AppState.
+     * The slice is the authoritative read path (all consumers read slices); the
+     * mirror write is retained so the free helpers in MainViewModelSessionActions
+     * that still read `state.value.<field>` (and CatchUpGapTest) see consistent
+     * values without a stale window. A follow-up that migrates those reads to
+     * slices can drop the mirror write.
      */
     @Suppress("DEPRECATION")
     private fun writeConnection(transform: (ConnectionState) -> ConnectionState) {
@@ -896,26 +896,15 @@ class MainViewModel @Inject constructor(
         )
     }
 
-    /**
-     * §R-17 M2: write the traffic slice atomically and mirror it onto the
-     * deprecated AppState fields in `_state`. See [writeConnection].
-     */
+    /** §R-17 M2→M5: write the traffic slice + mirror. See [writeConnection]. */
     @Suppress("DEPRECATION")
     private fun writeTraffic(transform: (TrafficState) -> TrafficState) {
         val next = transform(_trafficFlow.value)
         _trafficFlow.value = next
-        _state.value = _state.value.copy(
-            trafficSent = next.trafficSent,
-            trafficReceived = next.trafficReceived
-        )
+        _state.value = _state.value.copy(trafficSent = next.trafficSent, trafficReceived = next.trafficReceived)
     }
 
-    /**
-     * §R-17 M3: write the composer slice atomically and mirror it onto the
-     * deprecated AppState fields in `_state`. See [writeConnection] for the
-     * synchronous-mirror rationale (RFC §4 strategy A, RFC §9.2). ALWAYS use
-     * this instead of `_composerFlow.update { ... }` on its own.
-     */
+    /** §R-17 M3→M5: write the composer slice + mirror. See [writeConnection]. */
     @Suppress("DEPRECATION")
     private fun writeComposer(transform: (ComposerState) -> ComposerState) {
         val next = transform(_composerFlow.value)
@@ -928,10 +917,7 @@ class MainViewModel @Inject constructor(
         )
     }
 
-    /**
-     * §R-17 M3: write the file slice atomically and mirror it onto the
-     * deprecated AppState fields in `_state`. See [writeConnection].
-     */
+    /** §R-17 M3→M5: write the file slice + mirror. See [writeConnection]. */
     @Suppress("DEPRECATION")
     private fun writeFile(transform: (FileState) -> FileState) {
         val next = transform(_fileFlow.value)
@@ -944,11 +930,7 @@ class MainViewModel @Inject constructor(
         )
     }
 
-    /**
-     * §R-17 M3: write the settings slice atomically and mirror it onto the
-     * deprecated AppState fields in `_state`. `error` is NOT here — it stays
-     * on `_state` (cross-domain, RFC §3.3). See [writeConnection].
-     */
+    /** §R-17 M3→M5: write the settings slice + mirror. `error` stays on AppState. */
     @Suppress("DEPRECATION")
     private fun writeSettings(transform: (SettingsState) -> SettingsState) {
         val next = transform(_settingsFlow.value)
@@ -963,7 +945,7 @@ class MainViewModel @Inject constructor(
         )
     }
 
-    /** §R-17 M4: write the chat slice + mirror. See [writeConnection]. `error` stays on `_state`. */
+    /** §R-17 M4→M5: write the chat slice + mirror. See [writeConnection]. */
     @Suppress("DEPRECATION")
     private fun writeChat(transform: (ChatState) -> ChatState) {
         val next = transform(_chatFlow.value)
@@ -982,7 +964,7 @@ class MainViewModel @Inject constructor(
         )
     }
 
-    /** §R-17 M4: write the session-list slice + mirror. See [writeConnection]. */
+    /** §R-17 M4→M5: write the session-list slice + mirror. See [writeConnection]. */
     @Suppress("DEPRECATION")
     private fun writeSessionList(transform: (SessionListState) -> SessionListState) {
         val next = transform(_sessionListFlow.value)
@@ -1004,7 +986,7 @@ class MainViewModel @Inject constructor(
         )
     }
 
-    /** §R-17 M4: write the unread slice + mirror. See [writeConnection]. */
+    /** §R-17 M4→M5: write the unread slice + mirror. See [writeConnection]. */
     @Suppress("DEPRECATION")
     private fun writeUnread(transform: (UnreadState) -> UnreadState) {
         val next = transform(_unreadFlow.value)
@@ -1016,7 +998,7 @@ class MainViewModel @Inject constructor(
         )
     }
 
-    /** §R-17 M4: write the host slice + mirror. See [writeConnection]. */
+    /** §R-17 M4→M5: write the host slice + mirror. See [writeConnection]. */
     @Suppress("DEPRECATION")
     private fun writeHost(transform: (HostState) -> HostState) {
         val next = transform(_hostFlow.value)
@@ -1053,79 +1035,85 @@ class MainViewModel @Inject constructor(
      */
     @Suppress("DEPRECATION")
     private fun updateState(transform: (AppState) -> AppState) {
-        val next = transform(_state.value)
-        _state.value = next
-        // Sync every slice from the new AppState mirror. Each MutableStateFlow
-        // suppresses equal-value emissions, so only actually-changed slices
-        // notify their subscribers.
-        _connectionFlow.value = ConnectionState(
-            isConnected = next.isConnected,
-            isConnecting = next.isConnecting,
-            serverVersion = next.serverVersion,
-            connectionPhase = next.connectionPhase,
-            tunnelActivationState = next.tunnelActivationState
-        )
-        _trafficFlow.value = TrafficState(
-            trafficSent = next.trafficSent,
-            trafficReceived = next.trafficReceived
-        )
-        _composerFlow.value = ComposerState(
-            inputText = next.inputText,
-            imageAttachments = next.imageAttachments,
-            sendingSessionIds = next.sendingSessionIds,
-            draftWorkdir = next.draftWorkdir
-        )
-        _fileFlow.value = FileState(
-            filePathToShowInFiles = next.filePathToShowInFiles,
-            filePreviewOriginRoute = next.filePreviewOriginRoute,
-            fileBrowserOpen = next.fileBrowserOpen,
-            fileBrowserWorkdir = next.fileBrowserWorkdir
-        )
-        _settingsFlow.value = SettingsState(
-            themeMode = next.themeMode,
-            markdownFontSizes = next.markdownFontSizes,
-            selectedAgentName = next.selectedAgentName,
-            agents = next.agents,
-            providers = next.providers,
-            availableCommands = next.availableCommands
-        )
-        _chatFlow.value = ChatState(
-            currentSessionId = next.currentSessionId,
-            messages = next.messages,
-            partsByMessage = next.partsByMessage,
-            streamingPartTexts = next.streamingPartTexts,
-            streamingReasoningPart = next.streamingReasoningPart,
-            olderMessagesCursor = next.olderMessagesCursor,
-            hasMoreMessages = next.hasMoreMessages,
-            isLoadingMessages = next.isLoadingMessages,
-            gapInfo = next.gapInfo,
-            staleNotice = next.staleNotice
-        )
-        _sessionListFlow.value = SessionListState(
-            sessions = next.sessions,
-            sessionStatuses = next.sessionStatuses,
-            expandedSessionIds = next.expandedSessionIds,
-            loadedSessionLimit = next.loadedSessionLimit,
-            hasMoreSessions = next.hasMoreSessions,
-            isLoadingMoreSessions = next.isLoadingMoreSessions,
-            isRefreshingSessions = next.isRefreshingSessions,
-            pendingPermissions = next.pendingPermissions,
-            pendingQuestions = next.pendingQuestions,
-            childSessions = next.childSessions,
-            directorySessions = next.directorySessions,
-            openSessionIds = next.openSessionIds,
-            sessionTodos = next.sessionTodos
-        )
-        _unreadFlow.value = UnreadState(
-            unreadSessions = next.unreadSessions,
-            tempClearedUnread = next.tempClearedUnread,
-            lastViewedTime = next.lastViewedTime
-        )
-        _hostFlow.value = HostState(
-            hostProfiles = next.hostProfiles,
-            currentHostProfileId = next.currentHostProfileId
-        )
+        // §R-17 M5: the slices are the authoritative store. updateState builds a
+        // TRANSIENT AppState aggregate from the slice values (+ the persisted
+        // error/lastNavPage from _state), applies the legacy `{ it.copy(...) }`
+        // transform against it, then pushes the result back to the slices via
+        // syncSlicesFromAppState. Only the cross-domain error/lastNavPage are
+        // persisted on _state — the per-domain mirror fields are no longer
+        // stored (no reader consumes them). MutableStateFlow suppresses
+        // equal-value emissions, so only actually-changed slices notify.
+        val before = aggregateFromSlices(_state.value)
+        val after = transform(before)
+        // §R-17 M5: slices are the authoritative store (the aggregate is built
+        // from them above). State is kept in sync so the free helpers in
+        // MainViewModelSessionActions that still read `state.value.<field>`
+        // (and the legacy CatchUpGapTest null-slices path) keep working — a
+        // follow-up can migrate those reads to slices and then state can slim
+        // to just error/lastNavPage.
+        _state.value = after
+        syncSlicesFromAppState(after, sliceFlows)
     }
+
+    /**
+     * §R-17 M5: builds a transient [AppState] snapshot from the authoritative
+     * slice values, carrying over the persisted [AppState.error] /
+     * [AppState.lastNavPage] from [seed]. Used by [updateState] so the legacy
+     * `(AppState) -> AppState` transforms keep compiling/working against the
+     * slice-derived values without each call site needing a per-slice rewrite.
+     */
+    @Suppress("DEPRECATION")
+    private fun aggregateFromSlices(seed: AppState): AppState = seed.copy(
+        isConnected = _connectionFlow.value.isConnected,
+        isConnecting = _connectionFlow.value.isConnecting,
+        serverVersion = _connectionFlow.value.serverVersion,
+        connectionPhase = _connectionFlow.value.connectionPhase,
+        tunnelActivationState = _connectionFlow.value.tunnelActivationState,
+        trafficSent = _trafficFlow.value.trafficSent,
+        trafficReceived = _trafficFlow.value.trafficReceived,
+        inputText = _composerFlow.value.inputText,
+        imageAttachments = _composerFlow.value.imageAttachments,
+        sendingSessionIds = _composerFlow.value.sendingSessionIds,
+        draftWorkdir = _composerFlow.value.draftWorkdir,
+        filePathToShowInFiles = _fileFlow.value.filePathToShowInFiles,
+        filePreviewOriginRoute = _fileFlow.value.filePreviewOriginRoute,
+        fileBrowserOpen = _fileFlow.value.fileBrowserOpen,
+        fileBrowserWorkdir = _fileFlow.value.fileBrowserWorkdir,
+        themeMode = _settingsFlow.value.themeMode,
+        markdownFontSizes = _settingsFlow.value.markdownFontSizes,
+        selectedAgentName = _settingsFlow.value.selectedAgentName,
+        agents = _settingsFlow.value.agents,
+        providers = _settingsFlow.value.providers,
+        availableCommands = _settingsFlow.value.availableCommands,
+        currentSessionId = _chatFlow.value.currentSessionId,
+        messages = _chatFlow.value.messages,
+        partsByMessage = _chatFlow.value.partsByMessage,
+        streamingPartTexts = _chatFlow.value.streamingPartTexts,
+        streamingReasoningPart = _chatFlow.value.streamingReasoningPart,
+        olderMessagesCursor = _chatFlow.value.olderMessagesCursor,
+        hasMoreMessages = _chatFlow.value.hasMoreMessages,
+        isLoadingMessages = _chatFlow.value.isLoadingMessages,
+        gapInfo = _chatFlow.value.gapInfo,
+        staleNotice = _chatFlow.value.staleNotice,
+        sessions = _sessionListFlow.value.sessions,
+        sessionStatuses = _sessionListFlow.value.sessionStatuses,
+        expandedSessionIds = _sessionListFlow.value.expandedSessionIds,
+        loadedSessionLimit = _sessionListFlow.value.loadedSessionLimit,
+        hasMoreSessions = _sessionListFlow.value.hasMoreSessions,
+        isLoadingMoreSessions = _sessionListFlow.value.isLoadingMoreSessions,
+        isRefreshingSessions = _sessionListFlow.value.isRefreshingSessions,
+        pendingPermissions = _sessionListFlow.value.pendingPermissions,
+        pendingQuestions = _sessionListFlow.value.pendingQuestions,
+        childSessions = _sessionListFlow.value.childSessions,
+        directorySessions = _sessionListFlow.value.directorySessions,
+        openSessionIds = _sessionListFlow.value.openSessionIds,
+        sessionTodos = _sessionListFlow.value.sessionTodos,
+        unreadSessions = _unreadFlow.value.unreadSessions,
+        tempClearedUnread = _unreadFlow.value.tempClearedUnread,
+        lastViewedTime = _unreadFlow.value.lastViewedTime,
+        hostProfiles = _hostFlow.value.hostProfiles,
+        currentHostProfileId = _hostFlow.value.currentHostProfileId
+    )
 
     /**
      * Expansion state for the four collapsible card types (ToolCallsRow,
@@ -1242,7 +1230,7 @@ class MainViewModel @Inject constructor(
     override fun catchUpAfterDisconnect(sessionId: String) =
         catchUpAfterDisconnectOrForeground(sessionId)
 
-    override fun currentSessionId(): String? = _state.value.currentSessionId
+    override fun currentSessionId(): String? = _chatFlow.value.currentSessionId
 
     // ──────────────────────────────────────────────────────────────────────
     // R-16 M2: ComposerCallbacks implementation.
@@ -1396,7 +1384,7 @@ class MainViewModel @Inject constructor(
      */
     fun openSessionFromDeepLink(sessionId: String) {
         viewModelScope.launch {
-            if (_state.value.sessions.none { it.id == sessionId }) {
+            if (_sessionListFlow.value.sessions.none { it.id == sessionId }) {
                 val fetched = withContext(Dispatchers.IO) {
                     runSuspendCatching { repository.getSession(sessionId).getOrNull() }.getOrNull()
                 }
@@ -1505,7 +1493,7 @@ class MainViewModel @Inject constructor(
                 // Start a new session in the current workdir (or fall back to
                 // a host-default createSession when no workdir is bound).
                 val workdir = repository.getCurrentDirectory()
-                    ?: _state.value.currentSession?.directory
+                    ?: currentSession(_sessionListFlow.value.sessions, _chatFlow.value.currentSessionId)?.directory
                 if (workdir != null) {
                     createSessionInWorkdir(workdir)
                 } else {
@@ -1513,7 +1501,7 @@ class MainViewModel @Inject constructor(
                 }
             }
             else -> {
-                val sessionId = _state.value.currentSessionId ?: run {
+                val sessionId = _chatFlow.value.currentSessionId ?: run {
                     updateState {
                         it.copy(error = "Open or create a session before running /$cmd")
                     }
@@ -1614,13 +1602,13 @@ class MainViewModel @Inject constructor(
      * unknown session for a root session.
      */
     fun openSubAgent(childSessionId: String) {
-        val parentId = _state.value.currentSessionId
+        val parentId = _chatFlow.value.currentSessionId
         viewModelScope.launch {
             // Try every local cache first; fall back to a single GET so we
             // always have the child session in `state.sessions` before select.
-            val child = _state.value.sessions.firstOrNull { it.id == childSessionId }
-                ?: parentId?.let { pid -> _state.value.childSessions[pid]?.find { it.id == childSessionId } }
-                ?: _state.value.childSessions.values.flatten().firstOrNull { it.id == childSessionId }
+            val child = _sessionListFlow.value.sessions.firstOrNull { it.id == childSessionId }
+                ?: parentId?.let { pid -> _sessionListFlow.value.childSessions[pid]?.find { it.id == childSessionId } }
+                ?: _sessionListFlow.value.childSessions.values.flatten().firstOrNull { it.id == childSessionId }
                 ?: runSuspendCatching { repository.getSession(childSessionId).getOrNull() }.getOrNull()
             // #14: only upsert + select when the child actually resolved.
             // Previously a null child still triggered selectSession(childSessionId),
@@ -1645,14 +1633,14 @@ class MainViewModel @Inject constructor(
      * state and the persisted [currentSessionId] is cleared.
      */
     fun closeSession(sessionId: String) {
-        val isCurrent = _state.value.currentSessionId == sessionId
+        val isCurrent = _chatFlow.value.currentSessionId == sessionId
         // Preserve the draft of the session being closed. selectSessionState
         // would otherwise mis-target the save once currentSessionId has moved
         // (it reads oldSessionId AFTER we've changed it), writing the closed
         // session's draft into the next session (#10). Save it explicitly here
         // so selectSession(nextId) only restores the next session's own draft.
         if (isCurrent) {
-            settingsManager.setDraftText(sessionId, _state.value.inputText)
+            settingsManager.setDraftText(sessionId, _composerFlow.value.inputText)
         }
         val updated = settingsManager.openSessionIds.filter { it != sessionId }
         settingsManager.openSessionIds = updated
@@ -1711,7 +1699,7 @@ class MainViewModel @Inject constructor(
     }
 
     fun loadMoreMessages() {
-        val sessionId = _state.value.currentSessionId ?: return
+        val sessionId = _chatFlow.value.currentSessionId ?: return
         launchLoadMoreMessages(
             scope = viewModelScope,
             repository = repository,
@@ -1735,8 +1723,8 @@ class MainViewModel @Inject constructor(
      * revisited.
      */
     fun refreshCurrentSession() {
-        val sessionId = _state.value.currentSessionId ?: return
-        if (_state.value.isLoadingMessages) return
+        val sessionId = _chatFlow.value.currentSessionId ?: return
+        if (_chatFlow.value.isLoadingMessages) return
         performGlobalColdStartRefresh(currentId = sessionId)
     }
 
@@ -1752,7 +1740,7 @@ class MainViewModel @Inject constructor(
         // shared isLoadingMessages guard, leaving an empty list. The caller
         // (refresh button or >5min tier) is user/initiated and idempotent —
         // skipping here is safe; the banner/action remains for a retry.
-        if (_state.value.isLoadingMessages) return
+        if (_chatFlow.value.isLoadingMessages) return
         clearSessionWindowCache()
         updateState {
             it.copy(
@@ -1794,7 +1782,7 @@ class MainViewModel @Inject constructor(
      * exhausted. Bound to the gap divider's tap action.
      */
     fun closeGap() {
-        val sessionId = _state.value.currentSessionId ?: return
+        val sessionId = _chatFlow.value.currentSessionId ?: return
         launchCloseGap(
             scope = viewModelScope,
             repository = repository,
@@ -1921,10 +1909,10 @@ class MainViewModel @Inject constructor(
     }
 
     fun sendMessage() {
-        val draftWorkdir = _state.value.draftWorkdir
-        val existingSessionId = _state.value.currentSessionId
-        val text = _state.value.inputText.trim()
-        val attachments = _state.value.imageAttachments
+        val draftWorkdir = _composerFlow.value.draftWorkdir
+        val existingSessionId = _chatFlow.value.currentSessionId
+        val text = _composerFlow.value.inputText.trim()
+        val attachments = _composerFlow.value.imageAttachments
         if (text.isEmpty() && attachments.isEmpty()) return
 
         // Draft mode: lazily create the session on the first send. The draft
@@ -1994,7 +1982,7 @@ class MainViewModel @Inject constructor(
         }
 
         val sessionId = existingSessionId ?: return
-        if (_state.value.sendingSessionIds.contains(sessionId)) return
+        if (_composerFlow.value.sendingSessionIds.contains(sessionId)) return
         dispatchSendMessage(sessionId)
     }
 
@@ -2020,7 +2008,7 @@ class MainViewModel @Inject constructor(
 
         val agent = _settingsFlow.value.selectedAgentName
         val model: Message.ModelInfo? = null
-        val currentSession = _state.value.currentSession
+        val currentSession = currentSession(_sessionListFlow.value.sessions, _chatFlow.value.currentSessionId)
 
         fun dispatchSend() {
             launchSendMessage(
@@ -2089,7 +2077,7 @@ class MainViewModel @Inject constructor(
     }
 
     fun abortSession() {
-        val sessionId = _state.value.currentSessionId ?: return
+        val sessionId = _chatFlow.value.currentSessionId ?: return
         viewModelScope.launch {
             repository.abortSession(sessionId)
                 .onFailure { error ->
@@ -2114,9 +2102,9 @@ class MainViewModel @Inject constructor(
     }
 
     fun editFromMessage(messageId: String) {
-        val sessionId = _state.value.currentSessionId ?: return
-        val message = _state.value.messages.firstOrNull { it.id == messageId && it.isUser } ?: return
-        val draft = (_state.value.partsByMessage[messageId] ?: emptyList()).firstOrNull { it.isText }?.text?.trim().orEmpty()
+        val sessionId = _chatFlow.value.currentSessionId ?: return
+        val message = _chatFlow.value.messages.firstOrNull { it.id == messageId && it.isUser } ?: return
+        val draft = (_chatFlow.value.partsByMessage[messageId] ?: emptyList()).firstOrNull { it.isText }?.text?.trim().orEmpty()
         if (draft.isBlank()) return
 
         viewModelScope.launch {
@@ -2150,7 +2138,7 @@ class MainViewModel @Inject constructor(
     fun selectAgent(agentName: String) {
         settingsManager.selectedAgentName = agentName
         writeSettings { it.copy(selectedAgentName = agentName) }
-        _state.value.currentSessionId?.let { settingsManager.setAgentForSession(it, agentName) }
+        _chatFlow.value.currentSessionId?.let { settingsManager.setAgentForSession(it, agentName) }
     }
 
     fun toggleSessionExpanded(sessionId: String) {

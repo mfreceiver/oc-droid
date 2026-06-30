@@ -171,11 +171,11 @@ internal class SessionSwitcher(
         // is leaving should be re-marked unread: if it was temp-cleared (user
         // had viewed it) and is still busy, background activity may still
         // produce output the user cares about — re-mark it.
-        val previousSessionId = state.value.currentSessionId
+        val previousSessionId = slices.chat.value.currentSessionId
         val previousWasBusyAndCleared = previousSessionId != null &&
             previousSessionId != sessionId &&
-            state.value.tempClearedUnread.contains(previousSessionId) &&
-            state.value.sessionStatuses[previousSessionId]?.isBusy == true
+            slices.unread.value.tempClearedUnread.contains(previousSessionId) &&
+            slices.sessionList.value.sessionStatuses[previousSessionId]?.isBusy == true
 
         // §Per-session message cache (write-back): snapshot the OUTGOING
         // session's currently-loaded view into the LRU before clearing it.
@@ -185,7 +185,7 @@ internal class SessionSwitcher(
 
         // ── Step 2: selectSessionState (inlined) ────────────────────────────
         // Save old draft, set currentSessionId, restore new draft, clear chat.
-        val oldSessionId = state.value.currentSessionId
+        val oldSessionId = slices.chat.value.currentSessionId
         val currentInputText = composerFlow.value.inputText
         if (oldSessionId != null) {
             callbacks.saveDraft(oldSessionId, currentInputText)
@@ -226,11 +226,11 @@ internal class SessionSwitcher(
         // ── Step 4: Look up target session + upsert if needed ───────────────
         // Union of cached sessions list and directorySessions (#10: a session
         // surfaced for a connected workdir may not yet be in the global list).
-        val targetSession = (state.value.sessions + state.value.directorySessions.values.flatten())
+        val targetSession = (slices.sessionList.value.sessions + slices.sessionList.value.directorySessions.values.flatten())
             .firstOrNull { it.id == sessionId }
         // #10: if the session is currently only in directorySessions, upsert
         // it now so currentSession lookup + workdir sync work.
-        if (targetSession != null && state.value.sessions.none { it.id == sessionId }) {
+        if (targetSession != null && slices.sessionList.value.sessions.none { it.id == sessionId }) {
             state.updateAndSync(slices) { it.copy(sessions = upsertSession(it.sessions, targetSession)) }
         }
 
@@ -240,7 +240,7 @@ internal class SessionSwitcher(
         expandedParts.value = emptyMap()
 
         // ── Step 6: Sync repository's workdir context ───────────────────────
-        val directory = state.value.sessions.firstOrNull { it.id == sessionId }?.directory
+        val directory = slices.sessionList.value.sessions.firstOrNull { it.id == sessionId }?.directory
         callbacks.syncCurrentDirectory(directory)
 
         // ── Step 7: Load messages + session status + child sessions ─────────
@@ -273,8 +273,8 @@ internal class SessionSwitcher(
 
         // Browser-tab semantics: prepend only when NOT already in the list.
         // Skip sub-agents (parentId != null) — transient navigations.
-        if (targetSession?.parentId == null && sessionId !in state.value.openSessionIds) {
-            val updated = (listOf(sessionId) + state.value.openSessionIds).take(8)
+        if (targetSession?.parentId == null && sessionId !in slices.sessionList.value.openSessionIds) {
+            val updated = (listOf(sessionId) + slices.sessionList.value.openSessionIds).take(8)
             callbacks.setOpenSessionIds(updated)
             state.updateAndSync(slices) { it.copy(openSessionIds = updated) }
             // Fix #5: persist the newly-opened session's metadata into

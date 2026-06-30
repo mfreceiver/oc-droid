@@ -192,7 +192,7 @@ internal class HostProfileController(
      * (mirrors selectHostProfile). Otherwise just removes the profile entry.
      */
     fun deleteHostProfile(profileId: String) {
-        val wasCurrent = profileId == state.value.currentHostProfileId
+        val wasCurrent = profileId == slices.host.value.currentHostProfileId
         hostProfileStore.delete(profileId)
         val current = hostProfileStore.currentProfile()
         configureRepositoryForProfile(current)
@@ -388,8 +388,8 @@ internal class HostProfileController(
         // 4. Tear down SSE + reset catch-up flags.
         callbacks.cancelSseForReconfigure()
         // 5. Reset AppState to defaults, preserving host profile list + current id.
-        val keptHostProfiles = state.value.hostProfiles
-        val keptHostProfileId = state.value.currentHostProfileId
+        val keptHostProfiles = slices.host.value.hostProfiles
+        val keptHostProfileId = slices.host.value.currentHostProfileId
         updateState {
             AppState(
                 hostProfiles = keptHostProfiles,

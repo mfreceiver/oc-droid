@@ -135,7 +135,8 @@ class MainActivity : AppCompatActivity() {
                 viewModel.coldStartReconnect()
             }
             val state by viewModel.state.collectAsStateWithLifecycle()
-            val darkTheme = when (state.themeMode) {
+            val settings by viewModel.settingsFlow.collectAsStateWithLifecycle()
+            val darkTheme = when (settings.themeMode) {
                 ThemeMode.LIGHT -> false
                 ThemeMode.DARK -> true
                 ThemeMode.SYSTEM -> isSystemInDarkTheme()
@@ -149,7 +150,7 @@ class MainActivity : AppCompatActivity() {
             // sidebar feature.
             OpenCodeTheme(
                 darkTheme = darkTheme,
-                markdownFontSizes = state.markdownFontSizes
+                markdownFontSizes = settings.markdownFontSizes
             ) {
                 PhoneLayout(viewModel = viewModel, initialPage = state.lastNavPage)
             }
@@ -202,7 +203,7 @@ class MainActivity : AppCompatActivity() {
  */
 @Composable
 private fun PhoneLayout(viewModel: MainViewModel, initialPage: Int = 0) {
-    val state by viewModel.state.collectAsStateWithLifecycle()
+    val file by viewModel.fileFlow.collectAsStateWithLifecycle()
     var navPage by rememberSaveable {
         mutableStateOf(initialPage.coerceIn(0, screens.lastIndex))
     }
@@ -273,7 +274,7 @@ private fun PhoneLayout(viewModel: MainViewModel, initialPage: Int = 0) {
         // is given an opaque surface background so the destination
         // underneath does not bleed through (FilesScreen's own root is
         // transparent by design — opaqueness is the host's responsibility).
-        if (state.fileBrowserOpen) {
+        if (file.fileBrowserOpen) {
             val filesViewModel: FilesViewModel = hiltViewModel()
             BackHandler { viewModel.closeFileBrowser() }
             Box(
@@ -283,8 +284,8 @@ private fun PhoneLayout(viewModel: MainViewModel, initialPage: Int = 0) {
             ) {
                 FilesScreen(
                     viewModel = filesViewModel,
-                    pathToShow = state.filePathToShowInFiles,
-                    sessionDirectory = state.fileBrowserWorkdir,
+                    pathToShow = file.filePathToShowInFiles,
+                    sessionDirectory = file.fileBrowserWorkdir,
                     onCloseFile = { viewModel.closeFileBrowser() },
                     onFileClick = { path -> viewModel.showFileInFiles(path, "sessions") }
                 )

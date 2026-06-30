@@ -28,6 +28,8 @@ import com.yage.opencode_client.ui.MainViewModel
 import com.yage.opencode_client.ui.SessionListState
 import com.yage.opencode_client.ui.SettingsState
 import com.yage.opencode_client.ui.SliceFlows
+import com.yage.opencode_client.ui.currentSession
+import com.yage.opencode_client.ui.visibleMessages
 import com.yage.opencode_client.ui.TrafficState
 import com.yage.opencode_client.ui.TunnelActivationState
 import com.yage.opencode_client.ui.UnreadState
@@ -335,7 +337,7 @@ class MainViewModelTest {
                 null
             )
         }
-        assertEquals("", viewModel.state.value.inputText)
+        assertEquals("", viewModel.composerFlow.value.inputText)
         assertNull(viewModel.state.value.error)
     }
 
@@ -357,7 +359,7 @@ class MainViewModelTest {
         advanceUntilIdle()
 
         coVerify(exactly = 1) { repository.sendMessage(any(), any(), any(), any(), any()) }
-        assertFalse(viewModel.state.value.sendingSessionIds.contains("session-1"))
+        assertFalse(viewModel.composerFlow.value.sendingSessionIds.contains("session-1"))
     }
 
     @Test
@@ -376,7 +378,7 @@ class MainViewModelTest {
         advanceUntilIdle()
 
         coVerify(atLeast = 1) { repository.getSessions(10) }
-        assertEquals("Updated", viewModel.state.value.sessions.single().title)
+        assertEquals("Updated", viewModel.sessionListFlow.value.sessions.single().title)
     }
 
     @Test
@@ -408,7 +410,7 @@ class MainViewModelTest {
         viewModel.sendMessage()
         advanceUntilIdle()
 
-        assertEquals("session-1", buildSessionTree(viewModel.state.value.sessions).first().session.id)
+        assertEquals("session-1", buildSessionTree(viewModel.sessionListFlow.value.sessions).first().session.id)
     }
 
     @Test
@@ -423,7 +425,7 @@ class MainViewModelTest {
         viewModel.sendMessage()
         advanceUntilIdle()
 
-        assertEquals("hello", viewModel.state.value.inputText)
+        assertEquals("hello", viewModel.composerFlow.value.inputText)
         assertEquals("send failed", viewModel.state.value.error)
     }
 
@@ -452,7 +454,7 @@ class MainViewModelTest {
                 any()
             )
         }
-        assertEquals("", viewModel.state.value.inputText)
+        assertEquals("", viewModel.composerFlow.value.inputText)
     }
 
     @Test
@@ -466,7 +468,7 @@ class MainViewModelTest {
         advanceUntilIdle()
 
         coVerify(exactly = 0) { repository.sendMessage(any(), any(), any(), any()) }
-        assertEquals("   ", viewModel.state.value.inputText)
+        assertEquals("   ", viewModel.composerFlow.value.inputText)
     }
 
     @Test
@@ -478,7 +480,7 @@ class MainViewModelTest {
         advanceUntilIdle()
 
         coVerify(exactly = 0) { repository.sendMessage(any(), any(), any(), any()) }
-        assertEquals("hello", viewModel.state.value.inputText)
+        assertEquals("hello", viewModel.composerFlow.value.inputText)
     }
 
     @Test
@@ -514,7 +516,7 @@ class MainViewModelTest {
             )
         )
 
-        val sessions = viewModel.state.value.sessions
+        val sessions = viewModel.sessionListFlow.value.sessions
         assertEquals(1, sessions.size)
         assertEquals("session-1", sessions.single().id)
         assertEquals("Server Title", sessions.single().title)
@@ -534,8 +536,8 @@ class MainViewModelTest {
 
         coVerify(exactly = 0) { repository.createSession(any()) }
         verify { repository.setCurrentDirectory("/home/user/myproject") }
-        assertEquals("/home/user/myproject", viewModel.state.value.draftWorkdir)
-        assertNull(viewModel.state.value.currentSessionId)
+        assertEquals("/home/user/myproject", viewModel.composerFlow.value.draftWorkdir)
+        assertNull(viewModel.chatFlow.value.currentSessionId)
     }
 
     @Test
@@ -563,9 +565,9 @@ class MainViewModelTest {
             repository.createSession(title = null)
             repository.sendMessage("session-1", "hello", any(), any(), any())
         }
-        assertEquals("session-1", viewModel.state.value.currentSessionId)
-        assertNull(viewModel.state.value.draftWorkdir)
-        assertTrue(viewModel.state.value.openSessionIds.contains("session-1"))
+        assertEquals("session-1", viewModel.chatFlow.value.currentSessionId)
+        assertNull(viewModel.composerFlow.value.draftWorkdir)
+        assertTrue(viewModel.sessionListFlow.value.openSessionIds.contains("session-1"))
     }
 
     @Test
@@ -575,12 +577,12 @@ class MainViewModelTest {
         val viewModel = createViewModel()
         viewModel.createSessionInWorkdir("/home/user/myproject")
         advanceUntilIdle()
-        assertEquals("/home/user/myproject", viewModel.state.value.draftWorkdir)
+        assertEquals("/home/user/myproject", viewModel.composerFlow.value.draftWorkdir)
 
         viewModel.selectSession("session-1")
         advanceUntilIdle()
 
-        assertNull(viewModel.state.value.draftWorkdir)
+        assertNull(viewModel.composerFlow.value.draftWorkdir)
     }
 
     @Test
@@ -595,7 +597,7 @@ class MainViewModelTest {
         viewModel.sendMessage()
         advanceUntilIdle()
 
-        assertNull(viewModel.state.value.currentSessionId)
+        assertNull(viewModel.chatFlow.value.currentSessionId)
         assertNotNull(viewModel.state.value.error)
         assertTrue(viewModel.state.value.error!!.contains("network error"))
     }
@@ -631,7 +633,7 @@ class MainViewModelTest {
         advanceUntilIdle()
 
         coVerify(exactly = 0) { repository.getSessions(any()) }
-        assertEquals("SSE Only", viewModel.state.value.sessions.single().title)
+        assertEquals("SSE Only", viewModel.sessionListFlow.value.sessions.single().title)
     }
 
     @Test
@@ -682,7 +684,7 @@ class MainViewModelTest {
         coVerify(exactly = 0) { repository.getSessions(any()) }
         assertEquals(
             "Pythagorean theorem: history, proof, engineering",
-            viewModel.state.value.sessions.single { it.id == "session-1" }.title
+            viewModel.sessionListFlow.value.sessions.single { it.id == "session-1" }.title
         )
     }
 
@@ -725,7 +727,7 @@ class MainViewModelTest {
         coVerify(exactly = 0) { repository.getSessions(any()) }
         coVerify(exactly = 0) { repository.getMessagesPaged(any(), any(), any()) }
         // Order unchanged: no refresh-driven reordering
-        assertEquals("session-1", viewModel.state.value.sessions.first().id)
+        assertEquals("session-1", viewModel.sessionListFlow.value.sessions.first().id)
     }
 
     @Test
@@ -796,14 +798,14 @@ class MainViewModelTest {
         )
         advanceUntilIdle()
 
-        val messages = viewModel.state.value.messages
+        val messages = viewModel.chatFlow.value.messages
         assertEquals(1, messages.size)
         // message metadata patched...
         assertEquals("m1", messages[0].id)
         assertEquals("code", messages[0].agent)
         assertEquals("stop", messages[0].finish)
         // ...parts preserved in partsByMessage...
-        assertEquals(listOf(part), viewModel.state.value.partsByMessage["m1"])
+        assertEquals(listOf(part), viewModel.chatFlow.value.partsByMessage["m1"])
         // ...and no reload issued.
         coVerify(exactly = 0) { repository.getMessagesPaged(any(), any(), any()) }
     }
@@ -840,8 +842,8 @@ class MainViewModelTest {
         )
         advanceUntilIdle()
 
-        assertEquals(1, viewModel.state.value.messages.size)
-        assertEquals("other", viewModel.state.value.messages[0].id)
+        assertEquals(1, viewModel.chatFlow.value.messages.size)
+        assertEquals("other", viewModel.chatFlow.value.messages[0].id)
         coVerify(exactly = 0) { repository.getMessagesPaged(any(), any(), any()) }
     }
 
@@ -858,10 +860,10 @@ class MainViewModelTest {
         advanceUntilIdle()
 
         coVerify { repository.getSessions(10) }
-        assertEquals(10, viewModel.state.value.loadedSessionLimit)
-        assertTrue(viewModel.state.value.hasMoreSessions)
-        assertEquals(10, viewModel.state.value.sessions.size)
-        assertFalse(viewModel.state.value.isRefreshingSessions)
+        assertEquals(10, viewModel.sessionListFlow.value.loadedSessionLimit)
+        assertTrue(viewModel.sessionListFlow.value.hasMoreSessions)
+        assertEquals(10, viewModel.sessionListFlow.value.sessions.size)
+        assertFalse(viewModel.sessionListFlow.value.isRefreshingSessions)
     }
 
     @Test
@@ -876,7 +878,7 @@ class MainViewModelTest {
         viewModel.loadSessions()
         advanceUntilIdle()
 
-        assertFalse(viewModel.state.value.isRefreshingSessions)
+        assertFalse(viewModel.sessionListFlow.value.isRefreshingSessions)
     }
 
     @Test
@@ -890,8 +892,8 @@ class MainViewModelTest {
         viewModel.loadSessions()
         advanceUntilIdle()
 
-        assertEquals(1, viewModel.state.value.sessions.size)
-        assertEquals("parent-1", viewModel.state.value.sessions.single().id)
+        assertEquals(1, viewModel.sessionListFlow.value.sessions.size)
+        assertEquals("parent-1", viewModel.sessionListFlow.value.sessions.single().id)
 
         val refreshedSessions = listOf(
             com.yage.opencode_client.data.model.Session(id = "parent-1", directory = "/tmp/project"),
@@ -906,9 +908,9 @@ class MainViewModelTest {
         viewModel.loadSessions()
         advanceUntilIdle()
 
-        assertEquals(2, viewModel.state.value.sessions.size)
-        assertEquals("child-1", viewModel.state.value.sessions.find { it.parentId == "parent-1" }?.id)
-        assertFalse(viewModel.state.value.isRefreshingSessions)
+        assertEquals(2, viewModel.sessionListFlow.value.sessions.size)
+        assertEquals("child-1", viewModel.sessionListFlow.value.sessions.find { it.parentId == "parent-1" }?.id)
+        assertFalse(viewModel.sessionListFlow.value.isRefreshingSessions)
     }
 
     @Test
@@ -920,7 +922,7 @@ class MainViewModelTest {
         viewModel.loadSessions()
         advanceUntilIdle()
 
-        assertFalse(viewModel.state.value.isRefreshingSessions)
+        assertFalse(viewModel.sessionListFlow.value.isRefreshingSessions)
         assertEquals("Failed to load sessions: network error", viewModel.state.value.error)
     }
 
@@ -948,10 +950,10 @@ class MainViewModelTest {
         advanceUntilIdle()
 
         coVerify { repository.getSessions(20) }
-        assertEquals(20, viewModel.state.value.loadedSessionLimit)
-        assertFalse(viewModel.state.value.hasMoreSessions)
-        assertEquals(15, viewModel.state.value.sessions.size)
-        assertEquals("session-5", viewModel.state.value.currentSessionId)
+        assertEquals(20, viewModel.sessionListFlow.value.loadedSessionLimit)
+        assertFalse(viewModel.sessionListFlow.value.hasMoreSessions)
+        assertEquals(15, viewModel.sessionListFlow.value.sessions.size)
+        assertEquals("session-5", viewModel.chatFlow.value.currentSessionId)
     }
 
     @Test
@@ -978,7 +980,7 @@ class MainViewModelTest {
         advanceUntilIdle()
 
         coVerify(exactly = 1) { repository.getSessions(20) }
-        assertEquals(20, viewModel.state.value.loadedSessionLimit)
+        assertEquals(20, viewModel.sessionListFlow.value.loadedSessionLimit)
     }
 
     // --- #10b: auto-select guards (currentSessionId never silently replaced) ---
@@ -1005,7 +1007,7 @@ class MainViewModelTest {
         assertEquals(
             "currentSessionId must be preserved, not replaced by first()",
             "session-not-in-list",
-            viewModel.state.value.currentSessionId
+            viewModel.chatFlow.value.currentSessionId
         )
         // Messages for the (temporarily-absent) current session are reloaded
         // so the user keeps their context.
@@ -1040,7 +1042,7 @@ class MainViewModelTest {
         assertEquals(
             "currentSessionId preserved across loadMore even when absent from refresh",
             "session-not-in-list",
-            viewModel.state.value.currentSessionId
+            viewModel.chatFlow.value.currentSessionId
         )
     }
 
@@ -1060,15 +1062,15 @@ class MainViewModelTest {
         viewModel.createSessionInWorkdir(workdir)
         advanceUntilIdle()
 
-        assertEquals(workdir, viewModel.state.value.draftWorkdir)
-        val dirSessions = viewModel.state.value.directorySessions[workdir]
+        assertEquals(workdir, viewModel.composerFlow.value.draftWorkdir)
+        val dirSessions = viewModel.sessionListFlow.value.directorySessions[workdir]
         assertNotNull("directorySessions should contain an entry for the workdir", dirSessions)
         assertEquals(2, dirSessions!!.size)
         assertEquals("existing-1", dirSessions[0].id)
         // The fetched sessions must NOT pollute the global sessions list.
         assertTrue(
             "directory sessions must not be written into state.sessions",
-            viewModel.state.value.sessions.none { it.id == "existing-1" }
+            viewModel.sessionListFlow.value.sessions.none { it.id == "existing-1" }
         )
     }
 
@@ -1082,9 +1084,9 @@ class MainViewModelTest {
         viewModel.createSessionInWorkdir(workdir)
         advanceUntilIdle()
 
-        assertEquals(workdir, viewModel.state.value.draftWorkdir)
+        assertEquals(workdir, viewModel.composerFlow.value.draftWorkdir)
         assertNull(viewModel.state.value.error)
-        assertTrue(viewModel.state.value.directorySessions.isEmpty())
+        assertTrue(viewModel.sessionListFlow.value.directorySessions.isEmpty())
     }
 
     // --- #13: expandedParts lifecycle ---
@@ -1250,7 +1252,7 @@ class MainViewModelTest {
             repository.updateSessionArchived("child", any())
             repository.updateSessionArchived("parent", any())
         }
-        assertTrue(viewModel.state.value.sessions.all { it.isArchived })
+        assertTrue(viewModel.sessionListFlow.value.sessions.all { it.isArchived })
     }
 
     @Test
@@ -1283,7 +1285,7 @@ class MainViewModelTest {
             repository.updateSessionArchived("parent", -1L)
             repository.updateSessionArchived("child", -1L)
         }
-        assertFalse(viewModel.state.value.sessions.any { it.isArchived })
+        assertFalse(viewModel.sessionListFlow.value.sessions.any { it.isArchived })
     }
 
     @Test
@@ -1306,8 +1308,8 @@ class MainViewModelTest {
         viewModel.loadMessages("session-1")
         advanceUntilIdle()
 
-        assertEquals(messages.map { it.info }, viewModel.state.value.messages)
-        assertEquals("plan", viewModel.state.value.selectedAgentName)
+        assertEquals(messages.map { it.info }, viewModel.chatFlow.value.messages)
+        assertEquals("plan", viewModel.settingsFlow.value.selectedAgentName)
     }
 
     // --- §C: visibleMessages hides non-user/assistant (system/tool/environment) ---
@@ -1332,11 +1334,11 @@ class MainViewModelTest {
 
         // chatState.messages is what the UI renders and is sourced from
         // AppState.visibleMessages (the filtered view), NOT the raw messages field.
-        val visible = viewModel.state.value.chatState.messages
+        val visible = visibleMessages(viewModel.chatFlow.value.messages, currentSession(viewModel.sessionListFlow.value.sessions, viewModel.chatFlow.value.currentSessionId))
         assertEquals(listOf("m1", "m3"), visible.map { it.id })
         assertTrue(visible.all { it.isUser || it.isAssistant })
         // The raw store is unchanged — system/tool messages still live in state.
-        assertEquals(6, viewModel.state.value.messages.size)
+        assertEquals(6, viewModel.chatFlow.value.messages.size)
     }
 
     @Test
@@ -1364,7 +1366,7 @@ class MainViewModelTest {
             it.copy(currentSessionId = "session-1", sessions = listOf(session), messages = mixed)
         }
 
-        val visible = viewModel.state.value.chatState.messages
+        val visible = visibleMessages(viewModel.chatFlow.value.messages, currentSession(viewModel.sessionListFlow.value.sessions, viewModel.chatFlow.value.currentSessionId))
         // Revert cut keeps m1, m2, m3 (id < "m4"); role filter then drops m2 (system).
         assertEquals(listOf("m1", "m3"), visible.map { it.id })
     }
@@ -1388,7 +1390,7 @@ class MainViewModelTest {
             )
         }
 
-        val visible = viewModel.state.value.chatState.messages
+        val visible = visibleMessages(viewModel.chatFlow.value.messages, currentSession(viewModel.sessionListFlow.value.sessions, viewModel.chatFlow.value.currentSessionId))
         assertEquals(listOf("m2"), visible.map { it.id })
     }
 
@@ -1418,8 +1420,8 @@ class MainViewModelTest {
             )
         )
 
-        assertEquals("thinking", viewModel.state.value.streamingPartTexts["part-1"])
-        assertEquals("part-1", viewModel.state.value.streamingReasoningPart?.id)
+        assertEquals("thinking", viewModel.chatFlow.value.streamingPartTexts["part-1"])
+        assertEquals("part-1", viewModel.chatFlow.value.streamingReasoningPart?.id)
     }
 
     @Test
@@ -1450,7 +1452,7 @@ class MainViewModelTest {
         delta("Hello")
         delta(", world")
 
-        assertEquals("Hello, world", viewModel.state.value.streamingPartTexts["part-1"])
+        assertEquals("Hello, world", viewModel.chatFlow.value.streamingPartTexts["part-1"])
         // No reload issued.
         coVerify(exactly = 0) { repository.getMessagesPaged(any(), any(), any()) }
     }
@@ -1475,7 +1477,7 @@ class MainViewModelTest {
             )
         )
 
-        assertTrue(viewModel.state.value.streamingPartTexts.isEmpty())
+        assertTrue(viewModel.chatFlow.value.streamingPartTexts.isEmpty())
     }
 
     @Test
@@ -1504,7 +1506,7 @@ class MainViewModelTest {
             )
         )
 
-        assertEquals(listOf("session-2", "session-1"), viewModel.state.value.sessions.map { it.id })
+        assertEquals(listOf("session-2", "session-1"), viewModel.sessionListFlow.value.sessions.map { it.id })
     }
 
     @Test
@@ -1535,7 +1537,7 @@ class MainViewModelTest {
             )
         )
 
-        val sessions = viewModel.state.value.sessions
+        val sessions = viewModel.sessionListFlow.value.sessions
         assertEquals(1, sessions.size)
         assertEquals("session-1", sessions[0].id)
         assertEquals("Refactor auth module", sessions[0].title)
@@ -1569,7 +1571,7 @@ class MainViewModelTest {
             )
         )
 
-        val sessions = viewModel.state.value.sessions
+        val sessions = viewModel.sessionListFlow.value.sessions
         assertEquals(2, sessions.size)
         assertEquals("session-new", sessions[0].id)
         assertEquals("New Feature", sessions[0].title)
@@ -1604,9 +1606,9 @@ class MainViewModelTest {
         advanceTimeBy(1000)
         advanceUntilIdle()
 
-        assertTrue(viewModel.state.value.streamingPartTexts.isEmpty())
-        assertNull(viewModel.state.value.streamingReasoningPart)
-        assertEquals(messages.map { it.info }, viewModel.state.value.messages)
+        assertTrue(viewModel.chatFlow.value.streamingPartTexts.isEmpty())
+        assertNull(viewModel.chatFlow.value.streamingReasoningPart)
+        assertEquals(messages.map { it.info }, viewModel.chatFlow.value.messages)
     }
 
     @Test
@@ -1627,8 +1629,8 @@ class MainViewModelTest {
         )
         advanceUntilIdle()
 
-        assertTrue(viewModel.state.value.streamingPartTexts.isEmpty())
-        assertNull(viewModel.state.value.streamingReasoningPart)
+        assertTrue(viewModel.chatFlow.value.streamingPartTexts.isEmpty())
+        assertNull(viewModel.chatFlow.value.streamingReasoningPart)
     }
 
     @Test
@@ -1673,12 +1675,12 @@ class MainViewModelTest {
         advanceUntilIdle()
 
         // Status badge updated to idle...
-        val status = viewModel.state.value.sessionStatuses["session-1"]
+        val status = viewModel.sessionListFlow.value.sessionStatuses["session-1"]
         assertNotNull(status)
         assertFalse(status!!.isBusy)
         // ...overlay cleared by the finalization reload...
-        assertTrue(viewModel.state.value.streamingPartTexts.isEmpty())
-        assertNull(viewModel.state.value.streamingReasoningPart)
+        assertTrue(viewModel.chatFlow.value.streamingPartTexts.isEmpty())
+        assertNull(viewModel.chatFlow.value.streamingReasoningPart)
         // ...and a resetLimit reload was issued.
         coVerify(atLeast = 1) { repository.getMessagesPaged("session-1", any(), any()) }
     }
@@ -1717,7 +1719,7 @@ class MainViewModelTest {
         advanceTimeBy(1000)
         advanceUntilIdle()
 
-        val status = viewModel.state.value.sessionStatuses["session-1"]
+        val status = viewModel.sessionListFlow.value.sessionStatuses["session-1"]
         assertNotNull(status)
         assertFalse(status!!.isBusy)
         coVerify(exactly = 0) { repository.getMessagesPaged(any(), any(), any()) }
@@ -1737,7 +1739,7 @@ class MainViewModelTest {
         )
         advanceUntilIdle()
 
-        assertEquals(permissions, viewModel.state.value.pendingPermissions)
+        assertEquals(permissions, viewModel.sessionListFlow.value.pendingPermissions)
     }
 
     @Test
@@ -1762,7 +1764,7 @@ class MainViewModelTest {
 
         verify { settingsManager.setDraftText("s1", "draft1") }
         verify { settingsManager.getDraftText("s2") }
-        assertEquals("draft2", viewModel.state.value.inputText)
+        assertEquals("draft2", viewModel.composerFlow.value.inputText)
     }
 
     @Test
@@ -1822,7 +1824,7 @@ class MainViewModelTest {
         advanceUntilIdle()
 
         coVerify(exactly = 1) { repository.deleteSession("session-1") }
-        assertEquals(listOf("session-2"), viewModel.state.value.sessions.map { it.id })
+        assertEquals(listOf("session-2"), viewModel.sessionListFlow.value.sessions.map { it.id })
     }
 
     @Test
@@ -1847,7 +1849,7 @@ class MainViewModelTest {
         coVerify(exactly = 1) {
             repository.respondPermission("session-1", "perm-1", PermissionResponse.ALWAYS)
         }
-        assertEquals(listOf("perm-2"), viewModel.state.value.pendingPermissions.map { it.id })
+        assertEquals(listOf("perm-2"), viewModel.sessionListFlow.value.pendingPermissions.map { it.id })
     }
 
     @Test
@@ -1864,7 +1866,7 @@ class MainViewModelTest {
         advanceUntilIdle()
 
         coVerify(exactly = 1) { repository.getPendingPermissions() }
-        assertEquals(permissions, viewModel.state.value.pendingPermissions)
+        assertEquals(permissions, viewModel.sessionListFlow.value.pendingPermissions)
     }
 
     @Test
@@ -1894,7 +1896,7 @@ class MainViewModelTest {
         advanceUntilIdle()
 
         coVerify(exactly = 1) { repository.replyQuestion("question-1", answers) }
-        assertEquals(listOf("question-2"), viewModel.state.value.pendingQuestions.map { it.id })
+        assertEquals(listOf("question-2"), viewModel.sessionListFlow.value.pendingQuestions.map { it.id })
     }
 
     @Test
@@ -1923,7 +1925,7 @@ class MainViewModelTest {
         advanceUntilIdle()
 
         coVerify(exactly = 1) { repository.rejectQuestion("question-1") }
-        assertEquals(listOf("question-2"), viewModel.state.value.pendingQuestions.map { it.id })
+        assertEquals(listOf("question-2"), viewModel.sessionListFlow.value.pendingQuestions.map { it.id })
     }
 
     @Test
@@ -1964,7 +1966,7 @@ class MainViewModelTest {
         advanceTimeBy(400)
         advanceUntilIdle()
 
-        assertEquals(messages.map { it.info }, viewModel.state.value.messages)
+        assertEquals(messages.map { it.info }, viewModel.chatFlow.value.messages)
     }
 
     @Test
@@ -1998,10 +2000,10 @@ class MainViewModelTest {
 
         // Overlay cleared (finalization boundary)...
         assertTrue("streaming overlay must be cleared on authoritative reload",
-            viewModel.state.value.streamingPartTexts.isEmpty())
-        assertNull(viewModel.state.value.streamingReasoningPart)
+            viewModel.chatFlow.value.streamingPartTexts.isEmpty())
+        assertNull(viewModel.chatFlow.value.streamingReasoningPart)
         // ...and the finalized authoritative part is present.
-        assertEquals(listOf(finalizedPart), viewModel.state.value.partsByMessage["m1"])
+        assertEquals(listOf(finalizedPart), viewModel.chatFlow.value.partsByMessage["m1"])
     }
 
     @Test
@@ -2045,8 +2047,8 @@ class MainViewModelTest {
             )
         )
 
-        assertEquals(listOf("question-1"), viewModel.state.value.pendingQuestions.map { it.id })
-        assertEquals("session-1", viewModel.state.value.pendingQuestions.single().sessionId)
+        assertEquals(listOf("question-1"), viewModel.sessionListFlow.value.pendingQuestions.map { it.id })
+        assertEquals("session-1", viewModel.sessionListFlow.value.pendingQuestions.single().sessionId)
     }
 
     @Test
@@ -2073,7 +2075,7 @@ class MainViewModelTest {
             )
         )
 
-        assertEquals(listOf("question-2"), viewModel.state.value.pendingQuestions.map { it.id })
+        assertEquals(listOf("question-2"), viewModel.sessionListFlow.value.pendingQuestions.map { it.id })
     }
 
     @Test
@@ -2087,7 +2089,7 @@ class MainViewModelTest {
         // Does not call the repository, but now surfaces a specific error so the
         // user knows why activation did nothing (previously a silent no-op).
         coVerify(exactly = 0) { repository.activateTunnel(any(), any()) }
-        assertTrue(viewModel.state.value.tunnelActivationState is TunnelActivationState.Error)
+        assertTrue(viewModel.connectionFlow.value.tunnelActivationState is TunnelActivationState.Error)
         assertNotNull(viewModel.state.value.error)
     }
 
@@ -2106,7 +2108,7 @@ class MainViewModelTest {
         advanceUntilIdle()
 
         coVerify(exactly = 0) { repository.activateTunnel(any(), any()) }
-        assertTrue(viewModel.state.value.tunnelActivationState is TunnelActivationState.Error)
+        assertTrue(viewModel.connectionFlow.value.tunnelActivationState is TunnelActivationState.Error)
         assertNotNull(viewModel.state.value.error)
     }
 
@@ -2128,7 +2130,7 @@ class MainViewModelTest {
         coVerify { repository.activateTunnel("http://server.test", "tunnel-secret") }
         assertEquals(
             com.yage.opencode_client.ui.TunnelActivationState.Success,
-            viewModel.state.value.tunnelActivationState
+            viewModel.connectionFlow.value.tunnelActivationState
         )
     }
 
@@ -2149,7 +2151,7 @@ class MainViewModelTest {
         viewModel.activateTunnelForCurrentHost()
         advanceUntilIdle()
 
-        val activationState = viewModel.state.value.tunnelActivationState
+        val activationState = viewModel.connectionFlow.value.tunnelActivationState
         assertTrue(activationState is com.yage.opencode_client.ui.TunnelActivationState.Error)
         assertTrue((activationState as com.yage.opencode_client.ui.TunnelActivationState.Error).message.contains("403"))
     }
@@ -2169,16 +2171,16 @@ class MainViewModelTest {
             it.copy(directorySessions = mapOf(workdir to listOf(dirSession)))
         }
         // Precondition: the session lives only in directorySessions.
-        assertTrue(viewModel.state.value.sessions.none { it.id == "dir-only-1" })
+        assertTrue(viewModel.sessionListFlow.value.sessions.none { it.id == "dir-only-1" })
 
         viewModel.selectSession("dir-only-1")
         advanceUntilIdle()
 
         // #10: the directory session must be upserted so currentSession resolves
         // (previously it stayed null and the workdir was dropped).
-        assertEquals("dir-only-1", viewModel.state.value.currentSessionId)
-        assertNotNull(viewModel.state.value.currentSession)
-        assertEquals("dir-only-1", viewModel.state.value.currentSession?.id)
+        assertEquals("dir-only-1", viewModel.chatFlow.value.currentSessionId)
+        assertNotNull(currentSession(viewModel.sessionListFlow.value.sessions, viewModel.chatFlow.value.currentSessionId))
+        assertEquals("dir-only-1", currentSession(viewModel.sessionListFlow.value.sessions, viewModel.chatFlow.value.currentSessionId)?.id)
         // workdir sync must target the directory session's directory, not null.
         verify { repository.setCurrentDirectory(workdir) }
     }
@@ -2191,12 +2193,12 @@ class MainViewModelTest {
 
         val viewModel = createViewModel()
         updateState(viewModel) { it.copy(currentSessionId = "parent-1") }
-        val beforeId = viewModel.state.value.currentSessionId
+        val beforeId = viewModel.chatFlow.value.currentSessionId
 
         viewModel.openSubAgent("child-missing")
         advanceUntilIdle()
 
-        assertEquals(beforeId, viewModel.state.value.currentSessionId)
+        assertEquals(beforeId, viewModel.chatFlow.value.currentSessionId)
         assertNotNull("error channel must be set when child session is unavailable", viewModel.state.value.error)
     }
 
@@ -2241,8 +2243,8 @@ class MainViewModelTest {
         // The next session must NOT inherit the closed session's draft text.
         verify(exactly = 0) { settingsManager.setDraftText("s2", "s1-unsent-draft") }
         // s2 becomes current and its own draft is restored.
-        assertEquals("s2", viewModel.state.value.currentSessionId)
-        assertEquals("s2draft", viewModel.state.value.inputText)
+        assertEquals("s2", viewModel.chatFlow.value.currentSessionId)
+        assertEquals("s2draft", viewModel.composerFlow.value.inputText)
     }
 
     // --- #10: deleteSession syncs settingsManager when no sessions remain (E) ---
@@ -2262,7 +2264,7 @@ class MainViewModelTest {
         viewModel.deleteSession("s1")
         advanceUntilIdle()
 
-        assertNull(viewModel.state.value.currentSessionId)
+        assertNull(viewModel.chatFlow.value.currentSessionId)
         verify { settingsManager.currentSessionId = null }
     }
 
@@ -2306,8 +2308,8 @@ class MainViewModelTest {
             it.copy(directorySessions = mapOf(workdir to listOf(ghost)))
         }
         // Precondition: the session lives in directorySessions (not in sessions).
-        assertTrue(viewModel.state.value.directorySessions[workdir]?.any { it.id == "dir-ghost" } == true)
-        assertTrue(viewModel.state.value.sessions.none { it.id == "dir-ghost" })
+        assertTrue(viewModel.sessionListFlow.value.directorySessions[workdir]?.any { it.id == "dir-ghost" } == true)
+        assertTrue(viewModel.sessionListFlow.value.sessions.none { it.id == "dir-ghost" })
 
         viewModel.deleteSession("dir-ghost")
         advanceUntilIdle()
@@ -2315,7 +2317,7 @@ class MainViewModelTest {
         coVerify(exactly = 1) { repository.deleteSession("dir-ghost") }
         // The ghost must be gone from directorySessions so the union UI cannot
         // render / re-select it.
-        val remaining = viewModel.state.value.directorySessions[workdir].orEmpty()
+        val remaining = viewModel.sessionListFlow.value.directorySessions[workdir].orEmpty()
         assertTrue("deleted id must be purged from directorySessions", remaining.none { it.id == "dir-ghost" })
     }
 
@@ -2335,10 +2337,10 @@ class MainViewModelTest {
         advanceUntilIdle()
 
         // draft mode restored — composer stays in draft, user can retry
-        assertEquals("/home/user/retry-proj", viewModel.state.value.draftWorkdir)
-        assertNull(viewModel.state.value.currentSessionId)
+        assertEquals("/home/user/retry-proj", viewModel.composerFlow.value.draftWorkdir)
+        assertNull(viewModel.chatFlow.value.currentSessionId)
         // input text preserved for retry
-        assertEquals("hello", viewModel.state.value.inputText)
+        assertEquals("hello", viewModel.composerFlow.value.inputText)
         assertNotNull(viewModel.state.value.error)
         assertTrue(viewModel.state.value.error!!.contains("network error"))
     }
@@ -2386,7 +2388,7 @@ class MainViewModelTest {
         assertEquals(
             "A initial load",
             listOf("m_a1", "m_a2"),
-            viewModel.state.value.messages.map { it.id }
+            viewModel.chatFlow.value.messages.map { it.id }
         )
         assertEquals(1, viewModel.sessionWindowCacheSize())
         assertNotNull(viewModel.peekSessionWindow("session-A"))
@@ -2397,7 +2399,7 @@ class MainViewModelTest {
         assertEquals(
             "B initial load",
             listOf("m_b1"),
-            viewModel.state.value.messages.map { it.id }
+            viewModel.chatFlow.value.messages.map { it.id }
         )
         assertEquals(2, viewModel.sessionWindowCacheSize())
 
@@ -2411,7 +2413,7 @@ class MainViewModelTest {
         viewModel.selectSession("session-A")
         advanceUntilIdle()
 
-        val finalIds = viewModel.state.value.messages.map { it.id }
+        val finalIds = viewModel.chatFlow.value.messages.map { it.id }
         assertTrue(
             "Cached m_a2 must survive the round-trip (got $finalIds)",
             finalIds.contains("m_a2")
@@ -2462,16 +2464,16 @@ class MainViewModelTest {
 
         viewModel.selectSession("session-A")
         advanceUntilIdle()
-        assertEquals(listOf("m_latest1", "m_latest2"), viewModel.state.value.messages.map { it.id })
-        assertEquals("cursor-1", viewModel.state.value.olderMessagesCursor)
+        assertEquals(listOf("m_latest1", "m_latest2"), viewModel.chatFlow.value.messages.map { it.id })
+        assertEquals("cursor-1", viewModel.chatFlow.value.olderMessagesCursor)
 
         // Load the older page.
         viewModel.loadMoreMessages()
         advanceUntilIdle()
-        val afterMore = viewModel.state.value.messages.map { it.id }
+        val afterMore = viewModel.chatFlow.value.messages.map { it.id }
         assertEquals(listOf("m_older1", "m_older2", "m_latest1", "m_latest2"), afterMore)
-        assertNull(viewModel.state.value.olderMessagesCursor)
-        assertFalse(viewModel.state.value.hasMoreMessages)
+        assertNull(viewModel.chatFlow.value.olderMessagesCursor)
+        assertFalse(viewModel.chatFlow.value.hasMoreMessages)
 
         // Snapshot the cached window — must mirror the post-loadMore state.
         val cached = viewModel.peekSessionWindow("session-A")
@@ -2488,7 +2490,7 @@ class MainViewModelTest {
         viewModel.selectSession("session-A")
         advanceUntilIdle()
 
-        val finalIds = viewModel.state.value.messages.map { it.id }
+        val finalIds = viewModel.chatFlow.value.messages.map { it.id }
         assertTrue(
             "Older messages must survive the round-trip via cache (got $finalIds)",
             finalIds.contains("m_older1") && finalIds.contains("m_older2")
@@ -2703,13 +2705,13 @@ class MainViewModelTest {
         viewModel.refreshCurrentSession()
         advanceUntilIdle()
 
-        val ids = viewModel.state.value.messages.map { it.id }
+        val ids = viewModel.chatFlow.value.messages.map { it.id }
         assertFalse("Older message is dropped on cold-start refresh (got $ids)", ids.contains("m_older"))
         assertTrue("Fresh latest window is loaded (got $ids)", ids.contains("m_fresh"))
         // Cursor reseeded from the fresh fetch (nextCursor=null → no more).
-        assertNull(viewModel.state.value.olderMessagesCursor)
+        assertNull(viewModel.chatFlow.value.olderMessagesCursor)
         // Gap wiped — a cold-start snapshot has no断层 reference.
-        assertNull(viewModel.state.value.gapInfo)
+        assertNull(viewModel.chatFlow.value.gapInfo)
     }
 
     @Test
@@ -2747,7 +2749,7 @@ class MainViewModelTest {
         advanceUntilIdle()
 
         // Status badge updated to busy...
-        val status = viewModel.state.value.sessionStatuses["session-1"]
+        val status = viewModel.sessionListFlow.value.sessionStatuses["session-1"]
         assertNotNull(status)
         assertTrue(status!!.isBusy)
         // ...and a reload was issued for the current session.
@@ -2779,7 +2781,7 @@ class MainViewModelTest {
         advanceTimeBy(1000)
         advanceUntilIdle()
 
-        val statusOther = viewModel2.state.value.sessionStatuses["session-other"]
+        val statusOther = viewModel2.sessionListFlow.value.sessionStatuses["session-other"]
         assertNotNull(statusOther)
         assertTrue(statusOther!!.isBusy)
         coVerify(exactly = 0) { repository.getMessagesPaged("session-other", any(), any()) }
@@ -2824,7 +2826,7 @@ class MainViewModelTest {
         )
         advanceUntilIdle()
 
-        val afterInsert = viewModel.state.value.messages
+        val afterInsert = viewModel.chatFlow.value.messages
         assertEquals(2, afterInsert.size)
         assertEquals("m_existing", afterInsert[0].id)
         assertEquals("msg_new", afterInsert[1].id)
@@ -2853,7 +2855,7 @@ class MainViewModelTest {
         )
         advanceUntilIdle()
 
-        val afterPatch = viewModel.state.value.messages
+        val afterPatch = viewModel.chatFlow.value.messages
         // Still 2 — the existing id was patched in place, not appended again.
         assertEquals(2, afterPatch.size)
         assertEquals("m_existing", afterPatch[0].id)
@@ -2879,7 +2881,7 @@ class MainViewModelTest {
         assertEquals("s1", viewModel.chatFlow.value.currentSessionId)
         assertEquals(
             "chatFlow slice must mirror AppState after free-helper write",
-            viewModel.state.value.currentSessionId,
+            viewModel.chatFlow.value.currentSessionId,
             viewModel.chatFlow.value.currentSessionId
         )
     }
@@ -2901,7 +2903,7 @@ class MainViewModelTest {
         )
         assertEquals(
             "sessionListFlow.sessions must mirror AppState.sessions",
-            viewModel.state.value.sessions.size,
+            viewModel.sessionListFlow.value.sessions.size,
             viewModel.sessionListFlow.value.sessions.size
         )
     }

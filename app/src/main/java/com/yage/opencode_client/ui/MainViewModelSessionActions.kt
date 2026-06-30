@@ -112,22 +112,90 @@ internal fun syncSlicesFromAppState(state: AppState, slices: SliceFlows) {
 }
 
 /**
- * §R-17 Stage 1: write AppState + synchronise every slice. Replaces
- * `state.updateAndSync(slices) { ... }` in free helpers. Single-threaded (Main.immediate) so
- * the non-CAS `value =` is equivalent to `update {}`; the slice sync runs
- * synchronously in the same call so any subsequent slice read sees the new
- * values. `slices` is nullable so legacy test callers (CatchUpGapTest) that
- * invoke helpers directly without a SliceFlows instance keep compiling — when
- * null, only the AppState mirror is written (the test helper
- * `syncAllSlicesFromState` covers the slice sync explicitly).
+ * §R-17 M5: build a transient [AppState] snapshot from the authoritative slice
+ * values, carrying over the persisted [AppState.error] / [AppState.lastNavPage]
+ * from [seed]. Used by [updateAndSync] so the legacy `(AppState) -> AppState`
+ * transforms keep working against slice-derived values without each call site
+ * needing a per-slice rewrite. Mirrors [MainViewModel.aggregateFromSlices].
  */
+@Suppress("DEPRECATION")
+internal fun aggregateFromSlices(slices: SliceFlows, seed: AppState): AppState = seed.copy(
+    isConnected = slices.connection.value.isConnected,
+    isConnecting = slices.connection.value.isConnecting,
+    serverVersion = slices.connection.value.serverVersion,
+    connectionPhase = slices.connection.value.connectionPhase,
+    tunnelActivationState = slices.connection.value.tunnelActivationState,
+    trafficSent = slices.traffic.value.trafficSent,
+    trafficReceived = slices.traffic.value.trafficReceived,
+    inputText = slices.composer.value.inputText,
+    imageAttachments = slices.composer.value.imageAttachments,
+    sendingSessionIds = slices.composer.value.sendingSessionIds,
+    draftWorkdir = slices.composer.value.draftWorkdir,
+    filePathToShowInFiles = slices.file.value.filePathToShowInFiles,
+    filePreviewOriginRoute = slices.file.value.filePreviewOriginRoute,
+    fileBrowserOpen = slices.file.value.fileBrowserOpen,
+    fileBrowserWorkdir = slices.file.value.fileBrowserWorkdir,
+    themeMode = slices.settings.value.themeMode,
+    markdownFontSizes = slices.settings.value.markdownFontSizes,
+    selectedAgentName = slices.settings.value.selectedAgentName,
+    agents = slices.settings.value.agents,
+    providers = slices.settings.value.providers,
+    availableCommands = slices.settings.value.availableCommands,
+    currentSessionId = slices.chat.value.currentSessionId,
+    messages = slices.chat.value.messages,
+    partsByMessage = slices.chat.value.partsByMessage,
+    streamingPartTexts = slices.chat.value.streamingPartTexts,
+    streamingReasoningPart = slices.chat.value.streamingReasoningPart,
+    olderMessagesCursor = slices.chat.value.olderMessagesCursor,
+    hasMoreMessages = slices.chat.value.hasMoreMessages,
+    isLoadingMessages = slices.chat.value.isLoadingMessages,
+    gapInfo = slices.chat.value.gapInfo,
+    staleNotice = slices.chat.value.staleNotice,
+    sessions = slices.sessionList.value.sessions,
+    sessionStatuses = slices.sessionList.value.sessionStatuses,
+    expandedSessionIds = slices.sessionList.value.expandedSessionIds,
+    loadedSessionLimit = slices.sessionList.value.loadedSessionLimit,
+    hasMoreSessions = slices.sessionList.value.hasMoreSessions,
+    isLoadingMoreSessions = slices.sessionList.value.isLoadingMoreSessions,
+    isRefreshingSessions = slices.sessionList.value.isRefreshingSessions,
+    pendingPermissions = slices.sessionList.value.pendingPermissions,
+    pendingQuestions = slices.sessionList.value.pendingQuestions,
+    childSessions = slices.sessionList.value.childSessions,
+    directorySessions = slices.sessionList.value.directorySessions,
+    openSessionIds = slices.sessionList.value.openSessionIds,
+    sessionTodos = slices.sessionList.value.sessionTodos,
+    unreadSessions = slices.unread.value.unreadSessions,
+    tempClearedUnread = slices.unread.value.tempClearedUnread,
+    lastViewedTime = slices.unread.value.lastViewedTime,
+    hostProfiles = slices.host.value.hostProfiles,
+    currentHostProfileId = slices.host.value.currentHostProfileId
+)
+
+/**
+ * §R-17 Stage 1→M5: applies a legacy `(AppState) -> AppState` transform against
+ * a TRANSIENT aggregate built from the authoritative slices, then pushes the
+ * result back to the slices via [syncSlicesFromAppState]. Only the cross-domain
+ * error/lastNavPage are persisted on the AppState flow — the per-domain mirror
+ * fields are no longer stored (no reader consumes them). `slices` is nullable so
+ * legacy callers that invoke helpers without a SliceFlows instance keep
+ * compiling (the null path just applies the transform to the persisted AppState,
+ * covering only error/lastNavPage). Single-threaded (Main.immediate).
+ */
+@Suppress("DEPRECATION")
 internal fun MutableStateFlow<AppState>.updateAndSync(
     slices: SliceFlows?,
     transform: (AppState) -> AppState
 ) {
-    val next = transform(value)
-    value = next
-    if (slices != null) syncSlicesFromAppState(next, slices)
+    if (slices == null) {
+        value = transform(value)
+        return
+    }
+    val before = aggregateFromSlices(slices, value)
+    val after = transform(before)
+    // §R-17 M5: slices authoritative (aggregate built from them). State kept in
+    // sync so free helpers that read `state.value.<field>` keep working.
+    value = after
+    syncSlicesFromAppState(after, slices)
 }
 
 /**

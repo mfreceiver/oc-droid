@@ -2,6 +2,7 @@ package com.yage.opencode_client.ui.controller
 
 import com.yage.opencode_client.data.model.ComposerImageAttachment
 import com.yage.opencode_client.ui.AppState
+import com.yage.opencode_client.ui.ChatState
 import com.yage.opencode_client.ui.ComposerState
 import kotlinx.coroutines.flow.MutableStateFlow
 
@@ -51,13 +52,14 @@ interface ComposerCallbacks {
 internal class ComposerController(
     private val state: MutableStateFlow<AppState>,
     private val composerFlow: MutableStateFlow<ComposerState>,
+    private val chatFlow: MutableStateFlow<ChatState>,
     private val expandedParts: MutableStateFlow<Map<String, Boolean>>,
     private val callbacks: ComposerCallbacks
 ) {
     /**
-     * §R-17 M3 (carried over): write the composer slice atomically and mirror
-     * it onto the deprecated AppState fields in `state`, so `state.value` stays
-     * consistent synchronously. Single-threaded (Main.immediate).
+     * §R-17 M3→M5: write the composer slice AND mirror it onto AppState. The
+     * slice is the authoritative read path; the mirror write is retained so the
+     * free helpers that read `state.value.draftWorkdir` see consistent values.
      */
     @Suppress("DEPRECATION")
     private fun writeComposer(transform: (ComposerState) -> ComposerState) {
@@ -73,7 +75,7 @@ internal class ComposerController(
 
     fun setInputText(text: String) {
         writeComposer { it.copy(inputText = text) }
-        state.value.currentSessionId?.let { callbacks.saveDraft(it, text) }
+        chatFlow.value.currentSessionId?.let { callbacks.saveDraft(it, text) }
     }
 
     fun addImageAttachments(attachments: List<ComposerImageAttachment>) {
@@ -91,10 +93,8 @@ internal class ComposerController(
      * leave the repository re-scoped to an abandoned project on resume/cold
      * start. No-op when there is no active draft.
      */
-    @Suppress("DEPRECATION")
     fun clearDraftIfActive() {
-        val current = state.value
-        if (current.draftWorkdir == null || current.currentSessionId != null) return
+        if (composerFlow.value.draftWorkdir == null || chatFlow.value.currentSessionId != null) return
         callbacks.clearPersistedWorkdir()
         writeComposer {
             it.copy(draftWorkdir = null, inputText = "", imageAttachments = emptyList())

@@ -18,6 +18,7 @@ import com.yage.opencode_client.ui.TUNNEL_SUCCESS_TOAST
 import com.yage.opencode_client.ui.TrafficState
 import com.yage.opencode_client.ui.TunnelActivationState
 import com.yage.opencode_client.ui.UnreadState
+import com.yage.opencode_client.ui.syncSlicesFromAppState
 import com.yage.opencode_client.util.SettingsManager
 import io.mockk.coEvery
 import io.mockk.coVerify
@@ -127,6 +128,12 @@ class HostProfileControllerTest {
         scope.testScheduler.advanceUntilIdle()
     }
 
+    // R-17 M5: seed AppState then propagate to slices (controllers read/write slices).
+    private fun seed(transform: (AppState) -> AppState) {
+        state.value = transform(state.value)
+        syncSlicesFromAppState(state.value, slices)
+    }
+
     // ── Accessors ──────────────────────────────────────────────────────────
 
     @Test
@@ -158,13 +165,13 @@ class HostProfileControllerTest {
 
     @Test
     fun `refreshHostProfileState writes hostProfiles list and current id to AppState`() {
-        state.value = state.value.copy(hostProfiles = emptyList(), currentHostProfileId = null)
+        seed { it.copy(hostProfiles = emptyList(), currentHostProfileId = null) }
         seedStore(listOf(profileB), currentId = "p-B")
 
         controller.refreshHostProfileState()
 
-        assertEquals(listOf(profileB), state.value.hostProfiles)
-        assertEquals("p-B", state.value.currentHostProfileId)
+        assertEquals(listOf(profileB), slices.host.value.hostProfiles)
+        assertEquals("p-B", slices.host.value.currentHostProfileId)
     }
 
     // ── saveHostProfile (three-state password contract) ────────────────────
@@ -225,7 +232,7 @@ class HostProfileControllerTest {
         verify { store.save(profileB) }
         // refreshHostProfileState re-reads the store:
         verify(atLeast = 1) { store.profiles() }
-        assertEquals("p-A", state.value.currentHostProfileId)
+        assertEquals("p-A", slices.host.value.currentHostProfileId)
     }
 
     // ── duplicateHostProfile ───────────────────────────────────────────────
@@ -245,7 +252,7 @@ class HostProfileControllerTest {
 
     @Test
     fun `deleteHostProfile of non-current profile reconfigures for current host without purge or reconnect`() {
-        state.value = state.value.copy(currentHostProfileId = "p-A")
+        seed { it.copy(currentHostProfileId = "p-A") }
 
         controller.deleteHostProfile("p-B")
 
@@ -260,12 +267,14 @@ class HostProfileControllerTest {
 
     @Test
     fun `deleteHostProfile of current profile purges per-host state, reconfigures for replacement, and force-reconnects`() {
-        state.value = state.value.copy(
+        seed {
+            it.copy(
             currentHostProfileId = "p-A",
             currentSessionId = "sess-old",
             sessions = listOf(com.yage.opencode_client.data.model.Session(id = "sess-old", directory = "/d")),
             openSessionIds = listOf("sess-old")
-        )
+            )
+        }
         // After deleting the current, the store picks profileB as the new current.
         seedStore(listOf(profileB), currentId = "p-B")
 
@@ -277,11 +286,11 @@ class HostProfileControllerTest {
         assertEquals(1, callbacks.forceReconnectCalls)
         assertEquals(1, callbacks.clearSessionWindowCacheCalls)
         // Per-host state purged.
-        assertNull("currentSessionId purged", state.value.currentSessionId)
-        assertTrue("sessions purged", state.value.sessions.isEmpty())
-        assertTrue("openSessionIds purged", state.value.openSessionIds.isEmpty())
+        assertNull("currentSessionId purged", slices.chat.value.currentSessionId)
+        assertTrue("sessions purged", slices.sessionList.value.sessions.isEmpty())
+        assertTrue("openSessionIds purged", slices.sessionList.value.openSessionIds.isEmpty())
         // AppState now reflects the replacement current id.
-        assertEquals("p-B", state.value.currentHostProfileId)
+        assertEquals("p-B", slices.host.value.currentHostProfileId)
     }
 
     // ── importHostProfile / exportHostProfile ──────────────────────────────
@@ -321,25 +330,27 @@ class HostProfileControllerTest {
 
     @Test
     fun `selectHostProfile purges per-host session, message, and draft state`() {
-        state.value = state.value.copy(
+        seed {
+            it.copy(
             currentSessionId = "sess-old",
             messages = listOf(com.yage.opencode_client.data.model.Message(id = "m1", role = "user")),
             openSessionIds = listOf("sess-old"),
             unreadSessions = setOf("sess-old"),
             draftWorkdir = "/old/proj",
             availableCommands = listOf(com.yage.opencode_client.data.api.CommandInfo("cmd"))
-        )
+            )
+        }
         every { store.select("p-B") } returns profileB
 
         controller.selectHostProfile("p-B")
         runPending()
 
-        assertNull("currentSessionId purged", state.value.currentSessionId)
-        assertTrue("messages purged", state.value.messages.isEmpty())
-        assertTrue("openSessionIds purged", state.value.openSessionIds.isEmpty())
-        assertTrue("unread purged", state.value.unreadSessions.isEmpty())
-        assertNull("draftWorkdir purged", state.value.draftWorkdir)
-        assertTrue("availableCommands purged", state.value.availableCommands.isEmpty())
+        assertNull("currentSessionId purged", slices.chat.value.currentSessionId)
+        assertTrue("messages purged", slices.chat.value.messages.isEmpty())
+        assertTrue("openSessionIds purged", slices.sessionList.value.openSessionIds.isEmpty())
+        assertTrue("unread purged", slices.unread.value.unreadSessions.isEmpty())
+        assertNull("draftWorkdir purged", slices.composer.value.draftWorkdir)
+        assertTrue("availableCommands purged", slices.settings.value.availableCommands.isEmpty())
     }
 
     @Test
@@ -457,7 +468,7 @@ class HostProfileControllerTest {
 
         controller.activateTunnelForCurrentHost()
 
-        assertEquals(TunnelActivationState.Error("未设置隧道密码"), state.value.tunnelActivationState)
+        assertEquals(TunnelActivationState.Error("未设置隧道密码"), slices.connection.value.tunnelActivationState)
         assertNotNull(state.value.error)
         assertTrue("error surfaced", state.value.error!!.contains("隧道激活失败"))
         // No network call scheduled.
@@ -472,7 +483,7 @@ class HostProfileControllerTest {
 
         controller.activateTunnelForCurrentHost()
 
-        assertEquals(TunnelActivationState.Error("隧道密码为空"), state.value.tunnelActivationState)
+        assertEquals(TunnelActivationState.Error("隧道密码为空"), slices.connection.value.tunnelActivationState)
         coVerify(exactly = 0) { repository.activateTunnel(any(), any(), any()) }
     }
 
@@ -490,11 +501,11 @@ class HostProfileControllerTest {
         assertEquals(
             "Loading state set synchronously before the async probe",
             TunnelActivationState.Loading,
-            state.value.tunnelActivationState
+            slices.connection.value.tunnelActivationState
         )
         runPending()
 
-        assertEquals(TunnelActivationState.Success, state.value.tunnelActivationState)
+        assertEquals(TunnelActivationState.Success, slices.connection.value.tunnelActivationState)
         assertEquals(TUNNEL_SUCCESS_TOAST, state.value.error)
         coVerify { repository.activateTunnel(profile.serverUrl, "real-pw", profile.allowInsecureConnections) }
     }
@@ -510,7 +521,7 @@ class HostProfileControllerTest {
         controller.activateTunnelForCurrentHost()
         runPending()
 
-        val tunnelState = state.value.tunnelActivationState
+        val tunnelState = slices.connection.value.tunnelActivationState
         assertTrue("failure yields TunnelActivationState.Error", tunnelState is TunnelActivationState.Error)
         assertEquals("boom-network", (tunnelState as TunnelActivationState.Error).message)
         assertTrue("error toast includes exception message", state.value.error!!.contains("boom-network"))
@@ -521,7 +532,8 @@ class HostProfileControllerTest {
 
     @Test
     fun `resetLocalDataAndResync preserves hostProfiles and currentHostProfileId but wipes everything else`() {
-        state.value = state.value.copy(
+        seed {
+            it.copy(
             hostProfiles = listOf(profileA, profileB),
             currentHostProfileId = "p-A",
             currentSessionId = "sess-x",
@@ -530,24 +542,25 @@ class HostProfileControllerTest {
             serverVersion = "1.2.3",
             trafficSent = 999L,
             trafficReceived = 888L
-        )
+            )
+        }
 
         controller.resetLocalDataAndResync()
 
         // Preserved:
-        assertEquals(listOf(profileA, profileB), state.value.hostProfiles)
-        assertEquals("p-A", state.value.currentHostProfileId)
+        assertEquals(listOf(profileA, profileB), slices.host.value.hostProfiles)
+        assertEquals("p-A", slices.host.value.currentHostProfileId)
         // Wiped:
-        assertNull("currentSessionId reset", state.value.currentSessionId)
-        assertEquals("", state.value.inputText)
-        assertNull("serverVersion reset", state.value.serverVersion)
+        assertNull("currentSessionId reset", slices.chat.value.currentSessionId)
+        assertEquals("", slices.composer.value.inputText)
+        assertNull("serverVersion reset", slices.connection.value.serverVersion)
         // Reconnecting slice values:
-        assertFalse("isConnected false", state.value.isConnected)
-        assertTrue("isConnecting true", state.value.isConnecting)
-        assertEquals("reconnecting", state.value.connectionPhase)
-        assertEquals(0L, state.value.trafficSent)
-        assertEquals(0L, state.value.trafficReceived)
-        assertEquals(TunnelActivationState.Idle, state.value.tunnelActivationState)
+        assertFalse("isConnected false", slices.connection.value.isConnected)
+        assertTrue("isConnecting true", slices.connection.value.isConnecting)
+        assertEquals("reconnecting", slices.connection.value.connectionPhase)
+        assertEquals(0L, slices.traffic.value.trafficSent)
+        assertEquals(0L, slices.traffic.value.trafficReceived)
+        assertEquals(TunnelActivationState.Idle, slices.connection.value.tunnelActivationState)
     }
 
     @Test

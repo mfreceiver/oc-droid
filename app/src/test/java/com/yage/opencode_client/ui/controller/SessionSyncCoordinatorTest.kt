@@ -17,6 +17,7 @@ import com.yage.opencode_client.ui.SettingsState
 import com.yage.opencode_client.ui.SliceFlows
 import com.yage.opencode_client.ui.TrafficState
 import com.yage.opencode_client.ui.UnreadState
+import com.yage.opencode_client.ui.syncSlicesFromAppState
 import io.mockk.unmockkAll
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.serialization.json.JsonObjectBuilder
@@ -79,9 +80,18 @@ class SessionSyncCoordinatorTest {
         unmockkAll()
     }
 
+    /**
+     * Seeds AppState then propagates to the slices (the coordinator reads
+     * slices). R-17 M5: controllers no longer read the AppState mirror.
+     */
+    private fun seed(transform: (AppState) -> AppState) {
+        state.value = transform(state.value)
+        syncSlicesFromAppState(state.value, slices)
+    }
+
     /** Current-session guard: many folds only touch the current session's view. */
     private fun setCurrentSession(sessionId: String?) {
-        state.value = state.value.copy(currentSessionId = sessionId)
+        seed { it.copy(currentSessionId = sessionId) }
     }
 
     private fun event(type: String, block: JsonObjectBuilder.() -> Unit): SSEEvent =
@@ -103,9 +113,11 @@ class SessionSyncCoordinatorTest {
 
     @Test
     fun `session created prepends the parsed session via upsert`() {
-        state.value = state.value.copy(
+        seed {
+            it.copy(
             sessions = listOf(Session(id = "session-1", directory = "/tmp/old"))
-        )
+            )
+        }
 
         coordinator.handleEvent(event("session.created") {
             put("session", buildJsonObject {
@@ -115,7 +127,7 @@ class SessionSyncCoordinatorTest {
             })
         })
 
-        assertEquals(listOf("session-2", "session-1"), state.value.sessions.map { it.id })
+        assertEquals(listOf("session-2", "session-1"), slices.sessionList.value.sessions.map { it.id })
     }
 
     @Test
@@ -125,14 +137,16 @@ class SessionSyncCoordinatorTest {
         })
 
         assertEquals(1, callbacks.onNonFatalIssueCalls)
-        assertTrue(state.value.sessions.isEmpty())
+        assertTrue(slices.sessionList.value.sessions.isEmpty())
     }
 
     @Test
     fun `session updated replaces the existing session title from info`() {
-        state.value = state.value.copy(
+        seed {
+            it.copy(
             sessions = listOf(Session(id = "session-1", directory = "/tmp/project", title = null))
-        )
+            )
+        }
 
         coordinator.handleEvent(event("session.updated") {
             put("info", buildJsonObject {
@@ -142,16 +156,18 @@ class SessionSyncCoordinatorTest {
             })
         })
 
-        val sessions = state.value.sessions
+        val sessions = slices.sessionList.value.sessions
         assertEquals(1, sessions.size)
         assertEquals("Refactor auth module", sessions[0].title)
     }
 
     @Test
     fun `session updated inserts an unknown session from the session key`() {
-        state.value = state.value.copy(
+        seed {
+            it.copy(
             sessions = listOf(Session(id = "session-1", directory = "/tmp/old"))
-        )
+            )
+        }
 
         coordinator.handleEvent(event("session.updated") {
             put("session", buildJsonObject {
@@ -161,7 +177,7 @@ class SessionSyncCoordinatorTest {
             })
         })
 
-        val ids = state.value.sessions.map { it.id }
+        val ids = slices.sessionList.value.sessions.map { it.id }
         assertEquals(listOf("session-new", "session-1"), ids)
     }
 
@@ -176,8 +192,8 @@ class SessionSyncCoordinatorTest {
             put("status", buildJsonObject { put("type", JsonPrimitive("busy")) })
         })
 
-        assertNotNull(state.value.sessionStatuses["session-1"])
-        assertTrue(state.value.sessionStatuses["session-1"]!!.isBusy)
+        assertNotNull(slices.sessionList.value.sessionStatuses["session-1"])
+        assertTrue(slices.sessionList.value.sessionStatuses["session-1"]!!.isBusy)
         assertEquals(listOf("session-1" to true), callbacks.onRefreshMessagesCalls)
     }
 
@@ -190,24 +206,26 @@ class SessionSyncCoordinatorTest {
             put("status", buildJsonObject { put("type", JsonPrimitive("busy")) })
         })
 
-        assertTrue(state.value.sessionStatuses["session-2"]!!.isBusy)
+        assertTrue(slices.sessionList.value.sessionStatuses["session-2"]!!.isBusy)
         assertTrue(callbacks.onRefreshMessagesCalls.isEmpty())
     }
 
     @Test
     fun `session status idle on current with a non-empty streaming overlay triggers a resetLimit reload`() {
         setCurrentSession("session-1")
-        state.value = state.value.copy(
+        seed {
+            it.copy(
             streamingPartTexts = mapOf("part-1" to "partial"),
             streamingReasoningPart = Part(id = "part-1", messageId = "m1", sessionId = "session-1", type = "reasoning")
-        )
+            )
+        }
 
         coordinator.handleEvent(event("session.status") {
             put("sessionID", JsonPrimitive("session-1"))
             put("status", buildJsonObject { put("type", JsonPrimitive("idle")) })
         })
 
-        assertFalse(state.value.sessionStatuses["session-1"]!!.isBusy)
+        assertFalse(slices.sessionList.value.sessionStatuses["session-1"]!!.isBusy)
         assertEquals(listOf("session-1" to true), callbacks.onRefreshMessagesCalls)
     }
 
@@ -220,21 +238,21 @@ class SessionSyncCoordinatorTest {
             put("status", buildJsonObject { put("type", JsonPrimitive("idle")) })
         })
 
-        assertFalse(state.value.sessionStatuses["session-1"]!!.isBusy)
+        assertFalse(slices.sessionList.value.sessionStatuses["session-1"]!!.isBusy)
         assertTrue(callbacks.onRefreshMessagesCalls.isEmpty())
     }
 
     @Test
     fun `session status idle on a temp-cleared non-current session drops it from tempClearedUnread`() {
         setCurrentSession("session-1")
-        state.value = state.value.copy(tempClearedUnread = setOf("session-2"))
+        seed { it.copy(tempClearedUnread = setOf("session-2")) }
 
         coordinator.handleEvent(event("session.status") {
             put("sessionID", JsonPrimitive("session-2"))
             put("status", buildJsonObject { put("type", JsonPrimitive("idle")) })
         })
 
-        assertFalse(state.value.tempClearedUnread.contains("session-2"))
+        assertFalse(slices.unread.value.tempClearedUnread.contains("session-2"))
     }
 
     @Test
@@ -268,7 +286,7 @@ class SessionSyncCoordinatorTest {
             put("sessionID", JsonPrimitive("session-2"))
         })
 
-        assertTrue(state.value.unreadSessions.contains("session-2"))
+        assertTrue(slices.unread.value.unreadSessions.contains("session-2"))
         assertTrue(callbacks.onRefreshMessagesCalls.isEmpty())
     }
 
@@ -280,7 +298,7 @@ class SessionSyncCoordinatorTest {
             put("sessionID", JsonPrimitive("session-1"))
         })
 
-        assertFalse(state.value.unreadSessions.contains("session-1"))
+        assertFalse(slices.unread.value.unreadSessions.contains("session-1"))
     }
 
     // ── message.updated (patch-if-found + insert-if-absent) ─────────────────
@@ -288,9 +306,11 @@ class SessionSyncCoordinatorTest {
     @Test
     fun `message updated patches an existing message in place without reloading`() {
         setCurrentSession("session-1")
-        state.value = state.value.copy(
+        seed {
+            it.copy(
             messages = listOf(Message(id = "m1", role = "assistant"), Message(id = "m2", role = "user"))
-        )
+            )
+        }
 
         coordinator.handleEvent(event("message.updated") {
             put("sessionID", JsonPrimitive("session-1"))
@@ -301,7 +321,7 @@ class SessionSyncCoordinatorTest {
             })
         })
 
-        assertEquals(listOf("m1", "m2"), state.value.messages.map { it.id })
+        assertEquals(listOf("m1", "m2"), slices.chat.value.messages.map { it.id })
         // No reload issued — patch is in-place.
         assertTrue(callbacks.onRefreshMessagesCalls.isEmpty())
     }
@@ -309,7 +329,7 @@ class SessionSyncCoordinatorTest {
     @Test
     fun `message updated inserts a new message when its id is absent from the local list`() {
         setCurrentSession("session-1")
-        state.value = state.value.copy(messages = listOf(Message(id = "m1", role = "user")))
+        seed { it.copy(messages = listOf(Message(id = "m1", role = "user"))) }
 
         coordinator.handleEvent(event("message.updated") {
             put("sessionID", JsonPrimitive("session-1"))
@@ -320,13 +340,13 @@ class SessionSyncCoordinatorTest {
         })
 
         // Inserted at the tail (oldest-first list).
-        assertEquals(listOf("m1", "m2"), state.value.messages.map { it.id })
+        assertEquals(listOf("m1", "m2"), slices.chat.value.messages.map { it.id })
     }
 
     @Test
     fun `message updated is ignored when the event targets a non-current session`() {
         setCurrentSession("session-1")
-        state.value = state.value.copy(messages = listOf(Message(id = "m1", role = "user")))
+        seed { it.copy(messages = listOf(Message(id = "m1", role = "user"))) }
 
         coordinator.handleEvent(event("message.updated") {
             put("sessionID", JsonPrimitive("session-other"))
@@ -337,7 +357,7 @@ class SessionSyncCoordinatorTest {
         })
 
         // Defensive session guard: list untouched.
-        assertEquals(listOf("m1"), state.value.messages.map { it.id })
+        assertEquals(listOf("m1"), slices.chat.value.messages.map { it.id })
     }
 
     // ── message.part.updated (full text / delta / part.created) ─────────────
@@ -356,7 +376,7 @@ class SessionSyncCoordinatorTest {
             })
         })
 
-        assertEquals("Hello world", state.value.streamingPartTexts["part-1"])
+        assertEquals("Hello world", slices.chat.value.streamingPartTexts["part-1"])
     }
 
     @Test
@@ -373,17 +393,19 @@ class SessionSyncCoordinatorTest {
             put("delta", JsonPrimitive("thinking"))
         })
 
-        assertEquals("thinking", state.value.streamingPartTexts["part-1"])
-        assertEquals("part-1", state.value.streamingReasoningPart?.id)
+        assertEquals("thinking", slices.chat.value.streamingPartTexts["part-1"])
+        assertEquals("part-1", slices.chat.value.streamingReasoningPart?.id)
     }
 
     @Test
     fun `message part updated with null ids clears the overlay and triggers a resetLimit=false reload`() {
         setCurrentSession("session-1")
-        state.value = state.value.copy(
+        seed {
+            it.copy(
             streamingPartTexts = mapOf("part-1" to "stale"),
             streamingReasoningPart = Part(id = "part-1", messageId = "m1", sessionId = "session-1", type = "text")
-        )
+            )
+        }
 
         // part.created: part object present but no messageID / id yet.
         coordinator.handleEvent(event("message.part.updated") {
@@ -391,8 +413,8 @@ class SessionSyncCoordinatorTest {
             put("part", buildJsonObject { put("type", JsonPrimitive("text")) })
         })
 
-        assertTrue(state.value.streamingPartTexts.isEmpty())
-        assertNull(state.value.streamingReasoningPart)
+        assertTrue(slices.chat.value.streamingPartTexts.isEmpty())
+        assertNull(slices.chat.value.streamingReasoningPart)
         assertEquals(listOf("session-1" to false), callbacks.onRefreshMessagesCalls)
     }
 
@@ -410,7 +432,7 @@ class SessionSyncCoordinatorTest {
             put("delta", JsonPrimitive("ignored"))
         })
 
-        assertTrue(state.value.streamingPartTexts.isEmpty())
+        assertTrue(slices.chat.value.streamingPartTexts.isEmpty())
         assertTrue(callbacks.onRefreshMessagesCalls.isEmpty())
     }
 
@@ -431,7 +453,7 @@ class SessionSyncCoordinatorTest {
         delta("Hello")
         delta(", world")
 
-        assertEquals("Hello, world", state.value.streamingPartTexts["part-1"])
+        assertEquals("Hello, world", slices.chat.value.streamingPartTexts["part-1"])
         assertTrue(callbacks.onRefreshMessagesCalls.isEmpty())
     }
 
@@ -446,7 +468,7 @@ class SessionSyncCoordinatorTest {
             put("delta", JsonPrimitive("ignored"))
         })
 
-        assertTrue(state.value.streamingPartTexts.isEmpty())
+        assertTrue(slices.chat.value.streamingPartTexts.isEmpty())
     }
 
     // ── permission.asked / question.* / todo.updated ────────────────────────
@@ -478,15 +500,17 @@ class SessionSyncCoordinatorTest {
             })
         })
 
-        assertEquals(listOf("question-1"), state.value.pendingQuestions.map { it.id })
-        assertEquals("session-1", state.value.pendingQuestions.single().sessionId)
+        assertEquals(listOf("question-1"), slices.sessionList.value.pendingQuestions.map { it.id })
+        assertEquals("session-1", slices.sessionList.value.pendingQuestions.single().sessionId)
     }
 
     @Test
     fun `question asked is idempotent when the id already exists`() {
-        state.value = state.value.copy(
+        seed {
+            it.copy(
             pendingQuestions = listOf(QuestionRequest(id = "question-1", sessionId = "session-1", questions = emptyList()))
-        )
+            )
+        }
 
         coordinator.handleEvent(event("question.asked") {
             put("id", JsonPrimitive("question-1"))
@@ -494,36 +518,40 @@ class SessionSyncCoordinatorTest {
             put("questions", buildJsonArray {})
         })
 
-        assertEquals(1, state.value.pendingQuestions.size)
+        assertEquals(1, slices.sessionList.value.pendingQuestions.size)
     }
 
     @Test
     fun `question rejected removes the pending question by requestID`() {
-        state.value = state.value.copy(
+        seed {
+            it.copy(
             pendingQuestions = listOf(
                 QuestionRequest(id = "question-1", sessionId = "session-1", questions = emptyList()),
                 QuestionRequest(id = "question-2", sessionId = "session-2", questions = emptyList())
             )
-        )
+            )
+        }
 
         coordinator.handleEvent(event("question.rejected") {
             put("requestID", JsonPrimitive("question-1"))
         })
 
-        assertEquals(listOf("question-2"), state.value.pendingQuestions.map { it.id })
+        assertEquals(listOf("question-2"), slices.sessionList.value.pendingQuestions.map { it.id })
     }
 
     @Test
     fun `question replied removes the pending question by id fallback`() {
-        state.value = state.value.copy(
+        seed {
+            it.copy(
             pendingQuestions = listOf(QuestionRequest(id = "question-1", sessionId = "session-1", questions = emptyList()))
-        )
+            )
+        }
 
         coordinator.handleEvent(event("question.replied") {
             put("id", JsonPrimitive("question-1"))
         })
 
-        assertTrue(state.value.pendingQuestions.isEmpty())
+        assertTrue(slices.sessionList.value.pendingQuestions.isEmpty())
     }
 
     @Test
@@ -540,7 +568,7 @@ class SessionSyncCoordinatorTest {
             })
         })
 
-        val todos = state.value.sessionTodos["session-1"]
+        val todos = slices.sessionList.value.sessionTodos["session-1"]
         assertNotNull(todos)
         assertEquals(1, todos!!.size)
         assertEquals("todo-1", todos[0].id)
@@ -553,7 +581,7 @@ class SessionSyncCoordinatorTest {
             put("todos", JsonPrimitive("not-an-array"))
         })
 
-        assertNull(state.value.sessionTodos["session-1"])
+        assertNull(slices.sessionList.value.sessionTodos["session-1"])
     }
 
     @Test

@@ -72,7 +72,7 @@ import com.yage.opencode_client.data.model.HostProfile
 import com.yage.opencode_client.data.model.Session
 import com.yage.opencode_client.data.model.SessionStatus
 import com.yage.opencode_client.data.model.TodoItem
-import com.yage.opencode_client.ui.AppState
+import com.yage.opencode_client.ui.ContextUsage
 import com.yage.opencode_client.ui.TunnelActivationState
 import com.yage.opencode_client.ui.theme.BrandGold
 import com.yage.opencode_client.ui.theme.opencode
@@ -88,7 +88,7 @@ internal data class ChatTopBarState(
     val expandedSessionIds: Set<String> = emptySet(),
     val agents: List<AgentInfo>,
     val selectedAgentName: String,
-    val contextUsage: AppState.ContextUsage?,
+    val contextUsage: ContextUsage?,
     val sessionTodos: List<TodoItem> = emptyList(),
     val hostName: String = "",
     val isConnected: Boolean = false,
@@ -598,7 +598,7 @@ private fun SessionTab(
  */
 @Composable
 private fun ContextMenuButton(
-    usage: AppState.ContextUsage?,
+    usage: ContextUsage?,
     todos: List<TodoItem>,
     selectedAgentName: String,
     expanded: Boolean,
@@ -686,7 +686,7 @@ private fun ContextMenuButton(
 
 @Composable
 private fun ContextUsageDialog(
-    usage: AppState.ContextUsage?,
+    usage: ContextUsage?,
     onDismiss: () -> Unit
 ) {
     AlertDialog(
@@ -955,7 +955,7 @@ private fun formatTrafficBytes(bytes: Long): String {
 }
 
 @Composable
-internal fun ContextUsageRing(usage: AppState.ContextUsage?) {
+internal fun ContextUsageRing(usage: ContextUsage?) {
     val ringColor = when {
         usage == null -> MaterialTheme.colorScheme.onSurfaceVariant
         usage.percentage >= 0.9f -> MaterialTheme.colorScheme.error
