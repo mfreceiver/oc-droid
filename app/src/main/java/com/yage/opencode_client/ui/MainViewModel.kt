@@ -723,6 +723,24 @@ class MainViewModel @Inject constructor(
     /** Read-only host slice for direct subscription (M4 consumers). */
     val hostFlow: StateFlow<HostState> = _hostFlow.asStateFlow()
 
+    /**
+     * §R-17 Stage 1: bundle of all nine slice flows, passed to free helpers
+     * (`launch*` / `handle*` / `applySavedSettings`) so their `updateAndSync`
+     * calls keep every slice in sync with the AppState mirror. Built once;
+     * the underlying MutableStateFlows are the same `_xxxFlow` fields above.
+     */
+    private val sliceFlows: SliceFlows = SliceFlows(
+        connection = _connectionFlow,
+        traffic = _trafficFlow,
+        composer = _composerFlow,
+        file = _fileFlow,
+        settings = _settingsFlow,
+        chat = _chatFlow,
+        sessionList = _sessionListFlow,
+        unread = _unreadFlow,
+        host = _hostFlow
+    )
+
     val state: StateFlow<AppState> = _state.asStateFlow()
 
     /**
@@ -1285,7 +1303,7 @@ class MainViewModel @Inject constructor(
     }
 
     private fun loadSettings() {
-        applySavedSettings(repository, settingsManager, hostProfileStore, _state, _connectionFlow, _settingsFlow)
+        applySavedSettings(repository, settingsManager, hostProfileStore, _state, _connectionFlow, _settingsFlow, sliceFlows)
     }
 
     /** Q6: persist the phone pager page the user navigated to, so cold start lands there. */
@@ -1739,7 +1757,8 @@ class MainViewModel @Inject constructor(
             settingsManager = settingsManager,
             onSelectSession = ::selectSession,
             onLoadSessionStatus = ::loadSessionStatus,
-            onLoadMessages = { sessionId -> loadMessages(sessionId) }
+            onLoadMessages = { sessionId -> loadMessages(sessionId) },
+            slices = sliceFlows,
         )
     }
 
@@ -1748,7 +1767,8 @@ class MainViewModel @Inject constructor(
             scope = viewModelScope,
             repository = repository,
             state = _state,
-            onSelectSession = ::selectSession
+            onSelectSession = ::selectSession,
+            slices = sliceFlows,
         )
     }
 
@@ -1756,7 +1776,8 @@ class MainViewModel @Inject constructor(
         launchLoadSessionStatus(
             scope = viewModelScope,
             repository = repository,
-            state = _state
+            state = _state,
+            slices = sliceFlows,
         )
     }
 
@@ -1783,7 +1804,7 @@ class MainViewModel @Inject constructor(
             captureCurrentSessionWindow(previousSessionId)
         }
 
-        selectSessionState(_state, settingsManager, sessionId, _composerFlow)
+        selectSessionState(_state, settingsManager, sessionId, _composerFlow, sliceFlows)
 
         // §Per-session message cache (restore): if the new session has a
         // cached window, seed messages/parts/cursor/hasMore from it INSTEAD
@@ -2012,7 +2033,8 @@ class MainViewModel @Inject constructor(
             sessionId = sessionId,
             resetLimit = resetLimit,
             settingsManager = settingsManager,
-            onCacheWindow = ::writeSessionWindow
+            onCacheWindow = ::writeSessionWindow,
+            slices = sliceFlows,
         )
     }
 
@@ -2028,7 +2050,8 @@ class MainViewModel @Inject constructor(
             repository = repository,
             state = _state,
             sessionId = sessionId,
-            onCacheWindow = ::writeSessionWindow
+            onCacheWindow = ::writeSessionWindow,
+            slices = sliceFlows,
         )
     }
 
@@ -2093,7 +2116,8 @@ class MainViewModel @Inject constructor(
             settingsFlow = _settingsFlow,
             sessionId = sessionId,
             settingsManager = settingsManager,
-            onCacheWindow = ::writeSessionWindow
+            onCacheWindow = ::writeSessionWindow,
+            slices = sliceFlows,
         )
     }
 
@@ -2109,7 +2133,8 @@ class MainViewModel @Inject constructor(
             repository = repository,
             state = _state,
             sessionId = sessionId,
-            onCacheWindow = ::writeSessionWindow
+            onCacheWindow = ::writeSessionWindow,
+            slices = sliceFlows,
         )
     }
 
@@ -2141,7 +2166,7 @@ class MainViewModel @Inject constructor(
     }
 
     fun createSession(title: String? = null) {
-        launchCreateSession(viewModelScope, repository, _state, title, ::selectSession)
+        launchCreateSession(viewModelScope, repository, _state, title, ::selectSession, sliceFlows)
     }
 
     /**
@@ -2223,19 +2248,19 @@ class MainViewModel @Inject constructor(
     }
 
     fun forkSession(sessionId: String, messageId: String?) {
-        launchForkSession(viewModelScope, repository, _state, sessionId, messageId, ::selectSession)
+        launchForkSession(viewModelScope, repository, _state, sessionId, messageId, ::selectSession, sliceFlows)
     }
 
     fun archiveSession(sessionId: String) {
-        launchSetSessionArchived(viewModelScope, repository, _state, sessionId, archived = true)
+        launchSetSessionArchived(viewModelScope, repository, _state, sessionId, archived = true, sliceFlows)
     }
 
     fun restoreSession(sessionId: String) {
-        launchSetSessionArchived(viewModelScope, repository, _state, sessionId, archived = false)
+        launchSetSessionArchived(viewModelScope, repository, _state, sessionId, archived = false, sliceFlows)
     }
 
     fun deleteSession(sessionId: String) {
-        launchDeleteSession(viewModelScope, repository, _state, settingsManager, sessionId, ::selectSession)
+        launchDeleteSession(viewModelScope, repository, _state, settingsManager, sessionId, ::selectSession, sliceFlows)
     }
 
     fun sendMessage() {
@@ -2359,7 +2384,8 @@ class MainViewModel @Inject constructor(
                 },
                 onComplete = {
                     writeComposer { state -> state.copy(sendingSessionIds = state.sendingSessionIds - sessionId) }
-                }
+                },
+                slices = sliceFlows,
             )
         }
 
@@ -2854,7 +2880,8 @@ class MainViewModel @Inject constructor(
             onRefreshMessages = ::loadMessagesWithRetry,
             onRefreshSessions = ::loadSessions,
             onLoadPendingPermissions = ::loadPendingPermissions,
-            onNonFatalIssue = { message -> reportNonFatalIssue(TAG, message) }
+            onNonFatalIssue = { message -> reportNonFatalIssue(TAG, message) },
+            slices = sliceFlows,
         )
     }
 

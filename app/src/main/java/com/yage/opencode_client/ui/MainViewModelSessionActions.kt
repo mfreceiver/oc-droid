@@ -15,6 +15,122 @@ import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 
 /**
+ * §R-17 Stage 1 (consumer-migration enabler): container holding all nine slice
+ * `MutableStateFlow`s so that free helpers (`launch*` / `handle*`) can
+ * synchronise EVERY slice after writing the AppState mirror — without each
+ * helper taking nine separate flow params. Built once in MainViewModel and
+ * passed (as `slices`) to every free helper that writes AppState.
+ */
+internal data class SliceFlows(
+    val connection: MutableStateFlow<ConnectionState>,
+    val traffic: MutableStateFlow<TrafficState>,
+    val composer: MutableStateFlow<ComposerState>,
+    val file: MutableStateFlow<FileState>,
+    val settings: MutableStateFlow<SettingsState>,
+    val chat: MutableStateFlow<ChatState>,
+    val sessionList: MutableStateFlow<SessionListState>,
+    val unread: MutableStateFlow<UnreadState>,
+    val host: MutableStateFlow<HostState>
+)
+
+/**
+ * §R-17 Stage 1: mirror every slice from an AppState snapshot. Extracted from
+ * MainViewModel.updateState's inline sync so free helpers can call it after
+ * `state.updateAndSync(slices) { ... }`. `MutableStateFlow`'s distinctUntilChanged means only
+ * slices whose fields actually changed emit — so calling this on every write
+ * still gives per-slice isolation once consumers subscribe to a single slice.
+ */
+@Suppress("DEPRECATION")
+internal fun syncSlicesFromAppState(state: AppState, slices: SliceFlows) {
+    slices.connection.value = ConnectionState(
+        isConnected = state.isConnected,
+        isConnecting = state.isConnecting,
+        serverVersion = state.serverVersion,
+        connectionPhase = state.connectionPhase,
+        tunnelActivationState = state.tunnelActivationState
+    )
+    slices.traffic.value = TrafficState(
+        trafficSent = state.trafficSent,
+        trafficReceived = state.trafficReceived
+    )
+    slices.composer.value = ComposerState(
+        inputText = state.inputText,
+        imageAttachments = state.imageAttachments,
+        sendingSessionIds = state.sendingSessionIds,
+        draftWorkdir = state.draftWorkdir
+    )
+    slices.file.value = FileState(
+        filePathToShowInFiles = state.filePathToShowInFiles,
+        filePreviewOriginRoute = state.filePreviewOriginRoute,
+        fileBrowserOpen = state.fileBrowserOpen,
+        fileBrowserWorkdir = state.fileBrowserWorkdir
+    )
+    slices.settings.value = SettingsState(
+        themeMode = state.themeMode,
+        markdownFontSizes = state.markdownFontSizes,
+        selectedAgentName = state.selectedAgentName,
+        agents = state.agents,
+        providers = state.providers,
+        availableCommands = state.availableCommands
+    )
+    slices.chat.value = ChatState(
+        currentSessionId = state.currentSessionId,
+        messages = state.messages,
+        partsByMessage = state.partsByMessage,
+        streamingPartTexts = state.streamingPartTexts,
+        streamingReasoningPart = state.streamingReasoningPart,
+        olderMessagesCursor = state.olderMessagesCursor,
+        hasMoreMessages = state.hasMoreMessages,
+        isLoadingMessages = state.isLoadingMessages,
+        gapInfo = state.gapInfo,
+        staleNotice = state.staleNotice
+    )
+    slices.sessionList.value = SessionListState(
+        sessions = state.sessions,
+        sessionStatuses = state.sessionStatuses,
+        expandedSessionIds = state.expandedSessionIds,
+        loadedSessionLimit = state.loadedSessionLimit,
+        hasMoreSessions = state.hasMoreSessions,
+        isLoadingMoreSessions = state.isLoadingMoreSessions,
+        isRefreshingSessions = state.isRefreshingSessions,
+        pendingPermissions = state.pendingPermissions,
+        pendingQuestions = state.pendingQuestions,
+        childSessions = state.childSessions,
+        directorySessions = state.directorySessions,
+        openSessionIds = state.openSessionIds,
+        sessionTodos = state.sessionTodos
+    )
+    slices.unread.value = UnreadState(
+        unreadSessions = state.unreadSessions,
+        tempClearedUnread = state.tempClearedUnread,
+        lastViewedTime = state.lastViewedTime
+    )
+    slices.host.value = HostState(
+        hostProfiles = state.hostProfiles,
+        currentHostProfileId = state.currentHostProfileId
+    )
+}
+
+/**
+ * §R-17 Stage 1: write AppState + synchronise every slice. Replaces
+ * `state.updateAndSync(slices) { ... }` in free helpers. Single-threaded (Main.immediate) so
+ * the non-CAS `value =` is equivalent to `update {}`; the slice sync runs
+ * synchronously in the same call so any subsequent slice read sees the new
+ * values. `slices` is nullable so legacy test callers (CatchUpGapTest) that
+ * invoke helpers directly without a SliceFlows instance keep compiling — when
+ * null, only the AppState mirror is written (the test helper
+ * `syncAllSlicesFromState` covers the slice sync explicitly).
+ */
+internal fun MutableStateFlow<AppState>.updateAndSync(
+    slices: SliceFlows?,
+    transform: (AppState) -> AppState
+) {
+    val next = transform(value)
+    value = next
+    if (slices != null) syncSlicesFromAppState(next, slices)
+}
+
+/**
  * §R-17 M3: top-level mirror writers for the composer/settings slices. These
  * duplicate the field lists of [MainViewModel.writeComposer] /
  * [MainViewModel.writeSettings] because the `launch*` helpers in this file
@@ -111,10 +227,11 @@ internal fun launchLoadSessions(
     onSelectSession: (String) -> Unit,
     onLoadSessionStatus: () -> Unit,
     onLoadMessages: (String) -> Unit
-) {
+, slices: SliceFlows? = null) {
+
     scope.launch {
         val limit = MainViewModelTimings.sessionPageSize
-        state.update {
+        state.updateAndSync(slices) {
             it.copy(
                 loadedSessionLimit = limit,
                 hasMoreSessions = true,
@@ -124,7 +241,7 @@ internal fun launchLoadSessions(
         }
         repository.getSessions(limit)
             .onSuccess { sessions ->
-                state.update {
+                state.updateAndSync(slices) {
                     val mergedSessions = mergeRefreshedSessionsPreservingLocalActivity(
                         sessions,
                         it.sessions,
@@ -173,12 +290,12 @@ internal fun launchLoadSessions(
                         onLoadMessages(currentId)
                     }
                     else -> {
-                        state.update { it.copy(currentSessionId = null, messages = emptyList(), partsByMessage = emptyMap()) }
+                        state.updateAndSync(slices) { it.copy(currentSessionId = null, messages = emptyList(), partsByMessage = emptyMap()) }
                     }
                 }
             }
             .onFailure { error ->
-                state.update {
+                state.updateAndSync(slices) {
                     it.copy(
                         isLoadingMoreSessions = false,
                         isRefreshingSessions = false,
@@ -194,10 +311,11 @@ internal fun launchLoadMoreSessions(
     repository: OpenCodeRepository,
     state: MutableStateFlow<AppState>,
     onSelectSession: (String) -> Unit
-) {
+, slices: SliceFlows? = null) {
+
     var nextLimit = 0
     var shouldLaunch = false
-    state.update { current ->
+    state.updateAndSync(slices) { current ->
         if (!current.hasMoreSessions || current.isLoadingMoreSessions) {
             current
         } else {
@@ -211,10 +329,10 @@ internal fun launchLoadMoreSessions(
         repository.getSessions(nextLimit)
             .onSuccess { sessions ->
                 if (state.value.loadedSessionLimit > nextLimit) {
-                    state.update { it.copy(isLoadingMoreSessions = false) }
+                    state.updateAndSync(slices) { it.copy(isLoadingMoreSessions = false) }
                     return@onSuccess
                 }
-                state.update {
+                state.updateAndSync(slices) {
                     val mergedSessions = mergeRefreshedSessionsPreservingLocalActivity(
                         sessions,
                         it.sessions,
@@ -241,11 +359,11 @@ internal fun launchLoadMoreSessions(
                     // refreshedSessions.first(): tolerate the session even when
                     // it is temporarily absent from the refreshed list. #10.
                     currentId != null -> Unit
-                    else -> state.update { it.copy(currentSessionId = null, messages = emptyList(), partsByMessage = emptyMap()) }
+                    else -> state.updateAndSync(slices) { it.copy(currentSessionId = null, messages = emptyList(), partsByMessage = emptyMap()) }
                 }
             }
             .onFailure { error ->
-                state.update {
+                state.updateAndSync(slices) {
                     it.copy(
                         isLoadingMoreSessions = false,
                         error = "Failed to load more sessions: ${errorMessageOrFallback(error, "unknown error")}"
@@ -259,11 +377,12 @@ internal fun launchLoadSessionStatus(
     scope: CoroutineScope,
     repository: OpenCodeRepository,
     state: MutableStateFlow<AppState>
-) {
+, slices: SliceFlows? = null) {
+
     scope.launch {
         repository.getSessionStatus()
             .onSuccess { statuses ->
-                state.update { it.copy(sessionStatuses = statuses) }
+                state.updateAndSync(slices) { it.copy(sessionStatuses = statuses) }
             }
             .onFailure { error ->
                 reportNonFatalIssue("MainViewModel", "Failed to load session status", error)
@@ -276,7 +395,8 @@ internal fun selectSessionState(
     settingsManager: SettingsManager,
     sessionId: String,
     composerFlow: MutableStateFlow<ComposerState>
-) {
+, slices: SliceFlows? = null) {
+
     val oldSessionId = state.value.currentSessionId
     // §R-17 M3: read composer slice directly (authoritative; mirror is kept in
     // sync by applyComposerSlice but reading the slice avoids the @Deprecated
@@ -288,7 +408,7 @@ internal fun selectSessionState(
 
     settingsManager.currentSessionId = sessionId
     val restoredDraft = settingsManager.getDraftText(sessionId)
-        state.update {
+        state.updateAndSync(slices) {
             // §15.2 (review B2): clear streaming buffers on session switch so a
             // stale partial from the previous session cannot bleed into the new
             // one and re-combine with fresh deltas (key collision on
@@ -338,7 +458,8 @@ internal fun launchLoadMessages(
     // §R-17 M3: optional settings slice (see launchCatchUp). Defaults null so
     // legacy test callers keep compiling; production passes _settingsFlow.
     settingsFlow: MutableStateFlow<SettingsState>? = null
-) {
+, slices: SliceFlows? = null) {
+
     // Coalesce concurrent loads. ADB showed startup triggers message loads from
     // multiple paths (testConnection→loadSessions→onLoadMessages, ON_START
     // catch-up) within ~2.6s — 3 parallel fetches of the same large
@@ -349,7 +470,7 @@ internal fun launchLoadMessages(
         DebugLog.d("Sync", "launchLoadMessages skipped: isLoadingMessages already true")
         return
     }
-    state.update { it.copy(isLoadingMessages = true) }
+    state.updateAndSync(slices) { it.copy(isLoadingMessages = true) }
     scope.launch {
         // §on-demand: cursor pagination. The first load (resetLimit) captures the
         // X-Next-Cursor for future loadMore; subsequent periodic reloads fetch the
@@ -363,7 +484,7 @@ internal fun launchLoadMessages(
                     val inferredAgentName = lastAssistant?.info?.agent
                     val agentName = settingsManager?.getAgentForSession(sessionId) ?: inferredAgentName
                     val beforeMergeSize = state.value.messages.size
-                    state.update {
+                    state.updateAndSync(slices) {
                         // §preserveUnfetched (mirrors opencode-web reconcileFetched):
                         // a periodic reload (resetLimit=false) fetches the latest
                         // window but must NOT erase already-loaded older history
@@ -460,20 +581,20 @@ internal fun launchLoadMessages(
                         )
                     )
                 } else {
-                    state.update { it.copy(isLoadingMessages = false) }
+                    state.updateAndSync(slices) { it.copy(isLoadingMessages = false) }
                 }
             }
             .onFailure { error ->
                 DebugLog.w("Sync", "loadMessages failed: ${errorMessageOrFallback(error, "unknown error")}")
                 if (sessionId == state.value.currentSessionId) {
-                    state.update {
+                    state.updateAndSync(slices) {
                         it.copy(
                             isLoadingMessages = false,
                             error = "Failed to load messages: ${errorMessageOrFallback(error, "unknown error")}"
                         )
                     }
                 } else {
-                    state.update { it.copy(isLoadingMessages = false) }
+                    state.updateAndSync(slices) { it.copy(isLoadingMessages = false) }
                 }
             }
 
@@ -482,7 +603,7 @@ internal fun launchLoadMessages(
         try {
             repository.getSessionTodos(sessionId)
                 .onSuccess { todos ->
-                    state.update { it.copy(sessionTodos = it.sessionTodos + (sessionId to todos)) }
+                    state.updateAndSync(slices) { it.copy(sessionTodos = it.sessionTodos + (sessionId to todos)) }
                 }
         } catch (e: Exception) {
             // R-14: never swallow structured concurrency cancellation — re-throw
@@ -545,13 +666,14 @@ internal fun launchCatchUp(
     // when null, selectedAgentName is written only to the AppState mirror
     // (production callers pass _settingsFlow so the slice stays in sync).
     settingsFlow: MutableStateFlow<SettingsState>? = null
-) {
+, slices: SliceFlows? = null) {
+
     // §Phase1B (gpt-2 S3 / glm-1 🟡-1): synchronous check-and-set (mirrors
     // launchLoadMessages) to close the race where two concurrent catch-up
     // triggers each pass the guard before either sets the flag, firing two
     // probes / tail reloads. Reset on every exit path (skip / success / fail).
     if (state.value.isLoadingMessages) return
-    state.update { it.copy(isLoadingMessages = true) }
+    state.updateAndSync(slices) { it.copy(isLoadingMessages = true) }
     scope.launch {
         // Order-independent newest id (messages is oldest-first per ora-2).
         val anchorNewestId = state.value.messages
@@ -561,14 +683,14 @@ internal fun launchCatchUp(
         // No newer message on the server → skip the 5-message reload entirely.
         // Preserve any already-open gap (it is still unresolved).
         if (anchorNewestId != null && serverNewestId != null && anchorNewestId == serverNewestId) {
-            state.update { it.copy(isLoadingMessages = false) }
+            state.updateAndSync(slices) { it.copy(isLoadingMessages = false) }
             return@launch
         }
 
         repository.getMessagesPaged(sessionId, 5, before = null)
             .onSuccess { page ->
                 if (sessionId != state.value.currentSessionId) {
-                    state.update { it.copy(isLoadingMessages = false) }
+                    state.updateAndSync(slices) { it.copy(isLoadingMessages = false) }
                     return@onSuccess
                 }
                 // §preserveUnfetched merge (resetLimit=false): keep older loaded
@@ -610,7 +732,7 @@ internal fun launchCatchUp(
                 val inferredAgentName = lastAssistant?.info?.agent
                 val agentName = settingsManager?.getAgentForSession(sessionId) ?: inferredAgentName
 
-                state.update {
+                state.updateAndSync(slices) {
                     it.copy(
                         messages = mergedMessages,
                         partsByMessage = mergedParts,
@@ -644,7 +766,7 @@ internal fun launchCatchUp(
                 if (sessionId == state.value.currentSessionId) {
                     reportNonFatalIssue("MainViewModel", "Catch-up tail reload failed")
                 }
-                state.update { it.copy(isLoadingMessages = false) }
+                state.updateAndSync(slices) { it.copy(isLoadingMessages = false) }
             }
     }
 }
@@ -664,22 +786,23 @@ internal fun launchCloseGap(
     state: MutableStateFlow<AppState>,
     sessionId: String,
     onCacheWindow: (sessionId: String, window: CachedSessionWindow) -> Unit = { _, _ -> }
-) {
+, slices: SliceFlows? = null) {
+
     val gap = state.value.gapInfo ?: return
     if (!gap.open) return
     if (state.value.isLoadingMessages) return
     val cursor = gap.tailOldestCursor
     if (cursor == null) {
         // No more history to page — can't bridge; stop showing the divider.
-        state.update { it.copy(gapInfo = gap.copy(open = false)) }
+        state.updateAndSync(slices) { it.copy(gapInfo = gap.copy(open = false)) }
         return
     }
-    state.update { it.copy(isLoadingMessages = true) }
+    state.updateAndSync(slices) { it.copy(isLoadingMessages = true) }
     scope.launch {
         repository.getMessagesPaged(sessionId, limit = 5, before = cursor)
             .onSuccess { page ->
                 if (sessionId != state.value.currentSessionId) {
-                    state.update { it.copy(isLoadingMessages = false) }
+                    state.updateAndSync(slices) { it.copy(isLoadingMessages = false) }
                     return@onSuccess
                 }
                 // Closure check BEFORE dedup (raw page — `before=` is inclusive).
@@ -695,7 +818,7 @@ internal fun launchCloseGap(
                 // (tailOldestId) advances to the OLDEST id just loaded (the new
                 // seam between filled-gap and any still-missing range).
                 val newTailOldestId = bridged.minByOrNull { it.info.time?.created ?: Long.MAX_VALUE }?.info?.id
-                state.update {
+                state.updateAndSync(slices) {
                     val insertIdx = it.messages.indexOfFirst { m -> m.id == gap.tailOldestId }
                     val mergedMessages = if (insertIdx >= 0) {
                         it.messages.subList(0, insertIdx) + bridgedMessages + it.messages.subList(insertIdx, it.messages.size)
@@ -727,7 +850,7 @@ internal fun launchCloseGap(
                 if (sessionId == state.value.currentSessionId) {
                     reportNonFatalIssue("MainViewModel", "Gap closure fetch failed")
                 }
-                state.update { it.copy(isLoadingMessages = false) }
+                state.updateAndSync(slices) { it.copy(isLoadingMessages = false) }
             }
     }
 }
@@ -738,7 +861,8 @@ internal fun launchLoadMoreMessages(
     state: MutableStateFlow<AppState>,
     sessionId: String,
     onCacheWindow: (sessionId: String, window: CachedSessionWindow) -> Unit = { _, _ -> }
-) {
+, slices: SliceFlows? = null) {
+
     if (state.value.isLoadingMessages) return
     // §on-demand: cursor-based history paging. Fetch one older page via the V1
     // `before` cursor and PREPEND it — no longer re-downloading the latest
@@ -750,7 +874,7 @@ internal fun launchLoadMoreMessages(
     // synchronously BEFORE launch so a rapid second loadMore (fast scroll /
     // recomposition) can't pass the guard and fire a duplicate concurrent
     // fetch of the same cursor page.
-    state.update { it.copy(isLoadingMessages = true) }
+    state.updateAndSync(slices) { it.copy(isLoadingMessages = true) }
     scope.launch {
         repository.getMessagesPaged(sessionId, limit = 5, before = cursor)
             .onSuccess { page ->
@@ -762,7 +886,7 @@ internal fun launchLoadMoreMessages(
                         val older = page.items.filterNot { it.info.id in existingIds }
                         val olderMessages = older.map { it.info }
                         val olderParts = older.associate { it.info.id to it.parts }
-                        state.update {
+                        state.updateAndSync(slices) {
                             it.copy(
                                 messages = olderMessages + it.messages,
                                 partsByMessage = olderParts + it.partsByMessage,
@@ -772,7 +896,7 @@ internal fun launchLoadMoreMessages(
                             )
                         }
                     } else {
-                        state.update {
+                        state.updateAndSync(slices) {
                             it.copy(
                                 olderMessagesCursor = page.nextCursor,
                                 hasMoreMessages = page.nextCursor != null,
@@ -799,7 +923,7 @@ internal fun launchLoadMoreMessages(
                         )
                     )
                 } else {
-                    state.update { it.copy(isLoadingMessages = false) }
+                    state.updateAndSync(slices) { it.copy(isLoadingMessages = false) }
                 }
             }
             .onFailure {
@@ -810,7 +934,7 @@ internal fun launchLoadMoreMessages(
                 // user can tap "load more" again (transient failures shouldn't
                 // permanently disable history). With limit=5 a page is tiny, so
                 // hitting the 16 MB response cap is essentially impossible.
-                state.update { it.copy(isLoadingMessages = false) }
+                state.updateAndSync(slices) { it.copy(isLoadingMessages = false) }
             }
     }
 }
@@ -840,15 +964,16 @@ internal fun launchCreateSession(
     state: MutableStateFlow<AppState>,
     title: String?,
     onSelectSession: (String) -> Unit
-) {
+, slices: SliceFlows? = null) {
+
     scope.launch {
         repository.createSession(title)
             .onSuccess { session ->
-                state.update { it.copy(sessions = upsertSession(it.sessions, session)) }
+                state.updateAndSync(slices) { it.copy(sessions = upsertSession(it.sessions, session)) }
                 onSelectSession(session.id)
             }
             .onFailure { error ->
-                state.update { it.copy(error = "Failed to create session: ${errorMessageOrFallback(error, "unknown error")}") }
+                state.updateAndSync(slices) { it.copy(error = "Failed to create session: ${errorMessageOrFallback(error, "unknown error")}") }
             }
     }
 }
@@ -860,15 +985,16 @@ internal fun launchForkSession(
     sessionId: String,
     messageId: String?,
     onSelectSession: (String) -> Unit
-) {
+, slices: SliceFlows? = null) {
+
     scope.launch {
         repository.forkSession(sessionId, messageId)
             .onSuccess { session ->
-                state.update { it.copy(sessions = upsertSession(it.sessions, session)) }
+                state.updateAndSync(slices) { it.copy(sessions = upsertSession(it.sessions, session)) }
                 onSelectSession(session.id)
             }
             .onFailure { error ->
-                state.update { it.copy(error = "Failed to fork session: ${errorMessageOrFallback(error, "unknown error")}") }
+                state.updateAndSync(slices) { it.copy(error = "Failed to fork session: ${errorMessageOrFallback(error, "unknown error")}") }
             }
     }
 }
@@ -879,19 +1005,20 @@ internal fun launchSetSessionArchived(
     state: MutableStateFlow<AppState>,
     sessionId: String,
     archived: Boolean
-) {
+, slices: SliceFlows? = null) {
+
     scope.launch {
         val archivedValue = if (archived) System.currentTimeMillis() else -1L
         val ids = sessionSubtreeIds(state.value.sessions, sessionId, parentFirst = !archived)
         for (id in ids) {
             repository.updateSessionArchived(id, archivedValue)
                 .onSuccess { updated ->
-                    state.update { current ->
+                    state.updateAndSync(slices) { current ->
                         current.copy(sessions = current.sessions.map { session -> if (session.id == id) updated else session })
                     }
                 }
                 .onFailure { error ->
-                    state.update {
+                    state.updateAndSync(slices) {
                         it.copy(error = "Failed to ${if (archived) "archive" else "restore"} session: ${errorMessageOrFallback(error, "unknown error")}")
                     }
                     return@launch
@@ -916,7 +1043,8 @@ internal fun launchDeleteSession(
     settingsManager: SettingsManager,
     sessionId: String,
     onSelectSession: (String) -> Unit
-) {
+, slices: SliceFlows? = null) {
+
     scope.launch {
         repository.deleteSession(sessionId)
             .onSuccess {
@@ -926,7 +1054,7 @@ internal fun launchDeleteSession(
                 // leaving it in directorySessions would let SessionsScreen's
                 // union render it — and re-selecting it would upsert a ghost
                 // copy of an already-deleted server session (#10).
-                state.update {
+                state.updateAndSync(slices) {
                     val newSessions = it.sessions.filter { s -> s.id != sessionId }
                     val newDirSessions = it.directorySessions
                         .mapValues { (_, list) -> list.filter { s -> s.id != sessionId } }
@@ -943,12 +1071,12 @@ internal fun launchDeleteSession(
                         // in SettingsManager and would be restored on next
                         // launch / host switch, pointing at a deleted session.
                         settingsManager.currentSessionId = null
-                        state.update { it.copy(currentSessionId = null, messages = emptyList(), partsByMessage = emptyMap()) }
+                        state.updateAndSync(slices) { it.copy(currentSessionId = null, messages = emptyList(), partsByMessage = emptyMap()) }
                     }
                 }
             }
             .onFailure { error ->
-                state.update { it.copy(error = "Failed to delete session: ${errorMessageOrFallback(error, "unknown error")}") }
+                state.updateAndSync(slices) { it.copy(error = "Failed to delete session: ${errorMessageOrFallback(error, "unknown error")}") }
             }
     }
 }
@@ -967,11 +1095,12 @@ internal fun launchSendMessage(
     onRefreshSessions: () -> Unit,
     onSuccess: (() -> Unit)? = null,
     onComplete: (() -> Unit)? = null
-) {
+, slices: SliceFlows? = null) {
+
     scope.launch {
         repository.sendMessage(sessionId, text, agent, model, attachments = attachments)
             .onSuccess {
-                state.update {
+                state.updateAndSync(slices) {
                     // §append-safe (glmer MAJOR-1): inputText is cleared
                     // synchronously at dispatch time, so do NOT touch it here —
                     // wiping now would destroy a follow-up the user typed during
@@ -1001,7 +1130,7 @@ internal fun launchSendMessage(
                 // something new since the synchronous dispatch clear.
                 val currentInput = composerFlow.value.inputText
                 val restored = if (currentInput.isBlank()) text else currentInput
-                state.update { s ->
+                state.updateAndSync(slices) { s ->
                     s.copy(error = errorMessageOrFallback(error, "Failed to send message"))
                 }
                 applyComposerSlice(state, composerFlow) { it.copy(inputText = restored) }

@@ -16,7 +16,8 @@ internal fun applySavedSettings(
     state: MutableStateFlow<AppState>,
     connectionFlow: MutableStateFlow<ConnectionState>,
     settingsFlow: MutableStateFlow<SettingsState>
-) {
+, slices: SliceFlows? = null) {
+
     val currentProfile = hostProfileStore.currentProfile()
     val password = currentProfile.basicAuth?.passwordId?.let { settingsManager.basicAuthPassword(it) }
     repository.configure(
@@ -33,7 +34,7 @@ internal fun applySavedSettings(
     // Reuse the profile list once: it backs both AppState.hostProfiles and the
     // cold-start connectionPhase decision below.
     val profiles = hostProfileStore.profiles()
-    state.update {
+    state.updateAndSync(slices) {
         it.copy(
             currentSessionId = settingsManager.currentSessionId,
             lastNavPage = settingsManager.lastNavPage,
@@ -73,56 +74,14 @@ internal fun applySavedSettings(
     val connectionPhase = if (profiles.isNotEmpty()) "reconnecting" else null
     connectionFlow.update { it.copy(connectionPhase = connectionPhase) }
     @Suppress("DEPRECATION")
-    state.update { it.copy(connectionPhase = connectionPhase) }
+    state.updateAndSync(slices) { it.copy(connectionPhase = connectionPhase) }
 }
 
 /**
- * §R-17 M2: this helper is currently DEAD CODE (no callers in main or test).
- *
- * M2 does NOT use combine() for `MainViewModel.state` — `state` is
- * `_state.asStateFlow()` and the deprecated AppState connection fields are
- * kept in sync with the slice via `writeConnection` (which writes BOTH the
- * slice and `_state` mirror in one synchronous call). Because this helper
- * only writes the AppState mirror via the raw `state` parameter (it has no
- * access to `writeConnection` / the slice flow), reviving it as-is would
- * leave `MainViewModel._connectionFlow` stale while the mirror flickers —
- * the slice/mirror would drift apart.
- *
- * Do NOT revive without routing the connection-field writes through
- * `MainViewModel.writeConnection` (or equivalently accepting the slice flow
- * and mirroring back to `_state`). @Suppress("DEPRECATION") keeps the legacy
- * mirror writes warning-clean until the helper is deleted or rewritten.
+ * §R-17 Stage 1: launchConnectionTest (dead code, glm-1 N2) was REMOVED here.
+ * It had zero callers in main or test and only wrote the AppState mirror
+ * without slice sync — reviving it requires routing connection writes through
+ * MainViewModel.writeConnection (or accepting a SliceFlows param and using
+ * updateAndSync).
  */
-@Suppress("DEPRECATION")
-internal fun launchConnectionTest(
-    scope: CoroutineScope,
-    repository: OpenCodeRepository,
-    state: MutableStateFlow<AppState>,
-    onHealthyConnection: () -> Unit
-) {
-    scope.launch {
-        state.update { it.copy(isConnecting = true, error = null) }
-        repository.checkHealth()
-            .onSuccess { health ->
-                state.update {
-                    it.copy(
-                        isConnected = health.healthy,
-                        serverVersion = health.version,
-                        isConnecting = false
-                    )
-                }
-                if (health.healthy) {
-                    onHealthyConnection()
-                }
-            }
-            .onFailure { error ->
-                state.update {
-                    it.copy(
-                        isConnected = false,
-                        isConnecting = false,
-                        error = errorMessageOrFallback(error, "Connection failed")
-                    )
-                }
-            }
-    }
-}
+

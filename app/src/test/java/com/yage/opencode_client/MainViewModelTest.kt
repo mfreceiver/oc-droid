@@ -27,9 +27,11 @@ import com.yage.opencode_client.ui.HostState
 import com.yage.opencode_client.ui.MainViewModel
 import com.yage.opencode_client.ui.SessionListState
 import com.yage.opencode_client.ui.SettingsState
+import com.yage.opencode_client.ui.SliceFlows
 import com.yage.opencode_client.ui.TrafficState
 import com.yage.opencode_client.ui.TunnelActivationState
 import com.yage.opencode_client.ui.UnreadState
+import com.yage.opencode_client.ui.syncSlicesFromAppState
 import com.yage.opencode_client.ui.session.buildSessionTree
 import com.yage.opencode_client.util.SettingsManager
 import com.yage.opencode_client.util.ThemeMode
@@ -150,89 +152,32 @@ class MainViewModelTest {
         syncAllSlicesFromState(viewModel, newState)
     }
 
-    @Suppress("DEPRECATION", "UNCHECKED_CAST")
+    /**
+     * §R-17 Stage 1: mirror every slice from an AppState snapshot. Delegates to
+     * the PRODUCTION [syncSlicesFromAppState] so the test's mirror→slice path
+     * uses the exact same field mapping as production (no duplicated field
+     * lists to drift). The [SliceFlows] is assembled via reflection from
+     * MainViewModel's private `_xxxFlow` fields.
+     */
+    @Suppress("UNCHECKED_CAST")
     private fun syncAllSlicesFromState(viewModel: MainViewModel, state: AppState) {
-        // composer slice
-        MainViewModel::class.java.getDeclaredField("_composerFlow").apply {
-            isAccessible = true
-            (get(viewModel) as MutableStateFlow<ComposerState>).value = ComposerState(
-                inputText = state.inputText,
-                imageAttachments = state.imageAttachments,
-                sendingSessionIds = state.sendingSessionIds,
-                draftWorkdir = state.draftWorkdir
-            )
+        fun <T> flow(name: String): MutableStateFlow<T> {
+            val f = MainViewModel::class.java.getDeclaredField(name)
+            f.isAccessible = true
+            return f.get(viewModel) as MutableStateFlow<T>
         }
-        // file slice
-        MainViewModel::class.java.getDeclaredField("_fileFlow").apply {
-            isAccessible = true
-            (get(viewModel) as MutableStateFlow<FileState>).value = FileState(
-                filePathToShowInFiles = state.filePathToShowInFiles,
-                filePreviewOriginRoute = state.filePreviewOriginRoute,
-                fileBrowserOpen = state.fileBrowserOpen,
-                fileBrowserWorkdir = state.fileBrowserWorkdir
-            )
-        }
-        // settings slice
-        MainViewModel::class.java.getDeclaredField("_settingsFlow").apply {
-            isAccessible = true
-            (get(viewModel) as MutableStateFlow<SettingsState>).value = SettingsState(
-                themeMode = state.themeMode,
-                markdownFontSizes = state.markdownFontSizes,
-                selectedAgentName = state.selectedAgentName,
-                agents = state.agents,
-                providers = state.providers,
-                availableCommands = state.availableCommands
-            )
-        }
-        // §R-17 M4: chat/sessionList/unread/host slices
-        MainViewModel::class.java.getDeclaredField("_chatFlow").apply {
-            isAccessible = true
-            (get(viewModel) as MutableStateFlow<ChatState>).value = ChatState(
-                currentSessionId = state.currentSessionId,
-                messages = state.messages,
-                partsByMessage = state.partsByMessage,
-                streamingPartTexts = state.streamingPartTexts,
-                streamingReasoningPart = state.streamingReasoningPart,
-                olderMessagesCursor = state.olderMessagesCursor,
-                hasMoreMessages = state.hasMoreMessages,
-                isLoadingMessages = state.isLoadingMessages,
-                gapInfo = state.gapInfo,
-                staleNotice = state.staleNotice
-            )
-        }
-        MainViewModel::class.java.getDeclaredField("_sessionListFlow").apply {
-            isAccessible = true
-            (get(viewModel) as MutableStateFlow<SessionListState>).value = SessionListState(
-                sessions = state.sessions,
-                sessionStatuses = state.sessionStatuses,
-                expandedSessionIds = state.expandedSessionIds,
-                loadedSessionLimit = state.loadedSessionLimit,
-                hasMoreSessions = state.hasMoreSessions,
-                isLoadingMoreSessions = state.isLoadingMoreSessions,
-                isRefreshingSessions = state.isRefreshingSessions,
-                pendingPermissions = state.pendingPermissions,
-                pendingQuestions = state.pendingQuestions,
-                childSessions = state.childSessions,
-                directorySessions = state.directorySessions,
-                openSessionIds = state.openSessionIds,
-                sessionTodos = state.sessionTodos
-            )
-        }
-        MainViewModel::class.java.getDeclaredField("_unreadFlow").apply {
-            isAccessible = true
-            (get(viewModel) as MutableStateFlow<UnreadState>).value = UnreadState(
-                unreadSessions = state.unreadSessions,
-                tempClearedUnread = state.tempClearedUnread,
-                lastViewedTime = state.lastViewedTime
-            )
-        }
-        MainViewModel::class.java.getDeclaredField("_hostFlow").apply {
-            isAccessible = true
-            (get(viewModel) as MutableStateFlow<HostState>).value = HostState(
-                hostProfiles = state.hostProfiles,
-                currentHostProfileId = state.currentHostProfileId
-            )
-        }
+        val slices = SliceFlows(
+            connection = flow("_connectionFlow"),
+            traffic = flow("_trafficFlow"),
+            composer = flow("_composerFlow"),
+            file = flow("_fileFlow"),
+            settings = flow("_settingsFlow"),
+            chat = flow("_chatFlow"),
+            sessionList = flow("_sessionListFlow"),
+            unread = flow("_unreadFlow"),
+            host = flow("_hostFlow")
+        )
+        syncSlicesFromAppState(state, slices)
     }
 
     /**
@@ -2918,6 +2863,47 @@ class MainViewModelTest {
 
         // Patch/insert are pure state updates — no reload issued for either case.
         coVerify(exactly = 0) { repository.getMessagesPaged(any(), any(), any()) }
+    }
+
+    @Test
+    fun `Stage1 free helper syncs slice - selectSession mirrors chatFlow`() = runTest {
+        // §R-17 Stage 1 verification: free helpers (selectSessionState via
+        // selectSession) now write AppState through updateAndSync(sliceFlows),
+        // so the chatFlow slice must mirror the AppState chat fields. This is
+        // the hard prerequisite for consumer migration (Stage 2) — without it
+        // a consumer reading chatFlow would see stale values after selectSession.
+        val viewModel = createViewModel()
+        updateState(viewModel) { it.copy(sessions = listOf(Session(id = "s1", directory = "/tmp"))) }
+        viewModel.selectSession("s1")
+        advanceUntilIdle()
+        assertEquals("s1", viewModel.chatFlow.value.currentSessionId)
+        assertEquals(
+            "chatFlow slice must mirror AppState after free-helper write",
+            viewModel.state.value.currentSessionId,
+            viewModel.chatFlow.value.currentSessionId
+        )
+    }
+
+    @Test
+    fun `Stage1 free helper syncs slice - loadSessions mirrors sessionListFlow`() = runTest {
+        // §R-17 Stage 1: launchLoadSessions (free helper) writes AppState via
+        // updateAndSync; sessionListFlow must mirror the sessions field so a
+        // future consumer subscribing to sessionListFlow sees the loaded list.
+        coEvery { repository.getSessions(any()) } returns Result.success(
+            listOf(Session(id = "loaded-1", directory = "/tmp"))
+        )
+        val viewModel = createViewModel()
+        viewModel.loadSessions()
+        advanceUntilIdle()
+        assertTrue(
+            "sessionListFlow must contain the loaded session",
+            viewModel.sessionListFlow.value.sessions.any { it.id == "loaded-1" }
+        )
+        assertEquals(
+            "sessionListFlow.sessions must mirror AppState.sessions",
+            viewModel.state.value.sessions.size,
+            viewModel.sessionListFlow.value.sessions.size
+        )
     }
 
     @org.junit.After

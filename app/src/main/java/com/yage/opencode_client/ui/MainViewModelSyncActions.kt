@@ -29,18 +29,19 @@ internal fun launchSseCollection(
     repository: OpenCodeRepository,
     state: MutableStateFlow<AppState>,
     onEvent: (SSEEvent) -> Unit
-): Job {
+, slices: SliceFlows? = null): Job {
+
     return scope.launch {
         repository.connectSSE()
             .catch { error ->
                 Log.e("OC_ERROR", "SSE collection failed", error)
-                state.update { it.copy(error = "SSE Error: ${error.message}") }
+                state.updateAndSync(slices) { it.copy(error = "SSE Error: ${error.message}") }
             }
             .collect { result ->
                 result.onSuccess { event -> onEvent(event) }
                     .onFailure { error ->
                         Log.e("OC_ERROR", "SSE event failed", error)
-                        state.update { it.copy(error = "SSE Error: ${error.message}") }
+                        state.updateAndSync(slices) { it.copy(error = "SSE Error: ${error.message}") }
                     }
             }
     }
@@ -74,7 +75,8 @@ internal fun handleIncomingSseEvent(
     onRefreshSessions: () -> Unit,
     onLoadPendingPermissions: () -> Unit,
     onNonFatalIssue: (String) -> Unit
-) {
+, slices: SliceFlows? = null) {
+
     // Throttle dispatch logging to preserve the 1000-entry ring buffer's signal.
     // Skipped (noise): server.heartbeat (periodic), message.part.delta (per-token
     // during streaming — its render IS the proof), server.connected (fires on
@@ -94,7 +96,7 @@ internal fun handleIncomingSseEvent(
         "session.created" -> {
             val created = parseSessionCreatedEvent(event)
             if (created != null) {
-                state.update { it.copy(sessions = upsertSession(it.sessions, created.session)) }
+                state.updateAndSync(slices) { it.copy(sessions = upsertSession(it.sessions, created.session)) }
             } else {
                 onNonFatalIssue("Ignoring invalid session.created payload")
             }
@@ -102,7 +104,7 @@ internal fun handleIncomingSseEvent(
         "session.updated" -> {
             val updated = parseSessionUpdatedEvent(event)
             if (updated != null) {
-                state.update { it.copy(sessions = upsertSession(it.sessions, updated)) }
+                state.updateAndSync(slices) { it.copy(sessions = upsertSession(it.sessions, updated)) }
             } else {
                 onNonFatalIssue("Ignoring invalid session.updated payload")
             }
@@ -110,7 +112,7 @@ internal fun handleIncomingSseEvent(
         "session.status" -> {
             val statusEvent = parseSessionStatusEvent(event)
             if (statusEvent != null) {
-                state.update {
+                state.updateAndSync(slices) {
                     it.copy(
                         sessionStatuses = it.sessionStatuses + (statusEvent.sessionId to statusEvent.status)
                     )
@@ -143,7 +145,7 @@ internal fun handleIncomingSseEvent(
                     statusEvent.sessionId != state.value.currentSessionId &&
                     state.value.tempClearedUnread.contains(statusEvent.sessionId)
                 ) {
-                    state.update {
+                    state.updateAndSync(slices) {
                         it.copy(tempClearedUnread = it.tempClearedUnread - statusEvent.sessionId)
                     }
                 }
@@ -191,7 +193,7 @@ internal fun handleIncomingSseEvent(
             } else if (sessionId != null) {
                 // Mark unread: an out-of-band message arrived for a session
                 // the user is not currently viewing.
-                markSessionUnread(state, sessionId)
+                markSessionUnread(state, sessionId, slices)
             }
         }
         "message.updated" -> {
@@ -229,7 +231,7 @@ internal fun handleIncomingSseEvent(
                     // scan). When found, patch in place; when NOT found, append
                     // (insert) the new message at the tail (oldest-first list).
                     var found = false
-                    state.update { s ->
+                    state.updateAndSync(slices) { s ->
                         val newMessages = s.messages.map { if (it.id == updated.id) { found = true; updated } else it }
                         if (found) s.copy(messages = newMessages) else s.copy(messages = newMessages + updated)
                     }
@@ -254,7 +256,7 @@ internal fun handleIncomingSseEvent(
                         // Server sent full accumulated text — use it as the
                         // authoritative streaming value (replaces delta
                         // accumulation, acts as a sync point).
-                        state.update {
+                        state.updateAndSync(slices) {
                             it.copy(
                                 streamingPartTexts = it.streamingPartTexts + (key to fullText),
                                 streamingReasoningPart = reasoningPartOrNull(
@@ -268,7 +270,7 @@ internal fun handleIncomingSseEvent(
                     } else if (!delta.isNullOrBlank()) {
                         // Read previous inside the atomic update so a concurrent
                         // append to the same key isn't lost (TOCTOU-safe).
-                        state.update {
+                        state.updateAndSync(slices) {
                             val previousValue = it.streamingPartTexts[key].orEmpty()
                             it.copy(
                                 streamingPartTexts = it.streamingPartTexts + (key to (previousValue + delta)),
@@ -290,7 +292,7 @@ internal fun handleIncomingSseEvent(
                     // id yet) signals the start of a fresh streaming run —
                     // clear any stale partials and reload so we render the
                     // server-authoritative snapshot.
-                    state.update {
+                    state.updateAndSync(slices) {
                         it.copy(streamingPartTexts = emptyMap(), streamingReasoningPart = null)
                     }
                     onRefreshMessages(deltaEvent.sessionId, false)
@@ -322,7 +324,7 @@ internal fun handleIncomingSseEvent(
             if (!delta.isNullOrEmpty()) {
                 val key = partId
                 // Read previous inside the atomic update (TOCTOU-safe append).
-                state.update {
+                state.updateAndSync(slices) {
                     val previous = it.streamingPartTexts[key].orEmpty()
                     it.copy(streamingPartTexts = it.streamingPartTexts + (key to (previous + delta)))
                 }
@@ -334,7 +336,7 @@ internal fun handleIncomingSseEvent(
         "question.asked" -> {
             val question = parseQuestionAskedEvent(event)
             if (question != null) {
-                state.update { currentState ->
+                state.updateAndSync(slices) { currentState ->
                     val existing = currentState.pendingQuestions.any { it.id == question.id }
                     if (!existing) {
                         currentState.copy(pendingQuestions = currentState.pendingQuestions + question)
@@ -350,7 +352,7 @@ internal fun handleIncomingSseEvent(
             val requestId = event.payload.getString("requestID") 
                 ?: event.payload.getString("id")
             if (requestId != null) {
-                state.update { currentState ->
+                state.updateAndSync(slices) { currentState ->
                     currentState.copy(
                         pendingQuestions = currentState.pendingQuestions.filter { it.id != requestId }
                     )
@@ -365,7 +367,7 @@ internal fun handleIncomingSseEvent(
             } catch (_: Exception) {
                 return
             }
-            state.update { it.copy(sessionTodos = it.sessionTodos + (sessionId to todos)) }
+            state.updateAndSync(slices) { it.copy(sessionTodos = it.sessionTodos + (sessionId to todos)) }
         }
     }
 }
@@ -378,9 +380,10 @@ internal fun handleIncomingSseEvent(
  */
 private fun markSessionUnread(
     state: MutableStateFlow<AppState>,
-    sessionId: String
+    sessionId: String,
+    slices: SliceFlows?
 ) {
-    state.update { current ->
+    state.updateAndSync(slices) { current ->
         if (sessionId == current.currentSessionId) {
             current
         } else {
