@@ -52,12 +52,20 @@ fun SessionsScreen(
     // conversations discovered for a connected workdir that may not yet appear
     // in the global list), deduplicated by id so a session present in both
     // stores is only rendered once.
-    val recentSessions = remember(state.sessions, state.directorySessions) {
-        (state.sessions + state.directorySessions.values.flatten())
-            .distinctBy { it.id }
-            .filter { it.parentId == null && !it.isArchived }
-            .sortedByDescending { it.time?.updated ?: 0L }
-            .take(5)
+    // R-17 M1: derive recentSessions via remembered derivedStateOf instead of
+    // key-based remember. The lambda reads state.sessions / state.directory
+    // Sessions (State slices) and only re-emits when the structural result
+    // changes, so an SSE token delta (which mutates streamingPartTexts etc.)
+    // recomputes the block but yields an equal list and the LazyColumn items
+    // are skipped.
+    val recentSessions by remember {
+        derivedStateOf {
+            (state.sessions + state.directorySessions.values.flatten())
+                .distinctBy { it.id }
+                .filter { it.parentId == null && !it.isArchived }
+                .sortedByDescending { it.time?.updated ?: 0L }
+                .take(5)
+        }
     }
 
     // Derive workdir groups, excluding locally-hidden workdirs and sub-agents
@@ -72,7 +80,14 @@ fun SessionsScreen(
     // workdir that has only been discovered via the directory-scoped fetch
     // (and not yet promoted into the global list by a periodic refresh) still
     // shows its sessions here. Deduplicated by id to avoid double-rendering.
-    val workdirGroups = remember(state.sessions, state.directorySessions, hiddenWorkdirs, state.draftWorkdir) {
+    val workdirGroups by remember {
+        // R-17 M1: derivedStateOf auto-tracks every State read inside the
+        // block (state.sessions / state.directorySessions / state.draftWorkdir
+        // / hiddenWorkdirs) and only notifies downstream when the resulting
+        // list changes structurally. SSE token deltas leave sessions /
+        // directorySessions untouched, so the equal result is suppressed and
+        // the workdir LazyColumn is not recomposed.
+        derivedStateOf {
         val allSessions = (state.sessions + state.directorySessions.values.flatten())
             .distinctBy { it.id }
         // Fix #6b: normalize directory keys (trim + strip surrounding slashes)
@@ -115,6 +130,7 @@ fun SessionsScreen(
                 (keyToDisplayDir[key] ?: key) to sessList.sortedByDescending { it.time?.updated ?: 0L }
             }
             .sortedBy { normalizeDirectory(it.first) }
+        }
     }
 
     // Navigate to Chat tab after selecting a session

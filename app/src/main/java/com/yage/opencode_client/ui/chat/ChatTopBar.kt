@@ -356,7 +356,18 @@ internal fun ChatTopBar(
         // §17.2 the openSessions list is already filtered to root sessions
         // (parentId == null) by ChatScreen, so it never duplicates the
         // sub-agent currently shown in the title-slot breadcrumb.
-        SessionTabStrip(state = state, actions = actions)
+        // R-17 M1: pass only the slices SessionTabStrip reads (instead of the
+        // whole ChatTopBarState) so an unrelated state change — e.g.
+        // contextUsage / traffic / connection — does not invalidate this
+        // composable. Compose skipping keeps the LazyRow intact as long as
+        // openSessions / currentSessionId / unreadSessions are structurally
+        // equal to the previous call.
+        SessionTabStrip(
+            openSessions = state.openSessions,
+            currentSessionId = state.currentSessionId,
+            unreadSessions = state.unreadSessions,
+            actions = actions
+        )
     }
 
     if (showTodoDialog) {
@@ -487,7 +498,9 @@ private fun truncateTitle(value: String): String =
  */
 @Composable
 private fun SessionTabStrip(
-    state: ChatTopBarState,
+    openSessions: List<Session>,
+    currentSessionId: String?,
+    unreadSessions: Set<String>,
     actions: ChatTopBarActions,
     modifier: Modifier = Modifier
 ) {
@@ -497,11 +510,11 @@ private fun SessionTabStrip(
         contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp),
         horizontalArrangement = Arrangement.spacedBy(2.dp)
     ) {
-        items(state.openSessions, key = { it.id }) { session ->
+        items(openSessions, key = { it.id }) { session ->
             SessionTab(
                 title = session.displayName,
-                isSelected = session.id == state.currentSessionId,
-                isUnread = session.id in state.unreadSessions,
+                isSelected = session.id == currentSessionId,
+                isUnread = session.id in unreadSessions,
                 accentColor = oc.accentText,
                 onSelect = { actions.onSelectSession(session.id) },
                 onClose = { actions.onCloseSession(session.id) }

@@ -20,6 +20,7 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -93,12 +94,6 @@ fun ChatScreen(
         )
     }
 
-    // Resolve openSessionIds to actual Session objects for the top-bar dropdown.
-    val openSessions = remember(state.sessions, state.openSessionIds) {
-        state.openSessionIds
-            .mapNotNull { id -> state.sessions.find { it.id == id } }
-            .filter { it.parentId == null }
-    }
 
     // #14: edge-swipe / system-back returns to the parent session when viewing a
     // child. Registered here (deeper than PhoneLayout's pager-level BackHandler
@@ -115,9 +110,26 @@ fun ChatScreen(
     // Column must NOT also apply statusBarsPadding() — that would double-pad.
     // If ChatTopBar ever reverts to not handling the inset, re-add
     // .statusBarsPadding() here.
-    Column(modifier = Modifier.fillMaxSize()) {
-        ChatTopBar(
-            state = ChatTopBarState(
+    // R-17 M1: derive ChatTopBarState inside a remembered derivedStateOf.
+    // The lambda only reads the AppState slices that ChatTopBar actually
+    // consumes (sessions / currentSessionId / statuses / agents / cached
+    // contextUsage / connection / host profiles / tunnel / tabs / traffic /
+    // serverVersion). It deliberately does NOT read the high-frequency SSE
+    // fields (streamingPartTexts / visibleMessages / partsByMessage /
+    // streamingReasoningPart / inputText). An SSE token delta mutates only
+    // those fields, which makes the State<AppState> emit a new value and
+    // forces this block to re-evaluate, but the resulting ChatTopBarState is
+    // structurally equal to the previous one (data-class equals) — so
+    // derivedStateOf suppresses the change and ChatTopBar is skipped.
+    val topBarState by remember {
+        derivedStateOf {
+            // Resolve openSessionIds to actual Session objects for the
+            // top-bar tab strip. Filtered to root sessions (parentId == null)
+            // so sub-agents never duplicate the title-slot breadcrumb.
+            val resolvedOpenSessions = state.openSessionIds
+                .mapNotNull { id -> state.sessions.find { it.id == id } }
+                .filter { it.parentId == null }
+            ChatTopBarState(
                 sessions = state.sessions,
                 currentSessionId = state.currentSessionId,
                 sessionStatuses = state.sessionStatuses,
@@ -137,7 +149,7 @@ fun ChatScreen(
                 currentHostProfileId = state.currentHostProfileId,
                 tunnelActivationState = state.tunnelActivationState,
                 showTunnelAuth = (state.currentHostProfile?.tunnelPasswordId != null),
-                openSessions = openSessions,
+                openSessions = resolvedOpenSessions,
                 unreadSessions = state.unreadSessions,
                 draftWorkdir = state.draftWorkdir,
                 parentSessionId = state.currentSession?.parentId,
@@ -147,7 +159,13 @@ fun ChatScreen(
                 trafficSent = state.trafficSent,
                 trafficReceived = state.trafficReceived,
                 serverVersion = state.serverVersion
-            ),
+            )
+        }
+    }
+
+    Column(modifier = Modifier.fillMaxSize()) {
+        ChatTopBar(
+            state = topBarState,
             actions = ChatTopBarActions(
                 onSelectSession = viewModel::selectSession,
                 onCloseSession = viewModel::closeSession,
