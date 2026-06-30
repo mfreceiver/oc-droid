@@ -49,7 +49,9 @@ class SettingsSectionsInstrumentedTest {
                 HostProfileEditorDialog(
                     initial = profile,
                     onDismiss = {},
-                    onSave = { _, _, _ -> },
+                    // onSave arity is Function5 (profile, basicAuthPassword,
+                    // basicAuthEdited, tunnelPassword, tunnelEdited).
+                    onSave = { _, _, _, _, _ -> },
                 )
             }
         }

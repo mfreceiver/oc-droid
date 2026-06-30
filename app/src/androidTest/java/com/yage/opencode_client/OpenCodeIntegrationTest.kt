@@ -3,6 +3,9 @@ package com.yage.opencode_client
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import com.yage.opencode_client.data.repository.OpenCodeRepository
+import com.yage.opencode_client.util.SettingsManager
+import com.yage.opencode_client.util.TrafficLogger
+import com.yage.opencode_client.util.TrafficTracker
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.*
 import org.junit.Assume.assumeTrue
@@ -38,7 +41,16 @@ class OpenCodeIntegrationTest {
             serverUrl.isNotBlank()
         )
 
-        repository = OpenCodeRepository()
+        // R-18: OpenCodeRepository now requires TrafficTracker + TrafficLogger.
+        // This is a real-server integration test, so construct real instances
+        // from the instrumentation target context (they only count/log HTTP
+        // traffic, which is exactly what this suite exercises).
+        val ctx = InstrumentationRegistry.getInstrumentation().targetContext
+        val settingsManager = SettingsManager(ctx)
+        repository = OpenCodeRepository(
+            trafficTracker = TrafficTracker(settingsManager),
+            trafficLogger = TrafficLogger(ctx)
+        )
         repository.configure(
             baseUrl = serverUrl,
             username = username.ifEmpty { null },
