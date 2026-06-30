@@ -18,6 +18,8 @@ import com.yage.opencode_client.ui.controller.ComposerCallbacks
 import com.yage.opencode_client.ui.controller.ComposerController
 import com.yage.opencode_client.ui.controller.ForegroundCatchUpCallbacks
 import com.yage.opencode_client.ui.controller.ForegroundCatchUpController
+import com.yage.opencode_client.ui.controller.HostProfileCallbacks
+import com.yage.opencode_client.ui.controller.HostProfileController
 import com.yage.opencode_client.ui.controller.SessionSwitcher
 import com.yage.opencode_client.ui.controller.SessionSwitcherCallbacks
 import dagger.hilt.android.lifecycle.HiltViewModel
@@ -673,7 +675,7 @@ class MainViewModel @Inject constructor(
     private val hostProfileStore: HostProfileStore,
     internal val trafficTracker: TrafficTracker,
     private val appLifecycleMonitor: AppLifecycleMonitor
-) : ViewModel(), ForegroundCatchUpCallbacks, ComposerCallbacks, SessionSwitcherCallbacks {
+) : ViewModel(), ForegroundCatchUpCallbacks, ComposerCallbacks, SessionSwitcherCallbacks, HostProfileCallbacks {
 
     // §R-17 M2: _state keeps carrying every AppState field (the connection/
     // traffic ones are deprecated mirrors). The authoritative storage for
@@ -811,6 +813,27 @@ class MainViewModel @Inject constructor(
             composerFlow = _composerFlow,
             expandedParts = _expandedParts,
             slices = sliceFlows,
+            callbacks = this
+        )
+
+    /**
+     * R-16 M3: Host Profile CRUD + repository reconfiguration + tunnel
+     * activation + full local-data reset controller. Owns all host-profile
+     * management logic (selectHostProfile / deleteHostProfile / saveHostProfile
+     * / configureServer / configureRepositoryForProfile /
+     * activateTunnelForCurrentHost / resetLocalDataAndResync). Side effects
+     * (SSE cancel/reconnect, testConnection, sessionWindowCache clear,
+     * trafficTracker reset) flow through [HostProfileCallbacks] which
+     * MainViewModel implements below.
+     */
+    private val hostProfileController: HostProfileController =
+        HostProfileController(
+            scope = viewModelScope,
+            state = _state,
+            slices = sliceFlows,
+            hostProfileStore = hostProfileStore,
+            repository = repository,
+            settingsManager = settingsManager,
             callbacks = this
         )
 
@@ -1121,7 +1144,7 @@ class MainViewModel @Inject constructor(
     }
 
     /** Drops the entire cache. Called on host switch / host delete / reset. */
-    private fun clearSessionWindowCache() {
+    override fun clearSessionWindowCache() {
         sessionSwitcher.clearSessionWindowCache()
     }
 
@@ -1246,7 +1269,7 @@ class MainViewModel @Inject constructor(
      * stale events (session/status/message/permission/question) would pollute
      * the freshly-cleared state for the new profile.
      */
-    private fun cancelSseForReconfigure() {
+    override fun cancelSseForReconfigure() {
         DebugLog.i("SSE", "cancelSse (reconfigure)")
         sseJob?.cancel()
         sseJob = null
@@ -1254,6 +1277,25 @@ class MainViewModel @Inject constructor(
         // connect as a cold start (skip catch-up, the reconfigure path loads
         // sessions/messages itself). R-16 M1: delegated to the controller.
         foregroundCatchUpController.onHostReconfigured()
+    }
+
+    // ──────────────────────────────────────────────────────────────────────
+    // R-16 M3: HostProfileCallbacks implementation.
+    // The host-profile management logic lives in [hostProfileController];
+    // these are the orchestration hooks it calls back into for SSE lifecycle,
+    // connection testing, and cross-controller coordination.
+    //
+    // Several of these (cancelSseForReconfigure, startSse, coldStartReconnect,
+    // loadInitialData, clearSessionWindowCache) were previously private/internal
+    // methods on MainViewModel and are now `override` (public) to satisfy the
+    // interface. forceReconnect is shared with ForegroundCatchUpCallbacks.
+    // ──────────────────────────────────────────────────────────────────────
+
+    // Note: forceReconnect() is shared with ForegroundCatchUpCallbacks —
+    // a single override satisfies both interfaces.
+
+    override fun resetTrafficTracker() {
+        trafficTracker.reset()
     }
 
     /**
@@ -1292,42 +1334,15 @@ class MainViewModel @Inject constructor(
         updateState { it.copy(lastNavPage = clamped) }
     }
 
+    // R-16 M3: delegated to [hostProfileController].
     fun configureServer(url: String, username: String? = null, password: String? = null) {
-        // §Stage D (gpter 阻塞 #1): cancel any in-flight SSE feed BEFORE
-        // repository.configure, otherwise events from the previous
-        // credential/host keep landing in AppState during the new probe.
-        cancelSseForReconfigure()
-        settingsManager.serverUrl = url
-        settingsManager.username = username
-        settingsManager.password = password
-        repository.configure(url, username, password, allowInsecureConnections = currentHostProfile().allowInsecureConnections)
+        hostProfileController.configureServer(url, username, password)
     }
 
-    fun getHostProfiles(): List<HostProfile> = hostProfileStore.profiles()
+    fun getHostProfiles(): List<HostProfile> = hostProfileController.getHostProfiles()
 
-    fun currentHostProfile(): HostProfile = hostProfileStore.currentProfile()
+    fun currentHostProfile(): HostProfile = hostProfileController.currentHostProfile()
 
-    /**
-     * Persists [profile] and conditionally writes/clears the Basic Auth and
-     * tunnel passwords according to the explicit three-state contract:
-     *
-     *  - [basicAuthEdited] = true  → write [basicAuthPassword] (blank removes
-     *    the stored value, matching [SettingsManager.setBasicAuthPassword]'s
-     *    blank→remove semantics).
-     *  - [basicAuthEdited] = false → skip the Basic Auth branch entirely
-     *    (preserve whatever is currently stored). This is the fix for #5:
-     *    previously any save with a blank editor password field wiped the
-     *    stored credential.
-     *  - [tunnelEdited] / [tunnelPassword] follow the same rule for the
-     *    tunnel credential.
-     *
-     * When the editor clears the Basic Auth username ([HostProfile.basicAuth]
-     * becomes null) it passes [basicAuthEdited] = true + [basicAuthPassword]
-     * = "" so the orphaned password is removed — no special-case branch here.
-     *
-     * @see SettingsManager.setBasicAuthPassword
-     * @see SettingsManager.setTunnelPassword
-     */
     fun saveHostProfile(
         profile: HostProfile,
         basicAuthPassword: String = "",
@@ -1335,196 +1350,29 @@ class MainViewModel @Inject constructor(
         tunnelPassword: String = "",
         tunnelEdited: Boolean = false
     ) {
-        val normalized = if (profile.basicAuth != null) {
-            profile.copy(basicAuth = profile.basicAuth.copy(passwordId = profile.id))
-        } else {
-            profile
-        }
-        if (basicAuthEdited) {
-            settingsManager.setBasicAuthPassword(normalized.id, basicAuthPassword)
-        }
-        if (tunnelEdited) {
-            settingsManager.setTunnelPassword(normalized.id, tunnelPassword)
-        }
-        // Defense-in-depth (#5): when basicAuth is null on the saved profile
-        // and the editor did not explicitly touch the password field, the
-        // three-state contract above intentionally leaves any stored password
-        // alone. But a profile with no basicAuth config should never retain an
-        // orphaned password, so clear it here regardless. (Safe even when no
-        // password was stored — setBasicAuthPassword(blank) is a no-op remove.)
-        if (normalized.basicAuth == null) {
-            settingsManager.setBasicAuthPassword(normalized.id, "")
-        }
-        hostProfileStore.save(normalized)
-        refreshHostProfileState()
+        hostProfileController.saveHostProfile(profile, basicAuthPassword, basicAuthEdited, tunnelPassword, tunnelEdited)
     }
 
     fun selectHostProfile(profileId: String) {
-        viewModelScope.launch {
-            val profile = hostProfileStore.select(profileId)
-            // §Stage D (gpter 阻塞 #1): SSE cancellation is handled
-            // inside configureRepositoryForProfile() below (single authoritative
-            // point), so it fires before repository.configure runs.
-            updateState { it.copy(
-                currentSessionId = null,
-                messages = emptyList(),
-                partsByMessage = emptyMap(),
-                sessionStatuses = emptyMap(),
-                streamingPartTexts = emptyMap(),
-                streamingReasoningPart = null,
-                sessionTodos = emptyMap(),
-                // Switching host fully resets the per-host session/unread/draft
-                // state: the new host's sessions are unrelated to the previous
-                // one, so stale open tabs, unread markers and draft workdirs
-                // must not leak across hosts. [loadSessions] will repopulate
-                // [sessions]/[openSessionIds] for the new host.
-                openSessionIds = emptyList(),
-                unreadSessions = emptySet(),
-                tempClearedUnread = emptySet(),
-                lastViewedTime = emptyMap(),
-                sessions = emptyList(),
-                directorySessions = emptyMap()
-                // §R-17 M2: serverVersion moved to writeConnection below.
-                // §R-17 M3: draftWorkdir → writeComposer, availableCommands →
-                // writeSettings (both reset to defaults, mirrors kept in sync).
-            ) }
-            // §R-17 M3 (RFC §4 strategy A): reset the composer + settings slices
-            // that belong to the previous host. Intermediate state is legal
-            // (empty sessions list; draft/commands briefly stale until these
-            // run, but updateState above already flipped currentSessionId=null).
-            writeComposer { it.copy(draftWorkdir = null) }
-            writeSettings { it.copy(availableCommands = emptyList()) }
-            // §R-17 M2 (RFC §4 strategy A): clear the (previous host's) probed
-            // server version so it is not shown under the new host before the
-            // new health check repopulates it (or, if the new connection fails,
-            // no stale version lingers). Intermediate state here is legal: an
-            // empty `_state` paired with the old host's isConnected/Phase only
-            // briefly renders the empty-state spinner before testConnection
-            // rewrites the slice.
-            writeConnection { it.copy(serverVersion = null) }
-            // §Per-session message cache: cached windows belong to the previous
-            // host's sessions — they must not be restored onto the new host's
-            // unrelated sessions (different server, different message IDs).
-            clearSessionWindowCache()
-            settingsManager.currentSessionId = null
-            settingsManager.openSessionIds = emptyList()
-            // Clear the persisted session-metadata cache too: the previous
-            // host's sessions would otherwise re-seed AppState.sessions on the
-            // next cold start and pollute the new host's tab/title/workdir
-            // groups. loadSessions will repopulate the cache for the new host.
-            settingsManager.sessionCache = emptyList()
-            // §H3: clear the persisted workdir too — a path from host A is
-            // meaningless on host B (different machine/filesystem), and leaving
-            // it would let configureRepositoryForProfile restore it onto the new
-            // host. configureRepositoryForProfile (below) re-scopes to the
-            // (now-null) workdir, which is correct for a fresh host.
-            settingsManager.currentWorkdir = null
-            configureRepositoryForProfile(profile)
-            refreshHostProfileState()
-            testConnection(force = true)
-        }
+        hostProfileController.selectHostProfile(profileId)
     }
 
     fun duplicateHostProfile(profileId: String) {
-        hostProfileStore.duplicate(profileId)
-        refreshHostProfileState()
+        hostProfileController.duplicateHostProfile(profileId)
     }
 
     fun deleteHostProfile(profileId: String) {
-        // Detect deletion of the ACTIVE host: the new current host is then
-        // unrelated, so we must purge all per-host session/workdir state
-        // (mirrors selectHostProfile) — otherwise the old host's sessions/tabs/
-        // workdir leak into the new host (gpter review MAJOR).
-        val wasCurrent = profileId == _state.value.currentHostProfileId
-        hostProfileStore.delete(profileId)
-        val current = hostProfileStore.currentProfile()
-        configureRepositoryForProfile(current)
-        refreshHostProfileState()
-        if (wasCurrent) {
-            updateState {
-                it.copy(
-                    currentSessionId = null,
-                    messages = emptyList(),
-                    partsByMessage = emptyMap(),
-                    sessionStatuses = emptyMap(),
-                    streamingPartTexts = emptyMap(),
-                    streamingReasoningPart = null,
-                    sessionTodos = emptyMap(),
-                    openSessionIds = emptyList(),
-                    unreadSessions = emptySet(),
-                    tempClearedUnread = emptySet(),
-                    lastViewedTime = emptyMap(),
-                    sessions = emptyList(),
-                    directorySessions = emptyMap()
-                    // §R-17 M2: serverVersion moved to writeConnection below.
-                    // §R-17 M3: draftWorkdir → writeComposer, availableCommands →
-                    // writeSettings (below).
-                )
-            }
-            // §R-17 M3 (RFC §4 strategy A): reset composer + settings slices.
-            writeComposer { it.copy(draftWorkdir = null) }
-            writeSettings { it.copy(availableCommands = emptyList()) }
-            // §R-17 M2 (RFC §4 strategy A): clear the deleted (active) host's
-            // probed server version so the replacement host doesn't display a
-            // stale version before its own health check (or, on failed
-            // reconnect, at all). Intermediate state is legal (see selectHostProfile).
-            writeConnection { it.copy(serverVersion = null) }
-            // §Per-session message cache: ditto — cached windows belong to the
-            // deleted (active) host and must not survive into its replacement.
-            clearSessionWindowCache()
-            settingsManager.currentSessionId = null
-            settingsManager.openSessionIds = emptyList()
-            settingsManager.sessionCache = emptyList()
-            settingsManager.currentWorkdir = null
-            testConnection(force = true)
-        }
+        hostProfileController.deleteHostProfile(profileId)
     }
 
-    fun importHostProfile(payload: String): Result<HostProfile> = runCatching {
-        hostProfileStore.importJson(payload).also { refreshHostProfileState() }
-    }
+    fun importHostProfile(payload: String): Result<HostProfile> =
+        hostProfileController.importHostProfile(payload)
 
-    fun exportHostProfile(profile: HostProfile): String = hostProfileStore.exportJson(profile)
+    fun exportHostProfile(profile: HostProfile): String =
+        hostProfileController.exportHostProfile(profile)
 
-    private fun refreshHostProfileState() {
-        updateState {
-            it.copy(
-                hostProfiles = hostProfileStore.profiles(),
-                currentHostProfileId = hostProfileStore.currentProfile().id
-            )
-        }
-    }
-
-    private fun configureRepositoryForProfile(profile: HostProfile) {
-        // §Stage D (gpter 阻塞 #1, centralized): cancel any in-flight SSE feed
-        // BEFORE repository.configure. This is the single authoritative
-        // cancellation point for all profile-based reconfigure paths
-        // (selectHostProfile / deleteHostProfile / testConnection), so a stale
-        // SSE job from the previous host cannot keep delivering events into
-        // AppState while the new host's health probe is in flight.
-        // configureServer() keeps its own call because it invokes
-        // repository.configure(...) directly rather than via this helper.
-        // Safe during init: sseJob is null-initialized before the init block
-        // runs, and cancel() is null-safe.
-        cancelSseForReconfigure()
-        val password = profile.basicAuth?.passwordId?.let { settingsManager.basicAuthPassword(it) }
-        repository.configure(profile.serverUrl, profile.basicAuth?.username, password, allowInsecureConnections = profile.allowInsecureConnections)
-        // §H2: repository.configure() resets currentDirectory to null. Every
-        // reconfigure path (testConnection on cold start + each ON_START
-        // catch-up, selectHostProfile, deleteHostProfile) flows through here, so
-        // without restoring the persisted workdir afterwards, the connected
-        // project's directory context is lost and directory-scoped requests
-        // (file ops, slash commands) silently fall back to the server's default
-        // cwd. selectHostProfile clears currentWorkdir first (H3) so a host
-        // switch doesn't carry the previous host's path across.
-        settingsManager.currentWorkdir?.let { repository.setCurrentDirectory(it) }
-    }
-
-    fun getSavedConnectionSettings(): ConnectionFormSettings = ConnectionFormSettings(
-        serverUrl = settingsManager.serverUrl,
-        username = settingsManager.username ?: "",
-        password = settingsManager.password ?: ""
-    )
+    fun getSavedConnectionSettings(): ConnectionFormSettings =
+        hostProfileController.getSavedConnectionSettings()
 
     fun testConnection(force: Boolean = false, retries: Int = 0) {
         val now = System.currentTimeMillis()
@@ -1539,7 +1387,7 @@ class MainViewModel @Inject constructor(
             updateState { it.copy(error = null) }
             writeConnection { it.copy(isConnecting = true, connectionPhase = "connecting") }
             val profile = hostProfileStore.currentProfile()
-            configureRepositoryForProfile(profile)
+            hostProfileController.configureRepositoryForProfile(profile)
             // Retry loop: attempt 1 is always made; up to `retries` extra
             // attempts follow on failure/unhealthy with exponential backoff
             // (1s, 2s, 4s, ...). Default callers pass retries=0 (one-shot),
@@ -1612,11 +1460,11 @@ class MainViewModel @Inject constructor(
      * stranding the user on the disconnected empty state. Used exclusively
      * from [com.yage.opencode_client.MainActivity]'s cold-start LaunchedEffect.
      */
-    fun coldStartReconnect() {
+    override fun coldStartReconnect() {
         testConnection(force = true, retries = 3)
     }
 
-    private fun loadInitialData() {
+    override fun loadInitialData() {
         loadSessions()
         loadAgents()
         loadProviders()
@@ -2478,126 +2326,14 @@ class MainViewModel @Inject constructor(
      * (currentWorkdir is now null) — the user re-connects projects via the
      * Sessions screen; the global server session list still loads fresh.
      */
+    // R-16 M3: delegated to [hostProfileController].
     fun resetLocalDataAndResync() {
-        // 1. Wipe persisted local data (preserves connection + tunnel creds).
-        settingsManager.clearAllLocalData()
-        // 2. Zero the in-memory traffic tracker so its stale cumulative total
-        //    is not re-persisted on the next counted request (the persisted
-        //    traffic keys were already removed by clearAllLocalData above).
-        trafficTracker.reset()
-        // 3. Drop the per-session message-window cache (it belongs to the
-        //    wiped sessions and must not be restored onto fresh ones).
-        clearSessionWindowCache()
-        // 4. Tear down any in-flight SSE feed + reset reconnect flags so the
-        //    upcoming reconnect is treated as a genuine cold start (mirrors
-        //    selectHostProfile / reconfigure). Safe: cancel() is null-safe.
-        cancelSseForReconfigure()
-        // 5. Reset in-memory AppState to defaults, preserving only the host
-        //    profile list + current id. AppState() defaults clear: sessions,
-        //    directorySessions, messages, partsByMessage, openSessionIds,
-        //    currentSessionId, currentWorkdir, sessionTodos, childSessions,
-        //    drafts (inputText), unread/tempCleared, draftWorkdir, themeMode,
-        //    markdownFontSizes, selectedAgentName, traffic stats, streaming
-        //    state, file browser state, etc.
-        val keptHostProfiles = _state.value.hostProfiles
-        val keptHostProfileId = _state.value.currentHostProfileId
-        @Suppress("DEPRECATION")
-        updateState {
-            // §R-17 M2: connection/traffic fields left at their AppState
-            // defaults — they are deprecated mirrors and the combine() in
-            // `state` overwrites them from _connectionFlow / _trafficFlow
-            // (reset just below). Keeping them out of the constructor call
-            // avoids touching deprecated parameters.
-            AppState(
-                hostProfiles = keptHostProfiles,
-                currentHostProfileId = keptHostProfileId
-            )
-        }
-        // §R-17 M2: reset the connection + traffic slices to match the
-        // "isConnecting / reconnecting, traffic zeroed" semantics the old
-        // monolithic AppState() constructor provided. Atomicity (RFC §4
-        // strategy A): each intermediate state is legal (empty sessions list
-        // with a "reconnecting" badge). trafficTracker.reset() already ran
-        // above, so mirroring 0/0 here keeps the slice consistent with the
-        // tracker (otherwise combine would keep showing the stale pre-reset
-        // totals until the next refreshTrafficStats call — a behaviour
-        // regression vs. the old constructor-default zeroing).
-        writeConnection {
-            ConnectionState(isConnecting = true, connectionPhase = "reconnecting")
-        }
-        writeTraffic { TrafficState() }
-        // §R-17 M3: also reset the composer/file/settings slices — the old
-        // AppState() constructor zeroed their mirror fields, so without these
-        // the slices would keep their pre-reset values (input text, file
-        // browser, agent/theme/commands) while the mirrors flipped to defaults,
-        // i.e. slice/mirror drift. Intermediate state legal (mirrors already
-        // defaulted above; slices reset here).
-        writeComposer { ComposerState() }
-        writeFile { FileState() }
-        writeSettings { SettingsState() }
-        // 6. Reconnect to the (preserved) current host profile and re-fetch.
-        //    coldStartReconnect → testConnection(force=true, retries=3); on
-        //    health success it calls configureRepositoryForProfile (currentWorkdir
-        //    is null so no project is re-scoped) → loadInitialData + startSSE.
-        coldStartReconnect()
+        hostProfileController.resetLocalDataAndResync()
     }
 
+    // R-16 M3: delegated to [hostProfileController].
     fun activateTunnelForCurrentHost() {
-        val profile = hostProfileStore.currentProfile()
-        // The tunnel password is POSTed to the opencode server URL itself (the
-        // server acts as the tunnel gateway). Surface WHY activation can't
-        // proceed instead of silently returning — otherwise the user taps
-        // "Activate Tunnel" and nothing happens with no clue.
-        val passwordId = profile.tunnelPasswordId
-        if (passwordId == null) {
-            // §R-17 M2: tunnelActivationState moved to _connectionFlow; error
-            // stays on _state. Intermediate state legal.
-            updateState {
-                it.copy(error = "隧道激活失败：未设置隧道认证密码。请在「服务器」设置中填写隧道密码并保存后再试。")
-            }
-            writeConnection {
-                it.copy(tunnelActivationState = TunnelActivationState.Error("未设置隧道密码"))
-            }
-            return
-        }
-        val password = settingsManager.getTunnelPassword(passwordId)
-        if (password.isNullOrBlank()) {
-            updateState {
-                it.copy(error = "隧道激活失败：已配置密码标识但存储为空（可能保存时未输入）。请重新输入隧道密码并保存。")
-            }
-            writeConnection {
-                it.copy(tunnelActivationState = TunnelActivationState.Error("隧道密码为空"))
-            }
-            return
-        }
-
-        writeConnection { it.copy(tunnelActivationState = TunnelActivationState.Loading) }
-        viewModelScope.launch {
-            repository.activateTunnel(profile.serverUrl, password, allowInsecure = profile.allowInsecureConnections)
-                .onSuccess {
-                    updateState {
-                        it.copy(error = TUNNEL_SUCCESS_TOAST)
-                    }
-                    writeConnection {
-                        it.copy(tunnelActivationState = TunnelActivationState.Success)
-                    }
-                    Log.d(TAG, "Tunnel activated successfully for ${profile.serverUrl}")
-                }
-                .onFailure { error ->
-                    // The repository now enriches the exception with type+message
-                    // (e.g. "HTTP 401: ...", "UnknownHostException: ...",
-                    // "SSLPeerUnverifiedException: ..."). Surface that directly —
-                    // no generic prefix that would double up the fallback string.
-                    val msg = errorMessageOrFallback(error, "未知错误（无异常信息）")
-                    updateState {
-                        it.copy(error = "隧道激活失败：$msg")
-                    }
-                    writeConnection {
-                        it.copy(tunnelActivationState = TunnelActivationState.Error(msg))
-                    }
-                    Log.e(TAG, "Tunnel activation failed", error)
-                }
-        }
+        hostProfileController.activateTunnelForCurrentHost()
     }
 
     fun showFileInFiles(path: String, originRoute: String? = null) {
@@ -2691,7 +2427,7 @@ class MainViewModel @Inject constructor(
         }
     }
 
-    private fun startSSE() {
+    override fun startSSE() {
         DebugLog.i("SSE", "startSSE")
         sseJob?.cancel()
         sseJob = launchSseCollection(viewModelScope, repository, _state, ::handleSSEEvent)
