@@ -7,7 +7,7 @@ import android.util.Log
 import android.util.LruCache
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.mutableStateMapOf
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.produceState
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -138,8 +138,13 @@ object DataUriImageTransformer : ImageTransformer {
  * - **Disk cache** (`<cacheDir>/opencode_images/<urlHash>.bin`): raw response
  *   bytes, so re-rendering the same chat does NOT re-download. Bounded by
  *   [DISK_CACHE_MAX_BYTES] with simple LRU eviction (oldest files first).
- * - **Memory cache** (`mutableStateMapOf`): Compose-observable decoded
- *   `Bitmap`s; writes trigger recomposition of any [load] caller.
+ * - **Memory cache** (bounded `LruCache`): decoded `Bitmap`s; writes bump
+ *   [HttpImageHolder.cacheVersion] to recompose any [load] caller. R-03: the
+ *   former `mutableStateMapOf` was unbounded and retained every decoded
+ *   image for the process lifetime — an OOM risk under heavy chat image
+ *   load. It is now a 16 MB `LruCache` sized by `Bitmap.byteCount`; on
+ *   memory pressure `OpenCodeApp.onTrimMemory` calls [onLowMemory] to
+ *   evict (disk cache survives).
  * - **Parallel prefetch**: [prefetch] returns immediately and runs the
  *   download on [prefetchScope]; existing sequential `for (url in urls)
  *   { prefetch(url) }` call sites therefore fan out concurrently.
@@ -150,8 +155,21 @@ object DataUriImageTransformer : ImageTransformer {
 object HttpImageHolder {
     private const val DISK_CACHE_DIR_NAME = "opencode_images"
     private const val DISK_CACHE_MAX_BYTES = 50L * 1024 * 1024
+    private const val MEMORY_CACHE_MAX_BYTES = 16 * 1024 * 1024
 
-    private val cachedBitmaps = mutableStateMapOf<String, Bitmap>()
+    /**
+     * R-03: bounded LRU bitmap cache keyed by URL. [sizeOf] reports
+     * [Bitmap.byteCount] so eviction is byte-accurate rather than
+     * entry-count-based. The LruCache itself is NOT snapshot-aware, so
+     * Compose observation is provided by [cacheVersion]: every write bumps
+     * the int and any @Composable [load] caller that read it recomposes.
+     */
+    private val cachedBitmaps = object : LruCache<String, Bitmap>(MEMORY_CACHE_MAX_BYTES) {
+        override fun sizeOf(key: String, value: Bitmap): Int = value.byteCount
+    }
+    /** Compose-observable recomposition signal; bumped on every cache write. */
+    private val cacheVersion = mutableIntStateOf(0)
+
     private val inflightUrls = ConcurrentHashMap.newKeySet<String>()
     private val prefetchScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
@@ -186,8 +204,12 @@ object HttpImageHolder {
 
     @Composable
     fun load(url: String): ImageData? {
-        // Fast path: already decoded into memory.
-        cachedBitmaps[url]?.let { return bitmapToImageData(it) }
+        // Fast path: already decoded into memory. Reading cacheVersion first
+        // registers a Compose snapshot dependency so that a background write
+        // (downloadAndCache / loadFromDiskIntoMemory bumping it) recomposes
+        // this caller and the fast path then hits the freshly populated LRU.
+        @Suppress("unused") val version = cacheVersion.intValue
+        cachedBitmaps.get(url)?.let { return bitmapToImageData(it) }
 
         // Disk-cached but not yet decoded: kick off an async decode into memory.
         // Returns null on this frame; the state-map write triggers recomposition.
@@ -216,7 +238,7 @@ object HttpImageHolder {
      * No-op when the URL is already in memory or disk, or currently downloading.
      */
     fun prefetch(url: String) {
-        if (cachedBitmaps.containsKey(url)) return
+        if (cachedBitmaps.get(url) != null) return
         val file = fileForUrl(url)
         if (file != null && file.exists()) {
             // Disk hit: just promote into memory asynchronously.
@@ -256,7 +278,7 @@ object HttpImageHolder {
                     BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
                 }
                 if (bitmap != null) {
-                    cachedBitmaps[url] = bitmap
+                    putBitmap(url, bitmap)
                 } else {
                     Log.w(TAG, "Decoded null bitmap for markdown image: ${url.take(120)}")
                 }
@@ -269,18 +291,41 @@ object HttpImageHolder {
     }
 
     private suspend fun loadFromDiskIntoMemory(url: String, file: File) {
-        if (cachedBitmaps.containsKey(url)) return
+        if (cachedBitmaps.get(url) != null) return
         try {
             val bytes = withContext(Dispatchers.IO) { file.readBytes() }
             val bitmap = withContext(Dispatchers.IO) {
                 BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
             }
             if (bitmap != null) {
-                cachedBitmaps[url] = bitmap
+                putBitmap(url, bitmap)
             }
         } catch (e: Exception) {
             Log.w(TAG, "Failed to load cached image from disk for ${url.take(120)}", e)
         }
+    }
+
+    /**
+     * Writes [bitmap] under [url] into the bounded LRU and bumps the
+     * [cacheVersion] recomposition signal so any @Composable [load] caller
+     * observing this cache recomposes and picks up the fast path.
+     */
+    private fun putBitmap(url: String, bitmap: Bitmap) {
+        cachedBitmaps.put(url, bitmap)
+        cacheVersion.intValue++
+    }
+
+    /**
+     * R-03: drops the in-memory bitmap cache under system memory pressure
+     * (called from [com.yage.opencode_client.OpenCodeApp.onTrimMemory]). The
+     * disk cache is left intact — it is bounded and self-evicting. Bumping
+     * [cacheVersion] recomposes any @Composable [load] caller so a cleared
+     * entry cleanly resolves to a cache miss (null) and re-decodes from disk
+     * on the next load.
+     */
+    fun onLowMemory() {
+        cachedBitmaps.evictAll()
+        cacheVersion.intValue++
     }
 
     /**

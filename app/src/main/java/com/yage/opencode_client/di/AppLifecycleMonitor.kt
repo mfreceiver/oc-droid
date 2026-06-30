@@ -16,6 +16,7 @@ import com.yage.opencode_client.R
 import com.yage.opencode_client.data.model.PermissionRequest
 import com.yage.opencode_client.data.model.QuestionRequest
 import com.yage.opencode_client.data.repository.OpenCodeRepository
+import com.yage.opencode_client.util.runSuspendCatching
 import dagger.Module
 import dagger.Provides
 import dagger.hilt.InstallIn
@@ -184,11 +185,15 @@ class AppLifecycleMonitor @Inject constructor(
 
     private suspend fun pollPendingItems() {
         // Permissions
-        runCatching { repository.getPendingPermissions().getOrDefault(emptyList()) }
+        // R-14: runSuspendCatching rethrows CancellationException so the
+        // background poller's viewModelScope/appScope cancellation still
+        // propagates cleanly (runCatching would swallow it and keep the
+        // cancelled poller looping).
+        runSuspendCatching { repository.getPendingPermissions().getOrDefault(emptyList()) }
             .onSuccess { permissions -> permissions.forEach { handlePendingPermission(it) } }
             .onFailure { Log.w(TAG, "Background poll getPendingPermissions failed", it) }
         // Questions
-        runCatching { repository.getPendingQuestions().getOrDefault(emptyList()) }
+        runSuspendCatching { repository.getPendingQuestions().getOrDefault(emptyList()) }
             .onSuccess { questions -> questions.forEach { handlePendingQuestion(it) } }
             .onFailure { Log.w(TAG, "Background poll getPendingQuestions failed", it) }
     }

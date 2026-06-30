@@ -13,6 +13,7 @@ import com.yage.opencode_client.util.DebugLog
 import com.yage.opencode_client.util.ThemeMode
 import com.yage.opencode_client.util.TrafficTracker
 import com.yage.opencode_client.util.MarkdownFontSizes
+import com.yage.opencode_client.util.runSuspendCatching
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
@@ -747,7 +748,7 @@ class MainViewModel @Inject constructor(
         viewModelScope.launch {
             if (_state.value.sessions.none { it.id == sessionId }) {
                 val fetched = withContext(Dispatchers.IO) {
-                    runCatching { repository.getSession(sessionId).getOrNull() }.getOrNull()
+                    runSuspendCatching { repository.getSession(sessionId).getOrNull() }.getOrNull()
                 }
                 if (fetched != null) {
                     _state.update { st ->
@@ -1382,7 +1383,7 @@ class MainViewModel @Inject constructor(
             val child = _state.value.sessions.firstOrNull { it.id == childSessionId }
                 ?: parentId?.let { pid -> _state.value.childSessions[pid]?.find { it.id == childSessionId } }
                 ?: _state.value.childSessions.values.flatten().firstOrNull { it.id == childSessionId }
-                ?: runCatching { repository.getSession(childSessionId).getOrNull() }.getOrNull()
+                ?: runSuspendCatching { repository.getSession(childSessionId).getOrNull() }.getOrNull()
             // #14: only upsert + select when the child actually resolved.
             // Previously a null child still triggered selectSession(childSessionId),
             // which would set currentSessionId to a non-existent session and

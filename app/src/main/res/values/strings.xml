@@ -121,6 +121,9 @@
     <string name="host_profile_basic_auth_password">OpenCode Basic Auth password (optional)</string>
     <string name="host_profile_tunnel_password">Tunnel Password</string>
     <string name="host_profile_tunnel_password_label">Tunnel Password (intranet penetration)</string>
+    <string name="host_allow_insecure_title">Accept insecure connections</string>
+    <string name="host_allow_insecure_summary">Skip TLS certificate &amp; hostname verification for this host</string>
+    <string name="host_insecure_warning">Warning: disables certificate validation. Only use for trusted self-signed/internal servers. Vulnerable to man-in-the-middle attacks.</string>
     <string name="host_profile_untitled">Untitled</string>
     <string name="question_title">Question</string>
     <string name="question_multi_hint">Select one or more options</string>

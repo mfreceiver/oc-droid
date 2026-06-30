@@ -1,7 +1,9 @@
 package com.yage.opencode_client
 
 import android.app.Application
+import android.content.ComponentCallbacks2
 import com.yage.opencode_client.di.AppLifecycleMonitor
+import com.yage.opencode_client.ui.util.HttpImageHolder
 import com.yage.opencode_client.util.AppLocaleController
 import com.yage.opencode_client.util.CrashLogger
 import dagger.hilt.android.HiltAndroidApp
@@ -40,5 +42,21 @@ class OpenCodeApp : Application() {
         // first real WebView (MarkdownWebPreviewPane) now pays the one-time
         // init cost when the user actually opens a markdown web preview,
         // which is an acceptable, lazy trade-off. See MarkdownWebPreviewPane.
+    }
+
+    override fun onTrimMemory(level: Int) {
+        super.onTrimMemory(level)
+        // R-03: release the markdown image in-memory bitmap cache under
+        // memory pressure to avoid OOM. The disk cache survives (bounded +
+        // self-evicting), so cleared entries re-decode lazily. TRIM_MEMORY_UI_HIDDEN
+        // (20) is NOT memory pressure — it just means the UI went to background —
+        // so it is deliberately excluded.
+        when (level) {
+            ComponentCallbacks2.TRIM_MEMORY_RUNNING_LOW,
+            ComponentCallbacks2.TRIM_MEMORY_RUNNING_CRITICAL,
+            ComponentCallbacks2.TRIM_MEMORY_BACKGROUND,
+            ComponentCallbacks2.TRIM_MEMORY_MODERATE,
+            ComponentCallbacks2.TRIM_MEMORY_COMPLETE -> HttpImageHolder.onLowMemory()
+        }
     }
 }

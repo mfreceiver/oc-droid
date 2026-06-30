@@ -20,6 +20,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Surface
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
@@ -337,6 +338,9 @@ internal fun HostProfileEditorDialog(
     var showBasicPassword by remember(initial.id) { mutableStateOf(false) }
     var showTunnelPassword by remember(initial.id) { mutableStateOf(false) }
     var showDeleteConfirm by remember(initial.id) { mutableStateOf(false) }
+    // R-01: per-host "接受不安全连接"开关（自签证书/内网 TLS 用户需要显式启用，
+    // 否则全局 strict 校验会直接拒绝连接）。种子取自当前 HostProfile。
+    var allowInsecure by remember(initial.id) { mutableStateOf(initial.allowInsecureConnections) }
 
     AlertDialog(
         onDismissRequest = onDismiss,
@@ -426,6 +430,35 @@ internal fun HostProfileEditorDialog(
                         }
                     }
                 )
+                Spacer(modifier = Modifier.height(12.dp))
+                // R-01: per-host insecure-connections toggle. Off by default
+                // (strict TLS); enabling it downgrades this host's REST/SSE/
+                // health/tunnel clients to trust-all so self-signed or internal
+                // TLS servers can connect. The warning makes the MITM risk
+                // explicit at the point of enablement.
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(stringResource(R.string.host_allow_insecure_title))
+                        Text(
+                            stringResource(R.string.host_allow_insecure_summary),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Switch(checked = allowInsecure, onCheckedChange = { allowInsecure = it })
+                }
+                if (allowInsecure) {
+                    Spacer(modifier = Modifier.height(4.dp))
+                    Text(
+                        stringResource(R.string.host_insecure_warning),
+                        color = MaterialTheme.colorScheme.error,
+                        style = MaterialTheme.typography.bodySmall
+                    )
+                }
             }
         },
         // Bottom action row: [Delete(red)] ... [Cancel] [Save].
@@ -471,7 +504,8 @@ internal fun HostProfileEditorDialog(
                             name = name.ifBlank { "Untitled" },
                             serverUrl = serverUrl,
                             basicAuth = basicAuth,
-                            tunnelPasswordId = tunnelId
+                            tunnelPasswordId = tunnelId,
+                            allowInsecureConnections = allowInsecure
                         )
                         // If the user blanks the username on a profile that
                         // previously had basic auth, force passwordEdited so
