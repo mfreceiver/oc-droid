@@ -187,20 +187,23 @@ internal fun TrafficSection(
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
     ) {
         Column(modifier = Modifier.padding(16.dp)) {
-            TrafficRow(
-                label = stringResource(R.string.settings_traffic_sent),
-                bytes = sent
-            )
-            Spacer(modifier = Modifier.height(8.dp))
-            TrafficRow(
-                label = stringResource(R.string.settings_traffic_received),
-                bytes = received
-            )
-            Spacer(modifier = Modifier.height(8.dp))
-            TrafficRow(
-                label = stringResource(R.string.settings_traffic_total),
-                bytes = sent + received
-            )
+            // Single-line summary: ↑ sent (upload) / ↓ received (download).
+            // No Chinese labels and no total row — the two arrows + formatted
+            // values are enough at a glance.
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(24.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    "↑ ${formatBytes(sent)}",
+                    style = MaterialTheme.typography.bodyMedium
+                )
+                Text(
+                    "↓ ${formatBytes(received)}",
+                    style = MaterialTheme.typography.bodyMedium
+                )
+            }
             Spacer(modifier = Modifier.height(16.dp))
             OutlinedButton(
                 onClick = onReset,
@@ -209,25 +212,6 @@ internal fun TrafficSection(
                 Text(stringResource(R.string.settings_traffic_reset))
             }
         }
-    }
-}
-
-@Composable
-private fun TrafficRow(label: String, bytes: Long) {
-    Row(
-        modifier = Modifier.fillMaxWidth(),
-        horizontalArrangement = Arrangement.Center
-    ) {
-        Text(
-            label,
-            style = MaterialTheme.typography.bodyMedium,
-            color = MaterialTheme.colorScheme.onSurfaceVariant
-        )
-        Spacer(modifier = Modifier.width(8.dp))
-        Text(
-            formatBytes(bytes),
-            style = MaterialTheme.typography.bodyMedium
-        )
     }
 }
 

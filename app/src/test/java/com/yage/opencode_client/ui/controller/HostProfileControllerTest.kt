@@ -235,6 +235,57 @@ class HostProfileControllerTest {
         assertEquals("p-A", slices.host.value.currentHostProfileId)
     }
 
+    // ── saveHostProfile (#12: live reconfigure when allowInsecure toggled) ─
+
+    @Test
+    fun `saveHostProfile of active host reconfigures and force-reconnects when allowInsecure is toggled on`() {
+        // #12: profileA is the current host (id p-A, allowInsecure=false).
+        // Flip the toggle to true and save → must reconfigure REST/SSE/image
+        // clients + reconnect so the new TLS trust policy applies live,
+        // without needing a host switch or app restart.
+        seed { it.copy(currentHostProfileId = "p-A") }
+        val toggled = profileA.copy(allowInsecureConnections = true)
+
+        controller.saveHostProfile(toggled, basicAuthEdited = false)
+
+        // Reconfigured for the updated profileA with allowInsecure=true.
+        verify { repository.configure(toggled.serverUrl, any(), any(), true) }
+        // forceReconnect fired so the new SSL config takes effect immediately.
+        assertEquals(1, callbacks.forceReconnectCalls)
+        // configureRepositoryForProfile cancels SSE once.
+        assertEquals(1, callbacks.cancelSseForReconfigureCalls)
+    }
+
+    @Test
+    fun `saveHostProfile of active host does NOT reconfigure when allowInsecure is unchanged`() {
+        // Editing the active host's name (or any non-toggle field) must NOT
+        // trigger a reconnect — zero regression for the toggle-unchanged case.
+        seed { it.copy(currentHostProfileId = "p-A") }
+        val renamed = profileA.copy(name = "Renamed A") // allowInsecure stays false
+
+        controller.saveHostProfile(renamed, basicAuthEdited = false)
+
+        verify(exactly = 0) { repository.configure(any(), any(), any(), any()) }
+        assertEquals(0, callbacks.forceReconnectCalls)
+        assertEquals(0, callbacks.cancelSseForReconfigureCalls)
+    }
+
+    @Test
+    fun `saveHostProfile of non-current host does NOT reconfigure even if allowInsecure toggled`() {
+        // Saving a NON-active host (profileB while p-A is current) must only
+        // persist + refresh state, never touch the live connection — even when
+        // its toggle changed. The change takes effect when that host is later
+        // selected.
+        seed { it.copy(currentHostProfileId = "p-A") }
+        val toggled = profileB.copy(allowInsecureConnections = false) // was true
+
+        controller.saveHostProfile(toggled, basicAuthEdited = false)
+
+        verify(exactly = 0) { repository.configure(any(), any(), any(), any()) }
+        assertEquals(0, callbacks.forceReconnectCalls)
+        assertEquals(0, callbacks.cancelSseForReconfigureCalls)
+    }
+
     // ── duplicateHostProfile ───────────────────────────────────────────────
 
     @Test

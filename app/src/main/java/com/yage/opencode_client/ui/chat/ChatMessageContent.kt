@@ -57,6 +57,7 @@ import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
 
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -74,9 +75,8 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import com.mikepenz.markdown.compose.components.MarkdownComponentModel
 import com.mikepenz.markdown.compose.components.markdownComponents
-import com.mikepenz.markdown.compose.elements.highlightedCodeBlock
-import com.mikepenz.markdown.compose.elements.highlightedCodeFence
 import com.mikepenz.markdown.m3.Markdown
 import com.yage.opencode_client.R
 import com.yage.opencode_client.data.model.Message
@@ -139,6 +139,19 @@ internal fun ChatMessageList(
 
     val listState = rememberLazyListState()
     var shouldAutoScroll by remember { mutableStateOf(true) }
+    val sessionId = chatState.currentSessionId
+    // #3 — per-session scroll-position memory. The map is remembered at a
+    // stable call site, so it survives session switches (the listState, by
+    // contrast, is a single instance reused across sessions because Compose
+    // keeps ChatMessageList in the composition as long as currentSessionId !=
+    // null). Before opening a sub-session the user's last scroll offset in the
+    // parent is recorded here; returning to the parent restores it instead of
+    // jumping to the latest message.
+    val savedPositions = remember { mutableStateMapOf<String, Pair<Int, Int>>() }
+    // Session id for which we still owe a scroll-position restore once its
+    // messages have materialised. Set synchronously on session enter, consumed
+    // by the contentVersion effect after the message list is populated.
+    var pendingRestoreSession by remember { mutableStateOf<String?>(null) }
     val contentVersion = remember(messages, partsByMessage, streamingPartTexts, streamingReasoningPart, isLoading) {
         messages.size +
             partsByMessage.values.sumOf { it.size } +
@@ -155,7 +168,52 @@ internal fun ChatMessageList(
         }
     }
 
+    // #3 — continuously mirror the current scroll offset against the active
+    // session id. There is no "before session change" hook in Compose, so a
+    // reactive mirror is the simplest robust way to ensure the latest offset
+    // is on file the instant the user navigates into a sub-session.
+    LaunchedEffect(listState, sessionId) {
+        if (sessionId == null) return@LaunchedEffect
+        snapshotFlow {
+            listState.firstVisibleItemIndex to listState.firstVisibleItemScrollOffset
+        }.collect { pos ->
+            savedPositions[sessionId] = pos
+        }
+    }
+
+    // #3 — on session enter, decide intent: a "return" (saved position exists)
+    // queues a restore and disables follow-bottom; a fresh open enables
+    // follow-bottom. Only the synchronous state writes happen here; the actual
+    // scroll is deferred to the contentVersion effect so it runs against a
+    // populated message list (indices are valid), not the transiently-empty
+    // list seen mid-load.
+    LaunchedEffect(sessionId) {
+        val saved = sessionId?.let { savedPositions[it] }
+        if (saved != null) {
+            pendingRestoreSession = sessionId
+            shouldAutoScroll = false
+        } else {
+            pendingRestoreSession = null
+            shouldAutoScroll = true
+        }
+    }
+
     LaunchedEffect(contentVersion) {
+        // #3 — apply a queued restore once the target session's messages are
+        // loaded, then return early so we don't also fire the follow-bottom
+        // scroll for this same contentVersion tick.
+        val restoreFor = pendingRestoreSession
+        if (restoreFor != null && restoreFor == sessionId && messages.isNotEmpty()) {
+            val saved = savedPositions[restoreFor]
+            if (saved != null) {
+                pendingRestoreSession = null
+                shouldAutoScroll = false
+                // Clamp is handled by LazyListState when the index exceeds the
+                // current item count (e.g. if new messages shifted the list).
+                listState.scrollToItem(saved.first, saved.second)
+                return@LaunchedEffect
+            }
+        }
         if (shouldAutoScroll && (messages.isNotEmpty() || streamingReasoningPart != null)) {
             listState.animateScrollToItem(0)
         }
@@ -1001,8 +1059,8 @@ private fun TextPart(
                         content = normalizedText,
                         typography = markdownTypography(fontSizes),
                         components = markdownComponents(
-                            codeBlock = highlightedCodeBlock,
-                            codeFence = highlightedCodeFence
+                            codeBlock = { WrappedCodeBlock(it) },
+                            codeFence = { WrappedCodeBlock(it) }
                         ),
                         modifier = innerModifier,
                         imageTransformer = DataUriImageTransformer
@@ -1045,8 +1103,8 @@ private fun ResolvedMarkdownText(
                 typography = markdownTypography(fontSizes),
                 // §3.1 syntax highlighting via mikepenz code module + dev.snipme:highlights.
                 components = markdownComponents(
-                    codeBlock = highlightedCodeBlock,
-                    codeFence = highlightedCodeFence
+                    codeBlock = { WrappedCodeBlock(it) },
+                    codeFence = { WrappedCodeBlock(it) }
                 ),
                 modifier = modifier,
                 imageTransformer = DataUriImageTransformer
@@ -1145,8 +1203,8 @@ private fun ReasoningCard(
                                 typography = markdownTypography(reasoningFontSizes),
                                 // §3.1 syntax highlighting in reasoning blocks too.
                                 components = markdownComponents(
-                                    codeBlock = highlightedCodeBlock,
-                                    codeFence = highlightedCodeFence
+                                    codeBlock = { WrappedCodeBlock(it) },
+                                    codeFence = { WrappedCodeBlock(it) }
                                 ),
                                 modifier = Modifier.padding(8.dp),
                                 imageTransformer = DataUriImageTransformer
@@ -1257,7 +1315,6 @@ private fun SubAgentCard(
 
     val oc = MaterialTheme.opencode
     val statusErrorColor = oc.stateDangerFg
-    val isDark = LocalIsDarkTheme.current
 
     Surface(
         modifier = modifier
@@ -1294,12 +1351,14 @@ private fun SubAgentCard(
                 }
                 if (isRunning || isError) Spacer(modifier = Modifier.width(4.dp))
 
-                // Agent name — white in dark theme, onSurface in light theme
+                // Agent name — colored by agentTone (same hue as the leading
+                // icon) and bolded so the @mention reads as a strong label.
                 if (subAgentName != null) {
                     Text(
                         text = "@$subAgentName",
                         style = MaterialTheme.typography.labelSmall,
-                        color = if (isDark) Color.White else MaterialTheme.colorScheme.onSurface,
+                        color = agentTone(subAgentName, oc),
+                        fontWeight = FontWeight.Bold,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis
                     )
@@ -1372,6 +1431,73 @@ private fun stripSubAgentSuffix(text: String?): String {
     return Regex("\\s*\\(@[A-Za-z0-9_-]+\\s*subagent\\)", RegexOption.IGNORE_CASE)
         .replace(text, "")
         .trim()
+}
+
+/**
+ * Inserts a zero-width space (U+200B) after every `/` so that long file paths
+ * (which contain no whitespace) become wrappable inside a [Text] with
+ * `softWrap = true`. The ZWSP is invisible, so the rendered path looks
+ * identical but can break across lines at path separators. Used by the
+ * explored-file rows (#8) where full paths used to be clipped.
+ */
+private fun String.wrappablePath(): String = replace("/", "/\u200B")
+
+/**
+ * Extracts the raw code text from a markdown code-block / code-fence
+ * [MarkdownComponentModel], stripping the surrounding ``` / ~~~ fence lines
+ * (with their optional language tag) when present. For indented code blocks
+ * (no fence) the span text is returned as-is. Used by [WrappedCodeBlock] (#9)
+ * which renders code with wrapping instead of the library's horizontal scroll.
+ */
+private fun MarkdownComponentModel.codeText(): String {
+    val raw = content.subSequence(node.startOffset, node.endOffset).toString()
+    val lines = raw.split("\n")
+    if (lines.size >= 2) {
+        val first = lines.first().trimStart()
+        val last = lines.last().trimStart()
+        val isFenceStart = first.startsWith("```") || first.startsWith("~~~")
+        val isFenceEnd = last.startsWith("```") || last.startsWith("~~~")
+        if (isFenceStart && isFenceEnd) {
+            return lines.subList(1, lines.size - 1).joinToString("\n")
+        }
+    }
+    return raw
+}
+
+/**
+ * #9 — code block / code fence renderer that wraps long lines instead of
+ * scrolling horizontally. Replaces mikepenz's [highlightedCodeBlock] /
+ * [highlightedCodeFence], whose inner [Text] is wrapped in a
+ * `Modifier.horizontalScroll` + non-wrapping layout that hides wide content.
+ *
+ * Trade-off (per spec): we lose syntax highlighting (dev.snipme highlights) in
+ * exchange for full content visibility — long code lines soft-wrap onto the
+ * next line instead of being clipped or pushed off-screen. The muted layer02
+ * background + borderBase outline matches the Quiet Tech card styling used by
+ * the other tool cards. Content stays selectable.
+ */
+@Composable
+private fun WrappedCodeBlock(model: MarkdownComponentModel) {
+    val code = remember(model) { model.codeText() }
+    val oc = MaterialTheme.opencode
+    Surface(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(6.dp),
+        color = oc.layer02,
+        border = BorderStroke(1.dp, oc.borderBase)
+    ) {
+        SelectionContainer {
+            Text(
+                text = code,
+                modifier = Modifier.padding(8.dp),
+                style = MaterialTheme.typography.bodySmall,
+                fontFamily = FontFamily.Monospace,
+                color = MaterialTheme.colorScheme.onSurface,
+                softWrap = true,
+                overflow = TextOverflow.Visible
+            )
+        }
+    }
 }
 
 /**
@@ -1608,10 +1734,11 @@ private fun ToolCard(
                         filePaths.forEach { path ->
                             Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.Top) {
                                 Text(
-                                    text = path,
+                                    text = path.wrappablePath(),
                                     style = MaterialTheme.typography.bodySmall,
                                     fontFamily = FontFamily.Monospace,
                                     color = oc.accentText,
+                                    softWrap = true,
                                     modifier = Modifier.weight(1f)
                                 )
                                 IconButton(onClick = { onFileClick(path) }, modifier = Modifier.size(22.dp)) {
@@ -2049,11 +2176,10 @@ private fun ContextToolGroup(
                         verticalAlignment = Alignment.CenterVertically
                     ) {
                         Text(
-                            text = "$toolLabel · $subtitle",
+                            text = "$toolLabel · ${subtitle.wrappablePath()}",
                             style = MaterialTheme.typography.labelSmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis,
+                            softWrap = true,
                             modifier = Modifier.weight(1f)
                         )
                     }
@@ -2197,8 +2323,8 @@ private fun CompletedTaskCard(
                         content = bodyText,
                         typography = markdownTypography(fontSizes),
                         components = markdownComponents(
-                            codeBlock = highlightedCodeBlock,
-                            codeFence = highlightedCodeFence
+                            codeBlock = { WrappedCodeBlock(it) },
+                            codeFence = { WrappedCodeBlock(it) }
                         ),
                         imageTransformer = DataUriImageTransformer
                     )

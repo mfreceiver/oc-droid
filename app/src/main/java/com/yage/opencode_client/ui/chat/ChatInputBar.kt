@@ -36,6 +36,7 @@ import androidx.compose.material.icons.filled.Circle
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.MoreHoriz
 import androidx.compose.material.icons.filled.Stop
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Icon
@@ -55,7 +56,6 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.SolidColor
@@ -148,6 +148,13 @@ internal fun ChatInputBar(
     val sendIcon = if (canStop) Icons.Default.Stop else Icons.Default.ArrowUpward
     val sendContentDescription = if (canStop) stringResource(R.string.chat_interrupt_agent)
     else stringResource(R.string.chat_send)
+    // §6: stop-tap guardrail — the primary button flips to STOP while the
+    // agent is busy and the composer is empty. Such a tap is easy to misfire
+    // (thumb reaches for send, composer was just cleared), so route it through
+    // a confirm dialog instead of aborting immediately. The explicit menu item
+    // in QuietComposerStatus stays a direct abort (that is an intentional
+    // menu action, no second confirmation needed).
+    var showStopConfirm by remember { mutableStateOf(false) }
 
     // §9: composer card — rounded 10, surface (bg-base), 2dp elevation.
     Surface(
@@ -247,7 +254,7 @@ internal fun ChatInputBar(
                 // white icon, 1dp shadow; disabled at 0.5 alpha.
                 ChatPrimaryActionButton(
                     onClick = {
-                        if (canStop) onAbort()
+                        if (canStop) showStopConfirm = true
                         else handleComposerSend(
                             text = text,
                             availableCommands = availableCommands,
@@ -262,6 +269,30 @@ internal fun ChatInputBar(
                     dimWhenDisabled = true,
                     icon = sendIcon,
                     contentDescription = sendContentDescription
+                )
+            }
+
+            // §6: stop-confirmation dialog. Only the primary STOP tap is gated
+            // (it is a one-tap abort that is easy to misfire); the explicit
+            // menu item in QuietComposerStatus still aborts directly.
+            if (showStopConfirm) {
+                AlertDialog(
+                    onDismissRequest = { showStopConfirm = false },
+                    title = { Text("停止运行？") },
+                    text = { Text("当前任务将被中断，已发送的内容无法撤回。") },
+                    confirmButton = {
+                        TextButton(onClick = {
+                            onAbort()
+                            showStopConfirm = false
+                        }) {
+                            Text("停止", color = MaterialTheme.colorScheme.error)
+                        }
+                    },
+                    dismissButton = {
+                        TextButton(onClick = { showStopConfirm = false }) {
+                            Text("取消")
+                        }
+                    }
                 )
             }
         }
@@ -509,7 +540,9 @@ private fun ChatPrimaryActionButton(
     icon: ImageVector,
     contentDescription: String
 ) {
-    // §9: 28×28 visual (rounded 6, 1dp shadow, disabled alpha 0.5).
+    // §9: 28×28 visual (rounded 6, disabled alpha 0.5). The 1dp shadow was
+    // removed (#5): Compose shadow rendered a light/white edge halo on light
+    // themes that read as a semi-transparent white background behind the icon.
     // R-12 (WCAG 2.5.5): the outer Box is a 48dp touch target (the highest-
     // frequency button in the app), while the inner Box preserves the 28dp
     // styled visual so the composer's compact density is unchanged.
@@ -533,7 +566,6 @@ private fun ChatPrimaryActionButton(
         Box(
             modifier = Modifier
                 .size(28.dp)
-                .shadow(elevation = 1.dp, shape = RoundedCornerShape(6.dp))
                 .clip(RoundedCornerShape(6.dp))
                 .background(containerColor.copy(alpha = effectiveAlpha)),
             contentAlignment = Alignment.Center

@@ -16,6 +16,8 @@ import androidx.compose.ui.graphics.painter.BitmapPainter
 import androidx.compose.ui.layout.ContentScale
 import com.mikepenz.markdown.model.ImageData
 import com.mikepenz.markdown.model.ImageTransformer
+import com.yage.opencode_client.data.repository.http.SslConfigFactory
+import com.yage.opencode_client.data.repository.http.applySsl
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -232,11 +234,59 @@ object HttpImageHolder {
     private val inflightUrls = ConcurrentHashMap.newKeySet<String>()
     private val prefetchScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
-    private val imageHttpClient by lazy {
+    /**
+     * #12: SSL-aware image HTTP client. Built via [newImageHttpClient] which
+     * routes through the shared [SslConfigFactory] / [applySsl] entry point
+     * so that, when the active host opts into `allowInsecureConnections`,
+     * self-signed HTTPS markdown images are fetched with the trust-all
+     * config — previously this client was a bare `OkHttpClient.Builder()`
+     * with no SSL wiring and failed the TLS handshake on self-signed image
+     * hosts even with the toggle ON.
+     *
+     * Defaults to system trust (allowInsecure=false) to preserve the
+     * pre-fix behaviour when no host has been configured / the toggle is
+     * OFF. Rebuilt in place by [updateSsl], which is invoked from
+     * `HostProfileController.configureRepositoryForProfile` /
+     * `configureServer` alongside the repository reconfigure so the image
+     * client tracks the same trust policy as REST / SSE.
+     *
+     * Thread safety: the reference is `@Volatile` (read by prefetch
+     * coroutines on [Dispatchers.IO], written under `@Synchronized` in
+     * [updateSsl]); OkHttp clients are themselves thread-safe, so a stale
+     * in-flight call may finish on the previous client instance but no
+     * read/write race is possible.
+     */
+    private val sslConfigFactory = SslConfigFactory()
+
+    @Volatile
+    private var imageAllowInsecure: Boolean = false
+
+    @Volatile
+    private var imageHttpClient: OkHttpClient = newImageHttpClient(allowInsecure = false)
+
+    private fun newImageHttpClient(allowInsecure: Boolean): OkHttpClient =
         OkHttpClient.Builder()
+            .apply { applySsl(sslConfigFactory.sslConfigFor(allowInsecure)) }
             .connectTimeout(10, TimeUnit.SECONDS)
             .readTimeout(15, TimeUnit.SECONDS)
             .build()
+
+    /**
+     * #12: rebuilds the image HTTP client so its TLS trust policy matches the
+     * active host's [allowInsecure] flag. No-op when the flag is unchanged
+     * (avoids needless SSLContext churn on unrelated reconfigures). Called
+     * from the host profile controller on every repository reconfigure.
+     *
+     * Thread-safe: synchronized write + volatile field. The default
+     * (allowInsecure=false) is the system trust store, so this is a pure
+     * no-op until a trust-all host is configured — zero behaviour
+     * regression for the OFF case.
+     */
+    @Synchronized
+    fun updateSsl(allowInsecure: Boolean) {
+        if (allowInsecure == imageAllowInsecure) return
+        imageAllowInsecure = allowInsecure
+        imageHttpClient = newImageHttpClient(allowInsecure)
     }
 
     private val diskCacheDir: File? by lazy {

@@ -16,6 +16,7 @@ import com.yage.opencode_client.ui.TunnelActivationState
 import com.yage.opencode_client.ui.TUNNEL_SUCCESS_TOAST
 import com.yage.opencode_client.ui.errorMessageOrFallback
 import com.yage.opencode_client.ui.updateAndSync
+import com.yage.opencode_client.ui.util.HttpImageHolder
 import com.yage.opencode_client.util.DebugLog
 import com.yage.opencode_client.util.SettingsManager
 import kotlinx.coroutines.CoroutineScope
@@ -166,6 +167,14 @@ internal class HostProfileController(
         } else {
             profile
         }
+        // #12: snapshot the previous profile (before save) so we can detect
+        // whether the allowInsecure toggle of the ACTIVE host changed — that
+        // is the case that needs a live repository reconfigure + reconnect.
+        // Without this, editing the current host's "不安全连接" persisted the
+        // flag but left the existing REST/SSE OkHttp clients on the old
+        // (SystemDefault) SSL config, so the toggle only took effect after a
+        // host switch or app restart.
+        val previous = hostProfileStore.profiles().firstOrNull { it.id == normalized.id }
         if (basicAuthEdited) {
             settingsManager.setBasicAuthPassword(normalized.id, basicAuthPassword)
         }
@@ -179,6 +188,21 @@ internal class HostProfileController(
         }
         hostProfileStore.save(normalized)
         refreshHostProfileState()
+
+        // #12: if the saved profile is the currently active host AND its
+        // allowInsecureConnections flag actually changed, reconfigure the
+        // live repository clients (REST / SSE / image) and force a reconnect
+        // so the new TLS trust policy takes effect immediately. Mirrors the
+        // reconfigure+reconnect path used by selectHostProfile /
+        // deleteHostProfile(wasCurrent). Non-current hosts and edits that do
+        // not touch the toggle are left untouched (zero regression — the
+        // toggle-OFF / unchanged case behaves exactly as before).
+        val isActiveHost = normalized.id == slices.host.value.currentHostProfileId
+        val toggleChanged = previous?.allowInsecureConnections != normalized.allowInsecureConnections
+        if (isActiveHost && toggleChanged) {
+            configureRepositoryForProfile(normalized)
+            callbacks.forceReconnect()
+        }
     }
 
     fun duplicateHostProfile(profileId: String) {
@@ -288,10 +312,14 @@ internal class HostProfileController(
         settingsManager.serverUrl = url
         settingsManager.username = username
         settingsManager.password = password
+        val allowInsecure = currentHostProfile().allowInsecureConnections
         repository.configure(
             url, username, password,
-            allowInsecureConnections = currentHostProfile().allowInsecureConnections
+            allowInsecureConnections = allowInsecure
         )
+        // #12: mirror the host's TLS trust policy into the markdown image
+        // client (same as configureRepositoryForProfile).
+        HttpImageHolder.updateSsl(allowInsecure)
     }
 
     /**
@@ -312,6 +340,10 @@ internal class HostProfileController(
             profile.serverUrl, profile.basicAuth?.username, password,
             allowInsecureConnections = profile.allowInsecureConnections
         )
+        // #12: keep the markdown image HTTP client's TLS trust policy in sync
+        // with the active host so self-signed HTTPS images load under the
+        // trust-all toggle (same entry point as REST / SSE).
+        HttpImageHolder.updateSsl(profile.allowInsecureConnections)
         // §H2: restore persisted workdir after repository.configure resets it.
         settingsManager.currentWorkdir?.let { repository.setCurrentDirectory(it) }
     }

@@ -1,13 +1,7 @@
 package com.yage.opencode_client.ui.chat
 
-import androidx.compose.animation.AnimatedVisibility
-import androidx.compose.animation.expandVertically
-import androidx.compose.animation.fadeIn
-import androidx.compose.animation.fadeOut
-import androidx.compose.animation.shrinkVertically
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -20,7 +14,6 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.OpenInNew
 import androidx.compose.material.icons.filled.ChevronRight
 import androidx.compose.material.icons.filled.Edit
-import androidx.compose.material.icons.filled.ExpandLess
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -53,13 +46,13 @@ import androidx.compose.ui.res.stringResource
  * file gets its own row instead of being hidden inside one PatchCard's
  * expanded body.
  *
- * Default-expand policy: every non-delete file is expanded on first compose.
- * `status == null` is treated as non-delete (review fix — null != "delete").
- * Delete files start collapsed to keep the focus on additions/updates.
+ * Default state: header expanded on first compose so all file details are
+ * visible; collapse via the header toggle.
  *
- * The header carries the aggregate `+N -M` diff stat (summed across files).
- * Per-file rows show basename + per-file `+N -M` and expand to show the full
- * path with an "open in files" affordance.
+ * The header carries the aggregate `+N -M` diff stat (summed across files) and
+ * acts as the single expand/collapse toggle. Per-file rows show basename +
+ * per-file `+N -M`; when the header is expanded each row also shows the full
+ * path with an "open in files" affordance (no per-file secondary collapse).
  *
  * No `callId` cross-Part matching is performed — the caller has already
  * aggregated write Parts, and per §6 the unit of aggregation is the single
@@ -82,17 +75,6 @@ internal fun MultiFilePatchAccordion(
     val files = remember(parts) { parts.flatMap { it.files ?: emptyList() } }
     if (files.isEmpty()) return
 
-    // Default-expanded set: every non-delete file's path. status==null counts
-    // as non-delete (review fix — a null status is the common case for writes
-    // and edits, and treating it as delete would collapse everything by default).
-    // rememberSaveable so the expand state survives config change without being
-    // reset to the default-expand policy each time.
-    var expandedPaths by rememberSaveable(files) {
-        mutableStateOf(
-            files.filter { it.status?.lowercase() != "delete" }.map { it.path }.toSet()
-        )
-    }
-
     // Aggregate diff totals for the header. Per-file additions/deletions come
     // from FileChange when the server provided them; missing values count as 0.
     val (totalAdd, totalDel) = remember(files) {
@@ -104,7 +86,11 @@ internal fun MultiFilePatchAccordion(
         }
         a to d
     }
-    val allExpanded = expandedPaths.size == files.size
+
+    // Single header-level expand toggle (no per-file collapse anymore).
+    // rememberSaveable so the state survives config change. Defaults to
+    // expanded so file details are visible on first compose.
+    var expanded by rememberSaveable { mutableStateOf(true) }
 
     Surface(
         modifier = modifier
@@ -120,9 +106,7 @@ internal fun MultiFilePatchAccordion(
                 modifier = Modifier
                     .fillMaxWidth()
                     .padding(horizontal = 10.dp, vertical = 4.dp)
-                    .clickable {
-                        expandedPaths = if (allExpanded) emptySet() else files.map { it.path }.toSet()
-                    },
+                    .clickable { expanded = !expanded },
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Icon(
@@ -160,18 +144,19 @@ internal fun MultiFilePatchAccordion(
                 }
                 Spacer(modifier = Modifier.weight(1f))
                 Icon(
-                    if (allExpanded) Icons.Default.KeyboardArrowDown else Icons.Default.ChevronRight,
-                    contentDescription = if (allExpanded) "Collapse all" else "Expand all",
+                    if (expanded) Icons.Default.KeyboardArrowDown else Icons.Default.ChevronRight,
+                    contentDescription = if (expanded) "Collapse all" else "Expand all",
                     modifier = Modifier.size(20.dp),
                     tint = MaterialTheme.colorScheme.onSurfaceVariant
                 )
             }
 
-            // Per-file rows.
+            // Per-file rows. No per-file collapse anymore: the basename row is
+            // always shown (with its +N -M stat); when the header is expanded
+            // the full path + "open in files" affordance renders directly below.
             files.forEach { fc ->
                 val path = fc.path
                 val basename = path.substringAfterLast("/").ifEmpty { path }
-                val isExpanded = path in expandedPaths
                 val fileAdd = fc.additions ?: 0
                 val fileDel = fc.deletions ?: 0
                 val isDelete = fc.status?.lowercase() == "delete"
@@ -181,23 +166,12 @@ internal fun MultiFilePatchAccordion(
                         modifier = Modifier
                             .fillMaxWidth()
                             .padding(vertical = 4.dp)
-                            .testTag("toolcard.multi_patch.row.$basename")
-                            .clickable {
-                                expandedPaths = if (isExpanded) {
-                                    expandedPaths - path
-                                } else {
-                                    expandedPaths + path
-                                }
-                            },
+                            .testTag("toolcard.multi_patch.row.$basename"),
                         verticalAlignment = Alignment.CenterVertically
                     ) {
-                        Icon(
-                            if (isExpanded) Icons.Default.KeyboardArrowDown else Icons.Default.ChevronRight,
-                            contentDescription = if (isExpanded) "Collapse" else "Expand",
-                            modifier = Modifier.size(16.dp),
-                            tint = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                        Spacer(modifier = Modifier.width(4.dp))
+                        // Indent so the basename aligns with where the per-file
+                        // chevron used to sit (16.dp icon + 4.dp spacer = 20.dp).
+                        Spacer(modifier = Modifier.width(20.dp))
                         Text(
                             text = basename,
                             style = MaterialTheme.typography.labelMedium,
@@ -237,52 +211,29 @@ internal fun MultiFilePatchAccordion(
                         }
                     }
 
-                    AnimatedVisibility(
-                        visible = isExpanded,
-                        enter = expandVertically() + fadeIn(),
-                        exit = shrinkVertically() + fadeOut()
-                    ) {
-                        Column {
-                            Row(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .padding(start = 20.dp, top = 2.dp, bottom = 2.dp),
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
-                                Text(
-                                    text = path,
-                                    style = MaterialTheme.typography.bodySmall,
-                                    fontFamily = FontFamily.Monospace,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                    modifier = Modifier.weight(1f)
-                                )
-                                IconButton(
-                                    onClick = { onFileClick(path) },
-                                    modifier = Modifier.size(22.dp)
-                                ) {
-                                    Icon(
-                                        Icons.AutoMirrored.Filled.OpenInNew,
-                                        contentDescription = stringResource(R.string.files_show_in_files),
-                                        modifier = Modifier.size(14.dp),
-                                        tint = oc.accentText
-                                    )
-                                }
-                            }
-                            Row(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .clickable {
-                                        expandedPaths = expandedPaths - path
-                                    }
-                                    .padding(start = 20.dp, top = 0.dp, bottom = 4.dp),
-                                horizontalArrangement = Arrangement.Center,
-                                verticalAlignment = Alignment.CenterVertically
+                    if (expanded) {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(start = 20.dp, top = 2.dp, bottom = 4.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(
+                                text = path,
+                                style = MaterialTheme.typography.bodySmall,
+                                fontFamily = FontFamily.Monospace,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.weight(1f)
+                            )
+                            IconButton(
+                                onClick = { onFileClick(path) },
+                                modifier = Modifier.size(22.dp)
                             ) {
                                 Icon(
-                                    Icons.Default.ExpandLess,
-                                    contentDescription = "Collapse",
+                                    Icons.AutoMirrored.Filled.OpenInNew,
+                                    contentDescription = stringResource(R.string.files_show_in_files),
                                     modifier = Modifier.size(14.dp),
-                                    tint = oc.faint
+                                    tint = oc.accentText
                                 )
                             }
                         }

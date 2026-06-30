@@ -74,7 +74,6 @@ import com.yage.opencode_client.data.model.SessionStatus
 import com.yage.opencode_client.data.model.TodoItem
 import com.yage.opencode_client.ui.ContextUsage
 import com.yage.opencode_client.ui.TunnelActivationState
-import com.yage.opencode_client.ui.theme.BrandGold
 import com.yage.opencode_client.ui.theme.opencode
 import java.util.Locale
 
@@ -283,11 +282,11 @@ internal fun ChatTopBar(
                 else -> {
                     // §17: the dropdown session switcher moved to the persistent
                     // tab strip rendered as the TopAppBar's second row. The title
-                    // slot now shows only the current session title.
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        modifier = Modifier.widthIn(max = TITLE_SLOT_MAX_WIDTH)
-                    ) {
+                    // slot shows the current session title with a subtitle (#10)
+                    // carrying the last segment of the session's working
+                    // directory, so the user can tell which project the session
+                    // belongs to at a glance.
+                    Column(modifier = Modifier.widthIn(max = TITLE_SLOT_MAX_WIDTH)) {
                         Text(
                             text = currentSession?.displayName ?: "—",
                             style = MaterialTheme.typography.titleLarge,
@@ -295,6 +294,21 @@ internal fun ChatTopBar(
                             maxLines = 1,
                             overflow = TextOverflow.Ellipsis
                         )
+                        // #10: subtitle = basename of currentSession.directory.
+                        // Hidden when there is no session (the "—" placeholder
+                        // case) or when the basename is empty.
+                        currentSession?.directory
+                            ?.substringAfterLast("/")
+                            ?.takeIf { it.isNotEmpty() }
+                            ?.let { workdir ->
+                                Text(
+                                    text = workdir,
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                            }
                     }
                 }
             }
@@ -832,10 +846,13 @@ private fun ServerManagementDialog(
                 }
 
                 // --- Traffic statistics ---
+                // #4a: the two traffic counters are centered horizontally
+                // within the dialog (16dp spacing kept), so the ↑/↓ row reads
+                // as a balanced pair instead of left-aligned.
                 Spacer(modifier = Modifier.height(8.dp))
                 Row(
                     modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(16.dp)
+                    horizontalArrangement = Arrangement.spacedBy(16.dp, Alignment.CenterHorizontally)
                 ) {
                     Text(
                         text = "↑ ${formatTrafficBytes(trafficSent)}",
@@ -956,10 +973,18 @@ private fun formatTrafficBytes(bytes: Long): String {
 
 @Composable
 internal fun ContextUsageRing(usage: ContextUsage?) {
+    // #11: 4-stage color scale (cool → hot) reflecting context pressure.
+    // Arms are evaluated top-down so the order encodes the thresholds.
+    //   null                  → onSurfaceVariant (no data)
+    //   < 0.25                → primary (blue, healthy)
+    //   0.25 ..< 0.50         → green
+    //   0.50 ..< 0.75         → orange
+    //   >= 0.75               → error (red)
     val ringColor = when {
         usage == null -> MaterialTheme.colorScheme.onSurfaceVariant
-        usage.percentage >= 0.9f -> MaterialTheme.colorScheme.error
-        usage.percentage >= 0.7f -> BrandGold
+        usage.percentage >= 0.75f -> MaterialTheme.colorScheme.error
+        usage.percentage >= 0.50f -> Color(0xFFFF9800)
+        usage.percentage >= 0.25f -> Color(0xFF4CAF50)
         else -> MaterialTheme.colorScheme.primary
     }
     val trackColor = MaterialTheme.colorScheme.onSurfaceVariant.copy(
