@@ -2,6 +2,7 @@ package com.yage.opencode_client.util
 
 import android.content.Context
 import android.util.Log
+import dagger.hilt.android.qualifiers.ApplicationContext
 import java.io.File
 import java.io.FileWriter
 import java.io.PrintWriter
@@ -23,9 +24,8 @@ import javax.inject.Singleton
  * in 5 minutes actually comes from.
  */
 @Singleton
-class TrafficLogger @Inject constructor(
-    private val context: Context
-) {
+class TrafficLogger @Inject
+constructor(@param:ApplicationContext private val context: Context) {
     private val buffer = ArrayDeque<Entry>(MAX_ENTRIES)
     private val fmt = SimpleDateFormat("HH:mm:ss.SSS", Locale.US)
     private var sequence = 0L
