@@ -57,6 +57,7 @@ import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
 
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -156,9 +157,20 @@ internal fun ChatMessageList(
     // acceptable for the parent→sub→parent restore use-case; cross-process
     // restoration is handled by the server-side message list re-fetch + the
     // `shouldAutoScroll = true` fresh-open fallback. Capacity is bounded by
-    // MAX_SAVED_SESSIONS (LRU eviction of the oldest insertion) to avoid
-    // unbounded growth for heavy users that open many sub-sessions.
+    // MAX_SAVED_SESSIONS (LRU eviction) to avoid unbounded growth for heavy
+    // users that open many sub-sessions.
+    //
+    // 🟡 True LRU via accessOrder list (kimo 9.4 复审): SnapshotStateMap has
+    // **HashMap semantics — its iteration order is NOT insertion order** (per
+    // Compose source). A prior version used `savedPositions.keys.first()` to
+    // evict the "oldest" entry, but that actually removed an arbitrary (hash-
+    // bucket) entry — a pseudo-LRU bug. We now keep a parallel
+    // `mutableStateListOf<String>` (`SnapshotStateList`, which IS index-stable
+    // and preserves order) as an explicit access-order ledger: every write or
+    // restore-read of a sessionId moves its id to the tail; eviction pops from
+    // the head. This gives true LRU semantics.
     val savedPositions = remember { mutableStateMapOf<String, Pair<Int, Int>>() }
+    val accessOrder = remember { mutableStateListOf<String>() }
     // Session id for which we still owe a scroll-position restore once its
     // messages have materialised. Set synchronously on session enter, consumed
     // by the contentVersion effect after the message list is populated.
@@ -212,11 +224,17 @@ internal fun ChatMessageList(
                 // Guard (2): restore-in-flight → don't record programmatic scrolls.
                 if (pendingRestoreSession == sessionId) return@collect
                 savedPositions[sessionId] = pos
-                // 🟡 LRU cap: evict the oldest insertion when over capacity.
-                // SnapshotStateMap preserves insertion order, so the first key
-                // is the oldest entry. Bounded growth for heavy sub-session use.
-                while (savedPositions.size > MAX_SAVED_SESSIONS) {
-                    val oldest = savedPositions.keys.firstOrNull() ?: break
+                // 🟡 True LRU: move this id to the tail of the access ledger.
+                // remove returns false if absent — harmless; either way add()
+                // appends a fresh tail entry (a duplicate would corrupt the
+                // invariant, so we always remove-then-add).
+                accessOrder.remove(sessionId)
+                accessOrder.add(sessionId)
+                // Evict from the head (oldest) while over capacity. We iterate
+                // on accessOrder (index-stable SnapshotStateList), NOT on
+                // savedPositions.keys (HashMap order — see class doc above).
+                while (savedPositions.size > MAX_SAVED_SESSIONS && accessOrder.isNotEmpty()) {
+                    val oldest = accessOrder.removeAt(0)
                     savedPositions.remove(oldest)
                 }
             }
@@ -249,10 +267,23 @@ internal fun ChatMessageList(
             if (saved != null) {
                 pendingRestoreSession = null
                 shouldAutoScroll = false
+                // 🟡 True LRU (kimo 9.4): a restore is also an "access" — move
+                // this id to the tail so an actively-revisited session is not
+                // evicted by a later sibling-session write.
+                accessOrder.remove(restoreFor)
+                accessOrder.add(restoreFor)
                 // Clamp is handled by LazyListState when the index exceeds the
                 // current item count (e.g. if new messages shifted the list).
                 listState.scrollToItem(saved.first, saved.second)
                 return@LaunchedEffect
+            } else {
+                // 🟡 Defensive (glmer 🟡-1): the saved entry was evicted by an
+                // LRU tick between the session-switch (which set
+                // pendingRestoreSession) and this effect firing. Clear the
+                // pending flag and fall through to the follow-bottom branch so
+                // we don't get stuck with shouldAutoScroll=false at whatever
+                // residual index the listState happens to be on.
+                pendingRestoreSession = null
             }
         }
         if (shouldAutoScroll && (messages.isNotEmpty() || streamingReasoningPart != null)) {
@@ -1521,7 +1552,15 @@ private fun MarkdownComponentModel.codeFenceLanguage(): String {
     if (!isFenceStart) return ""
     // Strip the fence marker (3+ chars of ` or ~), then trim whitespace/quotes.
     val markerEnd = first.takeWhile { it == '`' || it == '~' }.length
-    return first.substring(markerEnd).trim().substringBefore(' ').ifBlank { "" }
+    // 🟡 Pandoc/attribute-style fence beautify (glmer 🟡-2): pandoc emits
+    // ` ```{.kotlin} ` instead of ` ```kotlin `. Strip the `{.` prefix and `}`
+    // suffix so the badge renders `kotlin` rather than the raw `{.kotlin}`.
+    return first.substring(markerEnd)
+        .trim()
+        .substringBefore(' ')
+        .removePrefix("{.")
+        .removeSuffix("}")
+        .ifBlank { "" }
 }
 
 /**
@@ -1611,8 +1650,11 @@ private val MAX_CARD_WIDTH = 220.dp
  * `savedPositions` inside [ChatMessageList]. The cache is keyed by sessionId
  * and lives for the lifetime of the ChatMessageList composable; without a cap
  * a user that opens many sub-sessions would accumulate entries forever. When
- * the cap is exceeded the oldest insertion is evicted (LRU). 30 is comfortably
- * above typical agent-task fan-out while bounding memory to a few KB.
+ * the cap is exceeded the least-recently-used entry is evicted — true LRU is
+ * implemented via the parallel `accessOrder` SnapshotStateList ledger (see
+ * `savedPositions` declaration doc for why SnapshotStateMap alone cannot do
+ * this). 30 is comfortably above typical agent-task fan-out while bounding
+ * memory to a few KB.
  */
 private const val MAX_SAVED_SESSIONS = 30
 

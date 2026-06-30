@@ -174,6 +174,12 @@ internal class HostProfileController(
         // flag but left the existing REST/SSE OkHttp clients on the old
         // (SystemDefault) SSL config, so the toggle only took effect after a
         // host switch or app restart.
+        // S-1: also detect a serverUrl change on the ACTIVE host — previously
+        // editing the current host's URL persisted the new value but left the
+        // existing clients pointed at the OLD endpoint, so the change only
+        // took effect after a host switch / app restart. Treat it the same as
+        // a toggle change: reconfigure + force reconnect to build clients for
+        // the new URL.
         val previous = hostProfileStore.profiles().firstOrNull { it.id == normalized.id }
         if (basicAuthEdited) {
             settingsManager.setBasicAuthPassword(normalized.id, basicAuthPassword)
@@ -189,17 +195,19 @@ internal class HostProfileController(
         hostProfileStore.save(normalized)
         refreshHostProfileState()
 
-        // #12: if the saved profile is the currently active host AND its
-        // allowInsecureConnections flag actually changed, reconfigure the
-        // live repository clients (REST / SSE / image) and force a reconnect
-        // so the new TLS trust policy takes effect immediately. Mirrors the
-        // reconfigure+reconnect path used by selectHostProfile /
-        // deleteHostProfile(wasCurrent). Non-current hosts and edits that do
-        // not touch the toggle are left untouched (zero regression — the
-        // toggle-OFF / unchanged case behaves exactly as before).
+        // #12 / S-1: if the saved profile is the currently active host AND
+        // either its allowInsecureConnections flag OR its serverUrl actually
+        // changed, reconfigure the live repository clients (REST / SSE /
+        // image) and force a reconnect so the new TLS trust policy / endpoint
+        // takes effect immediately. Mirrors the reconfigure+reconnect path
+        // used by selectHostProfile / deleteHostProfile(wasCurrent). Non-
+        // current hosts and edits that touch neither field are left untouched
+        // (zero regression — the toggle-OFF / unchanged-URL case behaves
+        // exactly as before).
         val isActiveHost = normalized.id == slices.host.value.currentHostProfileId
         val toggleChanged = previous?.allowInsecureConnections != normalized.allowInsecureConnections
-        if (isActiveHost && toggleChanged) {
+        val urlChanged = previous?.serverUrl != normalized.serverUrl
+        if (isActiveHost && (toggleChanged || urlChanged)) {
             configureRepositoryForProfile(normalized)
             callbacks.forceReconnect()
         }

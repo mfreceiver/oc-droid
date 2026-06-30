@@ -271,8 +271,13 @@ object HttpImageHolder {
      * 仅供 [com.yage.opencode_client.ui.controller.HostProfileControllerTest]
      * 断言 "controller 确实把信任策略同步到了 image client"；生产行为从不读取
      * 此字段。通过 [resetTestState] 重置。
+     *
+     * S-2: `@Volatile` 与同类字段（[imageAllowInsecure] / [imageHttpClient]）
+     * 保持一致——该字段由 [updateSsl] 在 `@Synchronized` 块内写入，但测试线程
+     * 可能从任意上下文读取，缺少 happens-before 边界时存在理论 stale read 风险。
      */
     @VisibleForTesting
+    @Volatile
     internal var lastUpdateSslAllowInsecure: Boolean? = null
 
     private fun newImageHttpClient(allowInsecure: Boolean): OkHttpClient =
