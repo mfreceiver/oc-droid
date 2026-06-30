@@ -1253,14 +1253,14 @@ private fun SubAgentCard(
                     Icons.Default.AccountTree,
                     contentDescription = null,
                     modifier = Modifier.size(14.dp),
-                    tint = if (subAgentName != null) agentTone(subAgentName) else oc.accentText
+                    tint = if (subAgentName != null) agentTone(subAgentName, oc) else oc.accentText
                 )
                 Spacer(modifier = Modifier.width(4.dp))
                 // Status icon: spinner while running, warning on error, nothing on done
                 when {
                     isRunning -> CircularProgressIndicator(
                         modifier = Modifier.size(14.dp),
-                        color = if (subAgentName != null) agentTone(subAgentName) else oc.accentText,
+                        color = if (subAgentName != null) agentTone(subAgentName, oc) else oc.accentText,
                         strokeWidth = 2.dp
                     )
                     isError -> Icon(

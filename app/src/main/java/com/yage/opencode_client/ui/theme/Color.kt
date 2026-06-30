@@ -143,11 +143,21 @@ val LightScrim = Color(0xFF000000)
 // ─────────────────────────────────────────────────────────────────────────────
 // Functional colors (diff viewer, git file status). These carry concrete
 // semantic meaning (added/removed/modified) and are intentionally NOT part of
-// the brand accent system. Unchanged by the v2 retheme.
+// the brand accent system.
+//
+// R-27: 这些色已迁移到 [OpencodeColors]（明暗双套）。下方顶层 val 保留为
+// **deprecated 别名**指向 [LightOpencodeColors] 对应字段——仅为兼容潜在的
+// 外部引用，新代码请改用 `MaterialTheme.opencode.addedFile` 等 token。
 // ─────────────────────────────────────────────────────────────────────────────
-val AddedLine = Color(0xFFE8F5E9)
-val DeletedLine = Color(0xFFFFEBEE)
-val ModifiedFile = Color(0xFFFFA726)
-val AddedFile = Color(0xFF66BB6A)
-val DeletedFile = Color(0xFFEF5350)
-val UntrackedFile = Color(0xFF90A4AE)
+@Deprecated("R-27: 改用 MaterialTheme.opencode.addedLine（明暗双套）", ReplaceWith("LightOpencodeColors.addedLine"))
+val AddedLine get() = LightOpencodeColors.addedLine
+@Deprecated("R-27: 改用 MaterialTheme.opencode.deletedLine（明暗双套）", ReplaceWith("LightOpencodeColors.deletedLine"))
+val DeletedLine get() = LightOpencodeColors.deletedLine
+@Deprecated("R-27: 改用 MaterialTheme.opencode.modifiedFile（明暗双套）", ReplaceWith("LightOpencodeColors.modifiedFile"))
+val ModifiedFile get() = LightOpencodeColors.modifiedFile
+@Deprecated("R-27: 改用 MaterialTheme.opencode.addedFile（明暗双套）", ReplaceWith("LightOpencodeColors.addedFile"))
+val AddedFile get() = LightOpencodeColors.addedFile
+@Deprecated("R-27: 改用 MaterialTheme.opencode.deletedFile（明暗双套）", ReplaceWith("LightOpencodeColors.deletedFile"))
+val DeletedFile get() = LightOpencodeColors.deletedFile
+@Deprecated("R-27: 改用 MaterialTheme.opencode.untrackedFile（明暗双套）", ReplaceWith("LightOpencodeColors.untrackedFile"))
+val UntrackedFile get() = LightOpencodeColors.untrackedFile

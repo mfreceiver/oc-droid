@@ -21,10 +21,7 @@ import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import com.yage.opencode_client.R
 import com.yage.opencode_client.data.model.FileNode
-import com.yage.opencode_client.ui.theme.AddedFile
-import com.yage.opencode_client.ui.theme.DeletedFile
-import com.yage.opencode_client.ui.theme.ModifiedFile
-import com.yage.opencode_client.ui.theme.UntrackedFile
+import com.yage.opencode_client.ui.theme.opencode
 
 @Composable
 internal fun FileBrowserPane(
@@ -49,11 +46,12 @@ internal fun FileRow(
     status: String?,
     onClick: () -> Unit
 ) {
+    val oc = MaterialTheme.opencode
     val statusColor = when (status) {
-        "added" -> AddedFile
-        "modified" -> ModifiedFile
-        "deleted" -> DeletedFile
-        else -> if (status == "untracked") UntrackedFile else null
+        "added" -> oc.addedFile
+        "modified" -> oc.modifiedFile
+        "deleted" -> oc.deletedFile
+        else -> if (status == "untracked") oc.untrackedFile else null
     }
 
     Row(

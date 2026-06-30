@@ -195,7 +195,10 @@ fun OpenCodeTheme(
     ) {
         MaterialTheme(
             colorScheme = colorScheme,
-            typography = typography
+            typography = typography,
+            // R-25: 集中下发 app-wide Shapes（5 档圆角 token），新代码用
+            // MaterialTheme.shapes.small/medium/large 等而非裸 RoundedCornerShape(dp)。
+            shapes = AppShapes,
         ) {
             Surface(
                 modifier = Modifier.fillMaxSize(),
