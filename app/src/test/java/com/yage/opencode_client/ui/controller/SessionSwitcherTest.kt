@@ -117,6 +117,42 @@ class SessionSwitcherTest {
         assertEquals(0, switcher.sessionWindowCacheSize())
     }
 
+    // ── M5 跟进 (§4.2): clearDeltaBuffers hookup ────────────────────────────
+
+    @Test
+    fun `switchTo clears delta buffers when leaving an outgoing session`() {
+        seed {
+            it.copy(
+            currentSessionId = "session-A",
+            sessions = listOf(
+                Session(id = "session-A", directory = "/tmp/a"),
+                Session(id = "session-B", directory = "/tmp/b")
+            )
+            )
+        }
+
+        switcher.switchTo("session-B")
+
+        // Real session change → pending deltas of session-A must be dropped
+        // exactly once so a late flush can't write into session-B's state.
+        assertEquals(1, callbacks.clearDeltaBuffersCalls)
+    }
+
+    @Test
+    fun `switchTo does NOT clear delta buffers when switching to same session`() {
+        seed {
+            it.copy(
+            currentSessionId = "session-A",
+            sessions = listOf(Session(id = "session-A", directory = "/tmp/a"))
+            )
+        }
+
+        switcher.switchTo("session-A")
+
+        // Same-session reselect must keep its own in-flight deltas intact.
+        assertEquals(0, callbacks.clearDeltaBuffersCalls)
+    }
+
     // ── Step 2: draft save / restore ────────────────────────────────────────
 
     @Test
@@ -630,6 +666,13 @@ class SessionSwitcherTest {
         override fun loadSessionStatus() {
             loadSessionStatusCalls++
             callOrder.add("loadSessionStatus")
+        }
+
+        var clearDeltaBuffersCalls = 0
+
+        override fun onClearDeltaBuffers() {
+            clearDeltaBuffersCalls++
+            callOrder.add("onClearDeltaBuffers")
         }
     }
 }

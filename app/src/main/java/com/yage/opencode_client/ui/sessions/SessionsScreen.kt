@@ -140,6 +140,10 @@ fun SessionsScreen(
         val keyToDisplayDir = LinkedHashMap<String, String>()
         for (s in allSessions) {
             if (s.parentId != null) continue
+            // Hide archived sessions from the connected-projects list too (the
+            // "recent sessions" list already filters them at line 99). Without
+            // this, the 归档 button in this list would hide nothing.
+            if (s.isArchived) continue
             val key = normalizeDirectory(s.directory)
             if (key in normalizedHidden) continue
             groupsByKey.getOrPut(key) { mutableListOf() }.add(s)

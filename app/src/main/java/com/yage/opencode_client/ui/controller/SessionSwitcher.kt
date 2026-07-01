@@ -54,6 +54,14 @@ interface SessionSwitcherCallbacks {
 
     /** Loads the current session-status map from the repository. */
     fun loadSessionStatus()
+
+    /**
+     * M5 跟进 (§4.2): drops all pending streaming-delta buffers in
+     * [SessionSyncCoordinator]. Called by [SessionSwitcher.switchTo] when
+     * LEAVING the outgoing session so its pending delta flush jobs can't
+     * write into the newly-selected session's state. Idempotent.
+     */
+    fun onClearDeltaBuffers()
 }
 
 /**
@@ -181,6 +189,12 @@ internal class SessionSwitcher(
         // session's currently-loaded view into the LRU before clearing it.
         if (previousSessionId != null && previousSessionId != sessionId) {
             captureCurrentSessionWindow(previousSessionId)
+            // M5 跟进 (§4.2): drop the outgoing session's pending streaming-
+            // delta buffers + cancel their flush jobs, so a late flush can't
+            // write into the newly-selected session's state. Done here
+            // (alongside the LRU write-back) because this branch only fires on
+            // a real session change — a same-session reselect keeps its deltas.
+            callbacks.onClearDeltaBuffers()
         }
 
         // ── Step 2: selectSessionState (inlined) ────────────────────────────

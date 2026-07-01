@@ -22,6 +22,8 @@ import com.yage.opencode_client.ui.controller.ForegroundCatchUpCallbacks
 import com.yage.opencode_client.ui.controller.ForegroundCatchUpController
 import com.yage.opencode_client.ui.controller.HostProfileCallbacks
 import com.yage.opencode_client.ui.controller.HostProfileController
+import com.yage.opencode_client.ui.controller.LowTrafficPoller
+import com.yage.opencode_client.ui.controller.LowTrafficPollerCallbacks
 import com.yage.opencode_client.ui.controller.SessionSyncCoordinator
 import com.yage.opencode_client.ui.controller.SessionSyncCoordinatorCallbacks
 import com.yage.opencode_client.ui.controller.SessionSwitcher
@@ -464,7 +466,7 @@ class MainViewModel @Inject constructor(
     private val hostProfileStore: HostProfileStore,
     internal val trafficTracker: TrafficTracker,
     private val appLifecycleMonitor: AppLifecycleMonitor
-) : ViewModel(), ForegroundCatchUpCallbacks, ComposerCallbacks, SessionSwitcherCallbacks, HostProfileCallbacks, ConnectionCoordinatorCallbacks, SessionSyncCoordinatorCallbacks {
+) : ViewModel(), ForegroundCatchUpCallbacks, ComposerCallbacks, SessionSwitcherCallbacks, HostProfileCallbacks, ConnectionCoordinatorCallbacks, SessionSyncCoordinatorCallbacks, LowTrafficPollerCallbacks {
 
     // §R-17 M2: _state keeps carrying every AppState field (the connection/
     // traffic ones are deprecated mirrors). The authoritative storage for
@@ -570,6 +572,29 @@ class MainViewModel @Inject constructor(
         ForegroundCatchUpController(
             appLifecycleMonitor = appLifecycleMonitor,
             scope = viewModelScope,
+            callbacks = this,
+            // R2: 省流守卫 — 省流模式下让位给 lowTrafficPoller (§5.1)。
+            isLowTrafficMode = { settingsManager.lowTrafficMode }
+        )
+
+    /**
+     * M1 (docs/省流模式设计.md §1): 省流模式轮询状态机。仅当
+     * [SettingsManager.lowTrafficMode] 开启时激活（[onLowTrafficModeChanged]
+     * 调 [LowTrafficPoller.start]/[LowTrafficPoller.stop]）。构造即订阅
+     * [AppLifecycleMonitor.isInForeground]，但 active=false 时所有回调 no-op。
+     * 与 [foregroundCatchUpController] 互斥并行（§5.1）：省流模式 SSE 未启，
+     * ForegroundCatchUpController 的回调天然 no-op，前台同步由本 poller 独占。
+     * Side effects (catchUp / stale hint / permission-question 补足) flow back
+     * through [LowTrafficPollerCallbacks] which MainViewModel implements below.
+     */
+    private val lowTrafficPoller: LowTrafficPoller =
+        LowTrafficPoller(
+            scope = viewModelScope,
+            state = _state,
+            slices = sliceFlows,
+            repository = repository,
+            settingsManager = settingsManager,
+            appLifecycleMonitor = appLifecycleMonitor,
             callbacks = this
         )
 
@@ -970,13 +995,66 @@ class MainViewModel @Inject constructor(
     override fun clearDraft() = clearDraftIfActive()
 
     // R-16 M4: SSE feed cancellation delegated to [connectionCoordinator]
-    // (the sseJob now lives there).
-    override fun cancelSse() = connectionCoordinator.cancelSse()
+    // (the sseJob now lives there). M5 跟进 (§4.2): also drop pending delta
+    // buffers — a stopped SSE feed won't deliver the part.updated that would
+    // have flushed them, so leaving them buffered risks a stale flush on the
+    // next connect. clearDeltaBuffers is idempotent.
+    override fun cancelSse() {
+        connectionCoordinator.cancelSse()
+        sessionSyncCoordinator.clearDeltaBuffers()
+    }
 
     override fun catchUpAfterDisconnect(sessionId: String) =
         catchUpAfterDisconnectOrForeground(sessionId)
 
     override fun currentSessionId(): String? = _chatFlow.value.currentSessionId
+
+    // ──────────────────────────────────────────────────────────────────────
+    // M1 (docs/省流模式设计.md §1): LowTrafficPollerCallbacks implementation.
+    // The poller state machine lives in [lowTrafficPoller]; these are the
+    // side-effect hooks it calls back into. triggerCatchUp 复用现有
+    // catchUpAfterDisconnectOrForeground (= launchCatchUp, M2 已 sentinel=4)，
+    // 不重写 reload 逻辑。permission/question 复用现有 pending* 写入模式。
+    // ──────────────────────────────────────────────────────────────────────
+
+    override fun triggerCatchUp(sessionId: String) =
+        catchUpAfterDisconnectOrForeground(sessionId)
+
+    override fun onStaleHint() {
+        // §1.5: 复用 staleNotice banner ("省流模式下可能不是最新，点击检查"
+        // 由 ChatScreen 渲染 — 现有 staleNotice UI 文案在省流模式下语义一致)。
+        updateState { it.copy(staleNotice = true) }
+    }
+
+    override fun onRetryError(sessionId: String) {
+        // §1.2 (gpter 致命#3): retry 持续 ≥3 tick → 顶部提示"运行出错"。
+        // 复用 error 通道（瞬态，下次成功 reload 由现有机制清除）。
+        updateState { it.copy(error = "会话运行出错，请检查重试") }
+    }
+
+    override fun onConnectionError() {
+        // §1.1 B4: status 连续失败 ≥3 → 连接错误态。复用 error 通道；
+        // onConnectionRecovered 在下一次成功 tick 清除。
+        updateState { it.copy(error = "省流模式：连接服务器失败，正在重试") }
+    }
+
+    override fun onConnectionRecovered() {
+        // 仅当此前进入过连接错误态时 poller 才回调此处 → 安全清 error。
+        if (_state.value.error?.startsWith("省流模式：连接") == true) {
+            updateState { it.copy(error = null) }
+        }
+    }
+
+    override fun onPendingPermissionsLoaded(list: List<com.yage.opencode_client.data.model.PermissionRequest>) {
+        // 复用 loadPendingPermissions 的写入模式（dser 🔴-3 前台补足）。
+        @Suppress("DEPRECATION")
+        updateState { it.copy(pendingPermissions = list) }
+    }
+
+    override fun onPendingQuestionsLoaded(list: List<com.yage.opencode_client.data.model.QuestionRequest>) {
+        @Suppress("DEPRECATION")
+        updateState { it.copy(pendingQuestions = list) }
+    }
 
     // ──────────────────────────────────────────────────────────────────────
     // R-16 M2: ComposerCallbacks implementation.
@@ -1026,6 +1104,12 @@ class MainViewModel @Inject constructor(
     override fun syncCurrentDirectory(directory: String?) {
         repository.setCurrentDirectory(directory)
     }
+
+    // M5 跟进 (§4.2): SessionSwitcher calls this when LEAVING the outgoing
+    // session so its pending delta flush jobs can't write into the new
+    // session's state. Delegates to SessionSyncCoordinator.clearDeltaBuffers
+    // (idempotent: cancels all flushJobs + clears deltaBuffer).
+    override fun onClearDeltaBuffers() = sessionSyncCoordinator.clearDeltaBuffers()
 
     // Note: loadChildSessions, loadMessages, and loadSessionStatus are
     // implemented as override methods on the existing MainViewModel functions
@@ -1309,6 +1393,12 @@ class MainViewModel @Inject constructor(
      */
     fun selectSession(sessionId: String) {
         sessionSwitcher.switchTo(sessionId)
+        // M4 简化版 (§1.7 G): 省流模式切 tab 时重置 M1 计数器 + 立即 catchUp。
+        // 正式的 R1 callback 接口留到 M4；先在此直接转发（R2 callback 已在
+        // lowTrafficPoller.onSessionSwitched 内幂等处理 active=false no-op）。
+        if (settingsManager.lowTrafficMode) {
+            lowTrafficPoller.onSessionSwitched(sessionId)
+        }
     }
 
     /**
@@ -1742,6 +1832,13 @@ class MainViewModel @Inject constructor(
         val attachments = composer.imageAttachments
         if (text.isEmpty() && attachments.isEmpty()) return
 
+        // §1.9 (gpter 可选#3): 省流模式下发送消息 → 本地标 busy + 重置 tick，
+        // 让后续轮询观测到 active→idle 做权威 reload。放在去重守卫之后、网络
+        // 发起之前（active=false 时 onMessageSent 幂等 no-op）。
+        if (settingsManager.lowTrafficMode) {
+            lowTrafficPoller.onMessageSent(sessionId)
+        }
+
         writeComposer { state -> state.copy(sendingSessionIds = state.sendingSessionIds + sessionId) }
 
         // §append-safe (glmer MAJOR-1): clear the composer synchronously on
@@ -1927,6 +2024,11 @@ class MainViewModel @Inject constructor(
 
     fun onLowTrafficModeChanged(enabled: Boolean) {
         settingsManager.lowTrafficMode = enabled
+        // M1: 省流模式开 → 启动 LowTrafficPoller（前台同步引擎）；关 → 停止。
+        // lowTrafficMode 是直接 var 非 Flow，必须显式 start/stop。start/stop 自身
+        // 幂等，且 active 状态会即时反映到 ForegroundCatchUpController 的
+        // isLowTrafficMode 守卫（下次 onForegroundChanged 生效）。
+        if (enabled) lowTrafficPoller.start() else lowTrafficPoller.stop()
         lowTrafficModeReloadJob?.cancel()
         lowTrafficModeReloadJob = viewModelScope.launch {
             delay(LOW_TRAFFIC_MODE_DEBOUNCE_MS)
@@ -2175,6 +2277,14 @@ class MainViewModel @Inject constructor(
     }
 
     override fun onCleared() {
+        // M1: 停止省流轮询（cancel loop + 清状态）。viewModelScope 即将被取消，
+        // 但显式 stop 保证 loopJob 立即释放、不依赖 scope 取消传播。
+        lowTrafficPoller.stop()
+        // M5 跟进 (§4.2): drop pending delta buffers before the scope is
+        // cancelled, so no flush job can fire post-teardown. (onCleared calls
+        // connectionCoordinator.cancelSse() directly rather than the cancelSse()
+        // override, so clearDeltaBuffers is added explicitly here.)
+        sessionSyncCoordinator.clearDeltaBuffers()
         connectionCoordinator.cancelSse()
         super.onCleared()
     }

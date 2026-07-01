@@ -1143,7 +1143,17 @@ internal fun launchSetSessionArchived(
             repository.updateSessionArchived(id, archivedValue)
                 .onSuccess { updated ->
                     state.updateAndSync(slices) { current ->
-                        current.copy(sessions = current.sessions.map { session -> if (session.id == id) updated else session })
+                        current.copy(
+                            sessions = current.sessions.map { session -> if (session.id == id) updated else session },
+                            // Keep directorySessions in sync so an archived
+                            // session disappears from the connected-projects
+                            // list immediately (refreshDirectorySessions
+                            // repopulates this map on expand, but the local
+                            // copy must not hold a stale unarchived version).
+                            directorySessions = current.directorySessions.mapValues { (_, list) ->
+                                list.map { session -> if (session.id == id) updated else session }
+                            }
+                        )
                     }
                 }
                 .onFailure { error ->
