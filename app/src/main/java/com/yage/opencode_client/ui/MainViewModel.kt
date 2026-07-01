@@ -1967,7 +1967,7 @@ class MainViewModel @Inject constructor(
         }
     }
 
-    fun loadPendingPermissions() {
+    override fun loadPendingPermissions() {
         viewModelScope.launch {
             repository.getPendingPermissions()
                 .onSuccess { permissions ->

@@ -171,18 +171,17 @@ class ConnectionCoordinatorTest {
     }
 
     @Test
-    fun `testConnection reconfigures the repository for the current profile before probing`() {
+    fun `testConnection no longer reconfigures the repository (callers pre-configure)`() {
         coEvery { repository.checkHealth() } returns Result.success(HealthResponse(healthy = true, version = "1.0"))
 
         coordinator.testConnection()
         runPending()
 
-        // configureRepositoryForCurrentProfile fires BEFORE checkHealth.
-        assertEquals(1, callbacks.configureRepositoryForCurrentProfileCalls)
-        val configureIdx = callbacks.callOrder.indexOf("configureRepositoryForCurrentProfile")
-        // checkHealth is a suspend mock; just assert configure ran (it runs first
-        // in the launched body, before the retry loop's first probe).
-        assertTrue("configure ran before the healthy fan-out", configureIdx >= 0)
+        // configureRepositoryForCurrentProfile must NOT fire from testConnection —
+        // its reconfigure chain (cancelSseForReconfigure -> onHostReconfigured)
+        // reset ForegroundCatchUpController.sseHasConnectedOnce and swallowed the
+        // 15s-5min foreground gap catch-up. Callers configure the repo themselves.
+        assertEquals(0, callbacks.configureRepositoryForCurrentProfileCalls)
     }
 
     // ── testConnection: healthy / unhealthy / failure branches ──────────────
@@ -294,6 +293,7 @@ class ConnectionCoordinatorTest {
         assertEquals(1, callbacks.loadAgentsCalls)
         assertEquals(1, callbacks.loadProvidersCalls)
         assertEquals(1, callbacks.loadPendingQuestionsCalls)
+        assertEquals(1, callbacks.loadPendingPermissionsCalls)
         coVerify { repository.getCommands() }
     }
 
@@ -488,6 +488,7 @@ class ConnectionCoordinatorTest {
         var loadAgentsCalls = 0
         var loadProvidersCalls = 0
         var loadPendingQuestionsCalls = 0
+        var loadPendingPermissionsCalls = 0
         var onHostReconfiguredCalls = 0
         val sseEvents = mutableListOf<SSEEvent>()
         val callOrder = mutableListOf<String>()
@@ -500,6 +501,7 @@ class ConnectionCoordinatorTest {
         override fun loadAgents() { loadAgentsCalls++; callOrder += "loadAgents" }
         override fun loadProviders() { loadProvidersCalls++; callOrder += "loadProviders" }
         override fun loadPendingQuestions() { loadPendingQuestionsCalls++; callOrder += "loadPendingQuestions" }
+        override fun loadPendingPermissions() { loadPendingPermissionsCalls++; callOrder += "loadPendingPermissions" }
         override fun onSseEvent(event: SSEEvent) { sseEvents += event }
         override fun onHostReconfigured() { onHostReconfiguredCalls++; callOrder += "onHostReconfigured" }
     }

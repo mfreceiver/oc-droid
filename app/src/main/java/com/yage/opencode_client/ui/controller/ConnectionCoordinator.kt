@@ -51,6 +51,7 @@ interface ConnectionCoordinatorCallbacks {
     fun loadAgents()
     fun loadProviders()
     fun loadPendingQuestions()
+    fun loadPendingPermissions()
 
     /**
      * Routes a single SSE event to [SessionSyncCoordinator.handleEvent]. The
@@ -189,7 +190,14 @@ internal class ConnectionCoordinator(
             // "connecting") is legal and transient.
             updateState { it.copy(error = null) }
             writeConnection { it.copy(isConnecting = true, connectionPhase = "connecting") }
-            callbacks.configureRepositoryForCurrentProfile()
+            // NOTE: configureRepositoryForCurrentProfile() was intentionally
+            // removed here. Every caller already configures the repository
+            // before invoking testConnection (cold start via applySavedSettings;
+            // host-switch paths call configureRepositoryForProfile directly).
+            // Re-calling it here chained cancelSseForReconfigure ->
+            // onHostReconfigured, which reset ForegroundCatchUpController.
+            // sseHasConnectedOnce and swallowed the 15s-5min foreground gap
+            // catch-up (real bug, pre-existing).
             // Retry loop: attempt 1 is always made; up to `retries` extra
             // attempts follow on failure/unhealthy with exponential backoff
             // (1s, 2s, 4s, ...). Default callers pass retries=0 (one-shot),
@@ -278,6 +286,7 @@ internal class ConnectionCoordinator(
         callbacks.loadAgents()
         callbacks.loadProviders()
         callbacks.loadPendingQuestions()
+        callbacks.loadPendingPermissions()
         loadCommands()
         // Re-fetch the directory-scoped sessions for the restored workdir so the
         // connected project's sessions reappear after restart (directorySessions
@@ -375,7 +384,23 @@ internal class ConnectionCoordinator(
                     state.updateAndSync(slices) { it.copy(error = "SSE Error: ${error.message}") }
                 }
                 .collect { result ->
-                    result.onSuccess { event -> callbacks.onSseEvent(event) }
+                    result.onSuccess { event ->
+                        // SSE liveness: a successful event (initial connect OR
+                        // retryWhen recovery after a network outage) proves the
+                        // server is reachable. Mirror it into ConnectionState so
+                        // the server icon flips green even when recovery happened
+                        // via the SSE auto-reconnect rather than a testConnection
+                        // health probe (which was the only place isConnected was
+                        // set true — leaving the icon red after auto-recovery).
+                        writeConnection {
+                            it.copy(
+                                isConnected = true,
+                                isConnecting = false,
+                                connectionPhase = "connected"
+                            )
+                        }
+                        callbacks.onSseEvent(event)
+                    }
                         .onFailure { error ->
                             Log.e("OC_ERROR", "SSE event failed", error)
                             state.updateAndSync(slices) { it.copy(error = "SSE Error: ${error.message}") }
