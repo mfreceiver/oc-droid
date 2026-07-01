@@ -1,5 +1,6 @@
 package com.yage.opencode_client.ui.controller
 
+import android.os.Looper
 import com.yage.opencode_client.data.model.ComposerImageAttachment
 import com.yage.opencode_client.ui.AppState
 import com.yage.opencode_client.ui.ChatState
@@ -63,6 +64,7 @@ internal class ComposerController(
      */
     @Suppress("DEPRECATION")
     private fun writeComposer(transform: (ComposerState) -> ComposerState) {
+        check(Looper.myLooper() === Looper.getMainLooper()) { "writeComposer must be called on the main thread" }
         val next = transform(composerFlow.value)
         composerFlow.value = next
         state.value = state.value.copy(

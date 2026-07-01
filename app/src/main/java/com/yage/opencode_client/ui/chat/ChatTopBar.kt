@@ -1,51 +1,24 @@
 package com.yage.opencode_client.ui.chat
 
-import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.ArrowBack
-import androidx.compose.material.icons.automirrored.filled.Chat
-import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.automirrored.filled.List
-import androidx.compose.material.icons.filled.Check
-import androidx.compose.material.icons.filled.Checklist
-import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Dns
-import androidx.compose.material.icons.filled.DonutLarge
-import androidx.compose.material.icons.filled.Refresh
-import androidx.compose.material.icons.filled.Settings
-import androidx.compose.material.icons.filled.SmartToy
-import androidx.compose.material.icons.filled.VpnKey
 import androidx.compose.material3.AlertDialog
-import androidx.compose.material3.Button
-import androidx.compose.material3.CircularProgressIndicator
-import androidx.compose.material3.DropdownMenu
-import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.PrimaryScrollableTabRow
 import androidx.compose.material3.Surface
-import androidx.compose.material3.Tab
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
@@ -63,7 +36,6 @@ import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
 import com.yage.opencode_client.R
 import com.yage.opencode_client.data.model.AgentInfo
 import com.yage.opencode_client.data.model.HostProfile
@@ -73,7 +45,6 @@ import com.yage.opencode_client.data.model.TodoItem
 import com.yage.opencode_client.ui.ContextUsage
 import com.yage.opencode_client.ui.TunnelActivationState
 import com.yage.opencode_client.ui.theme.opencode
-import java.util.Locale
 
 internal data class ChatTopBarState(
     val sessions: List<Session>,
@@ -200,168 +171,168 @@ internal fun ChatTopBar(
     // handling via its default windowInsets; the outer Column carries the
     // caller-supplied modifier.
     Column(modifier = modifier) {
-    TopAppBar(
-        windowInsets = TopAppBarDefaults.windowInsets,
-        navigationIcon = {
-            // Primary Sessions entry point — list affordance at the LEFT of
-            // the title. Replaces the former trailing "+" on the session tab
-            // strip as the canonical way to reach the Sessions destination.
-            IconButton(onClick = actions.onNavigateToSessions) {
-                Icon(
-                    Icons.AutoMirrored.Filled.List,
-                    contentDescription = stringResource(R.string.chat_action_sessions),
-                    tint = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-            }
-        },
-        title = {
-            when {
-                state.parentSessionId != null -> {
-                    // §8: sub-agent breadcrumb "[parent] / [current]". Only the
-                    // parent segment is clickable (navigates back to the parent
-                    // session); the current segment is plain. Single-level only
-                    // — matches v2 which does not render a full ancestry chain
-                    // (Session.parentId may be multi-level, but the UI shows one).
-                    val parentTitle = state.parentSessionTitle
-                        ?: stringResource(R.string.chat_parent_session)
-                    val currentTitle = currentSession?.displayName.orEmpty()
-                    val oc = MaterialTheme.opencode
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        modifier = Modifier.widthIn(max = TITLE_SLOT_MAX_WIDTH)
-                    ) {
-                        Text(
-                            text = truncateTitle(parentTitle),
-                            style = MaterialTheme.typography.labelMedium,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis,
-                            modifier = Modifier
-                                .weight(1f, fill = false)
-                                .clickable {
-                                    state.parentSessionId?.let(actions.onSelectSession)
+        TopAppBar(
+            windowInsets = TopAppBarDefaults.windowInsets,
+            navigationIcon = {
+                // Primary Sessions entry point — list affordance at the LEFT of
+                // the title. Replaces the former trailing "+" on the session tab
+                // strip as the canonical way to reach the Sessions destination.
+                IconButton(onClick = actions.onNavigateToSessions) {
+                    Icon(
+                        Icons.AutoMirrored.Filled.List,
+                        contentDescription = stringResource(R.string.chat_action_sessions),
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            },
+            title = {
+                when {
+                    state.parentSessionId != null -> {
+                        // §8: sub-agent breadcrumb "[parent] / [current]". Only the
+                        // parent segment is clickable (navigates back to the parent
+                        // session); the current segment is plain. Single-level only
+                        // — matches v2 which does not render a full ancestry chain
+                        // (Session.parentId may be multi-level, but the UI shows one).
+                        val parentTitle = state.parentSessionTitle
+                            ?: stringResource(R.string.chat_parent_session)
+                        val currentTitle = currentSession?.displayName.orEmpty()
+                        val oc = MaterialTheme.opencode
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier.widthIn(max = TITLE_SLOT_MAX_WIDTH)
+                        ) {
+                            Text(
+                                text = truncateTitle(parentTitle),
+                                style = MaterialTheme.typography.labelMedium,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                                modifier = Modifier
+                                    .weight(1f, fill = false)
+                                    .clickable {
+                                        state.parentSessionId?.let(actions.onSelectSession)
+                                    }
+                            )
+                            Text(
+                                text = " / ",
+                                style = MaterialTheme.typography.labelMedium,
+                                color = oc.faint
+                            )
+                            Text(
+                                text = currentTitle,
+                                style = MaterialTheme.typography.labelMedium,
+                                color = MaterialTheme.colorScheme.onSurface,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                        }
+                    }
+    
+                    state.draftWorkdir != null -> {
+                        // Draft mode: no session yet. Show the workdir basename in
+                        // place of a session title; the dropdown is hidden (there
+                        // is no session to switch to until the first send).
+                        val draftBasename = state.draftWorkdir.split("/")
+                            .filter { it.isNotEmpty() }.lastOrNull()
+                            ?: state.draftWorkdir
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier.widthIn(max = TITLE_SLOT_MAX_WIDTH)
+                        ) {
+                            Text(
+                                text = draftBasename,
+                                style = MaterialTheme.typography.titleLarge,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                        }
+                    }
+    
+                    else -> {
+                        // §17: the dropdown session switcher moved to the persistent
+                        // tab strip rendered as the TopAppBar's second row. The title
+                        // slot shows the current session title with a subtitle (#10)
+                        // carrying the last segment of the session's working
+                        // directory, so the user can tell which project the session
+                        // belongs to at a glance.
+                        Column(modifier = Modifier.widthIn(max = TITLE_SLOT_MAX_WIDTH)) {
+                            Text(
+                                text = currentSession?.displayName ?: "—",
+                                style = MaterialTheme.typography.titleLarge,
+                                color = MaterialTheme.colorScheme.onSurface,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                            // #10: subtitle = basename of currentSession.directory.
+                            // Hidden when there is no session (the "—" placeholder
+                            // case) or when the basename is empty.
+                            currentSession?.directory
+                                ?.substringAfterLast("/")
+                                ?.takeIf { it.isNotEmpty() }
+                                ?.let { workdir ->
+                                    Text(
+                                        text = workdir,
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
                                 }
-                        )
-                        Text(
-                            text = " / ",
-                            style = MaterialTheme.typography.labelMedium,
-                            color = oc.faint
-                        )
-                        Text(
-                            text = currentTitle,
-                            style = MaterialTheme.typography.labelMedium,
-                            color = MaterialTheme.colorScheme.onSurface,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis
-                        )
+                        }
                     }
                 }
-
-                state.draftWorkdir != null -> {
-                    // Draft mode: no session yet. Show the workdir basename in
-                    // place of a session title; the dropdown is hidden (there
-                    // is no session to switch to until the first send).
-                    val draftBasename = state.draftWorkdir.split("/")
-                        .filter { it.isNotEmpty() }.lastOrNull()
-                        ?: state.draftWorkdir
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        modifier = Modifier.widthIn(max = TITLE_SLOT_MAX_WIDTH)
-                    ) {
-                        Text(
-                            text = draftBasename,
-                            style = MaterialTheme.typography.titleLarge,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis
-                        )
+            },
+            actions = {
+                // --- Merged context menu: context / todo / agent in one dropdown.
+                // Trigger icon is the ContextUsageRing so the live usage state stays
+                // visible at a glance (#8).
+                ContextMenuButton(
+                    usage = state.contextUsage,
+                    todos = state.sessionTodos,
+                    selectedAgentName = state.selectedAgentName,
+                    expanded = showContextMenu,
+                    onToggleExpand = { showContextMenu = !showContextMenu },
+                    onContextClick = {
+                        showContextMenu = false
+                        showContextDialog = true
+                    },
+                    onTodoClick = {
+                        showContextMenu = false
+                        showTodoDialog = true
+                    },
+                    onAgentClick = {
+                        showContextMenu = false
+                        showAgentDialog = true
                     }
-                }
-
-                else -> {
-                    // §17: the dropdown session switcher moved to the persistent
-                    // tab strip rendered as the TopAppBar's second row. The title
-                    // slot shows the current session title with a subtitle (#10)
-                    // carrying the last segment of the session's working
-                    // directory, so the user can tell which project the session
-                    // belongs to at a glance.
-                    Column(modifier = Modifier.widthIn(max = TITLE_SLOT_MAX_WIDTH)) {
-                        Text(
-                            text = currentSession?.displayName ?: "—",
-                            style = MaterialTheme.typography.titleLarge,
-                            color = MaterialTheme.colorScheme.onSurface,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis
-                        )
-                        // #10: subtitle = basename of currentSession.directory.
-                        // Hidden when there is no session (the "—" placeholder
-                        // case) or when the basename is empty.
-                        currentSession?.directory
-                            ?.substringAfterLast("/")
-                            ?.takeIf { it.isNotEmpty() }
-                            ?.let { workdir ->
-                                Text(
-                                    text = workdir,
-                                    style = MaterialTheme.typography.labelSmall,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                    maxLines = 1,
-                                    overflow = TextOverflow.Ellipsis
-                                )
-                            }
-                    }
-                }
-            }
-        },
-        actions = {
-            // --- Merged context menu: context / todo / agent in one dropdown.
-            // Trigger icon is the ContextUsageRing so the live usage state stays
-            // visible at a glance (#8).
-            ContextMenuButton(
-                usage = state.contextUsage,
-                todos = state.sessionTodos,
-                selectedAgentName = state.selectedAgentName,
-                expanded = showContextMenu,
-                onToggleExpand = { showContextMenu = !showContextMenu },
-                onContextClick = {
-                    showContextMenu = false
-                    showContextDialog = true
-                },
-                onTodoClick = {
-                    showContextMenu = false
-                    showTodoDialog = true
-                },
-                onAgentClick = {
-                    showContextMenu = false
-                    showAgentDialog = true
-                }
-            )
-
-            // Server status indicator: an IconButton (Icons.Default.Dns)
-            // tinted to reflect the live connection state — the same colour
-            // logic the former status dot used. Tapping opens the existing
-            // ServerManagementDialog (host picker + refresh + tunnel + the
-            // "System Settings" navigation entry).
-            // R-24: the former hardcoded sRGB values (#FFA500 / #4CAF50 /
-            // #F44336) bypassed the theme, so they did not adapt to dark mode
-            // and clashed with the v2 palette. Now sourced from
-            // LocalOpencodeColors state-* tokens (which have explicit light +
-            // dark values), with M3 colorScheme.error as the connecting-state
-            // fallback for surfaces without an opencode provider.
-            val oc = MaterialTheme.opencode
-            val serverIconTint = when {
-                state.isConnecting -> oc.stateInfoFg
-                state.isConnected -> oc.stateSuccessFg
-                state.connectionPhase == null -> MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.4f)
-                else -> oc.stateDangerFg
-            }
-            IconButton(onClick = { showServerDialog = true }) {
-                Icon(
-                    Icons.Default.Dns,
-                    contentDescription = stringResource(R.string.chat_action_server),
-                    tint = serverIconTint
                 )
+    
+                // Server status indicator: an IconButton (Icons.Default.Dns)
+                // tinted to reflect the live connection state — the same colour
+                // logic the former status dot used. Tapping opens the existing
+                // ServerManagementDialog (host picker + refresh + tunnel + the
+                // "System Settings" navigation entry).
+                // R-24: the former hardcoded sRGB values (#FFA500 / #4CAF50 /
+                // #F44336) bypassed the theme, so they did not adapt to dark mode
+                // and clashed with the v2 palette. Now sourced from
+                // LocalOpencodeColors state-* tokens (which have explicit light +
+                // dark values), with M3 colorScheme.error as the connecting-state
+                // fallback for surfaces without an opencode provider.
+                val oc = MaterialTheme.opencode
+                val serverIconTint = when {
+                    state.isConnecting -> oc.stateInfoFg
+                    state.isConnected -> oc.stateSuccessFg
+                    state.connectionPhase == null -> MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.4f)
+                    else -> oc.stateDangerFg
+                }
+                IconButton(onClick = { showServerDialog = true }) {
+                    Icon(
+                        Icons.Default.Dns,
+                        contentDescription = stringResource(R.string.chat_action_server),
+                        tint = serverIconTint
+                    )
+                }
             }
-        }
-    )
+        )
 
         // §17: persistent horizontal session tab strip — the TopAppBar's
         // second row. Always visible (incl. when viewing a sub-agent); per
@@ -472,607 +443,5 @@ internal fun ChatTopBar(
             },
             onDismiss = { showServerDialog = false }
         )
-    }
-}
-
-private const val SESSION_TITLE_MAX_CHARS = 15
-
-/**
- * R-28: fixed currency symbol for the context-usage cost display.
- *
- * Confirmed with the user: this value is always CNY regardless of device
- * locale (the upstream server reports cost in CNY), so we deliberately do NOT
- * use NumberFormat.getCurrencyInstance(locale) — that would render "$" or
- * "€" on non-CNY devices and mislead the user. Pinned to "¥" with the same
- * 4-decimal formatting as before, so the visual is unchanged; the constant
- * centralises the policy and documents why locale is intentionally ignored.
- */
-private const val CURRENCY_SYMBOL = "¥"
-
-private fun truncateTitle(value: String): String =
-    if (value.length <= SESSION_TITLE_MAX_CHARS) value
-    else value.take(SESSION_TITLE_MAX_CHARS - 1) + "…"
-
-/**
- * §17: persistent horizontal session tab strip rendered as the TopAppBar's
- * second row. Replaces the former title-slot dropdown switcher. Built on the
-     * M3 [PrimaryScrollableTabRow] + [Tab] so we inherit the platform scroll-to-centre
- * behaviour, the selected-tab indicator, and the standard 48dp touch target
- * for free. Each tab's `text` slot carries the (truncated) session title, an
- * unread dot when the session received an out-of-band message, and a close-X
- * affordance; the active session is highlighted via the v2 accent colour
-     * (passed as [PrimaryScrollableTabRow]'s `contentColor` so the default indicator and
- * the selected-text tint share the same visual language).
- *
- * Per §17.2 the `openSessions` list is already filtered to root sessions
- * (parentId == null) by ChatScreen, so sub-agent sessions never appear here —
- * the tab strip and the title-slot breadcrumb (§8) coexist without conflict.
- *
- * The former trailing "+" affordance (which opened the Sessions page) has been
- * removed: Sessions is now reached via the [TopAppBar]'s `navigationIcon`
- * (left of the title).
- */
-@Composable
-private fun SessionTabStrip(
-    openSessions: List<Session>,
-    currentSessionId: String?,
-    unreadSessions: Set<String>,
-    actions: ChatTopBarActions,
-    modifier: Modifier = Modifier
-) {
-    // Empty-list guard: PrimaryScrollableTabRow indexes its indicator by
-    // selectedTabIndex against the tab list, so rendering it with zero tabs
-    // would trip an out-of-bounds when drawing the indicator.
-    if (openSessions.isEmpty()) return
-
-    val accentColor = MaterialTheme.opencode.accentText
-    // currentSessionId may belong to a sub-agent not present in openSessions
-    // (§17.2 filters to root sessions); coerce into range so the indicator
-    // never indexes past the last tab.
-    val selectedIndex = openSessions
-        .indexOfFirst { it.id == currentSessionId }
-        .coerceAtLeast(0)
-
-    PrimaryScrollableTabRow(
-        selectedTabIndex = selectedIndex,
-        modifier = modifier.fillMaxWidth(),
-        // This is the TopAppBar's second row, so drop the default surface
-        // fill + bottom divider — the strip must blend with the bar above.
-        containerColor = Color.Transparent,
-        divider = {},
-        // contentColor drives both the default selected-tab indicator colour
-        // and the Tab content tint; set it to the v2 accent so the underline
-        // and the active label read as one.
-        contentColor = accentColor,
-        // Match the former LazyRow's 8dp horizontal content padding instead
-        // of the M3 default 52dp (TabRowDefaults.ScrollableTabRowEdgePadding),
-        // which would push the first/last tabs far from the strip edges.
-        edgePadding = 8.dp
-    ) {
-        openSessions.forEach { session ->
-            val isSelected = session.id == currentSessionId
-            Tab(
-                selected = isSelected,
-                onClick = { actions.onSelectSession(session.id) },
-                // Explicit selected/unselected colours keep v2's accent vs
-                // onSurfaceVariant treatment regardless of the M3 default
-                // fading behaviour.
-                selectedContentColor = accentColor,
-                unselectedContentColor = MaterialTheme.colorScheme.onSurfaceVariant,
-                text = {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        // Unread dot: rendered in the accent color so it reads
-                        // as "activity" rather than an error. Cleared by the
-                        // VM when the session is opened.
-                        if (session.id in unreadSessions) {
-                            Box(
-                                modifier = Modifier
-                                    .padding(end = 6.dp)
-                                    .size(6.dp)
-                                    .background(color = accentColor, shape = CircleShape)
-                            )
-                        }
-                        Text(
-                            text = truncateTitle(session.displayName),
-                            style = MaterialTheme.typography.labelMedium,
-                            color = if (isSelected) accentColor
-                            else MaterialTheme.colorScheme.onSurfaceVariant,
-                            fontWeight = if (isSelected) FontWeight.SemiBold
-                            else FontWeight.Normal,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis
-                        )
-                        Spacer(modifier = Modifier.width(4.dp))
-                        // Close affordance. R-12 (WCAG 2.5.5): the visual X
-                        // stays at 14dp but the touch target is enlarged to
-                        // 44dp (AAA threshold) via an outer clickable Box.
-                        // Compose's clickable consumes the pointer event, so
-                        // tapping the X fires onClose without also triggering
-                        // the Tab's onClick (standard nested-clickable
-                        // behaviour).
-                        Box(
-                            modifier = Modifier
-                                .size(44.dp)
-                                .clickable(onClick = { actions.onCloseSession(session.id) }),
-                            contentAlignment = Alignment.Center
-                        ) {
-                            Icon(
-                                Icons.Default.Close,
-                                contentDescription = stringResource(R.string.common_close),
-                                modifier = Modifier.size(14.dp),
-                                tint = MaterialTheme.colorScheme.onSurfaceVariant
-                            )
-                        }
-                    }
-                }
-            )
-        }
-    }
-}
-
-/**
- * Single anchor + dropdown that folds the former Agent TextButton, Todo icon,
- * and Context ring into one menu (#8). The anchor reuses [ContextUsageRing] so
- * the live context pressure is always visible; tapping it opens a three-row
- * dropdown whose items delegate to the existing dialogs.
- */
-@Composable
-private fun ContextMenuButton(
-    usage: ContextUsage?,
-    todos: List<TodoItem>,
-    selectedAgentName: String,
-    expanded: Boolean,
-    onToggleExpand: () -> Unit,
-    onContextClick: () -> Unit,
-    onTodoClick: () -> Unit,
-    onAgentClick: () -> Unit
-) {
-    Box {
-        // The ring is the trigger; the previous standalone onClick (which opened
-        // the context dialog directly) is removed — the dropdown is the anchor.
-        // R-12 (WCAG 2.5.5): enlarge the click target to 44dp (AAA threshold)
-        // while keeping the ring visual at its tuned 28dp size (ChatUiTuning).
-        // The ring is centered inside the larger transparent Surface so the
-        // visual density of the actions cluster is unchanged.
-        Surface(
-            onClick = onToggleExpand,
-            shape = RoundedCornerShape(50),
-            color = Color.Transparent,
-            modifier = Modifier.size(44.dp)
-        ) {
-            Box(
-                modifier = Modifier.fillMaxSize(),
-                contentAlignment = Alignment.Center
-            ) {
-                ContextUsageRing(usage = usage)
-            }
-        }
-        DropdownMenu(
-            expanded = expanded,
-            onDismissRequest = { if (expanded) onToggleExpand() }
-        ) {
-            // 1. Context — "{pct}% {total}/{limit}", compact counts.
-            DropdownMenuItem(
-                text = {
-                    Text(
-                        if (usage != null) {
-                            val pct = (usage.percentage * 100).toInt()
-                            "$pct% ${usage.totalTokens / 1000}/${usage.contextLimit / 1000}"
-                        } else {
-                            stringResource(R.string.chat_context)
-                        }
-                    )
-                },
-                leadingIcon = {
-                    Icon(
-                        Icons.Default.DonutLarge,
-                        contentDescription = null,
-                        modifier = Modifier.size(18.dp)
-                    )
-                },
-                onClick = onContextClick
-            )
-            // 2. Todo — "{completed}/{total}", always shown (including 0/0).
-            DropdownMenuItem(
-                text = {
-                    val completed = todos.count { it.isCompleted }
-                    val total = todos.size
-                    Text("$completed/$total")
-                },
-                leadingIcon = {
-                    Icon(
-                        Icons.Default.Checklist,
-                        contentDescription = null,
-                        modifier = Modifier.size(18.dp)
-                    )
-                },
-                onClick = onTodoClick
-            )
-            // 3. Agent — selected agent name; opens the standalone picker dialog.
-            DropdownMenuItem(
-                text = { Text(selectedAgentName) },
-                leadingIcon = {
-                    Icon(
-                        Icons.Default.SmartToy,
-                        contentDescription = null,
-                        modifier = Modifier.size(18.dp)
-                    )
-                },
-                onClick = onAgentClick
-            )
-        }
-    }
-}
-
-@Composable
-private fun ContextUsageDialog(
-    usage: ContextUsage?,
-    onDismiss: () -> Unit
-) {
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        title = { Text(stringResource(R.string.chat_context)) },
-        text = {
-            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                if (usage == null) {
-                    Text(
-                        stringResource(R.string.chat_no_usage_data),
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                } else {
-                    ContextUsageSection(stringResource(R.string.chat_context_model_section)) {
-                        ContextUsageRow(stringResource(R.string.chat_context_provider), usage.providerId ?: stringResource(R.string.chat_context_unknown))
-                        ContextUsageRow(stringResource(R.string.chat_context_model), usage.modelId ?: stringResource(R.string.chat_context_unknown))
-                        ContextUsageRow(stringResource(R.string.chat_context_limit), formatCount(usage.contextLimit))
-                    }
-                    ContextUsageSection(stringResource(R.string.chat_context_tokens)) {
-                        ContextUsageRow(stringResource(R.string.chat_context_total), formatCount(usage.totalTokens))
-                        ContextUsageRow(stringResource(R.string.chat_context_input), formatOptionalCount(usage.inputTokens))
-                        ContextUsageRow(stringResource(R.string.chat_context_output), formatOptionalCount(usage.outputTokens))
-                        ContextUsageRow(stringResource(R.string.chat_context_reasoning), formatOptionalCount(usage.reasoningTokens))
-                        ContextUsageRow(stringResource(R.string.chat_context_cached_read), formatOptionalCount(usage.cachedReadTokens))
-                        ContextUsageRow(stringResource(R.string.chat_context_cached_write), formatOptionalCount(usage.cachedWriteTokens))
-                    }
-                    ContextUsageSection(stringResource(R.string.chat_context_cost)) {
-                        ContextUsageRow(stringResource(R.string.chat_context_cost), usage.cost?.let { "$CURRENCY_SYMBOL${String.format(Locale.US, "%.4f", it)}" } ?: stringResource(R.string.chat_context_no_cost))
-                    }
-                }
-            }
-        },
-        confirmButton = {
-            TextButton(onClick = onDismiss) {
-                Text(stringResource(R.string.common_done))
-            }
-        }
-    )
-}
-
-@Composable
-private fun ServerManagementDialog(
-    hostProfiles: List<HostProfile>,
-    currentHostProfileId: String?,
-    tunnelActivationState: TunnelActivationState,
-    showTunnelAuth: Boolean,
-    trafficSent: Long,
-    trafficReceived: Long,
-    serverVersion: String?,
-    onSelectHost: (String) -> Unit,
-    onRefresh: () -> Unit,
-    onActivateTunnel: () -> Unit,
-    onNavigateToSettings: () -> Unit,
-    onDismiss: () -> Unit
-) {
-    val oc = MaterialTheme.opencode
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        title = { Text(stringResource(R.string.server_dialog_title)) },
-        text = {
-            Column(
-                modifier = Modifier
-                    .heightIn(max = 400.dp)
-                    .verticalScroll(rememberScrollState()),
-                verticalArrangement = Arrangement.spacedBy(4.dp)
-            ) {
-                // --- Host profiles ---
-                if (hostProfiles.isEmpty()) {
-                    Text(
-                        stringResource(R.string.server_dialog_no_hosts),
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = oc.faint
-                    )
-                } else {
-                    hostProfiles.forEach { profile ->
-                        val isSelected = profile.id == currentHostProfileId
-                        if (isSelected) {
-                            // Current host: non-clickable display only
-                            Surface(
-                                shape = RoundedCornerShape(8.dp),
-                                color = oc.layer02,
-                                modifier = Modifier.fillMaxWidth()
-                            ) {
-                                Row(
-                                    modifier = Modifier
-                                        .fillMaxWidth()
-                                        .padding(12.dp),
-                                    verticalAlignment = Alignment.CenterVertically
-                                ) {
-                                    Column(
-                                        modifier = Modifier.weight(1f),
-                                        verticalArrangement = Arrangement.spacedBy(2.dp)
-                                    ) {
-                                        Text(
-                                            text = profile.name,
-                                            style = MaterialTheme.typography.bodyMedium,
-                                            fontWeight = FontWeight.Bold,
-                                            color = oc.accentText
-                                        )
-                                        serverVersion?.let { version ->
-                                            Text(
-                                                text = "v$version",
-                                                style = MaterialTheme.typography.bodySmall,
-                                                color = oc.faint
-                                            )
-                                        }
-                                    }
-                                    Icon(
-                                        Icons.Filled.Check,
-                                        contentDescription = null,
-                                        modifier = Modifier.size(16.dp),
-                                        tint = oc.stateSuccessFg
-                                    )
-                                }
-                            }
-                        } else {
-                            // Other hosts: tappable to switch
-                            Surface(
-                                onClick = { onSelectHost(profile.id) },
-                                shape = RoundedCornerShape(8.dp),
-                                color = Color.Transparent,
-                                modifier = Modifier.fillMaxWidth()
-                            ) {
-                                Column(
-                                    modifier = Modifier.padding(12.dp),
-                                    verticalArrangement = Arrangement.spacedBy(2.dp)
-                                ) {
-                                    Text(
-                                        text = profile.name,
-                                        style = MaterialTheme.typography.bodyMedium,
-                                        color = MaterialTheme.colorScheme.onSurface
-                                    )
-                                    // Version is shown ONLY on the selected (current/connected)
-                                    // host row — it's a single global value for the connected
-                                    // server, so rendering it under non-current profiles would
-                                    // be misleading (would show the connected host's version
-                                    // for hosts we haven't probed).
-                                }
-                            }
-                        }
-                    }
-                }
-
-                // --- Traffic statistics ---
-                // #4a: the two traffic counters are centered horizontally
-                // within the dialog (16dp spacing kept), so the ↑/↓ row reads
-                // as a balanced pair instead of left-aligned.
-                Spacer(modifier = Modifier.height(8.dp))
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(16.dp, Alignment.CenterHorizontally)
-                ) {
-                    Text(
-                        text = "↑ ${formatTrafficBytes(trafficSent)}",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = oc.faint
-                    )
-                    Text(
-                        text = "↓ ${formatTrafficBytes(trafficReceived)}",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = oc.faint
-                    )
-                }
-
-                // --- Action icon row: Settings / Refresh / Tunnel ---
-                Spacer(modifier = Modifier.height(4.dp))
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween
-                ) {
-                    IconButton(onClick = onNavigateToSettings) {
-                        Icon(
-                            Icons.Default.Settings,
-                            contentDescription = stringResource(R.string.server_dialog_system_settings),
-                            tint = oc.faint
-                        )
-                    }
-                    IconButton(onClick = onRefresh) {
-                        Icon(
-                            Icons.Default.Refresh,
-                            contentDescription = stringResource(R.string.chat_action_refresh_messages),
-                            tint = oc.faint
-                        )
-                    }
-                    if (showTunnelAuth) {
-                        val isActivating = tunnelActivationState is TunnelActivationState.Loading
-                        IconButton(
-                            onClick = onActivateTunnel,
-                            enabled = !isActivating
-                        ) {
-                            if (isActivating) {
-                                CircularProgressIndicator(
-                                    modifier = Modifier.size(18.dp),
-                                    strokeWidth = 2.dp,
-                                    color = oc.faint
-                                )
-                            } else {
-                                Icon(
-                                    Icons.Default.VpnKey,
-                                    contentDescription = stringResource(R.string.server_dialog_activate_tunnel),
-                                    tint = oc.faint
-                                )
-                            }
-                        }
-                    }
-                }
-            }
-        },
-        // No confirm or dismiss buttons — tap scrim to dismiss
-        confirmButton = {}
-    )
-}
-
-@Composable
-private fun ContextUsageSection(
-    title: String,
-    content: @Composable ColumnScope.() -> Unit
-) {
-    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-        Text(
-            title,
-            style = MaterialTheme.typography.labelMedium,
-            fontWeight = FontWeight.SemiBold,
-            color = MaterialTheme.colorScheme.primary
-        )
-        content()
-    }
-}
-
-@Composable
-private fun ContextUsageRow(label: String, value: String) {
-    Row(
-        modifier = Modifier.fillMaxWidth(),
-        horizontalArrangement = Arrangement.SpaceBetween,
-        verticalAlignment = Alignment.Top
-    ) {
-        Text(
-            label,
-            style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant
-        )
-        Text(
-            value,
-            style = MaterialTheme.typography.bodySmall,
-            fontWeight = FontWeight.Medium,
-            modifier = Modifier.padding(start = 16.dp)
-        )
-    }
-}
-
-private fun formatCount(value: Int): String = String.format(Locale.US, "%,d", value)
-
-private fun formatOptionalCount(value: Int?): String = value?.let(::formatCount) ?: "-"
-
-/**
- * Format byte counts for the traffic stats display: < 1 KiB → bytes,
- * < 1 MiB → KB, < 1 GiB → MB, otherwise GB. Locale.US enforces ASCII output.
- */
-private fun formatTrafficBytes(bytes: Long): String {
-    val unit = 1024L
-    if (bytes < unit) return "$bytes B"
-    val kb = bytes.toDouble() / unit
-    if (kb < unit) return String.format(Locale.US, "%.1f KB", kb)
-    val mb = kb / unit
-    if (mb < unit) return String.format(Locale.US, "%.1f MB", mb)
-    val gb = mb / unit
-    return String.format(Locale.US, "%.2f GB", gb)
-}
-
-@Composable
-internal fun ContextUsageRing(usage: ContextUsage?) {
-    // #11: 4-stage color scale (cool → hot) reflecting context pressure.
-    // Arms are evaluated top-down so the order encodes the thresholds.
-    //   null                  → onSurfaceVariant (no data)
-    //   < 0.25                → primary (blue, healthy)
-    //   0.25 ..< 0.50         → green
-    //   0.50 ..< 0.75         → orange
-    //   >= 0.75               → error (red)
-    // R-24: colours come from theme tokens so they adapt to light/dark. Green
-    // → stateSuccessFg, orange → stateWarningFg (both have explicit light +
-    // dark values in OpencodeColors); red/blue reuse M3 colorScheme.
-    val oc = MaterialTheme.opencode
-    val ringColor = when {
-        usage == null -> MaterialTheme.colorScheme.onSurfaceVariant
-        usage.percentage >= 0.75f -> MaterialTheme.colorScheme.error
-        usage.percentage >= 0.50f -> oc.stateWarningFg
-        usage.percentage >= 0.25f -> oc.stateSuccessFg
-        else -> MaterialTheme.colorScheme.primary
-    }
-    val trackColor = MaterialTheme.colorScheme.onSurfaceVariant.copy(
-        alpha = if (usage == null) 0.55f else 0.25f
-    )
-
-    Box(
-        modifier = Modifier.size(ChatUiTuning.contextRingOuterSize),
-        contentAlignment = Alignment.Center
-    ) {
-        CircularProgressIndicator(
-            progress = { 1f },
-            modifier = Modifier.size(ChatUiTuning.contextRingInnerSize),
-            color = trackColor,
-            strokeWidth = 3.dp
-        )
-        if (usage != null) {
-            CircularProgressIndicator(
-                progress = { usage.percentage },
-                modifier = Modifier.size(ChatUiTuning.contextRingInnerSize),
-                color = ringColor,
-                strokeWidth = 3.dp
-            )
-        }
-    }
-}
-
-@Composable
-internal fun ChatEmptyState(
-    isConnected: Boolean,
-    onConnect: () -> Unit,
-    isConnecting: Boolean = false,
-    connectionPhase: String? = null,
-    hostName: String = ""
-) {
-    Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-        Column(horizontalAlignment = Alignment.CenterHorizontally) {
-            if (isConnecting) {
-                // Cold-start reconnect in flight: show a spinner + phase text
-                // instead of the bare connect button. The button stays reserved
-                // for the truly-disconnected case below.
-                CircularProgressIndicator(
-                    modifier = Modifier.size(48.dp),
-                    strokeWidth = 4.dp
-                )
-                Spacer(modifier = Modifier.height(16.dp))
-                val phase = connectionPhase?.takeIf { it.isNotBlank() && it != "connecting" }
-                Text(
-                    text = if (phase != null) {
-                        "正在重连 $hostName… / $phase"
-                    } else {
-                        "正在重连 $hostName…"
-                    },
-                    style = MaterialTheme.typography.bodyLarge,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-            } else {
-                Icon(
-                    Icons.AutoMirrored.Filled.Chat,
-                    contentDescription = null,
-                    modifier = Modifier.size(64.dp),
-                    tint = MaterialTheme.colorScheme.outline
-                )
-                Spacer(modifier = Modifier.height(16.dp))
-                Text(
-                    if (isConnected) stringResource(R.string.chat_select_or_create_session) else stringResource(R.string.chat_connect_to_server),
-                    style = MaterialTheme.typography.bodyLarge
-                )
-                Spacer(modifier = Modifier.height(8.dp))
-                if (!isConnected) {
-                    Button(
-                        onClick = onConnect,
-                        modifier = Modifier.padding(horizontal = 24.dp, vertical = 12.dp)
-                    ) {
-                        Text(stringResource(R.string.chat_connect))
-                    }
-                }
-            }
-        }
     }
 }

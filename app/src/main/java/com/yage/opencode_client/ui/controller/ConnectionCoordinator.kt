@@ -1,5 +1,6 @@
 package com.yage.opencode_client.ui.controller
 
+import android.os.Looper
 import android.util.Log
 import com.yage.opencode_client.data.api.CommandInfo
 import com.yage.opencode_client.data.model.SSEEvent
@@ -8,6 +9,7 @@ import com.yage.opencode_client.ui.AppState
 import com.yage.opencode_client.ui.ConnectionState
 import com.yage.opencode_client.ui.SliceFlows
 import com.yage.opencode_client.ui.SettingsState
+import com.yage.opencode_client.ui.applySettingsSlice
 import com.yage.opencode_client.ui.errorMessageOrFallback
 import com.yage.opencode_client.ui.reportNonFatalIssue
 import com.yage.opencode_client.ui.updateAndSync
@@ -152,6 +154,7 @@ internal class ConnectionCoordinator(
      * [MainViewModel.writeConnection] / [updateState] above.)
      */
     private fun writeConnection(transform: (ConnectionState) -> ConnectionState) {
+        check(Looper.myLooper() === Looper.getMainLooper()) { "writeConnection must be called on the main thread" }
         val next = transform(connectionFlow.value)
         connectionFlow.value = next
         state.value = state.value.copy(
@@ -312,19 +315,15 @@ internal class ConnectionCoordinator(
         scope.launch {
             repository.getCommands()
                 .onSuccess { serverCommands ->
-                    settingsFlow.value = settingsFlow.value.copy(
-                        availableCommands = mergeCommands(localCommands(), serverCommands)
-                    )
-                    state.value = state.value.copy(
-                        availableCommands = settingsFlow.value.availableCommands
-                    )
+                    applySettingsSlice(state, settingsFlow) {
+                        it.copy(availableCommands = mergeCommands(localCommands(), serverCommands))
+                    }
                 }
                 .onFailure { error ->
                     reportNonFatalIssue(TAG, "Failed to load commands", error)
-                    settingsFlow.value = settingsFlow.value.copy(availableCommands = localCommands())
-                    state.value = state.value.copy(
-                        availableCommands = settingsFlow.value.availableCommands
-                    )
+                    applySettingsSlice(state, settingsFlow) {
+                        it.copy(availableCommands = localCommands())
+                    }
                 }
         }
     }

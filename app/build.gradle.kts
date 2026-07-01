@@ -26,11 +26,11 @@ android {
     compileSdk = 35
 
     defaultConfig {
-        applicationId = "com.yage.opencode_client"
+        applicationId = "cn.vectory.ocdroid"
         minSdk = 26
         targetSdk = 34
-        versionCode = 47
-        versionName = "0.5.2"
+        versionCode = 48
+        versionName = "0.5.3"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         // Integration test credentials from .env (dynamic, not in code)

@@ -1,17 +1,13 @@
 package com.yage.opencode_client.ui.controller
 
+import android.os.Looper
 import android.util.Log
 import com.yage.opencode_client.data.model.HostProfile
 import com.yage.opencode_client.data.repository.HostProfileStore
 import com.yage.opencode_client.data.repository.OpenCodeRepository
 import com.yage.opencode_client.ui.AppState
-import com.yage.opencode_client.ui.ComposerState
 import com.yage.opencode_client.ui.ConnectionFormSettings
-import com.yage.opencode_client.ui.ConnectionState
-import com.yage.opencode_client.ui.FileState
-import com.yage.opencode_client.ui.SettingsState
 import com.yage.opencode_client.ui.SliceFlows
-import com.yage.opencode_client.ui.TrafficState
 import com.yage.opencode_client.ui.TunnelActivationState
 import com.yage.opencode_client.ui.TUNNEL_SUCCESS_TOAST
 import com.yage.opencode_client.ui.errorMessageOrFallback
@@ -130,6 +126,7 @@ internal class HostProfileController(
 
     /** Writes AppState + syncs all slices (equivalent to MainViewModel.updateState). */
     private fun updateState(transform: (AppState) -> AppState) {
+        check(Looper.myLooper() === Looper.getMainLooper()) { "updateState must be called on the main thread" }
         state.updateAndSync(slices, transform)
     }
 
@@ -269,6 +266,7 @@ internal class HostProfileController(
      * windows, and server version must not leak across hosts.
      */
     private fun purgePerHostState() {
+        // Single atomic updateState: avoids multiple aggregate→sync cycles.
         updateState {
             it.copy(
                 currentSessionId = null,
@@ -283,12 +281,8 @@ internal class HostProfileController(
                 tempClearedUnread = emptySet(),
                 lastViewedTime = emptyMap(),
                 sessions = emptyList(),
-                directorySessions = emptyMap()
-            )
-        }
-        // Reset the composer + settings slices that belong to the previous host.
-        updateState {
-            it.copy(
+                directorySessions = emptyMap(),
+                // Reset the composer + settings slices that belong to the previous host.
                 draftWorkdir = null,
                 availableCommands = emptyList(),
                 serverVersion = null
@@ -369,20 +363,20 @@ internal class HostProfileController(
         val passwordId = profile.tunnelPasswordId
         if (passwordId == null) {
             updateState {
-                it.copy(error = "隧道激活失败：未设置隧道认证密码。请在「服务器」设置中填写隧道密码并保存后再试。")
-            }
-            updateState {
-                it.copy(tunnelActivationState = TunnelActivationState.Error("未设置隧道密码"))
+                it.copy(
+                    error = "隧道激活失败：未设置隧道认证密码。请在「服务器」设置中填写隧道密码并保存后再试。",
+                    tunnelActivationState = TunnelActivationState.Error("未设置隧道密码")
+                )
             }
             return
         }
         val password = settingsManager.getTunnelPassword(passwordId)
         if (password.isNullOrBlank()) {
             updateState {
-                it.copy(error = "隧道激活失败：已配置密码标识但存储为空（可能保存时未输入）。请重新输入隧道密码并保存。")
-            }
-            updateState {
-                it.copy(tunnelActivationState = TunnelActivationState.Error("隧道密码为空"))
+                it.copy(
+                    error = "隧道激活失败：已配置密码标识但存储为空（可能保存时未输入）。请重新输入隧道密码并保存。",
+                    tunnelActivationState = TunnelActivationState.Error("隧道密码为空")
+                )
             }
             return
         }
@@ -394,14 +388,22 @@ internal class HostProfileController(
                 allowInsecure = profile.allowInsecureConnections
             )
                 .onSuccess {
-                    updateState { it.copy(error = TUNNEL_SUCCESS_TOAST) }
-                    updateState { it.copy(tunnelActivationState = TunnelActivationState.Success) }
+                    updateState {
+                        it.copy(
+                            error = TUNNEL_SUCCESS_TOAST,
+                            tunnelActivationState = TunnelActivationState.Success
+                        )
+                    }
                     Log.d(TAG, "Tunnel activated successfully for ${profile.serverUrl}")
                 }
                 .onFailure { error ->
                     val msg = errorMessageOrFallback(error, "未知错误（无异常信息）")
-                    updateState { it.copy(error = "隧道激活失败：$msg") }
-                    updateState { it.copy(tunnelActivationState = TunnelActivationState.Error(msg)) }
+                    updateState {
+                        it.copy(
+                            error = "隧道激活失败：$msg",
+                            tunnelActivationState = TunnelActivationState.Error(msg)
+                        )
+                    }
                     Log.e(TAG, "Tunnel activation failed", error)
                 }
         }

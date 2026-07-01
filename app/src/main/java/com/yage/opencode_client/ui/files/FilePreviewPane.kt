@@ -59,6 +59,7 @@ import com.yage.opencode_client.ui.theme.LocalMarkdownFontSizes
 import com.yage.opencode_client.ui.theme.markdownTypography
 import com.yage.opencode_client.ui.util.DataUriImageTransformer
 import com.yage.opencode_client.ui.util.HttpImageHolder
+import com.yage.opencode_client.ui.util.ImageDecodeUtils
 import com.yage.opencode_client.ui.util.MarkdownImageResolver
 import java.io.File
 import kotlin.math.max
@@ -105,7 +106,7 @@ internal fun FilePreviewPane(
         }
         if (value is ImageLoadState.Loading) {
             value = withContext(Dispatchers.Default) {
-                decodeImagePayloadSampled(content, targetPx = IMAGE_DECODE_TARGET_PX)
+                decodeImagePayloadSampled(content, targetPx = ImageDecodeUtils.IMAGE_DECODE_TARGET_PX)
                     ?.let(ImageLoadState::Loaded)
                     ?: ImageLoadState.Failed
             }
@@ -366,19 +367,13 @@ private sealed interface ImageLoadState {
 }
 
 /**
- * Long-edge pixel budget for downsampled image decoding. 2048px matches the
- * common GL texture max and keeps even a multi-megapixel paste well under
- * ~16MB of bitmap memory on the decode path.
- */
-private const val IMAGE_DECODE_TARGET_PX = 2048
-
-/**
  * R-02a: decodes a base64 image payload off the main thread with two-pass
  * sampling. The first pass reads only the image bounds ([BitmapFactory.Options]
  * with [BitmapFactory.Options.inJustDecodeBounds] = true, no pixel allocation);
- * [calcInSampleSize] then picks the smallest power-of-two sample that keeps the
- * decoded long edge at or below [targetPx]; the second pass decodes the actual
- * (downsampled) bitmap. This bounds peak memory regardless of source size.
+ * [ImageDecodeUtils.calcInSampleSize] then picks the smallest power-of-two
+ * sample that keeps the decoded long edge at or below [targetPx]; the second
+ * pass decodes the actual (downsampled) bitmap. This bounds peak memory
+ * regardless of source size.
  *
  * Multiple base64 candidate spellings are attempted (raw + whitespace/newline-
  * stripped) because some server transports wrap or pad the payload. A candidate
@@ -400,7 +395,7 @@ private suspend fun decodeImagePayloadSampled(rawContent: String, targetPx: Int)
         // Pass 1: probe dimensions without allocating pixel memory.
         val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
         BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)
-        val sample = calcInSampleSize(bounds.outWidth, bounds.outHeight, targetPx)
+        val sample = ImageDecodeUtils.calcInSampleSize(bounds.outWidth, bounds.outHeight, targetPx)
         if (sample <= 0) continue // bounds probe failed (outWidth/outHeight <= 0): corrupt/unknown
         // Pass 2: real decode at the computed sample size.
         val decodeOpts = BitmapFactory.Options().apply { inSampleSize = sample }
@@ -409,29 +404,6 @@ private suspend fun decodeImagePayloadSampled(rawContent: String, targetPx: Int)
     }
 
     return null
-}
-
-/**
- * Computes a power-of-two [BitmapFactory.Options.inSampleSize] so the decoded
- * long edge is at most [target] pixels. Uses [Long] arithmetic throughout to
- * avoid [Int] overflow on very large source dimensions (a pathological payload
- * could report outWidth/outHeight near Int.MAX_VALUE, and the intermediate
- * `(w/s)*(h/s)` product would otherwise overflow Int and produce a wrong —
- * too small — sample size, causing an OOM on the second decode pass).
- *
- * Returns 0 for non-positive dimensions so the caller can treat the image as
- * undecodable rather than attempting a full-resolution fallback decode.
- */
-private fun calcInSampleSize(w: Int, h: Int, target: Int): Int {
-    if (w <= 0 || h <= 0 || target <= 0) return 0
-    var sample = 1
-    val longW = w.toLong()
-    val longH = h.toLong()
-    val longTarget = target.toLong()
-    while ((longW / sample) * (longH / sample) > longTarget * longTarget) {
-        sample *= 2
-    }
-    return sample
 }
 
 /**

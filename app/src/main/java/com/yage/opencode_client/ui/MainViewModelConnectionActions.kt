@@ -6,7 +6,6 @@ import com.yage.opencode_client.data.repository.HostProfileStore
 import com.yage.opencode_client.util.SettingsManager
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.flow.MutableStateFlow
-import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 
 internal fun applySavedSettings(
@@ -72,7 +71,6 @@ internal fun applySavedSettings(
     // empty-state UX can show a spinner instead of the bare connect button
     // while coldStartReconnect() is in flight.
     val connectionPhase = if (profiles.isNotEmpty()) "reconnecting" else null
-    connectionFlow.update { it.copy(connectionPhase = connectionPhase) }
     @Suppress("DEPRECATION")
     state.updateAndSync(slices) { it.copy(connectionPhase = connectionPhase) }
 }

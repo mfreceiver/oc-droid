@@ -1,5 +1,6 @@
 package com.yage.opencode_client.ui
 
+import android.os.Looper
 import android.util.Log
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
@@ -43,418 +44,6 @@ import javax.inject.Inject
  *  (not the sticky tunnelActivationState) drives severity. */
 const val TUNNEL_SUCCESS_TOAST = "隧道激活成功"
 
-sealed class TunnelActivationState {
-    data object Idle : TunnelActivationState()
-    data object Loading : TunnelActivationState()
-    data object Success : TunnelActivationState()
-    data class Error(val message: String) : TunnelActivationState()
-}
-
-/**
- * §R-17 M2: connection-domain state slice. Authoritative storage lives in
- * [MainViewModel._connectionFlow] (a dedicated `MutableStateFlow`); the
- * overlapping fields on [AppState] are deprecated mirrors kept only for
- * source/test compatibility until M4 retires them. Field set strictly
- * follows RFC R-17 §2.1.
- *
- * Write atomicity (RFC §4, strategy A): every mutation goes through a single
- * `writeConnection { ... }` (or a sequence of them where each
- * intermediate state is a legal UI state — never a `isConnected=true` paired
- * with a null `connectionPhase`). Do NOT rely on `Dispatchers.Main.immediate`
- * batching across separate `update` calls.
- */
-data class ConnectionState(
-    val isConnected: Boolean = false,
-    val isConnecting: Boolean = false,
-    val serverVersion: String? = null,
-    val connectionPhase: String? = null,
-    val tunnelActivationState: TunnelActivationState = TunnelActivationState.Idle
-)
-
-/**
- * §R-17 M2: traffic-domain state slice. Authoritative storage lives in
- * [MainViewModel._trafficFlow]. Field set strictly follows RFC R-17 §2.9.
- * Only written by [MainViewModel.refreshTrafficStats] and read by the server
- * management dialog (ChatTopBar) — isolating it avoids recomposing unrelated
- * subscribers each time the counter is refreshed.
- */
-data class TrafficState(
-    val trafficSent: Long = 0L,
-    val trafficReceived: Long = 0L
-) {
-    /** Combined sent + received traffic, derived so it never drifts. */
-    val totalTrafficBytes: Long
-        get() = trafficSent + trafficReceived
-}
-
-/**
- * §R-17 M3: composer-domain state slice. Authoritative storage lives in
- * [MainViewModel._composerFlow]. Field set strictly follows RFC R-17 §2.5.
- *
- * This is the highest-frequency slice (`inputText` mutates on every keystroke)
- * and the primary reason M3 exists: once M4 consumers subscribe to
- * `composerFlow` directly instead of reading `state.inputText`, keystrokes no
- * longer recompose ChatTopBar.
- *
- * Write atomicity (RFC §4 strategy A): same model as [ConnectionState] —
- * every mutation goes through [MainViewModel.writeComposer], which writes the
- * slice AND the `_state` mirror in one synchronous call. No dispatcher batch
- * reliance (RFC §9.2).
- */
-data class ComposerState(
-    val inputText: String = "",
-    val imageAttachments: List<ComposerImageAttachment> = emptyList(),
-    val sendingSessionIds: Set<String> = emptySet(),
-    val draftWorkdir: String? = null
-)
-
-/**
- * §R-17 M3: file-browser-domain state slice. Authoritative storage lives in
- * [MainViewModel._fileFlow]. Field set strictly follows RFC R-17 §2.6.
- * Consumed only by FilesScreen + PhoneLayout overlay; isolating it prevents
- * file-open/close from recomposing unrelated subscribers.
- */
-data class FileState(
-    val filePathToShowInFiles: String? = null,
-    val filePreviewOriginRoute: String? = null,
-    val fileBrowserOpen: Boolean = false,
-    val fileBrowserWorkdir: String? = null
-)
-
-/**
- * §R-17 M3: settings/global-preference state slice. Authoritative storage
- * lives in [MainViewModel._settingsFlow]. Field set strictly follows RFC
- * R-17 §2.4 EXCEPT `error`, which is cross-domain and stays on `_state` (see
- * RFC §3.3 — same call as M2 keeping `error` on `_state`).
- *
- * `availableCommands` is a connect-time / host-switch config (not live state)
- * but RFC §2.4 groups it here rather than under composer.
- */
-data class SettingsState(
-    val themeMode: ThemeMode = ThemeMode.SYSTEM,
-    val markdownFontSizes: MarkdownFontSizes = MarkdownFontSizes(),
-    val selectedAgentName: String = "build",
-    val agents: List<AgentInfo> = emptyList(),
-    val providers: ProvidersResponse? = null,
-    val availableCommands: List<CommandInfo> = emptyList()
-)
-
-/**
- * §R-17 M4: chat-domain state slice (RFC §2.2). Authoritative storage lives in
- * [MainViewModel._chatFlow]. The highest-frequency domain (SSE streaming deltas
- * mutate streamingPartTexts/messages many times per second). `error` is
- * intentionally NOT here — it is cross-domain and stays on `_state` (RFC §3.3,
- * same call as M2/M3).
- */
-data class ChatState(
-    val currentSessionId: String? = null,
-    val messages: List<Message> = emptyList(),
-    val partsByMessage: Map<String, List<Part>> = emptyMap(),
-    val streamingPartTexts: Map<String, String> = emptyMap(),
-    val streamingReasoningPart: Part? = null,
-    val olderMessagesCursor: String? = null,
-    val hasMoreMessages: Boolean = true,
-    val isLoadingMessages: Boolean = false,
-    val gapInfo: GapInfo? = null,
-    val staleNotice: Boolean = false
-)
-
-/**
- * §R-17 M4: session-list-domain state slice (RFC §2.3). Authoritative storage
- * lives in [MainViewModel._sessionListFlow]. Low-frequency (loadSessions /
- * loadMore / SSE session.created/updated); isolating it stops SSE chat deltas
- * from recomposing SessionsScreen.
- */
-data class SessionListState(
-    val sessions: List<Session> = emptyList(),
-    val sessionStatuses: Map<String, SessionStatus> = emptyMap(),
-    val expandedSessionIds: Set<String> = emptySet(),
-    val loadedSessionLimit: Int = MainViewModelTimings.sessionPageSize,
-    val hasMoreSessions: Boolean = true,
-    val isLoadingMoreSessions: Boolean = false,
-    val isRefreshingSessions: Boolean = false,
-    val pendingPermissions: List<PermissionRequest> = emptyList(),
-    val pendingQuestions: List<QuestionRequest> = emptyList(),
-    val childSessions: Map<String, List<Session>> = emptyMap(),
-    val directorySessions: Map<String, List<Session>> = emptyMap(),
-    val openSessionIds: List<String> = emptyList(),
-    val sessionTodos: Map<String, List<TodoItem>> = emptyMap()
-)
-
-/**
- * §R-17 M4: unread-domain state slice (RFC §2.7). Authoritative storage lives
- * in [MainViewModel._unreadFlow]. Drives the unread badge; depends on session
- * status + chat currentSessionId + foreground (cross-domain, see RFC §4).
- */
-data class UnreadState(
-    val unreadSessions: Set<String> = emptySet(),
-    val tempClearedUnread: Set<String> = emptySet(),
-    val lastViewedTime: Map<String, Long> = emptyMap()
-)
-
-/**
- * §R-17 M4: host-profile-domain state slice (RFC §2.8). Authoritative storage
- * lives in [MainViewModel._hostFlow]. Very low write frequency (save/switch/
- * import); consumed by ChatTopBar (server dialog) + SettingsScreen.
- */
-data class HostState(
-    val hostProfiles: List<HostProfile> = emptyList(),
-    val currentHostProfileId: String? = null
-)
-
-/**
- * §Per-session message cache: a snapshot of the loaded window for a single
- * session — the four pieces of message-state that [selectSessionState]
- * otherwise wipes to empty on every switch. Restoring from this snapshot on
- * return avoids the visible flicker + history re-fetch (the latest 5 only)
- * that previously hit users on every A→B→A hop. Bounded LRU lives in
- * [MainViewModel.sessionWindowCache]; the post-restore tail fetch
- * (`loadMessages(resetLimit = false)`) still runs to merge fresh messages
- * non-destructively, so a stale snapshot never hides new content.
- */
-internal data class CachedSessionWindow(
-    val messages: List<Message>,
-    val partsByMessage: Map<String, List<Part>>,
-    val olderMessagesCursor: String?,
-    val hasMoreMessages: Boolean
-)
-
-/**
- * §Phase1C gap (断层) state. Set by [MainViewModel.catchUpAfterDisconnectOrForeground] * when a tail reload detects the pre-reload newest message [anchorNewestId] is
- * NOT in the freshly-fetched latest window — meaning messages arrived during
- * the disconnect that fall outside the 5-message tail. The user can then tap
- * the gap divider to page older (loadMore-style) from [tailOldestCursor] until
- * [anchorNewestId] reappears (gap closed, [open] = false).
- *
- * - [anchorNewestId]: pre-reload local newest message id (by time.created).
- * - [tailOldestId]: the oldest id in the fetched tail window — the visual
- *   seam where the gap divider is rendered (between this and older history).
- * - [tailOldestCursor]: server cursor for paging OLDER from the tail's oldest
- *   (the gap-closure direction). Updated as the user pages.
- * - [open]: true while the gap is still unresolved.
- */
-data class GapInfo(
-    val anchorNewestId: String,
-    val tailOldestId: String,
-    val tailOldestCursor: String?,
-    val open: Boolean = true
-)
-
-data class ConnectionFormSettings(
-    val serverUrl: String,
-    val username: String,
-    val password: String
-)
-
-data class AppState(
-    // §R-17 M2: connection/traffic fields below are deprecated mirrors. The
-    // authoritative storage is MainViewModel._connectionFlow / _trafficFlow;
-    // this AppState keeps the fields only so legacy consumers and reflection-
-    // based tests keep compiling. `viewModel.state` is `_state.asStateFlow()`
-    // (a SYNCHRONOUS view — NOT a combine() chain; see the design note in
-    // docs/rfc-r17-appstate-split.md §6 「实施偏离记录」 for why combine+
-    // stateIn was rejected). These mirror fields are kept in sync with the
-    // slices by `MainViewModel.writeConnection` / `writeTraffic`, which in a
-    // single synchronous call write the slice AND `_state.value.copy(...)`
-    // over these fields — so `state.value` is consistent immediately after
-    // every write, with no dispatcher batch reliance (RFC §9.2). They will be
-    // removed in M4 together with the rest of AppState; once the mirrors are
-    // gone and no test/consumer reads `state.value.<conn/traffic>` directly,
-    // `state` can be reconsidered as a combine() of the slices.
-    @Deprecated("mirror from connectionFlow; M4 removes AppState", level = DeprecationLevel.WARNING)
-    val isConnected: Boolean = false,
-    @Deprecated("mirror from connectionFlow; M4 removes AppState", level = DeprecationLevel.WARNING)
-    val isConnecting: Boolean = false,
-    @Deprecated("mirror from connectionFlow; M4 removes AppState", level = DeprecationLevel.WARNING)
-    val serverVersion: String? = null,
-    @Deprecated("mirror from M4 slice; M5 removes AppState", level = DeprecationLevel.WARNING)
-    val sessions: List<Session> = emptyList(),
-    @Deprecated("mirror from M4 slice; M5 removes AppState", level = DeprecationLevel.WARNING)
-    val loadedSessionLimit: Int = MainViewModelTimings.sessionPageSize,
-    @Deprecated("mirror from M4 slice; M5 removes AppState", level = DeprecationLevel.WARNING)
-    val hasMoreSessions: Boolean = true,
-    @Deprecated("mirror from M4 slice; M5 removes AppState", level = DeprecationLevel.WARNING)
-    val isLoadingMoreSessions: Boolean = false,
-    @Deprecated("mirror from M4 slice; M5 removes AppState", level = DeprecationLevel.WARNING)
-    val isRefreshingSessions: Boolean = false,
-    @Deprecated("mirror from M4 slice; M5 removes AppState", level = DeprecationLevel.WARNING)
-    val expandedSessionIds: Set<String> = emptySet(),
-    @Deprecated("mirror from M4 slice; M5 removes AppState", level = DeprecationLevel.WARNING)
-    val currentSessionId: String? = null,
-    // Q6: persisted last-opened phone pager page (0=Chat...3=Settings).
-    val lastNavPage: Int = 0,
-    @Deprecated("mirror from M4 slice; M5 removes AppState", level = DeprecationLevel.WARNING)
-    val sessionStatuses: Map<String, SessionStatus> = emptyMap(),
-    // SSE-trust split store (S4): messages hold only Message metadata; parts
-    // live separately keyed by message id (populated by API load). Live
-    // streaming text is overlaid via streamingPartTexts (keyed by partId).
-    @Deprecated("mirror from M4 slice; M5 removes AppState", level = DeprecationLevel.WARNING)
-    val messages: List<Message> = emptyList(),
-    @Deprecated("mirror from M4 slice; M5 removes AppState", level = DeprecationLevel.WARNING)
-    val partsByMessage: Map<String, List<Part>> = emptyMap(),
-    // §on-demand: cursor-based history paging. olderMessagesCursor is the opaque
-    // V1 cursor for fetching the next older page (null = no more / reset).
-    @Deprecated("mirror from M4 slice; M5 removes AppState", level = DeprecationLevel.WARNING)
-    val olderMessagesCursor: String? = null,
-    @Deprecated("mirror from M4 slice; M5 removes AppState", level = DeprecationLevel.WARNING)
-    val hasMoreMessages: Boolean = true,
-    @Deprecated("mirror from M4 slice; M5 removes AppState", level = DeprecationLevel.WARNING)
-    val isLoadingMessages: Boolean = false,
-    @Deprecated("mirror from settingsFlow; M4 removes AppState", level = DeprecationLevel.WARNING)
-    val agents: List<AgentInfo> = emptyList(),
-    @Deprecated("mirror from settingsFlow; M4 removes AppState", level = DeprecationLevel.WARNING)
-    val selectedAgentName: String = "build",
-    @Deprecated("mirror from settingsFlow; M4 removes AppState", level = DeprecationLevel.WARNING)
-    val providers: ProvidersResponse? = null,
-    @Deprecated("mirror from M4 slice; M5 removes AppState", level = DeprecationLevel.WARNING)
-    val pendingPermissions: List<PermissionRequest> = emptyList(),
-    @Deprecated("mirror from M4 slice; M5 removes AppState", level = DeprecationLevel.WARNING)
-    val pendingQuestions: List<QuestionRequest> = emptyList(),
-    @Deprecated("mirror from composerFlow; M4 removes AppState", level = DeprecationLevel.WARNING)
-    val inputText: String = "",
-    val error: String? = null,
-    @Deprecated("mirror from settingsFlow; M4 removes AppState", level = DeprecationLevel.WARNING)
-    val themeMode: ThemeMode = ThemeMode.SYSTEM,
-    @Deprecated("mirror from settingsFlow; M4 removes AppState", level = DeprecationLevel.WARNING)
-    val markdownFontSizes: MarkdownFontSizes = MarkdownFontSizes(),
-    @Deprecated("mirror from fileFlow; M4 removes AppState", level = DeprecationLevel.WARNING)
-    val filePathToShowInFiles: String? = null,
-    @Deprecated("mirror from fileFlow; M4 removes AppState", level = DeprecationLevel.WARNING)
-    val filePreviewOriginRoute: String? = null,
-    // Bug3: project-level file browser opened from the Sessions screen. The
-    // overlay is rendered at the PhoneLayout ROOT (above the HorizontalPager)
-    // and the pager's userScrollEnabled is bound to !fileBrowserOpen, so Chat
-    // can't be swiped to / interacted with during a browse. This keeps the
-    // global currentDirectory (temporarily re-scoped to fileBrowserWorkdir)
-    // unambiguous — no desync.
-    @Deprecated("mirror from fileFlow; M4 removes AppState", level = DeprecationLevel.WARNING)
-    val fileBrowserOpen: Boolean = false,
-    @Deprecated("mirror from fileFlow; M4 removes AppState", level = DeprecationLevel.WARNING)
-    val fileBrowserWorkdir: String? = null,
-    @Deprecated("mirror from M4 slice; M5 removes AppState", level = DeprecationLevel.WARNING)
-    val streamingPartTexts: Map<String, String> = emptyMap(),
-    @Deprecated("mirror from M4 slice; M5 removes AppState", level = DeprecationLevel.WARNING)
-    val streamingReasoningPart: Part? = null,
-    @Deprecated("mirror from M4 slice; M5 removes AppState", level = DeprecationLevel.WARNING)
-    val sessionTodos: Map<String, List<TodoItem>> = emptyMap(),
-    @Deprecated("mirror from composerFlow; M4 removes AppState", level = DeprecationLevel.WARNING)
-    val sendingSessionIds: Set<String> = emptySet(),
-    @Deprecated("mirror from composerFlow; M4 removes AppState", level = DeprecationLevel.WARNING)
-    val imageAttachments: List<ComposerImageAttachment> = emptyList(),
-    @Deprecated("mirror from M4 slice; M5 removes AppState", level = DeprecationLevel.WARNING)
-    val hostProfiles: List<HostProfile> = emptyList(),
-    @Deprecated("mirror from M4 slice; M5 removes AppState", level = DeprecationLevel.WARNING)
-    val currentHostProfileId: String? = null,
-    @Deprecated("mirror from connectionFlow; M4 removes AppState", level = DeprecationLevel.WARNING)
-    val connectionPhase: String? = null,
-    @Deprecated("mirror from connectionFlow; M4 removes AppState", level = DeprecationLevel.WARNING)
-    val tunnelActivationState: TunnelActivationState = TunnelActivationState.Idle,
-    /**
-     * Sub-agent (child) sessions keyed by parent session ID. Populated lazily
-     * after a session is selected via [MainViewModel.loadChildSessions]. Used
-     * to render sub-agent cards and to support parent->child navigation.
-     */
-    @Deprecated("mirror from M4 slice; M5 removes AppState", level = DeprecationLevel.WARNING)
-    val childSessions: Map<String, List<Session>> = emptyMap(),
-    /**
-     * Per-directory root sessions, keyed by workdir path. Populated by
-     * [MainViewModel.createSessionInWorkdir] via
-     * [OpenCodeRepository.getSessionsForDirectory] so the user can see (and
-     * pick up) prior conversations when connecting a project. Stored
-     * separately from [sessions] so periodic global refreshes do not discard
-     * it. [SessionsScreen] merges both for display.
-     */
-    @Deprecated("mirror from M4 slice; M5 removes AppState", level = DeprecationLevel.WARNING)
-    val directorySessions: Map<String, List<Session>> = emptyMap(),
-    /**
-     * Mirror of [SettingsManager.openSessionIds] (browser-tab style list of
-     * "open" session IDs in open-order, most recently opened first). Kept in
-     * AppState so the Compose UI recomposes when the list changes.
-     * [SettingsManager] remains the persistent source of truth — this field
-     * is the observable projection.
-     */
-    @Deprecated("mirror from M4 slice; M5 removes AppState", level = DeprecationLevel.WARNING)
-    val openSessionIds: List<String> = emptyList(),
-    /**
-     * Non-null when the user has entered "draft" (deferred-create) mode by
-     * invoking [MainViewModel.createSessionInWorkdir]. The repository's
-     * current directory has been set to this workdir, but no POST /session
-     * has been issued. The first [MainViewModel.sendMessage] will create the
-     * session on demand and clear this field. Selecting/creating any
-     * other session or switching host discards the draft.
-     */
-    @Deprecated("mirror from composerFlow; M4 removes AppState", level = DeprecationLevel.WARNING)
-    val draftWorkdir: String? = null,
-    /**
-     * Per-session last-viewed epoch millis. Updated whenever the user
-     * selects/opens a session. Used as the basis for [unreadSessions].
-     * Not currently persisted across restarts.
-     */
-    @Deprecated("mirror from M4 slice; M5 removes AppState", level = DeprecationLevel.WARNING)
-    val lastViewedTime: Map<String, Long> = emptyMap(),
-    /**
-     * Session IDs that have received SSE message updates more recently than
-     * their [lastViewedTime] (and are not the currently-open session).
-     * Drives the unread badge in the session lists. Cleared on open.
-     */
-    @Deprecated("mirror from M4 slice; M5 removes AppState", level = DeprecationLevel.WARNING)
-    val unreadSessions: Set<String> = emptySet(),
-    /**
-     * Sessions the user has opened (cleared the unread badge) and that are
-     * still eligible to be *re-marked* unread if they remain busy when the
-     * user navigates away, or if a new out-of-band message arrives for them
-     * while they are not the current session (server 1.17.11+ surfaces new
-     * messages via `message.updated`; the message.created branch is retained
-     * only for forward-compat).
-     *
-     * A session leaves this set when the server reports it going idle
-     * (busy -> idle) — at that point the in-flight task is complete and there
-     * is nothing further to surface. This implements the "swipe away from a
-     * busy session = re-mark unread; session completes cleanly = do not"
-     * behaviour.
-     */
-    @Deprecated("mirror from M4 slice; M5 removes AppState", level = DeprecationLevel.WARNING)
-    val tempClearedUnread: Set<String> = emptySet(),
-    /**
-     * Slash commands available in the composer. Merges a small set of
-     * client-side commands (/clear, /compact, /undo, /redo) with the
-     * server-published list (GET /command). Populated by
-     * [MainViewModel.loadCommands] on connect.
-     */
-    @Deprecated("mirror from settingsFlow; M4 removes AppState", level = DeprecationLevel.WARNING)
-    val availableCommands: List<CommandInfo> = emptyList(),
-    /**
-     * Cumulative HTTP traffic counters mirrored from [TrafficTracker] for the
-     * Settings page. Refreshed on-demand by [MainViewModel.refreshTrafficStats]
-     * (e.g. when Settings opens) rather than on every request, to avoid
-     * recomposing the whole app on each network call. [totalTrafficBytes] is
-     * derived so it can never drift out of sync.
-     *
-     * §R-17 M2: these are deprecated mirrors; authoritative storage is
-     * [MainViewModel._trafficFlow]. M4 removes AppState.
-     */
-    @Deprecated("mirror from trafficFlow; M4 removes AppState", level = DeprecationLevel.WARNING)
-    val trafficSent: Long = 0L,
-    @Deprecated("mirror from trafficFlow; M4 removes AppState", level = DeprecationLevel.WARNING)
-    val trafficReceived: Long = 0L,
-    /**
-     * §Phase1C: non-null when a tail reload detected messages may have arrived
-     * during a disconnect that fall outside the 5-message tail window. Drives
-     * the gap divider UI + user-triggered closure. Cleared on session switch,
-     * manual refresh (global cold-start), and cold start. See [GapInfo].
-     */
-    @Deprecated("mirror from M4 slice; M5 removes AppState", level = DeprecationLevel.WARNING)
-    val gapInfo: GapInfo? = null,
-    /**
-     * §Phase1E: shown as a top banner after a long (>5min) background absence
-     * or process rebuild — "长时间未查看，仅显示最新内容 [点击重新加载全部会话]".
-     * Tapping the action triggers [MainViewModel.refreshCurrentSession] (global
-     * cold-start). Cleared once a normal load completes.
-     */
-    @Deprecated("mirror from M4 slice; M5 removes AppState", level = DeprecationLevel.WARNING)
-    val staleNotice: Boolean = false
-)
-
 @HiltViewModel
 @OptIn(FlowPreview::class)
 class MainViewModel @Inject constructor(
@@ -488,8 +77,8 @@ class MainViewModel @Inject constructor(
     /** §R-17 M3: composer-domain slice (RFC §2.5). Authoritative storage. */
     private val _composerFlow = MutableStateFlow(ComposerState())
     /**
-     * Expansion state for the four collapsible card types (ToolCallsRow,
-     * ReasoningCard, ToolCard, PatchCard). Kept in a dedicated StateFlow
+     * Expansion state for collapsible card types (streaming parts, reasoning,
+     * tool calls, sub-agent task cards, patch/context cards). Kept in a dedicated StateFlow
      * (NOT inside [AppState]) so toggling a card only recomposes the
      * subscribers of this flow (the individual cards), not the whole
      * ChatScreen. Key format: `"${messageId}|${partKey}"` (constructed by
@@ -666,8 +255,8 @@ class MainViewModel @Inject constructor(
     /**
      * §R-17 M2→M5: write the connection slice AND mirror it onto AppState.
      * The slice is the authoritative read path (all consumers read slices); the
-     * mirror write is retained so the free helpers in MainViewModelSessionActions
-     * that still read `state.value.<field>` (and CatchUpGapTest) see consistent
+     * mirror write is retained so the free helpers in the MainViewModel*Actions
+     * files that still read `state.value.<field>` (and CatchUpGapTest) see consistent
      * values without a stale window. A follow-up that migrates those reads to
      * slices can drop the mirror write.
      *
@@ -682,6 +271,7 @@ class MainViewModel @Inject constructor(
      */
     @Suppress("DEPRECATION")
     private fun writeConnection(transform: (ConnectionState) -> ConnectionState) {
+        check(Looper.myLooper() === Looper.getMainLooper()) { "writeConnection must be called on the main thread" }
         val next = transform(_connectionFlow.value)
         _connectionFlow.value = next
         _state.value = _state.value.copy(
@@ -696,6 +286,7 @@ class MainViewModel @Inject constructor(
     /** §R-17 M2→M5: write the traffic slice + mirror. See [writeConnection]. */
     @Suppress("DEPRECATION")
     private fun writeTraffic(transform: (TrafficState) -> TrafficState) {
+        check(Looper.myLooper() === Looper.getMainLooper()) { "writeTraffic must be called on the main thread" }
         val next = transform(_trafficFlow.value)
         _trafficFlow.value = next
         _state.value = _state.value.copy(trafficSent = next.trafficSent, trafficReceived = next.trafficReceived)
@@ -704,6 +295,7 @@ class MainViewModel @Inject constructor(
     /** §R-17 M3→M5: write the composer slice + mirror. See [writeConnection]. */
     @Suppress("DEPRECATION")
     private fun writeComposer(transform: (ComposerState) -> ComposerState) {
+        check(Looper.myLooper() === Looper.getMainLooper()) { "writeComposer must be called on the main thread" }
         val next = transform(_composerFlow.value)
         _composerFlow.value = next
         _state.value = _state.value.copy(
@@ -717,6 +309,7 @@ class MainViewModel @Inject constructor(
     /** §R-17 M3→M5: write the file slice + mirror. See [writeConnection]. */
     @Suppress("DEPRECATION")
     private fun writeFile(transform: (FileState) -> FileState) {
+        check(Looper.myLooper() === Looper.getMainLooper()) { "writeFile must be called on the main thread" }
         val next = transform(_fileFlow.value)
         _fileFlow.value = next
         _state.value = _state.value.copy(
@@ -730,6 +323,7 @@ class MainViewModel @Inject constructor(
     /** §R-17 M3→M5: write the settings slice + mirror. `error` stays on AppState. */
     @Suppress("DEPRECATION")
     private fun writeSettings(transform: (SettingsState) -> SettingsState) {
+        check(Looper.myLooper() === Looper.getMainLooper()) { "writeSettings must be called on the main thread" }
         val next = transform(_settingsFlow.value)
         _settingsFlow.value = next
         _state.value = _state.value.copy(
@@ -745,6 +339,7 @@ class MainViewModel @Inject constructor(
     /** §R-17 M4→M5: write the chat slice + mirror. See [writeConnection]. */
     @Suppress("DEPRECATION")
     private fun writeChat(transform: (ChatState) -> ChatState) {
+        check(Looper.myLooper() === Looper.getMainLooper()) { "writeChat must be called on the main thread" }
         val next = transform(_chatFlow.value)
         _chatFlow.value = next
         _state.value = _state.value.copy(
@@ -764,6 +359,7 @@ class MainViewModel @Inject constructor(
     /** §R-17 M4→M5: write the session-list slice + mirror. See [writeConnection]. */
     @Suppress("DEPRECATION")
     private fun writeSessionList(transform: (SessionListState) -> SessionListState) {
+        check(Looper.myLooper() === Looper.getMainLooper()) { "writeSessionList must be called on the main thread" }
         val next = transform(_sessionListFlow.value)
         _sessionListFlow.value = next
         _state.value = _state.value.copy(
@@ -786,6 +382,7 @@ class MainViewModel @Inject constructor(
     /** §R-17 M4→M5: write the unread slice + mirror. See [writeConnection]. */
     @Suppress("DEPRECATION")
     private fun writeUnread(transform: (UnreadState) -> UnreadState) {
+        check(Looper.myLooper() === Looper.getMainLooper()) { "writeUnread must be called on the main thread" }
         val next = transform(_unreadFlow.value)
         _unreadFlow.value = next
         _state.value = _state.value.copy(
@@ -798,6 +395,7 @@ class MainViewModel @Inject constructor(
     /** §R-17 M4→M5: write the host slice + mirror. See [writeConnection]. */
     @Suppress("DEPRECATION")
     private fun writeHost(transform: (HostState) -> HostState) {
+        check(Looper.myLooper() === Looper.getMainLooper()) { "writeHost must be called on the main thread" }
         val next = transform(_hostFlow.value)
         _hostFlow.value = next
         _state.value = _state.value.copy(
@@ -816,7 +414,7 @@ class MainViewModel @Inject constructor(
      * transform against it, then writes the result back to `_state` AND
      * re-syncs every slice from it via [syncSlicesFromAppState]. `_state` thus
      * stays a synchronised mirror of the slices (retained because the free
-     * helpers in MainViewModelSessionActions still read `state.value.<field>`,
+     * helpers in the MainViewModel*Actions files still read `state.value.<field>`,
      * and CatchUpGapTest's null-slices path — see M5.2 tech debt).
      *
      * Isolation still works because `MutableStateFlow` only emits on
@@ -839,6 +437,7 @@ class MainViewModel @Inject constructor(
      */
     @Suppress("DEPRECATION")
     private fun updateState(transform: (AppState) -> AppState) {
+        check(Looper.myLooper() === Looper.getMainLooper()) { "updateState must be called on the main thread" }
         val before = aggregateFromSlices(_state.value)
         val after = transform(before)
         _state.value = after
@@ -859,21 +458,6 @@ class MainViewModel @Inject constructor(
      */
     private fun aggregateFromSlices(seed: AppState): AppState =
         aggregateFromSlices(sliceFlows, seed)
-
-    /**
-     * Expansion state for the four collapsible card types (ToolCallsRow,
-     * ReasoningCard, ToolCard, PatchCard). Kept in a dedicated StateFlow
-     * (NOT inside [AppState]) so toggling a card only recomposes the
-     * subscribers of this flow (the individual cards), not the whole
-     * ChatScreen. Key format: `"${messageId}|${partKey}"` (constructed by
-     * the card layer; this VM does not parse keys).
-     *
-     * Cleared on session switch via [clearExpandedParts] (called from
-     * [selectSession]) so switching conversations resets all cards to their
-     * default collapsed state. loadMore / loadMessages deliberately do NOT
-     * clear it — the user's in-progress expand state must survive history
-     * pagination.
-     */
 
     // R-16 M2: delegated to [composerController].
     fun togglePartExpand(key: String, currentValue: Boolean) {
@@ -1391,7 +975,7 @@ class MainViewModel @Inject constructor(
      */
     fun closeSession(sessionId: String) {
         val isCurrent = _chatFlow.value.currentSessionId == sessionId
-        // Preserve the draft of the session being closed. selectSessionState
+        // Preserve the draft of the session being closed. The session-switch flow
         // would otherwise mis-target the save once currentSessionId has moved
         // (it reads oldSessionId AFTER we've changed it), writing the closed
         // session's draft into the next session (#10). Save it explicitly here

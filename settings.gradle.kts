@@ -22,5 +22,5 @@ dependencyResolutionManagement {
     }
 }
 
-rootProject.name = "opencode_client"
+rootProject.name = "ocdroid"
 include(":app")
