@@ -289,7 +289,26 @@ internal fun ChatMessageList(
             }
         }
         if (shouldAutoScroll && (messages.isNotEmpty() || streamingReasoningPart != null)) {
-            listState.animateScrollToItem(0)
+            // 闪屏修复：流式输出（reasoning 进行中 / streamingPartTexts 非空）时
+            // 用瞬时 scrollToItem 代替 animateScrollToItem。
+            //
+            // 根因：contentVersion 含 streamingPartTexts.hashCode()，每个 token 到达
+            // 都重启本 LaunchedEffect → animateScrollToItem(0) 启动的 ~300ms 滚动动画
+            // 被下一个 token（M5 coalescing ~100ms）打断重启。动画反复中断 + reasoning
+            // 内容增长导致 item 高度漂移，使滚动位置在"到底（完全显示）"与"未到底
+            // （收缩视图）"间持续跳变 → 用户看到的"窗口在完全显示和收缩间持续变化"。
+            //
+            // 瞬时 scrollToItem 无动画可堆叠，每帧精确对齐 item 0 顶部，reasoning 顶部
+            // 钉住视口底部，新 token 平滑流入，零抖动。这是流式聊天列表（iMessage /
+            // Telegram / WhatsApp）跟随到底部的标准实现。
+            //
+            // 非流式（新消息到达、初始加载，streamingPartTexts 为空且无 reasoning part）
+            // 保留 animateScrollToItem 平滑跟随，体验不受影响。
+            if (streamingReasoningPart != null || streamingPartTexts.isNotEmpty()) {
+                listState.scrollToItem(0)
+            } else {
+                listState.animateScrollToItem(0)
+            }
         }
     }
 

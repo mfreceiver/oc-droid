@@ -1602,15 +1602,17 @@ class MainViewModelTest {
     }
 
     @Test
-    fun `handleSSEEvent missing delta clears streaming state and refreshes messages`() = runTest {
+    fun `handleSSEEvent part-created preserves streaming overlay and refreshes messages`() = runTest {
         val messages = listOf(MessageWithParts(info = Message(id = "a2", role = "assistant")))
         coEvery { repository.getMessagesPaged("session-1", any(), any()) } returns Result.success(MessagesPage(messages, null))
         val viewModel = createViewModel()
+        val initialStreaming = mapOf("part-1" to "partial")
+        val initialReasoning = Part(id = "part-1", messageId = "message-1", sessionId = "session-1", type = "reasoning")
         updateState(viewModel) {
             it.copy(
                 currentSessionId = "session-1",
-                streamingPartTexts = mapOf("part-1" to "partial"),
-                streamingReasoningPart = Part(id = "part-1", messageId = "message-1", sessionId = "session-1", type = "reasoning")
+                streamingPartTexts = initialStreaming,
+                streamingReasoningPart = initialReasoning
             )
         }
 
@@ -1629,9 +1631,69 @@ class MainViewModelTest {
         advanceTimeBy(1000)
         advanceUntilIdle()
 
-        assertTrue(viewModel.chatFlow.value.streamingPartTexts.isEmpty())
-        assertNull(viewModel.chatFlow.value.streamingReasoningPart)
+        // 闪屏修复：part.created（part 对象只有 type 无 messageID/id）不再清空
+        // overlay —— 同回合内每个新 part（reasoning→text→tool…）都会发此信号，
+        // 清空会导致所有流式气泡反复坍缩/充填闪烁。reload(resetLimit=false) 保留
+        // streamingPartTexts/streamingReasoningPart（§append-safe）。
+        assertEquals(initialStreaming, viewModel.chatFlow.value.streamingPartTexts)
+        assertEquals(initialReasoning, viewModel.chatFlow.value.streamingReasoningPart)
         assertEquals(messages.map { it.info }, viewModel.chatFlow.value.messages)
+    }
+
+    @Test
+    fun `resetLimit=false reload clears streamingReasoningPart when promoted to history but preserves streamingPartTexts`() = runTest {
+        // 双重渲染修复（gpter/kimo MAJOR）：reset=false reload 若把正在流式的
+        // reasoning part 带入 partsByMessage，必须清除 streamingReasoningPart（否则
+        // streaming-reasoning item 与 MessageRow 的历史 ReasoningCard 双重渲染），
+        // 同时保留 streamingPartTexts（MessageRow 用它覆盖 part.text，内容最新不闪屏）。
+        val reasoningPart = Part(id = "part-1", messageId = "a2", sessionId = "session-1", type = "reasoning", text = "old-persisted")
+        val messages = listOf(MessageWithParts(info = Message(id = "a2", role = "assistant"), parts = listOf(reasoningPart)))
+        coEvery { repository.getMessagesPaged("session-1", any(), any()) } returns Result.success(MessagesPage(messages, null))
+        val viewModel = createViewModel()
+        val seededTexts = mapOf("part-1" to "streaming-latest")
+        updateState(viewModel) {
+            it.copy(
+                currentSessionId = "session-1",
+                streamingPartTexts = seededTexts,
+                streamingReasoningPart = Part(id = "part-1", messageId = "a2", sessionId = "session-1", type = "reasoning")
+            )
+        }
+
+        viewModel.loadMessages("session-1", resetLimit = false)
+        advanceTimeBy(1000)
+        advanceUntilIdle()
+
+        assertNull(viewModel.chatFlow.value.streamingReasoningPart)
+        assertEquals(seededTexts, viewModel.chatFlow.value.streamingPartTexts)
+    }
+
+    @Test
+    fun `resetLimit=true busy reload also clears streamingReasoningPart when promoted to history`() = runTest {
+        // gpter MAJOR / kimo MINOR：reset=true + session busy 时 overlay 仍保留
+        // （streamingFinalized=false），此时若 reasoning part 已进入 partsByMessage，
+        // 同样必须清除 streamingReasoningPart 避免双重渲染。
+        val reasoningPart = Part(id = "part-1", messageId = "a2", sessionId = "session-1", type = "reasoning", text = "old")
+        val messages = listOf(MessageWithParts(info = Message(id = "a2", role = "assistant"), parts = listOf(reasoningPart)))
+        coEvery { repository.getMessagesPaged("session-1", any(), any()) } returns Result.success(MessagesPage(messages, null))
+        val viewModel = createViewModel()
+        val seededTexts = mapOf("part-1" to "streaming-latest")
+        updateState(viewModel) {
+            it.copy(
+                currentSessionId = "session-1",
+                streamingPartTexts = seededTexts,
+                streamingReasoningPart = Part(id = "part-1", messageId = "a2", sessionId = "session-1", type = "reasoning"),
+                sessionStatuses = mapOf("session-1" to SessionStatus(type = "busy"))
+            )
+        }
+
+        viewModel.loadMessages("session-1", resetLimit = true)
+        advanceTimeBy(1000)
+        advanceUntilIdle()
+
+        // busy → overlayWillBePreserved=true → reasoningPromotedToHistory 触发：
+        // streamingReasoningPart 清除（不双重），streamingPartTexts 保留（不闪屏）。
+        assertNull(viewModel.chatFlow.value.streamingReasoningPart)
+        assertEquals(seededTexts, viewModel.chatFlow.value.streamingPartTexts)
     }
 
     @Test

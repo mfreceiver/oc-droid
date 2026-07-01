@@ -16,15 +16,16 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.Chat
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
-import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.AddComment
 import androidx.compose.material.icons.filled.Archive
-import androidx.compose.material.icons.filled.CreateNewFolder
-import androidx.compose.material.icons.filled.Folder
+import androidx.compose.material.icons.filled.FolderOpen
+import androidx.compose.material.icons.filled.Forum
 import androidx.compose.material.icons.filled.History
+import androidx.compose.material.icons.filled.Inbox
 import androidx.compose.material.icons.filled.KeyboardArrowDown
+import androidx.compose.material.icons.filled.LibraryAdd
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -200,7 +201,7 @@ fun SessionsScreen(
                     // the primary way back to the conversation.
                     IconButton(onClick = onSwitchToChat) {
                         Icon(
-                            Icons.AutoMirrored.Filled.ArrowBack,
+                            Icons.Default.Forum,
                             contentDescription = stringResource(R.string.common_back)
                         )
                     }
@@ -211,7 +212,7 @@ fun SessionsScreen(
                     // matter whether the workdir list is empty or populated).
                     IconButton(onClick = { showNewWorkdirDialog = true }) {
                         Icon(
-                            Icons.Default.CreateNewFolder,
+                            Icons.Default.LibraryAdd,
                             contentDescription = stringResource(R.string.sessions_connect_new_action),
                             tint = MaterialTheme.colorScheme.onSurfaceVariant
                         )
@@ -253,7 +254,7 @@ fun SessionsScreen(
             // --- Workdirs Section ---
             item(key = "workdirs_header") {
                 SectionHeader(
-                    icon = Icons.Default.Folder,
+                    icon = Icons.Default.Inbox,
                     title = stringResource(R.string.sessions_tab_workdirs)
                 )
             }
@@ -278,7 +279,6 @@ fun SessionsScreen(
                         // trailingContent consume their own taps.
                         ListItem(
                             modifier = Modifier
-                                .heightIn(min = 48.dp)
                                 .combinedClickable(
                                 onClick = {
                                     if (isExpanded) {
@@ -348,7 +348,7 @@ fun SessionsScreen(
                                         }
                                     ) {
                                         Icon(
-                                            Icons.Default.Folder,
+                                            Icons.Default.FolderOpen,
                                             contentDescription = stringResource(R.string.nav_files),
                                             modifier = Modifier.size(18.dp),
                                             tint = MaterialTheme.colorScheme.onSurfaceVariant
@@ -369,7 +369,7 @@ fun SessionsScreen(
                                         }
                                     ) {
                                         Icon(
-                                            Icons.Default.Add,
+                                            Icons.Default.AddComment,
                                             contentDescription = stringResource(R.string.sessions_tab_create_session),
                                             modifier = Modifier.size(18.dp)
                                         )

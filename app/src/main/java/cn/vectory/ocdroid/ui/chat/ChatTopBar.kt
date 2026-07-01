@@ -15,6 +15,7 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.widthIn
@@ -26,7 +27,6 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ChatBubbleOutline
 import androidx.compose.material.icons.filled.Dns
 import androidx.compose.material3.AlertDialog
-import androidx.compose.material3.BadgedBox
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -349,16 +349,15 @@ internal fun ChatTopBar(
                         )
                     }
                     if (badgeColor != null) {
-                        BadgedBox(
-                            badge = {
-                                Box(
-                                    Modifier
-                                        .size(8.dp)
-                                        .background(badgeColor, CircleShape)
-                                )
-                            }
-                        ) {
+                        Box {
                             serverIcon()
+                            Box(
+                                Modifier
+                                    .align(Alignment.TopEnd)
+                                    .offset(x = 2.dp, y = (-4).dp)
+                                    .size(8.dp)
+                                    .background(badgeColor, CircleShape)
+                            )
                         }
                     } else {
                         serverIcon()

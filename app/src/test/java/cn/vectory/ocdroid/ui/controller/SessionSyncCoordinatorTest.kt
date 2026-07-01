@@ -401,12 +401,14 @@ class SessionSyncCoordinatorTest {
     }
 
     @Test
-    fun `message part updated with null ids clears the overlay and triggers a resetLimit=false reload`() {
+    fun `message part updated with null ids preserves the overlay and triggers a resetLimit=false reload`() {
         setCurrentSession("session-1")
+        val seeded = mapOf("part-1" to "stale")
+        val seededReasoning = Part(id = "part-1", messageId = "m1", sessionId = "session-1", type = "text")
         seed {
             it.copy(
-            streamingPartTexts = mapOf("part-1" to "stale"),
-            streamingReasoningPart = Part(id = "part-1", messageId = "m1", sessionId = "session-1", type = "text")
+            streamingPartTexts = seeded,
+            streamingReasoningPart = seededReasoning
             )
         }
 
@@ -416,8 +418,11 @@ class SessionSyncCoordinatorTest {
             put("part", buildJsonObject { put("type", JsonPrimitive("text")) })
         })
 
-        assertTrue(slices.chat.value.streamingPartTexts.isEmpty())
-        assertNull(slices.chat.value.streamingReasoningPart)
+        // 闪屏修复：part.created（无 id）不再清空 overlay —— 同回合内每个新 part
+        // 都发此信号，清空会导致所有流式气泡反复坍缩/充填闪烁。overlay 保留，
+        // 仅触发 reload(resetLimit=false) 刷新权威快照。
+        assertEquals(seeded, slices.chat.value.streamingPartTexts)
+        assertEquals(seededReasoning, slices.chat.value.streamingReasoningPart)
         assertEquals(listOf("session-1" to false), callbacks.onRefreshMessagesCalls)
     }
 
@@ -531,10 +536,11 @@ class SessionSyncCoordinatorTest {
     }
 
     @Test
-    fun `message part created with null ids clears all pending delta buffers`() {
+    fun `message part created with null ids drops pending delta buffers but preserves overlay`() {
         setCurrentSession("session-1")
         seed { it.copy(streamingPartTexts = mapOf("part-1" to "partial")) }
 
+        // Leading edge: first delta writes immediately + opens the 100ms window.
         coordinator.handleEvent(event("message.part.delta") {
             put("sessionID", JsonPrimitive("session-1"))
             put("messageID", JsonPrimitive("message-1"))
@@ -543,16 +549,58 @@ class SessionSyncCoordinatorTest {
         })
         assertEquals("partial MORE", slices.chat.value.streamingPartTexts["part-1"])
 
-        // part.created wipes the whole overlay → pending buffers must be dropped.
+        // Trailing delta buffers (window still open) — not yet written.
+        coordinator.handleEvent(event("message.part.delta") {
+            put("sessionID", JsonPrimitive("session-1"))
+            put("messageID", JsonPrimitive("message-1"))
+            put("partID", JsonPrimitive("part-1"))
+            put("delta", JsonPrimitive(" BUFFERED"))
+        })
+        // Still "partial MORE" — trailing delta is buffered, not written.
+        assertEquals("partial MORE", slices.chat.value.streamingPartTexts["part-1"])
+
+        // part.created (null ids): clearDeltaBuffers() drops the pending
+        // " BUFFERED" buffer, but the overlay is PRESERVED (闪屏修复).
         coordinator.handleEvent(event("message.part.updated") {
             put("sessionID", JsonPrimitive("session-1"))
             put("part", buildJsonObject { put("type", JsonPrimitive("text")) })
         })
 
-        assertTrue(slices.chat.value.streamingPartTexts.isEmpty())
-        // Advancing time must not resurrect any buffered delta into the cleared overlay.
+        // Overlay preserved — not cleared.
+        assertEquals("partial MORE", slices.chat.value.streamingPartTexts["part-1"])
+        // Advancing time must not resurrect the buffered delta (clearDeltaBuffers
+        // cancelled the flush job + dropped the buffer).
         scope.testScheduler.advanceUntilIdle()
-        assertTrue(slices.chat.value.streamingPartTexts.isEmpty())
+        assertEquals("partial MORE", slices.chat.value.streamingPartTexts["part-1"])
+    }
+
+    @Test
+    fun `part-created preserves overlay then idle finalization clears it via resetLimit reload`() {
+        setCurrentSession("session-1")
+        seed {
+            it.copy(
+            streamingPartTexts = mapOf("part-1" to "streaming"),
+            streamingReasoningPart = Part(id = "part-1", messageId = "m1", sessionId = "session-1", type = "reasoning")
+            )
+        }
+
+        // part.created (null ids): overlay preserved (闪屏修复), reload(resetLimit=false).
+        coordinator.handleEvent(event("message.part.updated") {
+            put("sessionID", JsonPrimitive("session-1"))
+            put("part", buildJsonObject { put("type", JsonPrimitive("text")) })
+        })
+        assertEquals("streaming", slices.chat.value.streamingPartTexts["part-1"])
+        assertEquals(listOf("session-1" to false), callbacks.onRefreshMessagesCalls)
+
+        // session.status idle: overlay still non-empty → idle finalization fires
+        // reload(resetLimit=true), which is the safety net that ultimately clears
+        // the overlay (MainViewModelMessageActions streamingFinalized branch).
+        coordinator.handleEvent(event("session.status") {
+            put("sessionID", JsonPrimitive("session-1"))
+            put("status", buildJsonObject { put("type", JsonPrimitive("idle")) })
+        })
+        assertFalse(slices.sessionList.value.sessionStatuses["session-1"]!!.isBusy)
+        assertEquals(listOf("session-1" to false, "session-1" to true), callbacks.onRefreshMessagesCalls)
     }
 
     @Test

@@ -366,16 +366,22 @@ internal class SessionSyncCoordinator(
                         // do NOT reload — a foreground catch-up or the next
                         // message.updated / part.created reconciles if needed.
                     } else {
-                        // §15.1 (review B3): a true `part.created` (no message/part
-                        // id yet) signals the start of a fresh streaming run —
-                        // clear any stale partials and reload so we render the
-                        // server-authoritative snapshot. §M5: also drop all pending
-                        // delta buffers — the whole overlay is being wiped, so any
-                        // buffered tokens belong to the previous run.
+                        // 闪屏修复：part.created（part 对象只有 type 无 messageID/id）
+                        // 在同一回合内每个新 part 都会发出（reasoning→text→tool…），
+                        // 并非原先注释假设的"全新回合"。原先这里无条件清空
+                        // streamingPartTexts + streamingReasoningPart，导致所有流式
+                        // 气泡（reasoning 卡片、正文 text）瞬间坍缩为零高度，下一个
+                        // 带 ID 的 part.updated 又重新填充 → 反复闪烁（用户观察：思考
+                        // 卡片与正文气泡持续闪屏）。
+                        //
+                        // 修复：不再手动清空 overlay。reload(resetLimit=false) 本身保留
+                        // streamingPartTexts/streamingReasoningPart（见 launchLoadMessages
+                        // §append-safe MainViewModelMessageActions.kt:108-109），当前流式
+                        // 气泡继续显示不坍缩。仅 clearDeltaBuffers() 丢弃旧 part 的 pending
+                        // delta 缓冲（新 part 随后用权威 fullText 恢复，不丢数据）。下一
+                        // 个带 ID 的 message.part.updated 正确更新流式状态；回合结束 idle
+                        // finalization（resetLimit=true + streamingFinalized）正常清空 overlay。
                         clearDeltaBuffers()
-                        state.updateAndSync(slices) {
-                            it.copy(streamingPartTexts = emptyMap(), streamingReasoningPart = null)
-                        }
                         callbacks.onRefreshMessages(deltaEvent.sessionId, false)
                     }
                 }
@@ -517,7 +523,10 @@ internal class SessionSyncCoordinator(
         val buffered = deltaBuffer.remove(partId)
         if (buffered == null || buffered.isEmpty()) return
         // Guard: the leading-edge value must still be present. An intervening
-        // overlay clear means the buffered text is stale → drop, don't append.
+        // overlay clear (session switch / ViewModel reset / global cold-start
+        // refresh) means the buffered text is stale → drop, don't append.
+        // (闪屏修复后 part.created 不再清空 overlay，故本 guard 对 part.created
+        // 场景不再触发；它仍保护 session switch / clear 等其它 overlay-wipe 路径。)
         if (state.value.streamingPartTexts[partId] == null) return
         val text = buffered.toString()
         state.updateAndSync(slices) {
