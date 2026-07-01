@@ -94,6 +94,10 @@ app/src/main/java/cn/vectory/ocdroid/
 - EncryptedSharedPreferences（安全存储）
 - Kover（测试覆盖率）
 
+## 兼容的 OpenCode 服务端版本
+
+当前适配 **OpenCode Server [v1.17.11](https://github.com/anomalyco/opencode/releases/tag/v1.17.11)**。
+
 ## License
 
 本项目基于 [grapeot/opencode_android_client](https://github.com/grapeot/opencode_android_client)（MIT）深度改造。
