@@ -80,14 +80,14 @@ class CatchUpGapTest {
             msg("Y", 400L, "user"),
             msg("Z", 500L, "assistant")
         )
-        coEvery { repository.getMessagesPaged("s1", 4, null) } returns Result.success(MessagesPage(tail, "cursor-from-tail-oldest"))
+        coEvery { repository.getMessagesPaged("s1", any(), null) } returns Result.success(MessagesPage(tail, "cursor-from-tail-oldest"))
         // §F4: catchUp now auto-launches closeGap. Stub the older-page fetch so the
         // gap is bridged on the first auto-step (older page contains anchor A).
         // Without this stub the relaxed-mock default (empty page, null cursor) would
         // mark the gap open=false via the "history exhausted" path, hiding the
         // auto-closure semantics under test below.
         val olderPage = listOf(msg("B", 250L, "user"), msg("A", 100L, "user"))
-        coEvery { repository.getMessagesPaged("s1", 3, "cursor-from-tail-oldest") } returns
+        coEvery { repository.getMessagesPaged("s1", any(), "cursor-from-tail-oldest") } returns
             Result.success(MessagesPage(olderPage, "cursor-next"))
 
         launchCatchUp(this, repository, state, "s1")
@@ -103,8 +103,8 @@ class CatchUpGapTest {
             state.value.messages.map { it.id }
         )
         // The catchUp fetch + the auto-closeGap fetch both ran.
-        coVerify(exactly = 1) { repository.getMessagesPaged("s1", 4, null) }
-        coVerify(exactly = 1) { repository.getMessagesPaged("s1", 3, "cursor-from-tail-oldest") }
+        coVerify(exactly = 1) { repository.getMessagesPaged("s1", any(), null) }
+        coVerify(exactly = 1) { repository.getMessagesPaged("s1", any(), "cursor-from-tail-oldest") }
     }
 
     @Test
@@ -123,7 +123,7 @@ class CatchUpGapTest {
             msg("A", 100L, "user"),
             msg("Z", 500L, "assistant")
         )
-        coEvery { repository.getMessagesPaged("s1", 4, null) } returns Result.success(MessagesPage(tail, null))
+        coEvery { repository.getMessagesPaged("s1", any(), null) } returns Result.success(MessagesPage(tail, null))
 
         launchCatchUp(this, repository, state, "s1")
         advanceUntilIdle()
@@ -153,7 +153,7 @@ class CatchUpGapTest {
         // Paged-older result (ascending) contains the anchor A → closure.
         // B sits between A and Z chronologically. M2: step defaults to 3.
         val page = listOf(msg("B", 250L, "user"), msg("A", 100L, "user"))
-        coEvery { repository.getMessagesPaged("s1", 3, "cursor-1") } returns Result.success(MessagesPage(page, "cursor-2"))
+        coEvery { repository.getMessagesPaged("s1", any(), "cursor-1") } returns Result.success(MessagesPage(page, "cursor-2"))
 
         launchCloseGap(this, repository, state, "s1")
         advanceUntilIdle()
@@ -184,7 +184,7 @@ class CatchUpGapTest {
         val repository = repo()
         // Page does NOT contain A; more history remains.
         val page = listOf(msg("M", 250L, "user"))
-        coEvery { repository.getMessagesPaged("s1", 3, "cursor-1") } returns Result.success(MessagesPage(page, "cursor-2"))
+        coEvery { repository.getMessagesPaged("s1", any(), "cursor-1") } returns Result.success(MessagesPage(page, "cursor-2"))
 
         // M2: maxSteps=1 forces the legacy single-step-per-call behaviour
         // so this test asserts ONE page + cursor advance (not a full auto-loop).
@@ -272,7 +272,7 @@ class CatchUpGapTest {
         val repository = repo()
         coEvery { repository.probeLatestMessageId("s1") } returns Result.failure(java.io.IOException("net"))
         val tail = listOf(msg("X", 300L), msg("Y", 400L))
-        coEvery { repository.getMessagesPaged("s1", 4, null) } returns Result.success(MessagesPage(tail, "c"))
+        coEvery { repository.getMessagesPaged("s1", any(), null) } returns Result.success(MessagesPage(tail, "c"))
 
         launchCatchUp(this, repository, state, "s1")
         advanceUntilIdle()
@@ -320,7 +320,7 @@ class CatchUpGapTest {
         val repository = repo()
         // Page does NOT contain A; M sits between A and Z.
         val page = listOf(msg("M", 250L, "user"))
-        coEvery { repository.getMessagesPaged("s1", 3, "cursor-1") } returns Result.success(MessagesPage(page, "cursor-2"))
+        coEvery { repository.getMessagesPaged("s1", any(), "cursor-1") } returns Result.success(MessagesPage(page, "cursor-2"))
 
         // M2: maxSteps=1 → single step, asserting tailOldestId advance.
         launchCloseGap(this, repository, state, "s1", maxSteps = 1)
@@ -381,7 +381,7 @@ class CatchUpGapTest {
             msg("n2", 300L, "user"),
             msg("n3", 400L, "assistant")
         )
-        coEvery { repository.getMessagesPaged("s1", 4, null) } returns Result.success(MessagesPage(tail, null))
+        coEvery { repository.getMessagesPaged("s1", any(), null) } returns Result.success(MessagesPage(tail, null))
 
         launchCatchUp(this, repository, state, "s1")
         advanceUntilIdle()
@@ -406,10 +406,10 @@ class CatchUpGapTest {
         )
         val repository = repo()
         // Page 1 (cursor-1): M only, no anchor, advances cursor.
-        coEvery { repository.getMessagesPaged("s1", 3, "cursor-1") } returns
+        coEvery { repository.getMessagesPaged("s1", any(), "cursor-1") } returns
             Result.success(MessagesPage(listOf(msg("M", 250L, "user")), "cursor-2"))
         // Page 2 (cursor-2): raw page contains anchor A → closure (B is new, A deduped).
-        coEvery { repository.getMessagesPaged("s1", 3, "cursor-2") } returns
+        coEvery { repository.getMessagesPaged("s1", any(), "cursor-2") } returns
             Result.success(MessagesPage(listOf(msg("B", 150L, "user"), msg("A", 100L, "user")), "cursor-3"))
 
         launchCloseGap(this, repository, state, "s1") // default step=3, maxSteps=5
@@ -438,9 +438,9 @@ class CatchUpGapTest {
             )
         )
         val repository = repo()
-        coEvery { repository.getMessagesPaged("s1", 3, "cursor-1") } returns
+        coEvery { repository.getMessagesPaged("s1", any(), "cursor-1") } returns
             Result.success(MessagesPage(listOf(msg("M1", 250L, "user")), "cursor-2"))
-        coEvery { repository.getMessagesPaged("s1", 3, "cursor-2") } returns
+        coEvery { repository.getMessagesPaged("s1", any(), "cursor-2") } returns
             Result.success(MessagesPage(listOf(msg("M2", 200L, "user")), "cursor-3"))
 
         launchCloseGap(this, repository, state, "s1", step = 3, maxSteps = 2)
@@ -470,7 +470,7 @@ class CatchUpGapTest {
         )
         val repository = repo()
         // One page, no anchor, no further history (nextCursor=null).
-        coEvery { repository.getMessagesPaged("s1", 3, "cursor-1") } returns
+        coEvery { repository.getMessagesPaged("s1", any(), "cursor-1") } returns
             Result.success(MessagesPage(listOf(msg("M", 250L, "user")), null))
 
         launchCloseGap(this, repository, state, "s1")

@@ -19,20 +19,36 @@ internal object MainViewModelTimings {
     const val sessionPageSize = 10
     const val messageRetryDelayMs = 400L
     /**
-     * Initial message page size when opening a session. Kept small (2) so the
-     * first response stays well under the ResponseSizeGuardInterceptor 16 MB
-     * cap even when a message carries large tool output / patches / base64 —
-     * a limit=5 page was observed to exceed it on big agentic sessions.
-     * Aligns with the web client's initialMessagePageSize. Deeper history is
-     * loaded on demand via loadMoreMessages.
+     * Initial message page size when opening a session.
+     *
+     * Tuned for the post-LSP-diagnostics-cleanup payload: with `state.metadata.
+     * diagnostics` stripped (server `lsp:false` + DB purge + client-side strip),
+     * measured per-message sizes are p50=3.3KB / p90=17.8KB / p99=81KB /
+     * max=840KB. A page of 20 messages is therefore ~360KB typical (p90) and
+     * ~16.8MB even in the pathological all-outliers case — comfortably under
+     * the 32MB ResponseSizeGuard. 20 gives the user full recent context on
+     * open without paging for typical sessions; deeper history via
+     * loadMoreMessages.
      */
-    const val initialMessagePageSize = 2
+    const val initialMessagePageSize = 20
     /**
-     * Page size for manual "load more history" paging. Larger than the initial
-     * page so deep-history browsing is fast; a typical page stays well under
-     * the 16 MB guard (the web client measures ~3.6 MB for 200 messages). If a
-     * pathological page ever trips the guard, loadMore surfaces the error and
-     * the user can retry — it never blocks opening the session.
+     * Tail page size for catch-up (reconnect / foreground return). Runs
+     * frequently, so kept smaller than the initial page; 10 messages ≈ 180KB
+     * (p90), negligible per-reconnect cost while pulling more recent context
+     * than the old fixed 4.
+     */
+    const val catchUpMessagePageSize = 10
+    /**
+     * Step size for gap closure (paging backward to fill a detected history
+     * gap). Larger step = fewer round-trips to close big gaps; 10 keeps each
+     * step small while speeding closure vs the old 3.
+     */
+    const val gapCloseMessagePageSize = 10
+    /**
+     * Page size for manual "load more history" paging. A typical page stays
+     * well under the 32MB guard (50 × p99(81KB) ≈ 4MB). If a pathological page
+     * ever trips the guard, loadMore surfaces the error and the user can retry
+     * — it never blocks opening the session.
      */
     const val historyMessagePageSize = 50
     /** Delay before the one-shot title refresh after a new session's first

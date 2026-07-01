@@ -768,7 +768,7 @@ internal fun launchCatchUp(
             return@launch
         }
 
-        repository.getMessagesPaged(sessionId, 4, before = null)
+        repository.getMessagesPaged(sessionId, MainViewModelTimings.catchUpMessagePageSize, before = null)
             .onSuccess { page ->
                 if (sessionId != state.value.currentSessionId) {
                     state.updateAndSync(slices) { it.copy(isLoadingMessages = false) }
@@ -877,7 +877,7 @@ internal fun launchCatchUp(
  * reaching the anchor it stops and leaves the gap hint (open [GapInfo]) for a
  * manual tap, which re-enters [launchCloseGap] with a fresh budget.
  */
-internal const val GAP_CLOSE_STEP_DEFAULT = 3
+internal const val GAP_CLOSE_STEP_DEFAULT = MainViewModelTimings.gapCloseMessagePageSize
 internal const val GAP_CLOSE_MAX_STEPS = 5
 
 /**
