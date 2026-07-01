@@ -89,7 +89,7 @@ $JAVA_HOME/bin/keytool -genkeypair -v \
   -keyalg RSA -keysize 2048 -validity 10000 \
   -storepass 'YOUR_STORE_PASSWORD' \
   -keypass 'YOUR_KEY_PASSWORD' \
-  -dname "CN=opencode_client, OU=dev, O=fork, C=CN"
+  -dname "CN=ocdroid, OU=dev, O=mfreceiver, C=CN"
 ```
 
 把生成的 `release.keystore` 放在项目根目录（已被 `.gitignore` 忽略，勿提交）。
@@ -142,8 +142,7 @@ buildTypes {
 }
 ```
 
-> 💡 **合并冲突提示**：`app/build.gradle.kts` 是上游文件，改它会在合并上游时有冲突风险（见 `FORK_SYNC.md`）。
-> 建议把签名改造放在**独立 dev 分支**上，改动尽量集中（就上面这一小块），合并上游后容易重新应用。
+> 💡 **签名改造建议**：把签名配置改动尽量集中（就上面这一小块），方便未来维护。
 
 ### 3.4 构建
 
@@ -169,14 +168,14 @@ buildTypes {
 
 ## 5. 版本号管理
 
-沿用上游 `v0.1.YYYYMMDD` 风格，`app/build.gradle.kts` 内手动维护：
+### 版本号
+
+沿用语义化版本命名（如 `0.1.0`、`0.2.0`），`app/build.gradle.kts` 内手动维护：
 
 ```kotlin
-versionCode = 12                // 每次发版 +1
-versionName = "0.1.20260622"    // 上游发版日期
+versionCode = 1
+versionName = "0.1.0"     // 当前版本
 ```
-
-自己的发布可加后缀区分，如 `0.1.20260622-fork.1`，避免与上游 tag 冲突。
 
 ---
 
@@ -201,11 +200,11 @@ cp app/build/outputs/apk/release/app-release.apk "APK/opencode_client-$VERSION.a
 
 ### 6.2 发版到自建 Gitea（用 tea CLI）
 
-本机已装 `tea` CLI（`/home/mar/tools/tea/tea`）。**tag 指向 `dev` 分支的发布提交**（dev 承载 fork 的签名配置与自定义）：
+本机已装 `tea` CLI（`/home/mar/tools/tea/tea`）：
 
 ```bash
-TAG="v$VERSION-fork.1"   # fork 发版加 -fork.N 后缀，避免与上游 tag 冲突
-git tag -a "$TAG" -m "Fork release: signed release APK based on upstream $VERSION"
+TAG="v$VERSION"   # 如 v0.1.0
+git tag -a "$TAG" -m "Release $VERSION"
 git push origin "$TAG"
 
 /home/mar/tools/tea/tea releases create -r mfreceiver/oc-droid \
@@ -215,7 +214,7 @@ git push origin "$TAG"
   -a "APK/oc-droid-$VERSION.apk"
 ```
 
-> `master` 纯跟上游、不掺自定义，因此发版 tag 打在 `dev` 上。详见 `FORK_SYNC.md` 的两线分支模型。
+- `main` 分支为开发主线，tag 打在 `main` 的发布提交上。
 
 ---
 
@@ -236,4 +235,3 @@ git push origin "$TAG"
 
 - x-liker 的签名/发版模式：`mfreceiver/x-liker` 的 `app/build.gradle.kts` 与 `AGENTS.md`
 - 上游构建说明：根目录 `README.md`「构建」章节
-- Fork 同步策略：`FORK_SYNC.md`

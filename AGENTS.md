@@ -1,7 +1,7 @@
-# AGENTS.md - ocdroid (mfreceiver fork)
+# AGENTS.md - ocdroid
 
-> 本仓库是上游 [grapeot/opencode_android_client](https://github.com/grapeot/opencode_android_client) 的自建 Git fork，用于持续开发并定期同步上游。
-> 本文件是给在此仓库工作的 agent 的操作指引。完整同步策略见 `FORK_SYNC.md`，构建细节见 `docs/build-apk.md`。
+> 本仓库基于 [grapeot/opencode_android_client](https://github.com/grapeot/opencode_android_client)（MIT）深度改造，已独立发展，不再跟踪上游。
+> 本文件是给在此仓库工作的 agent 的操作指引，构建细节见 `docs/build-apk.md`。
 
 ---
 
@@ -16,7 +16,7 @@ export PATH="$JAVA_HOME/bin:$PATH:$ANDROID_HOME/platform-tools"
 ```
 
 - **JDK 21**（JBR），构建用项目自带 `./gradlew` wrapper（Gradle 9.3.1），**不要**用系统 gradle。
-- 工具链（在 `gradle/libs.versions.toml` 锁定，**勿擅自升级，跟随上游**）：AGP 9.1.0 / Kotlin 2.2.10 / KSP 2.3.6 / compileSdk 35 / minSdk 26 / targetSdk 34。
+- 工具链（在 `gradle/libs.versions.toml` 锁定，**勿擅自升级**）：AGP 9.1.0 / Kotlin 2.2.10 / KSP 2.3.6 / compileSdk 35 / minSdk 26 / targetSdk 34。
 - SDK 已就绪：android-35 + build-tools 34.0.0/35.0.0/35.0.1。
 - 首次构建需 `local.properties`（已 gitignore）：`printf 'sdk.dir=/home/mar/android-sdk\n' > local.properties`。
 - **工具链与其它本机项目（x-liker / syncplayer）完全隔离**：各项目用自己的 wrapper + 版本目录，互不影响。
@@ -42,7 +42,7 @@ export PATH="$JAVA_HOME/bin:$PATH:$ANDROID_HOME/platform-tools"
 ## 发布产物
 
 - 发布的 APK 统一放**项目根目录 `APK/` 文件夹**（已 gitignore，不入库），按 `oc-droid-<版本号>.apk` 命名（如 `oc-droid-0.5.0.apk`）。应用名称为 **OC Droid**。
-- 发版用 `tea` CLI 打 Gitea Release，tag 用 `v<版本号>`（如 `v0.5.0`），tag 指向 `dev` 分支提交。详见 `docs/build-apk.md` 第 6 节。
+- 发版用 `tea` CLI 打 Gitea Release，tag 用 `v<版本号>`（如 `v0.1.0`），tag 指向 `main` 分支提交。详见 `docs/build-apk.md`。
 
 ## 测试
 
@@ -74,43 +74,21 @@ export PATH="$JAVA_HOME/bin:$PATH:$ANDROID_HOME/platform-tools"
 - **不得**在物理 Android 手机上跑 `connectedDebugAndroidTest`、安装或启动 debug 构建，**除非用户明确要求**。真机含用户正式 App 与凭证，测试包可能覆盖。
 - UI / 插桩测试与安装**仅用模拟器**。若同时连了真机和模拟器，用 `ANDROID_SERIAL=<模拟器id>` 明确指定。
 
-## Git 分支模型（两线制）
+## Git 分支模型
 
-- **`master`**：纯跟上游，只接收上游更新，**零自定义提交**。
-- **`dev`**：开发分支，承载本 fork 所有自定义（文档、签名配置、功能开发）。**在此分支工作与出包**。
+单一主线分支 **`main`**，在此分支工作与出包。
 
 ```bash
 # 日常开发
-git checkout dev              # 改代码 → commit → git push
+git checkout main              # 改代码 → commit → git push
 
-# 同步上游（master 永远只跟上游）
-git checkout master && bash scripts/sync-upstream.sh
-
-# 把上游新功能带到 dev
-git checkout dev && git rebase master        # 必要时 git push --force-with-lease origin dev
+# 发布
+git checkout main && ./gradlew assembleRelease
 ```
 
-发布包：`git checkout dev && ./gradlew assembleRelease`。
+## Remote
 
-## Remote 与上游同步
-
-- `origin` = 自建 Git：`https://git.vectory.cn:18443/mfreceiver/oc-droid.git`（日常推送目标）。
-- `upstream` = GitHub 源：`grapeot/opencode_android_client`（只读拉取）。
-- 一键同步：`bash scripts/sync-upstream.sh [--rebase]`（fetch 上游+tag → 同步 master → 推 origin）。
-- 上游的 `feat/*`、`fix/*` 分支已镜像备查；**不要**主动并入 dev，等上游合并后自动随 master 进入。需要提前试用某未合并功能时，临时 `git checkout -b trial upstream/<分支>`，不并入 dev。
-
-## 安全审计（同步上游后）
-
-- **每次 `sync-upstream.sh` 跟进上游后，对差异部分做增量安全审计**（排查后门 + 严重性能问题），产出新的带日期报告。
-- 工作流与审计台账见 `docs/security-audit-workflow.md`；全量基线报告见 `docs/security-audit-2026-06-27.md`。
-- 审计用 gpter / glmer / kimo 三方并行，只审 `diff` 出来的差异文件；重点查新增凭证/网络端点/依赖，并对照基线报告的 H1~H4、M1~M6 是否被上游重新引入。
-- 报告命名 `docs/security-audit-YYYY-MM-DD.md`，完成后把日期/上游版本/基点追加到工作流文档的「审计台账」。
-
-## 改动与冲突控制
-
-- 自定义内容尽量放**新文件**（如 `FORK_SYNC.md`、`docs/build-apk.md`），少改上游文件，降低合并冲突。
-- 必须改上游文件时（如 `app/build.gradle.kts` 签名块、本 `AGENTS.md`），改动要**小而集中**，方便上游合并后重新应用。
-- 合并冲突时，公共文件优先采纳上游版本，再迁移自定义部分。
+- `origin` = `https://git.vectory.cn:18443/mfreceiver/oc-droid.git`（日常推送）。
 
 ## 常见问题
 
@@ -121,8 +99,5 @@ git checkout dev && git rebase master        # 必要时 git push --force-with-l
 
 ## 相关文档
 
-- `FORK_SYNC.md` — fork 同步与管理策略（完整版）
-- `docs/build-apk.md` — 本地构建 / 签名 / 发版指南（实测版）
-- `docs/security-audit-workflow.md` — 同步上游后的差异审计工作流与台账
-- `docs/security-audit-2026-06-27.md` — 安全审计全量基线报告
+- `docs/build-apk.md` — 本地构建 / 签名 / 发版指南
 - `README.md` — 项目功能与使用说明
