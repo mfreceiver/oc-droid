@@ -19,6 +19,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.Archive
 import androidx.compose.material.icons.filled.CreateNewFolder
 import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.History
@@ -366,12 +367,15 @@ fun SessionsScreen(
                             }
                         }
 
-                        // Expandable session list within workdir
+                        // Expandable session list within workdir. Use a modest
+                        // inset (was start=40dp) so session cards use the full
+                        // screen width instead of being squeezed into a narrow
+                        // column; SessionCard itself adds 8dp horizontal padding.
                         AnimatedVisibility(visible = isExpanded && sessionsInWorkdir.isNotEmpty()) {
                             Column(
                                 modifier = Modifier
                                     .fillMaxWidth()
-                                    .padding(start = 40.dp, end = 16.dp)
+                                    .padding(horizontal = 8.dp)
                             ) {
                                 sessionsInWorkdir.forEach { session ->
                                     SessionCard(
@@ -528,17 +532,15 @@ private fun SessionCard(
                     color = MaterialTheme.colorScheme.onSurface,
                     modifier = Modifier.weight(1f)
                 )
-                // 归档 button on the right edge of the title row. Only rendered
+                // 归档 icon on the right edge of the title row. Only rendered
                 // where a handler is supplied (connected-projects expanded list);
-                // omitted from the top "recent sessions" list.
+                // omitted from the top "recent sessions" list. IconButton gives a
+                // 48dp touch target (R-12) in a compact right-edge footprint.
                 if (onArchive != null) {
-                    TextButton(
-                        onClick = onArchive,
-                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp)
-                    ) {
-                        Text(
-                            text = stringResource(R.string.sessions_archive),
-                            style = MaterialTheme.typography.labelSmall
+                    IconButton(onClick = onArchive) {
+                        Icon(
+                            Icons.Default.Archive,
+                            contentDescription = stringResource(R.string.sessions_archive)
                         )
                     }
                 }

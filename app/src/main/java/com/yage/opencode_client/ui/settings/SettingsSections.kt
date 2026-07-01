@@ -69,9 +69,12 @@ import java.util.Locale
 internal fun ConnectionProfileSection(
     profile: HostProfile,
     connectionState: ConnectionState,
-    onManageProfiles: () -> Unit
+    onManageProfiles: () -> Unit,
+    hideHeader: Boolean = false
 ) {
-    SectionHeader(title = stringResource(R.string.settings_connection_profile))
+    if (!hideHeader) {
+        SectionHeader(title = stringResource(R.string.settings_connection_profile))
+    }
 
     Card(
         modifier = Modifier.fillMaxWidth(),
@@ -179,9 +182,12 @@ internal fun AppearanceSection(
 internal fun TrafficSection(
     sent: Long,
     received: Long,
-    onReset: () -> Unit
+    onReset: () -> Unit,
+    hideHeader: Boolean = false
 ) {
-    SectionHeader(title = stringResource(R.string.settings_traffic))
+    if (!hideHeader) {
+        SectionHeader(title = stringResource(R.string.settings_traffic))
+    }
 
     Card(
         modifier = Modifier.fillMaxWidth(),
@@ -229,9 +235,12 @@ internal fun TrafficSection(
 @Composable
 internal fun LowTrafficSection(
     enabled: Boolean,
-    onToggle: (Boolean) -> Unit
+    onToggle: (Boolean) -> Unit,
+    hideHeader: Boolean = false
 ) {
-    SectionHeader(title = stringResource(R.string.settings_low_traffic))
+    if (!hideHeader) {
+        SectionHeader(title = stringResource(R.string.settings_low_traffic))
+    }
 
     Card(
         modifier = Modifier.fillMaxWidth(),
@@ -288,10 +297,12 @@ private fun formatBytes(bytes: Long): String {
  * cleared, since the wipe is irreversible.
  */
 @Composable
-internal fun DangerZoneSection(onClearLocalData: () -> Unit) {
+internal fun DangerZoneSection(onClearLocalData: () -> Unit, hideHeader: Boolean = false) {
     var showConfirm by remember { mutableStateOf(false) }
 
-    SectionHeader(title = stringResource(R.string.settings_danger_zone))
+    if (!hideHeader) {
+        SectionHeader(title = stringResource(R.string.settings_danger_zone))
+    }
 
     Card(
         modifier = Modifier.fillMaxWidth(),
@@ -382,7 +393,7 @@ internal fun AboutSection() {
 }
 
 @Composable
-internal fun DebugLogSection() {
+internal fun DebugLogSection(hideHeader: Boolean = false) {
     val oc = MaterialTheme.opencode
     val liveEntries by DebugLog.entries.collectAsStateWithLifecycle()
     val context = LocalContext.current
@@ -410,7 +421,9 @@ internal fun DebugLogSection() {
         }
     }
 
-    SectionHeader(title = "调试日志")
+    if (!hideHeader) {
+        SectionHeader(title = "调试日志")
+    }
 
     Card(
         modifier = Modifier.fillMaxWidth(),

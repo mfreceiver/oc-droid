@@ -21,6 +21,8 @@
     <string name="settings_save">保存</string>
     <string name="settings_saved">设置已保存</string>
     <string name="settings_connection_profile">连接配置</string>
+    <string name="settings_section_connections">连接管理</string>
+    <string name="settings_section_debug">调试</string>
     <string name="settings_server_connection">服务器连接</string>
     <string name="settings_server_url">服务器 URL</string>
     <string name="settings_username_optional">用户名（可选）</string>

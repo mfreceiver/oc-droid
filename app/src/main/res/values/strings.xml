@@ -21,6 +21,8 @@
     <string name="settings_save">Save</string>
     <string name="settings_saved">Settings saved</string>
     <string name="settings_connection_profile">Connection Profile</string>
+    <string name="settings_section_connections">Connections</string>
+    <string name="settings_section_debug">Debug</string>
     <string name="settings_server_connection">Server Connection</string>
     <string name="settings_server_url">Server URL</string>
     <string name="settings_username_optional">Username (optional)</string>

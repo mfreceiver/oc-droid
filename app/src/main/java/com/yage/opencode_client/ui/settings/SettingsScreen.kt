@@ -119,10 +119,31 @@ fun SettingsScreen(
                 .verticalScroll(rememberScrollState())
                 .padding(16.dp)
         ) {
+            // ── 连接管理 (Connection management): profile + traffic + low-traffic
+            // under a single shared section header. Each sub-card hides its own
+            // header (hideHeader = true) so only the group header shows. ──
+            SectionHeader(title = stringResource(R.string.settings_section_connections))
             ConnectionProfileSection(
                 profile = host.hostProfiles.firstOrNull { it.id == host.currentHostProfileId } ?: viewModel.currentHostProfile(),
                 connectionState = connection,
-                onManageProfiles = { showHostProfiles = true }
+                onManageProfiles = { showHostProfiles = true },
+                hideHeader = true
+            )
+            Spacer(modifier = Modifier.height(12.dp))
+            TrafficSection(
+                sent = traffic.trafficSent,
+                received = traffic.trafficReceived,
+                onReset = viewModel::resetTrafficStats,
+                hideHeader = true
+            )
+            Spacer(modifier = Modifier.height(12.dp))
+            LowTrafficSection(
+                enabled = lowTrafficMode,
+                onToggle = { enabled ->
+                    lowTrafficMode = enabled
+                    viewModel.onLowTrafficModeChanged(enabled)
+                },
+                hideHeader = true
             )
 
             SettingsSectionDivider()
@@ -134,30 +155,14 @@ fun SettingsScreen(
 
             SettingsSectionDivider()
 
-            TrafficSection(
-                sent = traffic.trafficSent,
-                received = traffic.trafficReceived,
-                onReset = viewModel::resetTrafficStats
+            // ── 调试 (Debug): debug log + danger zone under one header. ──
+            SectionHeader(title = stringResource(R.string.settings_section_debug))
+            DebugLogSection(hideHeader = true)
+            Spacer(modifier = Modifier.height(12.dp))
+            DangerZoneSection(
+                onClearLocalData = viewModel::resetLocalDataAndResync,
+                hideHeader = true
             )
-
-            SettingsSectionDivider()
-
-            LowTrafficSection(
-                enabled = lowTrafficMode,
-                onToggle = { enabled ->
-                    // 即时持久化（M3 守卫 + M1 轮询读最新值生效）；本地状态同步刷新。
-                    lowTrafficMode = enabled
-                    viewModel.onLowTrafficModeChanged(enabled)
-                }
-            )
-
-            SettingsSectionDivider()
-
-            DebugLogSection()
-
-            SettingsSectionDivider()
-
-            DangerZoneSection(onClearLocalData = viewModel::resetLocalDataAndResync)
 
             SettingsSectionDivider()
 
