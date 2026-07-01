@@ -81,17 +81,30 @@ class CatchUpGapTest {
             msg("Z", 500L, "assistant")
         )
         coEvery { repository.getMessagesPaged("s1", 4, null) } returns Result.success(MessagesPage(tail, "cursor-from-tail-oldest"))
+        // §F4: catchUp now auto-launches closeGap. Stub the older-page fetch so the
+        // gap is bridged on the first auto-step (older page contains anchor A).
+        // Without this stub the relaxed-mock default (empty page, null cursor) would
+        // mark the gap open=false via the "history exhausted" path, hiding the
+        // auto-closure semantics under test below.
+        val olderPage = listOf(msg("B", 250L, "user"), msg("A", 100L, "user"))
+        coEvery { repository.getMessagesPaged("s1", 3, "cursor-from-tail-oldest") } returns
+            Result.success(MessagesPage(olderPage, "cursor-next"))
 
         launchCatchUp(this, repository, state, "s1")
         advanceUntilIdle()
 
-        val gap = state.value.gapInfo
-        assertNotNull("gap must open when anchor not in fetched window", gap)
-        assertEquals("A", gap!!.anchorNewestId)
-        // tailOldestId = the fetched message with the smallest created time ("X").
-        assertEquals("X", gap.tailOldestId)
-        assertEquals("cursor-from-tail-oldest", gap.tailOldestCursor)
-        assertTrue(gap.open)
+        // §F4: catchUp opened the gap; auto-closeGap immediately ran and closed it
+        // (older page contained anchor A → bridged). Final state: gapInfo=null,
+        // messages merged ascending by time = [A, B, X, Y, Z] (A deduped).
+        assertNull("auto-closeGap must close the gap detected by catchUp (F4)", state.value.gapInfo)
+        assertEquals(
+            "merged ascending after auto-closure",
+            listOf("A", "B", "X", "Y", "Z"),
+            state.value.messages.map { it.id }
+        )
+        // The catchUp fetch + the auto-closeGap fetch both ran.
+        coVerify(exactly = 1) { repository.getMessagesPaged("s1", 4, null) }
+        coVerify(exactly = 1) { repository.getMessagesPaged("s1", 3, "cursor-from-tail-oldest") }
     }
 
     @Test

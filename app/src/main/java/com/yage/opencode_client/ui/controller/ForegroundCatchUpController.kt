@@ -191,6 +191,12 @@ internal class ForegroundCatchUpController(
      * or the 15s–5min tier catches up.
      */
     fun onServerConnected() {
+        // §B (glm 重要): 防御性省流守卫——与 onForegroundChanged 对称。省流模式下
+        // SSE 未启 (M3)，理论上不会触发本回调；但万一上游误连或事件残留，直接 return
+        // 避免在省流模式下重复 catchUp (LowTrafficPoller 已独占前台同步)。
+        if (isLowTrafficMode()) {
+            return
+        }
         val suppress = suppressNextConnectCatchUp
         suppressNextConnectCatchUp = false
         val doCatchUp = sseHasConnectedOnce && !suppress

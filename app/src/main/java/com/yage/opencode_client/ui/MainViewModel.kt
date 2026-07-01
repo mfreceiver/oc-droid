@@ -958,6 +958,11 @@ class MainViewModel @Inject constructor(
 
     init {
         loadSettings()
+        // §F1 (3/3 评审一致确认致命): 持久化 lowTrafficMode=true 后进程重建冷启动时，
+        // M3 守卫跳过 SSE、M1 又从未 start → 界面静止。loadSettings 读取最新持久化
+        // 值后，若省流模式开启则立即激活 M1 轮询。start() 自身幂等；foreground 守卫
+        // 由 LowTrafficPoller 内部处理。
+        if (settingsManager.lowTrafficMode) lowTrafficPoller.start()
         // §15.2: foreground/background hook now lives in
         // [foregroundCatchUpController] (it subscribes to
         // appLifecycleMonitor.isInForeground in its own init, launched into
@@ -1017,8 +1022,13 @@ class MainViewModel @Inject constructor(
     // 不重写 reload 逻辑。permission/question 复用现有 pending* 写入模式。
     // ──────────────────────────────────────────────────────────────────────
 
-    override fun triggerCatchUp(sessionId: String) =
+    override fun triggerCatchUp(sessionId: String) {
+        // §D (kimo 重要): triggerCatchUp 是恢复信号 (active→idle / probe hit /
+        // foreground return / session switch 都会触发) → 清除 onRetryError 设的
+        // retry error。瞬态：若仍异常，下次 retry ≥3 tick 会重新设。
+        clearTransientLowTrafficError(retryOnly = true)
         catchUpAfterDisconnectOrForeground(sessionId)
+    }
 
     override fun onStaleHint() {
         // §1.5: 复用 staleNotice banner ("省流模式下可能不是最新，点击检查"
@@ -1028,8 +1038,9 @@ class MainViewModel @Inject constructor(
 
     override fun onRetryError(sessionId: String) {
         // §1.2 (gpter 致命#3): retry 持续 ≥3 tick → 顶部提示"运行出错"。
-        // 复用 error 通道（瞬态，下次成功 reload 由现有机制清除）。
-        updateState { it.copy(error = "会话运行出错，请检查重试") }
+        // 复用 error 通道 (瞬态，下次 triggerCatchUp / onConnectionRecovered 由
+        // §D clearTransientLowTrafficError 清除)。
+        updateState { it.copy(error = RETRY_ERROR_MSG) }
     }
 
     override fun onConnectionError() {
@@ -1039,8 +1050,23 @@ class MainViewModel @Inject constructor(
     }
 
     override fun onConnectionRecovered() {
-        // 仅当此前进入过连接错误态时 poller 才回调此处 → 安全清 error。
-        if (_state.value.error?.startsWith("省流模式：连接") == true) {
+        // §D (kimo 重要): 恢复连接 → 清除省流模式设的所有瞬态 error (连接错误 +
+        // retry 错误)。仅当确实处于任一瞬态时才写，避免无谓 state 抖动。
+        clearTransientLowTrafficError(retryOnly = false)
+    }
+
+    /**
+     * §D (kimo 重要): 清除省流模式写过的瞬态 error 字符串。
+     *  - `retryOnly = true`: 只清 onRetryError 设的 retry error (triggerCatchUp 路径)。
+     *  - `retryOnly = false`: 同时清 onConnectionError 设的连接 error (onConnectionRecovered)。
+     * 复用现有"按字符串前缀匹配"的 error 通道（与 onConnectionRecovered 旧实现一致）。
+     */
+    private fun clearTransientLowTrafficError(retryOnly: Boolean) {
+        val current = _state.value.error ?: return
+        val isRetryError = current == RETRY_ERROR_MSG
+        val isConnectionError = current?.startsWith("省流模式：连接") == true
+        val shouldClear = if (retryOnly) isRetryError else (isRetryError || isConnectionError)
+        if (shouldClear) {
             updateState { it.copy(error = null) }
         }
     }
@@ -2011,24 +2037,37 @@ class MainViewModel @Inject constructor(
      * 行为：
      *  1. 立即持久化新值到 [settingsManager]（M3 的 `ConnectionCoordinator
      *     .startSSE` 守卫、后续 M1 轮询都会读最新值，即时生效）。
-     *  2. 触发当前 session 重载（`resetLimit=true`），让用户立即看到省流/
-     *     实时模式的同步结果——但**不清 `sessionWindowCache` 中其他 session
-     *     的缓存**（dser 🟠-3）：只调用 [loadMessages]，不调用全局冷启动刷新。
-     *  3. 加 3s 防抖（`LOW_TRAFFIC_MODE_DEBOUNCE_MS`）避免快速来回切反噬省流
-     *     ——每次切换取消前一个待执行的 reload Job，重新计时。
-     *
-     * SSE 的启停由调用方按需触发（M3 守卫让省流模式下 startSSE no-op；关闭省流
-     * 后由连接流程的下次 startSSE 恢复），这里只负责持久化 + 当前 session reload。
+     *  2. **F2 (gpter 致命#2)**: 开省流时先取消已有 SSE firehose + 清 delta buffer，
+     *     再启动 M1。否则已运行的 SSE (69MB/min) 不会被 M3 守卫自动停，变成双通道。
+     *  3. **F3 (gpter 致命#3)**: 关省流时停 M1 后恢复 SSE 实时同步。已连接则直接
+     *     startSSE；未连接走 forceReconnect (成功后 testConnection 内部会 startSSE)。
+     *  4. 触发当前 session 重载（`resetLimit=true`），让用户立即看到省流/实时模式的
+     *     同步结果——但**不清 `sessionWindowCache` 中其他 session 的缓存**（dser 🟠-3）。
+     *  5. 加 3s 防抖（`LOW_TRAFFIC_MODE_DEBOUNCE_MS`）避免快速来回切反噬省流。
      */
     private var lowTrafficModeReloadJob: Job? = null
 
     fun onLowTrafficModeChanged(enabled: Boolean) {
         settingsManager.lowTrafficMode = enabled
-        // M1: 省流模式开 → 启动 LowTrafficPoller（前台同步引擎）；关 → 停止。
-        // lowTrafficMode 是直接 var 非 Flow，必须显式 start/stop。start/stop 自身
-        // 幂等，且 active 状态会即时反映到 ForegroundCatchUpController 的
-        // isLowTrafficMode 守卫（下次 onForegroundChanged 生效）。
-        if (enabled) lowTrafficPoller.start() else lowTrafficPoller.stop()
+        if (enabled) {
+            // §F2 (gpter 致命#2): 取消已有 SSE firehose。M3 守卫只防新 startSSE，
+            // 不会停已在跑的 collector，必须显式 cancelSse。同时清 delta buffer 防
+            // 下次连接 stale flush (cancelSse override 已含 clearDeltaBuffers，但此处
+            // 显式调用以匹配 §4.2 跟进语义并避免 override 语义漂移)。
+            connectionCoordinator.cancelSse()
+            sessionSyncCoordinator.clearDeltaBuffers()
+            lowTrafficPoller.start()
+        } else {
+            lowTrafficPoller.stop()
+            // §F3 (gpter 致命#3): 关省流 → 恢复 SSE 实时同步。M3 守卫此时读到
+            // lowTrafficMode=false，startSSE 不再被跳过。已连接直接 startSSE；未连接
+            // 走 forceReconnect (testConnection force=true)，健康检查成功后会 startSSE。
+            if (_connectionFlow.value.isConnected) {
+                connectionCoordinator.startSSE()
+            } else {
+                forceReconnect()
+            }
+        }
         lowTrafficModeReloadJob?.cancel()
         lowTrafficModeReloadJob = viewModelScope.launch {
             delay(LOW_TRAFFIC_MODE_DEBOUNCE_MS)
@@ -2291,6 +2330,12 @@ class MainViewModel @Inject constructor(
 
     private companion object {
         private const val TAG = "MainViewModel"
+
+        /**
+         * §D (kimo 重要): onRetryError 写入的瞬态 error 字符串。常量化以便
+         * [clearTransientLowTrafficError] 精确匹配清除 (避免漂移)。
+         */
+        private const val RETRY_ERROR_MSG = "会话运行出错，请检查重试"
 
         /** 省流模式切换后重载当前 session 的防抖（§1.8 H，避免快速来回切反噬省流）。 */
         private const val LOW_TRAFFIC_MODE_DEBOUNCE_MS = 3000L

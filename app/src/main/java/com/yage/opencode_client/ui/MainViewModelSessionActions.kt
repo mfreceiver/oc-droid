@@ -845,6 +845,21 @@ internal fun launchCatchUp(
                         hasMoreMessages = postUpdate.hasMoreMessages
                     )
                 )
+                // §F4 (gpter 致命#4 / 设计 §1.3/§1.4): catchUp 发现 gap 后自动启动
+                // closeGap (step=3, maxSteps=5)。此时 isLoadingMessages 已在上一行
+                // state update 中被置 false，launchCloseGap 的 isLoading 守卫可正常
+                // 通过；它内部会重新置 isLoading=true 并 launch 独立协程走自动闭合循环。
+                // newGap==null (无 gap 或 anchor 在窗口内) 时不触发，避免无谓 fetch。
+                if (newGap != null) {
+                    launchCloseGap(
+                        scope = scope,
+                        repository = repository,
+                        state = state,
+                        sessionId = sessionId,
+                        onCacheWindow = onCacheWindow,
+                        slices = slices
+                    )
+                }
             }
             .onFailure {
                 if (sessionId == state.value.currentSessionId) {

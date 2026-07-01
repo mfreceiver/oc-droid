@@ -354,6 +354,162 @@ class LowTrafficPollerTest {
         assertEquals("s1", callbacks.triggerCatchUpIds.single())
     }
 
+    // ── 13. currentSessionId==null 安全跳过 (评审 H.1) ──────────────────────
+
+    @Test
+    fun `doTick is a safe no-op when currentSessionId is null`() {
+        val poller = makePoller(TestScope())
+        callbacks.currentSessionId = null
+        stubIdle(statusOf("s1", "idle"))
+        stubPendingEmpty()
+        poller.start()
+
+        // No crash, no callback, no status write — sessionId guard returns before any I/O.
+        runTick(poller)
+
+        assertEquals("null sessionId never triggers catchUp", 0, callbacks.triggerCatchUpCalls)
+    }
+
+    // ── 14. probeLatestMessageId 返回 null/失败 不计数不崩溃 (评审 H.2) ──────
+
+    @Test
+    fun `probeLatestMessageId failure does not crash or increment unchanged counter`() {
+        val poller = makePoller(TestScope())
+        stubIdle(statusOf("s1", "idle"))
+        stubSessionUpdated(100L)
+        coEvery { repository.probeLatestMessageId("s1") } returns Result.failure(java.io.IOException("probe net"))
+        stubPendingEmpty()
+        poller.start()
+
+        repeat(6) { runTick(poller) } // content probe at tick 6 fails
+
+        assertEquals("failed probe does not increment unchanged counter", 0, poller.unchangedCounterForTest())
+        assertEquals("no catchUp on probe failure", 0, callbacks.triggerCatchUpCalls)
+        assertEquals("no stale hint on probe failure", 0, callbacks.onStaleHintCalls)
+    }
+
+    // ── 15. retry→idle 跳变触发 catchUp (评审 H.3) ──────────────────────────
+
+    @Test
+    fun `retry to idle transition triggers catchUp`() {
+        val poller = makePoller(TestScope())
+        stubPendingEmpty()
+        stubProbe("A")
+        stubSessionUpdated(100L)
+        poller.start()
+
+        // tick 1: retry (active per §1.2 — retry = run in progress)
+        coEvery { repository.getSessionStatus() } returns Result.success(statusOf("s1", "retry"))
+        runTick(poller)
+        assertEquals("retry alone does not catchUp", 0, callbacks.triggerCatchUpCalls)
+
+        // tick 2: idle (active→idle jump — retry counts as active)
+        coEvery { repository.getSessionStatus() } returns Result.success(statusOf("s1", "idle"))
+        runTick(poller)
+
+        assertEquals("retry→idle jump → catchUp", 1, callbacks.triggerCatchUpCalls)
+        assertEquals("s1", callbacks.triggerCatchUpIds.single())
+    }
+
+    // ── 16. onMessageSent 后本地 busy 在下一 tick 不被 server idle 覆盖 (评审 H.4 / §A) ─
+
+    @Test
+    fun `onMessageSent local busy survives next tick server idle (validates A)`() {
+        val poller = makePoller(TestScope())
+        stubPendingEmpty()
+        stubProbe("A")
+        stubSessionUpdated(100L)
+        poller.start()
+
+        // tick 1: busy (lastStatus ← busy)
+        coEvery { repository.getSessionStatus() } returns Result.success(statusOf("s1", "busy"))
+        runTick(poller)
+
+        // user sends → local busy badge + localBusyUntil[s1] window set
+        poller.onMessageSent("s1")
+        assertEquals("onMessageSent writes local busy", "busy", state.value.sessionStatuses["s1"]?.type)
+
+        // tick 2: server returns idle. §A must preserve local busy in uiStatuses
+        // (rawStatuses still idle → state machine still fires active→idle catchUp).
+        callbacks.reset()
+        coEvery { repository.getSessionStatus() } returns Result.success(statusOf("s1", "idle"))
+        runTick(poller)
+
+        assertEquals(
+            "local busy badge preserved despite server idle (A)",
+            "busy",
+            state.value.sessionStatuses["s1"]?.type
+        )
+        assertEquals(
+            "state machine still detects active→idle via rawStatuses",
+            1,
+            callbacks.triggerCatchUpCalls
+        )
+    }
+
+    // ── 17. status map 缺失当前 session 时 lastStatus 保留 (评审 H.5 / §C) ───
+
+    @Test
+    fun `status map missing current session preserves lastStatus (validates C)`() {
+        val poller = makePoller(TestScope())
+        stubPendingEmpty()
+        stubProbe("A")
+        stubSessionUpdated(100L)
+        poller.start()
+
+        // tick 1: busy (lastStatus ← busy)
+        coEvery { repository.getSessionStatus() } returns Result.success(statusOf("s1", "busy"))
+        runTick(poller)
+
+        // tick 2: status map empty (current session missing) — §C must NOT clear lastStatus
+        callbacks.reset()
+        coEvery { repository.getSessionStatus() } returns Result.success(emptyMap())
+        runTick(poller)
+        assertEquals("missing-session tick does not catchUp", 0, callbacks.triggerCatchUpCalls)
+
+        // tick 3: idle — lastStatus preserved as busy → wasActive=true → active→idle fires
+        coEvery { repository.getSessionStatus() } returns Result.success(statusOf("s1", "idle"))
+        runTick(poller)
+
+        assertEquals(
+            "lastStatus preserved across missing-session tick → active→idle fires (C)",
+            1,
+            callbacks.triggerCatchUpCalls
+        )
+        assertEquals("s1", callbacks.triggerCatchUpIds.single())
+    }
+
+    // ── 18. isLoadingMessages=true 仍写 status，跳过 probe/计数器 (评审 §E) ────
+
+    @Test
+    fun `isLoadingMessages true still writes status badge but skips state machine (validates E)`() {
+        val poller = makePoller(TestScope())
+        stubIdle(statusOf("s1", "idle"))
+        stubSessionUpdated(100L)
+        stubProbe("Z") // differs from anchor A → would normally trigger catchUp
+        stubPendingEmpty()
+        poller.start()
+
+        // Simulate an in-flight load: isLoadingMessages=true.
+        state.value = state.value.copy(isLoadingMessages = true)
+
+        runTick(poller)
+
+        // §E: status map IS written even during isLoading (badge stays in sync).
+        assertEquals(
+            "status map written during isLoading (E)",
+            "idle",
+            state.value.sessionStatuses["s1"]?.type
+        )
+        // §E: probe / state machine skipped → no catchUp, no counter advancement.
+        assertEquals("no catchUp during isLoading", 0, callbacks.triggerCatchUpCalls)
+        assertEquals(
+            "tickCounter frozen during isLoading (no probe cadence advance)",
+            0,
+            poller.unchangedCounterForTest()
+        )
+    }
+
     // ── helpers ────────────────────────────────────────────────────────────
 
     /** Runs one tick synchronously by invoking the internal [LowTrafficPoller.doTick].

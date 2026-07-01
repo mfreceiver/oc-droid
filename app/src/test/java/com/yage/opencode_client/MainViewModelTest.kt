@@ -14,6 +14,7 @@ import com.yage.opencode_client.data.model.SSEPayload
 import com.yage.opencode_client.data.model.HealthResponse
 import com.yage.opencode_client.data.model.HostProfile
 import com.yage.opencode_client.data.model.BasicAuthConfig
+import com.yage.opencode_client.data.model.ProvidersResponse
 import com.yage.opencode_client.data.repository.HostProfileStore
 import com.yage.opencode_client.data.repository.MessagesPage
 import com.yage.opencode_client.data.repository.OpenCodeRepository
@@ -49,6 +50,7 @@ import io.mockk.runs
 import io.mockk.unmockkAll
 import io.mockk.verify
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.emptyFlow
@@ -128,6 +130,14 @@ class MainViewModelTest {
         coEvery { repository.getMessages(any(), any()) } returns Result.success(emptyList())
         coEvery { repository.getMessagesPaged(any(), any(), any()) } returns Result.success(MessagesPage(emptyList(), null))
         coEvery { repository.getPendingPermissions() } returns Result.success(emptyList())
+        // §省流 F2/F3 tests call testConnection (healthy) which triggers loadInitialData
+        // → these loaders. Relaxed mockk returns Object for generic Result<T> returns
+        // (ClassCastException on the .getOrThrow / onSuccess path), so stub explicit
+        // empty results. Safe for all other tests (additional relaxed stubs).
+        coEvery { repository.getAgents() } returns Result.success(emptyList())
+        coEvery { repository.getProviders() } returns Result.success(ProvidersResponse())
+        coEvery { repository.getCommands() } returns Result.success(emptyList())
+        coEvery { repository.getPendingQuestions() } returns Result.success(emptyList())
     }
 
     private fun createViewModel(): MainViewModel {
@@ -1950,6 +1960,175 @@ class MainViewModelTest {
         advanceUntilIdle()
 
         coVerify(exactly = 1) { repository.checkHealth() }
+    }
+
+    // ── §省流 三方评审致命修复 F1/F2/F3 ──────────────────────────────────────
+
+    /**
+     * §F1 (3/3 一致确认致命): 持久化 lowTrafficMode=true 后进程重建冷启动必须自动
+     * 启动 M1 (LowTrafficPoller)，否则 SSE 被 M3 守卫跳过、M1 又从未 start → 界面静止。
+     *
+     * 验证：在 createViewModel 前把 settingsManager.lowTrafficMode 桩为 true (模拟
+     * 持久化值)，构造后用反射读 LowTrafficPoller.active 必须为 true。
+     *
+     * cleanup: onCleared() 停止轮询的 while(isActive){delay;doTick} 死循环——它跑在
+     * viewModelScope 上 (与 runTest 共享 StandardTestDispatcher)，不停掉会让 runTest
+     * 的自动 cleanup 无限推进虚拟时间。
+     */
+    @Test
+    fun `cold start with persisted lowTraffic=true auto-starts the poller (validates F1)`() = runTest {
+        every { settingsManager.lowTrafficMode } returns true
+
+        val viewModel = createViewModel()
+        try {
+            val active = readLowTrafficPollerActive(viewModel)
+            assertTrue(
+                "lowTrafficPoller must auto-start on cold init when lowTrafficMode is persisted true (F1)",
+                active
+            )
+        } finally {
+            stopLowTrafficPoller(viewModel)
+        }
+    }
+
+    /**
+     * §F2 (gpter 致命#2): 运行时开省流必须取消已有 SSE firehose，否则变成双通道
+     * (69MB/min)。M3 守卫只防新 startSSE，不会停已在跑的 collector。
+     *
+     * 验证：先 testConnection (healthy) 让 startSSE 跑起来 → sseJob 非 null；
+     * 再 onLowTrafficModeChanged(true) → connectionCoordinator.cancelSse() 必须把
+     * sseJob 置 null。
+     */
+    @Test
+    fun `enabling low-traffic mode cancels in-flight SSE feed (validates F2)`() = runTest {
+        coEvery { repository.checkHealth() } returns Result.success(HealthResponse(healthy = true, version = "1.0"))
+        // emptyFlow: collector completes immediately but sseJob field still holds the
+        // (completed) Job reference until cancelSse nulls it — exactly what we assert.
+        every { repository.connectSSE() } returns emptyFlow()
+
+        val viewModel = createViewModel()
+        try {
+            viewModel.testConnection(force = true)
+            advanceUntilIdle()
+
+            assertNotNull("SSE feed should be active after healthy connect", readSseJob(viewModel))
+
+            viewModel.onLowTrafficModeChanged(true)
+
+            assertNull(
+                "SSE feed must be cancelled when enabling low-traffic (F2 — no dual-channel firehose)",
+                readSseJob(viewModel)
+            )
+        } finally {
+            stopLowTrafficPoller(viewModel)
+        }
+    }
+
+    /**
+     * §F3 (gpter 致命#3): 运行时关省流必须恢复 SSE 实时同步。M3 守卫此时读到
+     * lowTrafficMode=false，startSSE 不再被跳过。
+     *
+     * 验证：lowTrafficMode=true 起步 (init 跳过 SSE)；标记 connected；调
+     * onLowTrafficModeChanged(false) → connectionCoordinator.startSSE() 必须被调用
+     * (sseJob 非 null + connectSSE 被访问)。
+     */
+    @Test
+    fun `disabling low-traffic mode restores SSE feed when connected (validates F3)`() = runTest {
+        // Dynamic lowTrafficMode stub so onLowTrafficModeChanged's setter takes effect
+        // (otherwise the M3 guard inside startSSE would keep blocking).
+        var lowTraffic = true
+        every { settingsManager.lowTrafficMode } answers { lowTraffic }
+        every { settingsManager.lowTrafficMode = any<Boolean>() } answers { lowTraffic = firstArg() }
+        every { repository.connectSSE() } returns emptyFlow()
+
+        val viewModel = createViewModel()
+        try {
+            // lowTraffic=true → init starts poller, SSE skipped (M3 guard).
+            assertNull("no SSE feed while lowTrafficMode is on", readSseJob(viewModel))
+            verify(exactly = 0) { repository.connectSSE() }
+
+            // Mark connected so onLowTrafficModeChanged(false) takes the startSSE branch.
+            updateConnection(viewModel) { it.copy(isConnected = true) }
+
+            viewModel.onLowTrafficModeChanged(false)
+            advanceUntilIdle()
+
+            assertNotNull(
+                "SSE feed must be restored when disabling low-traffic while connected (F3)",
+                readSseJob(viewModel)
+            )
+            verify(atLeast = 1) { repository.connectSSE() }
+        } finally {
+            stopLowTrafficPoller(viewModel)
+        }
+    }
+
+    /**
+     * §F3 negative branch: 关省流时若未连接，走 forceReconnect 路径 (testConnection
+     * force=true)，成功后内部会 startSSE。验证 forceReconnect 被触发 (checkHealth 重新探测)。
+     */
+    @Test
+    fun `disabling low-traffic mode while disconnected triggers forceReconnect (validates F3)`() = runTest {
+        var lowTraffic = true
+        every { settingsManager.lowTrafficMode } answers { lowTraffic }
+        every { settingsManager.lowTrafficMode = any<Boolean>() } answers { lowTraffic = firstArg() }
+        every { repository.connectSSE() } returns emptyFlow()
+        coEvery { repository.checkHealth() } returns Result.success(HealthResponse(healthy = true, version = "1.0"))
+
+        val viewModel = createViewModel()
+        try {
+            // isConnected stays false (default) → onLowTrafficModeChanged(false) takes forceReconnect.
+            assertEquals(false, viewModel.state.value.isConnected)
+
+            viewModel.onLowTrafficModeChanged(false)
+            advanceUntilIdle()
+
+            // forceReconnect = testConnection(force=true) → checkHealth probed → on success startSSE.
+            coVerify(atLeast = 1) { repository.checkHealth() }
+            assertNotNull(
+                "forceReconnect path must startSSE on healthy reconnect (F3 disconnected branch)",
+                readSseJob(viewModel)
+            )
+        } finally {
+            stopLowTrafficPoller(viewModel)
+        }
+    }
+
+    // ── Reflection helpers for the F1/F2/F3 tests ───────────────────────────
+    // (connectionCoordinator / sseJob / lowTrafficPoller.active are all private;
+    //  the production code never needs them exposed, so we read via reflection
+    //  rather than widening visibility for tests.)
+
+    private fun readSseJob(viewModel: MainViewModel): Job? {
+        val coordinatorField = MainViewModel::class.java.getDeclaredField("connectionCoordinator")
+        coordinatorField.isAccessible = true
+        val coordinator = coordinatorField.get(viewModel)
+        val sseJobField = coordinator.javaClass.getDeclaredField("sseJob")
+        sseJobField.isAccessible = true
+        return sseJobField.get(coordinator) as? Job
+    }
+
+    private fun readLowTrafficPollerActive(viewModel: MainViewModel): Boolean {
+        val pollerField = MainViewModel::class.java.getDeclaredField("lowTrafficPoller")
+        pollerField.isAccessible = true
+        val poller = pollerField.get(viewModel)
+        val activeField = poller.javaClass.getDeclaredField("active")
+        activeField.isAccessible = true
+        return activeField.getBoolean(poller)
+    }
+
+    /**
+     * Stops the [LowTrafficPoller] background loop. The poller's
+     * `while(isActive){delay(5000); doTick()}` runs on viewModelScope which shares
+     * runTest's StandardTestDispatcher — without stopping it, runTest's auto-cleanup
+     * would advance virtual time forever. onCleared() is protected so can't be called
+     * directly; stop() is public on the internal class (same module).
+     */
+    private fun stopLowTrafficPoller(viewModel: MainViewModel) {
+        val pollerField = MainViewModel::class.java.getDeclaredField("lowTrafficPoller")
+        pollerField.isAccessible = true
+        val poller = pollerField.get(viewModel) as com.yage.opencode_client.ui.controller.LowTrafficPoller
+        poller.stop()
     }
 
     @Test

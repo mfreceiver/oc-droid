@@ -204,6 +204,10 @@ internal class LowTrafficPoller(
      * poll can observe active→idle authoritatively. Reset tick to 5s (kill
      * backoff) + reset idle/retry counters. Does NOT fire catchUp (the
      * active→idle transition will).
+     *
+     * §A (glm): also stamp [localBusyUntil] for [LOCAL_BUSY_WINDOW_MS] so the
+     * next doTick's full-map overwrite of `sessionStatuses` doesn't clobber
+     * this local busy badge with the server's stale idle (UI 闪回).
      */
     fun onMessageSent(sessionId: String) {
         if (!active) return
@@ -212,6 +216,9 @@ internal class LowTrafficPoller(
             it.copy(sessionStatuses = it.sessionStatuses + (sessionId to SessionStatus(type = "busy")))
         }
         lastStatus = SessionStatus(type = "busy")
+        // §A: keep the local busy badge alive across the next status overwrite
+        // (server may still report idle until its own state machine catches up).
+        localBusyUntil[sessionId] = clock() + LOCAL_BUSY_WINDOW_MS
         consecutiveUnchanged = 0
         consecutiveIdleWithoutReload = 0
         consecutiveRetryTicks = 0
@@ -255,19 +262,21 @@ internal class LowTrafficPoller(
     internal suspend fun doTick() {
         if (!active) return
         val sessionId = callbacks.currentSessionId() ?: return
-        // §1.5 (gpter 重要#1): a load is in flight → skip this tick entirely
-        // (don't advance tickCounter, don't touch counters). Avoids racing a
-        // concurrent reload and double-counting during the load window.
-        if (state.value.isLoadingMessages) return
-
-        tickCounter++
-        doTickForSession(sessionId)
+        // §E (kimo 重要): isLoadingMessages=true 时整 tick return 会让 badge 失同步
+        // (doTickForSession 的 sessionStatuses 全量写入是 badge 唯一驱动)。改为：
+        // 仍跑 status/permission/question 写入，只跳过 probe / 计数器推进 / catchUp
+        // 状态机 (skipStateMachine)。tickCounter 也冻结——它是 probe 节拍来源。
+        val skipStateMachine = state.value.isLoadingMessages
+        if (!skipStateMachine) tickCounter++
+        doTickForSession(sessionId, skipStateMachine = skipStateMachine)
     }
 
-    private suspend fun doTickForSession(sessionId: String) {
+    private suspend fun doTickForSession(sessionId: String, skipStateMachine: Boolean = false) {
         // ── ① status poll (B4: failure must not change lastStatus / counters) ──
         val statusResult = repository.getSessionStatus()
         if (statusResult.isFailure) {
+            // §E: isLoading 期间不动失败计数器 (loading 本身就是"正在工作"信号)。
+            if (skipStateMachine) return
             consecutiveStatusFailures++
             DebugLog.w(TAG, "status poll failed (#$consecutiveStatusFailures)")
             if (consecutiveStatusFailures == MAX_STATUS_FAILURES) {
@@ -280,31 +289,57 @@ internal class LowTrafficPoller(
             return
         }
         // Recovery: a single success after the error tier → recovered + reset.
-        if (connectionErrorNotified) {
-            connectionErrorNotified = false
-            callbacks.onConnectionRecovered()
+        // §E: 仅在状态机活跃时清——isLoading 期间不干扰连接健康计数器。
+        if (!skipStateMachine) {
+            if (connectionErrorNotified) {
+                connectionErrorNotified = false
+                callbacks.onConnectionRecovered()
+            }
+            consecutiveStatusFailures = 0
+            networkBackoffTickMs = tickMs
         }
-        consecutiveStatusFailures = 0
-        networkBackoffTickMs = tickMs
 
-        val statuses = statusResult.getOrDefault(emptyMap())
+        val rawStatuses = statusResult.getOrDefault(emptyMap())
+        // §A (glm 重要): 每 tick 用 server status 整 map 覆盖会把 onMessageSent 写
+        // 的本地 busy 标记冲掉 (server 可能仍报 idle)，UI 闪回 idle。对在
+        // [localBusyUntil] 窗口内的 session，server 报 idle/missing 时保留 busy。
+        // 注意：状态机逻辑用 rawStatuses (server 真实态) 做 active→idle 检测，
+        // 绝不被本地标记干扰——本地 busy 只影响 UI badge。
+        val gcNow = clock()
+        localBusyUntil.entries.removeAll { it.value <= gcNow }
+        val uiStatuses = if (localBusyUntil.isEmpty()) {
+            rawStatuses
+        } else {
+            rawStatuses.mapValues { (id, s) ->
+                if (id in localBusyUntil && !s.isBusy && !s.isRetry) {
+                    SessionStatus(type = "busy")
+                } else {
+                    s
+                }
+            }
+        }
         // §1.7: write the full status map every tick — non-current tabs get a
         // lightweight busy/idle badge refresh without any per-tab message load.
-        state.updateAndSync(slices) { it.copy(sessionStatuses = statuses) }
+        state.updateAndSync(slices) { it.copy(sessionStatuses = uiStatuses) }
 
         // ── ② ③ permission / question (省流前台补足, dser 🔴-3) ──
         // Best-effort: a failure here is swallowed (the status poll above is
         // the authoritative connection-health signal). The next tick retries.
+        // §E: 这两个写入在 isLoading 期间也跑 (pendingPermissions/Questions 是
+        // 前台补足信号，与 message load 互不干扰)。
         repository.getPendingPermissions()
             .onSuccess { callbacks.onPendingPermissionsLoaded(it) }
         repository.getPendingQuestions()
             .onSuccess { callbacks.onPendingQuestionsLoaded(it) }
 
-        val currentStatus = statuses[sessionId]
+        // §E: isLoading 期间到此为止——不推进 probe / 计数器 / catchUp 状态机。
+        if (skipStateMachine) return
+
+        val currentStatus = rawStatuses[sessionId]
         if (currentStatus == null) {
-            // Current session absent from the status map (draft / unknown id) —
-            // skip this tick without disturbing lastStatus (§1.1 "无则跳过本轮").
-            lastStatus = null
+            // §C (glm+gpter 重要): 当前 session 不在 status map (draft / unknown id)
+            // → 跳过本轮。**不动 lastStatus** —— 保留上一态用于后续 active→idle 跳变
+            // 检测 (旧实现误清 lastStatus=null 导致下一态丢失 wasActive 信号)。
             return
         }
 
@@ -457,6 +492,16 @@ internal class LowTrafficPoller(
     @Volatile private var idleBackoffActive: Boolean = false
     @Volatile private var networkBackoffTickMs: Long = tickMs
 
+    /**
+     * §A (glm 重要): per-session "本地 busy 截止时间戳"。`onMessageSent` 写入
+     * `now + LOCAL_BUSY_WINDOW_MS`；doTick 写 sessionStatuses 时对窗口内且 server
+     * 报 idle 的 session 保留 busy (UI 不闪回)。条目在 doTick 中按时间戳 GC。
+     *
+     * 所有读写都在注入 scope (单一 dispatcher) 上，与其它状态机字段一致——
+     * 内容访问无竞争；引用本身永不重新赋值，故无需 @Volatile。
+     */
+    private val localBusyUntil: MutableMap<String, Long> = mutableMapOf()
+
     // ── test hooks (internal; the loop wrapper + backoff ladders are trivial
     //    to assert via these readouts instead of virtual-time acrobatics) ───
 
@@ -498,5 +543,12 @@ internal class LowTrafficPoller(
 
         /** §1.6: network-failure tick ladder (5s→10s→20s→30s cap). */
         private val NETWORK_BACKOFF_LADDER = longArrayOf(10_000L, 20_000L, 30_000L)
+
+        /**
+         * §A (glm 重要): onMessageSent 后本地 busy 标记在 sessionStatuses 整 map
+         * 覆盖中保留的窗口。10s 足够 server 状态机跟上 (典型 busy→idle 几秒内)；
+         * 超时后 GC，让 server 真实态接管 badge。
+         */
+        const val LOCAL_BUSY_WINDOW_MS = 10_000L
     }
 }
