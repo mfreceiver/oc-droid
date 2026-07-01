@@ -54,6 +54,21 @@ export PATH="$JAVA_HOME/bin:$PATH:$ANDROID_HOME/platform-tools"
 
 集成测试前：复制 `.env.example` 为 `.env`，填入 `OPENCODE_*` 凭证。
 
+## 改动校验（替代 LSP 自检，必做）
+
+> **本工作区的 opencode 服务端已关闭 LSP（`lsp: false`）**，编辑后不再有编译器/诊断的自动反馈。因此 **agent 每次改动 Kotlin/资源后，必须主动运行下列命令**确认无编译与测试错误，相当于手动 LSP 自检。这些命令的输出走会被服务端截断（≤50KB）的 `output` 通道，不会产生 `metadata.diagnostics` 膨胀。
+
+```bash
+export JAVA_HOME=/home/mar/android-studio/jbr
+export ANDROID_HOME=/home/mar/android-sdk
+export PATH="$JAVA_HOME/bin:$PATH:$ANDROID_HOME/platform-tools"
+./gradlew compileDebugKotlin        # 编译校验（最快，每次改动必跑）
+./gradlew testDebugUnitTest         # 单元测试（改动逻辑后必跑）
+./gradlew lintDebug                 # 静态检查（可选）
+```
+
+只有上述命令全部通过，才视为一次改动完成；失败则先修复再继续。
+
 ## 设备安全（硬性规定）
 
 - **不得**在物理 Android 手机上跑 `connectedDebugAndroidTest`、安装或启动 debug 构建，**除非用户明确要求**。真机含用户正式 App 与凭证，测试包可能覆盖。

@@ -22,7 +22,7 @@ import java.io.IOException
  *
  * The cap is lowered to 10 bytes via the `internal constructor(cap)` for
  * these tests so the trip path can be exercised without allocating 16 MB
- * strings. Production uses the default 16 MB cap via the `@Inject` no-arg
+ * strings. Production uses the default 32 MB cap via the `@Inject` no-arg
  * constructor.
  */
 class ResponseSizeGuardInterceptorTest {
@@ -129,10 +129,10 @@ class ResponseSizeGuardInterceptorTest {
     }
 
     @Test
-    fun `default cap matches the documented 16 MB constant`() {
+    fun `default cap matches the documented 32 MB constant`() {
         assertEquals(
             "MAX_RESPONSE_BYTES is the documented OOM P0 cap",
-            16L * 1024 * 1024,
+            32L * 1024 * 1024,
             ResponseSizeGuardInterceptor.MAX_RESPONSE_BYTES
         )
     }

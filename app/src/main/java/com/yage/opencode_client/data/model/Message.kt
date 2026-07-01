@@ -13,6 +13,7 @@ import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.buildJsonObject
 
 @Serializable
 data class Message(
@@ -279,7 +280,15 @@ object PartStateSerializer : kotlinx.serialization.KSerializer<PartState> {
                 var title: String? = (element["title"] as? JsonPrimitive)?.content
                 var output: String? = (element["output"] as? JsonPrimitive)?.content
 
-                val metadata = element["metadata"] as? JsonObject
+                // Strip LSP `diagnostics`: opencode attaches the full LSP
+                // diagnostic map to state.metadata.diagnostics — it can be
+                // multi-MB per edit/write part and is never read here (only
+                // sessionId / todos / path / output / description are used).
+                // Dropping it bounds the deserialized object + sustained heap.
+                val metadata = (element["metadata"] as? JsonObject)?.let { m ->
+                    if ("diagnostics" !in m) m
+                    else buildJsonObject { m.forEach { (k, v) -> if (k != "diagnostics") put(k, v) } }
+                }
                 if (metadata != null) {
                     if (output == null) output = (metadata["output"] as? JsonPrimitive)?.content
                     if (title == null) title = (metadata["description"] as? JsonPrimitive)?.content

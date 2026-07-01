@@ -93,17 +93,22 @@ class ResponseSizeGuardInterceptor @Inject constructor() : Interceptor {
 
     companion object {
         /**
-         * Hard cap on any single HTTP response body (16 MB).
+         * Hard cap on any single HTTP response body (32 MB).
          *
-         * Rationale (0.1.13, gpter review #5): on a 256 MB heap the
-         * kotlinx-serialization converter reads the whole body into a byte
-         * array, then decodes into a String (~2× memory), so a 32 MB cap
-         * can still allocate ~96 MB during conversion. 16 MB gives a ~48 MB
-         * worst-case allocation while still accommodating sessions with
-         * very large tool outputs. Beyond 16 MB the server should use
-         * cursor pagination (already supported), making this a signalling
-         * cap rather than an everyday limit.
+         * Rationale: originally 16 MB to bound the kotlinx-serialization
+         * converter's whole-body String allocation (~2× bytes) against OOM on
+         * a 256 MB heap. The dominant cause of giant responses — opencode's
+         * LSP `state.metadata.diagnostics` (multi-MB per edit) — is now
+         * mitigated at the source (server `lsp: false`), purged from the DB,
+         * and additionally stripped client-side during deserialization
+         * (see PartStateSerializer), so real responses are again small.
+         *
+         * Raised to 32 MB as a signalling safety net: with diagnostics gone,
+         * tripping it indicates an unexpected pathological payload (or a
+         * session whose diagnostics pre-date the cleanup) rather than the
+         * everyday case. Cursor pagination (`limit`) remains the primary
+         * control; this cap just prevents a single runaway body from OOMing.
          */
-        const val MAX_RESPONSE_BYTES = 16L * 1024 * 1024
+        const val MAX_RESPONSE_BYTES = 32L * 1024 * 1024
     }
 }
