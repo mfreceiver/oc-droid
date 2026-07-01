@@ -105,4 +105,5 @@ app/src/main/java/com/yage/opencode_client/
 
 ## License
 
-与 OpenCode 保持一致。
+本项目基于 [grapeot/opencode_android_client](https://github.com/grapeot/opencode_android_client)（MIT）深度改造。
+采用 MIT 协议，详见 [LICENSE](./LICENSE)。
