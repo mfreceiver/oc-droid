@@ -12,6 +12,7 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -58,13 +59,24 @@ internal fun truncateTitle(value: String): String =
 /**
  * §17: persistent horizontal session tab strip rendered as the TopAppBar's
  * second row. Replaces the former title-slot dropdown switcher. Built on the
- *     M3 [PrimaryScrollableTabRow] + [Tab] so we inherit the platform scroll-to-centre
- *     behaviour, the selected-tab indicator, and the standard 48dp touch target
- *     for free. Each tab's `text` slot carries the (truncated) session title, an
- *     unread dot when the session received an out-of-band message, and a close-X
- *     affordance; the active session is highlighted via the v2 accent colour
- *     (passed as [PrimaryScrollableTabRow]'s `contentColor` so the default indicator and
- *     the selected-text tint share the same visual language).
+ * M3 [PrimaryScrollableTabRow] + [Tab] so we inherit the platform scroll-to-centre
+ * behaviour, the selected-tab indicator, and the standard touch target
+ * for free. Each tab's `text` slot carries the (truncated) session title, an
+ * unread dot when the session received an out-of-band message, and a close-X
+ * affordance; the active session is highlighted via a workdir-derived tone
+ * (passed as [PrimaryScrollableTabRow]'s `contentColor` so the default indicator and
+ * the selected-text tint share the same visual language).
+ *
+ * **Tab height**: each `Tab` is constrained to 36dp (via `Modifier.height`)
+ * for a compact second-row strip; the inner close-X touch target and icon are
+ * shrunk accordingly to fit. The M3 default 48dp is overridden because this
+ * strip is a secondary navigation row beneath the TopAppBar, not the primary
+ * tab surface.
+ *
+ * **Accent colour**: [workdirTone] hashes the current session's `directory`
+ * into the unified 16-colour palette, so each project reads as a distinct
+ * accent at a glance (mirrors the workdir-hash tinting used elsewhere). Falls
+ * back to [opencode.accentText] when no session is active.
  *
  * Per §17.2 the `openSessions` list is already filtered to root sessions
  * (parentId == null) by ChatScreen, so sub-agent sessions never appear here —
@@ -78,6 +90,7 @@ internal fun truncateTitle(value: String): String =
 internal fun SessionTabStrip(
     openSessions: List<Session>,
     currentSessionId: String?,
+    currentWorkdir: String?,
     unreadSessions: Set<String>,
     actions: ChatTopBarActions,
     modifier: Modifier = Modifier
@@ -87,7 +100,11 @@ internal fun SessionTabStrip(
     // would trip an out-of-bounds when drawing the indicator.
     if (openSessions.isEmpty()) return
 
-    val accentColor = MaterialTheme.opencode.accentText
+    val oc = MaterialTheme.opencode
+    // Workdir-hash accent: each project gets a stable, distinct tone. Falls
+    // back to the v2 accentText when there is no current session (e.g. all
+    // tabs unselected) so the indicator still renders with a sane colour.
+    val accentColor = currentWorkdir?.let { workdirTone(it, oc) } ?: oc.accentText
     // currentSessionId may belong to a sub-agent not present in openSessions
     // (§17.2 filters to root sessions); coerce into range so the indicator
     // never indexes past the last tab.
@@ -103,8 +120,8 @@ internal fun SessionTabStrip(
         containerColor = Color.Transparent,
         divider = {},
         // contentColor drives both the default selected-tab indicator colour
-        // and the Tab content tint; set it to the v2 accent so the underline
-        // and the active label read as one.
+        // and the Tab content tint; set it to the workdir-hash accent so the
+        // underline and the active label read as one.
         contentColor = accentColor,
         // Match the former LazyRow's 8dp horizontal content padding instead
         // of the M3 default 52dp (TabRowDefaults.ScrollableTabRowEdgePadding),
@@ -116,6 +133,10 @@ internal fun SessionTabStrip(
             Tab(
                 selected = isSelected,
                 onClick = { actions.onSelectSession(session.id) },
+                // Compact 36dp height — this is a secondary nav row, not the
+                // primary tab surface. Modifier.height overrides the M3
+                // default 48dp (heightIn min) by clamping both min and max.
+                modifier = Modifier.height(36.dp),
                 // Explicit selected/unselected colours keep v2's accent vs
                 // onSurfaceVariant treatment regardless of the M3 default
                 // fading behaviour.
@@ -125,12 +146,13 @@ internal fun SessionTabStrip(
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         // Unread dot: rendered in the accent color so it reads
                         // as "activity" rather than an error. Cleared by the
-                        // VM when the session is opened.
+                        // VM when the session is opened. 5dp fits the compact
+                        // 36dp row.
                         if (session.id in unreadSessions) {
                             Box(
                                 modifier = Modifier
                                     .padding(end = 6.dp)
-                                    .size(6.dp)
+                                    .size(5.dp)
                                     .background(color = accentColor, shape = CircleShape)
                             )
                         }
@@ -146,22 +168,23 @@ internal fun SessionTabStrip(
                         )
                         Spacer(modifier = Modifier.width(4.dp))
                         // Close affordance. R-12 (WCAG 2.5.5): the visual X
-                        // stays at 14dp but the touch target is enlarged to
-                        // 44dp (AAA threshold) via an outer clickable Box.
-                        // Compose's clickable consumes the pointer event, so
-                        // tapping the X fires onClose without also triggering
-                        // the Tab's onClick (standard nested-clickable
-                        // behaviour).
+                        // stays small but the touch target is enlarged as far
+                        // as the 36dp row allows (28dp box). The Tab's own
+                        // onClick is the broader 36dp touch target, so the X
+                        // only needs to win the inner tap. Compose's clickable
+                        // consumes the pointer event, so tapping the X fires
+                        // onClose without also triggering the Tab's onClick
+                        // (standard nested-clickable behaviour).
                         Box(
                             modifier = Modifier
-                                .size(44.dp)
+                                .size(28.dp)
                                 .clickable(onClick = { actions.onCloseSession(session.id) }),
                             contentAlignment = Alignment.Center
                         ) {
                             Icon(
                                 Icons.Default.Close,
                                 contentDescription = stringResource(R.string.common_close),
-                                modifier = Modifier.size(14.dp),
+                                modifier = Modifier.size(12.dp),
                                 tint = MaterialTheme.colorScheme.onSurfaceVariant
                             )
                         }

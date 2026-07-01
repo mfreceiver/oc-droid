@@ -10,7 +10,6 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.dp
 import com.yage.opencode_client.data.model.Message
 import com.yage.opencode_client.data.model.Part
@@ -47,8 +46,7 @@ internal fun MessageRow(
     onFileClick: (String) -> Unit,
     onOpenSubAgent: (String) -> Unit,
     expandedParts: Map<String, Boolean>,
-    onToggleExpand: (String, Boolean) -> Unit,
-    agentColorAssignments: MutableMap<String, Color>
+    onToggleExpand: (String, Boolean) -> Unit
 ) {
     val isUser = message.isUser
 
@@ -124,7 +122,6 @@ internal fun MessageRow(
                         is ToolRenderItem.SubAgent -> SubAgentCard(
                             part = item.part,
                             onOpenSubAgent = onOpenSubAgent,
-                            agentColorAssignments = agentColorAssignments,
                             modifier = Modifier.widthIn(max = MAX_CARD_WIDTH)
                         )
                         is ToolRenderItem.WritePatch -> {
@@ -170,7 +167,6 @@ internal fun MessageRow(
                     messageId = message.id,
                     expandedParts = expandedParts,
                     onToggleExpand = onToggleExpand,
-                    agentColorAssignments = agentColorAssignments,
                     modifier = Modifier.fillMaxWidth()
                 )
                 i += 1
@@ -228,7 +224,6 @@ internal fun PartView(
     messageId: String,
     expandedParts: Map<String, Boolean>,
     onToggleExpand: (String, Boolean) -> Unit,
-    agentColorAssignments: MutableMap<String, Color>,
     modifier: Modifier = Modifier.fillMaxWidth()
 ) {
     val expandKey = "${messageId}|${part.id}"
@@ -282,7 +277,6 @@ internal fun PartView(
         part.isSubAgentTask -> SubAgentCard(
             part = part,
             onOpenSubAgent = onOpenSubAgent,
-            agentColorAssignments = agentColorAssignments,
             modifier = Modifier.widthIn(max = MAX_CARD_WIDTH)
         )
         part.isTool -> ToolCard(

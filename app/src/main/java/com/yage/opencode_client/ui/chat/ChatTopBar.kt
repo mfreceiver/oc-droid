@@ -1,19 +1,32 @@
 package com.yage.opencode_client.ui.chat
 
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.expandVertically
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.shrinkVertically
+import androidx.compose.animation.slideInVertically
+import androidx.compose.animation.slideOutVertically
+import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.List
+import androidx.compose.material.icons.filled.ChatBubbleOutline
 import androidx.compose.material.icons.filled.Dns
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.BadgedBox
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -144,7 +157,10 @@ private val TITLE_SLOT_MAX_WIDTH = 340.dp
 internal fun ChatTopBar(
     state: ChatTopBarState,
     actions: ChatTopBarActions,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    // §顶部 tab 联动显隐：由 ChatMessageList 的滚动方向检测提升而来。
+    // true = 显示 SessionTabStrip；false = 滑出 + 折叠该行。
+    tabVisible: Boolean = true
 ) {
     val currentSession = state.sessions.find { it.id == state.currentSessionId }
     var showContextMenu by remember { mutableStateOf(false) }
@@ -174,12 +190,13 @@ internal fun ChatTopBar(
         TopAppBar(
             windowInsets = TopAppBarDefaults.windowInsets,
             navigationIcon = {
-                // Primary Sessions entry point — list affordance at the LEFT of
-                // the title. Replaces the former trailing "+" on the session tab
-                // strip as the canonical way to reach the Sessions destination.
+                // Primary Sessions entry point — chat-bubble-outline affordance
+                // at the LEFT of the title. Replaces the former trailing "+" on
+                // the session tab strip as the canonical way to reach the
+                // Sessions destination.
                 IconButton(onClick = actions.onNavigateToSessions) {
                     Icon(
-                        Icons.AutoMirrored.Filled.List,
+                        Icons.Filled.ChatBubbleOutline,
                         contentDescription = stringResource(R.string.chat_action_sessions),
                         tint = MaterialTheme.colorScheme.onSurfaceVariant
                     )
@@ -307,29 +324,45 @@ internal fun ChatTopBar(
                 )
     
                 // Server status indicator: an IconButton (Icons.Default.Dns)
-                // tinted to reflect the live connection state — the same colour
-                // logic the former status dot used. Tapping opens the existing
+                // that is always grey (onSurfaceVariant); a small coloured dot
+                // (BadgedBox + Box) at the icon's top-end corner reflects the
+                // live connection state. Tapping opens the existing
                 // ServerManagementDialog (host picker + refresh + tunnel + the
                 // "System Settings" navigation entry).
-                // R-24: the former hardcoded sRGB values (#FFA500 / #4CAF50 /
-                // #F44336) bypassed the theme, so they did not adapt to dark mode
-                // and clashed with the v2 palette. Now sourced from
-                // LocalOpencodeColors state-* tokens (which have explicit light +
-                // dark values), with M3 colorScheme.error as the connecting-state
-                // fallback for surfaces without an opencode provider.
+                // R-24: the status colours are sourced from LocalOpencodeColors
+                // state-* tokens (which have explicit light + dark values), so
+                // the badge adapts to dark mode and matches the v2 palette.
+                // none (not connected AND no connectionPhase) → no badge at all.
                 val oc = MaterialTheme.opencode
-                val serverIconTint = when {
-                    state.isConnecting -> oc.stateInfoFg
+                val badgeColor = when {
                     state.isConnected -> oc.stateSuccessFg
-                    state.connectionPhase == null -> MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.4f)
+                    state.isConnecting -> oc.stateInfoFg
+                    state.connectionPhase == null -> null
                     else -> oc.stateDangerFg
                 }
                 IconButton(onClick = { showServerDialog = true }) {
-                    Icon(
-                        Icons.Default.Dns,
-                        contentDescription = stringResource(R.string.chat_action_server),
-                        tint = serverIconTint
-                    )
+                    val serverIcon: @Composable () -> Unit = {
+                        Icon(
+                            Icons.Default.Dns,
+                            contentDescription = stringResource(R.string.chat_action_server),
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                    if (badgeColor != null) {
+                        BadgedBox(
+                            badge = {
+                                Box(
+                                    Modifier
+                                        .size(8.dp)
+                                        .background(badgeColor, CircleShape)
+                                )
+                            }
+                        ) {
+                            serverIcon()
+                        }
+                    } else {
+                        serverIcon()
+                    }
                 }
             }
         )
@@ -345,12 +378,35 @@ internal fun ChatTopBar(
         // composable. Compose skipping keeps the PrimaryScrollableTabRow intact as long as
         // openSessions / currentSessionId / unreadSessions are structurally
         // equal to the previous call.
-        SessionTabStrip(
-            openSessions = state.openSessions,
-            currentSessionId = state.currentSessionId,
-            unreadSessions = state.unreadSessions,
-            actions = actions
-        )
+        //
+        // §顶部 tab 联动显隐：用 AnimatedVisibility 包裹整行。`tabVisible` 由
+        // ChatMessageList 的滚动方向检测驱动（向下滚隐藏 / 向上滚显示）。
+        // 动画组合：fade + height expand/shrink（让下方内容平滑填充空隙）
+        // + vertical slide（向上滑出/从顶部滑入，符合顶部 bar 的方向感）。
+        // 时长 ~200ms（覆盖默认 300ms，更跟手）。
+        AnimatedVisibility(
+            visible = tabVisible,
+            enter = fadeIn(animationSpec = tween(200)) +
+                expandVertically(animationSpec = tween(200)) +
+                slideInVertically(
+                    animationSpec = tween(200),
+                    initialOffsetY = { fullHeight -> -fullHeight }
+                ),
+            exit = fadeOut(animationSpec = tween(200)) +
+                shrinkVertically(animationSpec = tween(200)) +
+                slideOutVertically(
+                    animationSpec = tween(200),
+                    targetOffsetY = { fullHeight -> -fullHeight }
+                )
+        ) {
+            SessionTabStrip(
+                openSessions = state.openSessions,
+                currentSessionId = state.currentSessionId,
+                currentWorkdir = currentSession?.directory,
+                unreadSessions = state.unreadSessions,
+                actions = actions
+            )
+        }
     }
 
     if (showTodoDialog) {

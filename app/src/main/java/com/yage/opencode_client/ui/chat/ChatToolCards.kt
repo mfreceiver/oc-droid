@@ -373,15 +373,6 @@ internal fun BasicTool(
                     tint = MaterialTheme.colorScheme.onSurfaceVariant
                 )
                 Spacer(modifier = Modifier.width(6.dp))
-                if (canExpand) {
-                    Icon(
-                        if (expanded) Icons.Default.KeyboardArrowDown else Icons.Default.ChevronRight,
-                        contentDescription = if (expanded) "Collapse" else "Expand",
-                        modifier = Modifier.size(18.dp),
-                        tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f)
-                    )
-                    Spacer(modifier = Modifier.width(2.dp))
-                }
                 if (isRunning) {
                     CircularProgressIndicator(
                         modifier = Modifier.size(14.dp),
@@ -418,6 +409,14 @@ internal fun BasicTool(
                         contentDescription = "Tool error",
                         modifier = Modifier.size(14.dp),
                         tint = oc.stateDangerFg
+                    )
+                }
+                if (canExpand) {
+                    Icon(
+                        if (expanded) Icons.Default.KeyboardArrowDown else Icons.Default.ChevronRight,
+                        contentDescription = if (expanded) "Collapse" else "Expand",
+                        modifier = Modifier.size(18.dp),
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant
                     )
                 }
             }

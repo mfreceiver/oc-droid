@@ -25,11 +25,9 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
@@ -73,7 +71,6 @@ import com.yage.opencode_client.ui.util.DataUriImageTransformer
 internal fun SubAgentCard(
     part: Part,
     onOpenSubAgent: (String) -> Unit,
-    agentColorAssignments: MutableMap<String, Color>,
     modifier: Modifier = Modifier.fillMaxWidth()
 ) {
     val sessionId = part.taskSubSessionId
@@ -85,8 +82,12 @@ internal fun SubAgentCard(
     val subAgentName = remember(rawTitle, description) {
         parseSubAgentName(rawTitle) ?: parseSubAgentName(description)
     }
-    val cleanTitle = remember(rawTitle, subAgentName) {
-        stripSubAgentSuffix(rawTitle).ifBlank { description ?: rawTitle }
+    val cleanTitle = remember(rawTitle, description) {
+        val strippedTitle = stripSubAgentSuffix(rawTitle)
+        // fallback 到 description 时同样要 strip 尾部 marker，否则 marker 会
+        // 经 description 字段重新回显到正文行。
+        if (strippedTitle.isNotBlank()) strippedTitle
+        else stripSubAgentSuffix(description ?: rawTitle)
     }
 
     val taskXml = remember(part.toolOutput) { parseTaskXml(part.toolOutput) }
@@ -101,24 +102,10 @@ internal fun SubAgentCard(
     val oc = MaterialTheme.opencode
     val statusErrorColor = oc.stateDangerFg
 
-    // D4: agent tone — known agents keep their fixed tone; unknown agents get a
-    // maximin session-stable assignment (farthest from occupied colors) written
-    // back into the shared session map so the same agent name always renders the
-    // same color and adjacent agents don't collide. tone == accentText when no
-    // agent name.
-    //
-    // `agentTone(...)` is read-only and safe in composition; only the write-back
-    // into the session map is deferred to SideEffect to avoid writing state
-    // during composition (gpter/glmer D4 阻断项: composition-phase state write).
-    val tone = if (subAgentName != null) agentTone(subAgentName, oc, agentColorAssignments) else oc.accentText
-    SideEffect {
-        if (subAgentName != null) {
-            val key = subAgentName.trim().lowercase()
-            if (key !in oc.agentTones && key !in agentColorAssignments) {
-                agentColorAssignments[key] = tone
-            }
-        }
-    }
+    // Agent tone — name hashed into the unified 16-color agentPalette (方案B).
+    // 同一 agent 名永远同色（hash 确定性），随明暗主题切换。无 agent 名时回退
+    // 到 accentText。
+    val tone = if (subAgentName != null) agentTone(subAgentName, oc) else oc.accentText
 
     Surface(
         modifier = modifier
@@ -206,7 +193,7 @@ internal fun SubAgentCard(
                         Icons.Default.ChevronRight,
                         contentDescription = "Open sub-agent conversation",
                         modifier = Modifier.size(14.dp),
-                        tint = oc.accentText
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant
                     )
                 }
             }
@@ -215,26 +202,57 @@ internal fun SubAgentCard(
 }
 
 /**
- * Extracts the `xxx` from a title shaped like "(@xxx subagent)" or
- * "Description (@xxx subagent)". Returns null when no such marker is present.
+ * Extracts the `xxx` agent name from a sub-agent title/description. 方案B：
+ * 无样例容错——按优先级尝试多种常见格式变体，命中第一个非空捕获即返回：
+ *   1. "(@xxx subagent)" / "(@xxx Subagent)" / "(@xxx)" —— 带括号，可选
+ *      subagent 后缀。可选组 `(?:\s+subagent)?` 匹配零次时即覆盖纯 `(@xxx)`，
+ *      匹配一次时覆盖 `(@xxx subagent)`，所以无需再单列纯括号变体（旧
+ *      pattern 3 `\(@xxx\)` 永远被 pattern 1 抢先命中，是死代码，已删）。
+ *   2. "@xxx subagent" —— 无括号，空格分隔的 subagent 标记
+ *
+ * 注意：本函数面向服务器返回的 task 元数据 title/description（结构化字段），
+ * 不对任意自然语言正文做防误匹配——例如 "ask (@senior-dev) to review" 会命中
+ * "senior-dev"，属已知容错行为（方案B）。
+ *
+ * Returns null when no marker matches.
  */
 internal fun parseSubAgentName(text: String?): String? {
     if (text.isNullOrBlank()) return null
-    val match = Regex("\\(@([A-Za-z0-9_-]+)\\s*subagent\\)", RegexOption.IGNORE_CASE).find(text)
-    return match?.groupValues?.getOrNull(1)
+    val patterns = listOf(
+        // pattern 1: 带括号 + 可选 subagent 后缀。可选组零次匹配即覆盖纯
+        // `(@xxx)`，故不再单独列纯括号变体（旧 pattern 3 永远不会执行）。
+        Regex("\\(@([A-Za-z0-9_-]+)(?:\\s+subagent)?\\)", RegexOption.IGNORE_CASE),
+        // pattern 2: 无括号，空格分隔的 "@xxx subagent"。
+        Regex("@([A-Za-z0-9_-]+)\\s+subagent", RegexOption.IGNORE_CASE),
+    )
+    for (p in patterns) {
+        p.find(text)?.groupValues?.getOrNull(1)?.let { if (it.isNotBlank()) return it }
+    }
+    return null
 }
 
 /**
- * Strips the trailing "(@xxx subagent)" marker from a sub-agent title so the
- * body line doesn't redundantly echo what the header's @agentName badge already
- * shows. Returns the cleaned title (may be blank if the marker was the only
- * content); the caller decides whether to fall back to the description.
+ * Strips the **trailing** sub-agent marker ("(@xxx subagent)" / "@xxx subagent" /
+ * "(@xxx)") from a sub-agent title so the body line doesn't redundantly echo
+ * what the header's @agentName badge already shows.
+ *
+ * 只删尾部 suffix：title 格式为 "Description (@xxx subagent)"，marker 恒在
+ * 串尾，故用 `$` end-anchor 锚定。正文中间出现的 `(@mention)` 保留不动（旧
+ * 实现用全局 replace 会误删中间 mention）。变体集与 [parseSubAgentName]
+ * 对齐。返回清理后的 title（marker 是唯一内容时返回空串）；调用方决定是否
+ * fallback 到 description。
  */
 internal fun stripSubAgentSuffix(text: String?): String {
     if (text.isNullOrBlank()) return ""
-    return Regex("\\s*\\(@[A-Za-z0-9_-]+\\s*subagent\\)", RegexOption.IGNORE_CASE)
-        .replace(text, "")
-        .trim()
+    val tailPatterns = listOf(
+        // 带括号 + 可选 subagent 后缀，尾部锚定。`(@xxx)` / `(@xxx subagent)`。
+        Regex("\\s*\\(@[A-Za-z0-9_-]+(?:\\s+subagent)?\\)\\s*$", RegexOption.IGNORE_CASE),
+        // 无括号的 "@xxx subagent"，尾部锚定。
+        Regex("\\s*@[A-Za-z0-9_-]+\\s+subagent\\s*$", RegexOption.IGNORE_CASE),
+    )
+    // 每条 pattern 至多命中尾部一处（`$` 锚定），replaceFirst 即可；fold 让两种
+    // 变体都能被尝试剥离。
+    return tailPatterns.fold(text) { acc, p -> p.replaceFirst(acc, "") }.trim()
 }
 
 /**

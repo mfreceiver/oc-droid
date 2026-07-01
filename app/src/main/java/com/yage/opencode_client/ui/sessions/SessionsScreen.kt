@@ -17,6 +17,7 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.automirrored.filled.Chat
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Archive
@@ -24,7 +25,6 @@ import androidx.compose.material.icons.filled.CreateNewFolder
 import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.KeyboardArrowDown
-import androidx.compose.material.icons.filled.SmartToy
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -39,6 +39,8 @@ import com.yage.opencode_client.R
 import com.yage.opencode_client.data.model.Session
 import com.yage.opencode_client.data.model.SessionStatus
 import com.yage.opencode_client.ui.MainViewModel
+import com.yage.opencode_client.ui.chat.workdirTone
+import com.yage.opencode_client.ui.theme.opencode
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.map
 import java.text.SimpleDateFormat
@@ -211,7 +213,7 @@ fun SessionsScreen(
                         Icon(
                             Icons.Default.CreateNewFolder,
                             contentDescription = stringResource(R.string.sessions_connect_new_action),
-                            tint = MaterialTheme.colorScheme.primary
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant
                         )
                     }
                 }
@@ -275,7 +277,9 @@ fun SessionsScreen(
                         // gesture target; the browse / create IconButtons in
                         // trailingContent consume their own taps.
                         ListItem(
-                            modifier = Modifier.combinedClickable(
+                            modifier = Modifier
+                                .heightIn(min = 48.dp)
+                                .combinedClickable(
                                 onClick = {
                                     if (isExpanded) {
                                         expandedWorkdirs = expandedWorkdirs - workdir
@@ -312,11 +316,11 @@ fun SessionsScreen(
                                         Text(
                                             text = stringResource(R.string.sessions_draft_badge),
                                             style = MaterialTheme.typography.labelSmall,
-                                            color = MaterialTheme.colorScheme.primary,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant,
                                             modifier = Modifier
                                                 .clip(RoundedCornerShape(4.dp))
                                                 .background(
-                                                    MaterialTheme.colorScheme.primary.copy(alpha = 0.12f)
+                                                    MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.12f)
                                                 )
                                                 .padding(horizontal = 6.dp, vertical = 1.dp)
                                         )
@@ -492,7 +496,7 @@ private fun SectionHeader(icon: androidx.compose.ui.graphics.vector.ImageVector,
             icon,
             contentDescription = null,
             modifier = Modifier.size(20.dp),
-            tint = MaterialTheme.colorScheme.primary
+            tint = MaterialTheme.colorScheme.onSurfaceVariant
         )
         Spacer(modifier = Modifier.width(8.dp))
         Text(
@@ -533,6 +537,8 @@ private fun SessionCard(
         if (updatedText != null) add(updatedText)
     }
 
+    val oc = MaterialTheme.opencode
+
     ElevatedCard(
         modifier = Modifier
             .fillMaxWidth()
@@ -550,6 +556,7 @@ private fun SessionCard(
         // so the whole card remains the click/long-click target (archive button
         // consumes its own taps).
         ListItem(
+            modifier = Modifier.heightIn(min = 48.dp),
             headlineContent = {
                 Text(
                     text = session.displayName,
@@ -568,9 +575,10 @@ private fun SessionCard(
             } else null,
             leadingContent = {
                 Icon(
-                    Icons.Default.SmartToy,
+                    Icons.AutoMirrored.Filled.Chat,
                     contentDescription = null,
-                    tint = MaterialTheme.colorScheme.onSurfaceVariant
+                    tint = workdirTone(session.directory, oc),
+                    modifier = Modifier.size(20.dp)
                 )
             },
             trailingContent = {
@@ -598,7 +606,7 @@ private fun SessionCard(
                                 .padding(start = 8.dp)
                                 .size(8.dp)
                                 .background(
-                                    color = MaterialTheme.colorScheme.primary,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
                                     shape = CircleShape
                                 )
                         )

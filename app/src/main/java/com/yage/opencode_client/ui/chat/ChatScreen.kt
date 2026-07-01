@@ -99,6 +99,13 @@ fun ChatScreen(
     val unread by viewModel.unreadFlow.collectAsStateWithLifecycle()
     val host by viewModel.hostFlow.collectAsStateWithLifecycle()
     var showFileBrowser by remember { mutableStateOf(false) }
+    // §顶部 session tab 联动显隐：状态产生在 ChatMessageList（listState 所在），
+    // 消费在 ChatTopBar（AnimatedVisibility 包裹 SessionTabStrip）。这里在
+    // 共同祖先 ChatScreen 提升 `tabVisible`，通过 onTabVisibilityChange 回调
+    // 从 ChatMessageList 写入，通过 prop 从 ChatTopBar 读取。默认显示。
+    var tabVisible by remember { mutableStateOf(true) }
+    // §G4 会话切换时重置 tab 可见——避免从隐藏态切到新会话后 tab 仍不可见。
+    LaunchedEffect(chat.currentSessionId) { tabVisible = true }
     // §R-17 Stage 2: expandedParts collect moved INTO ChatMessageList (it now
     // subscribes to viewModel.expandedParts directly), so ChatScreen no longer
     // needs to observe it — toggling a card recomposes only ChatMessageList.
@@ -327,7 +334,8 @@ fun ChatScreen(
     Column(modifier = Modifier.fillMaxSize()) {
         ChatTopBar(
             state = topBarState,
-            actions = topBarActions
+            actions = topBarActions,
+            tabVisible = tabVisible
         )
 
         // Thin separator between the top bar (session tabs) and the chat area.
@@ -384,7 +392,8 @@ fun ChatScreen(
             } else if (chat.currentSessionId != null) {
                 ChatMessageList(
                     viewModel = viewModel,
-                    onFileClick = onChatFileClick
+                    onFileClick = onChatFileClick,
+                    onTabVisibilityChange = { tabVisible = it }
                 )
             }
 

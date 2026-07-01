@@ -44,6 +44,7 @@ import com.yage.opencode_client.data.repository.OpenCodeRepository
 import com.yage.opencode_client.ui.GapInfo
 import com.yage.opencode_client.ui.MainViewModel
 import com.yage.opencode_client.ui.theme.opencode
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.flow.drop
 
@@ -56,7 +57,8 @@ import kotlinx.coroutines.flow.drop
 @Composable
 internal fun ChatMessageList(
     viewModel: MainViewModel,
-    onFileClick: (String) -> Unit
+    onFileClick: (String) -> Unit,
+    onTabVisibilityChange: (Boolean) -> Unit = {}
 ) {
     // §R-17 Stage 2: subscribe to chatFlow + sessionListFlow directly so SSE
     // streaming deltas (streamingPartTexts mutation) only recompose this list,
@@ -93,21 +95,6 @@ internal fun ChatMessageList(
 
     // sessionId 在 remember key 里需要——提前取（下面 savedPositions 等也用）。
     val sessionId = chatState.currentSessionId
-    // 主题实例：sessionId/oc 变化都要重建分配表。Light↔Dark 切换时 oc 实例从
-    // LightOpencodeColors 变为 DarkOpencodeColors（不同的 OpencodeColors data class
-    // 实例），remember(oc) 即能捕获，使分配表里的 Color 全部按新主题重分配。
-    val oc = MaterialTheme.opencode
-
-    // D4: 会话级 agent→color 分配表。SubAgentCard 渲染时贪心写入（未知 agent 按
-    // maximin 从调色板挑离占用色最远的色），保证「同一 agent 名永远同色」且会话内
-    // 相邻 agent 不撞色。
-    //
-    // remember key 含 sessionId + oc：
-    // - sessionId：切换会话清空旧分配，避免上一会话的颜色泄漏到新会话（gpter/glmer
-    //   D4 阻断项）。
-    // - oc：明暗主题切换时 oc 实例变化，整张表重建，所有已分配 Color 按新主题的
-    //   palette/agentTones 重新求解，避免「主题切了但颜色没动」。
-    val agentColorAssignments = remember(sessionId, oc) { mutableStateMapOf<String, Color>() }
 
     val listState = rememberLazyListState()
     var shouldAutoScroll by remember { mutableStateOf(true) }
@@ -205,6 +192,52 @@ internal fun ChatMessageList(
                 while (savedPositions.size > MAX_SAVED_SESSIONS && accessOrder.isNotEmpty()) {
                     val oldest = accessOrder.removeAt(0)
                     savedPositions.remove(oldest)
+                }
+            }
+    }
+
+    // ── §顶部 session tab 联动显隐 ────────────────────────────────────────
+    // 检测 LazyColumn 滚动方向，把"显示/隐藏顶部 tab strip"的意图通过
+    // [onTabVisibilityChange] 回调提升到 ChatScreen（消费方在 ChatTopBar 用
+    // AnimatedVisibility 包裹 SessionTabStrip）。
+    //
+    // **reverseLayout 语义**（见 LazyColumn reverseLayout=true）：
+    //   - index 0 = 最新消息，渲染在视觉**底部**。
+    //   - index 越大 = 越旧的消息，越靠视觉**顶部**。
+    //   - 因此 `firstVisibleItemIndex` **增大** = 用户在"向上滚"（看更旧的消息）。
+    //   - `firstVisibleItemIndex` **减小** = 用户在"向下滚"（看更新的消息）。
+    //
+    // 任务约定：向下滚（看更新）→ 隐藏 tab；向上滚（看更旧）→ 显示 tab。
+    //
+    // **防抖/误判防护**：
+    //   1. `delay(300)` —— 会话切换后给 auto-scroll-to-bottom（contentVersion
+    //      effect 里的 `animateScrollToItem(0)`）和 saved-position restore 一段
+    //      时间完成，避免它们造成的"大跳"被误判为用户手势方向。这段时间内
+    //      不采集方向（tab 保持上次状态，默认显示）。
+    //   2. `pendingRestoreSession == sessionId` —— 跳过 saved-position restore
+    //      期间的程序化滚动（与现有 savedPositions mirror 的同款 guard）。
+    //   3. `|delta| > 3` —— 单帧跨越超过 3 个 item 几乎必然是程序化滚动
+    //      （用户手势/fling 每帧至多跨 1-2 个 item），忽略。这是对 1 的双保险。
+    LaunchedEffect(listState, sessionId) {
+        if (sessionId == null) return@LaunchedEffect
+        // 等待会话切换后的程序化滚动（auto-scroll / restore）完成。
+        delay(300)
+        var prevIndex = listState.firstVisibleItemIndex
+        snapshotFlow { listState.firstVisibleItemIndex }
+            .collect { index ->
+                // Guard: saved-position restore 期间的程序化滚动不计入方向判断。
+                if (pendingRestoreSession == sessionId) {
+                    prevIndex = index
+                    return@collect
+                }
+                val delta = index - prevIndex
+                prevIndex = index
+                // Guard: 单帧大跳（auto-scroll 残留 / 极端 fling 边界）。
+                val absDelta = if (delta < 0) -delta else delta
+                if (absDelta > 3) return@collect
+                when {
+                    delta > 0 -> onTabVisibilityChange(true)   // 向上滚（看更旧）→ show
+                    delta < 0 -> onTabVisibilityChange(false)  // 向下滚（看更新）→ hide
                 }
             }
     }
@@ -321,8 +354,7 @@ internal fun ChatMessageList(
                 onFileClick = onFileClick,
                 onOpenSubAgent = onOpenSubAgent,
                 expandedParts = expandedParts,
-                onToggleExpand = onToggleExpand,
-                agentColorAssignments = agentColorAssignments
+                onToggleExpand = onToggleExpand
             )
         }
         if (gapInsertIndex > 0) {
@@ -344,8 +376,7 @@ internal fun ChatMessageList(
                 onFileClick = onFileClick,
                 onOpenSubAgent = onOpenSubAgent,
                 expandedParts = expandedParts,
-                onToggleExpand = onToggleExpand,
-                agentColorAssignments = agentColorAssignments
+                onToggleExpand = onToggleExpand
             )
         }
         if (messages.isNotEmpty() && hasMoreMessages) {

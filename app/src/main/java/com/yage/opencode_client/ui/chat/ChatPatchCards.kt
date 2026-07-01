@@ -274,7 +274,7 @@ internal fun ContextToolGroup(
                     if (expanded) Icons.Default.KeyboardArrowDown else Icons.Default.ChevronRight,
                     contentDescription = if (expanded) "Collapse" else "Expand",
                     modifier = Modifier.size(18.dp),
-                    tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f)
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant
                 )
             }
     

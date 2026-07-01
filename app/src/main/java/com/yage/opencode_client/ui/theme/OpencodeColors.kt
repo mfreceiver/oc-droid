@@ -54,10 +54,9 @@ data class OpencodeColors(
     // 明暗主题变化——深色模式下部分中等饱和度色对比度不足。现纳入 OpencodeColors
     // 由明暗双套分别提供。索引/语义保持不变（agent id → tone index 映射稳定）。
     //
-    // (1) 4 个已知 agent 类型固定色（AgentTone.kt.agentTones）。
-    val agentTones: Map<String, Color>,
-    // (2) 12 个 hash fallback 调色板（AgentTone.kt.colorPalette）。
-    val colorPalette: List<Color>,
+    // 统一 16 色 hash 调色板（agent name hash + workdir hash 共用），按视觉
+    // 区分度排序；作为 agentTone / workdirTone 的唯一色源。
+    val agentPalette: List<Color>,
     // (3) 6 个 git-diff / 文件状态语义色（Color.kt）。
     //   - addedLine/deletedLine：diff 行背景填充（浅色=浅pastel、深色=暗调）。
     //   - modifiedFile/addedFile/deletedFile/untrackedFile：文件状态图标前景。
@@ -108,27 +107,24 @@ internal val LightOpencodeColors = OpencodeColors(
     bgContrast = Color(0xFF242424),
 
     // R-27 浅色：保留原 AgentTone/Color.kt 顶层硬编码值，迁移来源可追溯。
-    // agentTones 4 个已知 agent 类型固定色（与原 AgentTone.kt 一致）。
-    agentTones = mapOf(
-        "ask" to Color(0xFF6CB4EE),
-        "build" to Color(0xFFE8A838),
-        "docs" to Color(0xFF66BB6A),
-        "plan" to Color(0xFFAB7FD0),
-    ),
-    // colorPalette 12 个 hash fallback（与原 AgentTone.kt 顺序一致，索引稳定）。
-    colorPalette = listOf(
-        Color(0xFF5B9BD5), // steel blue
-        Color(0xFFED7D31), // orange
-        Color(0xFF70AD47), // green
-        Color(0xFF9B72CF), // purple
-        Color(0xFFE06666), // coral
-        Color(0xFF4ECDC4), // teal
-        Color(0xFFF4B942), // golden
-        Color(0xFF6C8EBF), // slate blue
-        Color(0xFFCC6B99), // rose
-        Color(0xFF7EC8A0), // mint
-        Color(0xFFD4A76A), // tan
-        Color(0xFF8FBCBB), // dark cyan
+    // agentPalette 统一 16 色 hash 调色板，作为 agent name hash / workdir hash 的唯一色源。
+    agentPalette = listOf(
+        Color(0xFF6CB4EE), // 浅蓝 (原 ask)
+        Color(0xFFE8A838), // 橙 (原 build)
+        Color(0xFF66BB6A), // 绿 (原 docs)
+        Color(0xFFAB7FD0), // 紫 (原 plan)
+        Color(0xFF5B9BD5), // 钢蓝
+        Color(0xFFED7D31), // 橙
+        Color(0xFF70AD47), // 绿
+        Color(0xFF9B72CF), // 紫
+        Color(0xFFE06666), // 珊瑚
+        Color(0xFF4ECDC4), // 青绿
+        Color(0xFFF4B942), // 金
+        Color(0xFF6C8EBF), // 石板蓝
+        Color(0xFFCC6B99), // 玫瑰
+        Color(0xFF7EC8A0), // 薄荷
+        Color(0xFFD4A76A), // 棕褐
+        Color(0xFF8FBCBB), // 深青
     ),
     // git-diff / 文件状态语义色（与原 Color.kt 一致；addedLine/deletedLine 为
     // 行背景 pastel，modifiedFile/addedFile/deletedFile/untrackedFile 为图标前景）。
@@ -176,31 +172,31 @@ internal val DarkOpencodeColors = OpencodeColors(
     bgContrast = Color(0xFF5C5C5C),
 
     // R-27 深色：在 DarkBackground #080808 上保证 ≥ 3:1 图形对比度。原则：
-    // (a) agentTones/colorPalette 的中等饱和度色整体向 HSL 亮度 +8~12% 提亮，
+    // (a) agentPalette 的中等饱和度色整体向 HSL 亮度 +8~12% 提亮，
     //     避免在纯黑背景上发闷；已高亮的色（如 teal/golden）维持。
     // (b) addedLine/deletedLine 是行背景填充——深色下切换为暗调有色底
     //     （呼应 stateSuccessBg/stateDangerBg 风格），保持 +N/-M 行的可读性。
     // (c) modifiedFile/addedFile/deletedFile/untrackedFile 是文件状态图标前景，
     //     各自取 Material 200 色阶（更亮）保证图标在暗背景上清晰。
-    agentTones = mapOf(
-        "ask" to Color(0xFF7CC4F4),   // #6CB4EE +~10% L
-        "build" to Color(0xFFF5BC4C), // #E8A838 +~10% L
-        "docs" to Color(0xFF81C784),  // #66BB6A → green 300
-        "plan" to Color(0xFFC09BE0),  // #AB7FD0 +~10% L
-    ),
-    colorPalette = listOf(
-        Color(0xFF7AB8E8), // steel blue +L
-        Color(0xFFFF9352), // orange +L
-        Color(0xFF8BC34A), // green → light green 500
-        Color(0xFFB891E0), // purple +L
-        Color(0xFFF08080), // coral → light coral
-        Color(0xFF6FE0D7), // teal +L
-        Color(0xFFFFCB5E), // golden +L
-        Color(0xFF8AA8D4), // slate blue +L
-        Color(0xFFE088B0), // rose +L
-        Color(0xFF95D8B3), // mint +L
-        Color(0xFFE5BC82), // tan +L
-        Color(0xFFA8D0CF), // dark cyan +L
+    // agentPalette 暗色提亮版：与亮色同顺序，各槽位对应亮色变体的提亮版本，
+    // 保证 #080808 背景上对比度 ≥ 3:1。
+    agentPalette = listOf(
+        Color(0xFF7CC4F4), // 浅蓝 (原 ask +L)
+        Color(0xFFF5BC4C), // 橙 (原 build +L)
+        Color(0xFF81C784), // 绿 (原 docs → green 300)
+        Color(0xFFC09BE0), // 紫 (原 plan +L)
+        Color(0xFF7AB8E8), // 钢蓝 +L
+        Color(0xFFFF9352), // 橙 +L
+        Color(0xFF8BC34A), // 绿 → light green 500
+        Color(0xFFB891E0), // 紫 +L
+        Color(0xFFF08080), // 珊瑚 → light coral
+        Color(0xFF6FE0D7), // 青绿 +L
+        Color(0xFFFFCB5E), // 金 +L
+        Color(0xFF8AA8D4), // 石板蓝 +L
+        Color(0xFFE088B0), // 玫瑰 +L
+        Color(0xFF95D8B3), // 薄荷 +L
+        Color(0xFFE5BC82), // 棕褐 +L
+        Color(0xFFA8D0CF), // 深青 +L
     ),
     addedLine = Color(0xFF14361D),     // 暗绿底（pastel → dark tint）
     deletedLine = Color(0xFF3A1517),   // 暗红底
