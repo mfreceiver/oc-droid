@@ -1,4 +1,4 @@
-# AGENTS.md - opencode_android_client (mfreceiver fork)
+# AGENTS.md - ocdroid (mfreceiver fork)
 
 > 本仓库是上游 [grapeot/opencode_android_client](https://github.com/grapeot/opencode_android_client) 的自建 Git fork，用于持续开发并定期同步上游。
 > 本文件是给在此仓库工作的 agent 的操作指引。完整同步策略见 `FORK_SYNC.md`，构建细节见 `docs/build-apk.md`。
@@ -94,7 +94,7 @@ git checkout dev && git rebase master        # 必要时 git push --force-with-l
 
 ## Remote 与上游同步
 
-- `origin` = 自建 Git：`https://git.vectory.cn:18443/mfreceiver/opencode_android_client.git`（日常推送目标）。
+- `origin` = 自建 Git：`https://git.vectory.cn:18443/mfreceiver/oc-droid.git`（日常推送目标）。
 - `upstream` = GitHub 源：`grapeot/opencode_android_client`（只读拉取）。
 - 一键同步：`bash scripts/sync-upstream.sh [--rebase]`（fetch 上游+tag → 同步 master → 推 origin）。
 - 上游的 `feat/*`、`fix/*` 分支已镜像备查；**不要**主动并入 dev，等上游合并后自动随 master 进入。需要提前试用某未合并功能时，临时 `git checkout -b trial upstream/<分支>`，不并入 dev。
@@ -115,7 +115,7 @@ git checkout dev && git rebase master        # 必要时 git push --force-with-l
 ## 常见问题
 
 - **Java 找不到 / gradlew 失败**：先 `export JAVA_HOME=/home/mar/android-studio/jbr`（见上）。
-- **Run 报 Module not found**：Android Studio → File → Sync Project with Gradle Files；仍失败 → Invalidate Caches / Restart。Run 配置用 module `opencode_client.app`（settings.gradle.kts 的 rootProject.name + `:app`）。
+- **Run 报 Module not found**：Android Studio → File → Sync Project with Gradle Files；仍失败 → Invalidate Caches / Restart。Run 配置用 module `ocdroid.app`（settings.gradle.kts 的 rootProject.name + `:app`）。
 - **构建慢**：开 Gradle 配置缓存（见上）。
 - **缺 `local.properties`**：见「构建环境」末尾的 `printf` 命令。
 

@@ -1013,7 +1013,7 @@ class SSHKeyManager(context: Context) {
 ```
 app/
 ├── src/main/
-│   ├── java/com/yage/opencode_client/
+│   ├── java/cn/vectory/ocdroid/
 │   │   ├── OpenCodeApp.kt            # Application 类
 │   │   ├── MainActivity.kt           # 入口 Activity
 │   │   ├── data/

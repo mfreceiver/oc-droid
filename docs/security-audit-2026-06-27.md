@@ -1,6 +1,6 @@
 # 安全审计报告
 
-> **审计项目**：opencode_android_client（mfreceiver fork）
+> **审计项目**：ocdroid（mfreceiver fork）
 > **项目版本**：`0.1.20260622`（versionName）
 > **审计日期**：2026-06-27
 > **审计基线**：上游基点 `v0.1.20260622` @ `ec517f1`；dev HEAD @ `27b4dc0`（dev 领先上游 5 个自定义提交）

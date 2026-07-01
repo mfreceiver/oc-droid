@@ -5,7 +5,7 @@
 # Kotlinx Serialization - keep @Serializable class names for reflection
 -keepattributes *Annotation*, InnerClasses, Signature
 -dontwarn kotlinx.serialization.**
--keep,includedescriptorclasses class com.yage.opencode_client.data.model.** { *; }
+-keep,includedescriptorclasses class cn.vectory.ocdroid.data.model.** { *; }
 
 # EncryptedSharedPreferences / Tink - errorprone annotations are compile-only
 -dontwarn com.google.errorprone.annotations.**
@@ -45,7 +45,7 @@
 # --- Added: fix release ParameterizedType / serialization errors ---
 # Retrofit API interface: keep generic return-type signatures so Retrofit reflection
 # sees ParameterizedType (List<Session>, Map<...>) instead of raw Class.
--keep interface com.yage.opencode_client.data.api.OpenCodeApi { *; }
+-keep interface cn.vectory.ocdroid.data.api.OpenCodeApi { *; }
 
 # kotlinx.serialization: keep serializer() reflection (R8 9-compatible form;
 # the official -if/-keep templates with "**$*" are rejected by this R8 version).

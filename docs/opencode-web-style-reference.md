@@ -1,7 +1,7 @@
 # opencode 原生 Web 聊天页样式参考
 
 > 来源：本地参考仓库 `oc-ref/`（`github.com/anomalyco/opencode`，已 gitignore）。
-> 用途：为本 Android 项目（opencode_android_client）的 Compose UI 提供 1:1 视觉还原依据。
+> 用途：为本 Android 项目（ocdroid）的 Compose UI 提供 1:1 视觉还原依据。
 > 两份后台探查（exp-1 结构映射 + exp-2 具体数值）综合产出。
 
 ---

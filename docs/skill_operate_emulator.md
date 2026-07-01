@@ -3,7 +3,7 @@
 ## 元数据
 
 - 类型：API Guide / 操作层
-- 适用场景：需要驱动跑在 Android 模拟器里的 opencode client（`com.yage.opencode_client`）做任何 UI 操作——配置 server、新建/切换 session、发 prompt、读屏幕状态。
+- 适用场景：需要驱动跑在 Android 模拟器里的 opencode client（`cn.vectory.ocdroid`）做任何 UI 操作——配置 server、新建/切换 session、发 prompt、读屏幕状态。
 - 上层 skill：测试任务编排见 `skill_ui_test_tasks.md`，它建立在本 skill 之上。
 - 工具：`ui_driver/`（Python CLI，`.venv/bin/python -m ui_driver`）。完整命令参考、输出 schema、架构见 `ui_driver/README.md`。
 

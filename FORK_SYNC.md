@@ -9,7 +9,7 @@
 
 | Remote | 地址 | 用途 |
 |--------|------|------|
-| `origin` | `https://git.vectory.cn:18443/mfreceiver/opencode_android_client.git` | **自建 Git**，日常开发与推送的目标 |
+| `origin` | `https://git.vectory.cn:18443/mfreceiver/oc-droid.git` | **自建 Git**，日常开发与推送的目标 |
 | `upstream` | `https://github.com/grapeot/opencode_android_client.git` | **上游 GitHub 源**，只用来拉取更新 |
 
 查看当前 remote：

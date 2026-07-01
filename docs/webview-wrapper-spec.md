@@ -405,7 +405,7 @@ webView.webViewClient = object : WebViewClient() {
 
 ## 5. 可复用代码清单
 
-以下代码可从现有项目 `/home/mar/personal_projects/opencode-android/app/src/main/java/com/yage/opencode_client/` **直接复制或微调**到新项目。
+以下代码可从现有项目 `/home/mar/personal_projects/opencode-android/app/src/main/java/cn/vectory/ocdroid/` **直接复制或微调**到新项目。
 
 ### 5.1 数据模型（无需修改）
 

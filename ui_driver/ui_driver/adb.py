@@ -75,7 +75,7 @@ class Adb:
       3. first 'emulator-*' from `adb devices`
     """
 
-    PACKAGE = "com.yage.opencode_client"
+    PACKAGE = "cn.vectory.ocdroid"
     ACTIVITY = ".MainActivity"
 
     def __init__(self, serial: Optional[str] = None, adb_path: Optional[str] = None):

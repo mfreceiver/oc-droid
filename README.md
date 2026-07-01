@@ -1,6 +1,6 @@
-# OpenCode Android Client
+# OCDroid
 
-OpenCode 的原生 Android 客户端，用于远程连接 OpenCode 服务端、发送指令、监控 AI 工作进度、浏览代码变更。
+OCDroid — 基于 OpenCode 协议的原生 Android 客户端，用于远程连接 AI coding agent、发送指令、监控工作进度、浏览代码变更。
 
 ## 功能概述
 
@@ -70,7 +70,7 @@ export PATH="$JAVA_HOME/bin:$PATH"
 ## 项目结构
 
 ```
-app/src/main/java/com/yage/opencode_client/
+app/src/main/java/cn/vectory/ocdroid/
 ├── data/
 │   ├── api/          # REST API 接口、SSE 客户端
 │   ├── model/        # 数据模型（Session、Message、File 等）

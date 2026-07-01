@@ -22,7 +22,7 @@ plugins {
 }
 
 android {
-    namespace = "com.yage.opencode_client"
+    namespace = "cn.vectory.ocdroid"
     compileSdk = 35
 
     defaultConfig {

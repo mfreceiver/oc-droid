@@ -292,9 +292,9 @@ def test_parse_top_activity_main():
     out = (
         "  ResumedActivity in stack=...\n"
         "  topResumedActivity=ActivityRecord{abc u0 "
-        "com.yage.opencode_client/.MainActivity t42}\n"
+        "cn.vectory.ocdroid/.MainActivity t42}\n"
     )
-    assert parsing.parse_top_activity(out) == "com.yage.opencode_client/.MainActivity"
+    assert parsing.parse_top_activity(out) == "cn.vectory.ocdroid/.MainActivity"
 
 
 def test_parse_top_activity_launcher():

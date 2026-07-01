@@ -55,7 +55,7 @@ git diff --stat "$LAST_AUDITED_BASE"..upstream/master \
 ```markdown
 # 安全审计报告（增量）
 
-> **审计项目**：opencode_android_client（mfreceiver fork）
+> **审计项目**：ocdroid（mfreceiver fork）
 > **项目版本**：<versionName，如 0.1.202607xx>
 > **审计日期**：<YYYY-MM-DD>
 > **审计类型**：增量（同步上游后）

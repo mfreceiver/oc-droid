@@ -16,7 +16,7 @@ def _load(name):
 class FakeAdb:
     """Records every action and serves a scripted sequence of XML dumps."""
 
-    PACKAGE = "com.yage.opencode_client"
+    PACKAGE = "cn.vectory.ocdroid"
     ACTIVITY = ".MainActivity"
 
     def __init__(self, xml_sequence, keyboard_shown=False):

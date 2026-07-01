@@ -1,7 +1,7 @@
 # ui_driver
 
 A deterministic adb/uiautomator operation layer for the opencode Android
-client (`com.yage.opencode_client`). It binds the repetitive adb + uiautomator
+client (`cn.vectory.ocdroid`). It binds the repetitive adb + uiautomator
 action sequences into named commands. An AI agent calls a command, reads the
 returned UI tree (JSON on stdout), decides, and calls the next command.
 
@@ -82,7 +82,7 @@ Each entry in `nodes` (flat list, one per uiautomator node):
   "content-desc": "",
   "resource-id": "",
   "class": "android.widget.Button",
-  "package": "com.yage.opencode_client",
+  "package": "cn.vectory.ocdroid",
   "bounds": [560, 800, 1032, 900],
   "center": [796, 850],
   "clickable": true,

@@ -8,7 +8,7 @@ Android 需要对齐 iOS PR #94：Files 中 Markdown 文件默认用 Web Preview
 
 ## 1. 背景
 
-Android 当前 Files Markdown 预览走 `multiplatform-markdown-renderer-m3`，已经支持普通 Markdown 和 data URI 图片，入口在 `app/src/main/java/com/yage/opencode_client/ui/files/FilePreviewPane.kt`。这条路径稳定，但和 iOS 旧 MarkdownUI 一样，不能稳定承载 `<style>`、HTML 卡片、inline SVG 和复杂 visual layout。
+Android 当前 Files Markdown 预览走 `multiplatform-markdown-renderer-m3`，已经支持普通 Markdown 和 data URI 图片，入口在 `app/src/main/java/cn/vectory/ocdroid/ui/files/FilePreviewPane.kt`。这条路径稳定，但和 iOS 旧 MarkdownUI 一样，不能稳定承载 `<style>`、HTML 卡片、inline SVG 和复杂 visual layout。
 
 iOS PR #94 已经验证了另一条路径：本地 bundle 一个 HTML/JS/CSS shell，用 `WKWebView` 渲染 Markdown，经 sanitizer 过滤后展示。Android 需要保留同样的产品语义，但用 Android WebView 与 app assets 实现。
 

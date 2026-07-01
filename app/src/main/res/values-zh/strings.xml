@@ -30,7 +30,7 @@
     <string name="settings_show_password">显示密码</string>
     <string name="settings_hide_password">隐藏密码</string>
     <string name="settings_about">关于</string>
-    <string name="settings_about_description">OpenCode AI coding agent 的原生 Android 客户端。</string>
+    <string name="settings_about_description">OCDroid — 远程连接 AI coding agent 的 Android 原生客户端。</string>
     <string name="settings_version">版本 %1$s</string>
     <string name="settings_traffic">流量统计</string>
     <string name="settings_traffic_reset">重置</string>
@@ -119,8 +119,8 @@
     <string name="host_profile_add_title">添加主机配置</string>
     <string name="host_profile_edit_title">编辑主机配置</string>
     <string name="host_profile_name">配置名称</string>
-    <string name="host_profile_basic_auth_username">OpenCode Basic Auth 用户名（可选）</string>
-    <string name="host_profile_basic_auth_password">OpenCode Basic Auth 密码（可选）</string>
+    <string name="host_profile_basic_auth_username">Basic Auth 用户名（可选）</string>
+    <string name="host_profile_basic_auth_password">Basic Auth 密码（可选）</string>
     <string name="host_profile_tunnel_password">隧道密码</string>
     <string name="host_profile_tunnel_password_label">认证密码（内网穿透）</string>
     <string name="host_allow_insecure_title">接受不安全连接</string>

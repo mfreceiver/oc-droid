@@ -129,7 +129,7 @@
 新建 `ui/theme/OpencodeColors.kt`：
 
 ```kotlin
-package com.yage.opencode_client.ui.theme
+package cn.vectory.ocdroid.ui.theme
 
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.runtime.Composable

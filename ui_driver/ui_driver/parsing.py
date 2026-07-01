@@ -381,7 +381,7 @@ def parse_top_activity(dumpsys_activity_activities: str) -> Optional[str]:
     activities`.
 
     We look for `topResumedActivity` and return the `pkg/.Activity` token from
-    that line (e.g. 'com.yage.opencode_client/.MainActivity'), or None if the
+    that line (e.g. 'cn.vectory.ocdroid/.MainActivity'), or None if the
     line is absent. Some API levels label it `mResumedActivity`; we accept that
     too as a fallback.
     """
