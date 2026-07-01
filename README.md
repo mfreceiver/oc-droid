@@ -94,15 +94,6 @@ app/src/main/java/cn/vectory/ocdroid/
 - EncryptedSharedPreferences（安全存储）
 - Kover（测试覆盖率）
 
-## 文档
-
-- `docs/PRD.md` — 产品需求
-- `docs/RFC.md` — 技术方案
-
-## 姊妹项目
-
-- [OpenCode iOS Client](https://github.com/grapeot/opencode_ios_client) — iOS 原生客户端，功能对等
-
 ## License
 
 本项目基于 [grapeot/opencode_android_client](https://github.com/grapeot/opencode_android_client)（MIT）深度改造。

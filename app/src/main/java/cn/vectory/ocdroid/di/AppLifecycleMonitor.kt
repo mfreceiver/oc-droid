@@ -135,7 +135,7 @@ class AppLifecycleMonitor @Inject constructor(
     /**
      * Hook for [cn.vectory.ocdroid.ui.MainViewModel] to push its
      * `state.error` changes. Per §18.1: when the error changes AND we are in
-     * background, fire an `opencode.errors` notification. Errors are **not**
+     * background, fire an `ocdroid.errors` notification. Errors are **not**
      * snapshot-deduplicated (the spec wants errors to be repeatable).
      */
     fun onAppError(error: String?) {
@@ -296,8 +296,8 @@ class AppLifecycleMonitor @Inject constructor(
     companion object {
         private const val TAG = "AppLifecycleMonitor"
 
-        const val CHANNEL_DECISIONS = "opencode.decisions"
-        const val CHANNEL_ERRORS = "opencode.errors"
+        const val CHANNEL_DECISIONS = "ocdroid.decisions"
+        const val CHANNEL_ERRORS = "ocdroid.errors"
 
         /** Background polling interval per §18.1 (R-A, D1). */
         private const val POLL_INTERVAL_MS = 30_000L

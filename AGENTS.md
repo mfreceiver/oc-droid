@@ -126,4 +126,3 @@ git checkout dev && git rebase master        # 必要时 git push --force-with-l
 - `docs/security-audit-workflow.md` — 同步上游后的差异审计工作流与台账
 - `docs/security-audit-2026-06-27.md` — 安全审计全量基线报告
 - `README.md` — 项目功能与使用说明
-- `docs/PRD.md` / `docs/RFC.md` — 产品需求与技术方案
