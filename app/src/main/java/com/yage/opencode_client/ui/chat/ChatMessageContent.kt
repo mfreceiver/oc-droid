@@ -25,8 +25,11 @@ import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.LiveHelp
+import androidx.compose.material.icons.automirrored.filled.OpenInNew
 import androidx.compose.material.icons.filled.AccountTree
 import androidx.compose.material.icons.filled.Build
+import androidx.compose.material.icons.filled.Checklist
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.ErrorOutline
 import androidx.compose.material.icons.filled.ChevronRight
@@ -36,13 +39,13 @@ import androidx.compose.material.icons.filled.FileOpen
 import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.ExpandLess
 import androidx.compose.material.icons.filled.KeyboardArrowDown
-import androidx.compose.material.icons.automirrored.filled.OpenInNew
 import androidx.compose.material.icons.filled.Psychology
-import androidx.compose.material.icons.filled.RadioButtonUnchecked
+import androidx.compose.material.icons.filled.Public
+import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Terminal
-import androidx.compose.material.icons.filled.TravelExplore
 import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.Checkbox
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -55,7 +58,7 @@ import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
-
+import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateMapOf
@@ -139,9 +142,26 @@ internal fun ChatMessageList(
     val onToggleExpand: (String, Boolean) -> Unit = viewModel::togglePartExpand
     val onCloseGap: () -> Unit = viewModel::closeGap
 
+    // sessionId 在 remember key 里需要——提前取（下面 savedPositions 等也用）。
+    val sessionId = chatState.currentSessionId
+    // 主题实例：sessionId/oc 变化都要重建分配表。Light↔Dark 切换时 oc 实例从
+    // LightOpencodeColors 变为 DarkOpencodeColors（不同的 OpencodeColors data class
+    // 实例），remember(oc) 即能捕获，使分配表里的 Color 全部按新主题重分配。
+    val oc = MaterialTheme.opencode
+
+    // D4: 会话级 agent→color 分配表。SubAgentCard 渲染时贪心写入（未知 agent 按
+    // maximin 从调色板挑离占用色最远的色），保证「同一 agent 名永远同色」且会话内
+    // 相邻 agent 不撞色。
+    //
+    // remember key 含 sessionId + oc：
+    // - sessionId：切换会话清空旧分配，避免上一会话的颜色泄漏到新会话（gpter/glmer
+    //   D4 阻断项）。
+    // - oc：明暗主题切换时 oc 实例变化，整张表重建，所有已分配 Color 按新主题的
+    //   palette/agentTones 重新求解，避免「主题切了但颜色没动」。
+    val agentColorAssignments = remember(sessionId, oc) { mutableStateMapOf<String, Color>() }
+
     val listState = rememberLazyListState()
     var shouldAutoScroll by remember { mutableStateOf(true) }
-    val sessionId = chatState.currentSessionId
     // #3 — per-session scroll-position memory. The map is remembered at a
     // stable call site, so it survives session switches (the listState, by
     // contrast, is a single instance reused across sessions because Compose
@@ -352,7 +372,8 @@ internal fun ChatMessageList(
                 onFileClick = onFileClick,
                 onOpenSubAgent = onOpenSubAgent,
                 expandedParts = expandedParts,
-                onToggleExpand = onToggleExpand
+                onToggleExpand = onToggleExpand,
+                agentColorAssignments = agentColorAssignments
             )
         }
         if (gapInsertIndex > 0) {
@@ -374,7 +395,8 @@ internal fun ChatMessageList(
                 onFileClick = onFileClick,
                 onOpenSubAgent = onOpenSubAgent,
                 expandedParts = expandedParts,
-                onToggleExpand = onToggleExpand
+                onToggleExpand = onToggleExpand,
+                agentColorAssignments = agentColorAssignments
             )
         }
         if (messages.isNotEmpty() && hasMoreMessages) {
@@ -521,7 +543,8 @@ private fun MessageRow(
     onFileClick: (String) -> Unit,
     onOpenSubAgent: (String) -> Unit,
     expandedParts: Map<String, Boolean>,
-    onToggleExpand: (String, Boolean) -> Unit
+    onToggleExpand: (String, Boolean) -> Unit,
+    agentColorAssignments: MutableMap<String, Color>
 ) {
     val isUser = message.isUser
 
@@ -597,6 +620,7 @@ private fun MessageRow(
                         is ToolRenderItem.SubAgent -> SubAgentCard(
                             part = item.part,
                             onOpenSubAgent = onOpenSubAgent,
+                            agentColorAssignments = agentColorAssignments,
                             modifier = Modifier.widthIn(max = MAX_CARD_WIDTH)
                         )
                         is ToolRenderItem.WritePatch -> {
@@ -642,6 +666,7 @@ private fun MessageRow(
                     messageId = message.id,
                     expandedParts = expandedParts,
                     onToggleExpand = onToggleExpand,
+                    agentColorAssignments = agentColorAssignments,
                     modifier = Modifier.fillMaxWidth()
                 )
                 i += 1
@@ -699,6 +724,7 @@ private fun PartView(
     messageId: String,
     expandedParts: Map<String, Boolean>,
     onToggleExpand: (String, Boolean) -> Unit,
+    agentColorAssignments: MutableMap<String, Color>,
     modifier: Modifier = Modifier.fillMaxWidth()
 ) {
     val expandKey = "${messageId}|${part.id}"
@@ -749,7 +775,12 @@ private fun PartView(
         )
         part.isImageAttachment -> ImageFilePart(part, modifier)
         part.isFile -> FileAttachmentPart(part, modifier)
-        part.isSubAgentTask -> SubAgentCard(part, onOpenSubAgent, Modifier.widthIn(max = MAX_CARD_WIDTH))
+        part.isSubAgentTask -> SubAgentCard(
+            part = part,
+            onOpenSubAgent = onOpenSubAgent,
+            agentColorAssignments = agentColorAssignments,
+            modifier = Modifier.widthIn(max = MAX_CARD_WIDTH)
+        )
         part.isTool -> ToolCard(
             part = part,
             onFileClick = onFileClick,
@@ -958,6 +989,7 @@ private fun FolderContents(
     folderName: String,
     entries: List<ToolCardClassifier.DirectoryEntry>
 ) {
+    val oc = MaterialTheme.opencode
     val sorted = remember(entries) {
         entries.sortedWith(
             compareByDescending<ToolCardClassifier.DirectoryEntry> { it.isDirectory }
@@ -992,7 +1024,7 @@ private fun FolderContents(
                         imageVector = if (entry.isDirectory) Icons.Default.Folder else Icons.Default.Description,
                         contentDescription = null,
                         modifier = Modifier.size(18.dp),
-                        tint = MaterialTheme.colorScheme.primary
+                        tint = oc.accentText
                     )
                     Spacer(modifier = Modifier.width(10.dp))
                     Text(
@@ -1027,6 +1059,16 @@ private fun ToolCallsRow(
 ) {
     val expandedKey = "${messageId}|${parts.first().id}"
     val expanded = expandedParts[expandedKey] ?: false
+    // D4: this row is currently unreferenced (superseded by MessageRow's
+    // run-classification); keep a local assignment map so the SubAgentCard
+    // call below still satisfies the anti-collision contract if it is revived.
+    //
+    // 本地兜底 map：ToolCallsRow 没有会话级 sessionId 上下文透传过来，且本 row
+    // 当前死代码（仅当未来复活时才被组合）。其生命周期等同于本 row 的一次组合，
+    // 远短于 ChatMessageList 顶层那张会话级表，因此**不**加 sessionId/oc key——
+    // 切换会话时本 row 也会离开 composition、map 自然释放，不存在跨会话泄漏。
+    // 复活时应改为透传 ChatMessageList 的 session 级 map（见 §145-161）。
+    val agentColorAssignments = remember { mutableStateMapOf<String, Color>() }
     // §5.7 v2 tool-calls row: transparent surface + borderBase + 6dp radius
     // (was surfaceVariant solid + 12dp). Keeps the merged "N tool calls" row
     // visually aligned with the other v2 cards.
@@ -1061,7 +1103,12 @@ private fun ToolCallsRow(
                 Spacer(modifier = Modifier.size(8.dp))
                 parts.forEach { part ->
                     if (part.isSubAgentTask) {
-                        SubAgentCard(part, onOpenSubAgent, Modifier.fillMaxWidth())
+                        SubAgentCard(
+                            part = part,
+                            onOpenSubAgent = onOpenSubAgent,
+                            agentColorAssignments = agentColorAssignments,
+                            modifier = Modifier.fillMaxWidth()
+                        )
                     } else {
                         ToolCard(
                             part = part,
@@ -1205,7 +1252,7 @@ private fun ReasoningCard(
     Surface(
         modifier = modifier.padding(vertical = 1.dp),
         shape = RoundedCornerShape(6.dp),
-        color = Color.Transparent,
+        color = oc.layer03,
         border = BorderStroke(1.dp, oc.borderBase)
     ) {
         Column {
@@ -1317,11 +1364,10 @@ private fun TodoListInline(
     Column(modifier = modifier) {
         todos.forEach { todo ->
             Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                Icon(
-                    imageVector = if (todo.isCompleted) Icons.Default.CheckCircle else Icons.Default.RadioButtonUnchecked,
-                    contentDescription = null,
-                    modifier = Modifier.size(16.dp),
-                    tint = if (todo.isCompleted) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outline
+                Checkbox(
+                    checked = todo.isCompleted,
+                    onCheckedChange = null,
+                    modifier = Modifier.size(20.dp)
                 )
                 Spacer(modifier = Modifier.width(8.dp))
                 Text(
@@ -1361,6 +1407,7 @@ private fun TodoListInline(
 private fun SubAgentCard(
     part: Part,
     onOpenSubAgent: (String) -> Unit,
+    agentColorAssignments: MutableMap<String, Color>,
     modifier: Modifier = Modifier.fillMaxWidth()
 ) {
     val sessionId = part.taskSubSessionId
@@ -1388,13 +1435,32 @@ private fun SubAgentCard(
     val oc = MaterialTheme.opencode
     val statusErrorColor = oc.stateDangerFg
 
+    // D4: agent tone — known agents keep their fixed tone; unknown agents get a
+    // maximin session-stable assignment (farthest from occupied colors) written
+    // back into the shared session map so the same agent name always renders the
+    // same color and adjacent agents don't collide. tone == accentText when no
+    // agent name.
+    //
+    // `agentTone(...)` is read-only and safe in composition; only the write-back
+    // into the session map is deferred to SideEffect to avoid writing state
+    // during composition (gpter/glmer D4 阻断项: composition-phase state write).
+    val tone = if (subAgentName != null) agentTone(subAgentName, oc, agentColorAssignments) else oc.accentText
+    SideEffect {
+        if (subAgentName != null) {
+            val key = subAgentName.trim().lowercase()
+            if (key !in oc.agentTones && key !in agentColorAssignments) {
+                agentColorAssignments[key] = tone
+            }
+        }
+    }
+
     Surface(
         modifier = modifier
             .padding(vertical = 1.dp)
             .testTag("toolcard.subagent$tagSuffix")
             .then(if (canOpen) Modifier.clickable { onOpenSubAgent(sessionId!!) } else Modifier),
         shape = RoundedCornerShape(6.dp),
-        color = Color.Transparent,
+        color = oc.layer02,
         border = BorderStroke(1.dp, oc.borderBase)
     ) {
         Column(modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)) {
@@ -1404,14 +1470,14 @@ private fun SubAgentCard(
                     Icons.Default.AccountTree,
                     contentDescription = null,
                     modifier = Modifier.size(14.dp),
-                    tint = if (subAgentName != null) agentTone(subAgentName, oc) else oc.accentText
+                    tint = tone
                 )
                 Spacer(modifier = Modifier.width(4.dp))
                 // Status icon: spinner while running, warning on error, nothing on done
                 when {
                     isRunning -> CircularProgressIndicator(
                         modifier = Modifier.size(14.dp),
-                        color = if (subAgentName != null) agentTone(subAgentName, oc) else oc.accentText,
+                        color = tone,
                         strokeWidth = 2.dp
                     )
                     isError -> Icon(
@@ -1429,7 +1495,7 @@ private fun SubAgentCard(
                     Text(
                         text = "@$subAgentName",
                         style = MaterialTheme.typography.labelSmall,
-                        color = agentTone(subAgentName, oc),
+                        color = tone,
                         fontWeight = FontWeight.Bold,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis
@@ -1662,20 +1728,28 @@ private const val MAX_SAVED_SESSIONS = 30
 
 /**
  * Picks the Material icon for a tool based on its name (lowercased, prefix-matched).
- *  - read/grep/glob/list → FileOpen (file inspection)
- *  - edit/write/patch/apply_patch → Edit (file mutation)
- *  - bash/terminal/cmd → Terminal (shell)
+ *  - question             → LiveHelp (clarifying question tool)
+ *  - webfetch             → Public (web fetch)
+ *  - task                 → AccountTree (sub-agent task)
+ *  - todowrite/todoread   → Checklist (todo management)
+ *  - read/list            → FileOpen (file inspection)
+ *  - glob/grep            → Search (file search)
+ *  - edit/write/apply_patch/patch → Edit (file mutation)
+ *  - bash/terminal/cmd/shell      → Terminal (shell)
  *  - anything else → Build (generic tool)
+ *
+ * Prefix branches are ordered so more specific tool names win over generic
+ * prefixes (e.g. `webfetch` before `read`, `todowrite` before `read`).
  */
-private fun toolIcon(toolName: String?): androidx.compose.ui.graphics.vector.ImageVector {
+internal fun toolIcon(toolName: String?): androidx.compose.ui.graphics.vector.ImageVector {
     val lower = toolName?.lowercase() ?: return Icons.Default.Build
     return when {
-        lower.startsWith("read") ||
-            lower.startsWith("grep") ||
-            lower.startsWith("glob") ||
-            lower.startsWith("list") ||
-            lower.startsWith("todoread") ||
-            lower.startsWith("webfetch") -> Icons.Default.FileOpen
+        lower.startsWith("question") -> Icons.AutoMirrored.Filled.LiveHelp
+        lower.startsWith("webfetch") -> Icons.Default.Public
+        lower.startsWith("task") -> Icons.Default.AccountTree
+        lower.startsWith("todowrite") || lower.startsWith("todoread") -> Icons.Default.Checklist
+        lower.startsWith("read") || lower.startsWith("list") -> Icons.Default.FileOpen
+        lower.startsWith("glob") || lower.startsWith("grep") -> Icons.Default.Search
         lower.startsWith("edit") ||
             lower.startsWith("write") ||
             lower.startsWith("apply_patch") ||
@@ -1775,7 +1849,7 @@ private fun ToolCard(
     Surface(
         modifier = modifier.padding(vertical = 2.dp),
         shape = RoundedCornerShape(6.dp),
-        color = Color.Transparent,
+        color = oc.layer02,
         border = BorderStroke(1.dp, oc.borderBase)
     ) {
         CompositionLocalProvider(LocalContentColor provides MaterialTheme.colorScheme.onSurfaceVariant) {
@@ -1968,7 +2042,7 @@ private fun PatchCard(
             .padding(vertical = 1.dp)
             .testTag("toolcard.patch.$basename"),
         shape = RoundedCornerShape(6.dp),
-        color = Color.Transparent,
+        color = oc.layer02,
         border = BorderStroke(1.dp, oc.borderBase)
     ) {
         Column {
@@ -1980,7 +2054,7 @@ private fun PatchCard(
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Icon(
-                    Icons.Default.Edit,
+                    toolIcon(part.tool),
                     contentDescription = null,
                     modifier = Modifier.size(14.dp),
                     tint = MaterialTheme.colorScheme.onSurfaceVariant
@@ -2134,7 +2208,7 @@ private fun BasicTool(
     Surface(
         modifier = modifier.padding(vertical = 1.dp),
         shape = RoundedCornerShape(6.dp),
-        color = Color.Transparent,
+        color = oc.layer02,
         border = BorderStroke(1.dp, oc.borderBase)
     ) {
     Column {
@@ -2148,6 +2222,13 @@ private fun BasicTool(
                 ),
             verticalAlignment = Alignment.CenterVertically
         ) {
+            Icon(
+                toolIcon(toolName),
+                contentDescription = null,
+                modifier = Modifier.size(14.dp),
+                tint = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            Spacer(modifier = Modifier.width(6.dp))
             if (canExpand) {
                 Icon(
                     if (expanded) Icons.Default.KeyboardArrowDown else Icons.Default.ChevronRight,
@@ -2283,7 +2364,7 @@ private fun ContextToolGroup(
     Surface(
         modifier = modifier.padding(vertical = 1.dp),
         shape = RoundedCornerShape(6.dp),
-        color = Color.Transparent,
+        color = oc.layer02,
         border = BorderStroke(1.dp, oc.borderBase)
     ) {
     Column {
@@ -2295,7 +2376,7 @@ private fun ContextToolGroup(
             verticalAlignment = Alignment.CenterVertically
         ) {
             Icon(
-                Icons.Default.TravelExplore,
+                toolIcon(parts.first().tool),
                 contentDescription = null,
                 modifier = Modifier.size(14.dp),
                 tint = MaterialTheme.colorScheme.onSurfaceVariant
@@ -2443,7 +2524,7 @@ private fun CompletedTaskCard(
     Surface(
         modifier = modifier.padding(vertical = 1.dp),
         shape = RoundedCornerShape(6.dp),
-        color = Color.Transparent,
+        color = oc.layer02,
         border = BorderStroke(1.dp, oc.borderBase)
     ) {
         Column(modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)) {

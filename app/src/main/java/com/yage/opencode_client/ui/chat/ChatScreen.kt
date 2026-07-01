@@ -16,9 +16,14 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.SnackbarDuration
+import androidx.compose.material3.SnackbarHost
+import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import androidx.compose.material3.windowsizeclass.WindowSizeClass
+import androidx.compose.material3.windowsizeclass.WindowWidthSizeClass
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.derivedStateOf
@@ -27,6 +32,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -50,12 +56,20 @@ import com.yage.opencode_client.ui.currentHostProfile
 import com.yage.opencode_client.ui.currentSession
 import com.yage.opencode_client.ui.currentSessionStatus
 import com.yage.opencode_client.ui.visibleMessages
-import com.yage.opencode_client.ui.common.AppToast
-import com.yage.opencode_client.ui.common.ToastSeverity
 import com.yage.opencode_client.ui.theme.opencode
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
+
+/**
+ * §B3: provides a [WindowSizeClass] computed once in [com.yage.opencode_client.MainActivity]
+ * via the M3 entry point `calculateWindowSizeClass(activity)`. Screens read it
+ * through this local instead of hand-rolling `LocalConfiguration.current.screenWidthDp >= N`
+ * checks, which drift from the canonical M3 breakpoints (Compact <600,
+ * Medium 600-839, Expanded ≥840). Nullable so previews / unit tests that run
+ * without a provider fall back gracefully rather than crash.
+ */
+val LocalWindowSizeClass = staticCompositionLocalOf<WindowSizeClass?> { null }
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -90,6 +104,11 @@ fun ChatScreen(
     // needs to observe it — toggling a card recomposes only ChatMessageList.
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
+    // §C1: standard M3 Snackbar host. Replaces the former top-aligned AppToast
+    // for both AppState.error and bottom-bar question-submit failures. Mounted
+    // inside the chat-area Box below (BottomCenter); showSnackbar() is driven
+    // by LaunchedEffects keyed on the error sources.
+    val snackbarHostState = remember { SnackbarHostState() }
     val imagePickerLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.GetMultipleContents()
     ) { uris ->
@@ -249,7 +268,8 @@ fun ChatScreen(
     // 🟠-1: surface bottom-bar question-submit failures to the user (the VM's
     // replyQuestion only Log.w's + invokes onError; it does NOT write to
     // AppState.error, and we can't modify MainViewModel this round). This local
-    // error string is rendered as an AppToast (which auto-dismisses after 3s).
+    // error string is surfaced via the M3 Snackbar (see the LaunchedEffect
+    // keyed on it below), which auto-dismisses after its duration elapses.
     var questionSubmitError by remember { mutableStateOf<String?>(null) }
     // 🟠-2: in-flight guard for the bottom-bar question submit — prevents
     // double-submits on slow networks (the in-card Submit already has its own
@@ -265,6 +285,37 @@ fun ChatScreen(
         // has no onSuccess callback (replyQuestion only offers onError), so
         // observing pendingQuestion becoming null is the success signal.
         isSubmittingQuestion = false
+    }
+    // §C1: surface AppState.error via Snackbar (was a top-aligned AppToast that
+    // auto-dismissed after 3s). The LaunchedEffect key is the error value, so a
+    // new error relaunches the effect — `showSnackbar` suspends until the
+    // snackbar finishes its duration (or is dismissed), at which point we clear
+    // the source via `viewModel.clearError()` (the onDismiss-equivalent).
+    // SnackbarHostState serializes concurrent showSnackbar calls, so a
+    // simultaneous global-error + question-error still displays in turn.
+    LaunchedEffect(appStateError) {
+        appStateError?.let { error ->
+            val isTunnelSuccess = error == TUNNEL_SUCCESS_TOAST
+            snackbarHostState.showSnackbar(
+                message = error,
+                duration = if (isTunnelSuccess) SnackbarDuration.Short else SnackbarDuration.Long
+            )
+            viewModel.clearError()
+        }
+    }
+    // §C1: bottom-bar question-submit failure → Snackbar. Same pattern as
+    // above; clears `questionSubmitError` after the snackbar finishes so a new
+    // failure can fire again. Trigger/clear timing is unchanged from the
+    // AppToast era (the `questionSubmitError = null` clear semantics are
+    // preserved exactly).
+    LaunchedEffect(questionSubmitError) {
+        questionSubmitError?.let { error ->
+            snackbarHostState.showSnackbar(
+                message = error,
+                duration = SnackbarDuration.Long
+            )
+            questionSubmitError = null
+        }
     }
     val questionAnswersValid = pendingQuestion?.let { pq ->
         pq.questions.isNotEmpty() &&
@@ -288,14 +339,22 @@ fun ChatScreen(
         // chat area is intentionally empty — the user is mid-composition and
         // the session will materialise on first send. We do not render the
         // "select or create session" empty state in that case.
-        // §10: on wide screens (≥600dp) wrap the conversation area (messages +
-        // composer) in a v2-style card — rounded 10, surface (bg-base), 2dp
-        // elevation, 8dp outer padding. On phone (<600dp) the chat stays
-        // full-bleed for maximum display area (RectangleShape + transparent +
-        // 0 elevation ⇒ an invisible, non-clipping wrapper). The TopBar stays
-        // outside the card either way (a full-width top bar is more natural on
-        // mobile and avoids double-rounded corners at the top).
-        val isWide = LocalConfiguration.current.screenWidthDp >= 600
+        // §10: on wide screens (M3 WindowSizeClass: Medium 600-839dp or
+        // Expanded ≥840dp) wrap the conversation area (messages + composer) in
+        // a v2-style card — rounded 10, surface (bg-base), 2dp elevation, 8dp
+        // outer padding. On phone (Compact <600dp) the chat stays full-bleed
+        // for maximum display area (RectangleShape + transparent + 0 elevation
+        // ⇒ an invisible, non-clipping wrapper). The TopBar stays outside the
+        // card either way (a full-width top bar is more natural on mobile and
+        // avoids double-rounded corners at the top).
+        // §B3: `isWide` follows the M3 WindowSizeClass provided by MainActivity
+        // (Compact vs Medium/Expanded) instead of a hand-rolled `screenWidthDp
+        // >= 600` threshold. The `?: screenWidthDp >= 600` arm is a
+        // preview/test fallback when no provider is mounted — it preserves the
+        // previous behavior in those contexts.
+        val isWide = LocalWindowSizeClass.current
+            ?.let { it.widthSizeClass != WindowWidthSizeClass.Compact }
+            ?: (LocalConfiguration.current.screenWidthDp >= 600)
         val cardShape = if (isWide) RoundedCornerShape(10.dp) else RectangleShape
         Surface(
             modifier = Modifier
@@ -330,8 +389,8 @@ fun ChatScreen(
             }
 
             // §Phase1E stale notice banner — shown after a long (>5min)
-            // background absence. Positioned at TopCenter alongside the error
-            // Snackbar but rendered first so the error (if any) stacks below.
+            // background absence. Positioned at TopCenter so it stays clear of
+            // the bottom-mounted Snackbar (formerly the AppToast sat here too).
             if (chat.staleNotice && chat.currentSessionId != null) {
                 StaleNoticeBanner(
                     onReload = { viewModel.refreshCurrentSession() },
@@ -341,41 +400,17 @@ fun ChatScreen(
                 )
             }
 
-            appStateError?.let { error ->
-                // Toast rendered at the TOP of the chat area so tunnel
-                // activation feedback (and any other error) surfaces in the upper
-                // region of the interface instead of being buried at the bottom.
-                // Severity follows the message identity, not tunnelActivationState
-                // (which is sticky and would poison subsequent errors as "Success").
-                val severity =
-                    if (error == TUNNEL_SUCCESS_TOAST) ToastSeverity.Success
-                    else ToastSeverity.Error
-                AppToast(
-                    message = error,
-                    severity = severity,
-                    modifier = Modifier
-                        .align(Alignment.TopCenter)
-                        .padding(top = 8.dp, start = 16.dp, end = 16.dp, bottom = 16.dp),
-                    onDismiss = { viewModel.clearError() }
-                )
-            }
-
-            // 🟠-1: bottom-bar question-submit failure toast. AppToast
-            // auto-dismisses after 3s when onDismiss != null. Positioned at
-            // TopCenter alongside appStateError; the two are independent
-            // (replyQuestion does not write AppState.error), so simultaneous
-            // display is rare. Offset top so it stacks below a global error
-            // toast rather than overlapping it.
-            questionSubmitError?.let { error ->
-                AppToast(
-                    message = error,
-                    severity = ToastSeverity.Error,
-                    modifier = Modifier
-                        .align(Alignment.TopCenter)
-                        .padding(top = 72.dp, start = 16.dp, end = 16.dp),
-                    onDismiss = { questionSubmitError = null }
-                )
-            }
+            // §C1: M3 Snackbar replaces the former top-aligned AppToast for
+            // both AppState.error (tunnel activation / global errors) and the
+            // bottom-bar question-submit failure. Default bottom placement is
+            // accepted per the migration spec. SnackbarHost is the LAST child
+            // of this Box so it overlays the message list / empty state; the
+            // actual showSnackbar() calls are driven by the LaunchedEffects
+            // keyed on `appStateError` / `questionSubmitError` above.
+            SnackbarHost(
+                hostState = snackbarHostState,
+                modifier = Modifier.align(Alignment.BottomCenter)
+            )
         }
 
         // Input bar is enabled whenever there is either a concrete session OR

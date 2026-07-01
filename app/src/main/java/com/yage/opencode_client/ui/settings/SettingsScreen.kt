@@ -1,5 +1,6 @@
 package com.yage.opencode_client.ui.settings
 
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
@@ -7,6 +8,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.Dns
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.Visibility
 import androidx.compose.material.icons.filled.VisibilityOff
@@ -16,10 +18,11 @@ import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.ListItem
+import androidx.compose.material3.ListItemDefaults
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.RadioButton
-import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -262,51 +265,58 @@ internal fun HostProfileRow(
     onSelect: () -> Unit,
     onEdit: () -> Unit
 ) {
-    Surface(
-        onClick = onOpen,
+    // A3: collapsed the hand-rolled Surface + Row layout onto the M3 ListItem
+    // template (leadingContent = host icon, headlineContent = name,
+    // supportingContent = server URL, trailingContent = the existing
+    // RadioButton + edit affordance). The RadioButton control itself and all
+    // click handlers are preserved verbatim; only the container changed.
+    ListItem(
         modifier = Modifier
             .fillMaxWidth()
+            .clickable { onOpen() }
             .testTag("host.profile.row.${profile.id}"),
-        shape = MaterialTheme.shapes.medium,
-        color = MaterialTheme.colorScheme.surfaceVariant
-    ) {
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 8.dp, vertical = 4.dp),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            RadioButton(
-                selected = selected,
-                onClick = onSelect
+        colors = ListItemDefaults.colors(
+            containerColor = MaterialTheme.colorScheme.surfaceVariant
+        ),
+        leadingContent = {
+            Icon(
+                Icons.Default.Dns,
+                contentDescription = null,
+                tint = MaterialTheme.colorScheme.primary
             )
-            Column(
-                modifier = Modifier
-                    .weight(1f)
-                    .padding(horizontal = 8.dp)
-            ) {
-                Text(
-                    profile.displayName,
-                    style = MaterialTheme.typography.bodyLarge
+        },
+        headlineContent = {
+            Text(
+                profile.displayName,
+                style = MaterialTheme.typography.bodyLarge
+            )
+        },
+        supportingContent = {
+            Text(
+                profile.serverUrl,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
+        },
+        trailingContent = {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                RadioButton(
+                    selected = selected,
+                    onClick = onSelect
                 )
-                Text(
-                    profile.serverUrl,
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis
-                )
-            }
-            // Edit: opens the editor dialog. IconButton consumes the click so
-            // it does not bubble up to the row's Surface onOpen handler.
-            IconButton(onClick = onEdit) {
-                Icon(
-                    Icons.Default.Edit,
-                    contentDescription = stringResource(R.string.host_profile_edit_icon)
-                )
+                // Edit: opens the editor dialog. IconButton consumes the click
+                // so it does not bubble up to the row's onOpen handler.
+                IconButton(onClick = onEdit) {
+                    Icon(
+                        Icons.Default.Edit,
+                        contentDescription = stringResource(R.string.host_profile_edit_icon)
+                    )
+                }
             }
         }
-    }
+    )
 }
 
 @Composable

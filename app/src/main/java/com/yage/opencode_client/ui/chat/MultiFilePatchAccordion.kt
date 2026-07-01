@@ -46,8 +46,8 @@ import androidx.compose.ui.res.stringResource
  * file gets its own row instead of being hidden inside one PatchCard's
  * expanded body.
  *
- * Default state: header expanded on first compose so all file details are
- * visible; collapse via the header toggle.
+ * Default state: collapsed on first compose; per-file rows hidden until
+ * expanded.
  *
  * The header carries the aggregate `+N -M` diff stat (summed across files) and
  * acts as the single expand/collapse toggle. Per-file rows show basename +
@@ -89,15 +89,21 @@ internal fun MultiFilePatchAccordion(
 
     // Single header-level expand toggle (no per-file collapse anymore).
     // rememberSaveable so the state survives config change. Defaults to
-    // expanded so file details are visible on first compose.
-    var expanded by rememberSaveable { mutableStateOf(true) }
+    // collapsed so the chat stays compact; the header carries the aggregate
+    // diff stat and is tapped to reveal per-file rows.
+    //
+    // Keyed on the first Part's id so a reordering / replacement of the patch
+    // list (different leading Part) does not inherit a stale expanded state from
+    // the previous composition slot — the saveable registry otherwise keys by
+    // call-site identity alone.
+    var expanded by rememberSaveable(parts.firstOrNull()?.id) { mutableStateOf(false) }
 
     Surface(
         modifier = modifier
             .padding(vertical = 2.dp)
             .testTag("toolcard.multi_patch.${files.size}"),
         shape = RoundedCornerShape(6.dp),
-        color = androidx.compose.ui.graphics.Color.Transparent,
+        color = oc.layer02,
         border = BorderStroke(1.dp, oc.borderBase)
     ) {
         Column {
@@ -151,67 +157,67 @@ internal fun MultiFilePatchAccordion(
                 )
             }
 
-            // Per-file rows. No per-file collapse anymore: the basename row is
-            // always shown (with its +N -M stat); when the header is expanded
-            // the full path + "open in files" affordance renders directly below.
-            files.forEach { fc ->
-                val path = fc.path
-                val basename = path.substringAfterLast("/").ifEmpty { path }
-                val fileAdd = fc.additions ?: 0
-                val fileDel = fc.deletions ?: 0
-                val isDelete = fc.status?.lowercase() == "delete"
+            // Per-file rows. Rendered only when the header is expanded so the
+            // collapsed card stays a single header line (count + aggregate
+            // diff stat); tapping the header reveals basename + full path rows.
+            if (expanded) {
+                files.forEach { fc ->
+                    val path = fc.path
+                    val basename = path.substringAfterLast("/").ifEmpty { path }
+                    val fileAdd = fc.additions ?: 0
+                    val fileDel = fc.deletions ?: 0
+                    val isDelete = fc.status?.lowercase() == "delete"
 
-                Column(modifier = Modifier.padding(horizontal = 10.dp)) {
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(vertical = 4.dp)
-                            .testTag("toolcard.multi_patch.row.$basename"),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        // Indent so the basename aligns with where the per-file
-                        // chevron used to sit (16.dp icon + 4.dp spacer = 20.dp).
-                        Spacer(modifier = Modifier.width(20.dp))
-                        Text(
-                            text = basename,
-                            style = MaterialTheme.typography.labelMedium,
-                            color = if (isDelete) MaterialTheme.colorScheme.onSurfaceVariant
-                            else MaterialTheme.colorScheme.onSurface,
-                            fontFamily = FontFamily.Monospace,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis,
-                            modifier = Modifier.weight(1f)
-                        )
-                        if (isDelete) {
-                            Spacer(modifier = Modifier.width(6.dp))
+                    Column(modifier = Modifier.padding(horizontal = 10.dp)) {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(vertical = 4.dp)
+                                .testTag("toolcard.multi_patch.row.$basename"),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            // Indent so the basename aligns with where the per-file
+                            // chevron used to sit (16.dp icon + 4.dp spacer = 20.dp).
+                            Spacer(modifier = Modifier.width(20.dp))
                             Text(
-                                text = "deleted",
-                                style = MaterialTheme.typography.labelSmall,
-                                color = oc.stateDangerFg
+                                text = basename,
+                                style = MaterialTheme.typography.labelMedium,
+                                color = if (isDelete) MaterialTheme.colorScheme.onSurfaceVariant
+                                else MaterialTheme.colorScheme.onSurface,
+                                fontFamily = FontFamily.Monospace,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                                modifier = Modifier.weight(1f)
                             )
-                        } else {
-                            if (fileAdd > 0) {
+                            if (isDelete) {
                                 Spacer(modifier = Modifier.width(6.dp))
                                 Text(
-                                    text = "+$fileAdd",
+                                    text = "deleted",
                                     style = MaterialTheme.typography.labelSmall,
-                                    color = oc.stateSuccessFg,
-                                    fontFamily = FontFamily.Monospace
+                                    color = oc.stateDangerFg
                                 )
-                            }
-                            if (fileDel > 0) {
-                                Spacer(modifier = Modifier.width(4.dp))
-                                Text(
-                                    text = "-$fileDel",
-                                    style = MaterialTheme.typography.labelSmall,
-                                    color = oc.stateDangerFg,
-                                    fontFamily = FontFamily.Monospace
-                                )
+                            } else {
+                                if (fileAdd > 0) {
+                                    Spacer(modifier = Modifier.width(6.dp))
+                                    Text(
+                                        text = "+$fileAdd",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = oc.stateSuccessFg,
+                                        fontFamily = FontFamily.Monospace
+                                    )
+                                }
+                                if (fileDel > 0) {
+                                    Spacer(modifier = Modifier.width(4.dp))
+                                    Text(
+                                        text = "-$fileDel",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = oc.stateDangerFg,
+                                        fontFamily = FontFamily.Monospace
+                                    )
+                                }
                             }
                         }
-                    }
 
-                    if (expanded) {
                         Row(
                             modifier = Modifier
                                 .fillMaxWidth()

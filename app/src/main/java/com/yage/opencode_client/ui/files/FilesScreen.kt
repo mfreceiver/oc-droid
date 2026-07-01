@@ -10,21 +10,21 @@ import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.SnackbarHost
+import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.semantics
-import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.yage.opencode_client.R
-import com.yage.opencode_client.ui.common.AppToast
-import com.yage.opencode_client.ui.common.ToastSeverity
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -37,6 +37,15 @@ fun FilesScreen(
 ) {
     val state by viewModel.state.collectAsStateWithLifecycle()
 
+    // C1: error feedback via Snackbar (replaces the former AppToast top overlay).
+    val snackbarHostState = remember { SnackbarHostState() }
+    LaunchedEffect(state.error) {
+        state.error?.let { message ->
+            snackbarHostState.showSnackbar(message)
+            viewModel.clearError()
+        }
+    }
+
     // Refresh once when entering the Files tab so the list is up to date.
     LaunchedEffect(Unit) {
         viewModel.refresh()
@@ -46,7 +55,7 @@ fun FilesScreen(
         viewModel.syncPathToShow(pathToShow, sessionDirectory)
     }
 
-    // The toast is rendered as a sibling overlay (NOT a child of the Column)
+    // The snackbar is rendered as a sibling overlay (NOT a child of the Column)
     // so appearing/disappearing does not push the file tree vertically.
     Box(modifier = Modifier.fillMaxSize()) {
         Column(modifier = Modifier
@@ -113,13 +122,9 @@ fun FilesScreen(
             }
         }
 
-        state.error?.let { message ->
-            AppToast(
-                message = message,
-                severity = ToastSeverity.Error,
-                modifier = Modifier.align(Alignment.TopCenter).padding(16.dp),
-                onDismiss = viewModel::clearError
-            )
-        }
+        SnackbarHost(
+            hostState = snackbarHostState,
+            modifier = Modifier.align(Alignment.BottomCenter)
+        )
     }
 }

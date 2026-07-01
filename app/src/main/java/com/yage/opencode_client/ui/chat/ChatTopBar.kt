@@ -15,10 +15,7 @@ import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.widthIn
-import androidx.compose.foundation.lazy.LazyRow
-import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -46,7 +43,9 @@ import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.PrimaryScrollableTabRow
 import androidx.compose.material3.Surface
+import androidx.compose.material3.Tab
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
@@ -60,7 +59,6 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.draw.clip
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
@@ -373,7 +371,7 @@ internal fun ChatTopBar(
         // R-17 M1: pass only the slices SessionTabStrip reads (instead of the
         // whole ChatTopBarState) so an unrelated state change — e.g.
         // contextUsage / traffic / connection — does not invalidate this
-        // composable. Compose skipping keeps the LazyRow intact as long as
+        // composable. Compose skipping keeps the PrimaryScrollableTabRow intact as long as
         // openSessions / currentSessionId / unreadSessions are structurally
         // equal to the previous call.
         SessionTabStrip(
@@ -497,10 +495,14 @@ private fun truncateTitle(value: String): String =
 
 /**
  * §17: persistent horizontal session tab strip rendered as the TopAppBar's
- * second row. Replaces the former title-slot dropdown switcher. Each tab shows
- * the (truncated) session title, an unread dot when the session received an
- * out-of-band message, and a close-X; the active session is highlighted with
- * the v2 accent color.
+ * second row. Replaces the former title-slot dropdown switcher. Built on the
+     * M3 [PrimaryScrollableTabRow] + [Tab] so we inherit the platform scroll-to-centre
+ * behaviour, the selected-tab indicator, and the standard 48dp touch target
+ * for free. Each tab's `text` slot carries the (truncated) session title, an
+ * unread dot when the session received an out-of-band message, and a close-X
+ * affordance; the active session is highlighted via the v2 accent colour
+     * (passed as [PrimaryScrollableTabRow]'s `contentColor` so the default indicator and
+ * the selected-text tint share the same visual language).
  *
  * Per §17.2 the `openSessions` list is already filtered to root sessions
  * (parentId == null) by ChatScreen, so sub-agent sessions never appear here —
@@ -518,87 +520,91 @@ private fun SessionTabStrip(
     actions: ChatTopBarActions,
     modifier: Modifier = Modifier
 ) {
-    val oc = MaterialTheme.opencode
-    LazyRow(
-        modifier = modifier.fillMaxWidth(),
-        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp),
-        horizontalArrangement = Arrangement.spacedBy(2.dp)
-    ) {
-        items(openSessions, key = { it.id }) { session ->
-            SessionTab(
-                title = session.displayName,
-                isSelected = session.id == currentSessionId,
-                isUnread = session.id in unreadSessions,
-                accentColor = oc.accentText,
-                onSelect = { actions.onSelectSession(session.id) },
-                onClose = { actions.onCloseSession(session.id) }
-            )
-        }
-    }
-}
+    // Empty-list guard: PrimaryScrollableTabRow indexes its indicator by
+    // selectedTabIndex against the tab list, so rendering it with zero tabs
+    // would trip an out-of-bounds when drawing the indicator.
+    if (openSessions.isEmpty()) return
 
-/**
- * A single session tab. The whole row is tappable (selects the session); the
- * trailing X is a nested click target that closes the session. The active tab
- * uses the v2 accent text color + SemiBold weight in lieu of a background fill
- * (keeps the strip visually quiet, matching v2's understated tab treatment).
- */
-@Composable
-private fun SessionTab(
-    title: String,
-    isSelected: Boolean,
-    isUnread: Boolean,
-    accentColor: Color,
-    onSelect: () -> Unit,
-    onClose: () -> Unit
-) {
-    val textColor = if (isSelected) accentColor
-    else MaterialTheme.colorScheme.onSurfaceVariant
-    Row(
-        verticalAlignment = Alignment.CenterVertically,
-        modifier = Modifier
-            .heightIn(min = 36.dp)
-            .clip(RoundedCornerShape(6.dp))
-            .clickable(onClick = onSelect)
-            .padding(horizontal = 10.dp, vertical = 4.dp)
+    val accentColor = MaterialTheme.opencode.accentText
+    // currentSessionId may belong to a sub-agent not present in openSessions
+    // (§17.2 filters to root sessions); coerce into range so the indicator
+    // never indexes past the last tab.
+    val selectedIndex = openSessions
+        .indexOfFirst { it.id == currentSessionId }
+        .coerceAtLeast(0)
+
+    PrimaryScrollableTabRow(
+        selectedTabIndex = selectedIndex,
+        modifier = modifier.fillMaxWidth(),
+        // This is the TopAppBar's second row, so drop the default surface
+        // fill + bottom divider — the strip must blend with the bar above.
+        containerColor = Color.Transparent,
+        divider = {},
+        // contentColor drives both the default selected-tab indicator colour
+        // and the Tab content tint; set it to the v2 accent so the underline
+        // and the active label read as one.
+        contentColor = accentColor,
+        // Match the former LazyRow's 8dp horizontal content padding instead
+        // of the M3 default 52dp (TabRowDefaults.ScrollableTabRowEdgePadding),
+        // which would push the first/last tabs far from the strip edges.
+        edgePadding = 8.dp
     ) {
-        // Unread dot: rendered in the accent color so it reads as "activity"
-        // rather than an error. Cleared by the VM when the session is opened.
-        if (isUnread) {
-            Box(
-                modifier = Modifier
-                    .padding(end = 6.dp)
-                    .size(6.dp)
-                    .background(color = accentColor, shape = CircleShape)
-            )
-        }
-        Text(
-            text = truncateTitle(title),
-            style = MaterialTheme.typography.labelMedium,
-            color = textColor,
-            fontWeight = if (isSelected) FontWeight.SemiBold else FontWeight.Normal,
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis
-        )
-        Spacer(modifier = Modifier.width(4.dp))
-        // Close affordance. R-12 (WCAG 2.5.5): the visual X stays at 14dp but
-        // the touch target is enlarged to 44dp (AAA threshold) via an outer
-        // clickable Box — the former 20dp target was well under the minimum.
-        // Compose's clickable consumes the pointer event, so tapping the X
-        // fires onClose without also triggering the row's select clickable
-        // (standard nested-clickable behavior). The 44dp footprint makes the
-        // tab row slightly taller; acceptable for touch ergonomics.
-        Box(
-            modifier = Modifier
-                .size(44.dp)
-                .clickable(onClick = onClose),
-            contentAlignment = Alignment.Center
-        ) {
-            Icon(
-                Icons.Default.Close,
-                contentDescription = stringResource(R.string.common_close),
-                modifier = Modifier.size(14.dp),
-                tint = MaterialTheme.colorScheme.onSurfaceVariant
+        openSessions.forEach { session ->
+            val isSelected = session.id == currentSessionId
+            Tab(
+                selected = isSelected,
+                onClick = { actions.onSelectSession(session.id) },
+                // Explicit selected/unselected colours keep v2's accent vs
+                // onSurfaceVariant treatment regardless of the M3 default
+                // fading behaviour.
+                selectedContentColor = accentColor,
+                unselectedContentColor = MaterialTheme.colorScheme.onSurfaceVariant,
+                text = {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        // Unread dot: rendered in the accent color so it reads
+                        // as "activity" rather than an error. Cleared by the
+                        // VM when the session is opened.
+                        if (session.id in unreadSessions) {
+                            Box(
+                                modifier = Modifier
+                                    .padding(end = 6.dp)
+                                    .size(6.dp)
+                                    .background(color = accentColor, shape = CircleShape)
+                            )
+                        }
+                        Text(
+                            text = truncateTitle(session.displayName),
+                            style = MaterialTheme.typography.labelMedium,
+                            color = if (isSelected) accentColor
+                            else MaterialTheme.colorScheme.onSurfaceVariant,
+                            fontWeight = if (isSelected) FontWeight.SemiBold
+                            else FontWeight.Normal,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                        Spacer(modifier = Modifier.width(4.dp))
+                        // Close affordance. R-12 (WCAG 2.5.5): the visual X
+                        // stays at 14dp but the touch target is enlarged to
+                        // 44dp (AAA threshold) via an outer clickable Box.
+                        // Compose's clickable consumes the pointer event, so
+                        // tapping the X fires onClose without also triggering
+                        // the Tab's onClick (standard nested-clickable
+                        // behaviour).
+                        Box(
+                            modifier = Modifier
+                                .size(44.dp)
+                                .clickable(onClick = { actions.onCloseSession(session.id) }),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Icon(
+                                Icons.Default.Close,
+                                contentDescription = stringResource(R.string.common_close),
+                                modifier = Modifier.size(14.dp),
+                                tint = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                    }
+                }
             )
         }
     }

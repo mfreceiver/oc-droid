@@ -11,9 +11,8 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Checklist
-import androidx.compose.material.icons.filled.RadioButtonUnchecked
+import androidx.compose.material3.Checkbox
 import androidx.compose.material3.Icon
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
@@ -84,14 +83,10 @@ fun TodoListPanel(
                     .padding(vertical = 6.dp),
                 verticalAlignment = Alignment.Top
             ) {
-                Icon(
-                    imageVector = if (todo.isCompleted) Icons.Default.CheckCircle else Icons.Default.RadioButtonUnchecked,
-                    contentDescription = null,
-                    modifier = Modifier
-                        .size(18.dp)
-                        .padding(top = 2.dp),
-                    tint = if (todo.isCompleted) MaterialTheme.colorScheme.primary
-                    else MaterialTheme.colorScheme.outline
+                Checkbox(
+                    checked = todo.isCompleted,
+                    onCheckedChange = null,
+                    modifier = Modifier.size(20.dp)
                 )
                 Spacer(modifier = Modifier.width(8.dp))
                 Text(

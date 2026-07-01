@@ -24,6 +24,7 @@ import androidx.compose.material.icons.filled.CreateNewFolder
 import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.KeyboardArrowDown
+import androidx.compose.material.icons.filled.SmartToy
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -267,39 +268,39 @@ fun SessionsScreen(
                     val isDraft = workdir == draftWorkdir && sessionsInWorkdir.isEmpty()
 
                     Column(modifier = Modifier.fillMaxWidth()) {
-                        // Workdir header row (click = expand/collapse, long-click = disconnect)
-                        Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .combinedClickable(
-                                    onClick = {
-                                        if (isExpanded) {
-                                            expandedWorkdirs = expandedWorkdirs - workdir
-                                        } else {
-                                            expandedWorkdirs = expandedWorkdirs + workdir
-                                            // Fix #6c: re-fetch this project's directory
-                                            // sessions on expand so a conversation created
-                                            // elsewhere (web) — whose session.created SSE
-                                            // event was missed while backgrounded — appears
-                                            // without a full reconnect. Fire-and-forget; on
-                                            // failure the existing list is kept (onSuccess only).
-                                            viewModel.refreshDirectorySessions(workdir)
-                                        }
-                                    },
-                                    onLongClick = { pendingDisconnectWorkdir = workdir }
+                        // Workdir header row (click = expand/collapse, long-click = disconnect).
+                        // A1: converged the custom Row onto the M3 ListItem. The
+                        // combinedClickable (expand/collapse + long-click disconnect)
+                        // is forwarded via the modifier so the whole row remains the
+                        // gesture target; the browse / create IconButtons in
+                        // trailingContent consume their own taps.
+                        ListItem(
+                            modifier = Modifier.combinedClickable(
+                                onClick = {
+                                    if (isExpanded) {
+                                        expandedWorkdirs = expandedWorkdirs - workdir
+                                    } else {
+                                        expandedWorkdirs = expandedWorkdirs + workdir
+                                        // Fix #6c: re-fetch this project's directory
+                                        // sessions on expand so a conversation created
+                                        // elsewhere (web) — whose session.created SSE
+                                        // event was missed while backgrounded — appears
+                                        // without a full reconnect. Fire-and-forget; on
+                                        // failure the existing list is kept (onSuccess only).
+                                        viewModel.refreshDirectorySessions(workdir)
+                                    }
+                                },
+                                onLongClick = { pendingDisconnectWorkdir = workdir }
+                            ),
+                            leadingContent = {
+                                Icon(
+                                    if (isExpanded) Icons.Default.KeyboardArrowDown
+                                    else Icons.AutoMirrored.Filled.KeyboardArrowRight,
+                                    contentDescription = if (isExpanded) "Collapse" else "Expand",
+                                    tint = MaterialTheme.colorScheme.onSurfaceVariant
                                 )
-                                .padding(horizontal = 16.dp, vertical = 10.dp),
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Icon(
-                                if (isExpanded) Icons.Default.KeyboardArrowDown
-                                else Icons.AutoMirrored.Filled.KeyboardArrowRight,
-                                contentDescription = if (isExpanded) "Collapse" else "Expand",
-                                modifier = Modifier.size(20.dp),
-                                tint = MaterialTheme.colorScheme.onSurfaceVariant
-                            )
-                            Spacer(modifier = Modifier.width(8.dp))
-                            Column(modifier = Modifier.weight(1f)) {
+                            },
+                            headlineContent = {
                                 Row(verticalAlignment = Alignment.CenterVertically) {
                                     Text(
                                         text = displayName,
@@ -321,51 +322,57 @@ fun SessionsScreen(
                                         )
                                     }
                                 }
+                            },
+                            supportingContent = {
                                 Text(
                                     text = workdir,
                                     style = MaterialTheme.typography.bodySmall,
                                     color = MaterialTheme.colorScheme.onSurfaceVariant
                                 )
-                            }
-                            // Browse files for this project (Bug3: relocated
-                            // from the chat tab strip). Scopes the repository
-                            // to this workdir and opens the file-browser overlay.
-                            // R-12 (WCAG 2.5.5): no explicit size override, so
-                            // the IconButton falls back to its 48dp default touch
-                            // target (the former 32dp was below the minimum).
-                            IconButton(
-                                onClick = {
-                                    viewModel.browseFilesInWorkdir(workdir)
+                            },
+                            trailingContent = {
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    // Browse files for this project (Bug3: relocated
+                                    // from the chat tab strip). Scopes the repository
+                                    // to this workdir and opens the file-browser overlay.
+                                    // R-12 (WCAG 2.5.5): no explicit size override, so
+                                    // the IconButton falls back to its 48dp default touch
+                                    // target (the former 32dp was below the minimum).
+                                    IconButton(
+                                        onClick = {
+                                            viewModel.browseFilesInWorkdir(workdir)
+                                        }
+                                    ) {
+                                        Icon(
+                                            Icons.Default.Folder,
+                                            contentDescription = stringResource(R.string.nav_files),
+                                            modifier = Modifier.size(18.dp),
+                                            tint = MaterialTheme.colorScheme.onSurfaceVariant
+                                        )
+                                    }
+                                    // Create-session affordance for this workdir. Tapping
+                                    // it opens a fresh draft against this directory AND
+                                    // jumps to Chat so the user lands in the composer
+                                    // for the new (draft) session. The draft itself is
+                                    // created by createSessionInWorkdir; the navigation
+                                    // is wired here so SessionsScreen stays decoupled
+                                    // from the Chat destination's internals.
+                                    // R-12 (WCAG 2.5.5): 48dp default touch target (was 32dp).
+                                    IconButton(
+                                        onClick = {
+                                            viewModel.createSessionInWorkdir(workdir)
+                                            onSwitchToChat()
+                                        }
+                                    ) {
+                                        Icon(
+                                            Icons.Default.Add,
+                                            contentDescription = stringResource(R.string.sessions_tab_create_session),
+                                            modifier = Modifier.size(18.dp)
+                                        )
+                                    }
                                 }
-                            ) {
-                                Icon(
-                                    Icons.Default.Folder,
-                                    contentDescription = stringResource(R.string.nav_files),
-                                    modifier = Modifier.size(18.dp),
-                                    tint = MaterialTheme.colorScheme.onSurfaceVariant
-                                )
                             }
-                            // Create-session affordance for this workdir. Tapping
-                            // it opens a fresh draft against this directory AND
-                            // jumps to Chat so the user lands in the composer
-                            // for the new (draft) session. The draft itself is
-                            // created by createSessionInWorkdir; the navigation
-                            // is wired here so SessionsScreen stays decoupled
-                            // from the Chat destination's internals.
-                            // R-12 (WCAG 2.5.5): 48dp default touch target (was 32dp).
-                            IconButton(
-                                onClick = {
-                                    viewModel.createSessionInWorkdir(workdir)
-                                    onSwitchToChat()
-                                }
-                            ) {
-                                Icon(
-                                    Icons.Default.Add,
-                                    contentDescription = stringResource(R.string.sessions_tab_create_session),
-                                    modifier = Modifier.size(18.dp)
-                                )
-                            }
-                        }
+                        )
 
                         // Expandable session list within workdir. Use a modest
                         // inset (was start=40dp) so session cards use the full
@@ -514,6 +521,18 @@ private fun SessionCard(
     val updatedText = (session.time?.updated?.takeIf { it > 0L } ?: session.time?.created?.takeIf { it > 0L })
         ?.let { formatTime(it) }
 
+    // Subtitle: the last-updated time always; the workdir basename only
+    // when showWorkdir is true (the connected-projects group omits it
+    // because its header already shows the workdir). Empty when there is
+    // neither a workdir nor a timestamp. Computed up-front so it can feed
+    // ListItem's supportingContent slot.
+    val subtitleParts = buildList {
+        if (showWorkdir) {
+            session.directory.split("/").filter { it.isNotEmpty() }.lastOrNull()?.let { add(it) }
+        }
+        if (updatedText != null) add(updatedText)
+    }
+
     ElevatedCard(
         modifier = Modifier
             .fillMaxWidth()
@@ -524,62 +543,69 @@ private fun SessionCard(
             ),
         elevation = CardDefaults.elevatedCardElevation(defaultElevation = 1.dp)
     ) {
-        Column(modifier = Modifier.padding(12.dp)) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
+        // A1: converged the custom title/subtitle Row onto the M3 ListItem.
+        // leadingContent = agent icon, headlineContent = title, supportingContent
+        // = metadata (workdir • time), trailingContent = archive action + status
+        // / unread indicators. combinedClickable stays on the outer ElevatedCard
+        // so the whole card remains the click/long-click target (archive button
+        // consumes its own taps).
+        ListItem(
+            headlineContent = {
                 Text(
                     text = session.displayName,
                     style = MaterialTheme.typography.bodyMedium.copy(fontWeight = FontWeight.Bold),
-                    color = MaterialTheme.colorScheme.onSurface,
-                    modifier = Modifier.weight(1f)
+                    color = MaterialTheme.colorScheme.onSurface
                 )
-                // 归档 icon on the right edge of the title row. Only rendered
-                // where a handler is supplied (connected-projects expanded list);
-                // omitted from the top "recent sessions" list. IconButton gives a
-                // 48dp touch target (R-12) in a compact right-edge footprint.
-                if (onArchive != null) {
-                    IconButton(onClick = onArchive) {
-                        Icon(
-                            Icons.Default.Archive,
-                            contentDescription = stringResource(R.string.sessions_archive)
+            },
+            supportingContent = if (subtitleParts.isNotEmpty()) {
+                {
+                    Text(
+                        text = subtitleParts.joinToString("  •  "),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            } else null,
+            leadingContent = {
+                Icon(
+                    Icons.Default.SmartToy,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            },
+            trailingContent = {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    // 归档 icon on the right edge. Only rendered where a handler
+                    // is supplied (connected-projects expanded list); omitted
+                    // from the top "recent sessions" list. IconButton gives a
+                    // 48dp touch target (R-12) in a compact right-edge footprint.
+                    if (onArchive != null) {
+                        IconButton(onClick = onArchive) {
+                            Icon(
+                                Icons.Default.Archive,
+                                contentDescription = stringResource(R.string.sessions_archive)
+                            )
+                        }
+                    }
+                    // M6: status indicator. busy → pulsing orange dot, retry →
+                    // solid red dot, idle/none → nothing (avoid visual noise).
+                    // Rendered before the unread dot so both can coexist.
+                    SessionStatusDot(status)
+                    if (isUnread) {
+                        // Small primary-colored unread dot on the right edge.
+                        Box(
+                            modifier = Modifier
+                                .padding(start = 8.dp)
+                                .size(8.dp)
+                                .background(
+                                    color = MaterialTheme.colorScheme.primary,
+                                    shape = CircleShape
+                                )
                         )
                     }
                 }
-                // M6: status indicator. busy → pulsing orange dot, retry → solid
-                // red dot, idle/none → nothing (avoid visual noise). Rendered
-                // before the unread dot so both can coexist on the right edge.
-                SessionStatusDot(status)
-                if (isUnread) {
-                    // Small primary-colored unread dot on the right edge.
-                    Box(
-                        modifier = Modifier
-                            .padding(start = 8.dp)
-                            .size(8.dp)
-                            .background(
-                                color = MaterialTheme.colorScheme.primary,
-                                shape = CircleShape
-                            )
-                    )
-                }
             }
-            Spacer(modifier = Modifier.height(2.dp))
-            // Subtitle: the last-updated time always; the workdir basename only
-            // when showWorkdir is true (the connected-projects group omits it
-            // because its header already shows the workdir). Empty when there is
-            // neither a workdir nor a timestamp.
-            val subtitleParts = buildList {
-                if (showWorkdir) {
-                    session.directory.split("/").filter { it.isNotEmpty() }.lastOrNull()?.let { add(it) }
-                }
-                if (updatedText != null) add(updatedText)
-            }
-            if (subtitleParts.isNotEmpty()) {
-                Text(
-                    text = subtitleParts.joinToString("  •  "),
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-            }
-        }
+        )
     }
 }
 

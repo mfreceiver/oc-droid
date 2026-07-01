@@ -181,15 +181,19 @@ fun markdownTypography(
     h4 = TextStyle(fontFamily = family, fontSize = sizes.h4.sp, fontWeight = FontWeight.Medium),
     h5 = TextStyle(fontFamily = family, fontSize = sizes.h5.sp, fontWeight = FontWeight.Medium),
     h6 = TextStyle(fontFamily = family, fontSize = sizes.h6.sp, fontWeight = FontWeight.Medium),
-    text = TextStyle(fontFamily = family, fontSize = sizes.body.sp),
-    paragraph = TextStyle(fontFamily = family, fontSize = sizes.body.sp),
-    ordered = TextStyle(fontFamily = family, fontSize = sizes.body.sp),
-    bullet = TextStyle(fontFamily = family, fontSize = sizes.body.sp),
-    list = TextStyle(fontFamily = family, fontSize = sizes.body.sp),
-    table = TextStyle(fontFamily = family, fontSize = sizes.body.sp),
-    code = TextStyle(fontSize = sizes.code.sp, fontFamily = FontFamily.Monospace),
+    // D2: explicit tight lineHeight on body/quote/code blocks so multi-line
+    // paragraphs, list items and tables don't inherit mikepenz's roomy default
+    // (≈1.5–1.6×). Tables use 1.3× for denser rows; body/list/quote/code use
+    // 1.4×. inlineCode is left untouched (inline spans don't need line height).
+    text = TextStyle(fontFamily = family, fontSize = sizes.body.sp, lineHeight = (sizes.body * 1.4f).sp),
+    paragraph = TextStyle(fontFamily = family, fontSize = sizes.body.sp, lineHeight = (sizes.body * 1.4f).sp),
+    ordered = TextStyle(fontFamily = family, fontSize = sizes.body.sp, lineHeight = (sizes.body * 1.4f).sp),
+    bullet = TextStyle(fontFamily = family, fontSize = sizes.body.sp, lineHeight = (sizes.body * 1.4f).sp),
+    list = TextStyle(fontFamily = family, fontSize = sizes.body.sp, lineHeight = (sizes.body * 1.4f).sp),
+    table = TextStyle(fontFamily = family, fontSize = sizes.body.sp, lineHeight = (sizes.body * 1.3f).sp),
+    code = TextStyle(fontSize = sizes.code.sp, fontFamily = FontFamily.Monospace, lineHeight = (sizes.code * 1.4f).sp),
     inlineCode = TextStyle(fontSize = sizes.inlineCode.sp, fontFamily = FontFamily.Monospace),
-    quote = TextStyle(fontFamily = family, fontSize = sizes.quote.sp),
+    quote = TextStyle(fontFamily = family, fontSize = sizes.quote.sp, lineHeight = (sizes.quote * 1.4f).sp),
 )
 
 /** Markdown typography with headers one size smaller than default. */

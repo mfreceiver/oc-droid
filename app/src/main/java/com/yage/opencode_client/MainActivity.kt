@@ -33,6 +33,7 @@ import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.map
 import com.yage.opencode_client.ui.MainViewModel
 import com.yage.opencode_client.ui.chat.ChatScreen
+import com.yage.opencode_client.ui.chat.LocalWindowSizeClass
 import com.yage.opencode_client.ui.files.FilesScreen
 import com.yage.opencode_client.ui.files.FilesViewModel
 import com.yage.opencode_client.ui.sessions.SessionsScreen
@@ -159,11 +160,22 @@ class MainActivity : AppCompatActivity() {
             // overlay is full-screen, so Chat is never interactable during a
             // browse — no desync), and matches the product decision to drop the
             // sidebar feature.
+            // §B3: compute the M3 WindowSizeClass once per configuration from
+            // the Activity (the canonical entry point — `calculateWindowSizeClass`
+            // is the stable 1.2.0+ API for deriving Compact / Medium / Expanded
+            // breakpoints from the real window size). Provided via a
+            // CompositionLocal so any descendant screen (ChatScreen etc.) can
+            // read it without each one re-deriving from
+            // LocalConfiguration.screenWidthDp. `@OptIn(ExperimentalMaterial3WindowSizeClassApi)`
+            // is on the MainActivity class.
+            val windowSizeClass = calculateWindowSizeClass(this)
             OpenCodeTheme(
                 darkTheme = darkTheme,
                 markdownFontSizes = settings.markdownFontSizes
             ) {
-                PhoneLayout(viewModel = viewModel, initialPage = lastNavPage)
+                CompositionLocalProvider(LocalWindowSizeClass provides windowSizeClass) {
+                    PhoneLayout(viewModel = viewModel, initialPage = lastNavPage)
+                }
             }
         }
     }
