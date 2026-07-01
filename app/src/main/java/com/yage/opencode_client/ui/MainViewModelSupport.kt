@@ -18,6 +18,23 @@ internal val lenientJson = Json { ignoreUnknownKeys = true }
 internal object MainViewModelTimings {
     const val sessionPageSize = 10
     const val messageRetryDelayMs = 400L
+    /**
+     * Initial message page size when opening a session. Kept small (2) so the
+     * first response stays well under the ResponseSizeGuardInterceptor 16 MB
+     * cap even when a message carries large tool output / patches / base64 —
+     * a limit=5 page was observed to exceed it on big agentic sessions.
+     * Aligns with the web client's initialMessagePageSize. Deeper history is
+     * loaded on demand via loadMoreMessages.
+     */
+    const val initialMessagePageSize = 2
+    /**
+     * Page size for manual "load more history" paging. Larger than the initial
+     * page so deep-history browsing is fast; a typical page stays well under
+     * the 16 MB guard (the web client measures ~3.6 MB for 200 messages). If a
+     * pathological page ever trips the guard, loadMore surfaces the error and
+     * the user can retry — it never blocks opening the session.
+     */
+    const val historyMessagePageSize = 50
     /** Delay before the one-shot title refresh after a new session's first
      *  message (see MainViewModel.scheduleTitleRefreshAfterFirstMessage). The
      *  server generates the title asynchronously in prompt-loop step 1; 5s is

@@ -552,7 +552,7 @@ internal fun launchLoadMessages(
         // X-Next-Cursor for future loadMore; subsequent periodic reloads fetch the
         // latest window only and preserve the cursor so scrolled history stays
         // loadable.
-        repository.getMessagesPaged(sessionId, 5, before = null)
+        repository.getMessagesPaged(sessionId, MainViewModelTimings.initialMessagePageSize, before = null)
             .onSuccess { page ->
                 DebugLog.d("Sync", "fetched ${page.items.size} messages, newestId=${page.items.lastOrNull()?.info?.id ?: "-"}")
                 if (sessionId == state.value.currentSessionId) {
@@ -1020,7 +1020,7 @@ internal fun launchLoadMoreMessages(
     // fetch of the same cursor page.
     state.updateAndSync(slices) { it.copy(isLoadingMessages = true) }
     scope.launch {
-        repository.getMessagesPaged(sessionId, limit = 5, before = cursor)
+        repository.getMessagesPaged(sessionId, limit = MainViewModelTimings.historyMessagePageSize, before = cursor)
             .onSuccess { page ->
                 if (sessionId == state.value.currentSessionId) {
                     if (page.items.isNotEmpty()) {

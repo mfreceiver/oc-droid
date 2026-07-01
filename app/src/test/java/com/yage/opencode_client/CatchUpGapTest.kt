@@ -248,7 +248,7 @@ class CatchUpGapTest {
             msg("t2", 200L, "user"),
             msg("t3", 300L, "assistant")
         )
-        coEvery { repository.getMessagesPaged("s1", 5, null) } returns Result.success(MessagesPage(tail, "tail-cursor"))
+        coEvery { repository.getMessagesPaged("s1", any(), null) } returns Result.success(MessagesPage(tail, "tail-cursor"))
 
         launchLoadMessages(this, repository, state, "s1", resetLimit = false)
         advanceUntilIdle()
@@ -348,7 +348,7 @@ class CatchUpGapTest {
         )
         val repository = repo()
         val fresh = listOf(msg("Z", 500L, "assistant"))
-        coEvery { repository.getMessagesPaged("s1", 5, null) } returns Result.success(MessagesPage(fresh, null))
+        coEvery { repository.getMessagesPaged("s1", any(), null) } returns Result.success(MessagesPage(fresh, null))
 
         launchLoadMessages(this, repository, state, "s1", resetLimit = true)
         advanceUntilIdle()

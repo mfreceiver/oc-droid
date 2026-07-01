@@ -1313,7 +1313,7 @@ class MainViewModelTest {
                 )
             )
         )
-        coEvery { repository.getMessagesPaged("session-1", 5, any()) } returns Result.success(MessagesPage(messages, null))
+        coEvery { repository.getMessagesPaged("session-1", any(), any()) } returns Result.success(MessagesPage(messages, null))
 
         val viewModel = createViewModel()
         updateState(viewModel) { it.copy(currentSessionId = "session-1") }
@@ -1605,7 +1605,7 @@ class MainViewModelTest {
     @Test
     fun `handleSSEEvent missing delta clears streaming state and refreshes messages`() = runTest {
         val messages = listOf(MessageWithParts(info = Message(id = "a2", role = "assistant")))
-        coEvery { repository.getMessagesPaged("session-1", 5, any()) } returns Result.success(MessagesPage(messages, null))
+        coEvery { repository.getMessagesPaged("session-1", any(), any()) } returns Result.success(MessagesPage(messages, null))
         val viewModel = createViewModel()
         updateState(viewModel) {
             it.copy(
@@ -1666,7 +1666,7 @@ class MainViewModelTest {
         // reload that reconciles against the now-persisted authoritative window
         // and clears the overlay (status is now idle, so the gated clear runs).
         val messages = listOf(MessageWithParts(info = Message(id = "a1", role = "assistant")))
-        coEvery { repository.getMessagesPaged("session-1", 5, any()) } returns Result.success(MessagesPage(messages, null))
+        coEvery { repository.getMessagesPaged("session-1", any(), any()) } returns Result.success(MessagesPage(messages, null))
         val viewModel = createViewModel()
         val streaming = mapOf("part-1" to "partial")
         val reasoning = Part(id = "part-1", messageId = "message-1", sessionId = "session-1", type = "reasoning")
@@ -2137,7 +2137,7 @@ class MainViewModelTest {
     @Test
     fun `handleSSEEvent message created refreshes messages for current session`() = runTest {
         val messages = listOf(MessageWithParts(info = Message(id = "m1", role = "assistant")))
-        coEvery { repository.getMessagesPaged("session-1", 5, any()) } returns Result.success(MessagesPage(messages, null))
+        coEvery { repository.getMessagesPaged("session-1", any(), any()) } returns Result.success(MessagesPage(messages, null))
         coEvery { repository.getSessions(100) } returns Result.success(
             listOf(com.yage.opencode_client.data.model.Session(id = "session-1", directory = "/tmp/project"))
         )
@@ -2170,7 +2170,7 @@ class MainViewModelTest {
         // else the partial overlay would mask the finalized part.text in the UI.
         val finalizedPart = Part(id = "p1", messageId = "m1", sessionId = "session-1", type = "text", text = "Hello world!")
         val messages = listOf(MessageWithParts(info = Message(id = "m1", role = "assistant"), parts = listOf(finalizedPart)))
-        coEvery { repository.getMessagesPaged("session-1", 5, any()) } returns Result.success(MessagesPage(messages, null))
+        coEvery { repository.getMessagesPaged("session-1", any(), any()) } returns Result.success(MessagesPage(messages, null))
 
         val viewModel = createViewModel()
         updateState(viewModel) {
@@ -2568,9 +2568,9 @@ class MainViewModelTest {
         // cache this would silently lose m_a2.
         val aMessagesRefresh = listOf(MessageWithParts(info = Message(id = "m_a1", role = "user")))
 
-        coEvery { repository.getMessagesPaged("session-A", 5, any()) } returns
+        coEvery { repository.getMessagesPaged("session-A", any(), any()) } returns
             Result.success(MessagesPage(aMessagesInitial, null))
-        coEvery { repository.getMessagesPaged("session-B", 5, any()) } returns
+        coEvery { repository.getMessagesPaged("session-B", any(), any()) } returns
             Result.success(MessagesPage(bMessages, null))
 
         val viewModel = createViewModel()
@@ -2599,7 +2599,7 @@ class MainViewModelTest {
 
         // Re-mock A: now the server "returns" only m_a1. Without the cache
         // this would silently lose m_a2.
-        coEvery { repository.getMessagesPaged("session-A", 5, any()) } returns
+        coEvery { repository.getMessagesPaged("session-A", any(), any()) } returns
             Result.success(MessagesPage(aMessagesRefresh, null))
 
         // Switch back to A — cached [m_a1, m_a2] should be restored and the
@@ -2642,15 +2642,15 @@ class MainViewModelTest {
         // mockk: when multiple stubs match a call, the LAST registered wins.
         // Register the generic fallback FIRST so the specific stubs below
         // override it (otherwise `any()` would shadow both specific matchers).
-        coEvery { repository.getMessagesPaged("session-A", 5, any()) } returns
+        coEvery { repository.getMessagesPaged("session-A", any(), any()) } returns
             Result.success(MessagesPage(aLatest, "cursor-1"))
         // Initial open uses before=null.
-        coEvery { repository.getMessagesPaged("session-A", 5, null) } returns
+        coEvery { repository.getMessagesPaged("session-A", any(), null) } returns
             Result.success(MessagesPage(aLatest, "cursor-1"))
         // loadMore uses before="cursor-1" and returns the older page (no next).
-        coEvery { repository.getMessagesPaged("session-A", 5, "cursor-1") } returns
+        coEvery { repository.getMessagesPaged("session-A", any(), "cursor-1") } returns
             Result.success(MessagesPage(aOlder, null))
-        coEvery { repository.getMessagesPaged("session-B", 5, any()) } returns
+        coEvery { repository.getMessagesPaged("session-B", any(), any()) } returns
             Result.success(MessagesPage(emptyList(), null))
 
         val viewModel = createViewModel()
@@ -2711,7 +2711,7 @@ class MainViewModelTest {
         }
         // Each session returns one unique message so we can verify eviction.
         for (i in 1..13) {
-            coEvery { repository.getMessagesPaged("session-$i", 5, any()) } returns
+            coEvery { repository.getMessagesPaged("session-$i", any(), any()) } returns
                 Result.success(
                     MessagesPage(
                         listOf(MessageWithParts(info = Message(id = "m-$i", role = "user"))),
@@ -2758,7 +2758,7 @@ class MainViewModelTest {
             it.copy(sessions = (1..13).map { i -> Session(id = "session-$i", directory = "/tmp/$i") })
         }
         for (i in 1..13) {
-            coEvery { repository.getMessagesPaged("session-$i", 5, any()) } returns
+            coEvery { repository.getMessagesPaged("session-$i", any(), any()) } returns
                 Result.success(MessagesPage(emptyList(), null))
         }
 
@@ -2810,7 +2810,7 @@ class MainViewModelTest {
         // does not affect what we are asserting.
         coEvery { repository.checkHealth() } returns Result.failure(IllegalStateException("offline"))
 
-        coEvery { repository.getMessagesPaged("session-A", 5, any()) } returns
+        coEvery { repository.getMessagesPaged("session-A", any(), any()) } returns
             Result.success(
                 MessagesPage(
                     listOf(MessageWithParts(info = Message(id = "m_a1", role = "user"))),
@@ -2853,7 +2853,7 @@ class MainViewModelTest {
 
     @Test
     fun `refreshCurrentSession is a no-op while a load is in flight`() = runTest {
-        coEvery { repository.getMessagesPaged("session-A", 5, any()) } coAnswers {
+        coEvery { repository.getMessagesPaged("session-A", any(), any()) } coAnswers {
             delay(100)
             Result.success(MessagesPage(emptyList(), null))
         }
@@ -2866,7 +2866,7 @@ class MainViewModelTest {
         viewModel.refreshCurrentSession()
         advanceUntilIdle()
 
-        coVerify(exactly = 1) { repository.getMessagesPaged("session-A", 5, any()) }
+        coVerify(exactly = 1) { repository.getMessagesPaged("session-A", any(), any()) }
     }
 
     @Test
@@ -2880,7 +2880,7 @@ class MainViewModelTest {
         // all are wiped.
         val older = Message(id = "m_older", role = "user")
         val fresh = MessageWithParts(info = Message(id = "m_fresh", role = "assistant"))
-        coEvery { repository.getMessagesPaged("session-A", 5, any()) } returns
+        coEvery { repository.getMessagesPaged("session-A", any(), any()) } returns
             Result.success(MessagesPage(listOf(fresh), null))
 
         val viewModel = createViewModel()
@@ -2917,7 +2917,7 @@ class MainViewModelTest {
         // even if the corresponding message.updated event missed the local
         // view. The overlay-clear in launchLoadMessages is gated on !busy, so
         // this reload does NOT disrupt any in-flight streaming overlay.
-        coEvery { repository.getMessagesPaged("session-1", 5, any()) } returns
+        coEvery { repository.getMessagesPaged("session-1", any(), any()) } returns
             Result.success(MessagesPage(emptyList(), null))
         val viewModel = createViewModel()
         updateState(viewModel) { it.copy(currentSessionId = "session-1") }
