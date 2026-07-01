@@ -721,7 +721,7 @@ internal fun launchLoadMessagesWithRetry(
  *    traffic saving). Any pre-existing open gap is preserved as-is.
  * 3. Otherwise fetch the latest-4 (sentinel) and merge (resetLimit=false
  *    semantics: keep older history + cursor + streaming overlay), then run
- *    gap detection. §省流 M2 / gpter 致命#4 (sentinel off-by-one): reload
+     *    gap detection. M2 / gpter 致命#4 (sentinel off-by-one): reload
  *    pulls 4 (3 display + 1 sentinel). If the anchor (pre-reload newest) is
  *    anywhere in the fetched window — INCLUDING the 4th sentinel slot — the
  *    tail is contiguous → no gap. This makes the "exactly N new" boundary
@@ -793,7 +793,7 @@ internal fun launchCatchUp(
                 val mergedMessages = olderKept + fetchedMessages
                 val mergedParts = state.value.partsByMessage.filterKeys { id -> id in olderKeptIds } + fetchedParts
 
-                // §省流 M2 / gpter 致命#4 (sentinel gap detection): the anchor
+                // M2 / gpter 致命#4 (sentinel gap detection): the anchor
                 // (pre-reload newest) ANYWHERE in the fetched 4-window — including
                 // the 4th sentinel slot — means the tail is contiguous → no gap.
                 // Fetching 4 (not 3) ensures the "exactly 3 new" boundary lands
@@ -871,7 +871,7 @@ internal fun launchCatchUp(
 }
 
 /**
- * §省流 M2 default gap-closure step (messages per page) and the auto-closure
+ * Default gap-closure step (messages per page) and the auto-closure
  * budget cap. Auto-closure pages `step` messages at a time from the gap's
  * [GapInfo.tailOldestCursor]; after [GAP_CLOSE_MAX_STEPS] pages without
  * reaching the anchor it stops and leaves the gap hint (open [GapInfo]) for a
@@ -881,7 +881,7 @@ internal const val GAP_CLOSE_STEP_DEFAULT = 3
 internal const val GAP_CLOSE_MAX_STEPS = 5
 
 /**
- * §Phase1C gap closure (loadMore-style), extended by §省流 M2.
+ * §Phase1C gap closure (loadMore-style).
  *
  * Pages OLDER from the gap's [GapInfo.tailOldestCursor] in steps of [step]
  * messages until the [GapInfo.anchorNewestId] reappears (gap closed → clear
@@ -891,7 +891,7 @@ internal const val GAP_CLOSE_MAX_STEPS = 5
  *  - [maxSteps] pages fetched without finding the anchor → budget exhausted →
  *    STOP auto-closure and leave [GapInfo] open so the UI keeps showing the
  *    tappable divider; a manual tap re-enters this function with a fresh
- *    budget (§省流 §1.4 "预算重置").
+ *    budget (§1.4 "预算重置").
  *
  * Uses a SEPARATE cursor chain from [launchLoadMoreMessages] so the two paging
  * anchors (gap boundary vs loaded-oldest) never pollute each other. Closure
@@ -906,11 +906,11 @@ internal fun launchCloseGap(
     sessionId: String,
     onCacheWindow: (sessionId: String, window: CachedSessionWindow) -> Unit = { _, _ -> }
 , slices: SliceFlows? = null,
-    // §省流 M2: parameterized step (default 3) replaces the old hardcoded
+    // §M2: parameterized step (default 3) replaces the old hardcoded
     // limit=5. SSE-mode callers that omit it get step=3 (acceptable per design
-    // §1.4); 省流 callers pass step=3 explicitly.
+    // §1.4); callers pass step=3 explicitly.
     step: Int = GAP_CLOSE_STEP_DEFAULT,
-    // §省流 M2: auto-closure budget cap. Default GAP_CLOSE_MAX_STEPS (=5).
+    // §M2: auto-closure budget cap. Default GAP_CLOSE_MAX_STEPS (=5).
     // Pass 1 to force the legacy single-step-per-call behaviour.
     maxSteps: Int = GAP_CLOSE_MAX_STEPS
 ) {
@@ -981,7 +981,7 @@ internal fun launchCloseGap(
             // divider advances; stop if state was unexpectedly cleared.
             gap = state.value.gapInfo ?: break
             cursor = page.nextCursor
-            // §省流 M2 budget cap: stop auto-closure after maxSteps and leave
+            // §M2 budget cap: stop auto-closure after maxSteps and leave
             // the gap hint open for a manual tap (fresh budget on re-entry).
             if (stepsTaken >= maxSteps) break
         }

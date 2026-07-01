@@ -84,8 +84,6 @@ fun SettingsScreen(
     }
 
     var showHostProfiles by remember { mutableStateOf(false) }
-    // 省流模式开关初始态从持久化读取；后续由 onCheckedChange 驱动本地状态。
-    var lowTrafficMode by remember { mutableStateOf(viewModel.isLowTrafficMode()) }
 
     if (showHostProfiles) {
         HostProfilesManagerScreen(
@@ -119,7 +117,7 @@ fun SettingsScreen(
                 .verticalScroll(rememberScrollState())
                 .padding(16.dp)
         ) {
-            // ── 连接管理 (Connection management): profile + traffic + low-traffic
+            // ── 连接管理 (Connection management): profile + traffic
             // under a single shared section header. Each sub-card hides its own
             // header (hideHeader = true) so only the group header shows. ──
             SectionHeader(title = stringResource(R.string.settings_section_connections))
@@ -137,14 +135,6 @@ fun SettingsScreen(
                 hideHeader = true
             )
             Spacer(modifier = Modifier.height(12.dp))
-            LowTrafficSection(
-                enabled = lowTrafficMode,
-                onToggle = { enabled ->
-                    lowTrafficMode = enabled
-                    viewModel.onLowTrafficModeChanged(enabled)
-                },
-                hideHeader = true
-            )
 
             SettingsSectionDivider()
 

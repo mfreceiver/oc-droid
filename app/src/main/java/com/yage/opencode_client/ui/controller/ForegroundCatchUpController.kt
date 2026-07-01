@@ -64,17 +64,6 @@ internal class ForegroundCatchUpController(
     // deterministically testable without depending on wall-clock latency in
     // the unit test harness. Defaults to System::currentTimeMillis in production.
     private val clock: () -> Long = { System.currentTimeMillis() },
-    /**
-     * R2 (docs/省流模式设计.md §5.1):省流守卫。Returns true when省流模式 is on —
-     * in that case this controller (SSE-mode foreground catch-up) cedes to the
-     * [LowTrafficPoller], which owns foreground sync when SSE is disabled. The
-     * guard is a `() -> Boolean` lambda rather than a [SettingsManager]
-     * reference so (a) the controller stays decoupled from SettingsManager
-     * (R-16 §7.3) and (b) existing tests keep compiling unchanged (default
-     * `{ false }` → SSE-mode behaviour preserved). MainViewModel passes
-     * `{ settingsManager.lowTrafficMode }` in production.
-     */
-    private val isLowTrafficMode: () -> Boolean = { false }
 ) {
     /**
      * Guards the very first [AppLifecycleMonitor.isInForeground] emission.
@@ -130,14 +119,6 @@ internal class ForegroundCatchUpController(
      * avoids half-open sockets).
      */
     fun onForegroundChanged(inForeground: Boolean) {
-        // R2 (docs/省流模式设计.md §5.1): 省流守卫. 省流模式下 SSE 关闭 → 无
-        // server.connected 事件、cancelSse/forceReconnect 回调天然 no-op →
-        // 此 controller 无活可干；前台同步由 LowTrafficPoller 接管（订阅同一个
-        // isInForeground，回前台时立即 catchUp flow）。直接 return，避免省流
-        // 模式下误触发 globalColdStartRefresh / setStaleNotice 等副作用。
-        if (isLowTrafficMode()) {
-            return
-        }
         // The first emission is the current state, not a transition — skip so
         // the ViewModel's very first subscribe does not spuriously reload.
         if (!hasObservedForegroundState) {
@@ -191,12 +172,6 @@ internal class ForegroundCatchUpController(
      * or the 15s–5min tier catches up.
      */
     fun onServerConnected() {
-        // §B (glm 重要): 防御性省流守卫——与 onForegroundChanged 对称。省流模式下
-        // SSE 未启 (M3)，理论上不会触发本回调；但万一上游误连或事件残留，直接 return
-        // 避免在省流模式下重复 catchUp (LowTrafficPoller 已独占前台同步)。
-        if (isLowTrafficMode()) {
-            return
-        }
         val suppress = suppressNextConnectCatchUp
         suppressNextConnectCatchUp = false
         val doCatchUp = sseHasConnectedOnce && !suppress

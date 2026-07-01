@@ -99,7 +99,7 @@ internal class SessionSyncCoordinator(
     private val callbacks: SessionSyncCoordinatorCallbacks
 ) {
     /**
-     * §M5 delta coalescing (docs/省流模式设计.md §4): per-partId trailing buffer
+     * §M5 delta coalescing: per-partId trailing buffer
      * and flush jobs. The leading-edge delta writes immediately; subsequent
      * deltas within [DELTA_COALESCE_MS] are appended to [deltaBuffer] and
      * flushed in one batch when the window expires — collapsing per-token
@@ -404,7 +404,7 @@ internal class SessionSyncCoordinator(
                 val delta = event.payload.getString("delta")
                 if (!delta.isNullOrEmpty()) {
                     val key = partId
-                    // §M5 delta coalescing (docs/省流模式设计.md §4): leading-edge
+                    // §M5 delta coalescing: leading-edge
                     // immediate + trailing 100ms coalesce per partId. The FIRST
                     // delta for a partId writes straight to streamingPartTexts
                     // (zero-latency first-token feel); subsequent deltas within
@@ -486,7 +486,7 @@ internal class SessionSyncCoordinator(
         }
     }
 
-    // ── §M5 delta coalescing helpers (docs/省流模式设计.md §4) ────────────────
+    // ── §M5 delta coalescing helpers ────────────────
 
     /**
      * Opens (or reopens) the [DELTA_COALESCE_MS] trailing-coalesce window for
@@ -541,7 +541,7 @@ internal class SessionSyncCoordinator(
      * Drops ALL pending delta buffers and cancels their flush jobs. Called when
      * the whole streaming overlay is wiped (part.created now; session switch /
      * SSE stop / ViewModel clear may be wired by the caller — see
-     * docs/省流模式设计.md §4.2). Safe to call repeatedly.
+     * §4.2). Safe to call repeatedly.
      */
     fun clearDeltaBuffers() {
         flushJobs.values.forEach { it.cancel() }
@@ -551,7 +551,7 @@ internal class SessionSyncCoordinator(
 
     companion object {
         /**
-         * §M5 trailing-coalesce window (docs/省流模式设计.md §7). Leading-edge
+         * §M5 trailing-coalesce window (§7). Leading-edge
          * delta writes immediately; subsequent deltas within this window are
          * batched into one flush → one Compose recomposition per window instead
          * of one per token.

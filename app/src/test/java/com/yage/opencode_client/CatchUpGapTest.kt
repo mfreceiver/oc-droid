@@ -74,7 +74,7 @@ class CatchUpGapTest {
         coEvery { repository.probeLatestMessageId("s1") } returns Result.success("Z")
         // Fetched tail (ASCENDING — oldest-first, matching real server order)
         // does NOT contain A → gap opens. Cursor pages older from the tail's
-        // oldest (X). §省流 M2: catchUp now pulls 4 (sentinel), not 5.
+        // oldest (X). M2: catchUp now pulls 4 (sentinel), not 5.
         val tail = listOf(
             msg("X", 300L, "assistant"),
             msg("Y", 400L, "user"),
@@ -118,7 +118,7 @@ class CatchUpGapTest {
         val repository = repo()
         coEvery { repository.probeLatestMessageId("s1") } returns Result.success("Z")
         // Fetched tail (ascending) INCLUDES A → contiguous, no gap.
-        // §省流 M2: catchUp pulls 4 (sentinel).
+        // M2: catchUp pulls 4 (sentinel).
         val tail = listOf(
             msg("A", 100L, "user"),
             msg("Z", 500L, "assistant")
@@ -151,7 +151,7 @@ class CatchUpGapTest {
         )
         val repository = repo()
         // Paged-older result (ascending) contains the anchor A → closure.
-        // B sits between A and Z chronologically. §省流 M2: step defaults to 3.
+        // B sits between A and Z chronologically. M2: step defaults to 3.
         val page = listOf(msg("B", 250L, "user"), msg("A", 100L, "user"))
         coEvery { repository.getMessagesPaged("s1", 3, "cursor-1") } returns Result.success(MessagesPage(page, "cursor-2"))
 
@@ -186,7 +186,7 @@ class CatchUpGapTest {
         val page = listOf(msg("M", 250L, "user"))
         coEvery { repository.getMessagesPaged("s1", 3, "cursor-1") } returns Result.success(MessagesPage(page, "cursor-2"))
 
-        // §省流 M2: maxSteps=1 forces the legacy single-step-per-call behaviour
+        // M2: maxSteps=1 forces the legacy single-step-per-call behaviour
         // so this test asserts ONE page + cursor advance (not a full auto-loop).
         launchCloseGap(this, repository, state, "s1", maxSteps = 1)
         advanceUntilIdle()
@@ -322,7 +322,7 @@ class CatchUpGapTest {
         val page = listOf(msg("M", 250L, "user"))
         coEvery { repository.getMessagesPaged("s1", 3, "cursor-1") } returns Result.success(MessagesPage(page, "cursor-2"))
 
-        // §省流 M2: maxSteps=1 → single step, asserting tailOldestId advance.
+        // M2: maxSteps=1 → single step, asserting tailOldestId advance.
         launchCloseGap(this, repository, state, "s1", maxSteps = 1)
         advanceUntilIdle()
 
@@ -356,11 +356,11 @@ class CatchUpGapTest {
         assertNull("resetLimit reload clears stale gap", state.value.gapInfo)
     }
 
-    // ── §省流 M2: sentinel + auto-closure loop ────────────────────────────
+    // ── M2: sentinel + auto-closure loop ────────────────────────────
 
     @Test
     fun `catchUp sentinel avoids false gap when exactly 3 new arrived`() = runTest {
-        // §省流 M2 / gpter 致命#4 (off-by-one): with the OLD limit=3 display
+        // M2 / gpter 致命#4 (off-by-one): with the OLD limit=3 display
         // window, exactly 3 new messages would push the anchor OUT of the
         // fetched window → false gap. Pulling 4 (3 display + 1 sentinel) keeps
         // the anchor at the sentinel (oldest) slot → correctly detected as
@@ -392,7 +392,7 @@ class CatchUpGapTest {
 
     @Test
     fun `closeGap auto-loops and closes when anchor appears on a later page`() = runTest {
-        // §省流 M2: launchCloseGap pages step-at-a-time up to maxSteps. Anchor
+        // M2: launchCloseGap pages step-at-a-time up to maxSteps. Anchor
         // not on page 1 but present on page 2 → closes after 2 steps.
         val state = MutableStateFlow(
             AppState(
@@ -424,7 +424,7 @@ class CatchUpGapTest {
 
     @Test
     fun `closeGap stops after maxSteps and leaves gap open for manual tap`() = runTest {
-        // §省流 M2 budget cap: anchor never appears; after maxSteps pages the
+        // M2 budget cap: anchor never appears; after maxSteps pages the
         // auto-loop STOPS and leaves GapInfo open so the divider stays tappable
         // (manual tap re-enters with a fresh budget).
         val state = MutableStateFlow(
@@ -456,7 +456,7 @@ class CatchUpGapTest {
 
     @Test
     fun `closeGap marks gap closed when history exhausted mid-loop`() = runTest {
-        // §省流 M2: if a page returns a null nextCursor before the anchor is
+        // M2: if a page returns a null nextCursor before the anchor is
         // reached, history is exhausted → can't bridge → mark open=false.
         val state = MutableStateFlow(
             AppState(

@@ -33,12 +33,7 @@
     <string name="settings_about_description">OpenCode AI coding agent 的原生 Android 客户端。</string>
     <string name="settings_version">版本 %1$s</string>
     <string name="settings_traffic">流量统计</string>
-    <string name="settings_traffic_sent">发送</string>
-    <string name="settings_traffic_received">接收</string>
-    <string name="settings_traffic_total">总计</string>
     <string name="settings_traffic_reset">重置</string>
-    <string name="settings_low_traffic">省流模式</string>
-    <string name="settings_low_traffic_summary">关闭实时 SSE 推送，改用轮询同步当前会话以节省流量。新消息可能会有短暂延迟。</string>
     <string name="host_profile_edit_icon">编辑</string>
     <string name="host_profile_test_icon">测试连接</string>
     <string name="host_profile_delete_confirm_title">删除配置</string>

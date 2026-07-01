@@ -595,7 +595,7 @@ private fun EmptyRow(text: String) {
 
 /**
  * M6: Small (~8dp) status indicator rendered on the right edge of a session
- * card's title row, just before the unread dot. Mapping (per 省流模式设计 M6):
+ * card's title row, just before the unread dot. Mapping:
  * - busy → orange dot with a gentle alpha pulse (visually signals "working").
  *   A pulse is used instead of the spec's "rotation" because rotation is
  *   imperceptible on a featureless circle; pulsing is the conventional

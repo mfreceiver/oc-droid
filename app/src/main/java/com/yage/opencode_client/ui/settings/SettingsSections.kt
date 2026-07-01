@@ -223,54 +223,6 @@ internal fun TrafficSection(
 }
 
 /**
- * 省流模式总开关（`docs/省流模式设计.md` §3 M0）。
- *
- * Switch 直接绑定到 [com.yage.opencode_client.ui.MainViewModel.onLowTrafficModeChanged]：
- * 变更即时持久化，M3 的 SSE 守卫 + 后续 M1 轮询会读最新值生效；模式切换会
- * 触发当前 session 重载（3s 防抖），但不清其他 session 缓存（§1.8 H）。
- *
- * 初始态从 [com.yage.opencode_client.ui.MainViewModel.isLowTrafficMode] 读取
- * （remember 一次，后续由 onCheckedChange 驱动本地状态）。
- */
-@Composable
-internal fun LowTrafficSection(
-    enabled: Boolean,
-    onToggle: (Boolean) -> Unit,
-    hideHeader: Boolean = false
-) {
-    if (!hideHeader) {
-        SectionHeader(title = stringResource(R.string.settings_low_traffic))
-    }
-
-    Card(
-        modifier = Modifier.fillMaxWidth(),
-        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
-    ) {
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(16.dp),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Column(modifier = Modifier.weight(1f)) {
-                Text(
-                    stringResource(R.string.settings_low_traffic),
-                    style = MaterialTheme.typography.bodyLarge
-                )
-                Spacer(modifier = Modifier.height(4.dp))
-                Text(
-                    stringResource(R.string.settings_low_traffic_summary),
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-            }
-            Spacer(modifier = Modifier.width(12.dp))
-            Switch(checked = enabled, onCheckedChange = onToggle)
-        }
-    }
-}
-
-/**
  * Formats [bytes] as a human-readable size. < 1KiB shows bytes; < 1MiB shows
  * KiB; < 1GiB shows MiB; otherwise GiB. Locale.US enforces ASCII digits and a
  * period decimal separator so the output is stable regardless of device locale.

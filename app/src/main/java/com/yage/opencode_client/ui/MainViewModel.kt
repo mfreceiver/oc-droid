@@ -22,8 +22,6 @@ import com.yage.opencode_client.ui.controller.ForegroundCatchUpCallbacks
 import com.yage.opencode_client.ui.controller.ForegroundCatchUpController
 import com.yage.opencode_client.ui.controller.HostProfileCallbacks
 import com.yage.opencode_client.ui.controller.HostProfileController
-import com.yage.opencode_client.ui.controller.LowTrafficPoller
-import com.yage.opencode_client.ui.controller.LowTrafficPollerCallbacks
 import com.yage.opencode_client.ui.controller.SessionSyncCoordinator
 import com.yage.opencode_client.ui.controller.SessionSyncCoordinatorCallbacks
 import com.yage.opencode_client.ui.controller.SessionSwitcher
@@ -32,7 +30,6 @@ import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.FlowPreview
-import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.launch
@@ -466,7 +463,7 @@ class MainViewModel @Inject constructor(
     private val hostProfileStore: HostProfileStore,
     internal val trafficTracker: TrafficTracker,
     private val appLifecycleMonitor: AppLifecycleMonitor
-) : ViewModel(), ForegroundCatchUpCallbacks, ComposerCallbacks, SessionSwitcherCallbacks, HostProfileCallbacks, ConnectionCoordinatorCallbacks, SessionSyncCoordinatorCallbacks, LowTrafficPollerCallbacks {
+) : ViewModel(), ForegroundCatchUpCallbacks, ComposerCallbacks, SessionSwitcherCallbacks, HostProfileCallbacks, ConnectionCoordinatorCallbacks, SessionSyncCoordinatorCallbacks {
 
     // §R-17 M2: _state keeps carrying every AppState field (the connection/
     // traffic ones are deprecated mirrors). The authoritative storage for
@@ -573,29 +570,6 @@ class MainViewModel @Inject constructor(
             appLifecycleMonitor = appLifecycleMonitor,
             scope = viewModelScope,
             callbacks = this,
-            // R2: 省流守卫 — 省流模式下让位给 lowTrafficPoller (§5.1)。
-            isLowTrafficMode = { settingsManager.lowTrafficMode }
-        )
-
-    /**
-     * M1 (docs/省流模式设计.md §1): 省流模式轮询状态机。仅当
-     * [SettingsManager.lowTrafficMode] 开启时激活（[onLowTrafficModeChanged]
-     * 调 [LowTrafficPoller.start]/[LowTrafficPoller.stop]）。构造即订阅
-     * [AppLifecycleMonitor.isInForeground]，但 active=false 时所有回调 no-op。
-     * 与 [foregroundCatchUpController] 互斥并行（§5.1）：省流模式 SSE 未启，
-     * ForegroundCatchUpController 的回调天然 no-op，前台同步由本 poller 独占。
-     * Side effects (catchUp / stale hint / permission-question 补足) flow back
-     * through [LowTrafficPollerCallbacks] which MainViewModel implements below.
-     */
-    private val lowTrafficPoller: LowTrafficPoller =
-        LowTrafficPoller(
-            scope = viewModelScope,
-            state = _state,
-            slices = sliceFlows,
-            repository = repository,
-            settingsManager = settingsManager,
-            appLifecycleMonitor = appLifecycleMonitor,
-            callbacks = this
         )
 
     /**
@@ -958,11 +932,6 @@ class MainViewModel @Inject constructor(
 
     init {
         loadSettings()
-        // §F1 (3/3 评审一致确认致命): 持久化 lowTrafficMode=true 后进程重建冷启动时，
-        // M3 守卫跳过 SSE、M1 又从未 start → 界面静止。loadSettings 读取最新持久化
-        // 值后，若省流模式开启则立即激活 M1 轮询。start() 自身幂等；foreground 守卫
-        // 由 LowTrafficPoller 内部处理。
-        if (settingsManager.lowTrafficMode) lowTrafficPoller.start()
         // §15.2: foreground/background hook now lives in
         // [foregroundCatchUpController] (it subscribes to
         // appLifecycleMonitor.isInForeground in its own init, launched into
@@ -1013,74 +982,6 @@ class MainViewModel @Inject constructor(
         catchUpAfterDisconnectOrForeground(sessionId)
 
     override fun currentSessionId(): String? = _chatFlow.value.currentSessionId
-
-    // ──────────────────────────────────────────────────────────────────────
-    // M1 (docs/省流模式设计.md §1): LowTrafficPollerCallbacks implementation.
-    // The poller state machine lives in [lowTrafficPoller]; these are the
-    // side-effect hooks it calls back into. triggerCatchUp 复用现有
-    // catchUpAfterDisconnectOrForeground (= launchCatchUp, M2 已 sentinel=4)，
-    // 不重写 reload 逻辑。permission/question 复用现有 pending* 写入模式。
-    // ──────────────────────────────────────────────────────────────────────
-
-    override fun triggerCatchUp(sessionId: String) {
-        // §D (kimo 重要): triggerCatchUp 是恢复信号 (active→idle / probe hit /
-        // foreground return / session switch 都会触发) → 清除 onRetryError 设的
-        // retry error。瞬态：若仍异常，下次 retry ≥3 tick 会重新设。
-        clearTransientLowTrafficError(retryOnly = true)
-        catchUpAfterDisconnectOrForeground(sessionId)
-    }
-
-    override fun onStaleHint() {
-        // §1.5: 复用 staleNotice banner ("省流模式下可能不是最新，点击检查"
-        // 由 ChatScreen 渲染 — 现有 staleNotice UI 文案在省流模式下语义一致)。
-        updateState { it.copy(staleNotice = true) }
-    }
-
-    override fun onRetryError(sessionId: String) {
-        // §1.2 (gpter 致命#3): retry 持续 ≥3 tick → 顶部提示"运行出错"。
-        // 复用 error 通道 (瞬态，下次 triggerCatchUp / onConnectionRecovered 由
-        // §D clearTransientLowTrafficError 清除)。
-        updateState { it.copy(error = RETRY_ERROR_MSG) }
-    }
-
-    override fun onConnectionError() {
-        // §1.1 B4: status 连续失败 ≥3 → 连接错误态。复用 error 通道；
-        // onConnectionRecovered 在下一次成功 tick 清除。
-        updateState { it.copy(error = "省流模式：连接服务器失败，正在重试") }
-    }
-
-    override fun onConnectionRecovered() {
-        // §D (kimo 重要): 恢复连接 → 清除省流模式设的所有瞬态 error (连接错误 +
-        // retry 错误)。仅当确实处于任一瞬态时才写，避免无谓 state 抖动。
-        clearTransientLowTrafficError(retryOnly = false)
-    }
-
-    /**
-     * §D (kimo 重要): 清除省流模式写过的瞬态 error 字符串。
-     *  - `retryOnly = true`: 只清 onRetryError 设的 retry error (triggerCatchUp 路径)。
-     *  - `retryOnly = false`: 同时清 onConnectionError 设的连接 error (onConnectionRecovered)。
-     * 复用现有"按字符串前缀匹配"的 error 通道（与 onConnectionRecovered 旧实现一致）。
-     */
-    private fun clearTransientLowTrafficError(retryOnly: Boolean) {
-        val current = _state.value.error ?: return
-        val isRetryError = current == RETRY_ERROR_MSG
-        val isConnectionError = current?.startsWith("省流模式：连接") == true
-        val shouldClear = if (retryOnly) isRetryError else (isRetryError || isConnectionError)
-        if (shouldClear) {
-            updateState { it.copy(error = null) }
-        }
-    }
-
-    override fun onPendingPermissionsLoaded(list: List<com.yage.opencode_client.data.model.PermissionRequest>) {
-        // 复用 loadPendingPermissions 的写入模式（dser 🔴-3 前台补足）。
-        @Suppress("DEPRECATION")
-        updateState { it.copy(pendingPermissions = list) }
-    }
-
-    override fun onPendingQuestionsLoaded(list: List<com.yage.opencode_client.data.model.QuestionRequest>) {
-        @Suppress("DEPRECATION")
-        updateState { it.copy(pendingQuestions = list) }
-    }
 
     // ──────────────────────────────────────────────────────────────────────
     // R-16 M2: ComposerCallbacks implementation.
@@ -1419,12 +1320,6 @@ class MainViewModel @Inject constructor(
      */
     fun selectSession(sessionId: String) {
         sessionSwitcher.switchTo(sessionId)
-        // M4 简化版 (§1.7 G): 省流模式切 tab 时重置 M1 计数器 + 立即 catchUp。
-        // 正式的 R1 callback 接口留到 M4；先在此直接转发（R2 callback 已在
-        // lowTrafficPoller.onSessionSwitched 内幂等处理 active=false no-op）。
-        if (settingsManager.lowTrafficMode) {
-            lowTrafficPoller.onSessionSwitched(sessionId)
-        }
     }
 
     /**
@@ -1825,7 +1720,7 @@ class MainViewModel @Inject constructor(
                         dispatchSendMessage(session.id)
                         // 主动拉取标题兜底：服务端在首条消息后异步生成标题
                         // (SessionPrompt.ensureTitle)，正常经 SSE session.updated
-                        // 下发，但 SSE 解析失败或省流模式关闭 SSE 时会丢失。
+                        // 下发，但 SSE 解析失败时会丢失。
                         // 故延迟 5s 后主动 GET 一次该会话，取回生成的标题。
                         scheduleTitleRefreshAfterFirstMessage(session.id)
                     }
@@ -1858,8 +1753,8 @@ class MainViewModel @Inject constructor(
      * (notably the auto-generated title) [titleRefreshDelayMs] after its first
      * message. The server generates the title asynchronously (SessionPrompt.
      * ensureTitle, prompt-loop step 1); it normally arrives via the
-     * `session.updated` SSE event, but that path can fail (lenient-parse bug
-     * aside) or be entirely absent in 省流模式 (SSE disabled). This HTTP pull is
+     * `session.updated` SSE event, but that path can fail (e.g. if the
+     * `session.updated` frame was missed or parse-failed). This HTTP pull is
      * a robust fallback that works regardless of SSE. No-op on failure.
      */
     private fun scheduleTitleRefreshAfterFirstMessage(sessionId: String) {
@@ -1891,13 +1786,6 @@ class MainViewModel @Inject constructor(
         val text = composer.inputText.trim()
         val attachments = composer.imageAttachments
         if (text.isEmpty() && attachments.isEmpty()) return
-
-        // §1.9 (gpter 可选#3): 省流模式下发送消息 → 本地标 busy + 重置 tick，
-        // 让后续轮询观测到 active→idle 做权威 reload。放在去重守卫之后、网络
-        // 发起之前（active=false 时 onMessageSent 幂等 no-op）。
-        if (settingsManager.lowTrafficMode) {
-            lowTrafficPoller.onMessageSent(sessionId)
-        }
 
         writeComposer { state -> state.copy(sendingSessionIds = state.sendingSessionIds + sessionId) }
 
@@ -2058,58 +1946,6 @@ class MainViewModel @Inject constructor(
     fun setThemeMode(mode: ThemeMode) {
         settingsManager.themeMode = mode
         writeSettings { it.copy(themeMode = mode) }
-    }
-
-    /**
-     * 省流模式当前值（`docs/省流模式设计.md` §3 M0）。供设置页 Switch 读取初始态。
-     */
-    fun isLowTrafficMode(): Boolean = settingsManager.lowTrafficMode
-
-    /**
-     * 省流模式切换入口（`docs/省流模式设计.md` §1.8 H / §3 M0）。
-     *
-     * 行为：
-     *  1. 立即持久化新值到 [settingsManager]（M3 的 `ConnectionCoordinator
-     *     .startSSE` 守卫、后续 M1 轮询都会读最新值，即时生效）。
-     *  2. **F2 (gpter 致命#2)**: 开省流时先取消已有 SSE firehose + 清 delta buffer，
-     *     再启动 M1。否则已运行的 SSE (69MB/min) 不会被 M3 守卫自动停，变成双通道。
-     *  3. **F3 (gpter 致命#3)**: 关省流时停 M1 后恢复 SSE 实时同步。已连接则直接
-     *     startSSE；未连接走 forceReconnect (成功后 testConnection 内部会 startSSE)。
-     *  4. 触发当前 session 重载（`resetLimit=true`），让用户立即看到省流/实时模式的
-     *     同步结果——但**不清 `sessionWindowCache` 中其他 session 的缓存**（dser 🟠-3）。
-     *  5. 加 3s 防抖（`LOW_TRAFFIC_MODE_DEBOUNCE_MS`）避免快速来回切反噬省流。
-     */
-    private var lowTrafficModeReloadJob: Job? = null
-
-    fun onLowTrafficModeChanged(enabled: Boolean) {
-        settingsManager.lowTrafficMode = enabled
-        if (enabled) {
-            // §F2 (gpter 致命#2): 取消已有 SSE firehose。M3 守卫只防新 startSSE，
-            // 不会停已在跑的 collector，必须显式 cancelSse。同时清 delta buffer 防
-            // 下次连接 stale flush (cancelSse override 已含 clearDeltaBuffers，但此处
-            // 显式调用以匹配 §4.2 跟进语义并避免 override 语义漂移)。
-            connectionCoordinator.cancelSse()
-            sessionSyncCoordinator.clearDeltaBuffers()
-            lowTrafficPoller.start()
-        } else {
-            lowTrafficPoller.stop()
-            // §F3 (gpter 致命#3): 关省流 → 恢复 SSE 实时同步。M3 守卫此时读到
-            // lowTrafficMode=false，startSSE 不再被跳过。已连接直接 startSSE；未连接
-            // 走 forceReconnect (testConnection force=true)，健康检查成功后会 startSSE。
-            if (_connectionFlow.value.isConnected) {
-                connectionCoordinator.startSSE()
-            } else {
-                forceReconnect()
-            }
-        }
-        lowTrafficModeReloadJob?.cancel()
-        lowTrafficModeReloadJob = viewModelScope.launch {
-            delay(LOW_TRAFFIC_MODE_DEBOUNCE_MS)
-            val sessionId = _chatFlow.value.currentSessionId ?: return@launch
-            // §1.8 H: 只重载当前 session；不清其他 session 缓存（不调
-            // performGlobalColdStartRefresh / clearSessionWindowCache）。
-            loadMessages(sessionId, resetLimit = true)
-        }
     }
 
     fun setMarkdownFontSizes(sizes: MarkdownFontSizes) {
@@ -2350,9 +2186,6 @@ class MainViewModel @Inject constructor(
     }
 
     override fun onCleared() {
-        // M1: 停止省流轮询（cancel loop + 清状态）。viewModelScope 即将被取消，
-        // 但显式 stop 保证 loopJob 立即释放、不依赖 scope 取消传播。
-        lowTrafficPoller.stop()
         // M5 跟进 (§4.2): drop pending delta buffers before the scope is
         // cancelled, so no flush job can fire post-teardown. (onCleared calls
         // connectionCoordinator.cancelSse() directly rather than the cancelSse()
@@ -2364,15 +2197,6 @@ class MainViewModel @Inject constructor(
 
     private companion object {
         private const val TAG = "MainViewModel"
-
-        /**
-         * §D (kimo 重要): onRetryError 写入的瞬态 error 字符串。常量化以便
-         * [clearTransientLowTrafficError] 精确匹配清除 (避免漂移)。
-         */
-        private const val RETRY_ERROR_MSG = "会话运行出错，请检查重试"
-
-        /** 省流模式切换后重载当前 session 的防抖（§1.8 H，避免快速来回切反噬省流）。 */
-        private const val LOW_TRAFFIC_MODE_DEBOUNCE_MS = 3000L
 
         // R-16 M1: FOREGROUND_RELOAD_MIN_INTERVAL_MS (15s) and
         // LONG_ABSENCE_THRESHOLD_MS (5min) moved to
