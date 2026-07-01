@@ -560,6 +560,9 @@ class MainViewModelTest {
         coEvery { repository.createSession(title = null) } returns Result.success(created)
         coEvery { repository.sendMessage(any(), any(), any(), any(), any()) } returns Result.success(Unit)
         coEvery { repository.getSessions(any()) } returns Result.success(listOf(created))
+        // scheduleTitleRefreshAfterFirstMessage fires 5s after the new session's
+        // first message (title fallback); mock the GET so it doesn't blow up.
+        coEvery { repository.getSession(any()) } returns Result.success(created)
         every { repository.setCurrentDirectory(any()) } just runs
 
         val viewModel = createViewModel()
@@ -2466,6 +2469,7 @@ class MainViewModelTest {
         coEvery { repository.createSession(title = null) } returns Result.success(created)
         coEvery { repository.sendMessage(any(), any(), any(), any(), any()) } returns Result.success(Unit)
         coEvery { repository.getSessions(any()) } returns Result.success(listOf(created))
+        coEvery { repository.getSession(any()) } returns Result.success(created)
         every { repository.setCurrentDirectory(any()) } just runs
 
         val viewModel = createViewModel()

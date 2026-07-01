@@ -18,6 +18,11 @@ internal val lenientJson = Json { ignoreUnknownKeys = true }
 internal object MainViewModelTimings {
     const val sessionPageSize = 10
     const val messageRetryDelayMs = 400L
+    /** Delay before the one-shot title refresh after a new session's first
+     *  message (see MainViewModel.scheduleTitleRefreshAfterFirstMessage). The
+     *  server generates the title asynchronously in prompt-loop step 1; 5s is
+     *  enough for the small/cheap title model to finish in practice. */
+    const val titleRefreshDelayMs = 5000L
 }
 
 internal data class SessionCreatedEvent(
@@ -51,7 +56,11 @@ internal fun errorMessageOrFallback(throwable: Throwable?, fallback: String): St
 internal fun parseSessionCreatedEvent(event: SSEEvent): SessionCreatedEvent? {
     val sessionJson = event.payload.getJsonObject("session") ?: return null
     return runCatching {
-        SessionCreatedEvent(Json.decodeFromString<Session>(sessionJson.toString()))
+        // lenientJson (ignoreUnknownKeys = true): the server's Session.Info
+        // carries fields absent from the local Session model (model/agent/...);
+        // the strict default Json would throw and silently drop the event —
+        // which is exactly why session titles stopped updating over SSE.
+        SessionCreatedEvent(lenientJson.decodeFromString<Session>(sessionJson.toString()))
     }.getOrNull()
 }
 
@@ -60,7 +69,7 @@ internal fun parseSessionUpdatedEvent(event: SSEEvent): Session? {
         ?: event.payload.getJsonObject("session")
         ?: return null
     return runCatching {
-        Json.decodeFromString<Session>(sessionJson.toString())
+        lenientJson.decodeFromString<Session>(sessionJson.toString())
     }.getOrNull()
 }
 

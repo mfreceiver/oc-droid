@@ -1823,6 +1823,11 @@ class MainViewModel @Inject constructor(
                             currentWorkdir = settingsManager.currentWorkdir
                         )
                         dispatchSendMessage(session.id)
+                        // 主动拉取标题兜底：服务端在首条消息后异步生成标题
+                        // (SessionPrompt.ensureTitle)，正常经 SSE session.updated
+                        // 下发，但 SSE 解析失败或省流模式关闭 SSE 时会丢失。
+                        // 故延迟 5s 后主动 GET 一次该会话，取回生成的标题。
+                        scheduleTitleRefreshAfterFirstMessage(session.id)
                     }
                     .onFailure { error ->
                         // §R-17 M3: draftWorkdir → writeComposer, error → _state.
@@ -1846,6 +1851,35 @@ class MainViewModel @Inject constructor(
         val sessionId = existingSessionId ?: return
         if (_composerFlow.value.sendingSessionIds.contains(sessionId)) return
         dispatchSendMessage(sessionId)
+    }
+
+    /**
+     * One-shot best-effort refresh of a freshly-created session's metadata
+     * (notably the auto-generated title) [titleRefreshDelayMs] after its first
+     * message. The server generates the title asynchronously (SessionPrompt.
+     * ensureTitle, prompt-loop step 1); it normally arrives via the
+     * `session.updated` SSE event, but that path can fail (lenient-parse bug
+     * aside) or be entirely absent in 省流模式 (SSE disabled). This HTTP pull is
+     * a robust fallback that works regardless of SSE. No-op on failure.
+     */
+    private fun scheduleTitleRefreshAfterFirstMessage(sessionId: String) {
+        viewModelScope.launch {
+            delay(MainViewModelTimings.titleRefreshDelayMs)
+            repository.getSession(sessionId)
+                .onSuccess { refreshed ->
+                    updateState { state ->
+                        state.copy(
+                            sessions = upsertSession(state.sessions, refreshed),
+                            directorySessions = state.directorySessions.mapValues { (_, list) ->
+                                list.map { if (it.id == sessionId) refreshed else it }
+                            }
+                        )
+                    }
+                }
+                // Silent on failure — this is best-effort; the next list
+                // refresh will pick up the title authoritatively.
+                .onFailure { }
+        }
     }
 
     private fun dispatchSendMessage(sessionId: String) {
