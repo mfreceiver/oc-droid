@@ -41,8 +41,8 @@ export PATH="$JAVA_HOME/bin:$PATH:$ANDROID_HOME/platform-tools"
 
 ## 发布产物
 
-- 发布的 APK 统一放**项目根目录 `APK/` 文件夹**（已 gitignore，不入库），按 `opencode_client-<版本号>.apk` 命名（如 `opencode_client-0.1.20260622.apk`）。
-- 发版用 `tea` CLI 打 Gitea Release，tag 用 `v<版本>-fork.N`（fork 后缀避免与上游冲突），tag 指向 `dev` 分支提交。详见 `docs/build-apk.md` 第 6 节。
+- 发布的 APK 统一放**项目根目录 `APK/` 文件夹**（已 gitignore，不入库），按 `oc-droid-<版本号>.apk` 命名（如 `oc-droid-0.5.0.apk`）。应用名称为 **OC Droid**。
+- 发版用 `tea` CLI 打 Gitea Release，tag 用 `v<版本号>`（如 `v0.5.0`），tag 指向 `dev` 分支提交。详见 `docs/build-apk.md` 第 6 节。
 
 ## 测试
 
