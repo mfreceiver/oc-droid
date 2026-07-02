@@ -1627,7 +1627,23 @@ class MainViewModel @Inject constructor(
         viewModelScope.launch {
             repository.getPendingQuestions()
                 .onSuccess { questions ->
-                    updateState { it.copy(pendingQuestions = questions) }
+                    // §P3 (question overwrite race): merge by id instead of full
+                    // replace. GET /question routes to one InstanceState; if the
+                    // request lands on the wrong directory instance (or runs in a
+                    // narrow timing window) it can return [] / a partial list while
+                    // a live question was just delivered via the SSE
+                    // question.asked event. A wholesale replace here would wipe
+                    // that live question and blank the card (Bug 2 symptom).
+                    // Overlapping ids take the GET version; ids only present
+                    // locally (SSE-delivered, not yet in GET) are preserved.
+                    // Removal stays handled by the SSE question.replied/rejected
+                    // handlers and the local reply/reject success paths.
+                    updateState { currentState ->
+                        val byGet = questions.associateBy { it.id }
+                        val existing = currentState.pendingQuestions.associateBy { it.id }
+                        val merged = (byGet + existing.filterKeys { it !in byGet }).values.toList()
+                        currentState.copy(pendingQuestions = merged)
+                    }
                 }
                 .onFailure { error ->
                     Log.w(TAG, "Failed to load questions: ${error.message}")

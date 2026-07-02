@@ -100,6 +100,18 @@ internal fun MessageRow(
                 }
                 for (p in run) {
                     when {
+                        // §P1 (question UI parity with web): hide running/pending
+                        // question tool parts — the interactive QuestionCardView
+                        // popup is the canonical UI for an active question,
+                        // matching opencode-web (message-part.tsx hideQuestion
+                        // filters pending/running question parts out of the
+                        // stream). STALE question parts (running with no live
+                        // pending match) are NOT hidden here — they fall through
+                        // to BasicTool's "Interrupted" rendering so the user
+                        // sees that the question genuinely failed/expired.
+                        p.isTool && p.tool?.lowercase() == "question" &&
+                            (p.stateDisplay == "running" || p.stateDisplay == "pending") &&
+                            p.id !in staleQuestionPartKeys -> { /* no-op: hidden */ }
                         // Rule 1: todowrite → hidden (todos live in the toolbar panel)
                         ToolCardClassifier.isTodoWriteTool(p) -> { /* no-op */ }
                         // Rule 2: task (sub-agent) → SubAgentCard

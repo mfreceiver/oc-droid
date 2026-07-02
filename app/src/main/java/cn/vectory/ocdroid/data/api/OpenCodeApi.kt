@@ -90,18 +90,22 @@ interface OpenCodeApi {
     @GET("permission")
     suspend fun getPendingPermissions(): List<PermissionRequest>
 
-    @Headers("X-Opencode-Skip-Dir: 1")
+    // §P0 (question routing): NO Skip-Dir — these endpoints must carry the
+    // directory header so the server routes to the InstanceState that owns the
+    // pending question. /question/{id}/reply has no sessionID in the URL, so
+    // the server cannot reverse-lookup session.directory (unlike /session/{id}
+    // routes) and falls back to process.cwd() — which is wrong in tunnel /
+    // multi-directory topologies. DirectoryHeaderInterceptor now injects
+    // X-Opencode-Directory for these (currentDirectory = the open session's dir).
     @GET("question")
     suspend fun getPendingQuestions(): List<QuestionRequest>
 
-    @Headers("X-Opencode-Skip-Dir: 1")
     @POST("question/{requestId}/reply")
     suspend fun replyQuestion(
         @Path("requestId") requestId: String,
         @Body body: QuestionReplyRequest
     ): Response<Unit>
 
-    @Headers("X-Opencode-Skip-Dir: 1")
     @POST("question/{requestId}/reject")
     suspend fun rejectQuestion(@Path("requestId") requestId: String): Response<Unit>
 
