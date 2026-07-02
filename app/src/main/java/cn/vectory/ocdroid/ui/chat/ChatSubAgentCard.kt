@@ -357,7 +357,8 @@ internal fun CompletedTaskCard(
                         typography = markdownTypography(fontSizes),
                         components = markdownComponents(
                             codeBlock = { WrappedCodeBlock(it) },
-                            codeFence = { WrappedCodeBlock(it) }
+                            codeFence = { WrappedCodeBlock(it) },
+                            table = { WrappedTable(it) }
                         ),
                         imageTransformer = DataUriImageTransformer
                     )

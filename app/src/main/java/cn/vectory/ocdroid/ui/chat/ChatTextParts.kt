@@ -1,13 +1,19 @@
 package cn.vectory.ocdroid.ui.chat
 
 import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.background
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.selection.SelectionContainer
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.LocalContentColor
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
@@ -23,11 +29,15 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.delay
+import com.mikepenz.markdown.compose.LocalMarkdownDimens
 import com.mikepenz.markdown.compose.components.MarkdownComponentModel
 import com.mikepenz.markdown.compose.components.markdownComponents
+import com.mikepenz.markdown.compose.elements.MarkdownTableBasicText
 import com.mikepenz.markdown.m3.Markdown
 import cn.vectory.ocdroid.data.repository.OpenCodeRepository
 import cn.vectory.ocdroid.ui.theme.LocalMarkdownFontSizes
@@ -36,6 +46,10 @@ import cn.vectory.ocdroid.ui.theme.opencode
 import cn.vectory.ocdroid.ui.util.DataUriImageTransformer
 import cn.vectory.ocdroid.ui.util.HttpImageHolder
 import cn.vectory.ocdroid.ui.util.MarkdownImageResolver
+import org.intellij.markdown.ast.findChildOfType
+import org.intellij.markdown.flavours.gfm.GFMElementTypes.HEADER
+import org.intellij.markdown.flavours.gfm.GFMElementTypes.ROW
+import org.intellij.markdown.flavours.gfm.GFMTokenTypes.CELL
 
 // ── Text part rendering: user bubble, assistant markdown, code blocks ─────
 // TextPart dispatches between the user's right-aligned neutral bubble and the
@@ -108,6 +122,93 @@ internal fun rememberPacedStreamingText(
 // codeFenceLanguage extensions) renders fenced code with soft-wrap instead of
 // mikepenz's horizontal scroll, surfacing the language as a badge.
 
+// ── Code/prose split for flicker-free streaming with code formatting ─────
+// Splits a growing streaming markdown string into ordered segments of PROSE
+// and CODE. PROSE renders as plain Text; CODE renders as a formatted code
+// block (CodeBlockSurface, the same renderer WrappedCodeBlock uses). Both are
+// height-monotonic while growing:
+//   - plain Text on a growing string only ever adds lines (never shrinks);
+//   - a code block is monospace Text with softWrap — adding lines only ever
+//     adds height (never shrinks), EVEN while the fence is still open.
+// So the Column of segments has a monotonically-growing total height → 0
+// height-shrinks → 0 flicker, while completed (and in-progress) code keeps its
+// code-block formatting. Prose loses inline markdown (**bold**, lists, links)
+// during streaming and snaps to full markdown on completion — an acceptable
+// trade-off since code formatting is the high-value part.
+//
+// Why not render prose as markdown too: the mikepenz Markdown renderer produces
+// pathologically unstable height when re-parsing ANY growing text during rapid
+// recomposition (measured: 151 height-shrinks/turn, peak 8213px for ~3500
+// chars; boundary-aware "complete-blocks-as-markdown" still gave 57 shrinks /
+// 11624px). Code blocks escape this because they render as plain monospace
+// Text (no markdown block-structure reflow). This hybrid keeps the valuable
+// formatting (code) and drops the unstable part (prose markdown) during stream.
+internal sealed class StreamSegment {
+    data class Prose(val raw: String) : StreamSegment()
+    data class Code(val code: String, val language: String) : StreamSegment()
+}
+
+/** Returns `" ``` "` / `"~~~"` if the line opens/closes a fence, else null. */
+private fun fenceMarkerOf(line: String): String? {
+    val t = line.trimStart()
+    return when {
+        t.startsWith("```") -> "```"
+        t.startsWith("~~~") -> "~~~"
+        else -> null
+    }
+}
+
+private fun splitCodeAndProse(text: String): List<StreamSegment> {
+    if (text.isEmpty()) return emptyList()
+    val segments = mutableListOf<StreamSegment>()
+    val lines = text.split("\n")
+    val proseBuf = StringBuilder()
+    // fenceMarker != null ⇒ currently inside a code fence of that marker char.
+    var fenceMarker: String? = null
+    var lang = ""
+    val codeBuf = StringBuilder()
+    fun flushProse() {
+        if (proseBuf.isNotEmpty()) {
+            segments.add(StreamSegment.Prose(proseBuf.toString()))
+            proseBuf.clear()
+        }
+    }
+    for (line in lines) {
+        val marker = fenceMarkerOf(line)
+        if (fenceMarker == null) {
+            if (marker != null) {
+                // A fence opens: freeze the prose accumulated so far, enter code.
+                flushProse()
+                fenceMarker = marker
+                lang = line.substring(marker.length).trim()
+                    .substringBefore(' ').removePrefix("{.").removeSuffix("}")
+                codeBuf.clear()
+            } else {
+                proseBuf.append(line).append('\n')
+            }
+        } else {
+            // Inside a fence. A line whose marker matches the opening marker's
+            // char closes the fence; anything else is code content.
+            if (marker != null && marker[0] == fenceMarker!![0]) {
+                segments.add(StreamSegment.Code(codeBuf.toString().trimEnd('\n'), lang))
+                fenceMarker = null
+                lang = ""
+                codeBuf.clear()
+            } else {
+                codeBuf.append(line).append('\n')
+            }
+        }
+    }
+    // End of text: an OPEN fence (not yet closed) is still emitted as a Code
+    // segment — a growing code block is height-monotonic, so rendering it
+    // formatted mid-stream is stable (no prose↔code seam reflow).
+    flushProse()
+    if (fenceMarker != null && codeBuf.isNotEmpty()) {
+        segments.add(StreamSegment.Code(codeBuf.toString().trimEnd('\n'), lang))
+    }
+    return segments
+}
+
 @Composable
 internal fun TextPart(
     text: String,
@@ -145,33 +246,82 @@ internal fun TextPart(
             }
         }
     } else {
-        // Pace the streaming text at the render layer so the markdown renderer
-        // re-parses on a throttled, forward-only value instead of per token —
-        // eliminates the incomplete-markdown height oscillation (flicker).
+        // §body-flicker-fix (v0.2.12): boundary-aware streaming. See
+        // splitStableTail(). The mikepenz Markdown renderer produces
+        // pathologically unstable height when re-parsing a GROWING incomplete
+        // streaming prefix (measured: 151 height-shrinks/turn, peak 8213px for
+        // ~3500 chars — same root cause as the reasoning card's 5000px). The
+        // render-layer pacer only reduces re-parse FREQUENCY, not the per-parse
+        // instability. Fix: during streaming, render COMPLETE leading blocks
+        // (paragraphs closed, fences balanced) as markdown — whose height only
+        // grows when a new block closes — plus the trailing INCOMPLETE block as
+        // plain text — whose height grows monotonically without reflow. Total
+        // height never shrinks → 0 flicker, while ~all completed content keeps
+        // formatting. On completion, snap to full markdown (with image
+        // resolution when a repository is available). Bypassing
+        // ResolvedMarkdownText during streaming also eliminates the per-step
+        // resolveImages churn (measured 164 redundant runs/turn).
         val renderText = rememberPacedStreamingText(text, isStreaming)
+        val fontSizes = LocalMarkdownFontSizes.current
         val innerModifier = modifier.padding(12.dp)
-        if (repository != null) {
-            ResolvedMarkdownText(
-                text = renderText,
-                repository = repository,
-                workspaceDirectory = workspaceDirectory,
-                modifier = innerModifier
-            )
-        } else {
-            val normalizedText = remember(renderText) { MarkdownImageResolver.normalizeStandaloneImageBlocks(renderText) }
-            val fontSizes = LocalMarkdownFontSizes.current
-            SelectionContainer {
-                CompositionLocalProvider(LocalContentColor provides MaterialTheme.colorScheme.onSurface) {
-                    Markdown(
-                        content = normalizedText,
-                        typography = markdownTypography(fontSizes),
-                        components = markdownComponents(
-                            codeBlock = { WrappedCodeBlock(it) },
-                            codeFence = { WrappedCodeBlock(it) }
-                        ),
-                        modifier = innerModifier,
-                        imageTransformer = DataUriImageTransformer
+        Box(modifier = Modifier.fillMaxWidth()) {
+            if (isStreaming) {
+                // §body-flicker-fix hybrid: split into prose + code segments.
+                // Prose → plain Text, code → CodeBlockSurface. Both are
+                // height-monotonic while growing → 0 flicker, code keeps
+                // formatting. See splitCodeAndProse().
+                val segments = remember(renderText) { splitCodeAndProse(renderText) }
+                SelectionContainer {
+                    CompositionLocalProvider(LocalContentColor provides MaterialTheme.colorScheme.onSurface) {
+                        Column(modifier = innerModifier) {
+                            segments.forEach { seg ->
+                                when (seg) {
+                                    is StreamSegment.Prose -> Text(
+                                        text = seg.raw,
+                                        // Reuse the markdown body TextStyle (fontFamily +
+                                        // fontSize + lineHeight) so the completion snap to
+                                        // formatted markdown is height-neutral — avoids the
+                                        // bodyMedium-vs-markdown lineHeight mismatch
+                                        // (21sp vs body*1.4) that caused a small snap-shrink
+                                        // at finalization (maxer 🟡-2).
+                                        style = markdownTypography(fontSizes).text,
+                                        color = MaterialTheme.colorScheme.onSurface
+                                    )
+                                    is StreamSegment.Code -> CodeBlockSurface(
+                                        code = seg.code,
+                                        language = seg.language
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+            } else {
+                // Completed: full markdown with image resolution (one-shot).
+                if (repository != null) {
+                    ResolvedMarkdownText(
+                        text = renderText,
+                        repository = repository,
+                        workspaceDirectory = workspaceDirectory,
+                        modifier = innerModifier
                     )
+                } else {
+                    val normalizedText = remember(renderText) { MarkdownImageResolver.normalizeStandaloneImageBlocks(renderText) }
+                    SelectionContainer {
+                        CompositionLocalProvider(LocalContentColor provides MaterialTheme.colorScheme.onSurface) {
+                            Markdown(
+                                content = normalizedText,
+                                typography = markdownTypography(fontSizes),
+                                components = markdownComponents(
+                                    codeBlock = { WrappedCodeBlock(it) },
+                                    codeFence = { WrappedCodeBlock(it) },
+                                    table = { WrappedTable(it) }
+                                ),
+                                modifier = innerModifier,
+                                imageTransformer = DataUriImageTransformer
+                            )
+                        }
+                    }
                 }
             }
         }
@@ -210,7 +360,8 @@ internal fun ResolvedMarkdownText(
                 // §3.1 syntax highlighting via mikepenz code module + dev.snipme:highlights.
                 components = markdownComponents(
                     codeBlock = { WrappedCodeBlock(it) },
-                    codeFence = { WrappedCodeBlock(it) }
+                    codeFence = { WrappedCodeBlock(it) },
+                    table = { WrappedTable(it) }
                 ),
                 modifier = modifier,
                 imageTransformer = DataUriImageTransformer
@@ -296,6 +447,19 @@ private fun MarkdownComponentModel.codeFenceLanguage(): String {
 internal fun WrappedCodeBlock(model: MarkdownComponentModel) {
     val code = remember(model) { model.codeText() }
     val language = remember(model) { model.codeFenceLanguage() }
+    CodeBlockSurface(code = code, language = language)
+}
+
+/**
+ * The reusable code-block renderer shared by [WrappedCodeBlock] (completed
+ * markdown) and the streaming code segments (see [splitCodeAndProse]). A
+ * muted layer02 surface + borderBase outline, monospace Text with softWrap so
+ * long lines wrap instead of horizontally scrolling/clipping, and an optional
+ * language badge in the top-right corner. Content stays selectable. See
+ * [WrappedCodeBlock] for the syntax-highlighting trade-off rationale (#9).
+ */
+@Composable
+internal fun CodeBlockSurface(code: String, language: String) {
     val oc = MaterialTheme.opencode
     Surface(
         modifier = Modifier.fillMaxWidth(),
@@ -336,6 +500,101 @@ internal fun WrappedCodeBlock(model: MarkdownComponentModel) {
                     style = MaterialTheme.typography.labelSmall,
                     fontFamily = FontFamily.Monospace,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+        }
+    }
+}
+
+/**
+ * #table-wrap — markdown TABLE renderer that WRAPS cell text instead of
+ * ellipsizing it, with a per-column max width. Replaces mikepenz's default
+ * [MarkdownTable] whose header/row cells use `maxLines = 1,
+ * overflow = TextOverflow.Ellipsis` (single-line truncation — the "缩略" the
+ * user saw). Each column is `widthIn(max = TABLE_COLUMN_MAX_WIDTH)` (NOT
+ * `weight(1f)`), so:
+ *   - few-column tables are NOT stretched wall-to-wall (they sit left at their
+ *     natural width, capped per column);
+ *   - long cell content soft-wraps onto extra lines instead of being cut.
+ * When the columns' total max width exceeds the available width, the whole
+ * table scrolls horizontally (each column keeps its cap, cells still wrap).
+ *
+ * Cell inline content (bold/`code`/links/images) is rendered via mikepenz's
+ * [MarkdownTableBasicText] (the same pipeline the default table uses), so we
+ * only change the LAYOUT + line policy, not the inline rendering.
+ */
+@Composable
+internal fun WrappedTable(model: MarkdownComponentModel) {
+    val node = model.node
+    val content = model.content
+    val style = model.typography.table
+    val oc = MaterialTheme.opencode
+    val cellPadding = LocalMarkdownDimens.current.tableCellPadding
+    val header = remember(node) { node.findChildOfType(HEADER) }
+    val rows = remember(node) { node.children.filter { it.type == ROW } }
+    val columnsCount = remember(node) {
+        header?.children?.count { it.type == CELL } ?: 0
+    }
+    // Per-column max width (the user's "每列最大宽度"). Cells wrap up to this;
+    // a column never exceeds it regardless of content length.
+    val maxColumnWidth = 160.dp
+    BoxWithConstraints(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(oc.layer02, RoundedCornerShape(6.dp))
+    ) {
+        // Horizontal-scroll only when the capped columns genuinely overflow the
+        // available width; otherwise let the table sit at its natural (capped)
+        // width, left-aligned.
+        val useScroll = maxColumnWidth * columnsCount > maxWidth
+        Column(
+            modifier = if (useScroll) {
+                Modifier.horizontalScroll(rememberScrollState())
+            } else {
+                Modifier.fillMaxWidth()
+            }
+        ) {
+            header?.let { h ->
+                WrappedTableRow(
+                    content = content,
+                    rowNode = h,
+                    style = style.copy(fontWeight = FontWeight.Bold),
+                    maxColumnWidth = maxColumnWidth,
+                    cellPadding = cellPadding
+                )
+                HorizontalDivider(color = oc.borderBase)
+            }
+            rows.forEach { row ->
+                WrappedTableRow(
+                    content = content,
+                    rowNode = row,
+                    style = style,
+                    maxColumnWidth = maxColumnWidth,
+                    cellPadding = cellPadding
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun WrappedTableRow(
+    content: String,
+    rowNode: org.intellij.markdown.ast.ASTNode,
+    style: androidx.compose.ui.text.TextStyle,
+    maxColumnWidth: androidx.compose.ui.unit.Dp,
+    cellPadding: androidx.compose.ui.unit.Dp
+) {
+    Row(verticalAlignment = Alignment.Top) {
+        rowNode.children.filter { it.type == CELL }.forEach { cell ->
+            Column(modifier = Modifier.padding(cellPadding).widthIn(max = maxColumnWidth)) {
+                // WRAP instead of ellipsize: maxLines = MAX + overflow = Visible.
+                MarkdownTableBasicText(
+                    content = content,
+                    cell = cell,
+                    style = style,
+                    maxLines = Int.MAX_VALUE,
+                    overflow = TextOverflow.Visible
                 )
             }
         }

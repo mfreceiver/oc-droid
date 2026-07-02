@@ -42,6 +42,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.sp
 import com.mikepenz.markdown.compose.components.markdownComponents
 import com.mikepenz.markdown.m3.Markdown
@@ -175,14 +176,16 @@ internal fun ReasoningCard(
                     shape = RoundedCornerShape(6.dp),
                     color = Color.Transparent
                 ) {
-                    // Cap the body height + scroll so long reasoning never
-                    // overflows the screen (the "内容外溢" symptom) — applies to
-                    // both streaming and completed.
+                    // Cap the body height + scroll so long streaming reasoning
+                    // never overflows the screen (the "内容外溢" symptom) WHILE
+                    // streaming. On completion the cap is released (Dp.Unspecified
+                    // = no upper bound) so a long finished chain-of-thought shows
+                    // at its full natural height per the user's decision.
                     SelectionContainer {
                         CompositionLocalProvider(LocalContentColor provides MaterialTheme.colorScheme.onSurfaceVariant) {
                             Box(
                                 modifier = Modifier
-                                    .heightIn(max = 280.dp)
+                                    .heightIn(max = if (isStreaming) 280.dp else Dp.Unspecified)
                                     .verticalScroll(scrollState)
                                     .padding(8.dp)
                             ) {
@@ -202,7 +205,8 @@ internal fun ReasoningCard(
                                         // §3.1 syntax highlighting in reasoning blocks too.
                                         components = markdownComponents(
                                             codeBlock = { WrappedCodeBlock(it) },
-                                            codeFence = { WrappedCodeBlock(it) }
+                                            codeFence = { WrappedCodeBlock(it) },
+                                            table = { WrappedTable(it) }
                                         ),
                                         imageTransformer = DataUriImageTransformer
                                     )

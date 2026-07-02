@@ -7,6 +7,7 @@ import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
@@ -389,7 +390,10 @@ internal fun ChatMessageList(
             val streamingExpandKey = streamingReasoningPart.messageId
                 ?.let { "$it|$streamingKey" } ?: "streaming|$streamingKey"
             item(key = "streaming-reasoning") {
-                Box(modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp)) {
+                // §card-width: responsive 2/3 width (capped 480dp) for the
+                // standalone streaming reasoning card, matching MessageRow's cap.
+                BoxWithConstraints(modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp)) {
+                    val cardMax = minOf(maxWidth * 2f / 3f, 480.dp)
                     ReasoningCard(
                         text = streamingText,
                         title = streamingReasoningPart.toolReason,
@@ -397,7 +401,7 @@ internal fun ChatMessageList(
                         expandedParts = expandedParts,
                         onToggleExpand = onToggleExpand,
                         expandedKey = streamingExpandKey,
-                        modifier = Modifier.widthIn(max = MAX_CARD_WIDTH)
+                        modifier = Modifier.widthIn(max = cardMax)
                     )
                 }
             }

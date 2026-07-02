@@ -1,5 +1,6 @@
 package cn.vectory.ocdroid.ui.chat
 
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -10,6 +11,7 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import cn.vectory.ocdroid.data.model.Message
 import cn.vectory.ocdroid.data.model.Part
@@ -59,10 +61,17 @@ internal fun MessageRow(
 ) {
     val isUser = message.isUser
 
-    Column(
-        modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp),
-        horizontalAlignment = if (isUser) Alignment.End else Alignment.Start
+    // §card-width (v0.2.12): responsive card width = 2/3 of the available row
+    // width, capped at 480dp for tablets. Replaces the old fixed 220dp cap.
+    // Wrapped in BoxWithConstraints so all cards below read `cardMax`.
+    BoxWithConstraints(
+        modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp)
     ) {
+        val cardMax = minOf(maxWidth * 2f / 3f, 480.dp)
+        Column(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalAlignment = if (isUser) Alignment.End else Alignment.Start
+        ) {
         // No "OpenCode" speaker title — the user's blue left bar vs the
         // assistant's container-less reply already make it clear who's speaking,
         // so an extra blue label is redundant.
@@ -144,12 +153,12 @@ internal fun MessageRow(
                             expandedParts = expandedParts,
                             onToggleExpand = onToggleExpand,
                             messageId = message.id,
-                            modifier = Modifier.widthIn(max = MAX_CARD_WIDTH)
+                            modifier = Modifier.widthIn(max = cardMax)
                         )
                         is ToolRenderItem.SubAgent -> SubAgentCard(
                             part = item.part,
                             onOpenSubAgent = onOpenSubAgent,
-                            modifier = Modifier.widthIn(max = MAX_CARD_WIDTH)
+                            modifier = Modifier.widthIn(max = cardMax)
                         )
                         is ToolRenderItem.WritePatch -> {
                             val writeFiles = item.part.files ?: emptyList()
@@ -157,7 +166,7 @@ internal fun MessageRow(
                                 MultiFilePatchAccordion(
                                     parts = listOf(item.part),
                                     onFileClick = onFileClick,
-                                    modifier = Modifier.widthIn(max = MAX_CARD_WIDTH)
+                                    modifier = Modifier.widthIn(max = cardMax)
                                 )
                             } else {
                                 PatchCard(
@@ -166,7 +175,7 @@ internal fun MessageRow(
                                     expandedParts = expandedParts,
                                     onToggleExpand = onToggleExpand,
                                     expandedKey = "${message.id}|${item.part.id}",
-                                    modifier = Modifier.widthIn(max = MAX_CARD_WIDTH)
+                                    modifier = Modifier.widthIn(max = cardMax)
                                 )
                             }
                         }
@@ -177,7 +186,7 @@ internal fun MessageRow(
                             onToggleExpand = onToggleExpand,
                             expandedKey = "${message.id}|${item.part.id}",
                             isStale = item.part.id in staleQuestionPartKeys,
-                            modifier = Modifier.widthIn(max = MAX_CARD_WIDTH)
+                            modifier = Modifier.widthIn(max = cardMax)
                         )
                     }
                 }
@@ -195,6 +204,7 @@ internal fun MessageRow(
                     messageId = message.id,
                     expandedParts = expandedParts,
                     onToggleExpand = onToggleExpand,
+                    cardMax = cardMax,
                     modifier = Modifier.fillMaxWidth()
                 )
                 i += 1
@@ -233,11 +243,12 @@ internal fun MessageRow(
             if (err.isNotBlank()) {
                 ErrorCard(
                     text = err,
-                    modifier = Modifier.widthIn(max = MAX_CARD_WIDTH)
+                    modifier = Modifier.widthIn(max = cardMax)
                 )
             }
         }
-    }
+        } // Column
+        } // BoxWithConstraints
 }
 
 @Composable
@@ -252,7 +263,11 @@ internal fun PartView(
     messageId: String,
     expandedParts: Map<String, Boolean>,
     onToggleExpand: (String, Boolean) -> Unit,
-    modifier: Modifier = Modifier.fillMaxWidth()
+    modifier: Modifier = Modifier.fillMaxWidth(),
+    // §card-width: responsive card max width (2/3 screen, capped 480dp) from
+    // the caller's BoxWithConstraints. Defaults to the legacy fixed cap so
+    // unscoped callers (tests/preview) still compile.
+    cardMax: Dp = MAX_CARD_WIDTH
 ) {
     val expandKey = "${messageId}|${part.id}"
     when {
@@ -279,7 +294,7 @@ internal fun PartView(
                     partId = part.id,
                     expandedParts = expandedParts,
                     onToggleExpand = onToggleExpand,
-                    modifier = Modifier.widthIn(max = MAX_CARD_WIDTH)
+                    modifier = Modifier.widthIn(max = cardMax)
                 )
             } else if (isUser || !textContent.contains("<task_result>", ignoreCase = true)) {
                 TextPart(
@@ -299,14 +314,14 @@ internal fun PartView(
             expandedParts = expandedParts,
             onToggleExpand = onToggleExpand,
             expandedKey = expandKey,
-            modifier = Modifier.widthIn(max = MAX_CARD_WIDTH)
+            modifier = Modifier.widthIn(max = cardMax)
         )
         part.isImageAttachment -> ImageFilePart(part, modifier)
         part.isFile -> FileAttachmentPart(part, modifier)
         part.isSubAgentTask -> SubAgentCard(
             part = part,
             onOpenSubAgent = onOpenSubAgent,
-            modifier = Modifier.widthIn(max = MAX_CARD_WIDTH)
+            modifier = Modifier.widthIn(max = cardMax)
         )
         part.isTool -> ToolCard(
             part = part,
@@ -314,7 +329,7 @@ internal fun PartView(
             expandedParts = expandedParts,
             onToggleExpand = onToggleExpand,
             expandedKey = expandKey,
-            modifier = Modifier.widthIn(max = MAX_CARD_WIDTH)
+            modifier = Modifier.widthIn(max = cardMax)
         )
         // Dead code removed (评审 Stage C #1): the previous
         // `part.isPatch && part.filePathsForNavigationFiltered.isNotEmpty()`
