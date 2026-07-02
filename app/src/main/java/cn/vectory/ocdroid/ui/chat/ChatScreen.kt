@@ -4,23 +4,21 @@ import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
-import androidx.compose.animation.core.Animatable
-import androidx.compose.animation.core.Spring
-import androidx.compose.animation.core.spring
 import androidx.compose.foundation.background
-import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxScope
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.pager.HorizontalPager
+import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
@@ -33,26 +31,21 @@ import androidx.compose.material3.windowsizeclass.WindowSizeClass
 import androidx.compose.material3.windowsizeclass.WindowWidthSizeClass
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.ui.res.stringResource
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
-import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.RectangleShape
-import androidx.compose.ui.input.pointer.pointerInput
-import androidx.compose.ui.input.pointer.util.VelocityTracker
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.platform.LocalDensity
-import androidx.compose.ui.unit.IntOffset
-import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.hilt.navigation.compose.hiltViewModel
@@ -75,8 +68,6 @@ import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.delay
-import kotlin.math.abs
-import kotlin.math.sign
 
 /**
  * §B3: provides a [WindowSizeClass] computed once in [cn.vectory.ocdroid.MainActivity]
@@ -319,24 +310,22 @@ fun ChatScreen(
     // §kimo#6: remember the compact lambda so ChatTopBar can skip when stable.
     val onContextCompact = remember(viewModel) { { viewModel.compactSession() } }
 
-    // §Feature A: swipe-to-switch-tab state captured as updated-state so the
-    // pointer-input coroutine always resolves against the latest root sessions
-    // without reinstalling the detector on every recomposition.
-    val density = LocalDensity.current
-    val minSwipePx = with(density) { 80.dp.toPx() }
-    val maxVerticalPx = with(density) { 24.dp.toPx() }
-    // §Feature A enhancement: animatable horizontal offset for the slide +
-    // velocity-driven fling animation. Content follows the finger during the
-    // drag and flings to the next/previous session on release.
-    val swipeOffset = remember { Animatable(0f) }
-    val currentSessionIdState = rememberUpdatedState(chat.currentSessionId)
-    val parentState = rememberUpdatedState(parent)
-    val rootOpenSessionsState = rememberUpdatedState(
+    // §pager: native HorizontalPager for swipe-to-switch. Each page maps to
+    // one root session; adjacent pages are visible during the drag for a book-
+    // like pager feel. Sub-agent sessions fall back to direct content.
+    val rootSessions = remember(sessionList.openSessionIds, sessionList.sessions) {
         sessionList.openSessionIds
             .mapNotNull { id -> sessionList.sessions.find { it.id == id } }
             .filter { it.parentId == null && !it.isArchived }
+    }
+    val currentRootIndex = remember(rootSessions, chat.currentSessionId, parent) {
+        val id = resolveEffectiveSelectedId(rootSessions, chat.currentSessionId, parent)
+        rootSessions.indexOfFirst { it.id == id }.coerceAtLeast(0)
+    }
+    val pagerState = rememberPagerState(
+        initialPage = currentRootIndex,
+        pageCount = { rootSessions.size.coerceAtLeast(1) }
     )
-    val onSelectSessionState = rememberUpdatedState(topBarActions.onSelectSession)
 
     // §#4: hoist the current session's pending question + its answer snapshot
     // here (root ChatScreen scope) so BOTH ChatInputBar (inside the chat
@@ -434,6 +423,29 @@ fun ChatScreen(
             }
         }
     }
+    // §pager: when the pager settles on a new page, select that session.
+    // Guarded to root sessions so a sub-agent view never accidentally switches
+    // tabs via the pager.
+    LaunchedEffect(pagerState) {
+        snapshotFlow { pagerState.settledPage }
+            .distinctUntilChanged()
+            .collect { page ->
+                val session = rootSessions.getOrNull(page)
+                if (session != null && session.id != chat.currentSessionId && parent == null) {
+                    topBarActions.onSelectSession(session.id)
+                }
+            }
+    }
+    // §pager: when the session changes externally (tab tap, sessions list,
+    // back gesture), scroll the pager to match without animation.
+    LaunchedEffect(chat.currentSessionId, rootSessions) {
+        if (parent == null && rootSessions.isNotEmpty()) {
+            val idx = rootSessions.indexOfFirst { it.id == chat.currentSessionId }
+            if (idx != -1 && idx != pagerState.currentPage) {
+                pagerState.scrollToPage(idx)
+            }
+        }
+    }
     val questionAnswersValid = pendingQuestion?.let { pq ->
         pq.questions.isNotEmpty() &&
             pq.questions.indices.all { i ->
@@ -486,194 +498,84 @@ fun ChatScreen(
             tonalElevation = if (isWide) 1.dp else 0.dp
         ) {
             Column(modifier = Modifier.fillMaxSize()) {
-                // §Feature A/C: chat content wrapper — holds the message list,
-                // snackbar host, and the floating thinking capsule overlay.
-                // §Feature A: horizontal swipe on the content area switches
-                // root session tabs; the threshold is evaluated on gesture END
-                // so it doesn't steal horizontal scroll from code blocks.
-                // §Feature A enhancement: content follows the finger during the
-                // drag and, on release, flings horizontally with the captured
-                // velocity to complete the transition.
+                // §pager: chat content wrapper. HorizontalPager shows root
+                // sessions side-by-side so adjacent pages are visible during the
+                // swipe, giving the book-like "both pages move together" feel.
                 Box(
                     modifier = Modifier
                         .weight(1f)
-                        .offset {
-                            IntOffset(
-                                x = swipeOffset.value.toInt(),
-                                y = 0
-                            )
-                        }
-                        .pointerInput(Unit) {
-                            val velocityTracker = VelocityTracker()
-                            var accumulatedX = 0f
-                            var accumulatedY = 0f
-
-                            detectHorizontalDragGestures(
-                                onDragStart = {
-                                    accumulatedX = 0f
-                                    accumulatedY = 0f
-                                    velocityTracker.resetTracking()
-                                },
-                                onHorizontalDrag = { change, dragAmount ->
-                                    accumulatedX += dragAmount
-                                    accumulatedY += change.position.y - change.previousPosition.y
-                                    // §kimo#3: track accumulated drag position
-                                    // (parent coordinate space) instead of
-                                    // change.position (which is in the offset
-                                    // node's local space and therefore
-                                    // underestimates velocity because the
-                                    // content tracks the finger).
-                                    velocityTracker.addPosition(
-                                        change.uptimeMillis,
-                                        Offset(accumulatedX, accumulatedY)
-                                    )
-                                    // Direct manipulation: content tracks the finger.
-                                    scope.launch {
-                                        swipeOffset.snapTo(swipeOffset.value + dragAmount)
-                                    }
-                                },
-                                onDragEnd = {
-                                    val velocityX = velocityTracker.calculateVelocity().x
-                                    val currentParent = parentState.value
-                                    val canSwitch = currentParent == null &&
-                                        abs(accumulatedX) >= minSwipePx &&
-                                        abs(accumulatedY) <= maxVerticalPx
-
-                                    if (canSwitch) {
-                                        val openSessions = rootOpenSessionsState.value
-                                        val currentId = currentSessionIdState.value
-                                        val effectiveId = resolveEffectiveSelectedId(
-                                            openSessions,
-                                            currentId,
-                                            currentParent
-                                        )
-                                        val idx = openSessions.indexOfFirst { it.id == effectiveId }
-                                        if (idx != -1) {
-                                            val nextIdx = if (accumulatedX < 0) {
-                                                // Left swipe → next root session.
-                                                (idx + 1).coerceAtMost(openSessions.lastIndex)
-                                            } else {
-                                                // Right swipe → previous root session.
-                                                (idx - 1).coerceAtLeast(0)
-                                            }
-                                            if (nextIdx != idx) {
-                                                scope.launch {
-                                                    val width = size.width.toFloat()
-                                                    val direction = sign(accumulatedX)
-                                                    val exitTarget = direction * width
-
-                                                    // Phase 1: fling the current
-                                                    // content off-screen, driven
-                                                    // by the release velocity.
-                                                    swipeOffset.animateTo(
-                                                        targetValue = exitTarget,
-                                                        animationSpec = spring(
-                                                            dampingRatio = Spring.DampingRatioNoBouncy,
-                                                            stiffness = Spring.StiffnessLow
-                                                        ),
-                                                        initialVelocity = velocityX
-                                                    )
-
-                                                    // Switch session while the
-                                                    // old content is off-screen.
-                                                    onSelectSessionState.value(openSessions[nextIdx].id)
-
-                                                    // Phase 2: bring the new
-                                                    // content in from the
-                                                    // opposite edge with a
-                                                    // natural deceleration.
-                                                    swipeOffset.snapTo(-exitTarget)
-                                                    swipeOffset.animateTo(
-                                                        targetValue = 0f,
-                                                        animationSpec = spring(
-                                                            dampingRatio = Spring.DampingRatioNoBouncy,
-                                                            stiffness = Spring.StiffnessMediumLow
-                                                        )
-                                                    )
-                                                }
-                                            } else {
-                                                // Boundary reached: spring back.
-                                                scope.launch {
-                                                    swipeOffset.animateTo(
-                                                        targetValue = 0f,
-                                                        animationSpec = spring()
-                                                    )
-                                                }
-                                            }
-                                        } else {
-                                            scope.launch {
-                                                swipeOffset.animateTo(
-                                                    targetValue = 0f,
-                                                    animationSpec = spring()
-                                                )
-                                            }
-                                        }
-                                    } else {
-                                        // Threshold not met: spring back to center.
-                                        scope.launch {
-                                            swipeOffset.animateTo(
-                                                targetValue = 0f,
-                                                animationSpec = spring()
-                                            )
-                                        }
-                                    }
-                                    accumulatedX = 0f
-                                    accumulatedY = 0f
-                                    velocityTracker.resetTracking()
-                                },
-                                onDragCancel = {
-                                    scope.launch {
-                                        swipeOffset.animateTo(
-                                            targetValue = 0f,
-                                            animationSpec = spring()
-                                        )
-                                    }
-                                    accumulatedX = 0f
-                                    accumulatedY = 0f
-                                    velocityTracker.resetTracking()
-                                }
-                            )
-                        }
+                        .fillMaxWidth()
                 ) {
-                    Box(modifier = Modifier.fillMaxSize()) {
-                        val isDraft = composer.draftWorkdir != null && chat.currentSessionId == null
-                        if (chat.currentSessionId == null && !isDraft) {
-                            ChatEmptyState(
-                                isConnected = connection.isConnected,
-                                isConnecting = connection.isConnecting,
-                                connectionPhase = connection.connectionPhase,
-                                hostName = curHostProfile?.name
-                                    ?: curHostProfile?.serverUrl
-                                        ?.substringAfter("://")
-                                        ?.substringBefore("/")
-                                    ?: "server",
-                                onConnect = { viewModel.testConnection() }
-                            )
-                        } else if (chat.currentSessionId != null) {
-                            ChatMessageList(
-                                viewModel = viewModel,
-                                onFileClick = onChatFileClick,
-                                onTabVisibilityChange = { tabVisible = it }
-                            )
+                    val isDraft = composer.draftWorkdir != null && chat.currentSessionId == null
+                    if (chat.currentSessionId != null && parent == null && rootSessions.size >= 2) {
+                        HorizontalPager(
+                            state = pagerState,
+                            modifier = Modifier.fillMaxSize()
+                        ) { page ->
+                            // §review (momo 🟠-4): defensive bounds guard. When a
+                            // root session is archived/deleted from another client,
+                            // rootSessions shrinks but pagerState.currentPage can
+                            // transiently exceed pageCount until the
+                            // currentSessionId/rootSessions sync effect clamps it.
+                            // Compose does not guarantee clamping the `page` arg,
+                            // so guard against IndexOutOfBoundsException here.
+                            val session = rootSessions.getOrNull(page)
+                            val sessionId = session?.id
+                            if (sessionId != null && sessionId == chat.currentSessionId) {
+                                ChatMessageList(
+                                    viewModel = viewModel,
+                                    onFileClick = onChatFileClick,
+                                    onTabVisibilityChange = { tabVisible = it }
+                                )
+                            } else {
+                                // Adjacent session — messages are not loaded
+                                // until the pager settles and selects it.
+                                Box(
+                                    modifier = Modifier.fillMaxSize(),
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    CircularProgressIndicator()
+                                }
+                            }
                         }
-
-                        // §Phase1E stale notice now surfaces as a timed M3 Snackbar (see
-                        // the LaunchedEffect keyed on chat.staleNotice above), so no
-                        // top-aligned banner is rendered here. The bottom-mounted
-                        // SnackbarHost below overlays both error/stale snackbars.
-
-                        // §C1: M3 Snackbar replaces the former top-aligned AppToast for
-                        // both AppState.error (tunnel activation / global errors) and the
-                        // bottom-bar question-submit failure. Default bottom placement is
-                        // accepted per the migration spec. SnackbarHost is the LAST child
-                        // of this Box so it overlays the message list / empty state; the
-                        // actual showSnackbar() calls are driven by the LaunchedEffects
-                        // keyed on `appStateError` / `questionSubmitError` above.
-                        SnackbarHost(
-                            hostState = snackbarHostState,
-                            modifier = Modifier.align(Alignment.BottomCenter)
+                    } else if (chat.currentSessionId != null) {
+                        // Single root session, sub-agent session, or pager
+                        // disabled — render the message list directly.
+                        ChatMessageList(
+                            viewModel = viewModel,
+                            onFileClick = onChatFileClick,
+                            onTabVisibilityChange = { tabVisible = it }
+                        )
+                    } else if (!isDraft) {
+                        ChatEmptyState(
+                            isConnected = connection.isConnected,
+                            isConnecting = connection.isConnecting,
+                            connectionPhase = connection.connectionPhase,
+                            hostName = curHostProfile?.name
+                                ?: curHostProfile?.serverUrl
+                                    ?.substringAfter("://")
+                                    ?.substringBefore("/")
+                                ?: "server",
+                            onConnect = { viewModel.testConnection() }
                         )
                     }
+
+                    // §Phase1E stale notice now surfaces as a timed M3 Snackbar (see
+                    // the LaunchedEffect keyed on chat.staleNotice above), so no
+                    // top-aligned banner is rendered here. The bottom-mounted
+                    // SnackbarHost below overlays both error/stale snackbars.
+
+                    // §C1: M3 Snackbar replaces the former top-aligned AppToast for
+                    // both AppState.error (tunnel activation / global errors) and the
+                    // bottom-bar question-submit failure. Default bottom placement is
+                    // accepted per the migration spec. SnackbarHost is the LAST child
+                    // of this Box so it overlays the message list / empty state; the
+                    // actual showSnackbar() calls are driven by the LaunchedEffects
+                    // keyed on `appStateError` / `questionSubmitError` above.
+                    SnackbarHost(
+                        hostState = snackbarHostState,
+                        modifier = Modifier.align(Alignment.BottomCenter)
+                    )
 
                     // §Feature C: floating capsule at top-center.
                     // §compact: when isCompacting, show a capsule without abort

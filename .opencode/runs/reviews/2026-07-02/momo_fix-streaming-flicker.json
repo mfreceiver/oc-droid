@@ -1,0 +1,19 @@
+{
+  "agent": "momo",
+  "scope": "fix-streaming-flicker",
+  "date": "2026-07-02",
+  "reviewed_commit": "working-tree (base 3fe21e2)",
+  "version_target": "0.2.8",
+  "verdict": "pass-with-fixes",
+  "score": 8.0,
+  "blocking_issues": [],
+  "non_blocking_issues": [
+    "flicker-fix1: message-created -> first-part-delta window still filters empty assistant row (accepted: hiding empty bubble is correct UX; documented as known limitation).",
+    "flicker-fix2: re-injection lacked part-type filter -> RESOLVED (added isText||isReasoning guard matching ensurePlaceholderPart).",
+    "flicker-fix2: zombie-placeholder risk when streamingFinalized -> RESOLVED (gated re-injection on !streamingFinalized).",
+    "HorizontalPager: session archive/delete currentPage bounds risk -> RESOLVED (added rootSessions.getOrNull(page) guard in content lambda).",
+    "HorizontalPager: settledPage reads stale currentSessionId snapshot -> accepted (onSelectSession idempotent).",
+    "No unit tests covering fix-2 re-injection branch -> deferred."
+  ],
+  "notes": "Reviewed combined diff: streaming flicker root-cause fix (dead isStreaming guard keyed by messageId vs partId-keyed streamingPartTexts; + placeholder survival across lagging server snapshots) and HorizontalPager refactor. Root-cause analysis and fix direction endorsed. All actionable items addressed before release."
+}

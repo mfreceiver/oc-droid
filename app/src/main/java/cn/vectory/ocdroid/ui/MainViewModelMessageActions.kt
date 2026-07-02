@@ -69,7 +69,7 @@ internal fun launchLoadMessages(
                         val fetchedMessages = page.items.map { m -> m.info }
                         val fetchedParts = page.items.associate { m -> m.info.id to m.parts }
                         val mergedMessages: List<Message>
-                        val mergedParts: Map<String, List<Part>>
+                        var mergedParts: Map<String, List<Part>>
                         // §Bug3 (scroll-yank + history-vanish): UNIFIED selective
                         // merge — ALWAYS preserve already-loaded older pages,
                         // regardless of resetLimit. Previously the resetLimit=true
@@ -98,6 +98,60 @@ internal fun launchLoadMessages(
                         mergedMessages = olderKept + fetchedMessages
                         // keep parts for older-kept messages + add fetched parts
                         mergedParts = it.partsByMessage.filterKeys { id -> id in olderKeptIds } + fetchedParts
+                        // §flicker-fix (placeholder survival): during a turn the
+                        // REST snapshot often LAGS the SSE stream — the in-flight
+                        // part isn't persisted yet, so fetchedParts for the
+                        // streaming message can be empty/stale and wipes the
+                        // locally-injected placeholder Part (added by
+                        // ensurePlaceholderPart on the leading-edge delta). The
+                        // streaming guard in ChatMessageList keeps the ROW
+                        // (separate fix), but MessageRow iterates an empty parts
+                        // list and renders nothing → the content still vanishes
+                        // for the ~100ms until the next delta flush re-injects the
+                        // placeholder. Re-inject the placeholder for every active
+                        // streaming partId whose Part was dropped by the server
+                        // snapshot so streaming output stays visible across
+                        // reloads. `it.partsByMessage` is the pre-merge state that
+                        // still holds our injected placeholders; `it.streamingPartTexts`
+                        // (pre-copy) holds the active streaming partIds.
+                        // §review (kimo 🟠-3 / momo 🟠-2): compute streamingFinalized
+                        // FIRST and gate re-injection on !streamingFinalized. At
+                        // finalization (idle) the server snapshot is authoritative —
+                        // the part is persisted and present in fetchedParts — so we
+                        // must NOT re-inject a placeholder there. Without this gate,
+                        // a lagging idle snapshot could re-inject a text=null
+                        // placeholder into partsByMessage while the overlay is
+                        // simultaneously cleared to emptyMap below → a zombie
+                        // placeholder with no overlay text → empty bubble after the
+                        // turn ends. During active streaming (!finalized) the overlay
+                        // is preserved and re-injection keeps output visible.
+                        val streamingFinalized = it.sessionStatuses[sessionId]
+                            ?.let { st -> !st.isBusy && !st.isRetry } ?: true
+                        val streamingPartIds = it.streamingPartTexts.keys
+                        if (!streamingFinalized && streamingPartIds.isNotEmpty()) {
+                            var reInjected = false
+                            val withPlaceholders = mergedParts.toMutableMap()
+                            for ((oldMsgId, oldParts) in it.partsByMessage) {
+                                for (p in oldParts) {
+                                    // §review (momo 🟠-2/🟠-3): only text/reasoning
+                                    // parts stream via streamingPartTexts and are
+                                    // rendered by PartView's TextPart/ReasoningCard.
+                                    // Re-injecting a tool/patch/file/step-* placeholder
+                                    // would misroute in PartView (empty tool card,
+                                    // orphaned streaming text). Match ensurePlaceholderPart's
+                                    // type guard (SessionSyncCoordinator §681-722).
+                                    if (p.id in streamingPartIds && (p.isText || p.isReasoning)) {
+                                        val merged = withPlaceholders[oldMsgId]
+                                        if (merged == null || merged.none { it.id == p.id }) {
+                                            withPlaceholders[oldMsgId] =
+                                                (merged ?: emptyList()) + p
+                                            reInjected = true
+                                        }
+                                    }
+                                }
+                            }
+                            if (reInjected) mergedParts = withPlaceholders
+                        }
                         // §append-safe (gpter BLOCKER): only drop the live
                         // streaming overlay when the session is NOT actively
                         // running. A resetLimit=true reload triggered while a
@@ -112,8 +166,6 @@ internal fun launchLoadMessages(
                         // resetLimit reload finalizes as before (preserving the
                         // S1 finalization-boundary model). Unknown status →
                         // finalize/clear (legacy behaviour).
-                        val streamingFinalized = it.sessionStatuses[sessionId]
-                            ?.let { st -> !st.isBusy && !st.isRetry } ?: true
                         it.copy(
                             messages = mergedMessages,
                             partsByMessage = mergedParts,

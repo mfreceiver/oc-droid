@@ -382,10 +382,26 @@ internal fun ChatMessageList(
         // window. Does NOT affect the standalone streaming-reasoning item
         // above (separate item{} block keyed "streaming-reasoning").
         val reversedMessages = messages.reversed().filterNot { msg ->
+            val msgParts = partsByMessage[msg.id].orEmpty()
             isRenderableEmptyMessage(
                 isUser = msg.isUser,
-                partsForMessage = partsByMessage[msg.id].orEmpty(),
-                isStreaming = msg.id in streamingPartTexts
+                partsForMessage = msgParts,
+                // §flicker-fix: streamingPartTexts is keyed by partId (S4
+                // rekey in d6ede32), NOT messageId — so a `msg.id in ...`
+                // check is always false and the streaming guard was dead.
+                // During a turn a reload (session.status busy / part.created /
+                // idle) replaces partsByMessage with the server snapshot; if
+                // that snapshot lags (the in-flight part isn't persisted yet)
+                // the message's parts are momentarily empty. With a dead guard
+                // the row is filtered out → height collapses, the next ≤100ms
+                // delta flush re-injects the placeholder via
+                // ensurePlaceholderPart → height expands → the "content
+                // vanishes then reappears, height collapses then expands"
+                // flicker. Correctly detect a streaming message by checking
+                // whether ANY of its parts is an active streaming partId, OR
+                // whether the standalone streaming reasoning part belongs to it.
+                isStreaming = msgParts.any { it.id in streamingPartTexts } ||
+                    streamingReasoningPart?.messageId == msg.id
             )
         }
         val showGap = gapInfo != null && gapInfo.open

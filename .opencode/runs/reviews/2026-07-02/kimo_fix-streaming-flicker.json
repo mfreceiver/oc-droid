@@ -1,0 +1,20 @@
+{
+  "agent": "kimo",
+  "scope": "fix-streaming-flicker",
+  "date": "2026-07-02",
+  "reviewed_commit": "working-tree (base 3fe21e2)",
+  "version_target": "0.2.8",
+  "verdict": "pass-with-fixes",
+  "score": 7.5,
+  "blocking_issues": [],
+  "non_blocking_issues": [
+    "HorizontalPager: default beyondBoundsPageCount=0 disposes offscreen pages -> per-page ChatMessageList savedPositions/listState reset -> swiping back to a root session jumps to bottom (regression vs single-instance offset-animation approach). USER ACCEPTED as known limitation for this release; scope limited to root-session swipe (sub-agent parent<->sub memory unaffected).",
+    "flicker-fix2: zombie placeholder when streamingFinalized -> RESOLVED (gated on !streamingFinalized).",
+    "flicker-fix2: no part-type filter -> RESOLVED (isText||isReasoning).",
+    "rememberPagerState initialPage stale on rootSessions 1<->2 transition -> accepted (first-frame flash, corrected by sync effect).",
+    "flicker-fix2 lacks unit tests -> deferred.",
+    "contentVersion ties to partsByMessage size -> minor extra restore-effect path; accepted.",
+    "Stale comment about listState cross-session reuse -> deferred."
+  ],
+  "notes": "Filled in for glmer which returned empty results twice (specialist failure). Core flicker fixes endorsed. Pager scroll-position regression acknowledged and accepted by user for this release."
+}
