@@ -587,7 +587,7 @@ class SessionSyncCoordinatorTest {
     }
 
     @Test
-    fun `message part updated full text cancels a pending delta flush so the snapshot stays authoritative`() {
+    fun `message part updated full text coalesces and replaces pending deltas so the snapshot stays authoritative`() {
         setCurrentSession("session-1")
 
         fun delta(d: String) = coordinator.handleEvent(event("message.part.delta") {
@@ -602,7 +602,10 @@ class SessionSyncCoordinatorTest {
         delta(" STALE")
         assertEquals("partial", slices.chat.value.streamingPartTexts["part-1"])
 
-        // Authoritative full text supersedes the streaming accumulation for part-1.
+        // Authoritative full text arrives while the delta coalesce window is
+        // still open. §Site1 coalescing: it is buffered into the REPLACE
+        // fullTextBuffer (not written synchronously), so the overlay still
+        // shows the leading-edge value until the window flushes.
         coordinator.handleEvent(event("message.part.updated") {
             put("sessionID", JsonPrimitive("session-1"))
             put("part", buildJsonObject {
@@ -612,9 +615,10 @@ class SessionSyncCoordinatorTest {
                 put("text", JsonPrimitive("AUTHORITATIVE"))
             })
         })
-        assertEquals("AUTHORITATIVE", slices.chat.value.streamingPartTexts["part-1"])
 
-        // Advancing the scheduler must NOT re-inject the cancelled STALE buffer.
+        // Flushing the coalesce window must apply the authoritative fullText as
+        // a REPLACE (fullTextBuffer wins over the deltaBuffer's STALE append),
+        // so the stale delta never corrupts the snapshot.
         scope.testScheduler.advanceUntilIdle()
         assertEquals("AUTHORITATIVE", slices.chat.value.streamingPartTexts["part-1"])
     }

@@ -87,6 +87,23 @@ data class Message(
         } else null)
 }
 
+/**
+ * True for an assistant message that has no renderable content: not a user
+ * message, has no parts in [partsForMessage], and is not currently streaming
+ * ([isStreaming] is false). Such messages render as a blank timestamp-only
+ * bubble and are filtered at the render layer. Streaming placeholders
+ * (a `Part` with `text=null` introduced by v0.2.5 streaming) are protected:
+ * the placeholder Part is present in [partsForMessage] (so it is non-empty),
+ * and/or [isStreaming] is true — either way this returns false.
+ *
+ * Pure (no Compose / state dependency) so it is unit-testable in isolation.
+ */
+fun isRenderableEmptyMessage(
+    isUser: Boolean,
+    partsForMessage: List<Part>,
+    isStreaming: Boolean
+): Boolean = !isUser && partsForMessage.isEmpty() && !isStreaming
+
 @Serializable
 data class MessageWithParts(
     val info: Message,

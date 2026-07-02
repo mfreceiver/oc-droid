@@ -3,9 +3,11 @@ package cn.vectory.ocdroid.ui.chat
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.background
-import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxScope
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -27,14 +29,17 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.RectangleShape
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.hilt.navigation.compose.hiltViewModel
@@ -56,6 +61,8 @@ import cn.vectory.ocdroid.ui.theme.opencode
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.delay
+import kotlin.math.abs
 
 /**
  * §B3: provides a [WindowSizeClass] computed once in [cn.vectory.ocdroid.MainActivity]
@@ -100,6 +107,10 @@ fun ChatScreen(
     // 共同祖先 ChatScreen 提升 `tabVisible`，通过 onTabVisibilityChange 回调
     // 从 ChatMessageList 写入，通过 prop 从 ChatTopBar 读取。默认显示。
     var tabVisible by remember { mutableStateOf(true) }
+    // §Feature B: first back in a root session arms a 1s exit-confirmation
+    // window; the BackHandler is disabled while pendingExit is true so the next
+    // back propagates to the system and exits the app.
+    var pendingExit by remember { mutableStateOf(false) }
     // §G4 会话切换时重置 tab 可见——避免从隐藏态切到新会话后 tab 仍不可见。
     LaunchedEffect(chat.currentSessionId) { tabVisible = true }
     // §R-17 Stage 2: expandedParts collect moved INTO ChatMessageList (it now
@@ -163,14 +174,36 @@ fun ChatScreen(
 
 
     // #14: edge-swipe / system-back returns to the parent session when viewing a
-    // child. Registered here (deeper than PhoneLayout's pager-level BackHandler
-    // from #12) so it wins dispatch priority while a child session is open.
-    // lastParent caches the most recent non-null parentId so the back callback
-    // still resolves the right target even if state recomposes mid-press.
+    // child session. Registered here (deeper than PhoneLayout's pager-level
+    // BackHandler from #12) so it wins dispatch priority while a child session
+    // is open. lastParent caches the most recent non-null parentId so the back
+    // callback still resolves the right target even if state recomposes mid-press.
     val parent = curSession?.parentId
     var lastParent by remember { mutableStateOf<String?>(null) }
     if (parent != null) lastParent = parent
     BackHandler(enabled = parent != null) { lastParent?.let { viewModel.selectSession(it) } }
+
+    // §Feature B: root-session double-confirm before system back exits the app.
+    // First back shows a 1s snackbar and disables this handler; a second back
+    // within the window propagates to the system. After 1s the handler re-arms.
+    BackHandler(enabled = parent == null && !pendingExit) {
+        pendingExit = true
+        scope.launch {
+            snackbarHostState.showTimed(
+                message = "退出请再次滑动",
+                durationMillis = 1000L
+            )
+        }
+    }
+    // §Feature B: auto-reset the exit-confirmation window after 1s. This also
+    // dismisses the snackbar naturally because showTimed uses Indefinite + a
+    // 1s timeout; when pendingExit flips back the UI re-arms the handler.
+    LaunchedEffect(pendingExit) {
+        if (pendingExit) {
+            delay(1_000)
+            pendingExit = false
+        }
+    }
 
     // Status-bar inset is handled by ChatTopBar's M3 TopAppBar (its default
     // TopAppBarDefaults.windowInsets consumes the status bar inset), so this
@@ -265,6 +298,21 @@ fun ChatScreen(
             onSwitchModel = { providerId, modelId -> viewModel.switchSessionModel(providerId, modelId) },
         )
     }
+
+    // §Feature A: swipe-to-switch-tab state captured as updated-state so the
+    // pointer-input coroutine always resolves against the latest root sessions
+    // without reinstalling the detector on every recomposition.
+    val density = LocalDensity.current
+    val minSwipePx = with(density) { 80.dp.toPx() }
+    val maxVerticalPx = with(density) { 24.dp.toPx() }
+    val currentSessionIdState = rememberUpdatedState(chat.currentSessionId)
+    val parentState = rememberUpdatedState(parent)
+    val rootOpenSessionsState = rememberUpdatedState(
+        sessionList.openSessionIds
+            .mapNotNull { id -> sessionList.sessions.find { it.id == id } }
+            .filter { it.parentId == null && !it.isArchived }
+    )
+    val onSelectSessionState = rememberUpdatedState(topBarActions.onSelectSession)
 
     // §#4: hoist the current session's pending question + its answer snapshot
     // here (root ChatScreen scope) so BOTH ChatInputBar (inside the chat
@@ -392,45 +440,109 @@ fun ChatScreen(
             tonalElevation = if (isWide) 1.dp else 0.dp
         ) {
             Column(modifier = Modifier.fillMaxSize()) {
-            Box(modifier = Modifier.weight(1f)) {
-            val isDraft = composer.draftWorkdir != null && chat.currentSessionId == null
-            if (chat.currentSessionId == null && !isDraft) {
-                ChatEmptyState(
-                    isConnected = connection.isConnected,
-                    isConnecting = connection.isConnecting,
-                    connectionPhase = connection.connectionPhase,
-                    hostName = curHostProfile?.name
-                        ?: curHostProfile?.serverUrl
-                            ?.substringAfter("://")
-                            ?.substringBefore("/")
-                            ?: "server",
-                    onConnect = { viewModel.testConnection() }
-                )
-            } else if (chat.currentSessionId != null) {
-                ChatMessageList(
-                    viewModel = viewModel,
-                    onFileClick = onChatFileClick,
-                    onTabVisibilityChange = { tabVisible = it }
-                )
-            }
+                // §Feature A/C: chat content wrapper — holds the message list,
+                // snackbar host, and the floating thinking capsule overlay.
+                // §Feature A: horizontal swipe on the content area switches
+                // root session tabs; the threshold is evaluated on gesture END
+                // so it doesn't steal horizontal scroll from code blocks.
+                Box(
+                    modifier = Modifier
+                        .weight(1f)
+                        .pointerInput(Unit) {
+                            var accumulatedX = 0f
+                            var accumulatedY = 0f
+                            detectHorizontalDragGestures(
+                                onHorizontalDrag = { change, dragAmount ->
+                                    accumulatedX += dragAmount
+                                    accumulatedY += change.position.y - change.previousPosition.y
+                                },
+                                onDragEnd = {
+                                    val currentParent = parentState.value
+                                    // Only root sessions participate in swipe switching.
+                                    if (currentParent == null &&
+                                        abs(accumulatedX) >= minSwipePx &&
+                                        abs(accumulatedY) <= maxVerticalPx
+                                    ) {
+                                        val openSessions = rootOpenSessionsState.value
+                                        val currentId = currentSessionIdState.value
+                                        val effectiveId = resolveEffectiveSelectedId(
+                                            openSessions,
+                                            currentId,
+                                            currentParent
+                                        )
+                                        val idx = openSessions.indexOfFirst { it.id == effectiveId }
+                                        if (idx != -1) {
+                                            val nextIdx = if (accumulatedX < 0) {
+                                                // Left swipe → next root session.
+                                                (idx + 1).coerceAtMost(openSessions.lastIndex)
+                                            } else {
+                                                // Right swipe → previous root session.
+                                                (idx - 1).coerceAtLeast(0)
+                                            }
+                                            if (nextIdx != idx) {
+                                                onSelectSessionState.value(openSessions[nextIdx].id)
+                                            }
+                                        }
+                                    }
+                                    accumulatedX = 0f
+                                    accumulatedY = 0f
+                                },
+                                onDragCancel = {
+                                    accumulatedX = 0f
+                                    accumulatedY = 0f
+                                }
+                            )
+                        }
+                ) {
+                    Box(modifier = Modifier.fillMaxSize()) {
+                        val isDraft = composer.draftWorkdir != null && chat.currentSessionId == null
+                        if (chat.currentSessionId == null && !isDraft) {
+                            ChatEmptyState(
+                                isConnected = connection.isConnected,
+                                isConnecting = connection.isConnecting,
+                                connectionPhase = connection.connectionPhase,
+                                hostName = curHostProfile?.name
+                                    ?: curHostProfile?.serverUrl
+                                        ?.substringAfter("://")
+                                        ?.substringBefore("/")
+                                    ?: "server",
+                                onConnect = { viewModel.testConnection() }
+                            )
+                        } else if (chat.currentSessionId != null) {
+                            ChatMessageList(
+                                viewModel = viewModel,
+                                onFileClick = onChatFileClick,
+                                onTabVisibilityChange = { tabVisible = it }
+                            )
+                        }
 
-            // §Phase1E stale notice now surfaces as a timed M3 Snackbar (see
-            // the LaunchedEffect keyed on chat.staleNotice above), so no
-            // top-aligned banner is rendered here. The bottom-mounted
-            // SnackbarHost below overlays both error/stale snackbars.
+                        // §Phase1E stale notice now surfaces as a timed M3 Snackbar (see
+                        // the LaunchedEffect keyed on chat.staleNotice above), so no
+                        // top-aligned banner is rendered here. The bottom-mounted
+                        // SnackbarHost below overlays both error/stale snackbars.
 
-            // §C1: M3 Snackbar replaces the former top-aligned AppToast for
-            // both AppState.error (tunnel activation / global errors) and the
-            // bottom-bar question-submit failure. Default bottom placement is
-            // accepted per the migration spec. SnackbarHost is the LAST child
-            // of this Box so it overlays the message list / empty state; the
-            // actual showSnackbar() calls are driven by the LaunchedEffects
-            // keyed on `appStateError` / `questionSubmitError` above.
-            SnackbarHost(
-                hostState = snackbarHostState,
-                modifier = Modifier.align(Alignment.BottomCenter)
-            )
-        }
+                        // §C1: M3 Snackbar replaces the former top-aligned AppToast for
+                        // both AppState.error (tunnel activation / global errors) and the
+                        // bottom-bar question-submit failure. Default bottom placement is
+                        // accepted per the migration spec. SnackbarHost is the LAST child
+                        // of this Box so it overlays the message list / empty state; the
+                        // actual showSnackbar() calls are driven by the LaunchedEffects
+                        // keyed on `appStateError` / `questionSubmitError` above.
+                        SnackbarHost(
+                            hostState = snackbarHostState,
+                            modifier = Modifier.align(Alignment.BottomCenter)
+                        )
+                    }
+
+                    // §Feature C: floating thinking capsule at top-center, shown
+                    // while the current session is actively running.
+                    ThinkingCapsuleOverlay(
+                        visible = currentSessionIsRunning && currentActivity != null,
+                        text = currentActivity?.text ?: "",
+                        startedAtMillis = currentActivity?.startedAtMillis,
+                        onAbort = viewModel::abortSession
+                    )
+                }
 
         // Input bar is enabled whenever there is either a concrete session OR
         // a draft workdir (so the user can type the first message that will
@@ -439,8 +551,6 @@ fun ChatScreen(
             ChatInputBar(
                 viewModel = viewModel,
                 isBusy = currentSessionIsRunning,
-                agentActivityText = currentActivity?.text,
-                agentStartedAtMillis = currentActivity?.startedAtMillis,
                 onAddImages = onAddImages,
                 pendingQuestion = pendingQuestion,
                 questionAnswersValid = questionAnswersValid,
@@ -547,6 +657,33 @@ fun ChatScreen(
  * top-aligned StaleNoticeBanner composable was removed when the notice
  * migrated to the snackbar host.
  */
+
+/**
+ * §Feature C: top-center floating thinking capsule. Extracted to a BoxScope
+ * extension so [AnimatedVisibility] resolves to the top-level function and can
+ * use [BoxScope.align]; inside the root [Column] it was colliding with the
+ * [ColumnScope.AnimatedVisibility] overload.
+ */
+@Composable
+private fun BoxScope.ThinkingCapsuleOverlay(
+    visible: Boolean,
+    text: String,
+    startedAtMillis: Long?,
+    onAbort: () -> Unit
+) {
+    AnimatedVisibility(
+        visible = visible,
+        modifier = Modifier.align(Alignment.TopCenter)
+    ) {
+        Box(Modifier.padding(top = 8.dp)) {
+            ThinkingCapsule(
+                text = text,
+                startedAtMillis = startedAtMillis,
+                onAbort = onAbort
+            )
+        }
+    }
+}
 
 private data class CurrentSessionActivity(
     val text: String,

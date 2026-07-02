@@ -70,20 +70,34 @@ internal fun launchLoadMessages(
                         val fetchedParts = page.items.associate { m -> m.info.id to m.parts }
                         val mergedMessages: List<Message>
                         val mergedParts: Map<String, List<Part>>
-                        if (resetLimit) {
-                            mergedMessages = fetchedMessages
-                            mergedParts = fetchedParts
-                        } else {
-                            val olderKept = it.messages.filter { m ->
-                                m.id !in fetchedIds && (oldestFetchedCreated == null ||
-                                    m.time?.created == null ||
-                                    m.time.created < oldestFetchedCreated)
-                            }
-                            val olderKeptIds = olderKept.map { m -> m.id }.toHashSet()
-                            mergedMessages = olderKept + fetchedMessages
-                            // keep parts for older-kept messages + add fetched parts
-                            mergedParts = it.partsByMessage.filterKeys { id -> id in olderKeptIds } + fetchedParts
+                        // §Bug3 (scroll-yank + history-vanish): UNIFIED selective
+                        // merge — ALWAYS preserve already-loaded older pages,
+                        // regardless of resetLimit. Previously the resetLimit=true
+                        // branch wholesale-replaced messages/partsByMessage with
+                        // the fetched page (latest 20), discarding older pages the
+                        // user had loaded via loadMore. During streaming,
+                        // session.status busy/idle triggers resetLimit=true
+                        // reloads, so loaded history vanished and the list shrank
+                        // → LazyListState lost its anchor and yanked to bottom.
+                        // Now both branches use the same selective merge that the
+                        // old resetLimit=false branch already used: keep local
+                        // messages whose id is NOT in the fetched set AND whose
+                        // created time predates the fetched page's oldest (or
+                        // whose created time is unavailable), then prepend them to
+                        // the fetched page. `m.id !in fetchedIds` dedups the seam
+                        // (loadMoreMessages has its own id-dedup at its seam too).
+                        // resetLimit STILL controls the downstream metadata resets
+                        // below (olderMessagesCursor, hasMoreMessages, gapInfo,
+                        // streaming overlay clearance) — only the merge changed.
+                        val olderKept = it.messages.filter { m ->
+                            m.id !in fetchedIds && (oldestFetchedCreated == null ||
+                                m.time?.created == null ||
+                                m.time.created < oldestFetchedCreated)
                         }
+                        val olderKeptIds = olderKept.map { m -> m.id }.toHashSet()
+                        mergedMessages = olderKept + fetchedMessages
+                        // keep parts for older-kept messages + add fetched parts
+                        mergedParts = it.partsByMessage.filterKeys { id -> id in olderKeptIds } + fetchedParts
                         // §append-safe (gpter BLOCKER): only drop the live
                         // streaming overlay when the session is NOT actively
                         // running. A resetLimit=true reload triggered while a

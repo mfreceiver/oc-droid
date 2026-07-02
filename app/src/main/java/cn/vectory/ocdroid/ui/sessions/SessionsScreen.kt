@@ -331,7 +331,18 @@ fun SessionsScreen(
                                 Text(
                                     text = workdir,
                                     style = MaterialTheme.typography.bodySmall,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    // §workdir-height-fix: constrain to a single line +
+                                    // ellipsis. M3 ListItem renders multi-line
+                                    // supportingContent with asymmetric bottom spacing
+                                    // (the taller left column mismatches the 48dp
+                                    // trailing IconButtons row), which made long-path
+                                    // workdir items show extra space at the bottom vs
+                                    // single-line items. Capping to 1 line keeps every
+                                    // workdir row a uniform height. The basename (the
+                                    // meaningful part) is already in headlineContent.
+                                    maxLines = 1,
+                                    overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis
                                 )
                             },
                             trailingContent = {

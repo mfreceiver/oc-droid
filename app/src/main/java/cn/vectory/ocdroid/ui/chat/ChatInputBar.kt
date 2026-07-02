@@ -21,12 +21,8 @@ import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.Add
-import androidx.compose.material.icons.filled.Circle
-import androidx.compose.material.icons.filled.MoreHoriz
 import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material3.AlertDialog
-import androidx.compose.material3.DropdownMenu
-import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LocalTextStyle
@@ -35,7 +31,6 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -60,16 +55,12 @@ import cn.vectory.ocdroid.R
 import cn.vectory.ocdroid.data.api.CommandInfo
 import cn.vectory.ocdroid.data.model.QuestionRequest
 import cn.vectory.ocdroid.ui.MainViewModel
-import cn.vectory.ocdroid.ui.theme.StopRed
 import cn.vectory.ocdroid.ui.theme.opencode
-import kotlinx.coroutines.delay
 
 @Composable
 internal fun ChatInputBar(
     viewModel: MainViewModel,
     isBusy: Boolean,
-    agentActivityText: String?,
-    agentStartedAtMillis: Long?,
     onAddImages: () -> Unit,
     // §#4: when a pending system question is active and the hoisted answers
     // satisfy its requirements, the primary send button submits the question
@@ -112,7 +103,6 @@ internal fun ChatInputBar(
     val canSend = text.isNotBlank() ||
         imageAttachments.isNotEmpty() ||
         (pendingQuestion != null && questionAnswersValid && !questionSubmitting)
-    val composerStatus = if (isBusy) agentActivityText ?: stringResource(R.string.chat_agent_running) else null
 
     // --- Slash-command autocomplete state ---
     // The composer offers command suggestions when the user types a leading
@@ -143,8 +133,7 @@ internal fun ChatInputBar(
     // running turn (matches the official web/TUI behaviour: the server's
     // `prompt_async` persists the message and the active run loop absorbs it
     // on its next iteration). Only when the agent is busy AND the composer is
-    // empty does the button become STOP (one-tap abort); the status-row menu
-    // remains a second stop entry point while typing.
+    // empty does the button become STOP (one-tap abort).
     val canStop = isBusy && !canSend
     // §3b: paper-plane Send icon (more idiomatic than ArrowUpward). Stop state
     // keeps the square Stop icon.
@@ -154,9 +143,7 @@ internal fun ChatInputBar(
     // §6: stop-tap guardrail — the primary button flips to STOP while the
     // agent is busy and the composer is empty. Such a tap is easy to misfire
     // (thumb reaches for send, composer was just cleared), so route it through
-    // a confirm dialog instead of aborting immediately. The explicit menu item
-    // in QuietComposerStatus stays a direct abort (that is an intentional
-    // menu action, no second confirmation needed).
+    // a confirm dialog instead of aborting immediately.
     var showStopConfirm by rememberSaveable { mutableStateOf(false) }
 
     // §9: composer card — rounded 10, surface (bg-base), 2dp elevation.
@@ -166,19 +153,10 @@ internal fun ChatInputBar(
         shape = RoundedCornerShape(10.dp),
         shadowElevation = 2.dp
     ) {
-        // Horizontal 16 inset lives on the Column so the status row, command
-        // panel, attachment strip, and editor all share one consistent side
-        // inset (the v2 composer spec's horizontal=16).
+        // Horizontal 16 inset lives on the Column so the command panel,
+        // attachment strip, and editor all share one consistent side inset
+        // (the v2 composer spec's horizontal=16).
         Column(modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp)) {
-            if (composerStatus != null) {
-                QuietComposerStatus(
-                    status = composerStatus,
-                    isBusy = isBusy,
-                    startedAtMillis = if (isBusy) agentStartedAtMillis else null,
-                    onAbort = onAbort,
-                )
-            }
-
             // Command suggestions panel — rendered above the input row (the
             // input sits at the bottom of the screen, so this visual ordering
             // keeps the suggestions visible without a popup that would open
@@ -294,8 +272,7 @@ internal fun ChatInputBar(
             }
 
             // §6: stop-confirmation dialog. Only the primary STOP tap is gated
-            // (it is a one-tap abort that is easy to misfire); the explicit
-            // menu item in QuietComposerStatus still aborts directly.
+            // (it is a one-tap abort that is easy to misfire).
             if (showStopConfirm) {
                 AlertDialog(
                     onDismissRequest = { showStopConfirm = false },
@@ -400,83 +377,6 @@ private fun CommandSuggestionsPanel(
             }
         }
     }
-}
-
-@Composable
-private fun QuietComposerStatus(
-    status: String,
-    isBusy: Boolean,
-    startedAtMillis: Long?,
-    onAbort: () -> Unit,
-) {
-    var menuExpanded by remember { mutableStateOf(false) }
-    var nowMillis by remember(startedAtMillis) { mutableStateOf(System.currentTimeMillis()) }
-
-    LaunchedEffect(isBusy, startedAtMillis) {
-        while (isBusy && startedAtMillis != null) {
-            nowMillis = System.currentTimeMillis()
-            delay(1_000)
-        }
-    }
-
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(vertical = 6.dp),
-        verticalAlignment = Alignment.CenterVertically
-    ) {
-        if (isBusy) {
-            Icon(
-                Icons.Default.Circle,
-                contentDescription = null,
-                tint = MaterialTheme.colorScheme.tertiary,
-                modifier = Modifier.size(8.dp)
-            )
-            Spacer(modifier = Modifier.width(8.dp))
-        }
-        Text(
-            text = status,
-            style = MaterialTheme.typography.labelMedium,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-            maxLines = 1,
-            modifier = Modifier.weight(1f)
-        )
-        if (isBusy && startedAtMillis != null) {
-            Text(
-                text = formatElapsed(nowMillis - startedAtMillis),
-                style = MaterialTheme.typography.labelMedium,
-                fontFamily = FontFamily.Monospace,
-                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f),
-            )
-            Spacer(modifier = Modifier.width(8.dp))
-        }
-        if (isBusy) {
-            Box {
-                IconButton(onClick = { menuExpanded = true }, modifier = Modifier.size(32.dp)) {
-                    Icon(
-                        Icons.Default.MoreHoriz,
-                        contentDescription = stringResource(R.string.chat_interrupt_agent),
-                        tint = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                }
-                DropdownMenu(expanded = menuExpanded, onDismissRequest = { menuExpanded = false }) {
-                    DropdownMenuItem(
-                        text = { Text(stringResource(R.string.chat_interrupt_agent)) },
-                        leadingIcon = { Icon(Icons.Default.Stop, contentDescription = null, tint = StopRed) },
-                        onClick = {
-                            menuExpanded = false
-                            onAbort()
-                        }
-                    )
-                }
-            }
-        }
-    }
-}
-
-private fun formatElapsed(elapsedMillis: Long): String {
-    val seconds = (elapsedMillis.coerceAtLeast(0L) / 1_000L).toInt()
-    return "%d:%02d".format(seconds / 60, seconds % 60)
 }
 
 @Composable

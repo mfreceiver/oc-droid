@@ -40,6 +40,7 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import cn.vectory.ocdroid.data.model.Message
 import cn.vectory.ocdroid.data.model.Part
+import cn.vectory.ocdroid.data.model.isRenderableEmptyMessage
 import cn.vectory.ocdroid.data.repository.OpenCodeRepository
 import cn.vectory.ocdroid.ui.GapInfo
 import cn.vectory.ocdroid.ui.MainViewModel
@@ -372,7 +373,21 @@ internal fun ChatMessageList(
         // LazyColumn (newest-first). tailOldestId is the oldest message in the
         // fetched tail window — the divider goes AFTER it in oldest-first order,
         // which means BEFORE it in the reversed (display) order.
-        val reversedMessages = messages.reversed()
+        // Render-layer empty-message filter: drop assistant messages that have
+        // no renderable content (the "blank timestamp-only bubble" defect).
+        // This is display-only — the underlying `messages` list / chat state is
+        // untouched. A v0.2.5 streaming placeholder (a Part with text=null) is
+        // protected: that Part lives in partsByMessage so partsForMessage is
+        // non-empty, and the isStreaming guard covers any transient pre-part
+        // window. Does NOT affect the standalone streaming-reasoning item
+        // above (separate item{} block keyed "streaming-reasoning").
+        val reversedMessages = messages.reversed().filterNot { msg ->
+            isRenderableEmptyMessage(
+                isUser = msg.isUser,
+                partsForMessage = partsByMessage[msg.id].orEmpty(),
+                isStreaming = msg.id in streamingPartTexts
+            )
+        }
         val showGap = gapInfo != null && gapInfo.open
         val gapInsertIndex = if (showGap) {
             val idx = reversedMessages.indexOfFirst { it.id == gapInfo!!.tailOldestId }

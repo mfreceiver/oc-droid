@@ -110,6 +110,14 @@ internal class SessionSyncCoordinator(
      * streamingPartTexts rekeying, S4).
      */
     private val deltaBuffer = mutableMapOf<String, StringBuilder>()
+    /**
+     * §Site1-coalesce: latest authoritative fullText per partId, buffered during
+     * the trailing [DELTA_COALESCE_MS] window. Unlike [deltaBuffer] (which
+     * APPENDs), this is REPLACE semantics — fullText is the server's
+     * authoritative accumulated text, so only the most recent value per key
+     * matters. Drained by [flushDeltaBuffer] (checked before [deltaBuffer]).
+     */
+    private val fullTextBuffer = mutableMapOf<String, String>()
     private val flushJobs = mutableMapOf<String, Job>()
     /**
      * Entry point for every SSE event. Mirrors the pre-extraction
@@ -363,24 +371,41 @@ internal class SessionSyncCoordinator(
                         val delta = deltaEvent.delta
                         if (!fullText.isNullOrBlank()) {
                             // Server sent full accumulated text — use it as the
-                            // authoritative streaming value (replaces delta
-                            // accumulation, acts as a sync point). §M5: cancel any
-                            // pending delta flush so a stale buffered append can't
-                            // corrupt the authoritative snapshot after this write.
-                            cancelDeltaFlush(key)
-                            state.updateAndSync(slices) { s ->
-                                s.copy(
-                                    streamingPartTexts = s.streamingPartTexts + (key to fullText),
-                                    streamingReasoningPart = reasoningPartOrNull(
-                                        partType = deltaEvent.partType,
-                                        partId = pId,
-                                        messageId = msgId,
-                                        sessionId = deltaEvent.sessionId
-                                    ) ?: s.streamingReasoningPart,
-                                    partsByMessage = ensurePlaceholderPart(
-                                        s.partsByMessage, msgId, pId, deltaEvent.sessionId, deltaEvent.partType
+                            // authoritative streaming value (REPLACE, not append;
+                            // acts as a sync point). §Site1-coalesce: mirror the
+                            // Site2 (delta) leading-edge + trailing
+                            // DELTA_COALESCE_MS coalesce pattern. Some Site1
+                            // servers emit fullText per-token; without coalescing
+                            // each event recomposed. Leading edge writes
+                            // immediately (zero-latency first-token feel) + sets
+                            // streamingReasoningPart once + ensures the placeholder
+                            // part; subsequent fullText events within the window
+                            // buffer into fullTextBuffer (REPLACE — fullText is
+                            // authoritative accumulated text, only the latest value
+                            // matters) and flush in one state write.
+                            if (flushJobs[key]?.isActive != true) {
+                                state.updateAndSync(slices) { s ->
+                                    s.copy(
+                                        streamingPartTexts = s.streamingPartTexts + (key to fullText),
+                                        streamingReasoningPart = reasoningPartOrNull(
+                                            partType = deltaEvent.partType,
+                                            partId = pId,
+                                            messageId = msgId,
+                                            sessionId = deltaEvent.sessionId
+                                        ) ?: s.streamingReasoningPart,
+                                        partsByMessage = ensurePlaceholderPart(
+                                            s.partsByMessage, msgId, pId, deltaEvent.sessionId, deltaEvent.partType
+                                        )
                                     )
-                                )
+                                }
+                                scheduleDeltaFlush(key)
+                            } else {
+                                // Trailing coalesce: buffer the latest fullText
+                                // (REPLACE). The pending DELTA_COALESCE_MS flush
+                                // writes the buffered fullText in one state write.
+                                // streamingReasoningPart was already set on this
+                                // part's leading edge.
+                                fullTextBuffer[key] = fullText
                             }
                         } else if (!delta.isNullOrBlank()) {
                             // §flicker-fix: apply the same leading-edge +
@@ -576,14 +601,41 @@ internal class SessionSyncCoordinator(
 
     /**
      * Flushes [partId]'s buffered deltas into [AppState.streamingPartTexts] in
-     * a single atomic append (TOCTOU-safe). Self-removes from [flushJobs] /
-     * [deltaBuffer]. If the overlay was cleared mid-window (session switch /
-     * part.created / ViewModel reset wiped streamingPartTexts), the buffer is
-     * dropped — re-injecting stale tokens into the new view would render ghost
-     * text from the previous session.
+     * a single atomic write (TOCTOU-safe). Self-removes from [flushJobs] /
+     * [deltaBuffer] / [fullTextBuffer]. If the overlay was cleared mid-window
+     * (session switch / part.created / ViewModel reset wiped
+     * streamingPartTexts), the buffer is dropped — re-injecting stale tokens
+     * into the new view would render ghost text from the previous session.
+     *
+     * §Site1-coalesce: a buffered fullText wins (REPLACE) — it is the server's
+     * authoritative accumulated text and supersedes any concurrent delta
+     * accumulation for this partId. It is checked BEFORE [deltaBuffer]; if
+     * present, streamingPartTexts[partId] is overwritten with the buffered
+     * value (REPLACE, not append) and the entry cleared. Only when no fullText
+     * is buffered does the delta APPEND path run.
      */
     private fun flushDeltaBuffer(partId: String) {
         flushJobs.remove(partId)
+        // §Site1-coalesce: REPLACE path — authoritative fullText wins outright.
+        if (state.value.streamingPartTexts[partId] != null) {
+            val bufferedFullText = fullTextBuffer.remove(partId)
+            if (bufferedFullText != null) {
+                state.updateAndSync(slices) {
+                    it.copy(streamingPartTexts = it.streamingPartTexts + (partId to bufferedFullText))
+                }
+                // The authoritative fullText supersedes any concurrent delta
+                // accumulation for this partId; drop a stale buffered delta so
+                // it can't be appended in a later coalesce window
+                // (AUTHORITATIVE fresh STALEmore corruption).
+                deltaBuffer.remove(partId)
+                return
+            }
+        } else {
+            // Overlay was wiped mid-window → drop any buffered fullText too
+            // (stale; re-injecting would render ghost text from the previous
+            // session).
+            fullTextBuffer.remove(partId)
+        }
         val buffered = deltaBuffer.remove(partId)
         if (buffered == null || buffered.isEmpty()) return
         // Guard: the leading-edge value must still be present. An intervening
@@ -600,18 +652,21 @@ internal class SessionSyncCoordinator(
     }
 
     /**
-     * Cancels [partId]'s pending flush and drops its buffer. Called when an
-     * authoritative full-text `message.part.updated` supersedes the streaming
-     * accumulation for this partId (so a stale buffered append can't corrupt
-     * the snapshot after the authoritative write).
+     * Cancels [partId]'s pending flush and drops its buffers (both delta APPEND
+     * and fullText REPLACE). Kept for callers that need to supersede the
+     * streaming accumulation for a partId with an authoritative snapshot
+     * outside the coalesce path; the §Site1-coalesce fullText branch no longer
+     * calls this (it lets the leading-edge + trailing pattern handle it), but
+     * the helper is retained for correctness/future use.
      */
     private fun cancelDeltaFlush(partId: String) {
         flushJobs.remove(partId)?.cancel()
         deltaBuffer.remove(partId)
+        fullTextBuffer.remove(partId)
     }
 
     /**
-     * Drops ALL pending delta buffers and cancels their flush jobs. Called when
+     * Drops ALL pending delta/fullText buffers and cancels their flush jobs. Called when
      * the whole streaming overlay is wiped (part.created now; session switch /
      * SSE stop / ViewModel clear may be wired by the caller — see
      * §4.2). Safe to call repeatedly.
@@ -620,6 +675,7 @@ internal class SessionSyncCoordinator(
         flushJobs.values.forEach { it.cancel() }
         flushJobs.clear()
         deltaBuffer.clear()
+        fullTextBuffer.clear()
     }
 
     // ── §streaming-render placeholder injection ────────────────
