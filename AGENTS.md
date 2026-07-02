@@ -41,8 +41,10 @@ export PATH="$JAVA_HOME/bin:$PATH:$ANDROID_HOME/platform-tools"
 
 ## 发布产物
 
-- 发布的 APK 统一放**项目根目录 `APK/` 文件夹**（已 gitignore，不入库），按 `oc-droid-<版本号>.apk` 命名（如 `oc-droid-0.5.0.apk`）。应用名称为 **OC Droid**。
-- 发版用 `tea` CLI 打 Gitea Release，tag 用 `v<版本号>`（如 `v0.1.0`），tag 指向 `main` 分支提交。详见 `docs/build-apk.md`。
+- 发布的 APK 统一放**项目根目录 `APK/` 文件夹**（已 gitignore，不入库），按 `oc-droid-<版本号>.apk` 命名（如 `oc-droid-0.2.3.apk`）。应用名称为 **OC Droid**。
+- 发版用 `tea` CLI 打 Gitea Release，tag 用 `v<版本号>`（如 `v0.2.3`），tag 指向 `main` 分支提交。详见 `docs/build-apk.md`。
+- **版本号约定**：每批发版 `versionName` 末位 +0.0.1（如 `0.2.2 → 0.2.3`），`versionCode` +1；破坏性变更再进位。两者在 `app/build.gradle.kts` 手动维护。
+- **发版前评审**：每批发版应先 `compileDebugKotlin` + `testDebugUnitTest` 全绿，再走多 agent 评审（如 `glmer` + `gpter`），按评审意见修订后再 bump 版本 / 出包 / 发版。
 
 ## 测试
 

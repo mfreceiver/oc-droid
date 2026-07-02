@@ -1,6 +1,5 @@
 # 本地构建测试 APK 指南
 
-> 参考姊妹项目 [x-liker](https://git.vectory.cn:18443/mfreceiver/x-liker) 的构建/签名体系，针对 `ocdroid` 整理。
 > 本文所有命令均已在本机（Linux）实测通过。
 
 ---
@@ -25,7 +24,7 @@
 | JDK | **21**（JBR，Android Studio 内置） | 需要 ≥17，实测 21 可用 |
 | compileSdk / minSdk / targetSdk | 35 / 26 / 34 | `app/build.gradle.kts` |
 
-> 注意：本项目工具链（AGP 9 / Gradle 9 / Kotlin 2.2）比 x-liker（AGP 8.7 / Gradle 8.11）新很多，但 JDK 21、android-35 平台、build-tools 35.0.x 本机已具备，可直接用。
+> 注意：JDK 21、android-35 平台、build-tools 35.0.x 本机已具备，可直接用。
 
 ### 1.2 环境变量（本机 Linux 实测路径）
 
@@ -37,8 +36,6 @@ export ANDROID_HOME=/home/mar/android-sdk
 export PATH="$JAVA_HOME/bin:$PATH"
 ```
 
-> 上游 README 写的是 macOS 路径（`/Applications/Android Studio.app/...`）；在本机用上面的 Linux 路径。
-
 ### 1.3 `local.properties`（指向 SDK）
 
 项目根目录需有 `local.properties`（已被 `.gitignore` 忽略，不会提交）：
@@ -49,145 +46,78 @@ printf 'sdk.dir=/home/mar/android-sdk\n' > local.properties
 
 ---
 
-## 2. 构建 Debug 测试 APK（主推，零配置）
+## 2. 构建 Debug / Release APK
 
 ```bash
-./gradlew assembleDebug
+./gradlew assembleDebug        # 测试 APK → app/build/outputs/apk/debug/app-debug.apk（调试密钥签名，可直接装）
+./gradlew assembleRelease      # 发布 APK → app/build/outputs/apk/release/app-release.apk（release 密钥签名）
 ```
 
-产物：
-
-```
-app/build/outputs/apk/debug/app-debug.apk
-```
-
-- 已用 **Android 调试密钥自动签名**，可直接安装，无需额外配置。
-- 实测：首次构建约 12 分钟（下载依赖），APK 约 26 MB。
-- 编译期有一条无害告警（`LocalClipboardManager` deprecated），不影响产物。
-
-### 安装到设备/模拟器
-
-```bash
-adb install -r app/build/outputs/apk/debug/app-debug.apk
-```
-
-> ⚠️ **设备安全**：仪表/插桩测试与安装 debug 包请**只用模拟器**。如同时连了真机和模拟器，用 `ANDROID_SERIAL=<模拟器id>` 明确指定，避免覆盖真机上的正式 App 与凭证。
+- 首次 debug 构建约 10+ 分钟（下载依赖）；release 约 1–2 分钟（依赖缓存后）。
+- 加速：在 `gradle.properties` 加 `org.gradle.configuration-cache=true`、`org.gradle.caching=true`、`org.gradle.parallel=true`。
 
 ---
 
-## 3. 构建 Release 签名 APK（用于分发/发版，可选）
+## 3. Release 签名（已配置）
 
-当前 `app/build.gradle.kts` 的 `release` 构建类型只有混淆/压缩，**没有 signingConfig**，直接 `assembleRelease` 只会得到未签名包。
-参考 x-liker 的做法：用 `local.properties` 注入签名凭证，debug 保留默认签名（**不要复用 release 密钥**）。
+Release 签名已在 `app/build.gradle.kts` 配置完毕：
 
-### 3.1 生成签名密钥库（一次性）
+- keystore：`/home/mar/.android/opencode_release.keystore`（**仓库外**，永不入库），alias `release`。
+- 凭证从 `local.properties`（gitignored）读取：`release.storeFile / storePassword / keyAlias / keyPassword`。
+- `signingConfigs.release` 读取上述凭证，`buildTypes.release` 绑定该签名。
 
-```bash
-$JAVA_HOME/bin/keytool -genkeypair -v \
-  -keystore release.keystore \
-  -alias release \
-  -keyalg RSA -keysize 2048 -validity 10000 \
-  -storepass 'YOUR_STORE_PASSWORD' \
-  -keypass 'YOUR_KEY_PASSWORD' \
-  -dname "CN=ocdroid, OU=dev, O=mfreceiver, C=CN"
-```
+> 若要在新机器上重建签名环境：用 `$JAVA_HOME/bin/keytool -genkeypair` 生成独立 keystore（**一 App 一 key**，勿复用其它项目），把 `release.*` 凭证写入 `local.properties`，并在 `signingConfigs.release` 指向它。**keystore 与密码务必备份**——丢失则无法以同一身份升级 App。
 
-把生成的 `release.keystore` 放在项目根目录（已被 `.gitignore` 忽略，勿提交）。
-
-### 3.2 在 `local.properties` 追加签名凭证
-
-```properties
-sdk.dir=/home/mar/android-sdk
-release.storeFile=release.keystore
-release.storePassword=YOUR_STORE_PASSWORD
-release.keyAlias=release
-release.keyPassword=YOUR_KEY_PASSWORD
-```
-
-> 沿用 x-liker 的 `local.properties` 方案（而非单独的 `signing.properties`），避免两个文件。x-liker 自身 AGENTS.md 与代码在这个命名上有出入，这里统一用 `local.properties`。
-
-### 3.3 在 `app/build.gradle.kts` 增加签名配置
-
-在 `android { }` 块内、`buildTypes { }` 之前加：
-
-```kotlin
-signingConfigs {
-    create("release") {
-        val props = java.util.Properties()
-        val propsFile = rootProject.file("local.properties")
-        if (propsFile.exists()) {
-            props.load(propsFile.inputStream())
-        }
-        storeFile = file(props.getProperty("release.storeFile", "release.keystore"))
-        storePassword = props.getProperty("release.storePassword", "")
-        keyAlias = props.getProperty("release.keyAlias", "release")
-        keyPassword = props.getProperty("release.keyPassword", "")
-    }
-}
-```
-
-并把 `release { }` 绑定该签名（在现有 release 块里加一行）：
-
-```kotlin
-buildTypes {
-    release {
-        isMinifyEnabled = true
-        isShrinkResources = true
-        proguardFiles(
-            getDefaultProguardFile("proguard-android-optimize.txt"),
-            "proguard-rules.pro"
-        )
-        signingConfig = signingConfigs.getByName("release")   // ← 新增
-    }
-}
-```
-
-> 💡 **签名改造建议**：把签名配置改动尽量集中（就上面这一小块），方便未来维护。
-
-### 3.4 构建
-
-```bash
-./gradlew assembleRelease
-```
-
-产物（已签名）：`app/build/outputs/apk/release/app-release.apk`
-未配置签名时则为 `app-release-unsigned.apk`（不可直接安装）。
+`./gradlew assembleRelease` 直接产出已签名的 `app-release.apk`。
 
 ---
 
 ## 4. 测试
 
 ```bash
-./gradlew testDebugUnitTest                 # 单元测试
-./gradlew koverHtmlReport                   # 覆盖率 → app/build/reports/kover/html/index.html
+./gradlew compileDebugKotlin     # 编译校验（最快，每次改动必跑）
+./gradlew testDebugUnitTest      # 单元测试
+./gradlew koverHtmlReport        # 覆盖率 → app/build/reports/kover/html/index.html
+./gradlew lintDebug              # 静态检查（可选）
 ```
 
-集成测试（`connectedDebugAndroidTest）需运行中的 OpenCode Server：把 `.env.example` 复制为 `.env` 填入凭证，且**仅在模拟器**运行。
+集成测试（`connectedDebugAndroidTest`）需运行中的 OpenCode Server：把 `.env.example` 复制为 `.env` 填入凭证，且**仅在模拟器**运行（详见 `AGENTS.md` 设备安全规定）。
 
 ---
 
 ## 5. 版本号管理
 
-### 版本号
-
-沿用语义化版本命名（如 `0.1.0`、`0.2.0`），`app/build.gradle.kts` 内手动维护：
+`app/build.gradle.kts` 内手动维护（`versionCode` 每次发版 +1，`versionName` 语义化）：
 
 ```kotlin
-versionCode = 1
-versionName = "0.1.0"     // 当前版本
+versionCode = 8
+versionName = "0.2.3"     // 当前版本
 ```
+
+约定：每批发版 `versionName` 末位 +0.0.1（如 `0.2.2 → 0.2.3`）；有破坏性变更再考虑进位。
 
 ---
 
 ## 6. 发版产物与 Gitea Release
 
-### 6.1 发布产物约定
+### 6.1 发版流程（已建立的实践）
 
-所有发布的 APK 放到**项目根目录的 `APK/` 文件夹**（已被 `.gitignore` 忽略，不入库），按 **`opencode_client-<versionName>.apk`** 命名：
+每批发版按此顺序，确保质量门禁：
+
+1. 实现 + `compileDebugKotlin` / `testDebugUnitTest` 全绿。
+2. 多 agent 评审（如 `glmer` + `gpter`），按评审意见修订。
+3. bump 版本号（§5）。
+4. `./gradlew assembleRelease` 产出签名 APK。
+5. `commit` → 打 tag `v<versionName>` → `git push origin main && git push origin <tag>`。
+6. 用 `tea` CLI 打 Gitea Release 并挂载 APK（§6.2）。
+
+### 6.2 发布产物约定
+
+所有发布的 APK 放到**项目根目录的 `APK/` 文件夹**（已被 `.gitignore` 忽略，不入库），按 **`oc-droid-<versionName>.apk`** 命名：
 
 ```
 APK/
-└── opencode_client-0.1.20260622.apk     # 即 opencode_client-<版本号>.apk
+└── oc-droid-0.2.3.apk
 ```
 
 一键产出（从构建产物拷贝并命名）：
@@ -195,15 +125,15 @@ APK/
 ```bash
 mkdir -p APK
 VERSION=$(grep 'versionName' app/build.gradle.kts | head -1 | sed 's/.*"\([^"]*\)".*/\1/')
-cp app/build/outputs/apk/release/app-release.apk "APK/opencode_client-$VERSION.apk"
+cp app/build/outputs/apk/release/app-release.apk "APK/oc-droid-$VERSION.apk"
 ```
 
-### 6.2 发版到自建 Gitea（用 tea CLI）
+### 6.3 发版到自建 Gitea（用 tea CLI）
 
 本机已装 `tea` CLI（`/home/mar/tools/tea/tea`）：
 
 ```bash
-TAG="v$VERSION"   # 如 v0.1.0
+TAG="v$VERSION"   # 如 v0.2.3
 git tag -a "$TAG" -m "Release $VERSION"
 git push origin "$TAG"
 
@@ -215,23 +145,19 @@ git push origin "$TAG"
 ```
 
 - `main` 分支为开发主线，tag 打在 `main` 的发布提交上。
+- 应用名称为 **OC Droid**；`origin` = `https://git.vectory.cn:18443/mfreceiver/oc-droid.git`。
 
 ---
 
-## 附：实测验证记录（本机）
+## 附：本机环境实测记录
 
 | 项目 | 结果 |
 |------|------|
 | JDK | 21.0.9（JBR）✓ |
 | Android SDK | android-35 + build-tools 35.0.0/35.0.1 ✓ |
-| `./gradlew assembleDebug` | **BUILD SUCCESSFUL**（12m12s，首次）✓ |
-| Debug APK | `app/build/outputs/apk/debug/app-debug.apk`（26 MB，已签名）✓ |
+| `./gradlew assembleDebug` | **BUILD SUCCESSFUL**（首次约 10+ 分钟）✓ |
+| Debug APK | `app/build/outputs/apk/debug/app-debug.apk`（约 26 MB，调试密钥签名）✓ |
 | Release 签名 | 已配置（`signingConfigs.release` 读 `local.properties`），`assembleRelease` 通过 ✓ |
-| Release APK | `APK/oc-droid-0.1.20260622.apk`（4.3 MB，已签名校验 OK）✓ |
+| Release APK | `APK/oc-droid-0.2.3.apk`（约 4.1 MB，release 密钥签名）✓ |
+| 服务端 | OpenCode Server v1.17.12（本机 `0.0.0.0:4096`）✓ |
 
----
-
-## 参考
-
-- x-liker 的签名/发版模式：`mfreceiver/x-liker` 的 `app/build.gradle.kts` 与 `AGENTS.md`
-- 上游构建说明：根目录 `README.md`「构建」章节
