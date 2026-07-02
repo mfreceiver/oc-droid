@@ -285,7 +285,7 @@ object PartStateSerializer : kotlinx.serialization.KSerializer<PartState> {
                 // multi-MB per edit/write part and is never read here (only
                 // sessionId / todos / path / output / description are used).
                 // Dropping it bounds the deserialized object + sustained heap.
-                val metadata = (element["metadata"] as? JsonObject)?.let { m ->
+                var metadata = (element["metadata"] as? JsonObject)?.let { m ->
                     if ("diagnostics" !in m) m
                     else buildJsonObject { m.forEach { (k, v) -> if (k != "diagnostics") put(k, v) } }
                 }
@@ -334,6 +334,42 @@ object PartStateSerializer : kotlinx.serialization.KSerializer<PartState> {
                     val todosObj = metadata["todos"]
                     if (todosObj is JsonArray) {
                         todos = parseTodos(todosObj)
+                    }
+                }
+
+                // §problem-7 (subagent toolbar): the `task` tool carries its
+                // agent name + description in `state.input.{agent,description,
+                // prompt}` (NOT in state.metadata), so without surfacing them
+                // here SubAgentCard has no @agent name and falls back to the
+                // flat accentText. This layer (PartState) only sees the state
+                // JSON — there is no toolName to gate on — so the injection is
+                // unconditional: it copies input.agent/description/prompt into
+                // metadata. This is a no-op for every other tool whose input
+                // lacks those keys (edit/write/bash/etc. carry command/path),
+                // so the branch is dead weight for them and costs only a cheap
+                // type check. Pending-state input is a JsonPrimitive (string),
+                // not an object, so it is skipped here — the subagent card then
+                // shows the description text and re-acquires the @name once the
+                // task transitions to running (input becomes an object).
+                val inputAsObj = element["input"] as? JsonObject
+                if (inputAsObj != null) {
+                    val agent = (inputAsObj["agent"] as? JsonPrimitive)?.content
+                    val desc = (inputAsObj["description"] as? JsonPrimitive)?.content
+                        ?: (inputAsObj["prompt"] as? JsonPrimitive)?.content
+                    // Only inject when there is something to add. `agent` is
+                    // task-specific and never collides with metadata; `description`
+                    // is added only when the metadata block did not already
+                    // provide one (explicit server metadata wins over input).
+                    val baseHasDesc = metadata?.containsKey("description") == true
+                    val addDesc = !desc.isNullOrEmpty() && !baseHasDesc
+                    if (agent != null || addDesc) {
+                        metadata = (metadata ?: buildJsonObject {}).let { base ->
+                            buildJsonObject {
+                                base.forEach { (k, v) -> put(k, v) }
+                                agent?.let { put("agent", JsonPrimitive(it)) }
+                                if (addDesc) put("description", JsonPrimitive(desc))
+                            }
+                        }
                     }
                 }
 

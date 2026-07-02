@@ -24,8 +24,8 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.ChatBubbleOutline
 import androidx.compose.material.icons.filled.Dns
+import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
@@ -51,6 +51,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import cn.vectory.ocdroid.R
 import cn.vectory.ocdroid.data.model.AgentInfo
+import cn.vectory.ocdroid.data.model.ConfigProvider
 import cn.vectory.ocdroid.data.model.HostProfile
 import cn.vectory.ocdroid.data.model.Message
 import cn.vectory.ocdroid.data.model.ProvidersResponse
@@ -223,13 +224,16 @@ internal fun ChatTopBar(
         TopAppBar(
             windowInsets = TopAppBarDefaults.windowInsets,
             navigationIcon = {
-                // Primary Sessions entry point — chat-bubble-outline affordance
-                // at the LEFT of the title. Replaces the former trailing "+" on
-                // the session tab strip as the canonical way to reach the
-                // Sessions destination.
+                // Primary Sessions entry point — "hamburger" list affordance at
+                // the LEFT of the title. (Icons.Filled.Menu rather than the
+                // AutoMirrored variant: the three-bar hamburger is visually
+                // symmetric so RTL mirroring is moot, and AutoMirrored.Menu is
+                // not available in this Compose version.)
+                // Replaces the former trailing "+" on the session tab strip as
+                // the canonical way to reach the Sessions destination.
                 IconButton(onClick = actions.onNavigateToSessions) {
                     Icon(
-                        Icons.Filled.ChatBubbleOutline,
+                        Icons.Filled.Menu,
                         contentDescription = stringResource(R.string.chat_action_sessions),
                         tint = MaterialTheme.colorScheme.onSurfaceVariant
                     )
@@ -439,6 +443,7 @@ internal fun ChatTopBar(
             SessionTabStrip(
                 openSessions = state.openSessions,
                 currentSessionId = state.currentSessionId,
+                parentSessionId = state.parentSessionId,
                 currentWorkdir = currentSession?.directory,
                 unreadSessions = state.unreadSessions,
                 actions = actions
@@ -556,10 +561,37 @@ internal fun ChatTopBar(
 }
 
 /**
+ * Pure filter for the model quick-switch picker's provider catalog (§problem:
+ * hide providers with no enabled model). Keeps a provider only when it has at
+ * least one model whose `"$providerId/$modelId"` key is NOT in [disabledModels]
+ * — so a provider whose every model the user disabled no longer renders an
+ * empty section header in the picker.
+ *
+ * The Settings `ModelManagementSection` intentionally does NOT use this: the
+ * management surface must list every provider (even fully-disabled ones) so a
+ * disabled model can be re-enabled. This filter is picker-only.
+ *
+ * `disabledModels` keys use the canonical `"$providerId/$modelId"` format also
+ * produced/consumed by SettingsManager (see ModelManagementSection /
+ * modelCatalogCounts). Extracted as a pure top-level fn so it has JVM unit
+ * tests (VisiblePickerProvidersTest) without needing Compose.
+ */
+internal fun visiblePickerProviders(
+    providers: ProvidersResponse?,
+    disabledModels: Set<String>
+): List<ConfigProvider> =
+    providers?.providers.orEmpty()
+        .filter { it.models.isNotEmpty() }
+        .filter { provider ->
+            provider.models.keys.any { modelId -> "${provider.id}/$modelId" !in disabledModels }
+        }
+
+/**
  * §model-selection: standalone AlertDialog that lists every enabled model in
  * the providers catalog grouped by provider. Disabled entries (per the
- * per-baseUrl SettingsManager set) are hidden. Selecting a row fires
- * [onSwitchModel] and dismisses.
+ * per-baseUrl SettingsManager set) are hidden, and providers with no remaining
+ * enabled model are omitted entirely (see [visiblePickerProviders]). Selecting
+ * a row fires [onSwitchModel] and dismisses.
  */
 @Composable
 private fun ModelPickerDialog(
@@ -569,7 +601,7 @@ private fun ModelPickerDialog(
     onSwitchModel: (providerId: String, modelId: String) -> Unit,
     onDismiss: () -> Unit
 ) {
-    val catalog = providers?.providers.orEmpty().filter { it.models.isNotEmpty() }
+    val catalog = visiblePickerProviders(providers, disabledModels)
     AlertDialog(
         onDismissRequest = onDismiss,
         title = { Text(stringResource(R.string.chat_model_picker_title)) },

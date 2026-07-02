@@ -79,8 +79,15 @@ internal fun SubAgentCard(
         ?: ""
     val description = part.state?.metadataString("description")?.takeIf { it.isNotEmpty() }
 
-    val subAgentName = remember(rawTitle, description) {
-        parseSubAgentName(rawTitle) ?: parseSubAgentName(description)
+    // §problem-7: prefer the structured agent name surfaced from the task
+    // tool's input (PartStateSerializer injects input.agent into metadata).
+    // Fall back to regex-parsing the title/description for the legacy
+    // "(@xxx subagent)" marker only when no structured field is present.
+    val metadataAgent = part.state?.metadataString("agent")
+    val subAgentName = remember(rawTitle, description, metadataAgent) {
+        metadataAgent
+            ?: parseSubAgentName(rawTitle)
+            ?: parseSubAgentName(description)
     }
     val cleanTitle = remember(rawTitle, description) {
         val strippedTitle = stripSubAgentSuffix(rawTitle)

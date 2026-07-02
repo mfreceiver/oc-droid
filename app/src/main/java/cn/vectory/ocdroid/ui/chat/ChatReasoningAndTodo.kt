@@ -48,6 +48,19 @@ import cn.vectory.ocdroid.ui.util.MarkdownImageResolver
 // styling). TodoListInline is the checkbox list shown inside expanded
 // non-todowrite tool cards.
 
+/**
+ * Max chars of the reasoning text the collapsed streaming preview measures &
+ * renders. Bounded so the per-token `maxLines = 1` TextLayout cost stays O(1)
+ * instead of O(n) over the growing full reasoning (which made cumulative layout
+ * O(n²) and caused visible jitter as reasoning grew past a few thousand chars).
+ *
+ * The preview shows the **tail** (the latest generated tokens): for streaming
+ * chain-of-thought that is what the user wants to watch, and it is a deliberate
+ * change from showing the head. `maxLines = 1` + Ellipsis still truncates the
+ * visual to one line.
+ */
+private const val REASONING_PREVIEW_TAIL_CHARS = 120
+
 @Composable
 internal fun ReasoningCard(
     text: String,
@@ -98,7 +111,11 @@ internal fun ReasoningCard(
                 if (isStreaming && !expanded && text.isNotBlank()) {
                     Spacer(modifier = Modifier.width(4.dp))
                     Text(
-                        text = text,
+                        // Take only the tail: see REASONING_PREVIEW_TAIL_CHARS.
+                        // Measuring/rendering the full growing reasoning every
+                        // token was O(n²) and the source of the streaming
+                        // flicker; the tail is also the part worth previewing.
+                        text = text.takeLast(REASONING_PREVIEW_TAIL_CHARS),
                         style = MaterialTheme.typography.labelSmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                         maxLines = 1,
