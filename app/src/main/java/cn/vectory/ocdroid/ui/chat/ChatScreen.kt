@@ -230,7 +230,12 @@ fun ChatScreen(
                 },
                 trafficSent = traffic.trafficSent,
                 trafficReceived = traffic.trafficReceived,
-                serverVersion = connection.serverVersion
+                serverVersion = connection.serverVersion,
+                // §model-selection: providers + disabledModels + currentModel
+                // drive the top-bar model quick-switch picker.
+                providers = settings.providers,
+                disabledModels = settings.disabledModels,
+                currentModel = chat.currentModel
             )
         }
     }
@@ -257,6 +262,7 @@ fun ChatScreen(
             onRefreshTrafficStats = viewModel::refreshTrafficStats,
             onSelectHost = { viewModel.selectHostProfile(it) },
             onActivateTunnel = { viewModel.activateTunnelForCurrentHost() },
+            onSwitchModel = { providerId, modelId -> viewModel.switchSessionModel(providerId, modelId) },
         )
     }
 

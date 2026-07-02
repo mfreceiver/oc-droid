@@ -187,4 +187,16 @@
     <string name="settings_clear_local_data_keeps">保留：服务器连接信息、主机配置、隧道口令。</string>
     <string name="settings_clear_local_data_clears">将清除：打开的标签页、会话缓存、未发送草稿、当前会话/项目、主题与字体偏好、流量统计。</string>
     <string name="settings_clear_local_data_irreversible">操作不可撤销。</string>
+    <string name="chat_model_picker_title">选择模型</string>
+    <string name="chat_model_picker_empty">当前服务器没有可用的模型</string>
+    <string name="settings_model_management">模型管理</string>
+    <string name="settings_model_management_hint">禁用的模型不会出现在快速切换中。设置按服务器保存。</string>
+    <string name="settings_model_management_empty">当前服务器未返回可用模型</string>
+    <string name="chat_marker_agent_prefix">智能体</string>
+    <string name="chat_marker_model_prefix">模型</string>
+    <string name="chat_marker_agent_switched">切换到 %1$s</string>
+    <string name="chat_marker_model_switched">切换到 %1$s</string>
+    <string name="chat_marker_context_compacted">上下文已压缩</string>
+    <string name="chat_marker_expand">展开</string>
+    <string name="chat_marker_collapse">折叠</string>
 </resources>

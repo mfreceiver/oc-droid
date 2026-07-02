@@ -332,7 +332,8 @@ class MainViewModel @Inject constructor(
             selectedAgentName = next.selectedAgentName,
             agents = next.agents,
             providers = next.providers,
-            availableCommands = next.availableCommands
+            availableCommands = next.availableCommands,
+            disabledModels = next.disabledModels
         )
     }
 
@@ -352,7 +353,8 @@ class MainViewModel @Inject constructor(
             hasMoreMessages = next.hasMoreMessages,
             isLoadingMessages = next.isLoadingMessages,
             gapInfo = next.gapInfo,
-            staleNotice = next.staleNotice
+            staleNotice = next.staleNotice,
+            currentModel = next.currentModel
         )
     }
 
@@ -772,6 +774,9 @@ class MainViewModel @Inject constructor(
 
     fun selectHostProfile(profileId: String) {
         hostProfileController.selectHostProfile(profileId)
+        // §model-selection: reload the per-baseUrl disabled-model set for the
+        // newly-selected host (it is scoped to the host URL).
+        reloadDisabledModelsForCurrentHost()
     }
 
     fun duplicateHostProfile(profileId: String) {
@@ -1514,6 +1519,59 @@ class MainViewModel @Inject constructor(
         settingsManager.selectedAgentName = agentName
         writeSettings { it.copy(selectedAgentName = agentName) }
         _chatFlow.value.currentSessionId?.let { settingsManager.setAgentForSession(it, agentName) }
+    }
+
+    /**
+     * §model-selection: toggles a model's "disabled" flag for the current
+     * host. Disabled models are hidden from the chat quick-switch picker but
+     * remain listed in Settings → Model management. Persisted per-baseUrl via
+     * [SettingsManager.setModelDisabled].
+     */
+    fun toggleModelDisabled(providerId: String, modelId: String) {
+        val baseUrl = hostProfileStore.currentProfile().serverUrl
+        val key = "$providerId/$modelId"
+        val currentlyDisabled = key in _settingsFlow.value.disabledModels
+        settingsManager.setModelDisabled(baseUrl, providerId, modelId, disabled = !currentlyDisabled)
+        writeSettings {
+            it.copy(
+                disabledModels = if (currentlyDisabled) it.disabledModels - key else it.disabledModels + key
+            )
+        }
+    }
+
+    /**
+     * §model-selection: reloads the per-baseUrl disabled-model set from
+     * [SettingsManager] using the current host profile's URL. Called on
+     * cold start (via `applySavedSettings`) and on host switch so the picker
+     * reflects the active server's saved selection.
+     */
+    fun reloadDisabledModelsForCurrentHost() {
+        val baseUrl = hostProfileStore.currentProfile().serverUrl
+        val set = settingsManager.getDisabledModels(baseUrl)
+        writeSettings { it.copy(disabledModels = set) }
+    }
+
+    /**
+     * §model-selection: switches the model bound to the current session via
+     * `POST /api/session/{id}/model`. On success updates `currentModel` so
+     * the top-bar picker reflects the new selection. On failure surfaces an
+     * error via AppState.error.
+     */
+    fun switchSessionModel(providerId: String, modelId: String) {
+        val sessionId = _chatFlow.value.currentSessionId ?: return
+        viewModelScope.launch {
+            repository.switchModel(sessionId, providerId, modelId)
+                .onSuccess {
+                    writeChat {
+                        it.copy(currentModel = Message.ModelInfo(providerId = providerId, modelId = modelId))
+                    }
+                }
+                .onFailure { error ->
+                    updateState {
+                        it.copy(error = "Failed to switch model: ${errorMessageOrFallback(error, "unknown error")}")
+                    }
+                }
+        }
     }
 
     fun toggleSessionExpanded(sessionId: String) {

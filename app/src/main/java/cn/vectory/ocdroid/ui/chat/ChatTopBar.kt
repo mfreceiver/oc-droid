@@ -52,11 +52,14 @@ import androidx.compose.ui.unit.dp
 import cn.vectory.ocdroid.R
 import cn.vectory.ocdroid.data.model.AgentInfo
 import cn.vectory.ocdroid.data.model.HostProfile
+import cn.vectory.ocdroid.data.model.Message
+import cn.vectory.ocdroid.data.model.ProvidersResponse
 import cn.vectory.ocdroid.data.model.Session
 import cn.vectory.ocdroid.data.model.SessionStatus
 import cn.vectory.ocdroid.data.model.TodoItem
 import cn.vectory.ocdroid.ui.ContextUsage
 import cn.vectory.ocdroid.ui.TunnelActivationState
+import cn.vectory.ocdroid.ui.resolveModelDisplayName
 import cn.vectory.ocdroid.ui.theme.opencode
 
 internal data class ChatTopBarState(
@@ -111,6 +114,24 @@ internal data class ChatTopBarState(
      * in [ServerManagementDialog] in place of the server URL.
      */
     val serverVersion: String? = null,
+    /**
+     * §model-selection: providers catalog (GET /config/providers), used to
+     * populate the quick-switch model picker dialog from the top-bar context
+     * menu. Null while loading / when the server returned nothing.
+     */
+    val providers: ProvidersResponse? = null,
+    /**
+     * §model-selection: per-baseUrl disabled-model entries (format
+     * `"$providerId/$modelId"`). Models whose key is in this set are hidden
+     * from the picker dialog.
+     */
+    val disabledModels: Set<String> = emptySet(),
+    /**
+     * §model-selection: the model currently bound to the active session
+     * (inferred from the latest assistant message's resolvedModel). Drives
+     * the model picker's selected highlight + the context menu entry label.
+     */
+    val currentModel: Message.ModelInfo? = null,
 )
 
 internal data class ChatTopBarActions(
@@ -141,6 +162,13 @@ internal data class ChatTopBarActions(
      * been removed in favour of this entry point.)
      */
     val onNavigateToSessions: () -> Unit = {},
+    /**
+     * §model-selection: switch the current session to the model identified by
+     * `(providerId, modelId)`. Wired to
+     * [cn.vectory.ocdroid.ui.MainViewModel.switchSessionModel] which POSTs
+     * /api/session/{id}/model.
+     */
+    val onSwitchModel: (providerId: String, modelId: String) -> Unit = { _, _ -> },
 )
 
 /**
@@ -168,6 +196,11 @@ internal fun ChatTopBar(
     var showContextDialog by remember { mutableStateOf(false) }
     var showAgentDialog by remember { mutableStateOf(false) }
     var showServerDialog by remember { mutableStateOf(false) }
+    // §model-selection: model quick-switch dialog opened from the merged
+    // context menu's "Model" entry.
+    var showModelDialog by remember { mutableStateOf(false) }
+    // §model-selection: friendly name shown on the context menu's Model entry.
+    val currentModelName = resolveModelDisplayName(state.currentModel, state.providers)
 
     // Refresh traffic stats when the server popup opens so the dialog shows
     // live sent/received bytes instead of stale `0 B` (refresh is otherwise
@@ -307,6 +340,7 @@ internal fun ChatTopBar(
                     usage = state.contextUsage,
                     todos = state.sessionTodos,
                     selectedAgentName = state.selectedAgentName,
+                    currentModelName = currentModelName,
                     expanded = showContextMenu,
                     onToggleExpand = { showContextMenu = !showContextMenu },
                     onContextClick = {
@@ -320,6 +354,10 @@ internal fun ChatTopBar(
                     onAgentClick = {
                         showContextMenu = false
                         showAgentDialog = true
+                    },
+                    onModelClick = {
+                        showContextMenu = false
+                        showModelDialog = true
                     }
                 )
     
@@ -499,4 +537,94 @@ internal fun ChatTopBar(
             onDismiss = { showServerDialog = false }
         )
     }
+
+    // §model-selection: model quick-switch picker. Lists every enabled model
+    // from the providers catalog (disabled entries are hidden), highlights
+    // the current selection, and dispatches a switch via onSwitchModel.
+    if (showModelDialog) {
+        ModelPickerDialog(
+            providers = state.providers,
+            disabledModels = state.disabledModels,
+            currentModel = state.currentModel,
+            onSwitchModel = { providerId, modelId ->
+                actions.onSwitchModel(providerId, modelId)
+                showModelDialog = false
+            },
+            onDismiss = { showModelDialog = false }
+        )
+    }
+}
+
+/**
+ * §model-selection: standalone AlertDialog that lists every enabled model in
+ * the providers catalog grouped by provider. Disabled entries (per the
+ * per-baseUrl SettingsManager set) are hidden. Selecting a row fires
+ * [onSwitchModel] and dismisses.
+ */
+@Composable
+private fun ModelPickerDialog(
+    providers: ProvidersResponse?,
+    disabledModels: Set<String>,
+    currentModel: Message.ModelInfo?,
+    onSwitchModel: (providerId: String, modelId: String) -> Unit,
+    onDismiss: () -> Unit
+) {
+    val catalog = providers?.providers.orEmpty().filter { it.models.isNotEmpty() }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text(stringResource(R.string.chat_model_picker_title)) },
+        text = {
+            if (catalog.isEmpty()) {
+                Text(
+                    stringResource(R.string.chat_model_picker_empty),
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                return@AlertDialog
+            }
+            Column(
+                modifier = Modifier
+                    .heightIn(max = 420.dp)
+                    .verticalScroll(rememberScrollState())
+            ) {
+                catalog.forEach { provider ->
+                    Text(
+                        provider.name?.takeIf { it.isNotEmpty() } ?: provider.id,
+                        style = MaterialTheme.typography.titleSmall,
+                        fontWeight = FontWeight.SemiBold,
+                        color = MaterialTheme.colorScheme.onSurface,
+                        modifier = Modifier.padding(top = 8.dp, bottom = 4.dp)
+                    )
+                    provider.models.forEach { (modelId, model) ->
+                        val key = "${provider.id}/$modelId"
+                        if (key in disabledModels) return@forEach
+                        val isSelected = currentModel != null &&
+                            currentModel.providerId == provider.id &&
+                            (currentModel.modelId == modelId || currentModel.modelId == model.id)
+                        Surface(
+                            onClick = { onSwitchModel(provider.id, modelId) },
+                            shape = RoundedCornerShape(8.dp),
+                            color = if (isSelected) MaterialTheme.colorScheme.surfaceVariant
+                            else Color.Transparent,
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Text(
+                                text = model.name ?: modelId,
+                                style = MaterialTheme.typography.bodyMedium,
+                                fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal,
+                                color = if (isSelected) MaterialTheme.colorScheme.onPrimaryContainer
+                                else MaterialTheme.colorScheme.onSurface,
+                                modifier = Modifier.padding(horizontal = 12.dp, vertical = 12.dp)
+                            )
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = onDismiss) {
+                Text(stringResource(R.string.common_done))
+            }
+        }
+    )
 }

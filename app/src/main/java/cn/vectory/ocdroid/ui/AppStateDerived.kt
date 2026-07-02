@@ -52,9 +52,26 @@ fun currentSessionStatus(
 ): SessionStatus? = currentSessionId?.let { sessionStatuses[it] }
 
 /**
+ * §s3-markers: synthetic message roles that survive the `visibleMessages`
+ * tool/system filter. Each role carries no `parts` and is rendered by the
+ * chat list as an inline metadata marker instead of a [MessageRow]:
+ *  - "agent-switched": inserted before a turn whose `agent` differs from the
+ *    prior user/assistant turn (agent prefix chip).
+ *  - "model-switched": inserted before a turn whose `resolvedModel` differs
+ *    from the prior user/assistant turn (model prefix chip).
+ *  - "compaction":     inserted at a context-compaction boundary (collapsible
+ *    divider). Reserved for future server-driven compaction events; the
+ *    client injector does not generate these today.
+ */
+internal val METADATA_MARKER_ROLES = setOf("agent-switched", "model-switched", "compaction")
+
+/**
  * The filtered chat transcript: applies the revert cutoff (messages before the
  * revert point) then drops tool/system/environment messages so only user +
- * assistant turns render. Verbatim move of the AppState.visibleMessages getter.
+ * assistant turns render. §s3-markers: synthetic metadata-marker messages
+ * ([METADATA_MARKER_ROLES]) survive the role filter so they can render
+ * inline between turns. Verbatim move of the AppState.visibleMessages getter
+ * + marker filter.
  */
 fun visibleMessages(messages: List<Message>, currentSession: Session?): List<Message> {
     val revertMessageId = currentSession?.revert?.messageId
@@ -64,9 +81,84 @@ fun visibleMessages(messages: List<Message>, currentSession: Session?): List<Mes
         messages.filter { message -> message.id < revertMessageId }
     }
     // Filter out system / tool / environment messages — only user and
-    // assistant messages are shown in the chat transcript.
-    return reverted.filter { !it.isToolRole }
+    // assistant messages are shown in the chat transcript, EXCEPT the
+    // synthetic metadata-marker messages (§s3-markers) which carry one of
+    // the [METADATA_MARKER_ROLES] roles and have no real parts.
+    return reverted.filter { !it.isToolRole || it.role in METADATA_MARKER_ROLES }
 }
+
+/**
+ * §s3-markers: walks the (already visible, oldest-first) [messages] list and
+ * inserts a synthetic [Message] (role ∈ [METADATA_MARKER_ROLES]) BEFORE
+ * every turn whose `agent` or `resolvedModel` differs from the previous
+ * USER-or-ASSISTANT message. Returns the interleaved list.
+ *
+ * Marker semantics:
+ *  - agent-switched: emitted when the new message's `agent` is non-null and
+ *    differs from the prior tracked agent; label = the new agent name.
+ *  - model-switched: emitted when the new message's `resolvedModel` is
+ *    non-null and differs from the prior tracked model; label = the new
+ *    model's `modelId` (the UI formats a friendly display name).
+ *
+ * Skip the very first assignment — i.e. do not emit a marker for the first
+ * non-null value (the user only cares about CHANGES). Comparison is on
+ * non-null values only: a transition null → non-null is not a change; a
+ * transition X → Y (both non-null, X != Y) emits one marker immediately
+ * before the differing message. Existing marker roles in the input are
+ * passed through untouched (they carry no agent/model so they don't affect
+ * the tracked values).
+ *
+ * Pure / deterministic; safe to re-run on every recomposition.
+ */
+fun injectMetadataMarkers(messages: List<Message>): List<Message> {
+    if (messages.isEmpty()) return messages
+    val out = ArrayList<Message>(messages.size + 4)
+    var trackedAgent: String? = null
+    var trackedModel: Message.ModelInfo? = null
+    var haveSeenAgent = false
+    var haveSeenModel = false
+    for (current in messages) {
+        // Only user / assistant turns drive the comparison; markers and
+        // other roles (already filtered out by visibleMessages) are skipped.
+        if (current.isUser || current.isAssistant) {
+            val newAgent = current.agent
+            val newModel = current.resolvedModel
+
+            if (newAgent != null && haveSeenAgent && newAgent != trackedAgent) {
+                out.add(
+                    Message(
+                        id = "marker-agent-${current.id}",
+                        role = "agent-switched",
+                        agent = newAgent
+                    )
+                )
+            }
+            if (newAgent != null) {
+                trackedAgent = newAgent
+                haveSeenAgent = true
+            }
+
+            if (newModel != null && haveSeenModel && newModel != trackedModel) {
+                out.add(
+                    Message(
+                        id = "marker-model-${current.id}",
+                        role = "model-switched",
+                        model = newModel,
+                        modelId = newModel.modelId,
+                        providerId = newModel.providerId
+                    )
+                )
+            }
+            if (newModel != null) {
+                trackedModel = newModel
+                haveSeenModel = true
+            }
+        }
+        out.add(current)
+    }
+    return out
+}
+
 
 /**
  * Context-usage percentage for the most recent assistant message that carries
@@ -116,6 +208,37 @@ fun computeContextUsage(messages: List<Message>, providers: ProvidersResponse?):
         cachedWriteTokens = tokens.cache?.write,
         cost = lastAssistant.cost
     )
+}
+
+/**
+ * §model-selection: infers the model bound to the current session by picking
+ * the most recent assistant message's [Message.resolvedModel]. Returns null
+ * when there are no assistant messages or none carries a model.
+ */
+fun inferCurrentModel(messages: List<Message>): Message.ModelInfo? =
+    messages.lastOrNull { it.isAssistant }?.resolvedModel
+
+/**
+ * §model-selection: resolves a human-readable display name for a model
+ * against the providers catalog. Searches the catalog for a matching
+ * `providerId` / `modelId` and returns its [ProviderModel.name]; falls back
+ * to the raw modelId when the model is not found OR its name is null, and
+ * returns the empty string when [currentModel] itself is null.
+ *
+ * Used by the chat top-bar context menu so the model entry reads as a
+ * friendly name (e.g. "GPT-5") instead of the raw id when possible.
+ */
+fun resolveModelDisplayName(
+    currentModel: Message.ModelInfo?,
+    providers: ProvidersResponse?
+): String {
+    if (currentModel == null) return ""
+    val match = providers?.providers?.firstOrNull { it.id == currentModel.providerId }?.let { provider ->
+        provider.models.entries.firstOrNull { (modelKey, model) ->
+            modelKey == currentModel.modelId || model.id == currentModel.modelId
+        }?.value
+    }
+    return match?.name?.takeIf { it.isNotEmpty() } ?: currentModel.modelId
 }
 
 private fun logContextUsageUnavailable(reason: String): ContextUsage? {

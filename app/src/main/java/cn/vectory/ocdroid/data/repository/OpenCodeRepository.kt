@@ -3,6 +3,10 @@ package cn.vectory.ocdroid.data.repository
 import cn.vectory.ocdroid.data.api.OpenCodeApi
 import cn.vectory.ocdroid.data.api.SSEClient
 import cn.vectory.ocdroid.data.api.*
+import cn.vectory.ocdroid.data.api.v2.OpenCodeApiV2
+import cn.vectory.ocdroid.data.api.v2.ModelInfoV2
+import cn.vectory.ocdroid.data.api.v2.ModelRefV2
+import cn.vectory.ocdroid.data.api.v2.SwitchModelRequest
 import cn.vectory.ocdroid.data.model.*
 import cn.vectory.ocdroid.data.repository.http.AuthInterceptor
 import cn.vectory.ocdroid.data.repository.http.CacheControlInterceptor
@@ -26,6 +30,7 @@ import okhttp3.Request
 import okhttp3.MediaType.Companion.toMediaType
 import com.jakewharton.retrofit2.converter.kotlinx.serialization.asConverterFactory
 import retrofit2.Retrofit
+import java.io.IOException
 import java.util.Base64
 import javax.inject.Inject
 import javax.inject.Singleton
@@ -98,10 +103,38 @@ class OpenCodeRepository @Inject constructor(
     private var api: OpenCodeApi = retrofit.create(OpenCodeApi::class.java)
     private var sseClient: SSEClient = SSEClient(sseHttp)
 
+    /**
+     * §model-selection: a SECOND Retrofit instance rooted at
+     * `<baseUrl>/api/` for the v2 model endpoints (GET /api/model,
+     * POST /api/session/{id}/model). Built with the SAME OkHttp [restHttp]
+     * client as [api] so auth / cache / traffic interceptors apply uniformly.
+     * Lives on its own interface ([OpenCodeApiV2]) and its own Retrofit root
+     * so the legacy message path ([api].getMessages / promptAsync) is
+     * untouched.
+     */
+    private var v2Retrofit: Retrofit = buildV2Retrofit(restHttp, hostConfig.baseUrl)
+    private var apiV2: OpenCodeApiV2 = v2Retrofit.create(OpenCodeApiV2::class.java)
+
     private fun buildRetrofit(client: OkHttpClient, baseUrl: String): Retrofit {
         val url = if (baseUrl.startsWith("http")) baseUrl else "http://$baseUrl"
         return Retrofit.Builder()
             .baseUrl(url.trimEnd('/') + "/")
+            .client(client)
+            .addConverterFactory(json.asConverterFactory("application/json".toMediaType()))
+            .build()
+    }
+
+    /**
+     * §model-selection: builds the v2 Retrofit rooted at `<baseUrl>/api/`.
+     * Uses the SAME converter factory (json with ignoreUnknownKeys=true) so
+     * the `location` echo on GET /api/model is dropped silently, and the same
+     * OkHttp client as [buildRetrofit] so the auth / cache / traffic
+     * interceptors apply.
+     */
+    private fun buildV2Retrofit(client: OkHttpClient, baseUrl: String): Retrofit {
+        val url = if (baseUrl.startsWith("http")) baseUrl else "http://$baseUrl"
+        return Retrofit.Builder()
+            .baseUrl(url.trimEnd('/') + "/api/")
             .client(client)
             .addConverterFactory(json.asConverterFactory("application/json".toMediaType()))
             .build()
@@ -113,6 +146,8 @@ class OpenCodeRepository @Inject constructor(
         sseHttp = clientFactory.sseClient(hostConfig.allowInsecure)
         retrofit = buildRetrofit(restHttp, hostConfig.baseUrl)
         api = retrofit.create(OpenCodeApi::class.java)
+        v2Retrofit = buildV2Retrofit(restHttp, hostConfig.baseUrl)
+        apiV2 = v2Retrofit.create(OpenCodeApiV2::class.java)
         sseClient = SSEClient(sseHttp)
     }
 
@@ -337,6 +372,30 @@ class OpenCodeRepository @Inject constructor(
     }
 
     suspend fun getProviders(): Result<ProvidersResponse> = runSuspendCatching { api.getProviders() }
+
+    /**
+     * §model-selection: lists the server's available models via the v2
+     * `GET /api/model` endpoint. Returns the `data` array (each entry carries
+     * `id`, `providerID`, `name`, `enabled`). The legacy [getProviders]
+     * (config/providers) is kept untouched and remains the source of truth
+     * for the context-limit index.
+     */
+    suspend fun getModels(): Result<List<ModelInfoV2>> = runSuspendCatching { apiV2.getModels().data }
+
+    /**
+     * §model-selection: switches the model bound to [sessionId] via the v2
+     * `POST /api/session/{sessionID}/model` endpoint. Server expects
+     * `{"model":{"providerID":"<p>","id":"<m>"}}` and returns 204 No Content
+     * on success.
+     */
+    suspend fun switchModel(
+        sessionId: String,
+        providerId: String,
+        modelId: String
+    ): Result<Unit> = runSuspendCatching {
+        val response = apiV2.switchModel(sessionId, SwitchModelRequest(ModelRefV2(id = modelId, providerId = providerId)))
+        if (!response.isSuccessful) throw IOException("switchModel HTTP ${response.code()}")
+    }
 
     suspend fun getAgents(): Result<List<AgentInfo>> = runSuspendCatching { api.getAgents() }
 

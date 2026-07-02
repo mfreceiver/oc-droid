@@ -56,6 +56,17 @@ fun SettingsScreen(
         .map { it.themeMode }
         .distinctUntilChanged()
         .collectAsStateWithLifecycle(initialValue = ThemeMode.SYSTEM)
+    // §model-selection: providers + disabledModels are read by the Model
+    // management section. Subscribed here (not in the parent) so SSE /
+    // composer deltas do not recompose SettingsScreen.
+    val providers by viewModel.settingsFlow
+        .map { it.providers }
+        .distinctUntilChanged()
+        .collectAsStateWithLifecycle(initialValue = null)
+    val disabledModels by viewModel.settingsFlow
+        .map { it.disabledModels }
+        .distinctUntilChanged()
+        .collectAsStateWithLifecycle(initialValue = emptySet())
     val traffic by viewModel.trafficFlow.collectAsStateWithLifecycle()
     val connection by viewModel.connectionFlow.collectAsStateWithLifecycle()
 
@@ -125,6 +136,18 @@ fun SettingsScreen(
             AppearanceSection(
                 themeMode = themeMode,
                 onThemeSelected = viewModel::setThemeMode
+            )
+
+            Spacer(modifier = Modifier.height(12.dp))
+            // §model-selection: per-baseUrl disabled-model management. Toggle
+            // state is persisted via SettingsManager and projected into the
+            // settings slice's disabledModels field.
+            ModelManagementSection(
+                providers = providers,
+                disabledModels = disabledModels,
+                onToggleModelDisabled = { providerId, modelId ->
+                    viewModel.toggleModelDisabled(providerId, modelId)
+                }
             )
 
             SettingsSectionDivider()

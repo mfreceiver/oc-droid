@@ -134,7 +134,12 @@ internal fun launchLoadMessages(
                             // belonged to the previous window and is now stale
                             // (anchor/tailOldest may no longer be present). Clear
                             // it; a fresh gap can only re-open via launchCatchUp.
-                            gapInfo = if (resetLimit) null else it.gapInfo
+                            gapInfo = if (resetLimit) null else it.gapInfo,
+                            // §model-selection: track the model bound to the
+                            // active session by inferring it from the latest
+                            // assistant message's resolvedModel. Surfaces in
+                            // the chat top-bar context menu.
+                            currentModel = inferCurrentModel(mergedMessages)
                         )
                     }
                     DebugLog.d("Sync", "merged: before=$beforeMergeSize after=${state.value.messages.size}")

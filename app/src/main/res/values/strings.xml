@@ -187,4 +187,16 @@
     <string name="settings_clear_local_data_keeps">Kept: server connection info, host profiles, tunnel passwords.</string>
     <string name="settings_clear_local_data_clears">Clears: open tabs, session cache, unsent drafts, current session/project, theme &amp; font preferences, traffic stats.</string>
     <string name="settings_clear_local_data_irreversible">This action cannot be undone.</string>
+    <string name="chat_model_picker_title">Select model</string>
+    <string name="chat_model_picker_empty">No models available</string>
+    <string name="settings_model_management">Model management</string>
+    <string name="settings_model_management_hint">Disabled models won\'t appear in quick switch. Saved per server.</string>
+    <string name="settings_model_management_empty">No models returned by server</string>
+    <string name="chat_marker_agent_prefix">Agent</string>
+    <string name="chat_marker_model_prefix">Model</string>
+    <string name="chat_marker_agent_switched">Switched to %1$s</string>
+    <string name="chat_marker_model_switched">Switched to %1$s</string>
+    <string name="chat_marker_context_compacted">Context compacted</string>
+    <string name="chat_marker_expand">Expand</string>
+    <string name="chat_marker_collapse">Collapse</string>
 </resources>

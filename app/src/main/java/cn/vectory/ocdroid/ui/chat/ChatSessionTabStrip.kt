@@ -23,6 +23,7 @@ import androidx.compose.material.icons.filled.Checklist
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.DonutLarge
 import androidx.compose.material.icons.filled.SmartToy
+import androidx.compose.material.icons.outlined.Memory
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Icon
@@ -206,11 +207,13 @@ internal fun ContextMenuButton(
     usage: ContextUsage?,
     todos: List<TodoItem>,
     selectedAgentName: String,
+    currentModelName: String,
     expanded: Boolean,
     onToggleExpand: () -> Unit,
     onContextClick: () -> Unit,
     onTodoClick: () -> Unit,
-    onAgentClick: () -> Unit
+    onAgentClick: () -> Unit,
+    onModelClick: () -> Unit
 ) {
     Box {
         // The ring is the trigger; the previous standalone onClick (which opened
@@ -284,6 +287,23 @@ internal fun ContextMenuButton(
                     )
                 },
                 onClick = onAgentClick
+            )
+            // 4. Model — §model-selection: current model display name; opens
+            // the standalone model picker dialog.
+            DropdownMenuItem(
+                text = {
+                    Text(
+                        currentModelName.ifEmpty { stringResource(R.string.chat_model_picker_title) }
+                    )
+                },
+                leadingIcon = {
+                    Icon(
+                        Icons.Outlined.Memory,
+                        contentDescription = null,
+                        modifier = Modifier.size(18.dp)
+                    )
+                },
+                onClick = onModelClick
             )
         }
     }

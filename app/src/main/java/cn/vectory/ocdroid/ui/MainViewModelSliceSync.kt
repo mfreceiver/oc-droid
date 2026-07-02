@@ -61,7 +61,8 @@ internal fun syncSlicesFromAppState(state: AppState, slices: SliceFlows) {
         selectedAgentName = state.selectedAgentName,
         agents = state.agents,
         providers = state.providers,
-        availableCommands = state.availableCommands
+        availableCommands = state.availableCommands,
+        disabledModels = state.disabledModels
     )
     slices.chat.value = ChatState(
         currentSessionId = state.currentSessionId,
@@ -73,7 +74,8 @@ internal fun syncSlicesFromAppState(state: AppState, slices: SliceFlows) {
         hasMoreMessages = state.hasMoreMessages,
         isLoadingMessages = state.isLoadingMessages,
         gapInfo = state.gapInfo,
-        staleNotice = state.staleNotice
+        staleNotice = state.staleNotice,
+        currentModel = state.currentModel
     )
     slices.sessionList.value = SessionListState(
         sessions = state.sessions,
@@ -131,6 +133,7 @@ internal fun aggregateFromSlices(slices: SliceFlows, seed: AppState): AppState =
     agents = slices.settings.value.agents,
     providers = slices.settings.value.providers,
     availableCommands = slices.settings.value.availableCommands,
+    disabledModels = slices.settings.value.disabledModels,
     currentSessionId = slices.chat.value.currentSessionId,
     messages = slices.chat.value.messages,
     partsByMessage = slices.chat.value.partsByMessage,
@@ -141,6 +144,7 @@ internal fun aggregateFromSlices(slices: SliceFlows, seed: AppState): AppState =
     isLoadingMessages = slices.chat.value.isLoadingMessages,
     gapInfo = slices.chat.value.gapInfo,
     staleNotice = slices.chat.value.staleNotice,
+    currentModel = slices.chat.value.currentModel,
     sessions = slices.sessionList.value.sessions,
     sessionStatuses = slices.sessionList.value.sessionStatuses,
     expandedSessionIds = slices.sessionList.value.expandedSessionIds,
@@ -244,6 +248,7 @@ internal fun applySettingsSlice(
         selectedAgentName = next.selectedAgentName,
         agents = next.agents,
         providers = next.providers,
-        availableCommands = next.availableCommands
+        availableCommands = next.availableCommands,
+        disabledModels = next.disabledModels
     )
 }

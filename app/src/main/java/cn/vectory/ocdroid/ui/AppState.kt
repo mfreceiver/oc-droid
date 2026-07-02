@@ -69,12 +69,24 @@ data class AppState(
     val hasMoreMessages: Boolean = true,
     @Deprecated("mirror from M4 slice; M5 removes AppState", level = DeprecationLevel.WARNING)
     val isLoadingMessages: Boolean = false,
+    /**
+     * §model-selection: mirror of [ChatState.currentModel] (the model bound
+     * to the active session, inferred from the latest assistant message).
+     */
+    @Deprecated("mirror from M4 slice; M5 removes AppState", level = DeprecationLevel.WARNING)
+    val currentModel: Message.ModelInfo? = null,
     @Deprecated("mirror from settingsFlow; M4 removes AppState", level = DeprecationLevel.WARNING)
     val agents: List<AgentInfo> = emptyList(),
     @Deprecated("mirror from settingsFlow; M4 removes AppState", level = DeprecationLevel.WARNING)
     val selectedAgentName: String = "build",
     @Deprecated("mirror from settingsFlow; M4 removes AppState", level = DeprecationLevel.WARNING)
     val providers: ProvidersResponse? = null,
+    /**
+     * §model-selection: per-baseUrl disabled-model entries mirror from
+     * settingsFlow.disabledModels. M4 removes AppState.
+     */
+    @Deprecated("mirror from settingsFlow; M4 removes AppState", level = DeprecationLevel.WARNING)
+    val disabledModels: Set<String> = emptySet(),
     @Deprecated("mirror from M4 slice; M5 removes AppState", level = DeprecationLevel.WARNING)
     val pendingPermissions: List<PermissionRequest> = emptyList(),
     @Deprecated("mirror from M4 slice; M5 removes AppState", level = DeprecationLevel.WARNING)

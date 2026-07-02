@@ -43,6 +43,8 @@ import cn.vectory.ocdroid.data.model.Part
 import cn.vectory.ocdroid.data.repository.OpenCodeRepository
 import cn.vectory.ocdroid.ui.GapInfo
 import cn.vectory.ocdroid.ui.MainViewModel
+import cn.vectory.ocdroid.ui.METADATA_MARKER_ROLES
+import cn.vectory.ocdroid.ui.injectMetadataMarkers
 import cn.vectory.ocdroid.ui.theme.opencode
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.collect
@@ -78,7 +80,11 @@ internal fun ChatMessageList(
     val messages: List<Message> = remember(chatState.messages, currentSession?.revert?.messageId) {
         val revertMessageId = currentSession?.revert?.messageId
         val reverted = if (revertMessageId == null) chatState.messages else chatState.messages.filter { it.id < revertMessageId }
-        reverted.filter { !it.isToolRole }
+        // §s3-markers: keep user/assistant turns + the synthetic metadata
+        // marker roles, then interleave markers wherever agent/model
+        // changed between consecutive turns.
+        val visible = reverted.filter { !it.isToolRole || it.role in METADATA_MARKER_ROLES }
+        injectMetadataMarkers(visible)
     }
     val partsByMessage: Map<String, List<Part>> = chatState.partsByMessage
     val streamingPartTexts: Map<String, String> = chatState.streamingPartTexts
@@ -364,17 +370,28 @@ internal fun ChatMessageList(
         val afterGap = if (gapInsertIndex > 0) reversedMessages.subList(gapInsertIndex, reversedMessages.size) else emptyList()
 
         items(beforeGap, key = { it.id }) { message ->
-            MessageRow(
-                message = message,
-                parts = partsByMessage[message.id].orEmpty(),
-                streamingPartTexts = streamingPartTexts,
-                repository = repository,
-                workspaceDirectory = workspaceDirectory,
-                onFileClick = onFileClick,
-                onOpenSubAgent = onOpenSubAgent,
-                expandedParts = expandedParts,
-                onToggleExpand = onToggleExpand
-            )
+            // §s3-markers: synthetic metadata-marker messages render as
+            // inline rows (agent / model chip or compaction divider) instead
+            // of a full MessageRow.
+            if (message.role in METADATA_MARKER_ROLES) {
+                MetadataMarkerRow(
+                    role = message.role,
+                    label = markerLabelFor(message),
+                    modifier = Modifier.fillMaxWidth()
+                )
+            } else {
+                MessageRow(
+                    message = message,
+                    parts = partsByMessage[message.id].orEmpty(),
+                    streamingPartTexts = streamingPartTexts,
+                    repository = repository,
+                    workspaceDirectory = workspaceDirectory,
+                    onFileClick = onFileClick,
+                    onOpenSubAgent = onOpenSubAgent,
+                    expandedParts = expandedParts,
+                    onToggleExpand = onToggleExpand
+                )
+            }
         }
         if (gapInsertIndex > 0) {
             item(key = "gap-divider") {
@@ -386,17 +403,25 @@ internal fun ChatMessageList(
             }
         }
         items(afterGap, key = { it.id }) { message ->
-            MessageRow(
-                message = message,
-                parts = partsByMessage[message.id].orEmpty(),
-                streamingPartTexts = streamingPartTexts,
-                repository = repository,
-                workspaceDirectory = workspaceDirectory,
-                onFileClick = onFileClick,
-                onOpenSubAgent = onOpenSubAgent,
-                expandedParts = expandedParts,
-                onToggleExpand = onToggleExpand
-            )
+            if (message.role in METADATA_MARKER_ROLES) {
+                MetadataMarkerRow(
+                    role = message.role,
+                    label = markerLabelFor(message),
+                    modifier = Modifier.fillMaxWidth()
+                )
+            } else {
+                MessageRow(
+                    message = message,
+                    parts = partsByMessage[message.id].orEmpty(),
+                    streamingPartTexts = streamingPartTexts,
+                    repository = repository,
+                    workspaceDirectory = workspaceDirectory,
+                    onFileClick = onFileClick,
+                    onOpenSubAgent = onOpenSubAgent,
+                    expandedParts = expandedParts,
+                    onToggleExpand = onToggleExpand
+                )
+            }
         }
         if (messages.isNotEmpty() && hasMoreMessages) {
             item(key = "load-more") {
@@ -531,3 +556,24 @@ private fun GapDivider(
  * memory to a few KB.
  */
 private const val MAX_SAVED_SESSIONS = 30
+
+/**
+ * §s3-markers: derives the human-readable label text for a synthetic
+ * metadata-marker [Message] (role ∈ [cn.vectory.ocdroid.ui.METADATA_MARKER_ROLES]).
+ *
+ * - agent-switched → the new agent name (message.agent). Falls back to the
+ *   empty string if `agent` was not set on the marker (defensive — injector
+ *   always populates it).
+ * - model-switched → the model's id (message.modelId or message.model?.modelId).
+ *   The chat list passes this raw; the [MetadataMarkerRow] chip will format
+ *   it for display (and could resolve a friendly name via providers in the
+ *   future).
+ * - compaction       → the marker's pre-formatted body summary, or a generic
+ *   localized fallback.
+ */
+private fun markerLabelFor(message: Message): String = when (message.role) {
+    "agent-switched" -> message.agent.orEmpty()
+    "model-switched" -> message.modelId ?: message.model?.modelId.orEmpty()
+    "compaction" -> message.modelId.orEmpty()
+    else -> ""
+}

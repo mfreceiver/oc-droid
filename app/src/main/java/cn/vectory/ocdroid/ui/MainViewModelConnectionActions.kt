@@ -53,11 +53,16 @@ internal fun applySavedSettings(
     // persisted prefs. Runs synchronously alongside the _state.update above;
     // intermediate state legal.
     val seedAgent = settingsManager.selectedAgentName ?: "build"
+    // §model-selection: load per-baseUrl disabled-model set for the active
+    // host so the chat quick-switch picker + Settings render the right
+    // entries on cold start.
+    val seedDisabledModels = settingsManager.getDisabledModels(currentProfile.serverUrl)
     applySettingsSlice(state, settingsFlow) {
         it.copy(
             selectedAgentName = seedAgent,
             themeMode = settingsManager.themeMode,
-            markdownFontSizes = settingsManager.markdownFontSizes
+            markdownFontSizes = settingsManager.markdownFontSizes,
+            disabledModels = seedDisabledModels
         )
     }
     // §R-17 M2 (RFC §4 strategy A): write the connection slice AND mirror it

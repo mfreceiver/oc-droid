@@ -248,6 +248,30 @@ class SettingsManager @Inject constructor(
     }
 
     /**
+     * §model-selection: per-baseUrl disabled-model set. Models the user has
+     * unchecked in Settings → Model management; those entries are hidden from
+     * the chat quick-switch picker. Storage key format:
+     * `disabled_models_<normalizedBaseUrl>` where normalize strips scheme +
+     * trailing slash (e.g. `http://localhost:4096/` → `localhost:4096`).
+     * Stored as a StringSet whose entries are `"$providerId/$modelId"`.
+     */
+    fun getDisabledModels(baseUrl: String): Set<String> {
+        return encryptedPrefs.getStringSet(disabledModelsKey(baseUrl), emptySet()) ?: emptySet()
+    }
+
+    /**
+     * §model-selection: toggle a single model's disabled flag for [baseUrl].
+     * [providerId]/[modelId] form the entry key `"$providerId/$modelId"`.
+     */
+    fun setModelDisabled(baseUrl: String, providerId: String, modelId: String, disabled: Boolean) {
+        val key = disabledModelsKey(baseUrl)
+        val current = (encryptedPrefs.getStringSet(key, emptySet()) ?: emptySet()).toMutableSet()
+        val entry = "$providerId/$modelId"
+        if (disabled) current.add(entry) else current.remove(entry)
+        encryptedPrefs.edit().putStringSet(key, current).apply()
+    }
+
+    /**
      * Hard reset: wipes EVERY persisted key EXCEPT the connection-credential
      * keys and the per-host password secrets (basic-auth + tunnel), then leaves
      * the encrypted prefs otherwise intact for those preserved entries.
@@ -317,6 +341,18 @@ class SettingsManager @Inject constructor(
 
         private fun basicAuthPasswordKey(passwordId: String): String = "basic_auth_password_$passwordId"
         private fun tunnelPasswordKey(id: String): String = "tunnel_password_$id"
+
+        /**
+         * §model-selection: storage key for the per-baseUrl disabled-model
+         * set. Strips scheme + trailing slash so `http://h:1/` and `https://h:1`
+         * share storage (same server, alternate transport).
+         */
+        private fun disabledModelsKey(baseUrl: String): String {
+            val normalized = baseUrl
+                .substringAfter("://")
+                .trimEnd('/')
+            return "disabled_models_$normalized"
+        }
     }
 }
 

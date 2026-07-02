@@ -108,7 +108,15 @@ data class SettingsState(
     val selectedAgentName: String = "build",
     val agents: List<AgentInfo> = emptyList(),
     val providers: ProvidersResponse? = null,
-    val availableCommands: List<CommandInfo> = emptyList()
+    val availableCommands: List<CommandInfo> = emptyList(),
+    /**
+     * §model-selection: per-baseUrl disabled-model entries (format
+     * `"$providerId/$modelId"`), projected from
+     * [cn.vectory.ocdroid.util.SettingsManager.getDisabledModels] for the
+     * current host. Used by Settings → Model management and the chat
+     * quick-switch picker to hide unchecked models.
+     */
+    val disabledModels: Set<String> = emptySet()
 )
 
 /**
@@ -128,7 +136,14 @@ data class ChatState(
     val hasMoreMessages: Boolean = true,
     val isLoadingMessages: Boolean = false,
     val gapInfo: GapInfo? = null,
-    val staleNotice: Boolean = false
+    val staleNotice: Boolean = false,
+    /**
+     * §model-selection: the model currently bound to the active session, as
+     * inferred from the latest assistant message's [Message.resolvedModel].
+     * Surfaced in the chat top-bar context menu + the model picker dialog.
+     * Updated by `switchSessionModel` success and after each message load.
+     */
+    val currentModel: Message.ModelInfo? = null
 )
 
 /**
