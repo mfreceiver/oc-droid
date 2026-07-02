@@ -92,6 +92,18 @@ internal fun ChatMessageList(
     val streamingPartTexts: Map<String, String> = chatState.streamingPartTexts
     val streamingReasoningPart: Part? = chatState.streamingReasoningPart
     val isLoading: Boolean = chatState.isLoadingMessages
+    // §flicker-fix: whether the current session is actively generating. The
+    // server creates the assistant message (message.updated insert) BEFORE its
+    // first part arrives, so for ~1s partsByMessage[assistantId] is empty and
+    // no streaming part references it yet. Using the session busy/retry status
+    // (set synchronously at send time, true through idle) as the keep-signal
+    // robustly covers that "pre-part window" — unlike streamingPartTexts,
+    // which is empty exactly then (the user-input-echo part is filtered by the
+    // §user-part-guard in SessionSyncCoordinator, so it no longer leaks into
+    // the overlay to fake-keep the row). See ChatMessageList filter §flicker-fix-D.
+    val sessionIsRunning = chatState.currentSessionId?.let { id ->
+        sessionListState.sessionStatuses[id]?.let { it.isBusy || it.isRetry }
+    } == true
     val hasMoreMessages: Boolean = chatState.hasMoreMessages
     val gapInfo: GapInfo? = chatState.gapInfo
     val repository: OpenCodeRepository = viewModel.repository
@@ -383,25 +395,40 @@ internal fun ChatMessageList(
         // above (separate item{} block keyed "streaming-reasoning").
         val reversedMessages = messages.reversed().filterNot { msg ->
             val msgParts = partsByMessage[msg.id].orEmpty()
+            // §flicker-fix-D (root cause confirmed empirically w/ deepseek-v4-flash):
+            // the server creates the assistant message (message.updated insert)
+            // BEFORE emitting its first part (step-start arrives ~1s later).
+            // During that "pre-part window" partsByMessage[msg.id] is empty AND
+            // no streaming part references this message yet, so the original
+            // guards (own-parts-in-overlay / streamingReasoningPart messageId)
+            // are both false → isRenderableEmptyMessage dropped the empty
+            // assistant row → LazyColumn item vanished → height collapsed →
+            // next state emission re-added it → flicker.
+            //
+            // Earlier iteration used streamingPartTexts.isNotEmpty() as the
+            // keep-signal, but two reviewers (maxer R1, glmer S-1) independently
+            // proved that is a no-op in the pre-part window: the §user-part-guard
+            // removes the user-input-echo part from the overlay, so the overlay
+            // is empty exactly during the window we need to cover. The correct
+            // signal is the SESSION busy/retry status (set at send time, true
+            // through idle) — it spans the whole turn including the pre-part gap.
+            //
+            // Safety: while the session is running, keep an empty non-user
+            // message — it is necessarily the in-progress assistant turn (old
+            // assistant messages always retain their parts across reloads; the
+            // placeholder-survival merge in MainViewModelMessageActions preserves
+            // partsByMessage for non-streaming messages). Once the turn
+            // finalizes the status flips idle → sessionIsRunning=false → a
+            // genuinely empty assistant message (e.g. a server error) is dropped
+            // again, preserving the original "blank timestamp bubble" defect fix.
+            val streamingActive = streamingPartTexts.isNotEmpty() || streamingReasoningPart != null
+            val isStreamingMsg = msgParts.any { it.id in streamingPartTexts } ||
+                streamingReasoningPart?.messageId == msg.id ||
+                (!msg.isUser && msgParts.isEmpty() && sessionIsRunning)
             isRenderableEmptyMessage(
                 isUser = msg.isUser,
                 partsForMessage = msgParts,
-                // §flicker-fix: streamingPartTexts is keyed by partId (S4
-                // rekey in d6ede32), NOT messageId — so a `msg.id in ...`
-                // check is always false and the streaming guard was dead.
-                // During a turn a reload (session.status busy / part.created /
-                // idle) replaces partsByMessage with the server snapshot; if
-                // that snapshot lags (the in-flight part isn't persisted yet)
-                // the message's parts are momentarily empty. With a dead guard
-                // the row is filtered out → height collapses, the next ≤100ms
-                // delta flush re-injects the placeholder via
-                // ensurePlaceholderPart → height expands → the "content
-                // vanishes then reappears, height collapses then expands"
-                // flicker. Correctly detect a streaming message by checking
-                // whether ANY of its parts is an active streaming partId, OR
-                // whether the standalone streaming reasoning part belongs to it.
-                isStreaming = msgParts.any { it.id in streamingPartTexts } ||
-                    streamingReasoningPart?.messageId == msg.id
+                isStreaming = isStreamingMsg
             )
         }
         val showGap = gapInfo != null && gapInfo.open

@@ -367,6 +367,21 @@ internal class SessionSyncCoordinator(
                     val pId = deltaEvent.partId
                     if (msgId != null && pId != null) {
                         val key = pId
+                        // §user-part-guard (flicker root cause, secondary): the
+                        // server emits message.part.updated for the USER message
+                        // too — the user input text is reflected as a part event
+                        // (type=text). Treating it as streaming assistant output
+                        // pollutes streamingPartTexts with a partId that belongs
+                        // to the user message and injects a placeholder into the
+                        // user bubble, which (a) misleads the assistant's
+                        // isStreaming guard and (b) can render echoed text in the
+                        // user's own bubble. Only ASSISTANT output streams — skip
+                        // parts whose owning message is a user message. The user
+                        // message is always inserted before its part event, so
+                        // the lookup is reliable; an unknown msgId falls through
+                        // (it is the assistant message being born).
+                        val ownerIsUser = slices.chat.value.messages.any { it.id == msgId && it.isUser }
+                        if (ownerIsUser) return
                         val fullText = deltaEvent.text
                         val delta = deltaEvent.delta
                         if (!fullText.isNullOrBlank()) {
@@ -486,6 +501,10 @@ internal class SessionSyncCoordinator(
                 // messageID required for a well-formed delta event (validation guard).
                 val msgId = event.payload.getString("messageID") ?: return
                 val partId = event.payload.getString("partID") ?: return
+                // §user-part-guard (see message.part.updated): only assistant
+                // output streams — skip deltas whose owning message is a user
+                // message (the server reflects the user input as a part event).
+                if (slices.chat.value.messages.any { it.id == msgId && it.isUser }) return
                 // `field` defaults to "text"; it is the type hint for this
                 // delta (e.g. "text", "reasoning"). Used as the placeholder
                 // partType so a reasoning field-delta routes to ReasoningCard,
