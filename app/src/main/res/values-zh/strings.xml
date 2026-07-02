@@ -193,6 +193,8 @@
     <string name="settings_model_management_hint">禁用的模型不会出现在快速切换中。设置按服务器保存。</string>
     <string name="settings_model_management_edit">编辑模型清单</string>
     <string name="settings_model_management_empty">当前服务器未返回可用模型</string>
+    <string name="settings_model_management_summary_none">%1$d</string>
+    <string name="settings_model_management_summary_disabled">已禁用 %1$d · 共 %2$d</string>
     <string name="chat_marker_agent_prefix">智能体</string>
     <string name="chat_marker_model_prefix">模型</string>
     <string name="chat_marker_agent_switched">切换到 %1$s</string>

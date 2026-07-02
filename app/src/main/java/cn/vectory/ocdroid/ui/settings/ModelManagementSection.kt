@@ -64,8 +64,8 @@ internal fun ModelManagementSection(
 ) {
     SectionHeader(title = stringResource(R.string.settings_model_management))
 
-    val catalog = providers?.providers.orEmpty().filter { it.models.isNotEmpty() }
-    if (catalog.isEmpty()) {
+    val (disabledCount, totalModels) = modelCatalogCounts(providers, disabledModels)
+    if (totalModels == 0) {
         // Inline empty-state card (no dialog to open when there is nothing to
         // edit).
         Card(
@@ -83,15 +83,12 @@ internal fun ModelManagementSection(
     }
 
     // Disabled-count summary shown as the row's supporting text so the user
-    // can tell at a glance whether any models are currently hidden.
-    val totalModels = catalog.sumOf { it.models.size }
-    val disabledCount = catalog.sumOf { provider ->
-        provider.models.count { (modelId, _) -> "${provider.id}/$modelId" in disabledModels }
-    }
+    // can tell at a glance whether any models are currently hidden. i18n'd via
+    // settings_model_management_summary_none / _disabled (no hardcoded English).
     val supporting = if (disabledCount == 0) {
-        "$totalModels"
+        stringResource(R.string.settings_model_management_summary_none, totalModels)
     } else {
-        "$disabledCount disabled · $totalModels total"
+        stringResource(R.string.settings_model_management_summary_disabled, disabledCount, totalModels)
     }
 
     var showDialog by rememberSaveable { mutableStateOf(false) }
@@ -250,4 +247,31 @@ private fun ModelRow(
         Spacer(modifier = Modifier.width(8.dp))
         Switch(checked = enabled, onCheckedChange = { onToggle() })
     }
+}
+
+/**
+ * Pure counts for the model-management summary. Returns
+ * `(disabledCount, totalModels)` over the providers catalog, where
+ * `totalModels` is the number of models the server returned and
+ * `disabledCount` is how many of those have a `"$providerId/$modelId"` entry
+ * in [disabledModels].
+ *
+ * Extracted from the [ModelManagementSection] Composable so the
+ * `"${provider.id}/$modelId"` key-format invariant is JVM-unit-testable
+ * (see `ModelCatalogCountsTest`). This guards against a regression of the
+ * v0.1.2 bug where the key was interpolated as `"$provider.id/$modelId"`
+ * (literal `.id` after the variable) and never matched a real disabled entry.
+ *
+ * Pure / deterministic; safe to call from tests without Compose.
+ */
+internal fun modelCatalogCounts(
+    providers: ProvidersResponse?,
+    disabledModels: Set<String>
+): Pair<Int, Int> {
+    val catalog = providers?.providers.orEmpty().filter { it.models.isNotEmpty() }
+    val total = catalog.sumOf { it.models.size }
+    val disabled = catalog.sumOf { provider ->
+        provider.models.count { (modelId, _) -> "${provider.id}/$modelId" in disabledModels }
+    }
+    return disabled to total
 }

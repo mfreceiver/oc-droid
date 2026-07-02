@@ -188,8 +188,9 @@ internal class SessionSwitcher(
      *  4. Look up target session (sessions ∪ directorySessions) + upsert if needed.
      *  5. Reset collapsible-card expansion state.
      *  6. Sync repository's workdir context to the selected session's directory.
-     *  6.5. Refresh pending questions (clear + load) so staleness comparison
-     *      uses fresh data and the new session's live question surfaces.
+     *  6.5. Refresh pending questions (load overwrites the list; no pre-clear)
+     *      so staleness comparison uses fresh data and the new session's live
+     *      question surfaces.
      *  7. Load messages (resetLimit based on cache hit) + session status + children.
      *  8. Update unread state machine (tempClearedUnread + re-mark busy) +
      *     discard draft + openSessionIds prepend + persistSessionCache.

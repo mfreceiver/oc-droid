@@ -262,11 +262,11 @@ fun resolveModelDisplayName(
  * **Conservative null handling**: a part missing `messageId` or `callId`
  * returns FALSE (NOT stale) — "unknown → leave the spinner, don't mis-kill".
  * Mis-rendering a possibly-live question as "Interrupted" is worse than
- * leaving a spinner on an ambiguous part. The承重 assumption that tool-
- * originated questions populate `tool:{messageID,callID}` is verified
- * (`opencode-src/v1.17.12/packages/opencode/src/tool/question.ts:27`), so a
- * question part without those fields is genuinely unexpected and should be
- * left alone rather than terminal-rendered.
+ * leaving a spinner on an ambiguous part. The underlying assumption that
+ * tool-originated questions populate `tool:{messageID,callID}` is verified
+ * (https://github.com/sst/opencode/blob/v1.17.12/packages/opencode/src/tool/question.ts#L27),
+ * so a question part without those fields is genuinely unexpected and should
+ * be left alone rather than terminal-rendered.
  */
 fun isStaleQuestionPart(part: Part, pending: List<QuestionRequest>): Boolean {
     if (!part.isTool) return false

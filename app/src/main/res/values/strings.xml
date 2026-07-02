@@ -193,6 +193,8 @@
     <string name="settings_model_management_hint">Disabled models won\'t appear in quick switch. Saved per server.</string>
     <string name="settings_model_management_edit">Edit model list</string>
     <string name="settings_model_management_empty">No models returned by server</string>
+    <string name="settings_model_management_summary_none">%1$d</string>
+    <string name="settings_model_management_summary_disabled">%1$d disabled · %2$d total</string>
     <string name="chat_marker_agent_prefix">Agent</string>
     <string name="chat_marker_model_prefix">Model</string>
     <string name="chat_marker_agent_switched">Switched to %1$s</string>
