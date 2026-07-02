@@ -120,4 +120,50 @@ class PartStateSerializerTaskInputTest {
         assertEquals("coder", state.metadataString("agent"))
         assertEquals("metadata-wins", state.metadataString("description"))
     }
+
+    // ── load-bearing contracts flagged by review ──────────────────────────
+
+    @Test
+    fun `input description does not become PartState title when element has no title`() {
+        // §glmer O-1 (承重): the title fallback at parsePartState reads
+        // metadata.description into `title`, and the task-field injection runs
+        // AFTER that. This ordering is the only thing keeping input.description
+        // out of `PartState.title` (which BasicToolCard and other cards read).
+        // Lock it so a future reorder of the injection silently polluting title
+        // turns the test red instead of silently changing card behaviour.
+        val state = decode(
+            """{"status":"running","input":{"agent":"coder","description":"Refactor the mapper"}}"""
+        )
+        assertNull(state.title)
+        assertEquals("coder", state.metadataString("agent"))
+        assertEquals("Refactor the mapper", state.metadataString("description"))
+    }
+
+    @Test
+    fun `task injection preserves an existing metadata sessionId passthrough`() {
+        // §maxer O-1 (承重): SubAgentCard clickability derives from
+        // `taskSubSessionId` ← `metadataString("sessionId")`. The injection
+        // transparently forwards every base metadata key, so an existing
+        // sessionId must survive untouched. Lock this so a future refactor that
+        // switches injection from "merge" to "replace" breaks sub-agent
+        // clickability loudly instead of silently.
+        val state = decode(
+            """{"metadata":{"sessionId":"child-session-42"},"input":{"agent":"explorer","description":"scan src"}}"""
+        )
+        assertEquals("child-session-42", state.metadataString("sessionId"))
+        assertEquals("explorer", state.metadataString("agent"))
+        assertEquals("scan src", state.metadataString("description"))
+    }
+
+    @Test
+    fun `existing metadata agent in a resolvable casing is not shadowed by input agent`() {
+        // §review follow-up: the non-clobber guard mirrors metadataString's
+        // casing resolution (exact / lowercase / UPPERCASE), so an existing
+        // metadata `AGENT` entry wins over input.agent and is not shadowed by
+        // a freshly-injected lowercase "agent" copy.
+        val state = decode(
+            """{"metadata":{"AGENT":"from-metadata"},"input":{"agent":"from-input"}}"""
+        )
+        assertEquals("from-metadata", state.metadataString("agent"))
+    }
 }

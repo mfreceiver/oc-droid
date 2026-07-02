@@ -64,6 +64,30 @@ internal fun truncateTitle(value: String): String =
     else value.take(SESSION_TITLE_MAX_CHARS - 1) + "…"
 
 /**
+ * Pure selection resolver for the session tab strip (§problem-1). Returns the
+ * session id that should read as "active" for highlight + scroll-centre:
+ *  - [currentSessionId] when it is itself a root session present in
+ *    [openSessions] (the normal case);
+ *  - otherwise [parentSessionId] when that is a root session in [openSessions]
+ *    (opening a sub-agent highlights its parent tab);
+ *  - otherwise null (draft session with currentSessionId == null, or a
+ *    multi-level orphan whose parent is itself a sub-agent not in openSessions).
+ *
+ * Extracted from the [SessionTabStrip] composable so the precedence + null
+ * semantics are covered by JVM unit tests (EffectiveSelectedIdTest) instead of
+ * only on-device verification. Pure: no Compose dependency.
+ */
+internal fun resolveEffectiveSelectedId(
+    openSessions: List<Session>,
+    currentSessionId: String?,
+    parentSessionId: String?
+): String? = when {
+    currentSessionId != null && openSessions.any { it.id == currentSessionId } -> currentSessionId
+    parentSessionId != null && openSessions.any { it.id == parentSessionId } -> parentSessionId
+    else -> null
+}
+
+/**
  * §17: persistent horizontal session tab strip rendered as the TopAppBar's
  * second row. Replaces the former title-slot dropdown switcher. Built on the
  * M3 [PrimaryScrollableTabRow] + [Tab] so we inherit the platform scroll-to-centre
@@ -118,6 +142,16 @@ internal fun SessionTabStrip(
     // Indicator/accent colour: current session's workdir hash. Falls back to
     // the v2 accentText when no session is active so the indicator still
     // renders with a sane colour.
+    //
+    // Note (§problem-1 review follow-up): when viewing a sub-agent, the
+    // currentSession is the child, so this colour comes from the child's
+    // workdir while the highlighted parent tab's own unread dot uses the
+    // parent's workdir hash (see dotColor below). opencode sub-agents share
+    // their parent's workdir, so the two coincide in practice; the
+    // theoretical mismatch only matters for a multi-workdir nesting that does
+    // not occur. Keeping child-workdir here (rather than plumbing the parent
+    // workdir through) is the lower-risk choice and matches the existing
+    // call site which already passes currentSession.directory.
     val accentColor = currentWorkdir?.let { workdirTone(it, oc) } ?: oc.accentText
 
     // §problem-1 fix: resolve which tab reads as "active". currentSessionId may
@@ -125,12 +159,11 @@ internal fun SessionTabStrip(
     // sessions) — fall back to the parent session so opening a sub-agent
     // highlights its parent tab instead of erroneously landing on tab 0.
     // Draft sessions (currentSessionId == null) and multi-level orphans
-    // highlight nothing (null).
-    val effectiveSelectedId: String? = when {
-        currentSessionId != null && openSessions.any { it.id == currentSessionId } -> currentSessionId
-        parentSessionId != null && openSessions.any { it.id == parentSessionId } -> parentSessionId
-        else -> null
-    }
+    // highlight nothing (null). Extracted as [resolveEffectiveSelectedId] so the
+    // selection semantics have a JVM unit test (EffectiveSelectedIdTest) rather
+    // than being verifiable only on-device.
+    val effectiveSelectedId: String? =
+        resolveEffectiveSelectedId(openSessions, currentSessionId, parentSessionId)
     // PrimaryScrollableTabRow needs a non-negative selectedTabIndex to drive
     // its scroll-to-centre; clamp to a valid index. The visible highlight is
     // driven per-tab by effectiveSelectedId (not this index), so an off match

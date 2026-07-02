@@ -356,17 +356,23 @@ object PartStateSerializer : kotlinx.serialization.KSerializer<PartState> {
                     val agent = (inputAsObj["agent"] as? JsonPrimitive)?.content
                     val desc = (inputAsObj["description"] as? JsonPrimitive)?.content
                         ?: (inputAsObj["prompt"] as? JsonPrimitive)?.content
-                    // Only inject when there is something to add. `agent` is
-                    // task-specific and never collides with metadata; `description`
-                    // is added only when the metadata block did not already
-                    // provide one (explicit server metadata wins over input).
-                    val baseHasDesc = metadata?.containsKey("description") == true
+                    // Server-provided `metadata` wins over `input` for both keys
+                    // (§problem-7 review follow-up). The check mirrors exactly
+                    // how [PartState.metadataString] resolves casing (exact key,
+                    // all-lowercase, all-UPPERCASE), so an existing metadata
+                    // entry that metadataString would actually read is never
+                    // duplicated + shadowed by a freshly-injected lowercase
+                    // copy. `agent` is task-specific and effectively never
+                    // collides, but the guard is symmetrical and zero-cost.
+                    val baseHasAgent = metadata.containsResolving("agent")
+                    val baseHasDesc = metadata.containsResolving("description")
+                    val addAgent = agent != null && !baseHasAgent
                     val addDesc = !desc.isNullOrEmpty() && !baseHasDesc
-                    if (agent != null || addDesc) {
+                    if (addAgent || addDesc) {
                         metadata = (metadata ?: buildJsonObject {}).let { base ->
                             buildJsonObject {
                                 base.forEach { (k, v) -> put(k, v) }
-                                agent?.let { put("agent", JsonPrimitive(it)) }
+                                if (addAgent) put("agent", JsonPrimitive(agent))
                                 if (addDesc) put("description", JsonPrimitive(desc))
                             }
                         }
@@ -402,6 +408,18 @@ object PartStateSerializer : kotlinx.serialization.KSerializer<PartState> {
                 } catch (e: Exception) { null }
             } else null
         }
+    }
+
+    /**
+     * Returns true when [metadata] contains [key] under any casing that
+     * [PartState.metadataString] would resolve (exact, all-lowercase, or
+     * all-UPPERCASE). Used by the task-field injection guard so an existing
+     * metadata entry is never duplicated + shadowed by a freshly-injected
+     * lowercase copy. Null-safe.
+     */
+    private fun JsonObject?.containsResolving(key: String): Boolean {
+        val m = this ?: return false
+        return m.containsKey(key) || m.containsKey(key.lowercase()) || m.containsKey(key.uppercase())
     }
 }
 
