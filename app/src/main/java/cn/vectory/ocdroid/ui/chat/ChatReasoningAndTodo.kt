@@ -135,7 +135,12 @@ internal fun ReasoningCard(
                 }
             }
             if (expanded && text.isNotBlank()) {
-                val normalizedText = remember(text) { MarkdownImageResolver.normalizeStandaloneImageBlocks(text) }
+                // Pace the streaming text at the render layer (same anti-flicker
+                // mechanism as TextPart): re-parse the markdown on a throttled,
+                // forward-only value instead of per token, so an expanded
+                // streaming reasoning card doesn't oscillate in height.
+                val renderText = rememberPacedStreamingText(text, isStreaming)
+                val normalizedText = remember(renderText) { MarkdownImageResolver.normalizeStandaloneImageBlocks(renderText) }
                 val fontSizes = LocalMarkdownFontSizes.current
                 // Reasoning text uses the smaller `reasoning` size (defaults to 12sp)
                 // by overriding `body` when rendering, so it visually de-emphasizes

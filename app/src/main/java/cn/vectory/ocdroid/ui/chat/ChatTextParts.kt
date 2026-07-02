@@ -18,12 +18,14 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import kotlinx.coroutines.delay
 import com.mikepenz.markdown.compose.components.MarkdownComponentModel
 import com.mikepenz.markdown.compose.components.markdownComponents
 import com.mikepenz.markdown.m3.Markdown
@@ -37,6 +39,59 @@ import cn.vectory.ocdroid.ui.util.MarkdownImageResolver
 
 // ── Text part rendering: user bubble, assistant markdown, code blocks ─────
 // TextPart dispatches between the user's right-aligned neutral bubble and the
+
+/**
+ * Render-layer throttle for streaming text — the anti-flicker mechanism.
+ *
+ * During streaming the incoming [text] (the accumulated full string) changes on
+ * every coalesced delta (~100ms) or faster when full-text snapshots bypass
+ * data-layer coalescing. Feeding each change straight into the markdown
+ * renderer re-parses the *growing, still-incomplete* markdown every time → the
+ * parsed structure (and thus the card height) oscillates frame-to-frame (an
+ * unclosed code fence makes everything below render as code, then a token
+ * closes it and it reflows shorter) → the visible "card collapses then expands"
+ * flicker.
+ *
+ * This pacer decouples render frequency from data frequency. It samples the
+ * latest [text] on a fixed [paceMs] cadence into [displayed], which only ever
+ * moves **forward** (the accumulated text only grows, so displayed only grows).
+ * The markdown renderer therefore re-parses at most ~paceMs, on a monotonically
+ * growing prefix — matching the web client's `PacedMarkdown`/`createPacedValue`
+ * approach. This is NOT plain-text rendering: the full markdown renderer still
+ * runs, just on a throttled, forward-only value.
+ *
+ * When streaming ends ([isStreaming] = false) the effect snaps [displayed] to
+ * the final text in one go.
+ *
+ * @return the throttled, forward-only string to feed to the markdown renderer.
+ */
+@Composable
+internal fun rememberPacedStreamingText(
+    text: String,
+    isStreaming: Boolean,
+    paceMs: Long = 100L
+): String {
+    // rememberUpdatedState keeps the latest text reachable from the
+    // once-launched pace loop without restarting it on every token.
+    val latest by rememberUpdatedState(text)
+    var displayed by remember { mutableStateOf(text) }
+    LaunchedEffect(isStreaming) {
+        if (isStreaming) {
+            // Sample-and-commit loop: advance displayed toward the latest
+            // accumulated text every paceMs. displayed only grows because
+            // `latest` (the accumulated overlay) only grows during a stream.
+            while (true) {
+                delay(paceMs)
+                displayed = latest
+            }
+        } else {
+            // Finalization: snap to the complete text immediately.
+            displayed = latest
+        }
+    }
+    return displayed
+}
+
 // assistant's full-width markdown. ResolvedMarkdownText resolves workspace
 // image references before rendering. WrappedCodeBlock (+ codeText /
 // codeFenceLanguage extensions) renders fenced code with soft-wrap instead of
@@ -48,7 +103,8 @@ internal fun TextPart(
     isUser: Boolean,
     modifier: Modifier = Modifier.fillMaxWidth(),
     repository: OpenCodeRepository? = null,
-    workspaceDirectory: String? = null
+    workspaceDirectory: String? = null,
+    isStreaming: Boolean = false
 ) {
     if (isUser) {
         // §4.2 v2 user bubble: right-aligned, layer02 background, 10dp radius,
@@ -78,16 +134,20 @@ internal fun TextPart(
             }
         }
     } else {
+        // Pace the streaming text at the render layer so the markdown renderer
+        // re-parses on a throttled, forward-only value instead of per token —
+        // eliminates the incomplete-markdown height oscillation (flicker).
+        val renderText = rememberPacedStreamingText(text, isStreaming)
         val innerModifier = modifier.padding(12.dp)
         if (repository != null) {
             ResolvedMarkdownText(
-                text = text,
+                text = renderText,
                 repository = repository,
                 workspaceDirectory = workspaceDirectory,
                 modifier = innerModifier
             )
         } else {
-            val normalizedText = remember(text) { MarkdownImageResolver.normalizeStandaloneImageBlocks(text) }
+            val normalizedText = remember(renderText) { MarkdownImageResolver.normalizeStandaloneImageBlocks(renderText) }
             val fontSizes = LocalMarkdownFontSizes.current
             SelectionContainer {
                 CompositionLocalProvider(LocalContentColor provides MaterialTheme.colorScheme.onSurface) {

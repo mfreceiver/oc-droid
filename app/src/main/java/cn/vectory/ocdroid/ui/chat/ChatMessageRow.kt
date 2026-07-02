@@ -287,7 +287,8 @@ internal fun PartView(
                     isUser = isUser,
                     modifier = modifier,
                     repository = repository,
-                    workspaceDirectory = workspaceDirectory
+                    workspaceDirectory = workspaceDirectory,
+                    isStreaming = streamingTextOverride != null
                 )
             }
         }
