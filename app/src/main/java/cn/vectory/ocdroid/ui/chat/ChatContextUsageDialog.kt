@@ -8,9 +8,15 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.outlined.Archive
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -39,7 +45,14 @@ private const val CURRENCY_SYMBOL = "¥"
 @Composable
 internal fun ContextUsageDialog(
     usage: ContextUsage?,
-    onDismiss: () -> Unit
+    onDismiss: () -> Unit,
+    /**
+     * §context-compact: optional callback fired when the user taps the
+     * "压缩" (compact) button. When null (the default), the button is
+     * hidden and the dialog behaves as before — so call sites that do not
+     * care about compaction (and ChatScreen.kt) keep compiling unchanged.
+     */
+    onCompact: (() -> Unit)? = null
 ) {
     AlertDialog(
         onDismissRequest = onDismiss,
@@ -72,6 +85,24 @@ internal fun ContextUsageDialog(
                 }
             }
         },
+        // §context-compact: only render the compact affordance when the caller
+        // wired a callback AND we actually have usage data to compact against.
+        dismissButton = if (onCompact != null && usage != null) {
+            {
+                TextButton(onClick = onCompact) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Icon(
+                            Icons.Outlined.Archive,
+                            contentDescription = null,
+                            modifier = Modifier.size(18.dp),
+                            tint = MaterialTheme.colorScheme.primary
+                        )
+                        Spacer(Modifier.width(6.dp))
+                        Text(stringResource(R.string.chat_context_compact))
+                    }
+                }
+            }
+        } else null,
         confirmButton = {
             TextButton(onClick = onDismiss) {
                 Text(stringResource(R.string.common_done))

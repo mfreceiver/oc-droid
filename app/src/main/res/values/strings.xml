@@ -83,6 +83,7 @@
     <string name="chat_context_cost">Cost</string>
     <string name="chat_context_no_cost">No cost data</string>
     <string name="chat_context_unknown">Unknown</string>
+    <string name="chat_context_compact">Compact</string>
     <string name="chat_add_image">Add image</string>
     <string name="chat_remove_image">Remove image</string>
     <string name="chat_send">Send</string>

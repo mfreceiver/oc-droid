@@ -189,7 +189,13 @@ internal fun ChatTopBar(
     modifier: Modifier = Modifier,
     // §顶部 tab 联动显隐：由 ChatMessageList 的滚动方向检测提升而来。
     // true = 显示 SessionTabStrip；false = 滑出 + 折叠该行。
-    tabVisible: Boolean = true
+    tabVisible: Boolean = true,
+    /**
+     * §context-compact: optional callback wired through to the context-usage
+     * dialog's "压缩" button. Null by default so existing call sites (and
+     * ChatScreen.kt) keep compiling unchanged.
+     */
+    onContextCompact: (() -> Unit)? = null
 ) {
     val currentSession = state.sessions.find { it.id == state.currentSessionId }
     var showContextMenu by remember { mutableStateOf(false) }
@@ -472,7 +478,16 @@ internal fun ChatTopBar(
     if (showContextDialog) {
         ContextUsageDialog(
             usage = state.contextUsage,
-            onDismiss = { showContextDialog = false }
+            onDismiss = { showContextDialog = false },
+            // §context-compact: dismiss the dialog first, then fire the compact
+            // callback. `let` keeps onCompact null-safe — when no callback is
+            // wired (default), ContextUsageDialog hides the button.
+            onCompact = onContextCompact?.let {
+                {
+                    showContextDialog = false
+                    it()
+                }
+            }
         )
     }
 

@@ -43,7 +43,10 @@ internal fun ThinkingCapsule(
     text: String,
     startedAtMillis: Long?,
     onAbort: () -> Unit,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    /** §compact: when false, the abort button is omitted (used by the
+     * compacting capsule — compaction cannot be interrupted). */
+    showAbort: Boolean = true
 ) {
     var nowMillis by remember(startedAtMillis) { mutableStateOf(System.currentTimeMillis()) }
 
@@ -102,17 +105,19 @@ internal fun ThinkingCapsule(
                 )
             }
 
-            // §glm-2 (WCAG 2.5.5): the default IconButton is a 48dp touch
-            // target, matching the repo's R-12 convention used by the primary
-            // send/stop button. The Icon visual stays compact (16dp) so the
-            // capsule keeps its quiet density. No outer Box wrapper needed.
-            IconButton(onClick = onAbort) {
-                Icon(
-                    imageVector = Icons.Default.Stop,
-                    contentDescription = stringResource(R.string.chat_interrupt_agent),
-                    tint = StopRed,
-                    modifier = Modifier.size(16.dp)
-                )
+            if (showAbort) {
+                // §glm-2 (WCAG 2.5.5): the default IconButton is a 48dp touch
+                // target, matching the repo's R-12 convention used by the primary
+                // send/stop button. The Icon visual stays compact (16dp) so the
+                // capsule keeps its quiet density. No outer Box wrapper needed.
+                IconButton(onClick = onAbort) {
+                    Icon(
+                        imageVector = Icons.Default.Stop,
+                        contentDescription = stringResource(R.string.chat_interrupt_agent),
+                        tint = StopRed,
+                        modifier = Modifier.size(16.dp)
+                    )
+                }
             }
         }
     }

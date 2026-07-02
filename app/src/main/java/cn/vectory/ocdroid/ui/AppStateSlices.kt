@@ -143,8 +143,19 @@ data class ChatState(
      * Surfaced in the chat top-bar context menu + the model picker dialog.
      * Updated by `switchSessionModel` success and after each message load.
      */
-    val currentModel: Message.ModelInfo? = null
-)
+     val currentModel: Message.ModelInfo? = null,
+     /**
+      * §compact: true while a context compaction is in progress for the active
+      * session. Set by [MainViewModel.compactSession], cleared when the session
+      * transitions from busy → idle (compaction done) or on immediate failure.
+      * While true, the compacting capsule is shown (no abort button) and chat
+      * input is disabled.
+      */
+     val isCompacting: Boolean = false,
+     /** §compact: System.currentTimeMillis when compaction started, for the
+      * capsule timer and the idle-clear guard floor. */
+     val compactStartedAt: Long = 0L
+ )
 
 /**
  * §R-17 M4: session-list-domain state slice (RFC §2.3). Authoritative storage

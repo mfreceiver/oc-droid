@@ -331,6 +331,30 @@ class OpenCodeRepository @Inject constructor(
         api.abortSession(sessionId)
     }
 
+    /**
+     * §context-compact: triggers server-side context compaction for [sessionId]
+     * via POST /session/{id}/summarize. The compaction itself runs async on
+     * the server; the resulting message/part SSE events drive the message
+     * reload automatically. [model] is the current session model (read from
+     * app state by the caller) — the server uses it to generate the summary.
+     *
+     * Returns true on success (server returns `true`); surfaces HTTP failures
+     * via the same error-body pattern as [executeCommand] / [sendMessage].
+     */
+    suspend fun summarizeSession(
+        sessionId: String,
+        model: Message.ModelInfo
+    ): Result<Boolean> = runSuspendCatching {
+        val response = api.summarizeSession(sessionId, SummarizeRequest(model.providerId, model.modelId))
+        if (!response.isSuccessful) {
+            val errorBody = response.errorBody()?.string() ?: response.message()
+            throw Exception("Summarize failed ${response.code()}: $errorBody")
+        }
+        val body = response.body()
+        if (body != null && !body) throw Exception("Summarize returned false (server declined)")
+        body ?: true
+    }
+
     suspend fun forkSession(sessionId: String, messageId: String? = null): Result<Session> = runSuspendCatching {
         api.forkSession(sessionId, ForkSessionRequest(messageId))
     }

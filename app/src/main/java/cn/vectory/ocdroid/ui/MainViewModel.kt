@@ -869,6 +869,48 @@ class MainViewModel @Inject constructor(
         }
     }
 
+    /**
+     * §context-compact: triggers server-side context compaction for the current
+     * session via POST /session/{id}/summarize. Reads the current session ID
+     * and current model from app state; the server uses the model to generate
+     * the summary of older messages. The compaction itself runs async on the
+     * server and the resulting message/part SSE events drive the message
+     * reload automatically — no manual reload is needed here.
+     *
+     * Surfaces failures (no session, no model, HTTP error) via the same
+     * [AppState.error] channel as [executeCommand].
+     */
+    fun compactSession() {
+        // §compact: guard against duplicate compaction.
+        if (_chatFlow.value.isCompacting) return
+        val sessionId = _chatFlow.value.currentSessionId ?: run {
+            updateState { it.copy(error = "Open or create a session before compacting") }
+            return
+        }
+        val model = _chatFlow.value.currentModel ?: run {
+            updateState { it.copy(error = "No model info available for compaction") }
+            return
+        }
+        writeChat { it.copy(isCompacting = true, compactStartedAt = System.currentTimeMillis()) }
+        viewModelScope.launch {
+            repository.summarizeSession(sessionId, model)
+                .onFailure { error ->
+                    writeChat { it.copy(isCompacting = false, compactStartedAt = 0L) }
+                    updateState {
+                        it.copy(error = errorMessageOrFallback(error, "Compact failed"))
+                    }
+                }
+        }
+    }
+
+    /** §compact: clears the compacting flag. Called by ChatScreen when the
+     * session transitions from busy → idle (compaction complete). */
+    fun clearCompacting() {
+        if (_chatFlow.value.isCompacting) {
+            writeChat { it.copy(isCompacting = false, compactStartedAt = 0L) }
+        }
+    }
+
     // R-16 M4: now also satisfies ConnectionCoordinatorCallbacks.loadSessions.
     override fun loadSessions() {
         launchLoadSessions(

@@ -64,6 +64,22 @@ interface OpenCodeApi {
     @POST("session/{id}/abort")
     suspend fun abortSession(@Path("id") sessionId: String): Response<Unit>
 
+    /**
+     * §context-compact: triggers server-side context compaction for [sessionId]
+     * (POST /session/{id}/summarize). The server summarizes old messages to
+     * free up context window. Returns true; compaction runs async and the
+     * resulting message/part SSE events drive the message reload
+     * automatically (the app already listens to SSE).
+     *
+     * Carries the same Skip-Dir marker as abort/fork/revert.
+     */
+    @Headers("X-Opencode-Skip-Dir: 1")
+    @POST("session/{id}/summarize")
+    suspend fun summarizeSession(
+        @Path("id") sessionId: String,
+        @Body body: SummarizeRequest
+    ): Response<Boolean>
+
     @Headers("X-Opencode-Skip-Dir: 1")
     @POST("session/{id}/fork")
     suspend fun forkSession(
@@ -242,6 +258,17 @@ data class ForkSessionRequest(
 data class RevertSessionRequest(
     @kotlinx.serialization.SerialName("messageID") val messageId: String,
     @kotlinx.serialization.SerialName("partID") val partId: String? = null
+)
+
+/**
+ * §context-compact: body for POST /session/{id}/summarize. Carries the model
+ * the server should use for the compaction summary. Mirrors the
+ * providerID/modelID shape used by [PromptRequest.ModelInput].
+ */
+@kotlinx.serialization.Serializable
+data class SummarizeRequest(
+    @kotlinx.serialization.SerialName("providerID") val providerId: String,
+    @kotlinx.serialization.SerialName("modelID") val modelId: String
 )
 
 /**

@@ -4,6 +4,9 @@ import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.Spring
+import androidx.compose.animation.core.spring
 import androidx.compose.foundation.background
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.layout.Box
@@ -11,8 +14,13 @@ import androidx.compose.foundation.layout.BoxScope
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.selection.SelectionContainer
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
@@ -20,10 +28,12 @@ import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.windowsizeclass.WindowSizeClass
 import androidx.compose.material3.windowsizeclass.WindowWidthSizeClass
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.ui.res.stringResource
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -37,9 +47,12 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.RectangleShape
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.input.pointer.util.VelocityTracker
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.unit.IntOffset
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.hilt.navigation.compose.hiltViewModel
@@ -63,6 +76,7 @@ import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.delay
 import kotlin.math.abs
+import kotlin.math.sign
 
 /**
  * §B3: provides a [WindowSizeClass] computed once in [cn.vectory.ocdroid.MainActivity]
@@ -111,6 +125,10 @@ fun ChatScreen(
     // window; the BackHandler is disabled while pendingExit is true so the next
     // back propagates to the system and exits the app.
     var pendingExit by remember { mutableStateOf(false) }
+    // §error-detail-dialog: when a detailed error message is shown via snackbar,
+    // the full text is stashed here for the "查看" dialog instead of cluttering
+    // the snackbar itself.
+    var errorDetail by remember { mutableStateOf<String?>(null) }
     // §G4 会话切换时重置 tab 可见——避免从隐藏态切到新会话后 tab 仍不可见。
     LaunchedEffect(chat.currentSessionId) { tabVisible = true }
     // §R-17 Stage 2: expandedParts collect moved INTO ChatMessageList (it now
@@ -298,6 +316,8 @@ fun ChatScreen(
             onSwitchModel = { providerId, modelId -> viewModel.switchSessionModel(providerId, modelId) },
         )
     }
+    // §kimo#6: remember the compact lambda so ChatTopBar can skip when stable.
+    val onContextCompact = remember(viewModel) { { viewModel.compactSession() } }
 
     // §Feature A: swipe-to-switch-tab state captured as updated-state so the
     // pointer-input coroutine always resolves against the latest root sessions
@@ -305,6 +325,10 @@ fun ChatScreen(
     val density = LocalDensity.current
     val minSwipePx = with(density) { 80.dp.toPx() }
     val maxVerticalPx = with(density) { 24.dp.toPx() }
+    // §Feature A enhancement: animatable horizontal offset for the slide +
+    // velocity-driven fling animation. Content follows the finger during the
+    // drag and flings to the next/previous session on release.
+    val swipeOffset = remember { Animatable(0f) }
     val currentSessionIdState = rememberUpdatedState(chat.currentSessionId)
     val parentState = rememberUpdatedState(parent)
     val rootOpenSessionsState = rememberUpdatedState(
@@ -357,18 +381,29 @@ fun ChatScreen(
     // displays in turn.
     LaunchedEffect(appStateError) {
         appStateError?.let { error ->
-            snackbarHostState.showTimed(error)
+            // §error-detail: all errors show a generic snackbar + "查看" action
+            // that opens a detail dialog with the full message. 10s duration
+            // (not the default 3s) so the user has time to notice and tap.
+            snackbarHostState.showTimed(
+                message = "发生错误",
+                durationMillis = 10_000L,
+                actionLabel = "查看",
+                onAction = { errorDetail = error }
+            )
             viewModel.clearError()
         }
     }
-    // §C1: bottom-bar question-submit failure → 3s Snackbar. Same pattern as
-    // above; clears `questionSubmitError` after the snackbar finishes so a new
-    // failure can fire again. Trigger/clear timing is unchanged from the
-    // AppToast era (the `questionSubmitError = null` clear semantics are
-    // preserved exactly).
+    // §C1: bottom-bar question-submit failure → same pattern as above; clears
+    // `questionSubmitError` after the snackbar finishes so a new failure can
+    // fire again.
     LaunchedEffect(questionSubmitError) {
         questionSubmitError?.let { error ->
-            snackbarHostState.showTimed(error)
+            snackbarHostState.showTimed(
+                message = "发生错误",
+                durationMillis = 10_000L,
+                actionLabel = "查看",
+                onAction = { errorDetail = error }
+            )
             questionSubmitError = null
         }
     }
@@ -384,9 +419,19 @@ fun ChatScreen(
         if (chat.staleNotice && chat.currentSessionId != null) {
             snackbarHostState.showTimed(
                 message = "长时间未查看，仅显示最新内容。",
-                actionLabel = "重新加载全部会话",
+                actionLabel = "刷新",
                 onAction = { viewModel.refreshCurrentSession() }
             )
+        }
+    }
+    // §compact: clear the compacting flag when the session transitions from
+    // busy → idle (compaction complete on the server). The 3s floor guard
+    // prevents premature clearing during the POST→server-startup gap.
+    LaunchedEffect(currentSessionIsRunning, chat.isCompacting) {
+        if (chat.isCompacting && !currentSessionIsRunning) {
+            if (System.currentTimeMillis() - chat.compactStartedAt > 3000) {
+                viewModel.clearCompacting()
+            }
         }
     }
     val questionAnswersValid = pendingQuestion?.let { pq ->
@@ -400,7 +445,8 @@ fun ChatScreen(
         ChatTopBar(
             state = topBarState,
             actions = topBarActions,
-            tabVisible = tabVisible
+            tabVisible = tabVisible,
+            onContextCompact = onContextCompact
         )
 
         // Thin separator between the top bar (session tabs) and the chat area.
@@ -445,24 +491,55 @@ fun ChatScreen(
                 // §Feature A: horizontal swipe on the content area switches
                 // root session tabs; the threshold is evaluated on gesture END
                 // so it doesn't steal horizontal scroll from code blocks.
+                // §Feature A enhancement: content follows the finger during the
+                // drag and, on release, flings horizontally with the captured
+                // velocity to complete the transition.
                 Box(
                     modifier = Modifier
                         .weight(1f)
+                        .offset {
+                            IntOffset(
+                                x = swipeOffset.value.toInt(),
+                                y = 0
+                            )
+                        }
                         .pointerInput(Unit) {
+                            val velocityTracker = VelocityTracker()
                             var accumulatedX = 0f
                             var accumulatedY = 0f
+
                             detectHorizontalDragGestures(
+                                onDragStart = {
+                                    accumulatedX = 0f
+                                    accumulatedY = 0f
+                                    velocityTracker.resetTracking()
+                                },
                                 onHorizontalDrag = { change, dragAmount ->
                                     accumulatedX += dragAmount
                                     accumulatedY += change.position.y - change.previousPosition.y
+                                    // §kimo#3: track accumulated drag position
+                                    // (parent coordinate space) instead of
+                                    // change.position (which is in the offset
+                                    // node's local space and therefore
+                                    // underestimates velocity because the
+                                    // content tracks the finger).
+                                    velocityTracker.addPosition(
+                                        change.uptimeMillis,
+                                        Offset(accumulatedX, accumulatedY)
+                                    )
+                                    // Direct manipulation: content tracks the finger.
+                                    scope.launch {
+                                        swipeOffset.snapTo(swipeOffset.value + dragAmount)
+                                    }
                                 },
                                 onDragEnd = {
+                                    val velocityX = velocityTracker.calculateVelocity().x
                                     val currentParent = parentState.value
-                                    // Only root sessions participate in swipe switching.
-                                    if (currentParent == null &&
+                                    val canSwitch = currentParent == null &&
                                         abs(accumulatedX) >= minSwipePx &&
                                         abs(accumulatedY) <= maxVerticalPx
-                                    ) {
+
+                                    if (canSwitch) {
                                         val openSessions = rootOpenSessionsState.value
                                         val currentId = currentSessionIdState.value
                                         val effectiveId = resolveEffectiveSelectedId(
@@ -480,16 +557,80 @@ fun ChatScreen(
                                                 (idx - 1).coerceAtLeast(0)
                                             }
                                             if (nextIdx != idx) {
-                                                onSelectSessionState.value(openSessions[nextIdx].id)
+                                                scope.launch {
+                                                    val width = size.width.toFloat()
+                                                    val direction = sign(accumulatedX)
+                                                    val exitTarget = direction * width
+
+                                                    // Phase 1: fling the current
+                                                    // content off-screen, driven
+                                                    // by the release velocity.
+                                                    swipeOffset.animateTo(
+                                                        targetValue = exitTarget,
+                                                        animationSpec = spring(
+                                                            dampingRatio = Spring.DampingRatioNoBouncy,
+                                                            stiffness = Spring.StiffnessLow
+                                                        ),
+                                                        initialVelocity = velocityX
+                                                    )
+
+                                                    // Switch session while the
+                                                    // old content is off-screen.
+                                                    onSelectSessionState.value(openSessions[nextIdx].id)
+
+                                                    // Phase 2: bring the new
+                                                    // content in from the
+                                                    // opposite edge with a
+                                                    // natural deceleration.
+                                                    swipeOffset.snapTo(-exitTarget)
+                                                    swipeOffset.animateTo(
+                                                        targetValue = 0f,
+                                                        animationSpec = spring(
+                                                            dampingRatio = Spring.DampingRatioNoBouncy,
+                                                            stiffness = Spring.StiffnessMediumLow
+                                                        )
+                                                    )
+                                                }
+                                            } else {
+                                                // Boundary reached: spring back.
+                                                scope.launch {
+                                                    swipeOffset.animateTo(
+                                                        targetValue = 0f,
+                                                        animationSpec = spring()
+                                                    )
+                                                }
                                             }
+                                        } else {
+                                            scope.launch {
+                                                swipeOffset.animateTo(
+                                                    targetValue = 0f,
+                                                    animationSpec = spring()
+                                                )
+                                            }
+                                        }
+                                    } else {
+                                        // Threshold not met: spring back to center.
+                                        scope.launch {
+                                            swipeOffset.animateTo(
+                                                targetValue = 0f,
+                                                animationSpec = spring()
+                                            )
                                         }
                                     }
                                     accumulatedX = 0f
                                     accumulatedY = 0f
+                                    velocityTracker.resetTracking()
                                 },
                                 onDragCancel = {
+                                    scope.launch {
+                                        swipeOffset.animateTo(
+                                            targetValue = 0f,
+                                            animationSpec = spring()
+                                        )
+                                    }
                                     accumulatedX = 0f
                                     accumulatedY = 0f
+                                    velocityTracker.resetTracking()
                                 }
                             )
                         }
@@ -534,15 +675,50 @@ fun ChatScreen(
                         )
                     }
 
-                    // §Feature C: floating thinking capsule at top-center, shown
-                    // while the current session is actively running.
-                    ThinkingCapsuleOverlay(
-                        visible = currentSessionIsRunning && currentActivity != null,
-                        text = currentActivity?.text ?: "",
-                        startedAtMillis = currentActivity?.startedAtMillis,
-                        onAbort = viewModel::abortSession
-                    )
+                    // §Feature C: floating capsule at top-center.
+                    // §compact: when isCompacting, show a capsule without abort
+                    // button ("压缩中…") instead of the normal thinking capsule.
+                    if (chat.isCompacting) {
+                        ThinkingCapsuleOverlay(
+                            visible = true,
+                            text = "压缩中…",
+                            startedAtMillis = chat.compactStartedAt.takeIf { it > 0 },
+                            onAbort = {},
+                            showAbort = false
+                        )
+                    } else {
+                        ThinkingCapsuleOverlay(
+                            visible = currentSessionIsRunning && currentActivity != null,
+                            text = currentActivity?.text ?: "",
+                            startedAtMillis = currentActivity?.startedAtMillis,
+                            onAbort = viewModel::abortSession
+                        )
+                    }
                 }
+
+        // §error-detail: dialog showing the full error text when the user taps
+        // "查看" on a detailed-error snackbar. Scrollable + selectable so long
+        // technical messages (HTTP bodies, stack traces) are readable.
+        errorDetail?.let { detail ->
+            AlertDialog(
+                onDismissRequest = { errorDetail = null },
+                title = { Text("错误详情") },
+                text = {
+                    SelectionContainer {
+                        Text(
+                            text = detail,
+                            style = MaterialTheme.typography.bodySmall,
+                            modifier = Modifier.verticalScroll(rememberScrollState())
+                        )
+                    }
+                },
+                confirmButton = {
+                    TextButton(onClick = { errorDetail = null }) {
+                        Text(stringResource(R.string.common_done))
+                    }
+                }
+            )
+        }
 
         // Input bar is enabled whenever there is either a concrete session OR
         // a draft workdir (so the user can type the first message that will
@@ -550,7 +726,7 @@ fun ChatScreen(
         if (chat.currentSessionId != null || composer.draftWorkdir != null) {
             ChatInputBar(
                 viewModel = viewModel,
-                isBusy = currentSessionIsRunning,
+                isBusy = currentSessionIsRunning || chat.isCompacting,
                 onAddImages = onAddImages,
                 pendingQuestion = pendingQuestion,
                 questionAnswersValid = questionAnswersValid,
@@ -669,7 +845,8 @@ private fun BoxScope.ThinkingCapsuleOverlay(
     visible: Boolean,
     text: String,
     startedAtMillis: Long?,
-    onAbort: () -> Unit
+    onAbort: () -> Unit,
+    showAbort: Boolean = true
 ) {
     AnimatedVisibility(
         visible = visible,
@@ -679,7 +856,8 @@ private fun BoxScope.ThinkingCapsuleOverlay(
             ThinkingCapsule(
                 text = text,
                 startedAtMillis = startedAtMillis,
-                onAbort = onAbort
+                onAbort = onAbort,
+                showAbort = showAbort
             )
         }
     }

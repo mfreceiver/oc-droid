@@ -83,6 +83,7 @@
     <string name="chat_context_cost">费用</string>
     <string name="chat_context_no_cost">没有费用数据</string>
     <string name="chat_context_unknown">未知</string>
+    <string name="chat_context_compact">压缩</string>
     <string name="chat_add_image">添加图片</string>
     <string name="chat_remove_image">移除图片</string>
     <string name="chat_send">发送</string>
