@@ -56,6 +56,25 @@ interface SessionSwitcherCallbacks {
     fun loadSessionStatus()
 
     /**
+     * §stale-question: clears the pending-questions list in AppState. Called
+     * by [SessionSwitcher.switchTo] BEFORE [loadPendingQuestions] so the
+     * outgoing session's questions do not leak across the switch (the live
+     * list is global to the server, but a stale snapshot from the previous
+     * session would otherwise keep that session's interrupted question parts
+     * marked as "live" until the refresh resolves).
+     */
+    fun clearPendingQuestions()
+
+    /**
+     * §stale-question: refreshes the pending-questions list from the server
+     * (GET /question). Called by [SessionSwitcher.switchTo] so the staleness
+     * comparison for question tool parts uses fresh data when the user lands
+     * on a session, and any live question the new session is asking surfaces
+     * immediately (instead of waiting for the next SSE event or full reconnect).
+     */
+    fun loadPendingQuestions()
+
+    /**
      * M5 跟进 (§4.2): drops all pending streaming-delta buffers in
      * [SessionSyncCoordinator]. Called by [SessionSwitcher.switchTo] when
      * LEAVING the outgoing session so its pending delta flush jobs can't
@@ -168,6 +187,8 @@ internal class SessionSwitcher(
      *  4. Look up target session (sessions ∪ directorySessions) + upsert if needed.
      *  5. Reset collapsible-card expansion state.
      *  6. Sync repository's workdir context to the selected session's directory.
+     *  6.5. Refresh pending questions (clear + load) so staleness comparison
+     *      uses fresh data and the new session's live question surfaces.
      *  7. Load messages (resetLimit based on cache hit) + session status + children.
      *  8. Update unread state machine (tempClearedUnread + re-mark busy) +
      *     discard draft + openSessionIds prepend + persistSessionCache.
@@ -256,6 +277,16 @@ internal class SessionSwitcher(
         // ── Step 6: Sync repository's workdir context ───────────────────────
         val directory = slices.sessionList.value.sessions.firstOrNull { it.id == sessionId }?.directory
         callbacks.syncCurrentDirectory(directory)
+
+        // ── Step 6.5: Refresh pending questions (§stale-question) ───────────
+        // Clear first so the outgoing session's questions don't leak across
+        // the switch (a stale snapshot would otherwise keep the previous
+        // session's interrupted question parts marked as "live" until the
+        // refresh resolves), then re-fetch so the new session's live
+        // question surfaces immediately and the staleness comparison in
+        // ChatMessageList uses fresh data.
+        callbacks.clearPendingQuestions()
+        callbacks.loadPendingQuestions()
 
         // ── Step 7: Load messages + session status + child sessions ─────────
         // resetLimit=false on cache hit (don't wipe restored messages); true

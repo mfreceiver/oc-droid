@@ -46,7 +46,12 @@ internal fun MessageRow(
     onFileClick: (String) -> Unit,
     onOpenSubAgent: (String) -> Unit,
     expandedParts: Map<String, Boolean>,
-    onToggleExpand: (String, Boolean) -> Unit
+    onToggleExpand: (String, Boolean) -> Unit,
+    // §stale-question: part ids whose question tool part is stuck "running"
+    // without a matching live QuestionRequest — rendered terminally instead
+    // of with a perpetual spinner. Empty by default so legacy callers keep
+    // compiling.
+    staleQuestionPartKeys: Set<String> = emptySet()
 ) {
     val isUser = message.isUser
 
@@ -149,6 +154,7 @@ internal fun MessageRow(
                             expandedParts = expandedParts,
                             onToggleExpand = onToggleExpand,
                             expandedKey = "${message.id}|${item.part.id}",
+                            isStale = item.part.id in staleQuestionPartKeys,
                             modifier = Modifier.widthIn(max = MAX_CARD_WIDTH)
                         )
                     }

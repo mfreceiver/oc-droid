@@ -615,6 +615,8 @@ class SessionSwitcherTest {
         val loadChildSessionsCalls = mutableListOf<String>()
         val loadMessagesCalls = mutableListOf<Pair<String, Boolean>>()
         var loadSessionStatusCalls = 0
+        var clearPendingQuestionsCalls = 0
+        var loadPendingQuestionsCalls = 0
         val callOrder = mutableListOf<String>()
 
         data class PersistCall(
@@ -666,6 +668,16 @@ class SessionSwitcherTest {
         override fun loadSessionStatus() {
             loadSessionStatusCalls++
             callOrder.add("loadSessionStatus")
+        }
+
+        override fun clearPendingQuestions() {
+            clearPendingQuestionsCalls++
+            callOrder.add("clearPendingQuestions")
+        }
+
+        override fun loadPendingQuestions() {
+            loadPendingQuestionsCalls++
+            callOrder.add("loadPendingQuestions")
         }
 
         var clearDeltaBuffersCalls = 0

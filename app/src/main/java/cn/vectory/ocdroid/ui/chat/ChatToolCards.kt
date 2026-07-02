@@ -306,12 +306,17 @@ internal fun BasicTool(
     expandedParts: Map<String, Boolean>,
     onToggleExpand: (String, Boolean) -> Unit,
     expandedKey: String,
+    // §stale-question: when true, override the "running" branch with a
+    // terminal "Interrupted" presentation (no spinner, muted icon, stale
+    // title). Set by the caller when the part is a question tool part stuck
+    // "running" with no matching live QuestionRequest.
+    isStale: Boolean = false,
     modifier: Modifier = Modifier.fillMaxWidth()
 ) {
     val toolName = part.tool ?: ""
     val lowerTool = toolName.lowercase()
     val status = part.stateDisplay
-    val isRunning = status == "running"
+    val isRunning = status == "running" && !isStale
     val isError = status == "error"
     val expanded = expandedParts[expandedKey] ?: false
 
@@ -327,6 +332,14 @@ internal fun BasicTool(
     val canExpand: Boolean
 
     when {
+        // §stale-question: terminal "Interrupted" presentation overrides the
+        // default title for interrupted question tool parts (no spinner; muted
+        // icon + stale title are rendered below).
+        isStale -> {
+            title = stringResource(R.string.chat_question_stale)
+            subtitle = stringResource(R.string.chat_question_stale_hint).takeIf { it.isNotEmpty() }
+            canExpand = false
+        }
         isBash -> {
             title = "Shell"
             subtitle = part.toolInputSummary?.take(80)
@@ -370,7 +383,11 @@ internal fun BasicTool(
                     toolIcon(toolName),
                     contentDescription = null,
                     modifier = Modifier.size(14.dp),
-                    tint = MaterialTheme.colorScheme.onSurfaceVariant
+                    // §stale-question: muted outline tint marks the part as
+                    // interrupted (overrides the default onSurfaceVariant so
+                    // the icon reads as "ended", not "in progress").
+                    tint = if (isStale) MaterialTheme.colorScheme.outline
+                    else MaterialTheme.colorScheme.onSurfaceVariant
                 )
                 Spacer(modifier = Modifier.width(6.dp))
                 if (isRunning) {

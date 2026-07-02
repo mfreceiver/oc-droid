@@ -93,6 +93,11 @@ class ForkSessionTest {
         coEvery { repository.getMessages(any(), any()) } returns Result.success(emptyList())
         coEvery { repository.getMessagesPaged(any(), any(), any()) } returns Result.success(MessagesPage(emptyList(), null))
         coEvery { repository.getPendingPermissions() } returns Result.success(emptyList())
+        // §stale-question: SessionSwitcher.switchTo now calls
+        // loadPendingQuestions() at Step 6.5, so the relaxed mock needs an
+        // explicit stub (otherwise it returns a non-List Result payload that
+        // throws ClassCastException inside the coroutine).
+        coEvery { repository.getPendingQuestions() } returns Result.success(emptyList())
     }
 
     @After

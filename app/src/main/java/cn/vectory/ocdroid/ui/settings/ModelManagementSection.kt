@@ -1,5 +1,6 @@
 package cn.vectory.ocdroid.ui.settings
 
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -13,7 +14,8 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.CheckCircle
+import androidx.compose.material.icons.filled.ChevronRight
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.HorizontalDivider
@@ -21,7 +23,13 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.res.stringResource
@@ -33,15 +41,20 @@ import cn.vectory.ocdroid.data.model.ConfigProvider
 import cn.vectory.ocdroid.data.model.ProvidersResponse
 
 /**
- * §model-selection: Settings → Model management section. Lists every model
- * the server returned via GET /config/providers, grouped by provider, each
- * with an enable/disable switch. Disabled models are hidden from the chat
- * quick-switch picker but remain listed here so the user can re-enable them.
+ * §model-management: Settings → Model management section.
  *
- * Per-baseUrl persistence lives in
+ * Renders a compact one-line row (label + chevron) that opens a scrollable
+ * AlertDialog listing every provider→model the server returned via
+ * GET /config/providers, each with an enable/disable Switch. Disabled models
+ * are hidden from the chat quick-switch picker but remain listed here so the
+ * user can re-enable them. Per-baseUrl persistence lives in
  * [cn.vectory.ocdroid.util.SettingsManager]; the caller projects the active
  * host's disabled set into [disabledModels] and routes toggles through
  * [onToggleModelDisabled]. Entries are keyed `"$providerId/$modelId"`.
+ *
+ * The dialog body replaces the previous always-expanded inline card so the
+ * Settings page stays scannable; only the empty-state message renders inline
+ * (no catalog → no row to tap, the card explains it).
  */
 @Composable
 internal fun ModelManagementSection(
@@ -50,15 +63,11 @@ internal fun ModelManagementSection(
     onToggleModelDisabled: (providerId: String, modelId: String) -> Unit
 ) {
     SectionHeader(title = stringResource(R.string.settings_model_management))
-    Text(
-        stringResource(R.string.settings_model_management_hint),
-        style = MaterialTheme.typography.bodySmall,
-        color = MaterialTheme.colorScheme.onSurfaceVariant
-    )
-    Spacer(modifier = Modifier.height(12.dp))
 
     val catalog = providers?.providers.orEmpty().filter { it.models.isNotEmpty() }
     if (catalog.isEmpty()) {
+        // Inline empty-state card (no dialog to open when there is nothing to
+        // edit).
         Card(
             modifier = Modifier.fillMaxWidth(),
             colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
@@ -73,34 +82,110 @@ internal fun ModelManagementSection(
         return
     }
 
-    Card(
-        modifier = Modifier.fillMaxWidth(),
-        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
+    // Disabled-count summary shown as the row's supporting text so the user
+    // can tell at a glance whether any models are currently hidden.
+    val totalModels = catalog.sumOf { it.models.size }
+    val disabledCount = catalog.sumOf { provider ->
+        provider.models.count { (modelId, _) -> "${provider.id}/$modelId" in disabledModels }
+    }
+    val supporting = if (disabledCount == 0) {
+        "$totalModels"
+    } else {
+        "$disabledCount disabled · $totalModels total"
+    }
+
+    var showDialog by rememberSaveable { mutableStateOf(false) }
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable { showDialog = true }
+            .padding(vertical = 12.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(12.dp)
     ) {
-        Column(
-            modifier = Modifier
-                .padding(16.dp)
-                .heightIn(max = 420.dp)
-                .verticalScroll(rememberScrollState())
-        ) {
-            catalog.forEachIndexed { providerIndex, provider ->
-                if (providerIndex > 0) {
-                    Spacer(modifier = Modifier.height(12.dp))
-                    HorizontalDivider()
-                    Spacer(modifier = Modifier.height(12.dp))
-                }
-                ProviderRow(
-                    provider = provider,
-                    disabledModels = disabledModels,
-                    onToggleModelDisabled = onToggleModelDisabled
-                )
-            }
+        Column(modifier = Modifier.weight(1f)) {
+            Text(
+                text = stringResource(R.string.settings_model_management_edit),
+                style = MaterialTheme.typography.bodyLarge,
+                color = MaterialTheme.colorScheme.onSurface
+            )
+            Text(
+                text = supporting,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
         }
+        Icon(
+            Icons.Default.ChevronRight,
+            contentDescription = null,
+            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.size(20.dp)
+        )
+    }
+
+    if (showDialog) {
+        ModelManagementDialog(
+            providers = providers,
+            disabledModels = disabledModels,
+            onToggleModelDisabled = onToggleModelDisabled,
+            onDismiss = { showDialog = false }
+        )
     }
 }
 
 @Composable
-private fun ProviderRow(
+private fun ModelManagementDialog(
+    providers: ProvidersResponse?,
+    disabledModels: Set<String>,
+    onToggleModelDisabled: (providerId: String, modelId: String) -> Unit,
+    onDismiss: () -> Unit
+) {
+    val catalog = providers?.providers.orEmpty().filter { it.models.isNotEmpty() }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = {
+            Column {
+                Text(stringResource(R.string.settings_model_management))
+                Text(
+                    text = stringResource(R.string.settings_model_management_hint),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(top = 4.dp)
+                )
+            }
+        },
+        text = {
+            Column(
+                modifier = Modifier
+                    .heightIn(max = 480.dp)
+                    .verticalScroll(rememberScrollState())
+            ) {
+                catalog.forEachIndexed { providerIndex, provider ->
+                    if (providerIndex > 0) {
+                        Spacer(modifier = Modifier.height(12.dp))
+                        HorizontalDivider()
+                        Spacer(modifier = Modifier.height(12.dp))
+                    }
+                    ProviderBlock(
+                        provider = provider,
+                        disabledModels = disabledModels,
+                        onToggleModelDisabled = onToggleModelDisabled
+                    )
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = onDismiss) {
+                Text(stringResource(R.string.common_done))
+            }
+        }
+    )
+}
+
+@Composable
+private fun ProviderBlock(
     provider: ConfigProvider,
     disabledModels: Set<String>,
     onToggleModelDisabled: (providerId: String, modelId: String) -> Unit
@@ -118,7 +203,11 @@ private fun ProviderRow(
                 providerId = provider.id,
                 modelId = modelId,
                 displayName = model.name ?: modelId,
-                enabled = "$provider.id/$modelId" !in disabledModels,
+                // §fix: "$provider.id/$modelId" was a literal `.id` after the
+                // variable — never matched a real disabledModels entry, so the
+                // switch appeared dead and the model was always "enabled".
+                // Use the real provider id from the closure parameter.
+                enabled = "${provider.id}/$modelId" !in disabledModels,
                 onToggle = { onToggleModelDisabled(provider.id, modelId) }
             )
         }
@@ -136,17 +225,11 @@ private fun ModelRow(
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .padding(vertical = 4.dp),
+            .clickable(onClick = onToggle)
+            .padding(vertical = 6.dp),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(12.dp)
     ) {
-        Icon(
-            Icons.Default.CheckCircle,
-            contentDescription = null,
-            tint = if (enabled) MaterialTheme.colorScheme.primary
-            else MaterialTheme.colorScheme.outline,
-            modifier = Modifier.size(18.dp)
-        )
         Column(modifier = Modifier.weight(1f)) {
             Text(
                 displayName,

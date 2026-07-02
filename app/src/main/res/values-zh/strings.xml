@@ -191,6 +191,7 @@
     <string name="chat_model_picker_empty">当前服务器没有可用的模型</string>
     <string name="settings_model_management">模型管理</string>
     <string name="settings_model_management_hint">禁用的模型不会出现在快速切换中。设置按服务器保存。</string>
+    <string name="settings_model_management_edit">编辑模型清单</string>
     <string name="settings_model_management_empty">当前服务器未返回可用模型</string>
     <string name="chat_marker_agent_prefix">智能体</string>
     <string name="chat_marker_model_prefix">模型</string>
@@ -199,4 +200,6 @@
     <string name="chat_marker_context_compacted">上下文已压缩</string>
     <string name="chat_marker_expand">展开</string>
     <string name="chat_marker_collapse">折叠</string>
+    <string name="chat_question_stale">已中断</string>
+    <string name="chat_question_stale_hint">该问题已中断，不再有效</string>
 </resources>

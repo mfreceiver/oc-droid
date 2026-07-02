@@ -45,6 +45,7 @@ import cn.vectory.ocdroid.ui.GapInfo
 import cn.vectory.ocdroid.ui.MainViewModel
 import cn.vectory.ocdroid.ui.METADATA_MARKER_ROLES
 import cn.vectory.ocdroid.ui.injectMetadataMarkers
+import cn.vectory.ocdroid.ui.isStaleQuestionPart
 import cn.vectory.ocdroid.ui.theme.opencode
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.collect
@@ -98,6 +99,18 @@ internal fun ChatMessageList(
     val onOpenSubAgent: (String) -> Unit = viewModel::openSubAgent
     val onToggleExpand: (String, Boolean) -> Unit = viewModel::togglePartExpand
     val onCloseGap: () -> Unit = viewModel::closeGap
+
+    // §stale-question: compute the set of part ids that are stuck "running"
+    // question parts WITHOUT a matching live QuestionRequest — these render
+    // in a terminal "Interrupted" state instead of a perpetual spinner.
+    // Recomputed only when the message window or the pending-questions list
+    // changes. Pure derivation: reads partsByMessage + sessionListState.
+    val pendingQuestions = sessionListState.pendingQuestions
+    val staleQuestionPartKeys: Set<String> = remember(partsByMessage, pendingQuestions) {
+        partsByMessage.values.flatten().mapNotNullTo(HashSet()) { part ->
+            if (isStaleQuestionPart(part, pendingQuestions)) part.id else null
+        }
+    }
 
     // sessionId 在 remember key 里需要——提前取（下面 savedPositions 等也用）。
     val sessionId = chatState.currentSessionId
@@ -389,7 +402,8 @@ internal fun ChatMessageList(
                     onFileClick = onFileClick,
                     onOpenSubAgent = onOpenSubAgent,
                     expandedParts = expandedParts,
-                    onToggleExpand = onToggleExpand
+                    onToggleExpand = onToggleExpand,
+                    staleQuestionPartKeys = staleQuestionPartKeys
                 )
             }
         }
@@ -419,7 +433,8 @@ internal fun ChatMessageList(
                     onFileClick = onFileClick,
                     onOpenSubAgent = onOpenSubAgent,
                     expandedParts = expandedParts,
-                    onToggleExpand = onToggleExpand
+                    onToggleExpand = onToggleExpand,
+                    staleQuestionPartKeys = staleQuestionPartKeys
                 )
             }
         }

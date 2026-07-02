@@ -1621,7 +1621,8 @@ class MainViewModel @Inject constructor(
         }
     }
 
-    // R-16 M4: now also satisfies ConnectionCoordinatorCallbacks.loadPendingQuestions.
+    // R-16 M4: now also satisfies ConnectionCoordinatorCallbacks.loadPendingQuestions
+    // §stale-question: and SessionSwitcherCallbacks.loadPendingQuestions.
     override fun loadPendingQuestions() {
         viewModelScope.launch {
             repository.getPendingQuestions()
@@ -1632,6 +1633,16 @@ class MainViewModel @Inject constructor(
                     Log.w(TAG, "Failed to load questions: ${error.message}")
                 }
         }
+    }
+
+    /**
+     * §stale-question: satisfies [SessionSwitcherCallbacks.clearPendingQuestions].
+     * Wipes the pending-questions list in AppState so the outgoing session's
+     * questions don't leak across a switch; the subsequent
+     * [loadPendingQuestions] re-fetches the authoritative server list.
+     */
+    override fun clearPendingQuestions() {
+        updateState { it.copy(pendingQuestions = emptyList()) }
     }
 
     fun replyQuestion(requestId: String, answers: List<List<String>>, onError: () -> Unit = {}) {

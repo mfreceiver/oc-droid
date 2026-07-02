@@ -3,7 +3,9 @@ package cn.vectory.ocdroid.ui
 import android.util.Log
 import cn.vectory.ocdroid.data.model.HostProfile
 import cn.vectory.ocdroid.data.model.Message
+import cn.vectory.ocdroid.data.model.Part
 import cn.vectory.ocdroid.data.model.ProvidersResponse
+import cn.vectory.ocdroid.data.model.QuestionRequest
 import cn.vectory.ocdroid.data.model.Session
 import cn.vectory.ocdroid.data.model.SessionStatus
 
@@ -239,6 +241,37 @@ fun resolveModelDisplayName(
         }?.value
     }
     return match?.name?.takeIf { it.isNotEmpty() } ?: currentModel.modelId
+}
+
+/**
+ * §stale-question: returns true iff [part] is a `question` tool part stuck
+ * in the "running" state WITHOUT a matching live [QuestionRequest] in
+ * [pending]. opencode 1.17.12 stores pending questions in-memory (server
+ * `question/index.ts:71`); on server restart / interrupted run the message
+ * history still has the part in "running" but `GET /question` returns empty
+ * for it → the UI renders a perpetual spinner. This predicate lets the chat
+ * list render such parts in a terminal "Interrupted" state instead.
+ *
+ * A part is stale iff ALL hold:
+ *  - [Part.isTool] is true.
+ *  - [Part.tool] (lowercased) equals `"question"`.
+ *  - [Part.stateDisplay] equals `"running"`.
+ *  - NO entry in [pending] has `tool.messageId == part.messageId` AND
+ *    `tool.callId == part.callId` (null refs on either side are treated as
+ *    non-matching — a null `part.callId` cannot be reconciled with a live
+ *    QuestionRequest, so the part is considered stale if the other conditions
+ *    hold; this matches the per-part terminal rendering goal).
+ */
+fun isStaleQuestionPart(part: Part, pending: List<QuestionRequest>): Boolean {
+    if (!part.isTool) return false
+    if (part.tool?.lowercase() != "question") return false
+    if (part.stateDisplay != "running") return false
+    val partMessageId = part.messageId ?: return true
+    val partCallId = part.callId ?: return true
+    return pending.none { q ->
+        val tool = q.tool ?: return@none false
+        tool.messageId == partMessageId && tool.callId == partCallId
+    }
 }
 
 private fun logContextUsageUnavailable(reason: String): ContextUsage? {
