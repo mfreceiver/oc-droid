@@ -2,6 +2,7 @@ package cn.vectory.ocdroid.ui.controller
 
 import cn.vectory.ocdroid.data.api.NOISY_SSE_LOG_EVENTS
 import cn.vectory.ocdroid.data.model.Message
+import cn.vectory.ocdroid.data.model.Part
 import cn.vectory.ocdroid.data.model.SSEEvent
 import cn.vectory.ocdroid.data.model.TodoItem
 import cn.vectory.ocdroid.ui.AppState
@@ -367,15 +368,18 @@ internal class SessionSyncCoordinator(
                             // pending delta flush so a stale buffered append can't
                             // corrupt the authoritative snapshot after this write.
                             cancelDeltaFlush(key)
-                            state.updateAndSync(slices) {
-                                it.copy(
-                                    streamingPartTexts = it.streamingPartTexts + (key to fullText),
+                            state.updateAndSync(slices) { s ->
+                                s.copy(
+                                    streamingPartTexts = s.streamingPartTexts + (key to fullText),
                                     streamingReasoningPart = reasoningPartOrNull(
                                         partType = deltaEvent.partType,
                                         partId = pId,
                                         messageId = msgId,
                                         sessionId = deltaEvent.sessionId
-                                    ) ?: it.streamingReasoningPart
+                                    ) ?: s.streamingReasoningPart,
+                                    partsByMessage = ensurePlaceholderPart(
+                                        s.partsByMessage, msgId, pId, deltaEvent.sessionId, deltaEvent.partType
+                                    )
                                 )
                             }
                         } else if (!delta.isNullOrBlank()) {
@@ -391,16 +395,19 @@ internal class SessionSyncCoordinator(
                             // once; subsequent deltas within the window buffer
                             // into deltaBuffer and flush in one batch.
                             if (flushJobs[key]?.isActive != true) {
-                                state.updateAndSync(slices) {
-                                    val previousValue = it.streamingPartTexts[key].orEmpty()
-                                    it.copy(
-                                        streamingPartTexts = it.streamingPartTexts + (key to (previousValue + delta)),
+                                state.updateAndSync(slices) { s ->
+                                    val previousValue = s.streamingPartTexts[key].orEmpty()
+                                    s.copy(
+                                        streamingPartTexts = s.streamingPartTexts + (key to (previousValue + delta)),
                                         streamingReasoningPart = reasoningPartOrNull(
                                             partType = deltaEvent.partType,
                                             partId = pId,
                                             messageId = msgId,
                                             sessionId = deltaEvent.sessionId
-                                        ) ?: it.streamingReasoningPart
+                                        ) ?: s.streamingReasoningPart,
+                                        partsByMessage = ensurePlaceholderPart(
+                                            s.partsByMessage, msgId, pId, deltaEvent.sessionId, deltaEvent.partType
+                                        )
                                     )
                                 }
                                 scheduleDeltaFlush(key)
@@ -452,11 +459,12 @@ internal class SessionSyncCoordinator(
                 val sessionId = event.payload.getString("sessionID") ?: return
                 if (sessionId != slices.chat.value.currentSessionId) return
                 // messageID required for a well-formed delta event (validation guard).
-                event.payload.getString("messageID") ?: return
+                val msgId = event.payload.getString("messageID") ?: return
                 val partId = event.payload.getString("partID") ?: return
-                // `field` defaults to "text"; Phase 2 ignores it (accumulates into
-                // the text overlay regardless) — field-specific handling is deferred.
-                @Suppress("UNUSED_VARIABLE")
+                // `field` defaults to "text"; it is the type hint for this
+                // delta (e.g. "text", "reasoning"). Used as the placeholder
+                // partType so a reasoning field-delta routes to ReasoningCard,
+                // not a generic text bubble.
                 val field = event.payload.getString("field") ?: "text"
                 val delta = event.payload.getString("delta")
                 if (!delta.isNullOrEmpty()) {
@@ -471,9 +479,14 @@ internal class SessionSyncCoordinator(
                     // from "msgId:partId" to partId, matching UI consumers).
                     if (flushJobs[key]?.isActive != true) {
                         // Leading edge: write now, then open the coalesce window.
-                        state.updateAndSync(slices) {
-                            val previous = it.streamingPartTexts[key].orEmpty()
-                            it.copy(streamingPartTexts = it.streamingPartTexts + (key to (previous + delta)))
+                        state.updateAndSync(slices) { s ->
+                            val previous = s.streamingPartTexts[key].orEmpty()
+                            s.copy(
+                                streamingPartTexts = s.streamingPartTexts + (key to (previous + delta)),
+                                partsByMessage = ensurePlaceholderPart(
+                                    s.partsByMessage, msgId, partId, sessionId, field
+                                )
+                            )
                         }
                         scheduleDeltaFlush(key)
                     } else {
@@ -607,6 +620,49 @@ internal class SessionSyncCoordinator(
         flushJobs.values.forEach { it.cancel() }
         flushJobs.clear()
         deltaBuffer.clear()
+    }
+
+    // ── §streaming-render placeholder injection ────────────────
+
+    /**
+     * Ensures a minimal placeholder [Part] exists in [partsByMessage] for the
+     * given [msgId]/[pId] so a `ChatMessageRow.PartView` is composed immediately
+     * and consumes the streaming override (`streamingTextOverride ?: part.text`)
+     * while SSE deltas accumulate. The placeholder has `text = null`, so the
+     * streaming override wins; when the REST reload later fires it replaces
+     * `partsByMessage[msgId]` wholesale, overwriting the placeholder with the
+     * real Part — no conflict.
+     *
+     * No-op when [partsByMessage] already has a Part with `id == pId` for [msgId]
+     * (the common case once the first placeholder has been inserted, or once the
+     * REST reload has brought the real parts in).
+     *
+     * Type guard: only `text` and `reasoning` parts are streamed through
+     * `streamingPartTexts` and rendered by `PartView`'s `TextPart` /
+     * `ReasoningCard`. Other part types (`tool`, `patch`, `file`, `step-start`,
+     * `step-finish`, …) are NOT streamed this way — injecting a placeholder for
+     * them would misroute in `PartView` (e.g. a `type="tool"` placeholder with
+     * `tool=null` renders an empty tool card; `step-*` has no render branch and
+     * the streaming text would be orphaned). For those types this is a no-op.
+     * They get their real `Part` from the REST reload as before.
+     */
+    private fun ensurePlaceholderPart(
+        partsByMessage: Map<String, List<Part>>,
+        msgId: String,
+        pId: String,
+        sessionId: String,
+        partType: String
+    ): Map<String, List<Part>> {
+        // Only text/reasoning parts stream via streamingPartTexts. Skip
+        // placeholder injection for any other type — they would misroute in
+        // PartView and the streaming text would never be consumed.
+        if (partType != "text" && partType != "reasoning") return partsByMessage
+        val existing = partsByMessage[msgId]
+        return when {
+            existing == null -> partsByMessage + (msgId to listOf(Part(id = pId, messageId = msgId, sessionId = sessionId, type = partType)))
+            existing.none { it.id == pId } -> partsByMessage + (msgId to (existing + Part(id = pId, messageId = msgId, sessionId = sessionId, type = partType)))
+            else -> partsByMessage
+        }
     }
 
     companion object {

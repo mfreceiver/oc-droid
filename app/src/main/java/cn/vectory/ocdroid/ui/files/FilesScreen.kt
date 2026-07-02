@@ -25,6 +25,7 @@ import androidx.compose.ui.semantics.semantics
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import cn.vectory.ocdroid.R
+import cn.vectory.ocdroid.ui.showTimed
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -37,11 +38,12 @@ fun FilesScreen(
 ) {
     val state by viewModel.state.collectAsStateWithLifecycle()
 
-    // C1: error feedback via Snackbar (replaces the former AppToast top overlay).
+    // C1: error feedback via a 3s Snackbar (replaces the former AppToast top
+    // overlay; previously used the M3 default duration).
     val snackbarHostState = remember { SnackbarHostState() }
     LaunchedEffect(state.error) {
         state.error?.let { message ->
-            snackbarHostState.showSnackbar(message)
+            snackbarHostState.showTimed(message)
             viewModel.clearError()
         }
     }

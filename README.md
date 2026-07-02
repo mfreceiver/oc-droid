@@ -39,21 +39,23 @@ App 已对 `*.ts.net` 域名配置 HTTP 豁免，无需额外设置。
 
 ## 构建
 
-> 以下为本机 Linux 路径。Windows / macOS 请替换为对应的 JDK/SDK 路径。完整构建/签名/发版细节见 [`docs/build-apk.md`](./docs/build-apk.md)，agent 操作指引见 [`AGENTS.md`](./AGENTS.md)。
+> 构建命令、签名、发版的**权威说明**见 [`docs/build-apk.md`](./docs/build-apk.md)；规则见 `.opencode/policies/build-signing.md`。本节只给速查。
 
 ```bash
-# 导出本机 JDK/SDK 环境（终端默认找不到 Java）
-export JAVA_HOME=/home/mar/android-studio/jbr
-export ANDROID_HOME=/home/mar/android-sdk
-export PATH="$JAVA_HOME/bin:$PATH:$ANDROID_HOME/platform-tools"
-
-./gradlew assembleDebug        # 测试 APK → app/build/outputs/apk/debug/app-debug.apk
-./gradlew assembleRelease      # 发布 APK → app/build/outputs/apk/release/app-release.apk（需配置 release 签名）
-./gradlew testDebugUnitTest    # 单元测试
-./gradlew koverHtmlReport      # 覆盖率 → app/build/reports/kover/html/index.html
+source ./scripts/env.sh          # 导出本机 JDK/SDK 环境（终端默认找不到 Java）
+./gradlew assembleDebug          # 测试 APK → app/build/outputs/apk/debug/app-debug.apk
+./gradlew assembleRelease        # 发布 APK → app/build/outputs/apk/release/app-release.apk（需配置 release 签名）
+./gradlew testDebugUnitTest      # 单元测试
+./gradlew koverHtmlReport        # 覆盖率 → app/build/reports/kover/html/index.html
 ```
 
-集成测试（`connectedDebugAndroidTest`）需要运行中的 OpenCode Server：将 `.env.example` 复制为 `.env` 并填入 `OPENCODE_*` 凭证，且**仅在模拟器**运行。
+发版走单一入口（内部已做：质量门禁 → bump 版本 → 构建 → tag）：
+
+```bash
+./scripts/release.sh patch       # patch | minor | major
+```
+
+集成测试（`connectedDebugAndroidTest`）需要运行中的 OpenCode Server：将 `.env.example` 复制为 `.env` 并填入 `OPENCODE_*` 凭证，且**仅在模拟器**运行（详见 [`AGENTS.md`](./AGENTS.md)「设备安全」）。
 
 ## 项目结构
 

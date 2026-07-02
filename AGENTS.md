@@ -1,105 +1,60 @@
 # AGENTS.md - ocdroid
 
 > 本仓库基于 [grapeot/opencode_android_client](https://github.com/grapeot/opencode_android_client)（MIT）深度改造，已独立发展，不再跟踪上游。
-> 本文件是给在此仓库工作的 agent 的操作指引，构建细节见 `docs/build-apk.md`。
+> 本文件是给在此仓库工作的 agent 的**入口索引**。具体规则下沉到 `.opencode/policies/`，操作命令收敛到 `scripts/`，细节见 `docs/build-apk.md`。
 
 ---
 
-## 构建环境（本机 Linux）
+## 流程入口（优先用脚本，不要手拼命令）
 
-终端默认找不到 Java，**每次构建前必须导出**（或写入 `~/.zshrc` 持久化）：
+| 任务 | 入口 | 规则 / 细节 |
+|---|---|---|
+| 改动后校验（替代 LSP，必做） | `./scripts/check.sh` | `.opencode/policies/build-signing.md`「改动校验」 |
+| 发版（出包 + commit + tag） | `./scripts/release.sh <patch\|minor\|major>` | `.opencode/policies/build-signing.md`、`.opencode/policies/versioning.md` |
+| bump 版本号 | `./scripts/release.sh` 内部调用，**禁止手改** `app/build.gradle.kts` | `.opencode/policies/versioning.md` |
+| 构建环境 export | `source ./scripts/env.sh` | `scripts/env.sh` |
+| 发版前评审（产物归档） | `.opencode/runs/reviews/<YYYY-MM-DD>/<reviewer>_<scope>.json` | `.opencode/policies/review-gate.md` |
 
-```bash
-export JAVA_HOME=/home/mar/android-studio/jbr
-export ANDROID_HOME=/home/mar/android-sdk
-export PATH="$JAVA_HOME/bin:$PATH:$ANDROID_HOME/platform-tools"
-```
+> 任何 release / 签名 / 上传 / 版本号修改，都不得由 agent 自由发挥命令，必须走上述脚本。
 
-- **JDK 21**（JBR），构建用项目自带 `./gradlew` wrapper（Gradle 9.3.1），**不要**用系统 gradle。
-- 工具链（在 `gradle/libs.versions.toml` 锁定，**勿擅自升级**）：AGP 9.1.0 / Kotlin 2.2.10 / KSP 2.3.6 / compileSdk 35 / minSdk 26 / targetSdk 34。
-- SDK 已就绪：android-35 + build-tools 34.0.0/35.0.0/35.0.1。
-- 首次构建需 `local.properties`（已 gitignore）：`printf 'sdk.dir=/home/mar/android-sdk\n' > local.properties`。
-- **工具链与其它本机项目（x-liker / syncplayer）完全隔离**：各项目用自己的 wrapper + 版本目录，互不影响。
+## 硬规则（不可违反）
 
-## 构建命令
+- **改动校验必做**：本工作区的 opencode 服务端已关闭 LSP（`lsp: false`），编辑后无编译器/诊断的自动反馈。每次改 Kotlin/资源后，必须 `./scripts/check.sh` 通过才算改动完成。等价于手动 LSP 自检；其输出走会被服务端截断（≤50KB）的 `output` 通道，不会产生 `metadata.diagnostics` 膨胀。
+- **设备安全**：不得在物理 Android 手机上跑 `connectedDebugAndroidTest`、安装或启动 debug 构建，**除非用户明确要求**。UI/插桩测试与安装**仅用模拟器**。若同时连了真机和模拟器，用 `ANDROID_SERIAL=<模拟器id>` 明确指定。
+- **Git 分支**：单一主线分支 `main`，在此分支工作与出包。
+- **版本号**：禁止手改 `app/build.gradle.kts` 的 `versionCode`/`versionName`，必须经脚本（见 `versioning.md`）。
 
-```bash
-./gradlew assembleDebug      # 测试 APK → app/build/outputs/apk/debug/app-debug.apk（调试密钥签名，可直接装）
-./gradlew assembleRelease    # 发布 APK → app/build/outputs/apk/release/app-release.apk（release 密钥签名）
-```
+## 构建/发版/测试细节
 
-- 首次 debug 构建约 10+ 分钟（下载依赖），release 约 1–2 分钟（依赖缓存后）。
-- 加速：在 `gradle.properties` 加 `org.gradle.configuration-cache=true`、`org.gradle.caching=true`、`org.gradle.parallel=true`。
+完整的构建命令、签名配置、产物命名、发版流程等**统一在以下文件**，本文件不再重复：
 
-## Release 签名
+- `docs/build-apk.md` — 本地构建 / 签名 / 发版完整指南（含本机路径、命令、tea CLI 用法）
+- `.opencode/policies/build-signing.md` — 构建/签名/校验规则（权威）
+- `.opencode/policies/versioning.md` — 版本号语义与 bump 规则（权威）
+- `.opencode/policies/review-gate.md` — 发版前评审与评审产物命名/留存规范
+- `.opencode/README.md` — 任务路由总表
 
-- keystore：`/home/mar/.android/opencode_release.keystore`（**仓库外**，永不入库），alias `release`。
-- 凭证写入 `local.properties`（gitignored）：`release.storeFile / storePassword / keyAlias / keyPassword`。
-- 签名配置在 `app/build.gradle.kts` 的 `signingConfigs.release`，从 `local.properties` 读取；`buildTypes.release` 绑定该签名。
-- **keystore 与密码务必备份**——丢失则无法以同一身份升级 App。密码不在本文件，存于本机 `local.properties`。
-- 新增 App 签名应使用**独立 key**（一 App 一 key，规范），不要复用 x-liker / syncplayer 的 key。
-
-## 发布产物
-
-- 发布的 APK 统一放**项目根目录 `APK/` 文件夹**（已 gitignore，不入库），按 `oc-droid-<版本号>.apk` 命名（如 `oc-droid-0.2.3.apk`）。应用名称为 **OC Droid**。
-- 发版用 `tea` CLI 打 Gitea Release，tag 用 `v<版本号>`（如 `v0.2.3`），tag 指向 `main` 分支提交。详见 `docs/build-apk.md`。
-- **版本号约定**：每批发版 `versionName` 末位 +0.0.1（如 `0.2.2 → 0.2.3`），`versionCode` +1；破坏性变更再进位。两者在 `app/build.gradle.kts` 手动维护。
-- **发版前评审**：每批发版应先 `compileDebugKotlin` + `testDebugUnitTest` 全绿，再走多 agent 评审（如 `glmer` + `gpter`），按评审意见修订后再 bump 版本 / 出包 / 发版。
-
-## 测试
+### 常用命令速查（细节见上）
 
 ```bash
-./gradlew testDebugUnitTest                 # 单元测试
-./gradlew koverHtmlReport                   # 覆盖率 → app/build/reports/kover/html/index.html
-./gradlew connectedDebugAndroidTest         # 集成测试（需 .env 凭证 + 运行中的 OpenCode Server）
+source ./scripts/env.sh                # 导出 JAVA_HOME / ANDROID_HOME（构建前必做，或写 ~/.zshrc）
+./scripts/check.sh                     # 编译 + 单测（每次改动必跑）
+./scripts/check.sh --full              # + lint + 覆盖率
+./scripts/release.sh patch             # 发版（唯一入口；内部已做 bump/构建/tag）
+./gradlew assembleDebug                # 仅 debug 包（仅模拟器）
+./gradlew connectedDebugAndroidTest    # 集成测试（需 .env + 模拟器）
 ```
-
-集成测试前：复制 `.env.example` 为 `.env`，填入 `OPENCODE_*` 凭证。
-
-## 改动校验（替代 LSP 自检，必做）
-
-> **本工作区的 opencode 服务端已关闭 LSP（`lsp: false`）**，编辑后不再有编译器/诊断的自动反馈。因此 **agent 每次改动 Kotlin/资源后，必须主动运行下列命令**确认无编译与测试错误，相当于手动 LSP 自检。这些命令的输出走会被服务端截断（≤50KB）的 `output` 通道，不会产生 `metadata.diagnostics` 膨胀。
-
-```bash
-export JAVA_HOME=/home/mar/android-studio/jbr
-export ANDROID_HOME=/home/mar/android-sdk
-export PATH="$JAVA_HOME/bin:$PATH:$ANDROID_HOME/platform-tools"
-./gradlew compileDebugKotlin        # 编译校验（最快，每次改动必跑）
-./gradlew testDebugUnitTest         # 单元测试（改动逻辑后必跑）
-./gradlew lintDebug                 # 静态检查（可选）
-```
-
-只有上述命令全部通过，才视为一次改动完成；失败则先修复再继续。
-
-## 设备安全（硬性规定）
-
-- **不得**在物理 Android 手机上跑 `connectedDebugAndroidTest`、安装或启动 debug 构建，**除非用户明确要求**。真机含用户正式 App 与凭证，测试包可能覆盖。
-- UI / 插桩测试与安装**仅用模拟器**。若同时连了真机和模拟器，用 `ANDROID_SERIAL=<模拟器id>` 明确指定。
-
-## Git 分支模型
-
-单一主线分支 **`main`**，在此分支工作与出包。
-
-```bash
-# 日常开发
-git checkout main              # 改代码 → commit → git push
-
-# 发布
-git checkout main && ./gradlew assembleRelease
-```
-
-## Remote
-
-- `origin` = `https://git.vectory.cn:18443/mfreceiver/oc-droid.git`（日常推送）。
 
 ## 常见问题
 
-- **Java 找不到 / gradlew 失败**：先 `export JAVA_HOME=/home/mar/android-studio/jbr`（见上）。
-- **Run 报 Module not found**：Android Studio → File → Sync Project with Gradle Files；仍失败 → Invalidate Caches / Restart。Run 配置用 module `ocdroid.app`（settings.gradle.kts 的 rootProject.name + `:app`）。
-- **构建慢**：开 Gradle 配置缓存（见上）。
-- **缺 `local.properties`**：见「构建环境」末尾的 `printf` 命令。
+- **Java 找不到 / gradlew 失败**：`source ./scripts/env.sh`（见上）。
+- **缺 `local.properties`**：`printf 'sdk.dir=/home/mar/android-sdk\n' > local.properties`。
+- **Run 报 Module not found**：Android Studio → File → Sync Project with Gradle Files；仍失败 → Invalidate Caches / Restart。Run 配置用 module `ocdroid.app`。
+- **构建慢**：在 `gradle.properties` 加 `org.gradle.configuration-cache=true` / `.caching=true` / `.parallel=true`。
+- **工具链与其它本机项目（x-liker / syncplayer）完全隔离**：各项目用自己的 wrapper + 版本目录，互不影响。
 
 ## 相关文档
 
 - `docs/build-apk.md` — 本地构建 / 签名 / 发版指南
 - `README.md` — 项目功能与使用说明
+- `.opencode/` — 项目治理（policy / template / runs）

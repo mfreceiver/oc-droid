@@ -18,6 +18,7 @@ import androidx.compose.material.icons.filled.ExpandLess
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.Psychology
 import androidx.compose.material3.Checkbox
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.LocalContentColor
 import androidx.compose.material3.MaterialTheme
@@ -48,19 +49,6 @@ import cn.vectory.ocdroid.ui.util.MarkdownImageResolver
 // styling). TodoListInline is the checkbox list shown inside expanded
 // non-todowrite tool cards.
 
-/**
- * Max chars of the reasoning text the collapsed streaming preview measures &
- * renders. Bounded so the per-token `maxLines = 1` TextLayout cost stays O(1)
- * instead of O(n) over the growing full reasoning (which made cumulative layout
- * O(n²) and caused visible jitter as reasoning grew past a few thousand chars).
- *
- * The preview shows the **tail** (the latest generated tokens): for streaming
- * chain-of-thought that is what the user wants to watch, and it is a deliberate
- * change from showing the head. `maxLines = 1` + Ellipsis still truncates the
- * visual to one line.
- */
-private const val REASONING_PREVIEW_TAIL_CHARS = 120
-
 @Composable
 internal fun ReasoningCard(
     text: String,
@@ -90,7 +78,11 @@ internal fun ReasoningCard(
                     .fillMaxWidth()
                     .padding(horizontal = 8.dp, vertical = 4.dp)
                     .then(
-                        if (expandedKey != null)
+                        // While thinking (isStreaming) the card is NOT
+                        // expandable: no content is shown and tapping does
+                        // nothing. Expansion is only allowed after the chain
+                        // of thought has finished.
+                        if (expandedKey != null && !isStreaming)
                             Modifier.clickable { onToggleExpand(expandedKey, expanded) }
                         else Modifier
                     ),
@@ -108,24 +100,23 @@ internal fun ReasoningCard(
                     style = MaterialTheme.typography.labelSmall,
                     color = if (isDark) Color.White else MaterialTheme.colorScheme.onSurfaceVariant
                 )
-                if (isStreaming && !expanded && text.isNotBlank()) {
-                    Spacer(modifier = Modifier.width(4.dp))
-                    Text(
-                        // Take only the tail: see REASONING_PREVIEW_TAIL_CHARS.
-                        // Measuring/rendering the full growing reasoning every
-                        // token was O(n²) and the source of the streaming
-                        // flicker; the tail is also the part worth previewing.
-                        text = text.takeLast(REASONING_PREVIEW_TAIL_CHARS),
-                        style = MaterialTheme.typography.labelSmall,
+                if (isStreaming) {
+                    // Thinking in progress: show an indeterminate loading ring
+                    // after the title (mirrors the SubAgent card's running
+                    // spinner style — 14.dp, strokeWidth 2.dp). No content is
+                    // shown and the card is not expandable until the reasoning
+                    // completes.
+                    Spacer(modifier = Modifier.width(6.dp))
+                    CircularProgressIndicator(
+                        modifier = Modifier.size(14.dp),
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        maxLines = 1,
-                        overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
-                        modifier = Modifier.weight(1f)
+                        strokeWidth = 2.dp
                     )
+                    Spacer(modifier = Modifier.weight(1f))
                 } else {
                     Spacer(modifier = Modifier.weight(1f))
                 }
-                if (expandedKey != null) {
+                if (expandedKey != null && !isStreaming) {
                     Icon(
                         if (expanded) Icons.Default.KeyboardArrowDown else Icons.Default.ChevronRight,
                         contentDescription = if (expanded) "Collapse" else "Expand",
@@ -134,7 +125,10 @@ internal fun ReasoningCard(
                     )
                 }
             }
-            if (expanded && text.isNotBlank()) {
+            // Only render the expanded reasoning body once thinking has
+            // finished (!isStreaming). While streaming the card stays collapsed
+            // to a title + spinner, with no content and no expand affordance.
+            if (!isStreaming && expanded && text.isNotBlank()) {
                 // Pace the streaming text at the render layer (same anti-flicker
                 // mechanism as TextPart): re-parse the markdown on a throttled,
                 // forward-only value instead of per token, so an expanded

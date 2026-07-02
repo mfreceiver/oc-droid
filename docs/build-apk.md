@@ -1,6 +1,6 @@
 # 本地构建测试 APK 指南
 
-> 本文所有命令均已在本机（Linux）实测通过。
+> 本文是本机（Linux）**实测记录**。构建/签名/发版的**权威规则**见 `.opencode/policies/build-signing.md`；版本号规则见 `.opencode/policies/versioning.md`；改动校验与发版入口见 `scripts/check.sh`、`scripts/release.sh`。本文与脚本若有冲突，以脚本和 policy 为准。
 
 ---
 
@@ -28,12 +28,13 @@
 
 ### 1.2 环境变量（本机 Linux 实测路径）
 
-终端默认找不到 Java，**每次构建前导出**（或写入 `~/.zshrc` 持久化）：
+终端默认找不到 Java，**每次构建前导出**（或写入 `~/.zshrc` 持久化）。环境变量的**唯一来源**是 `scripts/env.sh`：
 
 ```bash
-export JAVA_HOME=/home/mar/android-studio/jbr
-export ANDROID_HOME=/home/mar/android-sdk
-export PATH="$JAVA_HOME/bin:$PATH"
+source ./scripts/env.sh          # 等价于:
+# export JAVA_HOME=/home/mar/android-studio/jbr
+# export ANDROID_HOME=/home/mar/android-sdk
+# export PATH="$JAVA_HOME/bin:$PATH:$ANDROID_HOME/platform-tools"
 ```
 
 ### 1.3 `local.properties`（指向 SDK）
@@ -72,13 +73,15 @@ Release 签名已在 `app/build.gradle.kts` 配置完毕：
 
 ---
 
-## 4. 测试
+## 4. 测试 / 改动校验
+
+改动校验的**权威说明**见 `.opencode/policies/build-signing.md`「改动校验」，脚本入口 `scripts/check.sh`：
 
 ```bash
-./gradlew compileDebugKotlin     # 编译校验（最快，每次改动必跑）
-./gradlew testDebugUnitTest      # 单元测试
-./gradlew koverHtmlReport        # 覆盖率 → app/build/reports/kover/html/index.html
-./gradlew lintDebug              # 静态检查（可选）
+./scripts/check.sh             # 编译 + 单测（默认，每次改动必跑）
+./scripts/check.sh --lint      # + lintDebug
+./scripts/check.sh --full      # + lint + 覆盖率
+# 等价于：./gradlew compileDebugKotlin && testDebugUnitTest [&& lintDebug [&& koverHtmlReport]]
 ```
 
 集成测试（`connectedDebugAndroidTest`）需运行中的 OpenCode Server：把 `.env.example` 复制为 `.env` 填入凭证，且**仅在模拟器**运行（详见 `AGENTS.md` 设备安全规定）。
@@ -87,29 +90,41 @@ Release 签名已在 `app/build.gradle.kts` 配置完毕：
 
 ## 5. 版本号管理
 
-`app/build.gradle.kts` 内手动维护（`versionCode` 每次发版 +1，`versionName` 语义化）：
+权威规则见 `.opencode/policies/versioning.md`，脚本入口 `scripts/bump-version.sh`（**禁止手改** `app/build.gradle.kts` 的 `version*` 字段）：
 
-```kotlin
-versionCode = 8
-versionName = "0.2.3"     // 当前版本
+```bash
+./scripts/bump-version.sh patch   # patch | minor | major
 ```
 
-约定：每批发版 `versionName` 末位 +0.0.1（如 `0.2.2 → 0.2.3`）；有破坏性变更再考虑进位。
+`app/build.gradle.kts` 维护两个字段（`versionCode` 单调递增 +1，`versionName` 语义化 MAJOR.MINOR.PATCH）：
+
+```kotlin
+versionCode = 9
+versionName = "0.2.4"     // 当前版本
+```
 
 ---
 
 ## 6. 发版产物与 Gitea Release
 
-### 6.1 发版流程（已建立的实践）
+### 6.1 发版流程（单一入口）
 
-每批发版按此顺序，确保质量门禁：
+发版走 `scripts/release.sh`（详见 `.opencode/policies/build-signing.md`），内部已依次执行：
 
-1. 实现 + `compileDebugKotlin` / `testDebugUnitTest` 全绿。
-2. 多 agent 评审（如 `glmer` + `gpter`），按评审意见修订。
-3. bump 版本号（§5）。
+1. 分支=main、工作区干净校验。
+2. 质量门禁：`scripts/check.sh`（编译 + 单测全绿）。
+3. bump 版本号：`scripts/bump-version.sh`。
 4. `./gradlew assembleRelease` 产出签名 APK。
-5. `commit` → 打 tag `v<versionName>` → `git push origin main && git push origin <tag>`。
-6. 用 `tea` CLI 打 Gitea Release 并挂载 APK（§6.2）。
+5. 产物归档到 `APK/oc-droid-<versionName>.apk`。
+6. `commit` + 打 tag `v<versionName>`。
+
+```bash
+./scripts/release.sh patch       # patch | minor | major
+```
+
+`git push` 与 `tea releases create` **不自动执行**（对外发布需人工确认），脚本会打印命令。
+
+> 发版前的多 agent 评审（如 `glmer` + `gpter`）按评审意见修订；评审产物按 `.opencode/policies/review-gate.md` 归档到 `.opencode/runs/reviews/`。
 
 ### 6.2 发布产物约定
 

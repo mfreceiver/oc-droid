@@ -1,0 +1,12 @@
+{
+  "agent": "glmer",
+  "scope": "release",
+  "date": "2026-07-02",
+  "reviewed_commit": "PASTE_HEAD_SHA",
+  "version_target": "0.2.5",
+  "verdict": "pass",
+  "score": 8.5,
+  "blocking_issues": [],
+  "non_blocking_issues": [],
+  "notes": ""
+}

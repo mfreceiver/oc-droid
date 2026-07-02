@@ -74,3 +74,6 @@ docs/ios_markdown_preview_fixtures/
 .slim/worktrees.json
 # END oh-my-opencode-slim worktrees
 opencode-src/
+
+# transient local media (flicker-debug video/frames, etc.)
+/tmp/

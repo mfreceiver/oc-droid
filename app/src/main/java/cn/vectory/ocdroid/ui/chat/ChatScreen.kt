@@ -3,12 +3,10 @@ package cn.vectory.ocdroid.ui.chat
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
@@ -16,12 +14,10 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.SnackbarDuration
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.material3.windowsizeclass.WindowSizeClass
 import androidx.compose.material3.windowsizeclass.WindowWidthSizeClass
 import androidx.compose.runtime.Composable
@@ -49,12 +45,12 @@ import cn.vectory.ocdroid.data.model.SessionStatus
 import cn.vectory.ocdroid.ui.files.FilesScreen
 import cn.vectory.ocdroid.ui.files.FilesViewModel
 import cn.vectory.ocdroid.ui.MainViewModel
-import cn.vectory.ocdroid.ui.TUNNEL_SUCCESS_TOAST
 import cn.vectory.ocdroid.ui.TunnelActivationState
 import cn.vectory.ocdroid.ui.computeContextUsage
 import cn.vectory.ocdroid.ui.currentHostProfile
 import cn.vectory.ocdroid.ui.currentSession
 import cn.vectory.ocdroid.ui.currentSessionStatus
+import cn.vectory.ocdroid.ui.showTimed
 import cn.vectory.ocdroid.ui.visibleMessages
 import cn.vectory.ocdroid.ui.theme.opencode
 import kotlinx.coroutines.flow.distinctUntilChanged
@@ -303,35 +299,46 @@ fun ChatScreen(
         // observing pendingQuestion becoming null is the success signal.
         isSubmittingQuestion = false
     }
-    // §C1: surface AppState.error via Snackbar (was a top-aligned AppToast that
-    // auto-dismissed after 3s). The LaunchedEffect key is the error value, so a
-    // new error relaunches the effect — `showSnackbar` suspends until the
-    // snackbar finishes its duration (or is dismissed), at which point we clear
-    // the source via `viewModel.clearError()` (the onDismiss-equivalent).
-    // SnackbarHostState serializes concurrent showSnackbar calls, so a
-    // simultaneous global-error + question-error still displays in turn.
+    // §C1: surface AppState.error via a 3s Snackbar (was a top-aligned AppToast
+    // that auto-dismissed after 3s, then a Long-duration M3 Snackbar). The
+    // LaunchedEffect key is the error value, so a new error relaunches the
+    // effect — showTimed suspends until the snackbar finishes (action tap or
+    // 3s timeout), at which point we clear the source via viewModel.clearError()
+    // (the onDismiss-equivalent). SnackbarHostState serializes concurrent
+    // showSnackbar calls, so a simultaneous global-error + question-error still
+    // displays in turn.
     LaunchedEffect(appStateError) {
         appStateError?.let { error ->
-            val isTunnelSuccess = error == TUNNEL_SUCCESS_TOAST
-            snackbarHostState.showSnackbar(
-                message = error,
-                duration = if (isTunnelSuccess) SnackbarDuration.Short else SnackbarDuration.Long
-            )
+            snackbarHostState.showTimed(error)
             viewModel.clearError()
         }
     }
-    // §C1: bottom-bar question-submit failure → Snackbar. Same pattern as
+    // §C1: bottom-bar question-submit failure → 3s Snackbar. Same pattern as
     // above; clears `questionSubmitError` after the snackbar finishes so a new
     // failure can fire again. Trigger/clear timing is unchanged from the
     // AppToast era (the `questionSubmitError = null` clear semantics are
     // preserved exactly).
     LaunchedEffect(questionSubmitError) {
         questionSubmitError?.let { error ->
-            snackbarHostState.showSnackbar(
-                message = error,
-                duration = SnackbarDuration.Long
-            )
+            snackbarHostState.showTimed(error)
             questionSubmitError = null
+        }
+    }
+    // §Phase1E stale notice — now a 3s M3 Snackbar (was a top-aligned
+    // StaleNoticeBanner). Fires when returning after a >5min background
+    // absence. Carries the "reload all sessions" action; tapping it within the
+    // 3s window triggers a full cold-start refresh. If the timeout fires first
+    // the snackbar auto-dismisses — the stale flag clears naturally on session
+    // switch / next successful catch-up, so no source-clear is needed here.
+    // Keyed on (staleNotice, currentSessionId) so switching into the stale
+    // session re-arms it.
+    LaunchedEffect(chat.staleNotice, chat.currentSessionId) {
+        if (chat.staleNotice && chat.currentSessionId != null) {
+            snackbarHostState.showTimed(
+                message = "长时间未查看，仅显示最新内容。",
+                actionLabel = "重新加载全部会话",
+                onAction = { viewModel.refreshCurrentSession() }
+            )
         }
     }
     val questionAnswersValid = pendingQuestion?.let { pq ->
@@ -407,17 +414,10 @@ fun ChatScreen(
                 )
             }
 
-            // §Phase1E stale notice banner — shown after a long (>5min)
-            // background absence. Positioned at TopCenter so it stays clear of
-            // the bottom-mounted Snackbar (formerly the AppToast sat here too).
-            if (chat.staleNotice && chat.currentSessionId != null) {
-                StaleNoticeBanner(
-                    onReload = { viewModel.refreshCurrentSession() },
-                    modifier = Modifier
-                        .align(Alignment.TopCenter)
-                        .padding(top = 8.dp, start = 16.dp, end = 16.dp)
-                )
-            }
+            // §Phase1E stale notice now surfaces as a timed M3 Snackbar (see
+            // the LaunchedEffect keyed on chat.staleNotice above), so no
+            // top-aligned banner is rendered here. The bottom-mounted
+            // SnackbarHost below overlays both error/stale snackbars.
 
             // §C1: M3 Snackbar replaces the former top-aligned AppToast for
             // both AppState.error (tunnel activation / global errors) and the
@@ -542,48 +542,11 @@ fun ChatScreen(
 }
 
 /**
- * §Phase1E stale notice banner — a top-aligned informational bar shown after
- * the app returns from a long (>5min) background absence. Quiet Tech styling:
- * neutral surfaceVariant background, thin borderBase outline, inline text
- * button for the reload action. The banner is transient — tapping the action
- * triggers a full cold-start refresh that clears [AppState.staleNotice].
+ * §Phase1E stale notice now surfaces as a timed M3 Snackbar (see the
+ * LaunchedEffect keyed on chat.staleNotice in ChatScreen). The former
+ * top-aligned StaleNoticeBanner composable was removed when the notice
+ * migrated to the snackbar host.
  */
-@Composable
-private fun StaleNoticeBanner(
-    onReload: () -> Unit,
-    modifier: Modifier = Modifier
-) {
-    Surface(
-        modifier = modifier,
-        shape = RoundedCornerShape(10.dp),
-        color = MaterialTheme.colorScheme.surfaceVariant,
-        border = BorderStroke(
-            1.dp,
-            MaterialTheme.colorScheme.outline.copy(alpha = 0.3f)
-        )
-    ) {
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 16.dp, vertical = 10.dp),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Text(
-                text = "长时间未查看，仅显示最新内容。",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                modifier = Modifier.weight(1f)
-            )
-            TextButton(onClick = onReload) {
-                Text(
-                    text = "重新加载全部会话",
-                    style = MaterialTheme.typography.labelMedium,
-                    color = MaterialTheme.colorScheme.primary
-                )
-            }
-        }
-    }
-}
 
 private data class CurrentSessionActivity(
     val text: String,
