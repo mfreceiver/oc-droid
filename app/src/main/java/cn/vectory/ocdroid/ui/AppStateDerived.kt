@@ -257,17 +257,24 @@ fun resolveModelDisplayName(
  *  - [Part.tool] (lowercased) equals `"question"`.
  *  - [Part.stateDisplay] equals `"running"`.
  *  - NO entry in [pending] has `tool.messageId == part.messageId` AND
- *    `tool.callId == part.callId` (null refs on either side are treated as
- *    non-matching — a null `part.callId` cannot be reconciled with a live
- *    QuestionRequest, so the part is considered stale if the other conditions
- *    hold; this matches the per-part terminal rendering goal).
+ *    `tool.callId == part.callId`.
+ *
+ * **Conservative null handling**: a part missing `messageId` or `callId`
+ * returns FALSE (NOT stale) — "unknown → leave the spinner, don't mis-kill".
+ * Mis-rendering a possibly-live question as "Interrupted" is worse than
+ * leaving a spinner on an ambiguous part. The承重 assumption that tool-
+ * originated questions populate `tool:{messageID,callID}` is verified
+ * (`opencode-src/v1.17.12/packages/opencode/src/tool/question.ts:27`), so a
+ * question part without those fields is genuinely unexpected and should be
+ * left alone rather than terminal-rendered.
  */
 fun isStaleQuestionPart(part: Part, pending: List<QuestionRequest>): Boolean {
     if (!part.isTool) return false
     if (part.tool?.lowercase() != "question") return false
     if (part.stateDisplay != "running") return false
-    val partMessageId = part.messageId ?: return true
-    val partCallId = part.callId ?: return true
+    // Conservative: unknown → not stale (don't mis-kill a possibly-live part).
+    val partMessageId = part.messageId ?: return false
+    val partCallId = part.callId ?: return false
     return pending.none { q ->
         val tool = q.tool ?: return@none false
         tool.messageId == partMessageId && tool.callId == partCallId

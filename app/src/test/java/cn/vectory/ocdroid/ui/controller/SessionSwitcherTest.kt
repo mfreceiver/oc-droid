@@ -322,6 +322,53 @@ class SessionSwitcherTest {
         assertEquals(listOf("s1"), callbacks.loadChildSessionsCalls)
     }
 
+    // ── Step 6.5: pending-questions refresh ────────────────────────────────
+
+    @Test
+    fun `switchTo refreshes pending questions exactly once before loadMessages`() {
+        // §stale-question: Step 6.5 must call loadPendingQuestions() so the
+        // stale-question calc uses fresh data and any live question on the
+        // newly-selected session surfaces immediately. It must fire BEFORE
+        // Step 7's loadMessages so the first render of the message window
+        // already has the authoritative pending list to compare against.
+        // NB: we deliberately do NOT clearPendingQuestions() first (reviewer
+        // consensus: a failed async load would wipe a live SSE-delivered
+        // question). Assert clearPendingQuestions is never invoked — the
+        // callback was removed entirely from the interface.
+        seed {
+            it.copy(
+                currentSessionId = null,
+                sessions = listOf(Session(id = "s1", directory = "/d"))
+            )
+        }
+
+        switcher.switchTo("s1")
+
+        assertEquals(
+            "loadPendingQuestions must be invoked exactly once",
+            1,
+            callbacks.loadPendingQuestionsCalls
+        )
+        val loadPendingIdx = callbacks.callOrder.indexOf("loadPendingQuestions")
+        val loadMsgIdx = callbacks.callOrder.indexOf("loadMessages")
+        assertTrue(
+            "loadPendingQuestions must be recorded in callOrder (got ${callbacks.callOrder})",
+            loadPendingIdx >= 0
+        )
+        assertTrue(
+            "loadMessages must be recorded in callOrder (got ${callbacks.callOrder})",
+            loadMsgIdx >= 0
+        )
+        assertTrue(
+            "loadPendingQuestions (idx=$loadPendingIdx) must fire BEFORE loadMessages (idx=$loadMsgIdx); order=${callbacks.callOrder}",
+            loadPendingIdx < loadMsgIdx
+        )
+        assertFalse(
+            "clearPendingQuestions must never appear in callOrder; the callback was removed",
+            callbacks.callOrder.contains("clearPendingQuestions")
+        )
+    }
+
     // ── Step 8: unread state machine ────────────────────────────────────────
 
     @Test
@@ -615,7 +662,6 @@ class SessionSwitcherTest {
         val loadChildSessionsCalls = mutableListOf<String>()
         val loadMessagesCalls = mutableListOf<Pair<String, Boolean>>()
         var loadSessionStatusCalls = 0
-        var clearPendingQuestionsCalls = 0
         var loadPendingQuestionsCalls = 0
         val callOrder = mutableListOf<String>()
 
@@ -668,11 +714,6 @@ class SessionSwitcherTest {
         override fun loadSessionStatus() {
             loadSessionStatusCalls++
             callOrder.add("loadSessionStatus")
-        }
-
-        override fun clearPendingQuestions() {
-            clearPendingQuestionsCalls++
-            callOrder.add("clearPendingQuestions")
         }
 
         override fun loadPendingQuestions() {

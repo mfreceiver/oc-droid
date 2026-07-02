@@ -1635,16 +1635,6 @@ class MainViewModel @Inject constructor(
         }
     }
 
-    /**
-     * §stale-question: satisfies [SessionSwitcherCallbacks.clearPendingQuestions].
-     * Wipes the pending-questions list in AppState so the outgoing session's
-     * questions don't leak across a switch; the subsequent
-     * [loadPendingQuestions] re-fetches the authoritative server list.
-     */
-    override fun clearPendingQuestions() {
-        updateState { it.copy(pendingQuestions = emptyList()) }
-    }
-
     fun replyQuestion(requestId: String, answers: List<List<String>>, onError: () -> Unit = {}) {
         viewModelScope.launch {
             repository.replyQuestion(requestId, answers)

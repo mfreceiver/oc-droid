@@ -82,16 +82,19 @@ class StaleQuestionPartTest {
     }
 
     @Test
-    fun `stale when part has null messageId`() {
-        // No QuestionRequest can match a part with a null messageId.
+    fun `not stale when part messageId is null`() {
+        // §conservative-null: a part missing its messageId returns false —
+        // "unknown → leave the spinner, don't mis-kill". Mis-rendering a
+        // possibly-live question as Interrupted is worse than a spinner.
         val p = part(messageId = null)
-        assertTrue(isStaleQuestionPart(p, pending = listOf(qRef(messageId = "msg-1", callId = "call-1"))))
+        assertFalse(isStaleQuestionPart(p, pending = listOf(qRef(messageId = "msg-1", callId = "call-1"))))
     }
 
     @Test
-    fun `stale when part has null callId`() {
+    fun `not stale when part callId is null`() {
+        // §conservative-null: same rationale — unknown → not stale.
         val p = part(callId = null)
-        assertTrue(isStaleQuestionPart(p, pending = listOf(qRef(messageId = "msg-1", callId = "call-1"))))
+        assertFalse(isStaleQuestionPart(p, pending = listOf(qRef(messageId = "msg-1", callId = "call-1"))))
     }
 
     @Test

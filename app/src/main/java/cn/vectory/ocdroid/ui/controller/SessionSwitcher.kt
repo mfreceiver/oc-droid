@@ -56,21 +56,22 @@ interface SessionSwitcherCallbacks {
     fun loadSessionStatus()
 
     /**
-     * §stale-question: clears the pending-questions list in AppState. Called
-     * by [SessionSwitcher.switchTo] BEFORE [loadPendingQuestions] so the
-     * outgoing session's questions do not leak across the switch (the live
-     * list is global to the server, but a stale snapshot from the previous
-     * session would otherwise keep that session's interrupted question parts
-     * marked as "live" until the refresh resolves).
-     */
-    fun clearPendingQuestions()
-
-    /**
      * §stale-question: refreshes the pending-questions list from the server
      * (GET /question). Called by [SessionSwitcher.switchTo] so the staleness
      * comparison for question tool parts uses fresh data when the user lands
      * on a session, and any live question the new session is asking surfaces
      * immediately (instead of waiting for the next SSE event or full reconnect).
+     *
+     * Note: we REFRESH, not clear-and-reload. Clearing first was rejected
+     * (reviewer consensus, glmer most rigorous): if the async load fails
+     * (network), an empty list would wipe a LIVE question delivered earlier
+     * via SSE `question.asked`, making its QuestionCardView disappear and the
+     * part mis-render as "Interrupted" until the next reconnect. The
+     * onSuccess path atomically replaces the list; onFailure leaves state
+     * unchanged. Cross-session leakage is a non-issue because (a)
+     * `partsByMessage` is already cleared in Step 2 of [switchTo] so the
+     * outgoing session's parts don't participate in the stale calc, and (b)
+     * stale matching is by `messageId+callId`, not sessionId.
      */
     fun loadPendingQuestions()
 
@@ -279,13 +280,17 @@ internal class SessionSwitcher(
         callbacks.syncCurrentDirectory(directory)
 
         // ── Step 6.5: Refresh pending questions (§stale-question) ───────────
-        // Clear first so the outgoing session's questions don't leak across
-        // the switch (a stale snapshot would otherwise keep the previous
-        // session's interrupted question parts marked as "live" until the
-        // refresh resolves), then re-fetch so the new session's live
-        // question surfaces immediately and the staleness comparison in
-        // ChatMessageList uses fresh data.
-        callbacks.clearPendingQuestions()
+        // Re-fetch the server's pending-questions list so the new session's
+        // live question surfaces immediately and the stale-question calc in
+        // ChatMessageList uses fresh data. We deliberately do NOT clear the
+        // list first: loadPendingQuestions()'s onSuccess atomically replaces
+        // it, and onFailure leaves state unchanged — so a transient network
+        // failure cannot wipe a LIVE question that was delivered via SSE
+        // `question.asked` earlier (which would make its QuestionCardView
+        // disappear and the part mis-render as "Interrupted"). Cross-session
+        // leakage is a non-issue: partsByMessage is already cleared in Step 2
+        // so the outgoing session's parts don't participate in the stale calc,
+        // and stale matching is by messageId+callId, not sessionId.
         callbacks.loadPendingQuestions()
 
         // ── Step 7: Load messages + session status + child sessions ─────────
