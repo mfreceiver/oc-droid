@@ -485,6 +485,61 @@ class SessionSyncCoordinatorTest {
     }
 
     @Test
+    fun `message part updated blank reasoning creation records type and survives a text-field delta`() {
+        // §reasoning-routing-fix: the server creates a reasoning part via
+        // part.updated with type=reasoning but BLANK text (full=0) before
+        // streaming content via part.delta. This blank creation must record the
+        // true type + set streamingReasoningPart, otherwise the subsequent
+        // part.delta (field="text" — server quirk) injects a type=text
+        // placeholder and reasoning renders as 正文 (no thinking card).
+        setCurrentSession("session-1")
+
+        // Phase 1: blank creation event (no text, no delta).
+        coordinator.handleEvent(event("message.part.updated") {
+            put("sessionID", JsonPrimitive("session-1"))
+            put("part", buildJsonObject {
+                put("messageID", JsonPrimitive("message-1"))
+                put("id", JsonPrimitive("part-1"))
+                put("type", JsonPrimitive("reasoning"))
+            })
+        })
+
+        assertEquals("part-1", slices.chat.value.streamingReasoningPart?.id)
+        assertEquals("message-1", slices.chat.value.streamingReasoningPart?.messageId)
+        val partsAfterCreate = slices.chat.value.partsByMessage["message-1"]
+        assertNotNull(partsAfterCreate)
+        assertEquals("reasoning", partsAfterCreate!!.first { it.id == "part-1" }.type)
+
+        // Phase 2: idempotent — re-sending the creation event does not duplicate
+        // the placeholder.
+        coordinator.handleEvent(event("message.part.updated") {
+            put("sessionID", JsonPrimitive("session-1"))
+            put("part", buildJsonObject {
+                put("messageID", JsonPrimitive("message-1"))
+                put("id", JsonPrimitive("part-1"))
+                put("type", JsonPrimitive("reasoning"))
+            })
+        })
+        assertEquals(1, slices.chat.value.partsByMessage["message-1"]?.count { it.id == "part-1" })
+
+        // Phase 3: a part.delta with field="text" resolves to the KNOWN
+        // reasoning type (not field) and accumulates into the reasoning overlay.
+        coordinator.handleEvent(event("message.part.delta") {
+            put("sessionID", JsonPrimitive("session-1"))
+            put("messageID", JsonPrimitive("message-1"))
+            put("partID", JsonPrimitive("part-1"))
+            put("field", JsonPrimitive("text"))
+            put("delta", JsonPrimitive("step "))
+        })
+        assertEquals(
+            "reasoning",
+            slices.chat.value.partsByMessage["message-1"]!!.first { it.id == "part-1" }.type
+        )
+        assertEquals("part-1", slices.chat.value.streamingReasoningPart?.id)
+        assertEquals("step ", slices.chat.value.streamingPartTexts["part-1"])
+    }
+
+    @Test
     fun `message part updated with null ids preserves the overlay and triggers a resetLimit=false reload`() {
         setCurrentSession("session-1")
         val seeded = mapOf("part-1" to "stale")

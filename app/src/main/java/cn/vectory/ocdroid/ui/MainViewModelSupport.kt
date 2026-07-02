@@ -226,6 +226,16 @@ internal fun reasoningPartOrNull(partType: String, partId: String, messageId: St
     }
 }
 
+/**
+ * Whether a part [type] is streamed through `streamingPartTexts` and rendered by
+ * PartView's TextPart / ReasoningCard. Other types (tool, patch, file,
+ * step-start, step-finish, …) are NOT streamed this way — their content arrives
+ * via the REST reload as a full Part. Centralized so the part.updated and
+ * part.delta handlers agree, and so a future non-streamable type doesn't
+ * silently accumulate dead text in the streaming overlay.
+ */
+internal fun isStreamablePartType(type: String): Boolean = type == "text" || type == "reasoning"
+
 internal fun reportNonFatalIssue(tag: String, message: String, throwable: Throwable? = null) {
     if (throwable != null) {
         Log.w(tag, message, throwable)

@@ -78,11 +78,11 @@ internal fun ReasoningCard(
                     .fillMaxWidth()
                     .padding(horizontal = 8.dp, vertical = 4.dp)
                     .then(
-                        // While thinking (isStreaming) the card is NOT
-                        // expandable: no content is shown and tapping does
-                        // nothing. Expansion is only allowed after the chain
-                        // of thought has finished.
-                        if (expandedKey != null && !isStreaming)
+                        // The card is always tappable to expand/collapse,
+                        // including while streaming (so the user can watch the
+                        // chain-of-thought stream in incrementally). The body
+                        // render below is gated on `expanded` independently.
+                        if (expandedKey != null)
                             Modifier.clickable { onToggleExpand(expandedKey, expanded) }
                         else Modifier
                     ),
@@ -103,9 +103,10 @@ internal fun ReasoningCard(
                 if (isStreaming) {
                     // Thinking in progress: show an indeterminate loading ring
                     // after the title (mirrors the SubAgent card's running
-                    // spinner style — 14.dp, strokeWidth 2.dp). No content is
-                    // shown and the card is not expandable until the reasoning
-                    // completes.
+                    // spinner style — 14.dp, strokeWidth 2.dp). Kept visible in
+                    // both collapsed and expanded states so the "still thinking"
+                    // affordance is always present while streaming (matches the
+                    // shell tool card, which keeps its spinner while running).
                     Spacer(modifier = Modifier.width(6.dp))
                     CircularProgressIndicator(
                         modifier = Modifier.size(14.dp),
@@ -116,7 +117,7 @@ internal fun ReasoningCard(
                 } else {
                     Spacer(modifier = Modifier.weight(1f))
                 }
-                if (expandedKey != null && !isStreaming) {
+                if (expandedKey != null) {
                     Icon(
                         if (expanded) Icons.Default.KeyboardArrowDown else Icons.Default.ChevronRight,
                         contentDescription = if (expanded) "Collapse" else "Expand",
@@ -125,10 +126,14 @@ internal fun ReasoningCard(
                     )
                 }
             }
-            // Only render the expanded reasoning body once thinking has
-            // finished (!isStreaming). While streaming the card stays collapsed
-            // to a title + spinner, with no content and no expand affordance.
-            if (!isStreaming && expanded && text.isNotBlank()) {
+            // Render the expanded reasoning body whenever expanded (including
+            // while streaming). The paced-streaming text helper
+            // (rememberPacedStreamingText) re-parses markdown on a throttled,
+            // forward-only value, so an expanded streaming card updates
+            // incrementally without per-token height oscillation. While
+            // streaming the card shows the growing chain-of-thought; once
+            // finished it shows the complete text.
+            if (expanded && text.isNotBlank()) {
                 // Pace the streaming text at the render layer (same anti-flicker
                 // mechanism as TextPart): re-parse the markdown on a throttled,
                 // forward-only value instead of per token, so an expanded

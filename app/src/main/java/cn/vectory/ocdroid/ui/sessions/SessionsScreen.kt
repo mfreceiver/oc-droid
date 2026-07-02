@@ -594,24 +594,14 @@ private fun SessionCard(
             },
             trailingContent = {
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    // 归档 icon on the right edge. Only rendered where a handler
-                    // is supplied (connected-projects expanded list); omitted
-                    // from the top "recent sessions" list. IconButton gives a
-                    // 48dp touch target (R-12) in a compact right-edge footprint.
-                    if (onArchive != null) {
-                        IconButton(onClick = onArchive) {
-                            Icon(
-                                Icons.Default.Archive,
-                                contentDescription = stringResource(R.string.sessions_archive)
-                            )
-                        }
-                    }
                     // M6: status indicator. busy → pulsing orange dot, retry →
                     // solid red dot, idle/none → nothing (avoid visual noise).
-                    // Rendered before the unread dot so both can coexist.
                     SessionStatusDot(status)
                     if (isUnread) {
-                        // Small primary-colored unread dot on the right edge.
+                        // Small unread dot. Positioned to the LEFT of the
+                        // archive button (not the far right edge) so the
+                        // archive action stays the rightmost, easiest-to-reach
+                        // affordance, and the unread marker sits just inside it.
                         Box(
                             modifier = Modifier
                                 .padding(start = 8.dp)
@@ -621,6 +611,19 @@ private fun SessionCard(
                                     shape = CircleShape
                                 )
                         )
+                    }
+                    // 归档 icon on the right edge (rightmost). Only rendered
+                    // where a handler is supplied (connected-projects expanded
+                    // list); omitted from the top "recent sessions" list.
+                    // IconButton gives a 48dp touch target (R-12) in a compact
+                    // right-edge footprint.
+                    if (onArchive != null) {
+                        IconButton(onClick = onArchive) {
+                            Icon(
+                                Icons.Default.Archive,
+                                contentDescription = stringResource(R.string.sessions_archive)
+                            )
+                        }
                     }
                 }
             }

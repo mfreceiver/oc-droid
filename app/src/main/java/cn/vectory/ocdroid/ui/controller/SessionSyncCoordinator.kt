@@ -14,6 +14,7 @@ import cn.vectory.ocdroid.ui.parseSessionCreatedEvent
 import cn.vectory.ocdroid.ui.parseSessionStatusEvent
 import cn.vectory.ocdroid.ui.parseSessionUpdatedEvent
 import cn.vectory.ocdroid.ui.reasoningPartOrNull
+import cn.vectory.ocdroid.ui.isStreamablePartType
 import cn.vectory.ocdroid.ui.updateAndSync
 import cn.vectory.ocdroid.ui.upsertSession
 import cn.vectory.ocdroid.util.DebugLog
@@ -384,6 +385,39 @@ internal class SessionSyncCoordinator(
                         if (ownerIsUser) return
                         val fullText = deltaEvent.text
                         val delta = deltaEvent.delta
+                        // §reasoning-routing-fix (symptom: reasoning rendered as
+                        // 正文 / main body text). The server creates a reasoning
+                        // part via part.updated with type=reasoning but BLANK text
+                        // (full=0) BEFORE streaming its content via part.delta.
+                        // The blank creation event used to fall through the
+                        // fullText/delta gates below (both require non-blank
+                        // content), so the type=reasoning info was LOST. The
+                        // subsequent part.delta events then injected a placeholder
+                        // using their `field` — which the server sets to "text"
+                        // even for reasoning content — so the reasoning part became
+                        // type=text and rendered as 正文, and streamingReasoningPart
+                        // was never set (no thinking card). Record the part's TRUE
+                        // type at creation here (inject correctly-typed placeholder
+                        // + set streamingReasoningPart) so content routes to the
+                        // standalone thinking card. Idempotent: once the part
+                        // exists with the correct type this is a no-op.
+                        val pType = deltaEvent.partType
+                        if (isStreamablePartType(pType)) {
+                            val existingParts = slices.chat.value.partsByMessage[msgId]
+                            val hasCorrectType = existingParts?.any { it.id == pId && it.type == pType } == true
+                            if (!hasCorrectType) {
+                                state.updateAndSync(slices) { s ->
+                                    val base = s.partsByMessage[msgId]?.filterNot { it.id == pId } ?: emptyList()
+                                    s.copy(
+                                        streamingReasoningPart = reasoningPartOrNull(pType, pId, msgId, deltaEvent.sessionId)
+                                            ?: s.streamingReasoningPart,
+                                        partsByMessage = s.partsByMessage + (msgId to base + Part(
+                                            id = pId, messageId = msgId, sessionId = deltaEvent.sessionId, type = pType
+                                        ))
+                                    )
+                                }
+                            }
+                        }
                         if (!fullText.isNullOrBlank()) {
                             // Server sent full accumulated text — use it as the
                             // authoritative streaming value (REPLACE, not append;
@@ -513,6 +547,15 @@ internal class SessionSyncCoordinator(
                 val delta = event.payload.getString("delta")
                 if (!delta.isNullOrEmpty()) {
                     val key = partId
+                    // §reasoning-routing-fix: prefer the part's KNOWN type (set by
+                    // the part.updated creation event) over the delta's `field` —
+                    // the server sends field="text" even for reasoning content.
+                    val knownType = slices.chat.value.partsByMessage[msgId]
+                        ?.firstOrNull { it.id == partId }?.type ?: field
+                    // Only streamable types (text/reasoning) are rendered via
+                    // streamingPartTexts; a non-streamable type's delta would
+                    // accumulate dead overlay text never consumed by PartView.
+                    if (!isStreamablePartType(knownType)) return
                     // §M5 delta coalescing: leading-edge
                     // immediate + trailing 100ms coalesce per partId. The FIRST
                     // delta for a partId writes straight to streamingPartTexts
@@ -527,8 +570,10 @@ internal class SessionSyncCoordinator(
                             val previous = s.streamingPartTexts[key].orEmpty()
                             s.copy(
                                 streamingPartTexts = s.streamingPartTexts + (key to (previous + delta)),
+                                streamingReasoningPart = reasoningPartOrNull(knownType, partId, msgId, sessionId)
+                                    ?: s.streamingReasoningPart,
                                 partsByMessage = ensurePlaceholderPart(
-                                    s.partsByMessage, msgId, partId, sessionId, field
+                                    s.partsByMessage, msgId, partId, sessionId, knownType
                                 )
                             )
                         }

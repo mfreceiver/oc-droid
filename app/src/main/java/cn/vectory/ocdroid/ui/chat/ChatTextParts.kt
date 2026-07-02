@@ -80,9 +80,20 @@ internal fun rememberPacedStreamingText(
             // Sample-and-commit loop: advance displayed toward the latest
             // accumulated text every paceMs. displayed only grows because
             // `latest` (the accumulated overlay) only grows during a stream.
+            //
+            // §flicker-guard: strictly forward-only. A `message.part.updated`
+            // fullText sync point (REPLACE) can momentarily report a value that
+            // is shorter than or divergent from the delta-accumulated text
+            // (server race), which would shrink the rendered markdown and
+            // oscillate the card height (flicker). Only advance when `latest`
+            // actually extends `displayed` (longer AND displayed is a prefix).
+            // A divergent/shrunk latest is ignored until finalization snaps to
+            // the authoritative final text below.
             while (true) {
                 delay(paceMs)
-                displayed = latest
+                if (latest.length >= displayed.length && latest.startsWith(displayed)) {
+                    displayed = latest
+                }
             }
         } else {
             // Finalization: snap to the complete text immediately.

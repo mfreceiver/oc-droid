@@ -320,7 +320,20 @@ internal fun ChatMessageList(
                 pendingRestoreSession = null
             }
         }
-        if (shouldAutoScroll && (messages.isNotEmpty() || streamingReasoningPart != null)) {
+        // §symptom3-fix: when the user expands the in-progress streaming
+        // reasoning card (to read the chain-of-thought from its beginning),
+        // pause the bottom-pinning auto-follow. Otherwise the per-token
+        // scrollToItem(0) below re-pins the card's bottom every ~100ms,
+        // scrolling the card's header / content-start above the viewport — the
+        // "expanded thinking card header is truncated, can't see the real
+        // start" symptom. Collapsing the card resumes auto-follow.
+        val streamingReasoningExpanded = streamingReasoningPart?.let { sr ->
+            // §R-1: same key format as the standalone item + inline card.
+            val key = sr.messageId?.let { "$it|${sr.id}" } ?: "streaming|${sr.id}"
+            expandedParts[key] == true
+        } == true
+        if (shouldAutoScroll && !streamingReasoningExpanded &&
+            (messages.isNotEmpty() || streamingReasoningPart != null)) {
             // 闪屏修复：流式输出（reasoning 进行中 / streamingPartTexts 非空）时
             // 用瞬时 scrollToItem 代替 animateScrollToItem。
             //
@@ -365,6 +378,16 @@ internal fun ChatMessageList(
         if (streamingReasoningPart != null) {
             val streamingKey = streamingReasoningPart.id
             val streamingText = streamingPartTexts[streamingKey] ?: ""
+            // §R-1 (maxer): use the SAME expand-key format as the inline
+            // ReasoningCard in MessageRow ("${messageId}|${partId}"), so the
+            // user's expand state survives the standalone→inline transition
+            // when the turn finalizes (streamingReasoningPart clears → the
+            // inline card takes over with the same expandedParts entry).
+            // Null-guard: messageId is always set here (the part.updated
+            // handler returns early when messageID is absent), but defend
+            // against a malformed Part regardless.
+            val streamingExpandKey = streamingReasoningPart.messageId
+                ?.let { "$it|$streamingKey" } ?: "streaming|$streamingKey"
             item(key = "streaming-reasoning") {
                 Box(modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp)) {
                     ReasoningCard(
@@ -373,7 +396,7 @@ internal fun ChatMessageList(
                         isStreaming = true,
                         expandedParts = expandedParts,
                         onToggleExpand = onToggleExpand,
-                        expandedKey = "streaming|${streamingKey}",
+                        expandedKey = streamingExpandKey,
                         modifier = Modifier.widthIn(max = MAX_CARD_WIDTH)
                     )
                 }
