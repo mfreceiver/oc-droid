@@ -76,6 +76,13 @@ internal fun PatchCard(
     val basename = remember(primaryPath) {
         primaryPath?.substringAfterLast("/")?.takeIf { it.isNotEmpty() } ?: "file"
     }
+    // Fold-state tool label: show the actual tool name (Edit/Write/Apply_patch/
+    // Patch) so the card identifies the operation, not just the file. First-
+    // letter capitalization mirrors BasicTool's `else` branch; "apply_patch"
+    // stays "Apply_patch" (only the leading char is uppercased).
+    val toolLabel = remember(part.tool) {
+        (part.tool ?: "patch").replaceFirstChar { it.uppercase() }
+    }
 
     val (additions, deletions) = remember(part) {
         val fileAdd = primaryFile?.additions
@@ -119,6 +126,17 @@ internal fun PatchCard(
                     tint = MaterialTheme.colorScheme.onSurfaceVariant
                 )
                 Spacer(modifier = Modifier.width(6.dp))
+                Text(
+                    text = toolLabel,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1
+                )
+                Text(
+                    text = " · ",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
                 Text(
                     text = basename,
                     style = MaterialTheme.typography.labelSmall,

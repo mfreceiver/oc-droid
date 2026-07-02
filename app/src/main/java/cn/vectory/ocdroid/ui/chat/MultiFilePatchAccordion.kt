@@ -100,6 +100,12 @@ internal fun MultiFilePatchAccordion(
     // call-site identity alone.
     var expanded by rememberSaveable(parts.firstOrNull()?.id) { mutableStateOf(false) }
 
+    // Fold-state tool label (PatchCard parity): prefix the header with the
+    // actual tool name so multi-file cards also identify the operation.
+    val toolLabel = remember(parts.firstOrNull()?.tool) {
+        (parts.firstOrNull()?.tool ?: "patch").replaceFirstChar { it.uppercase() }
+    }
+
     Surface(
         modifier = modifier
             .padding(vertical = 2.dp)
@@ -124,6 +130,17 @@ internal fun MultiFilePatchAccordion(
                     tint = MaterialTheme.colorScheme.onSurfaceVariant
                 )
                 Spacer(modifier = Modifier.width(6.dp))
+                Text(
+                    text = toolLabel,
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1
+                )
+                Text(
+                    text = " · ",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
                 Text(
                     text = "${files.size} files",
                     style = MaterialTheme.typography.labelMedium,
