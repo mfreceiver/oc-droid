@@ -247,6 +247,7 @@ class MainViewModel @Inject constructor(
             scope = viewModelScope,
             state = _state,
             slices = sliceFlows,
+            settingsManager = settingsManager,
             callbacks = this
         )
 
@@ -1243,11 +1244,11 @@ class MainViewModel @Inject constructor(
     }
 
     fun archiveSession(sessionId: String) {
-        launchSetSessionArchived(viewModelScope, repository, _state, sessionId, archived = true, sliceFlows)
+        launchSetSessionArchived(viewModelScope, repository, _state, settingsManager, sessionId, archived = true, sliceFlows)
     }
 
     fun restoreSession(sessionId: String) {
-        launchSetSessionArchived(viewModelScope, repository, _state, sessionId, archived = false, sliceFlows)
+        launchSetSessionArchived(viewModelScope, repository, _state, settingsManager, sessionId, archived = false, sliceFlows)
     }
 
     fun deleteSession(sessionId: String) {

@@ -18,7 +18,10 @@ import cn.vectory.ocdroid.ui.SliceFlows
 import cn.vectory.ocdroid.ui.TrafficState
 import cn.vectory.ocdroid.ui.UnreadState
 import cn.vectory.ocdroid.ui.syncSlicesFromAppState
+import cn.vectory.ocdroid.util.SettingsManager
+import io.mockk.mockk
 import io.mockk.unmockkAll
+import io.mockk.verify
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.test.TestScope
 import kotlinx.serialization.json.JsonObjectBuilder
@@ -56,6 +59,7 @@ class SessionSyncCoordinatorTest {
     private lateinit var state: MutableStateFlow<AppState>
     private lateinit var slices: SliceFlows
     private lateinit var callbacks: RecordingSessionSyncCoordinatorCallbacks
+    private lateinit var settingsManager: SettingsManager
     private lateinit var scope: TestScope
     private lateinit var coordinator: SessionSyncCoordinator
 
@@ -73,9 +77,10 @@ class SessionSyncCoordinatorTest {
             unread = MutableStateFlow(UnreadState()),
             host = MutableStateFlow(HostState())
         )
+        settingsManager = mockk(relaxed = true)
         callbacks = RecordingSessionSyncCoordinatorCallbacks()
         scope = TestScope()
-        coordinator = SessionSyncCoordinator(scope, state, slices, callbacks)
+        coordinator = SessionSyncCoordinator(scope, state, slices, settingsManager, callbacks)
     }
 
     @After
@@ -182,6 +187,85 @@ class SessionSyncCoordinatorTest {
 
         val ids = slices.sessionList.value.sessions.map { it.id }
         assertEquals(listOf("session-new", "session-1"), ids)
+    }
+
+    @Test
+    fun `session updated archived evicts the id from openSessionIds and persists`() {
+        // Archived-by-another-client path: the SSE frame flips the session to
+        // archived. The handler must drop it from openSessionIds (so the tab
+        // strip drops it) and persist the cleaned list.
+        seed {
+            it.copy(
+                sessions = listOf(Session(id = "session-1", directory = "/tmp/project")),
+                openSessionIds = listOf("session-1", "session-2")
+            )
+        }
+
+        coordinator.handleEvent(event("session.updated") {
+            put("info", buildJsonObject {
+                put("id", JsonPrimitive("session-1"))
+                put("directory", JsonPrimitive("/tmp/project"))
+                put("time", buildJsonObject { put("archived", JsonPrimitive(1_700_000_000_000)) })
+            })
+        })
+
+        // Upsert still happened (authoritative record kept), but the tab list
+        // dropped the now-archived id.
+        assertTrue(slices.sessionList.value.sessions.any { it.id == "session-1" && it.isArchived })
+        assertEquals(listOf("session-2"), slices.sessionList.value.openSessionIds)
+        verify { settingsManager.openSessionIds = listOf("session-2") }
+    }
+
+    @Test
+    fun `session updated archived clears currentSessionId and messages when it is the open session`() {
+        // Cross-client archive of the currently-open session: the SSE handler
+        // must not only drop the tab (openSessionIds) but also clear
+        // currentSessionId + messages so the chat view falls back to empty,
+        // aligning with the user-triggered archive path.
+        seed {
+            it.copy(
+                sessions = listOf(Session(id = "session-1", directory = "/tmp/project")),
+                openSessionIds = listOf("session-1"),
+                currentSessionId = "session-1",
+                messages = listOf(Message(id = "msg-1", role = "assistant")),
+                partsByMessage = mapOf("msg-1" to emptyList())
+            )
+        }
+
+        coordinator.handleEvent(event("session.updated") {
+            put("info", buildJsonObject {
+                put("id", JsonPrimitive("session-1"))
+                put("directory", JsonPrimitive("/tmp/project"))
+                put("time", buildJsonObject { put("archived", JsonPrimitive(1_700_000_000_000)) })
+            })
+        })
+
+        assertNull(slices.chat.value.currentSessionId)
+        assertTrue(slices.chat.value.messages.isEmpty())
+        assertTrue(slices.chat.value.partsByMessage.isEmpty())
+        assertEquals(emptyList<String>(), slices.sessionList.value.openSessionIds)
+        verify { settingsManager.currentSessionId = null }
+    }
+
+    @Test
+    fun `session updated non-archived keeps openSessionIds untouched and does not persist`() {
+        seed {
+            it.copy(
+                sessions = listOf(Session(id = "session-1", directory = "/tmp/project")),
+                openSessionIds = listOf("session-1", "session-2")
+            )
+        }
+
+        coordinator.handleEvent(event("session.updated") {
+            put("info", buildJsonObject {
+                put("id", JsonPrimitive("session-1"))
+                put("directory", JsonPrimitive("/tmp/project"))
+                put("title", JsonPrimitive("Edited title"))
+            })
+        })
+
+        assertEquals(listOf("session-1", "session-2"), slices.sessionList.value.openSessionIds)
+        verify(exactly = 0) { settingsManager.openSessionIds = any() }
     }
 
     // ── session.status (busy / idle / temp-cleared finalization) ────────────

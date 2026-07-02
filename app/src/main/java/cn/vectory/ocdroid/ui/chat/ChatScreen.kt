@@ -197,10 +197,14 @@ fun ChatScreen(
         derivedStateOf {
             // Resolve openSessionIds to actual Session objects for the
             // top-bar tab strip. Filtered to root sessions (parentId == null)
-            // so sub-agents never duplicate the title-slot breadcrumb.
+            // so sub-agents never duplicate the title-slot breadcrumb. Also
+            // drops archived sessions as a render defense — the cold-start,
+            // user-archive, and SSE session.updated paths all evict archived
+            // ids from openSessionIds, but this guarantees no archived tab
+            // renders even if a path misses (e.g. a stale cached id).
             val resolvedOpenSessions = sessionList.openSessionIds
                 .mapNotNull { id -> sessionList.sessions.find { it.id == id } }
-                .filter { it.parentId == null }
+                .filter { it.parentId == null && !it.isArchived }
             ChatTopBarState(
                 sessions = sessionList.sessions,
                 currentSessionId = chat.currentSessionId,

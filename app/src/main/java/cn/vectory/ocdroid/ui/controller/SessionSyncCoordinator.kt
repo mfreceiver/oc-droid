@@ -16,6 +16,7 @@ import cn.vectory.ocdroid.ui.reasoningPartOrNull
 import cn.vectory.ocdroid.ui.updateAndSync
 import cn.vectory.ocdroid.ui.upsertSession
 import cn.vectory.ocdroid.util.DebugLog
+import cn.vectory.ocdroid.util.SettingsManager
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
@@ -96,6 +97,7 @@ internal class SessionSyncCoordinator(
     private val scope: CoroutineScope,
     private val state: MutableStateFlow<AppState>,
     private val slices: SliceFlows,
+    private val settingsManager: SettingsManager,
     private val callbacks: SessionSyncCoordinatorCallbacks
 ) {
     /**
@@ -179,7 +181,38 @@ internal class SessionSyncCoordinator(
             "session.updated" -> {
                 val updated = parseSessionUpdatedEvent(event)
                 if (updated != null) {
-                    state.updateAndSync(slices) { it.copy(sessions = upsertSession(it.sessions, updated)) }
+                    state.updateAndSync(slices) {
+                        if (updated.isArchived) {
+                            // Archived (typically by another client): evict the
+                            // id from the open-tabs list and persist, mirroring
+                            // the user-triggered archive path. If the archived
+                            // session is the currently-open one, also clear
+                            // currentSessionId + messages so the chat view falls
+                            // back to the empty state instead of lingering on an
+                            // archived session whose tab has disappeared.
+                            val newOpenIds = it.openSessionIds.filter { id -> id != updated.id }
+                            if (newOpenIds != it.openSessionIds) {
+                                settingsManager.openSessionIds = newOpenIds
+                            }
+                            if (it.currentSessionId == updated.id) {
+                                settingsManager.currentSessionId = null
+                                it.copy(
+                                    sessions = upsertSession(it.sessions, updated),
+                                    openSessionIds = newOpenIds,
+                                    currentSessionId = null,
+                                    messages = emptyList(),
+                                    partsByMessage = emptyMap()
+                                )
+                            } else {
+                                it.copy(
+                                    sessions = upsertSession(it.sessions, updated),
+                                    openSessionIds = newOpenIds
+                                )
+                            }
+                        } else {
+                            it.copy(sessions = upsertSession(it.sessions, updated))
+                        }
+                    }
                 } else {
                     callbacks.onNonFatalIssue("Ignoring invalid session.updated payload")
                 }
@@ -346,19 +379,37 @@ internal class SessionSyncCoordinator(
                                 )
                             }
                         } else if (!delta.isNullOrBlank()) {
-                            // Read previous inside the atomic update so a concurrent
-                            // append to the same key isn't lost (TOCTOU-safe).
-                            state.updateAndSync(slices) {
-                                val previousValue = it.streamingPartTexts[key].orEmpty()
-                                it.copy(
-                                    streamingPartTexts = it.streamingPartTexts + (key to (previousValue + delta)),
-                                    streamingReasoningPart = reasoningPartOrNull(
-                                        partType = deltaEvent.partType,
-                                        partId = pId,
-                                        messageId = msgId,
-                                        sessionId = deltaEvent.sessionId
-                                    ) ?: it.streamingReasoningPart
-                                )
+                            // §flicker-fix: apply the same leading-edge +
+                            // trailing DELTA_COALESCE_MS coalesce used by the
+                            // `message.part.delta` handler. The server emits
+                            // `message.part.updated` as the per-token streaming
+                            // event (dozens–100s/sec); without coalescing each
+                            // one wrote AppState and triggered a Compose
+                            // re-parse/recompose, causing streaming jitter.
+                            // Leading edge writes immediately (zero-latency
+                            // first-token feel) + sets streamingReasoningPart
+                            // once; subsequent deltas within the window buffer
+                            // into deltaBuffer and flush in one batch.
+                            if (flushJobs[key]?.isActive != true) {
+                                state.updateAndSync(slices) {
+                                    val previousValue = it.streamingPartTexts[key].orEmpty()
+                                    it.copy(
+                                        streamingPartTexts = it.streamingPartTexts + (key to (previousValue + delta)),
+                                        streamingReasoningPart = reasoningPartOrNull(
+                                            partType = deltaEvent.partType,
+                                            partId = pId,
+                                            messageId = msgId,
+                                            sessionId = deltaEvent.sessionId
+                                        ) ?: it.streamingReasoningPart
+                                    )
+                                }
+                                scheduleDeltaFlush(key)
+                            } else {
+                                // Trailing coalesce: buffer; the pending
+                                // DELTA_COALESCE_MS flush appends the batch in
+                                // one state write. streamingReasoningPart was
+                                // already set on this part's leading edge.
+                                deltaBuffer.getOrPut(key) { StringBuilder() }.append(delta)
                             }
                         }
                         // Else: ids present + both text & delta null/blank =

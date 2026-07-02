@@ -100,19 +100,6 @@ internal fun launchLoadMessages(
                         // finalize/clear (legacy behaviour).
                         val streamingFinalized = it.sessionStatuses[sessionId]
                             ?.let { st -> !st.isBusy && !st.isRetry } ?: true
-                        // 闪屏修复后续（gpter/kimo MAJOR）：本次 reload 若会保留 overlay
-                        // （reset=false 总保留；reset=true 仅在 session 已 finalized 时清空），
-                        // 且正在流式的 reasoning part 已被带入 partsByMessage，必须清除
-                        // streamingReasoningPart —— 否则 ChatMessageContent 的独立
-                        // streaming-reasoning item 与 MessageRow 里的历史 ReasoningCard
-                        // 会双重渲染同一 part。保留 streamingPartTexts：MessageRow 的
-                        // PartView 用它覆盖历史 part.text（流式内容最新），故不闪屏、
-                        // 不双重。覆盖 reset=false 与 reset=true+busy（overlay 仍保留）
-                        // 两条路径；reset=true+finalized 时 overlay 本就清空，无需 promotion。
-                        val reasoningPart = it.streamingReasoningPart
-                        val overlayWillBePreserved = !(resetLimit && streamingFinalized)
-                        val reasoningPromotedToHistory = overlayWillBePreserved && reasoningPart != null &&
-                            mergedParts.values.flatten().any { p -> p.id == reasoningPart.id && p.type == "reasoning" }
                         it.copy(
                             messages = mergedMessages,
                             partsByMessage = mergedParts,
@@ -121,7 +108,6 @@ internal fun launchLoadMessages(
                             streamingPartTexts = if (resetLimit && streamingFinalized) emptyMap() else it.streamingPartTexts,
                             streamingReasoningPart = when {
                                 resetLimit && streamingFinalized -> null
-                                reasoningPromotedToHistory -> null
                                 else -> it.streamingReasoningPart
                             },
                             // Only (re)seed the history cursor on a fresh open; a

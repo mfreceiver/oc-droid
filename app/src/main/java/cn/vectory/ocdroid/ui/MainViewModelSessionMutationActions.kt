@@ -54,6 +54,7 @@ internal fun launchSetSessionArchived(
     scope: CoroutineScope,
     repository: OpenCodeRepository,
     state: MutableStateFlow<AppState>,
+    settingsManager: SettingsManager,
     sessionId: String,
     archived: Boolean
 , slices: SliceFlows? = null) {
@@ -65,17 +66,48 @@ internal fun launchSetSessionArchived(
             repository.updateSessionArchived(id, archivedValue)
                 .onSuccess { updated ->
                     state.updateAndSync(slices) { current ->
-                        current.copy(
-                            sessions = current.sessions.map { session -> if (session.id == id) updated else session },
-                            // Keep directorySessions in sync so an archived
-                            // session disappears from the connected-projects
-                            // list immediately (refreshDirectorySessions
-                            // repopulates this map on expand, but the local
-                            // copy must not hold a stale unarchived version).
-                            directorySessions = current.directorySessions.mapValues { (_, list) ->
-                                list.map { session -> if (session.id == id) updated else session }
+                        val newSessions = current.sessions.map { session -> if (session.id == id) updated else session }
+                        // Keep directorySessions in sync so an archived
+                        // session disappears from the connected-projects
+                        // list immediately (refreshDirectorySessions
+                        // repopulates this map on expand, but the local
+                        // copy must not hold a stale unarchived version).
+                        val newDirSessions = current.directorySessions.mapValues { (_, list) ->
+                            list.map { session -> if (session.id == id) updated else session }
+                        }
+                        if (archivedValue > 0) {
+                            // Archived: evict the id from the open-tabs list
+                            // (browser-tab close equivalent for archive) and
+                            // persist via the existing SettingsManager setter.
+                            // Mirrors closeSession's currentSessionId fallback:
+                            // if the archived session was current, clear it
+                            // (and the loaded message window) so the chat view
+                            // falls back to the empty state instead of
+                            // pointing at a now-archived session.
+                            val newOpenIds = current.openSessionIds.filter { it != id }
+                            if (newOpenIds != current.openSessionIds) {
+                                settingsManager.openSessionIds = newOpenIds
                             }
-                        )
+                            if (current.currentSessionId == id) {
+                                settingsManager.currentSessionId = null
+                                current.copy(
+                                    sessions = newSessions,
+                                    directorySessions = newDirSessions,
+                                    openSessionIds = newOpenIds,
+                                    currentSessionId = null,
+                                    messages = emptyList(),
+                                    partsByMessage = emptyMap()
+                                )
+                            } else {
+                                current.copy(
+                                    sessions = newSessions,
+                                    directorySessions = newDirSessions,
+                                    openSessionIds = newOpenIds
+                                )
+                            }
+                        } else {
+                            current.copy(sessions = newSessions, directorySessions = newDirSessions)
+                        }
                     }
                 }
                 .onFailure { error ->

@@ -8,7 +8,6 @@ package cn.vectory.ocdroid.ui.chat
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
@@ -34,6 +33,7 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Tab
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.remember
@@ -41,7 +41,6 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
@@ -53,6 +52,11 @@ import cn.vectory.ocdroid.ui.ContextUsage
 import cn.vectory.ocdroid.ui.theme.opencode
 
 private const val SESSION_TITLE_MAX_CHARS = 15
+
+// Fill opacity for the selected tab background. Kept low so the workdir-hash
+// tint is visible but the title text stays clearly readable on both light and
+// dark surfaces.
+private const val SELECTED_TAB_FILL_ALPHA = 0.22f
 
 /**
  * Shared title-truncation helper used by the title-slot parent breadcrumb
@@ -90,24 +94,24 @@ internal fun resolveEffectiveSelectedId(
 /**
  * §17: persistent horizontal session tab strip rendered as the TopAppBar's
  * second row. Replaces the former title-slot dropdown switcher. Built on the
- * M3 [PrimaryScrollableTabRow] + [Tab] so we inherit the platform scroll-to-centre
- * behaviour and the standard touch target for free. Each tab's `text` slot
- * carries the (truncated) session title, an unread dot when the session
- * received an out-of-band message, and a close-X affordance.
+ * M3 [PrimaryScrollableTabRow] + [Tab] so we inherit the platform scroll physics
+ * and the standard touch target for free. Each tab's `text` slot carries the
+ * (truncated) session title, an unread dot when the session received an
+ * out-of-band message, and a close-X affordance.
  *
- * **Selection highlight** ([parentSessionId]): the active tab is resolved via
- * [effectiveSelectedId] — currentSessionId when it is a root session, otherwise
- * the parent session (so opening a sub-agent highlights its parent tab rather
- * than erroneously landing on tab 0). `selectedTabIndex` passed to M3 is only a
- * scroll-centre hint (clamped, never -1); the visible highlight is driven
- * per-tab so a null effective id draws no highlight at all.
+ * **Selection highlight + scroll position** ([parentSessionId]): the active tab
+ * is resolved via [effectiveSelectedId] — currentSessionId when it is a root
+ * session, otherwise the parent session (so opening a sub-agent highlights its
+ * parent tab). The scroll-centre hint passed to M3 is deliberately decoupled:
+ * it only follows explicit root-tab selection. When the user opens a sub-agent
+ * the hint stays at the previously selected root index, so the strip keeps its
+ * current scroll position instead of jumping to the leftmost tab.
  *
- * **Indicator + colours** (§problem-3/4): the M3 default indicator is disabled
- * (`indicator = {}`); each selected tab self-draws a 2dp underline whose width
- * matches the measured title width (so it hugs the title and never spans the
- * close button). The underline and each unread dot use a workdir-hash tone
- * ([workdirTone]); selected title text uses theme `onSurface` + SemiBold,
- * unselected uses `onSurfaceVariant`.
+ * **Indicator + colours**: the M3 default indicator is disabled
+ * (`indicator = {}`); the selected tab self-draws a translucent filled
+ * background tinted with the workdir-hash colour ([workdirTone]). Unselected
+ * tabs keep their plain background. The selected title text uses theme
+ * `onSurface` + SemiBold, unselected uses `onSurfaceVariant`.
  *
  * **Tab height**: each `Tab` is constrained to 36dp (via `Modifier.height`)
  * for a compact second-row strip; the inner close-X touch target and icon are
@@ -139,9 +143,9 @@ internal fun SessionTabStrip(
     if (openSessions.isEmpty()) return
 
     val oc = MaterialTheme.opencode
-    // Indicator/accent colour: current session's workdir hash. Falls back to
-    // the v2 accentText when no session is active so the indicator still
-    // renders with a sane colour.
+    // Accent colour: current session's workdir hash. Falls back to the v2
+    // accentText when no session is active so the selected tab still tints
+    // with a sane colour.
     //
     // Note (§problem-1 review follow-up): when viewing a sub-agent, the
     // currentSession is the child, so this colour comes from the child's
@@ -164,14 +168,25 @@ internal fun SessionTabStrip(
     // than being verifiable only on-device.
     val effectiveSelectedId: String? =
         resolveEffectiveSelectedId(openSessions, currentSessionId, parentSessionId)
-    // PrimaryScrollableTabRow needs a non-negative selectedTabIndex to drive
-    // its scroll-to-centre; clamp to a valid index. The visible highlight is
-    // driven per-tab by effectiveSelectedId (not this index), so an off match
-    // here only affects initial scroll position — never pass -1 to M3 (its
-    // indicator indexing is version-sensitive and may crash on negative).
-    val scrollHintIndex = openSessions
-        .indexOfFirst { it.id == effectiveSelectedId }
-        .let { if (it >= 0) it else 0 }
+    // §fix-1: decouple the scroll-centre hint from sub-agent highlight.
+    // [effectiveSelectedId] drives the visible per-tab highlight (parent tab
+    // stays highlighted while a sub-agent is open). The hint passed to M3,
+    // however, must only change on explicit root-tab selection; otherwise
+    // opening a sub-agent would make the strip jump to the leftmost tab.
+    // Remember the last selected root index and reuse it while currentSessionId
+    // is not itself a root session.
+    val currentRootIndex = openSessions.indexOfFirst { it.id == currentSessionId }
+    val parentRootIndex = openSessions.indexOfFirst { it.id == parentSessionId }
+    var lastRootIndex by remember { mutableIntStateOf(0) }
+    LaunchedEffect(currentRootIndex) {
+        if (currentRootIndex >= 0) lastRootIndex = currentRootIndex
+    }
+    val scrollHintIndex = when {
+        currentRootIndex >= 0 -> currentRootIndex
+        lastRootIndex in openSessions.indices -> lastRootIndex
+        parentRootIndex >= 0 -> parentRootIndex
+        else -> 0
+    }
 
     PrimaryScrollableTabRow(
         selectedTabIndex = scrollHintIndex,
@@ -183,9 +198,9 @@ internal fun SessionTabStrip(
         // contentColor tints the (now-empty) default indicator slot and the
         // tab ripple; keep the accentColour for visual consistency.
         contentColor = accentColor,
-        // §problem-4: disable the M3 default indicator — each tab draws its own
-        // title-width underline (see below) so the underline no longer spans
-        // the full tab width including the close button.
+        // §fix-2: disable the M3 default indicator — the selected tab draws a
+        // translucent filled background instead of an underline, so there is
+        // no full-width indicator to span the close button.
         indicator = {},
         // Match the former LazyRow's 8dp horizontal content padding instead
         // of the M3 default 52dp (TabRowDefaults.ScrollableTabRowEdgePadding),
@@ -194,19 +209,28 @@ internal fun SessionTabStrip(
     ) {
         openSessions.forEach { session ->
             val isSelected = session.id == effectiveSelectedId
-            // Measured title width in pixels; per-tab and keyed by session.id so
-            // each tab remembers its own measurement across recompositions.
-            var titleWidthPx by remember(session.id) { mutableIntStateOf(0) }
             Tab(
                 selected = isSelected,
                 onClick = { actions.onSelectSession(session.id) },
                 // Compact 36dp height — this is a secondary nav row, not the
                 // primary tab surface. Modifier.height overrides the M3
                 // default 48dp (heightIn min) by clamping both min and max.
-                modifier = Modifier.height(36.dp),
-                // §problem-3: selected/unselected text now use theme onSurface /
-                // onSurfaceVariant (weight differentiates selection); the hash
-                // colour lives only on the indicator underline + unread dot.
+                // §fix-2: selected tabs get a translucent filled background
+                // tinted with the workdir-hash colour; unselected tabs stay
+                // transparent so the strip blends with the TopAppBar surface.
+                modifier = Modifier
+                    .height(36.dp)
+                    .background(
+                        color = if (isSelected) {
+                            accentColor.copy(alpha = SELECTED_TAB_FILL_ALPHA)
+                        } else {
+                            Color.Transparent
+                        },
+                        shape = RoundedCornerShape(8.dp)
+                    ),
+                // §fix-2: text colour stays theme onSurface / onSurfaceVariant
+                // (weight differentiates selection); the hash colour now lives
+                // on the filled tab background + unread dot.
                 selectedContentColor = MaterialTheme.colorScheme.onSurface,
                 unselectedContentColor = MaterialTheme.colorScheme.onSurfaceVariant,
                 text = {
@@ -226,55 +250,32 @@ internal fun SessionTabStrip(
                                     .background(color = dotColor, shape = CircleShape)
                             )
                         }
-                        // Title + self-drawn indicator wrapped together so the
-                        // underline hugs the title's left/right edges exactly
-                        // (§problem-4). First layout pass reports titleWidthPx
-                        // == 0 → indicator skipped; it appears on the next
-                        // frame once the width is known. Keyed per session.id
-                        // above, an already-composed tab keeps its measured
-                        // width even when it later becomes selected.
-                        Column {
-                            Text(
-                                text = truncateTitle(session.displayName),
-                                style = MaterialTheme.typography.labelMedium,
-                                color = if (isSelected) MaterialTheme.colorScheme.onSurface
-                                else MaterialTheme.colorScheme.onSurfaceVariant,
-                                fontWeight = if (isSelected) FontWeight.SemiBold
-                                else FontWeight.Normal,
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis,
-                                onTextLayout = { titleWidthPx = it.size.width }
-                            )
-                            if (isSelected && titleWidthPx > 0) {
-                                Box(
-                                    modifier = Modifier
-                                        .width(
-                                            with(LocalDensity.current) { titleWidthPx.toDp() }
-                                        )
-                                        .height(2.dp)
-                                        .background(accentColor, RoundedCornerShape(1.dp))
-                                )
-                            }
-                        }
-                        Spacer(modifier = Modifier.width(4.dp))
-                        // Close affordance. R-12 (WCAG 2.5.5): the visual X
-                        // stays small but the touch target is enlarged as far
-                        // as the 36dp row allows (28dp box). The Tab's own
-                        // onClick is the broader 36dp touch target, so the X
-                        // only needs to win the inner tap. Compose's clickable
-                        // consumes the pointer event, so tapping the X fires
-                        // onClose without also triggering the Tab's onClick
-                        // (standard nested-clickable behaviour).
+                        Text(
+                            text = truncateTitle(session.displayName),
+                            style = MaterialTheme.typography.labelMedium,
+                            color = if (isSelected) MaterialTheme.colorScheme.onSurface
+                            else MaterialTheme.colorScheme.onSurfaceVariant,
+                            fontWeight = if (isSelected) FontWeight.SemiBold
+                            else FontWeight.Normal,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                        Spacer(modifier = Modifier.width(2.dp))
+                        // §fix-3: compact close affordance. 24dp touch target is
+                        // a deliberate compromise — noticeably narrower than the
+                        // prior 28dp (so each tab keeps room for the title) while
+                        // staying within the small-target range reviewers accept
+                        // for a secondary, non-data-destructive affordance.
                         Box(
                             modifier = Modifier
-                                .size(28.dp)
+                                .size(24.dp)
                                 .clickable(onClick = { actions.onCloseSession(session.id) }),
                             contentAlignment = Alignment.Center
                         ) {
                             Icon(
                                 Icons.Default.Close,
                                 contentDescription = stringResource(R.string.common_close),
-                                modifier = Modifier.size(12.dp),
+                                modifier = Modifier.size(11.dp),
                                 tint = MaterialTheme.colorScheme.onSurfaceVariant
                             )
                         }

@@ -51,7 +51,11 @@ internal fun MessageRow(
     // without a matching live QuestionRequest — rendered terminally instead
     // of with a perpetual spinner. Empty by default so legacy callers keep
     // compiling.
-    staleQuestionPartKeys: Set<String> = emptySet()
+    staleQuestionPartKeys: Set<String> = emptySet(),
+    // Suppress historical reasoning parts whose id matches the active
+    // streaming-reasoning part (the standalone streaming item in
+    // ChatMessageList already renders it). Null when no stream is active.
+    streamingReasoningPartId: String? = null
 ) {
     val isUser = message.isUser
 
@@ -66,6 +70,12 @@ internal fun MessageRow(
         var i = 0
         while (i < parts.size) {
             val part = parts[i]
+            // Skip historical reasoning parts that are currently rendered as
+            // the standalone streaming-reasoning item in ChatMessageList.
+            if (part.isReasoning && streamingReasoningPartId != null && part.id == streamingReasoningPartId) {
+                i += 1
+                continue
+            }
             val streamingText = streamingPartTexts[part.id]
             val isToolLike = part.isTool || (part.isPatch && part.filePathsForNavigationFiltered.isNotEmpty())
             if (isToolLike) {

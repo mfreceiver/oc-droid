@@ -33,17 +33,38 @@ internal fun applySavedSettings(
     // Reuse the profile list once: it backs both AppState.hostProfiles and the
     // cold-start connectionPhase decision below.
     val profiles = hostProfileStore.profiles()
+    // Seed sessions from the persisted metadata cache so tabs/title/
+    // workdir groups render instantly on cold start (before the server
+    // list loads). loadSessions replaces these with authoritative data.
+    val restoredSessions = settingsManager.sessionCache.map { entry -> entry.toSession() }
+    // Archived-session filtering: a cached entry may carry timeArchived if the
+    // user archived it last run (or another client did, surfaced via SSE
+    // session.updated before the process died). Without this filter the tab
+    // strip would render an archived tab and the chat could restore onto an
+    // archived session. Drop any openSessionId whose cached session is
+    // archived, persist the cleaned list back via the existing setter, and
+    // clear currentSessionId if it points at an archived session.
+    val archivedIds = restoredSessions.filter { it.isArchived }.map { it.id }.toSet()
+    val persistedOpenSessionIds = settingsManager.openSessionIds
+    val restoredOpenSessionIds = persistedOpenSessionIds.filterNot { it in archivedIds }
+    if (restoredOpenSessionIds != persistedOpenSessionIds) {
+        settingsManager.openSessionIds = restoredOpenSessionIds
+    }
+    val persistedCurrentSessionId = settingsManager.currentSessionId
+    val restoredCurrentSessionId = persistedCurrentSessionId?.let { cid ->
+        if (cid in archivedIds) null else cid
+    }
+    if (restoredCurrentSessionId != persistedCurrentSessionId) {
+        settingsManager.currentSessionId = restoredCurrentSessionId
+    }
     state.updateAndSync(slices) {
         it.copy(
-            currentSessionId = settingsManager.currentSessionId,
+            currentSessionId = restoredCurrentSessionId,
             lastNavPage = settingsManager.lastNavPage,
             hostProfiles = profiles,
             currentHostProfileId = currentProfile.id,
-            openSessionIds = settingsManager.openSessionIds,
-            // Seed sessions from the persisted metadata cache so tabs/title/
-            // workdir groups render instantly on cold start (before the server
-            // list loads). loadSessions replaces these with authoritative data.
-            sessions = settingsManager.sessionCache.map { entry -> entry.toSession() }
+            openSessionIds = restoredOpenSessionIds,
+            sessions = restoredSessions
             // §R-17 M2: connectionPhase moved to connectionFlow below.
             // §R-17 M3: selectedAgentName/themeMode/markdownFontSizes moved to
             // settingsFlow below.
