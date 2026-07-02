@@ -75,5 +75,9 @@ docs/ios_markdown_preview_fixtures/
 # END oh-my-opencode-slim worktrees
 opencode-src/
 
+# BEGIN oh-my-opencode-slim clonedeps
+.slim/clonedeps/repos/
+# END oh-my-opencode-slim clonedeps
+
 # transient local media (flicker-debug video/frames, etc.)
 /tmp/

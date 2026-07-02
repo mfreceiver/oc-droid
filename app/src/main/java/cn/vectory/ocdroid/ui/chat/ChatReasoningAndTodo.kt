@@ -3,13 +3,17 @@ package cn.vectory.ocdroid.ui.chat
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material.icons.Icons
@@ -26,13 +30,19 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import com.mikepenz.markdown.compose.components.markdownComponents
 import com.mikepenz.markdown.m3.Markdown
 import cn.vectory.ocdroid.R
@@ -127,24 +137,37 @@ internal fun ReasoningCard(
                 }
             }
             // Render the expanded reasoning body whenever expanded (including
-            // while streaming). The paced-streaming text helper
-            // (rememberPacedStreamingText) re-parses markdown on a throttled,
-            // forward-only value, so an expanded streaming card updates
-            // incrementally without per-token height oscillation. While
-            // streaming the card shows the growing chain-of-thought; once
-            // finished it shows the complete text.
+            // while streaming). While streaming the body shows the growing
+            // chain-of-thought as PLAIN TEXT (the markdown renderer oscillates
+            // pathologically on incomplete streaming prefixes — see the
+            // §streaming-body comment below); once finished it renders the
+            // complete text as formatted markdown.
             if (expanded && text.isNotBlank()) {
-                // Pace the streaming text at the render layer (same anti-flicker
-                // mechanism as TextPart): re-parse the markdown on a throttled,
-                // forward-only value instead of per token, so an expanded
-                // streaming reasoning card doesn't oscillate in height.
+                // §streaming-body: while streaming, render the paced text as
+                // PLAIN TEXT (the markdown renderer produces pathologically
+                // unstable height when re-parsing growing incomplete streaming
+                // text → flicker; confirmed via diagnostics: 67 height-shrinks/
+                // turn, ~5000px↔168px oscillation, all eliminated by plain text).
+                // Full markdown renders once, stably, on completion.
                 val renderText = rememberPacedStreamingText(text, isStreaming)
-                val normalizedText = remember(renderText) { MarkdownImageResolver.normalizeStandaloneImageBlocks(renderText) }
                 val fontSizes = LocalMarkdownFontSizes.current
-                // Reasoning text uses the smaller `reasoning` size (defaults to 12sp)
-                // by overriding `body` when rendering, so it visually de-emphasizes
-                // chain-of-thought vs the main assistant reply.
-                val reasoningFontSizes = fontSizes.copy(body = fontSizes.reasoning)
+                val scrollState = rememberScrollState()
+                // §auto-follow (per review, mirrors ChatMessageList's pattern):
+                // (a) use instant scrollTo during streaming — animateScrollTo is
+                //     cancelled every ~100ms paced advance and never completes;
+                // (b) pause auto-follow when the user scrolls up to read earlier
+                //     reasoning, so the next paced advance doesn't yank them back.
+                var userScrolledAway by remember { mutableStateOf(false) }
+                LaunchedEffect(scrollState) {
+                    snapshotFlow { scrollState.isScrollInProgress to scrollState.value }
+                        .collect { (inProgress, value) ->
+                            if (inProgress && value < scrollState.maxValue - 24) userScrolledAway = true
+                        }
+                }
+                LaunchedEffect(isStreaming) { if (!isStreaming) userScrolledAway = false }
+                LaunchedEffect(renderText, isStreaming) {
+                    if (isStreaming && !userScrolledAway) scrollState.scrollTo(scrollState.maxValue)
+                }
                 // §5.1 v2: transparent folding body — no tinted panel, just the
                 // outer border provides containment. Matches BasicTool's flat style.
                 Surface(
@@ -152,19 +175,39 @@ internal fun ReasoningCard(
                     shape = RoundedCornerShape(6.dp),
                     color = Color.Transparent
                 ) {
+                    // Cap the body height + scroll so long reasoning never
+                    // overflows the screen (the "内容外溢" symptom) — applies to
+                    // both streaming and completed.
                     SelectionContainer {
                         CompositionLocalProvider(LocalContentColor provides MaterialTheme.colorScheme.onSurfaceVariant) {
-                            Markdown(
-                                content = normalizedText,
-                                typography = markdownTypography(reasoningFontSizes),
-                                // §3.1 syntax highlighting in reasoning blocks too.
-                                components = markdownComponents(
-                                    codeBlock = { WrappedCodeBlock(it) },
-                                    codeFence = { WrappedCodeBlock(it) }
-                                ),
-                                modifier = Modifier.padding(8.dp),
-                                imageTransformer = DataUriImageTransformer
-                            )
+                            Box(
+                                modifier = Modifier
+                                    .heightIn(max = 280.dp)
+                                    .verticalScroll(scrollState)
+                                    .padding(8.dp)
+                            ) {
+                                if (isStreaming) {
+                                    // Plain text at the reasoning font size so the
+                                    // completion snap to markdown is size-neutral.
+                                    Text(
+                                        text = renderText,
+                                        style = MaterialTheme.typography.bodySmall.copy(fontSize = fontSizes.reasoning.sp),
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                } else {
+                                    val normalizedText = remember(renderText) { MarkdownImageResolver.normalizeStandaloneImageBlocks(renderText) }
+                                    Markdown(
+                                        content = normalizedText,
+                                        typography = markdownTypography(fontSizes.copy(body = fontSizes.reasoning)),
+                                        // §3.1 syntax highlighting in reasoning blocks too.
+                                        components = markdownComponents(
+                                            codeBlock = { WrappedCodeBlock(it) },
+                                            codeFence = { WrappedCodeBlock(it) }
+                                        ),
+                                        imageTransformer = DataUriImageTransformer
+                                    )
+                                }
+                            }
                         }
                     }
                 }
