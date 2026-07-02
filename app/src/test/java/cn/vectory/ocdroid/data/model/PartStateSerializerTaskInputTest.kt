@@ -155,6 +155,45 @@ class PartStateSerializerTaskInputTest {
         assertEquals("scan src", state.metadataString("description"))
     }
 
+    // ── subagent_type (live server key) ───────────────────────────────────
+
+    @Test
+    fun `subagent_type is used as agent name`() {
+        val state = decode(
+            """{"status":"running","input":{"subagent_type":"glmer","description":"Analyze data"}}"""
+        )
+        assertEquals("glmer", state.metadataString("agent"))
+        assertEquals("Analyze data", state.metadataString("description"))
+    }
+
+    @Test
+    fun `agent key still works as fallback when subagent_type absent`() {
+        val state = decode(
+            """{"status":"running","input":{"agent":"kimo","prompt":"do stuff"}}"""
+        )
+        assertEquals("kimo", state.metadataString("agent"))
+    }
+
+    @Test
+    fun `subagent_type wins over agent when both present`() {
+        val state = decode(
+            """{"status":"running","input":{"subagent_type":"glmer","agent":"kimo","description":"task"}}"""
+        )
+        assertEquals("glmer", state.metadataString("agent"))
+    }
+
+    @Test
+    fun `blank subagent_type falls back to non-blank agent`() {
+        // §review follow-up (glmer + gpter): a malformed empty subagent_type
+        // must not shadow a usable agent value.
+        val state = decode(
+            """{"status":"running","input":{"subagent_type":"","agent":"kimo","description":"task"}}"""
+        )
+        assertEquals("kimo", state.metadataString("agent"))
+    }
+
+    // ── load-bearing contracts flagged by review ──────────────────────────
+
     @Test
     fun `existing metadata agent in a resolvable casing is not shadowed by input agent`() {
         // §review follow-up: the non-clobber guard mirrors metadataString's

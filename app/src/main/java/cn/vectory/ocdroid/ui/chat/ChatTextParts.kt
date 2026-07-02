@@ -114,11 +114,10 @@ internal fun ResolvedMarkdownText(
     workspaceDirectory: String?,
     modifier: Modifier = Modifier
 ) {
-    var resolvedText by remember(text, workspaceDirectory) { mutableStateOf<String?>(null) }
+    var resolvedText by remember(workspaceDirectory) { mutableStateOf<String?>(null) }
     val normalizedText = remember(text) { MarkdownImageResolver.normalizeStandaloneImageBlocks(text) }
 
     LaunchedEffect(normalizedText, workspaceDirectory, repository) {
-        resolvedText = null
         resolvedText = MarkdownImageResolver.resolveImages(
             text = normalizedText,
             workspaceDirectory = workspaceDirectory,

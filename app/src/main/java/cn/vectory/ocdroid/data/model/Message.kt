@@ -353,7 +353,8 @@ object PartStateSerializer : kotlinx.serialization.KSerializer<PartState> {
                 // task transitions to running (input becomes an object).
                 val inputAsObj = element["input"] as? JsonObject
                 if (inputAsObj != null) {
-                    val agent = (inputAsObj["agent"] as? JsonPrimitive)?.content
+                    val agent = (inputAsObj["subagent_type"] as? JsonPrimitive)?.content?.takeIf { it.isNotBlank() }
+                        ?: (inputAsObj["agent"] as? JsonPrimitive)?.content
                     val desc = (inputAsObj["description"] as? JsonPrimitive)?.content
                         ?: (inputAsObj["prompt"] as? JsonPrimitive)?.content
                     // Server-provided `metadata` wins over `input` for both keys
