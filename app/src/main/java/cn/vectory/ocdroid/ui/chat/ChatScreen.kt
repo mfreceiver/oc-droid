@@ -36,6 +36,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.runtime.staticCompositionLocalOf
@@ -426,12 +427,26 @@ fun ChatScreen(
     // §pager: when the pager settles on a new page, select that session.
     // Guarded to root sessions so a sub-agent view never accidentally switches
     // tabs via the pager.
+    //
+    // §draft-guard (new-session bug fix): keep the LATEST currentSessionId in a
+    // rememberUpdatedState so this long-lived effect (keyed on the stable
+    // pagerState, launched once) reads the current value instead of the stale
+    // launch-time capture, and SKIP the auto-select while currentSessionId is
+    // null (draft mode — entered via createSessionInWorkdir's "new session"
+    // affordance). Without this guard, the snapshotFlow's INITIAL emit of
+    // settledPage on Chat entry would find a real root session and call
+    // onSelectSession on it, clobbering the draft (showing an old session
+    // instead of the empty composer the user just asked for). The session only
+    // materialises on first send; until then the pager must not steal focus.
+    val currentSessionIdLatest by rememberUpdatedState(chat.currentSessionId)
     LaunchedEffect(pagerState) {
         snapshotFlow { pagerState.settledPage }
             .distinctUntilChanged()
             .collect { page ->
                 val session = rootSessions.getOrNull(page)
-                if (session != null && session.id != chat.currentSessionId && parent == null) {
+                if (session != null && currentSessionIdLatest != null &&
+                    session.id != currentSessionIdLatest && parent == null
+                ) {
                     topBarActions.onSelectSession(session.id)
                 }
             }
