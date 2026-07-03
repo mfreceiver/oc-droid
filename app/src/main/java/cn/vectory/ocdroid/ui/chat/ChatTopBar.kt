@@ -1,13 +1,6 @@
 package cn.vectory.ocdroid.ui.chat
 
 import androidx.compose.animation.AnimatedVisibility
-import androidx.compose.animation.core.tween
-import androidx.compose.animation.expandVertically
-import androidx.compose.animation.fadeIn
-import androidx.compose.animation.fadeOut
-import androidx.compose.animation.shrinkVertically
-import androidx.compose.animation.slideInVertically
-import androidx.compose.animation.slideOutVertically
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Box
@@ -62,6 +55,7 @@ import cn.vectory.ocdroid.ui.ContextUsage
 import cn.vectory.ocdroid.ui.TunnelActivationState
 import cn.vectory.ocdroid.ui.resolveModelDisplayName
 import cn.vectory.ocdroid.ui.theme.SemanticColors
+import cn.vectory.ocdroid.ui.theme.AppMotion
 
 internal data class ChatTopBarState(
     val sessions: List<Session>,
@@ -431,18 +425,8 @@ internal fun ChatTopBar(
         // 时长 ~200ms（覆盖默认 300ms，更跟手）。
         AnimatedVisibility(
             visible = tabVisible,
-            enter = fadeIn(animationSpec = tween(200)) +
-                expandVertically(animationSpec = tween(200)) +
-                slideInVertically(
-                    animationSpec = tween(200),
-                    initialOffsetY = { fullHeight -> -fullHeight }
-                ),
-            exit = fadeOut(animationSpec = tween(200)) +
-                shrinkVertically(animationSpec = tween(200)) +
-                slideOutVertically(
-                    animationSpec = tween(200),
-                    targetOffsetY = { fullHeight -> -fullHeight }
-                )
+            enter = AppMotion.tabStripEnter(),
+            exit = AppMotion.tabStripExit()
         ) {
             SessionTabStrip(
                 openSessions = state.openSessions,

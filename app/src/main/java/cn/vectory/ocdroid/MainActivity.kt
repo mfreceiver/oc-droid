@@ -42,6 +42,7 @@ import cn.vectory.ocdroid.ui.theme.OpenCodeTheme
 import cn.vectory.ocdroid.ui.theme.compactTypography
 import cn.vectory.ocdroid.util.AppLocaleController
 import cn.vectory.ocdroid.util.ThemeMode
+import cn.vectory.ocdroid.ui.theme.AppMotion
 import dagger.hilt.android.AndroidEntryPoint
 import javax.inject.Inject
 import kotlinx.coroutines.launch
@@ -268,7 +269,7 @@ private fun PhoneLayout(viewModel: MainViewModel, initialPage: Int = 0) {
         ) { padding ->
             AnimatedContent(
                 targetState = navPage,
-                transitionSpec = { fadeIn() togetherWith fadeOut() },
+                transitionSpec = { fadeIn(AppMotion.standardSmall) togetherWith fadeOut(AppMotion.standardSmall) },
                 label = "phoneNav",
                 modifier = Modifier
                     .fillMaxSize()

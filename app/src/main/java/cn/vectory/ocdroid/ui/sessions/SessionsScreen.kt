@@ -1,12 +1,10 @@
 package cn.vectory.ocdroid.ui.sessions
 
 import androidx.compose.animation.AnimatedVisibility
-import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
-import androidx.compose.animation.core.tween
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.combinedClickable
@@ -42,6 +40,7 @@ import cn.vectory.ocdroid.data.model.SessionStatus
 import cn.vectory.ocdroid.ui.MainViewModel
 import cn.vectory.ocdroid.ui.chat.workdirTone
 import cn.vectory.ocdroid.ui.theme.SemanticColors
+import cn.vectory.ocdroid.ui.theme.AppMotion
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.map
 import java.text.SimpleDateFormat
@@ -665,7 +664,7 @@ private fun SessionStatusDot(status: SessionStatus?) {
             initialValue = 0.4f,
             targetValue = 1f,
             animationSpec = infiniteRepeatable(
-                animation = tween(durationMillis = 800, easing = LinearEasing),
+                animation = AppMotion.linearPulse(),
                 repeatMode = RepeatMode.Reverse
             ),
             label = "busyPulseAlpha"
