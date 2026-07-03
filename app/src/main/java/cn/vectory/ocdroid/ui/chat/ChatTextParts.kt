@@ -589,9 +589,17 @@ internal fun WrappedTable(model: MarkdownComponentModel) {
 /**
  * Single custom [Layout] that gives every column ONE shared width across the
  * header row + all body rows. Children are emitted row-major (header cells,
- * then each body row's cells) followed by an optional header divider; the
- * measure policy measures all cells twice (intrinsic → shared width) so columns
- * align while long cells still soft-wrap.
+ * then each body row's cells) followed by an optional header divider.
+ *
+ * Column-width resolution uses [androidx.compose.ui.layout.Measurable.maxIntrinsicWidth]
+ * (NOT measure()) for the intrinsic probe, then measures each cell exactly ONCE
+ * at its column's shared width. This avoids Compose's hard rule that a single
+ * Measurable may only be measured once per layout pass — intrinsic queries are
+ * explicitly exempt (the runtime error message points at this exact approach).
+ *
+ * Column width = min(cell.maxIntrinsicWidth, cap). For cells shorter than the
+ * cap this matches the natural content width; for overflowing cells the column
+ * pins at the cap so long cells soft-wrap while columns stay aligned.
  */
 @Composable
 private fun TableGrid(
@@ -653,23 +661,19 @@ private fun TableGrid(
                 measurables
             }
 
-            // Pass 1: measure every cell at the cap to learn intrinsic widths.
-            val capConstraints = Constraints(
-                minWidth = 0,
-                maxWidth = capPx,
-                minHeight = 0,
-                maxHeight = Constraints.Infinity
-            )
-            val intrinsic = Array(totalCells) { i -> cellMeasurables[i].measure(capConstraints) }
-
-            // Shared column width = widest cell in that column (already ≤ cap).
+            // Pass 1: query intrinsic widths. maxIntrinsicWidth() is NOT a
+            // measure() call — it returns the unwrapped content width (incl.
+            // the cellPadding modifier chain) without consuming the Measurable,
+            // so this never trips the "measured multiple times" invariant.
             val colWidths = IntArray(columnsCount)
             for (i in 0 until totalCells) {
+                val intrinsic = cellMeasurables[i].maxIntrinsicWidth(Constraints.Infinity)
+                val w = minOf(intrinsic, capPx)
                 val c = cells[i].colIndex
-                if (intrinsic[i].width > colWidths[c]) colWidths[c] = intrinsic[i].width
+                if (w > colWidths[c]) colWidths[c] = w
             }
 
-            // Pass 2: re-measure every cell at its column's exact shared width so
+            // Pass 2: single measure per cell at the shared column width so
             // wrapping (and thus row height) reflects the aligned column.
             val placeables = Array(totalCells) { i ->
                 val w = colWidths[cells[i].colIndex]

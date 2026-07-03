@@ -1,0 +1,24 @@
+{
+  "agent": "maxer",
+  "scope": "fix-tablegrid-double-measure",
+  "date": "2026-07-03",
+  "reviewed_commit": "3ff91ee",
+  "version_target": null,
+  "verdict": "block",
+  "score": 2.5,
+  "blocking_issues": [
+    "R1: Same cellMeasurables[i] is still measured twice (Pass 1 at cap, Pass 2 at shared width). SubcomposeLayout.kt does NOT set canMultiMeasure=true on its ReusableComposeNode (only Layout.kt's ReusableComposeNode does via init { this.canMultiMeasure = true }), and SubcomposeLayoutState.subcompose for same slotId + same content returns the cached node.children, so the two .first() calls return the SAME Measurable instance. The second measure() trips MeasuredTwiceErrorMessage because canMultiMeasure propagates as false along the parent chain. Confirmed against androidx-main: MeasurePassDelegate.trackMeasurementByParent checkPrecondition(measuredByParent == NotUsed || canMultiMeasure), and SubcomposeLayout.kt has zero canMultiMeasure references.",
+    "R2: The publicly documented correct pattern for two-pass SubcomposeLayout measurement (RevenueCat / Daniel Passos 2025-04) explicitly uses DIFFERENT slot ids for the two passes (e.g. measure-$i and recomposed-$i), so each pass creates fresh Measurables measured exactly once. The SubcomposeLayout variant did not adopt this pattern. ./scripts/check.sh only covers compile + JVM unit tests, not Compose rendering, so the crash would not surface until runtime on device."
+  ],
+  "non_blocking_issues": [
+    "N1: Performance cost — SubcomposeLayout runs 2*N*M subcompose+measure per table; multiple tables in a chat stream can cause perceptible scroll jank on low-end devices. Consider LookaheadLayout (Compose 1.4+, included in BOM 2025.12.00).",
+    "N2: slotId uses Int 0..totalCells-1; row/column count changes during streaming render could cause slot-reuse state misalignment. Use cell.node identity or (row,col) tuple.",
+    "N3: Comment 'SubcomposeLayout is the only Compose layout primitive that permits re-measuring the same Measurable' is conceptually wrong — SubcomposeLayout does not permit re-measuring; it permits building fresh Measurables via different slotIds. This misconception was the root cause of the failed fix.",
+    "S1: capPx<=0 defense missing.",
+    "S2: hasBoundedWidth=false + maxColumnWidth*columnsCount overflow path.",
+    "S3: .first() assumes Column always has children.",
+    "S4: MarkdownTableBasicText does not render inline images in cells.",
+    "S5: No ChatTextParts / TableGrid unit tests."
+  ],
+  "notes": "Direction (SubcomposeLayout) was reasonable but the specific implementation did not resolve the root cause. STRONGLY RECOMMENDED: before merging any table-layout fix, run a real N×M (>=3x3) table through a streaming chat on the emulator (adb logcat | grep 'measure() may not be called') to confirm runtime behavior. RESOLUTION: The block was accepted — the fix was reworked to Layout + maxIntrinsicWidth (intrinsic queries are not measure() calls and do not trip the canMultiMeasure invariant, matching the error message's own suggestion). This eliminates R1/R2 by construction. maxer's non-blocking notes (N2 slot stability, N3 comment accuracy, S1/S3 edge defenses) remain applicable to the revised approach where relevant."
+}

@@ -1,0 +1,19 @@
+{
+  "agent": "dser",
+  "scope": "fix-tablegrid-double-measure",
+  "date": "2026-07-03",
+  "reviewed_commit": "3ff91ee",
+  "version_target": null,
+  "verdict": "pass",
+  "score": 8.5,
+  "blocking_issues": [],
+  "non_blocking_issues": [
+    "No test coverage for TableGrid or WrappedTable — regression risk for two-pass measurement logic, column alignment, and edge cases (empty cells, no header, wide tokens).",
+    "rowCount defaults to 1 when cells is empty (line 630), producing a zero-height single-row layout; semantically should be 0.",
+    "Slot IDs are integer indices (0..N-1 for cells, N for divider). Currently correct because remember keys cover structural changes, but future key omissions could cause slot-reuse misalignment.",
+    "first() on subcompose cell result (line 650) assumes exactly one child Measurable; silently discards extras if MarkdownTableBasicText were refactored to multi-child layout. Consider singleOrNull().",
+    "SubcomposeLayout triggers N+1 subcompositions per measurement pass; acceptable for typical table sizes but adds measurement-phase overhead vs. original Layout approach.",
+    "capPx=0 edge case: if maxColumnWidth were changed to 0dp, all columns would collapse to 0 width (no crash, but useless rendering). Consider adding an assertion or minimum width guard."
+  ],
+  "notes": "Reviewed the SubcomposeLayout variant. Root cause analysis is accurate: the original Layout prohibited measuring the same Measurable twice in one pass. The appeal to intrinsic width (as suggested by the error message) is correctly dismissed in the SubcomposeLayout approach. NOTE: maxer subsequently blocked this variant on canMultiMeasure grounds (see maxer_fix-tablegrid-double-measure.json); the fix was reworked to the Layout + maxIntrinsicWidth approach which dser's non-blocking notes also point toward."
+}
