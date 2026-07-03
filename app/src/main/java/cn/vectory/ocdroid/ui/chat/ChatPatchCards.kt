@@ -253,7 +253,7 @@ internal fun ContextToolGroup(
 
     val oc = MaterialTheme.opencode
     Surface(
-        modifier = modifier.padding(vertical = 1.dp),
+        modifier = modifier.padding(vertical = 2.dp),
         shape = RoundedCornerShape(6.dp),
         color = oc.layer02,
         border = BorderStroke(1.dp, oc.borderBase)
@@ -262,7 +262,7 @@ internal fun ContextToolGroup(
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(horizontal = 8.dp, vertical = 4.dp)
+                    .padding(horizontal = 8.dp, vertical = 8.dp)
                     .clickable { onToggleExpand(expandedKey, expanded) },
                 verticalAlignment = Alignment.CenterVertically
             ) {
