@@ -313,12 +313,12 @@ internal fun CompletedTaskCard(
 
     val oc = MaterialTheme.opencode
     Surface(
-        modifier = modifier.padding(vertical = 1.dp),
+        modifier = modifier.padding(vertical = 2.dp),
         shape = RoundedCornerShape(6.dp),
         color = oc.layer02,
         border = BorderStroke(1.dp, oc.borderBase)
     ) {
-        Column(modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)) {
+        Column(modifier = Modifier.padding(horizontal = 8.dp, vertical = 8.dp)) {
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
