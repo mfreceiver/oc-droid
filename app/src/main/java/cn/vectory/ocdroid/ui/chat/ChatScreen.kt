@@ -439,13 +439,25 @@ fun ChatScreen(
     // instead of the empty composer the user just asked for). The session only
     // materialises on first send; until then the pager must not steal focus.
     val currentSessionIdLatest by rememberUpdatedState(chat.currentSessionId)
+    // §flicker-fix: this settle effect is keyed only on pagerState so it does
+    // NOT restart on every tab-list change (restarting would re-emit the
+    // current settledPage and auto-select during the close transition). That
+    // means its closure captures rootSessions/parent at launch time. After a
+    // tab close the captured list is stale, so a swipe resolves the settled
+    // page index against the OLD list — often landing on the just-closed
+    // session, which SessionSwitcher reopens, which the external-sync effect
+    // below then fights, oscillating the tabs a↔b. Mirror the
+    // rememberUpdatedState pattern commit 2344e38 used for currentSessionId so
+    // the collector always resolves against the freshest list + parent.
+    val rootSessionsLatest by rememberUpdatedState(rootSessions)
+    val parentLatest by rememberUpdatedState(parent)
     LaunchedEffect(pagerState) {
         snapshotFlow { pagerState.settledPage }
             .distinctUntilChanged()
             .collect { page ->
-                val session = rootSessions.getOrNull(page)
+                val session = rootSessionsLatest.getOrNull(page)
                 if (session != null && currentSessionIdLatest != null &&
-                    session.id != currentSessionIdLatest && parent == null
+                    session.id != currentSessionIdLatest && parentLatest == null
                 ) {
                     topBarActions.onSelectSession(session.id)
                 }
