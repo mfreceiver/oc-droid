@@ -1,0 +1,16 @@
+{
+  "agent": "dser",
+  "scope": "fix-workdir-persist",
+  "date": "2026-07-04",
+  "reviewed_commit": "b61538e",
+  "version_target": "0.2.20",
+  "verdict": "pass",
+  "score": 9.4,
+  "round": 2,
+  "blocking_issues": [],
+  "non_blocking_issues": [
+    "loadInitialData 与 createSessionInWorkdir 对同一 workdir 的写竞态：冷启动 directory fetch 晚于用户 tap 触发的 fetch 返回时，旧数据 last-writer-wins 覆盖新数据。触发窗口极窄（冷启动 UI 渲染→用户 tap 间通常 > 网络 RTT），影响限于单个 workdir 显示且下拉刷新自愈。可附 fetch 时间戳/generation 比较新鲜度。",
+    "refreshDirectorySessions / createSessionInWorkdir 用 updateAndSync 非 CAS（单写者主线程安全，建议演进时统一为 slice-CAS-first）。"
+  ],
+  "notes": "第 2 轮复审。第 1 轮 9.3/10 PASS（建议修 key 一致性）。本轮 key 一致性（入口 trim 全链路）+ appendDirectorySessions 真 CAS + generation guard 全部修复。唯一扣分点（极低概率写竞态）标注为不阻塞 9.5。上轮 #1-#5 逐条 ✅ 解决。"
+}

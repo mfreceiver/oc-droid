@@ -1075,6 +1075,9 @@ class MainViewModelTest {
         advanceUntilIdle()
 
         assertEquals(workdir, viewModel.composerFlow.value.draftWorkdir)
+        // §recent-workdirs: connecting a project records it so cold-start
+        // loadInitialData can restore its directory sessions after restart.
+        verify { settingsManager.addRecentWorkdir(workdir) }
         val dirSessions = viewModel.sessionListFlow.value.directorySessions[workdir]
         assertNotNull("directorySessions should contain an entry for the workdir", dirSessions)
         assertEquals(2, dirSessions!!.size)
@@ -1099,6 +1102,125 @@ class MainViewModelTest {
         assertEquals(workdir, viewModel.composerFlow.value.draftWorkdir)
         assertNull(viewModel.state.value.error)
         assertTrue(viewModel.sessionListFlow.value.directorySessions.isEmpty())
+    }
+
+    @Test
+    fun `createSessionInWorkdir trims workdir so all downstream keys stay consistent`() = runTest {
+        // §key-consistency: the entry-point trim ensures currentWorkdir,
+        // recentWorkdirs, directorySessions map key, and getSessionsForDirectory
+        // all share ONE key. Without it, a whitespace-padded path would split
+        // into two directorySessions entries (raw here vs trimmed in the
+        // cold-start restore path that reads recentWorkdirs).
+        val raw = "  /home/user/myproject  "
+        val trimmed = "/home/user/myproject"
+        every { repository.setCurrentDirectory(any()) } just runs
+        coEvery { repository.getSessionsForDirectory(trimmed, any()) } returns Result.success(emptyList())
+
+        val viewModel = createViewModel()
+        viewModel.createSessionInWorkdir(raw)
+        advanceUntilIdle()
+
+        verify { settingsManager.currentWorkdir = trimmed }
+        verify { settingsManager.addRecentWorkdir(trimmed) }
+        coVerify { repository.getSessionsForDirectory(trimmed, any()) }
+        verify { repository.setCurrentDirectory(trimmed) }
+    }
+
+    // --- REPRO: a connected workdir "randomly vanishes" after restart ---
+
+    /**
+     * Regression guard for the previously-reported "one of my two frequent
+     * workdirs randomly disappears after restart, not all of them" bug.
+     *
+     * Root cause: [AppState.directorySessions] (the `Map<workdir, sessions>`
+     * that backs the Sessions-screen "connected projects" groups) is pure
+     * in-memory state. On cold start, [cn.vectory.ocdroid.ui.controller.
+     * ConnectionCoordinator.loadInitialData] now re-fetches directory-scoped
+     * sessions for EVERY persisted recent workdir (not just the single
+     * currentWorkdir), so a previously-connected workdir that is NOT the
+     * current one is restored even when its sessions fall outside the first
+     * page of the global `getSessions(limit=10)` list.
+     *
+     * Before the fix, loadInitialData only restored currentWorkdir; the
+     * non-current workdir survived only if its sessions happened to stay in
+     * the global top-10 (server sorts by `updated` desc) — which is why the
+     * disappearance was intermittent ("random") rather than deterministic.
+     *
+     * This test asserts the FIX: workdir A is retained via the recentWorkdirs
+     * set even though its session is paged out of the global first page.
+     */
+    @Test
+    fun `non-current workdir is retained after cold start via recentWorkdirs even when paged out`() = runTest {
+        val workdirA = "/home/user/projectA"
+        val workdirB = "/home/user/projectB"
+        val sessionA = cn.vectory.ocdroid.data.model.Session(id = "s-a1", directory = workdirA, title = "A chat")
+        val sessionB = cn.vectory.ocdroid.data.model.Session(id = "s-b1", directory = workdirB, title = "B chat")
+
+        // Previous run connected A then B (B most recent). currentWorkdir is
+        // the single last-used value; recentWorkdirs remembers BOTH.
+        every { settingsManager.currentWorkdir } returns workdirB
+        every { settingsManager.recentWorkdirs } returns listOf(workdirB, workdirA)
+
+        // Healthy connect → loadInitialData.
+        coEvery { repository.checkHealth() } returns
+            Result.success(HealthResponse(healthy = true, version = "1.0"))
+        // Global list first page (limit=10): A's session is older and paged out;
+        // only B's session is returned here (server sorts by updated desc).
+        coEvery { repository.getSessions(10) } returns Result.success(listOf(sessionB))
+        // loadInitialData now re-fetches directorySessions for BOTH recent workdirs.
+        coEvery { repository.getSessionsForDirectory(workdirB, any()) } returns Result.success(listOf(sessionB))
+        coEvery { repository.getSessionsForDirectory(workdirA, any()) } returns Result.success(listOf(sessionA))
+
+        val viewModel = createViewModel()
+        viewModel.coldStartReconnect()
+        advanceUntilIdle()
+
+        // currentWorkdir (B) is restored into directorySessions.
+        assertTrue(
+            "current workdir B should be restored into directorySessions",
+            viewModel.sessionListFlow.value.directorySessions.containsKey(workdirB)
+        )
+        // FIX: A is ALSO restored into directorySessions via the recentWorkdirs
+        // set — no longer lost when its sessions are paged out of the global list.
+        assertTrue(
+            "FIX: non-current workdir A is RETAINED in directorySessions via recentWorkdirs",
+            viewModel.sessionListFlow.value.directorySessions.containsKey(workdirA)
+        )
+        assertEquals(
+            "A's directory sessions should be populated",
+            listOf(sessionA),
+            viewModel.sessionListFlow.value.directorySessions[workdirA]
+        )
+        // loadInitialData now issues a directory fetch for A as well.
+        coVerify(exactly = 1) { repository.getSessionsForDirectory(workdirA, any()) }
+    }
+
+    /**
+     * Complement to the retention test above: when recentWorkdirs is empty
+     * (fresh install / after a host switch purge), loadInitialData falls back
+     * to restoring only currentWorkdir — preserving the original behaviour for
+     * the single-project case and never fanning out unbounded fetches.
+     */
+    @Test
+    fun `loadInitialData restores only currentWorkdir when recentWorkdirs is empty`() = runTest {
+        val workdirB = "/home/user/projectB"
+        val sessionB = cn.vectory.ocdroid.data.model.Session(id = "s-b1", directory = workdirB, title = "B chat")
+
+        every { settingsManager.currentWorkdir } returns workdirB
+        every { settingsManager.recentWorkdirs } returns emptyList()
+        coEvery { repository.checkHealth() } returns
+            Result.success(HealthResponse(healthy = true, version = "1.0"))
+        coEvery { repository.getSessions(10) } returns Result.success(listOf(sessionB))
+        coEvery { repository.getSessionsForDirectory(workdirB, any()) } returns Result.success(listOf(sessionB))
+
+        val viewModel = createViewModel()
+        viewModel.coldStartReconnect()
+        advanceUntilIdle()
+
+        // currentWorkdir (B) still restored via the currentWorkdir fallback.
+        assertTrue(viewModel.sessionListFlow.value.directorySessions.containsKey(workdirB))
+        // Exactly one directory fetch (B only — no unbounded fan-out).
+        coVerify(exactly = 1) { repository.getSessionsForDirectory(any(), any()) }
     }
 
     // --- #13: expandedParts lifecycle ---

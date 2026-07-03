@@ -4,6 +4,7 @@ import android.os.Looper
 import android.util.Log
 import cn.vectory.ocdroid.data.api.CommandInfo
 import cn.vectory.ocdroid.data.model.SSEEvent
+import cn.vectory.ocdroid.data.model.Session
 import cn.vectory.ocdroid.data.repository.OpenCodeRepository
 import cn.vectory.ocdroid.data.repository.ServerCompatProfile
 import cn.vectory.ocdroid.ui.AppState
@@ -21,6 +22,7 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.catch
+import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
@@ -132,6 +134,18 @@ internal class ConnectionCoordinator(
 ) {
     private var sseJob: Job? = null
     private var lastHealthCheckTime = 0L
+
+    /**
+     * §generation-guard: bumped on every [cancelSseForReconfigure] (host/profile
+     * switch or manual reconfigure). [loadInitialData] captures this value and
+     * discards directory-fetch results that return AFTER a reconfigure — their
+     * sessions belong to the previous host and would otherwise pollute the new
+     * host's directorySessions. The fan-out in [loadInitialData] (up to one
+     * launch per recent workdir) amplifies this in-flight window, hence the
+     * explicit guard. Reads/writes are on the main thread (reconfigure +
+     * loadInitialData both run there); @Volatile is belt-and-suspenders.
+     */
+    @Volatile private var directoryFetchGeneration = 0L
 
     // ── State sync helpers (mirror MainViewModel.updateState / writeConnection) ──
 
@@ -328,9 +342,12 @@ internal class ConnectionCoordinator(
     /**
      * Loads initial data after a healthy connect: sessions, agents, providers,
      * pending questions, slash commands, and the directory-scoped sessions for
-     * the restored workdir (so the connected project's sessions reappear after
-     * restart — directorySessions is in-memory and otherwise empty until the
-     * user re-connects).
+     * EVERY known workdir (the persisted `recentWorkdirs` set + currentWorkdir)
+     * so each connected project's sessions reappear after restart —
+     * directorySessions is in-memory and otherwise empty until the user
+     * re-connects each project. Restoring only currentWorkdir lost every other
+     * project whose sessions fell outside the global getSessions(limit) first
+     * page.
      */
     fun loadInitialData() {
         callbacks.loadSessions()
@@ -339,17 +356,63 @@ internal class ConnectionCoordinator(
         callbacks.loadPendingQuestions()
         callbacks.loadPendingPermissions()
         loadCommands()
-        // Re-fetch the directory-scoped sessions for the restored workdir so the
-        // connected project's sessions reappear after restart (directorySessions
-        // is in-memory and otherwise empty until the user re-connects).
-        settingsManager.currentWorkdir?.let { workdir ->
+        // §generation-guard: capture the current generation so directory fetches
+        // that return AFTER a host reconfigure (cancelSseForReconfigure bumps
+        // this) are dropped — their sessions belong to the previous host.
+        val generation = directoryFetchGeneration
+        // Re-fetch directory-scoped sessions for EVERY known workdir (the
+        // persisted recentWorkdirs set + currentWorkdir) so each connected
+        // project's sessions reappear after restart. directorySessions is
+        // in-memory and otherwise empty until the user re-connects each one;
+        // restoring only currentWorkdir lost every other project whose
+        // sessions fell outside the global getSessions(limit) first page (the
+        // "one of my frequent projects randomly disappeared" bug).
+        val restoreWorkdirs = (
+            settingsManager.recentWorkdirs + listOfNotNull(settingsManager.currentWorkdir)
+        ).distinct().filter { it.isNotBlank() }
+        restoreWorkdirs.forEach { workdir ->
             scope.launch {
                 repository.getSessionsForDirectory(workdir)
                     .onSuccess { sessions ->
-                        updateState { it.copy(directorySessions = it.directorySessions + (workdir to sessions)) }
+                        // Drop stale-host results: a host/profile switch between
+                        // dispatch and return would otherwise write the previous
+                        // host's sessions into the new host's directorySessions.
+                        if (generation != directoryFetchGeneration) return@launch
+                        appendDirectorySessions(workdir, sessions)
+                    }
+                    .onFailure { error ->
+                        // Best-effort restore (mirrors createSessionInWorkdir):
+                        // a failed workdir simply stays absent from
+                        // directorySessions; the global getSessions list and a
+                        // user-initiated refreshDirectorySessions are the
+                        // fallbacks. Log for diagnosability without surfacing
+                        // a user-facing error.
+                        if (generation == directoryFetchGeneration) {
+                            reportNonFatalIssue(TAG, "directory restore failed for $workdir", error)
+                        }
                     }
             }
         }
+    }
+
+    /**
+     * Appends a workdir's directory-scoped sessions using a REAL compare-and-set
+     * ([MutableStateFlow.update]) on the sessionList slice, so the concurrent
+     * fan-out in [loadInitialData] cannot lose entries. This deliberately does
+     * NOT rely on the `Dispatchers.Main.immediate` single-thread serialization
+     * that [updateState]/[updateAndSync] depend on (§R-17 M5.1: that path is a
+     * non-atomic read-modify-write safe only because call sites are main-
+     * threaded and suspension-free). The fan-out here makes the CAS explicit.
+     * Mirrors the result onto the deprecated [AppState].directorySessions field
+     * so legacy free helpers reading `state.value.directorySessions` stay
+     * consistent.
+     */
+    @Suppress("DEPRECATION")
+    private fun appendDirectorySessions(workdir: String, sessions: List<Session>) {
+        slices.sessionList.update { slice ->
+            slice.copy(directorySessions = slice.directorySessions + (workdir to sessions))
+        }
+        state.update { it.copy(directorySessions = slices.sessionList.value.directorySessions) }
     }
 
     /**
@@ -481,6 +544,10 @@ internal class ConnectionCoordinator(
         DebugLog.i("SSE", "cancelSse (reconfigure)")
         sseJob?.cancel()
         sseJob = null
+        // §generation-guard: a host/profile switch invalidates every in-flight
+        // directory fetch from the previous host. Bump so loadInitialData's
+        // late-returning onSuccess blocks drop their (stale-host) results.
+        directoryFetchGeneration++
         // §Phase1E: a host/profile switch is a fresh server — treat the next
         // connect as a cold start (skip catch-up, the reconfigure path loads
         // sessions/messages itself). Routed to the catch-up controller.

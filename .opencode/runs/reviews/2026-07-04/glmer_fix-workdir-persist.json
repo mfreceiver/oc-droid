@@ -1,0 +1,16 @@
+{
+  "agent": "glmer",
+  "scope": "fix-workdir-persist",
+  "date": "2026-07-04",
+  "reviewed_commit": "b61538e",
+  "version_target": "0.2.20",
+  "verdict": "pass",
+  "score": 9.6,
+  "round": 2,
+  "blocking_issues": [],
+  "non_blocking_issues": [
+    "createSessionInWorkdir / refreshDirectorySessions 仍走 updateAndSync（state→slice 方向），而 loadInitialData 走 appendDirectorySessions（slice→state 方向）。两个 mirror 方向并存，单写者主线程下安全，但建议未来统一为 slice-CAS-first 模式以降低认知负担。",
+    "generation guard 未覆盖同 host 内 loadInitialData 重入（generation 不变，第一次晚回写不被 drop；同 host 同 key 数据兼容，仅冗余写）。"
+  ],
+  "notes": "第 2 轮复审。第 1 轮 9.0/10 NEEDS_FIX（O-1 updateAndSync 非 CAS 与设计文档声称的 CAS 不符，是核心扣分）。本轮 appendDirectorySessions 改用 MutableStateFlow.update 真 CAS + state.update CAS mirror，KDoc 明确不依赖 Main.immediate 串行化，核心扣分解决。generation guard 在 configureServer/configureRepositoryForProfile/resetLocalDataAndResync 全部 reconfigure 路径完备；coldStartReconnect 不调是正确设计（同 host 无 stale 风险）。"
+}

@@ -494,6 +494,7 @@ class HostProfileControllerTest {
         verify { settingsManager.openSessionIds = emptyList() }
         verify { settingsManager.sessionCache = emptyList() }
         verify { settingsManager.currentWorkdir = null }
+        verify { settingsManager.recentWorkdirs = emptyList() }
     }
 
     @Test

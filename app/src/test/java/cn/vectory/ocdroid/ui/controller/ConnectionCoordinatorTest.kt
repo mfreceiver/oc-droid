@@ -26,6 +26,7 @@ import io.mockk.mockk
 import io.mockk.mockkStatic
 import io.mockk.unmockkAll
 import io.mockk.verify
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asSharedFlow
@@ -362,14 +363,88 @@ class ConnectionCoordinatorTest {
     }
 
     @Test
+    fun `loadInitialData refreshes directorySessions for every recent workdir`() {
+        // §recent-workdirs: cold start restores ALL connected projects, not
+        // just currentWorkdir — otherwise a non-current workdir whose sessions
+        // fall outside the getSessions(limit) first page vanishes after restart.
+        every { settingsManager.currentWorkdir } returns "/current"
+        every { settingsManager.recentWorkdirs } returns listOf("/current", "/other")
+        coEvery { repository.getCommands() } returns Result.success(emptyList())
+        val currentSessions = listOf(Session(id = "s-cur", directory = "/current"))
+        val otherSessions = listOf(Session(id = "s-oth", directory = "/other"))
+        coEvery { repository.getSessionsForDirectory("/current") } returns Result.success(currentSessions)
+        coEvery { repository.getSessionsForDirectory("/other") } returns Result.success(otherSessions)
+
+        coordinator.loadInitialData()
+        runPending()
+
+        assertEquals(currentSessions, slices.sessionList.value.directorySessions["/current"])
+        assertEquals(otherSessions, slices.sessionList.value.directorySessions["/other"])
+        // currentWorkdir 是 /current（也在 recentWorkdirs 内）；distinct 去重后
+        // 只拉两次（/current + /other），不会对 /current 重复拉取。
+        coVerify(exactly = 1) { repository.getSessionsForDirectory("/current") }
+        coVerify(exactly = 1) { repository.getSessionsForDirectory("/other") }
+    }
+
+    @Test
     fun `loadInitialData skips the directory fetch when no workdir is restored`() {
         every { settingsManager.currentWorkdir } returns null
+        every { settingsManager.recentWorkdirs } returns emptyList()
         coEvery { repository.getCommands() } returns Result.success(emptyList())
 
         coordinator.loadInitialData()
         runPending()
 
         coVerify(exactly = 0) { repository.getSessionsForDirectory(any()) }
+    }
+
+    // ── §generation-guard: cross-host in-flight pollution ─────────────────
+
+    @Test
+    fun `loadInitialData drops directory fetches that return after a reconfigure`() {
+        // §generation-guard: a host switch (cancelSseForReconfigure) between
+        // dispatch and return must not let the PREVIOUS host's sessions
+        // pollute the NEW host's directorySessions. The fan-out here (up to 8
+        // launches) amplifies the in-flight window, so the generation check
+        // gates every onSuccess write.
+        every { settingsManager.currentWorkdir } returns "/proj"
+        every { settingsManager.recentWorkdirs } returns listOf("/proj")
+        coEvery { repository.getCommands() } returns Result.success(emptyList())
+        // Suspend the fetch so we can interleave a reconfigure before it returns.
+        val pending = CompletableDeferred<Result<List<Session>>>()
+        coEvery { repository.getSessionsForDirectory("/proj") } coAnswers { pending.await() }
+
+        coordinator.loadInitialData()
+        runPending() // launch now suspended on pending.await()
+
+        // Host/profile switch → cancelSseForReconfigure bumps generation.
+        coordinator.cancelSseForReconfigure()
+
+        // The stale-host result arrives AFTER the reconfigure.
+        pending.complete(Result.success(listOf(Session(id = "stale", directory = "/proj"))))
+        runPending()
+
+        // Stale result dropped: /proj must NOT appear in directorySessions.
+        assertFalse(
+            "stale-host directory result must be dropped after reconfigure",
+            slices.sessionList.value.directorySessions.containsKey("/proj")
+        )
+    }
+
+    @Test
+    fun `loadInitialData keeps directory fetches that return without a reconfigure`() {
+        // Positive control for the generation guard: identical setup but NO
+        // reconfigure interleaved → the result IS written.
+        every { settingsManager.currentWorkdir } returns "/proj"
+        every { settingsManager.recentWorkdirs } returns listOf("/proj")
+        coEvery { repository.getCommands() } returns Result.success(emptyList())
+        val sessions = listOf(Session(id = "s1", directory = "/proj"))
+        coEvery { repository.getSessionsForDirectory("/proj") } returns Result.success(sessions)
+
+        coordinator.loadInitialData()
+        runPending()
+
+        assertEquals(sessions, slices.sessionList.value.directorySessions["/proj"])
     }
 
     // ── SSE lifecycle ──────────────────────────────────────────────────────

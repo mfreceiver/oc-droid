@@ -1,0 +1,16 @@
+{
+  "agent": "gpter",
+  "scope": "fix-workdir-persist",
+  "date": "2026-07-04",
+  "reviewed_commit": "b61538e",
+  "version_target": "0.2.20",
+  "verdict": "pass",
+  "score": 9.5,
+  "round": 2,
+  "blocking_issues": [],
+  "non_blocking_issues": [
+    "appendDirectorySessions 的 slice 与 legacy state mirror 是两步写入，理论上 legacy reader 可在极短窗口读到旧 state.directorySessions；最终一致，且主路径应逐步迁移到 slice。",
+    "generation guard 只覆盖 directorySessions fetch；loadSessions/loadAgents/loadProviders 等旧 initial-data fan-out 的跨 host late-return 风险未由本补丁统一解决（本轮对症，非阻塞）。"
+  ],
+  "notes": "第 2 轮复审。第 1 轮 8.4/10 NEEDS_FIX（阻塞：旧 host in-flight directory fetch 跨 host 污染；重要：draft 残留、trim vs raw key 不一致、并发理由与 updateAndSync 实现不符）。本轮针对全部反馈修复：directoryFetchGeneration guard + appendDirectorySessions 真 StateFlow.update CAS + createSessionInWorkdir 入口 trim + onFailure 接 reportNonFatalIssue。reviewed_commit=b61538e 为评审时 HEAD，所审改动随后提交。"
+}

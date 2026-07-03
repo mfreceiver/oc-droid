@@ -297,6 +297,10 @@ internal class HostProfileController(
         // host B. configureRepositoryForProfile re-scopes to the (now-null)
         // workdir, which is correct for a fresh host.
         settingsManager.currentWorkdir = null
+        // §recent-workdirs: clear per-host workdir memory too — a path from
+        // host A is meaningless on host B (same rationale as currentWorkdir
+        // above). loadInitialData on the new host re-seeds from scratch.
+        settingsManager.recentWorkdirs = emptyList()
     }
 
     // ── Repository reconfiguration ────────────────────────────────────────

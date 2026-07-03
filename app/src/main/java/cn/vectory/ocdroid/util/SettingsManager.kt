@@ -96,6 +96,46 @@ class SettingsManager @Inject constructor(
         get() = encryptedPrefs.getString(KEY_CURRENT_WORKDIR, null)
         set(value) = encryptedPrefs.edit().putString(KEY_CURRENT_WORKDIR, value).apply()
 
+    /**
+     * The set of workdirs the user has recently connected to (MRU order), so
+     * cold-start [cn.vectory.ocdroid.ui.controller.ConnectionCoordinator.loadInitialData]
+     * can re-fetch directory-scoped sessions for EVERY connected project —
+     * not just the single [currentWorkdir]. Without this, a non-current
+     * workdir whose sessions fall outside the global `getSessions(limit=10)`
+     * first page vanishes from the Sessions screen after restart (the "one of
+     * my frequent projects randomly disappeared" bug). Capped at
+     * [MAX_RECENT_WORKDIRS].
+     */
+    var recentWorkdirs: List<String>
+        get() {
+            val json = encryptedPrefs.getString(KEY_RECENT_WORKDIRS, null) ?: return emptyList()
+            return try {
+                Json.decodeFromString<List<String>>(json)
+            } catch (e: Exception) {
+                Log.w(TAG, "Failed to parse recent workdirs, using empty", e)
+                emptyList()
+            }
+        }
+        set(value) {
+            val json = Json.encodeToString(value)
+            encryptedPrefs.edit().putString(KEY_RECENT_WORKDIRS, json).apply()
+        }
+
+    /**
+     * Prepends [workdir] to [recentWorkdirs] (MRU), deduplicating and capping
+     * at [MAX_RECENT_WORKDIRS]. Called when the user connects a project via
+     * `createSessionInWorkdir` so the workdir survives restart even after it
+     * is later superseded as [currentWorkdir]. Blank/whitespace-only entries
+     * are ignored.
+     */
+    fun addRecentWorkdir(workdir: String) {
+        val normalized = workdir.trim()
+        if (normalized.isEmpty()) return
+        val updated = (listOf(normalized) + recentWorkdirs.filter { it != normalized })
+            .take(MAX_RECENT_WORKDIRS)
+        recentWorkdirs = updated
+    }
+
     var selectedAgentName: String?
         get() = encryptedPrefs.getString(KEY_AGENT_NAME, null)
         set(value) = encryptedPrefs.edit().putString(KEY_AGENT_NAME, value).apply()
@@ -350,6 +390,9 @@ class SettingsManager @Inject constructor(
         private const val KEY_SESSION_ID = "session_id"
         private const val KEY_LAST_NAV_PAGE = "last_nav_page"
         private const val KEY_CURRENT_WORKDIR = "current_workdir"
+        private const val KEY_RECENT_WORKDIRS = "recent_workdirs"
+        /** Cap for [recentWorkdirs] — bounds cold-start directory-fetch fan-out. */
+        private const val MAX_RECENT_WORKDIRS = 8
         private const val KEY_AGENT_NAME = "agent_name"
         private const val KEY_THEME = "theme"
         private const val KEY_UI_FONT_SCALE = "ui_font_scale"

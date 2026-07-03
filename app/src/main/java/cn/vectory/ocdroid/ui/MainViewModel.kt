@@ -591,6 +591,13 @@ class MainViewModel @Inject constructor(
     }
 
     override fun clearPersistedWorkdir() {
+        // §recent-workdirs: deliberately does NOT clear recentWorkdirs. Draft
+        // discard (clearDraftIfActive) only abandons the in-progress, unsent
+        // draft — the workdir itself remains a project the user has shown
+        // interest in, so it stays in recentWorkdirs and is re-fetched on the
+        // next cold start (bounded by MAX_RECENT_WORKDIRS MRU eviction). This
+        // is intentional: "discard draft" ≠ "forget this project". If a user
+        // wants a project gone they disconnect it from the Sessions screen.
         settingsManager.currentWorkdir = null
     }
 
@@ -1261,6 +1268,13 @@ class MainViewModel @Inject constructor(
      * session or switches host), the draft is discarded.
      */
     fun createSessionInWorkdir(workdir: String) {
+        // §key-consistency: normalize once at the entry so every downstream
+        // store — repository.setCurrentDirectory, currentWorkdir, recentWorkdirs,
+        // directorySessions map key, getSessionsForDirectory parameter — shares
+        // the identical key. Without this, a workdir with surrounding whitespace
+        // would split into two directorySessions keys (raw here vs trimmed in
+        // addRecentWorkdir / cold-start restore).
+        val workdir = workdir.trim()
         repository.setCurrentDirectory(workdir)
         // Clear any previously selected session: draft mode shows an empty
         // chat page until the first message materialises the session.
@@ -1288,6 +1302,12 @@ class MainViewModel @Inject constructor(
         // Persist the connected workdir so a restart re-scopes the repository
         // to this project (currentDirectory is otherwise in-memory only).
         settingsManager.currentWorkdir = workdir
+        // §recent-workdirs: remember this workdir so cold-start loadInitialData
+        // re-fetches its directory sessions even after the user later switches
+        // to a different project. currentWorkdir is a single value; without
+        // this, every non-current project whose sessions fall outside the
+        // global getSessions(limit) first page vanishes after restart.
+        settingsManager.addRecentWorkdir(workdir)
         // Best-effort: fetch the existing root sessions for this workdir (#10)
         // so the user can discover / resume prior conversations in the project
         // they just connected. Stored in [AppState.directorySessions] (a map
@@ -1937,6 +1957,7 @@ class MainViewModel @Inject constructor(
      * (onSuccess only) — acceptable for a user-initiated refresh.
      */
     fun refreshDirectorySessions(workdir: String) {
+        val workdir = workdir.trim()
         if (workdir.isBlank()) return
         viewModelScope.launch {
             repository.getSessionsForDirectory(workdir)

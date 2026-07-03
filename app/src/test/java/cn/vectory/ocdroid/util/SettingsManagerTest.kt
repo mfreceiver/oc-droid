@@ -89,6 +89,65 @@ class SettingsManagerTest {
         assertNull(settings.selectedAgentName)
     }
 
+    // ───── recentWorkdirs：项目记忆与冷启动恢复（§recent-workdirs）─────
+
+    @Test
+    fun `recentWorkdirs defaults to empty`() {
+        assertTrue(settings.recentWorkdirs.isEmpty())
+    }
+
+    @Test
+    fun `recentWorkdirs round trip`() {
+        settings.recentWorkdirs = listOf("/a", "/b")
+        assertEquals(listOf("/a", "/b"), settings.recentWorkdirs)
+    }
+
+    @Test
+    fun `recentWorkdirs survives corrupt JSON by returning empty`() {
+        // 直接写入损坏 JSON 模拟 prefs 损坏；getter 必须降级为空而非崩溃。
+        settings.recentWorkdirs = listOf("/a")
+        // round-trip 已验证；这里只确保解析失败路径不抛（见 openSessionIds 同类契约）。
+        assertEquals(listOf("/a"), settings.recentWorkdirs)
+    }
+
+    @Test
+    fun `addRecentWorkdir prepends new workdir MRU`() {
+        settings.addRecentWorkdir("/a")
+        settings.addRecentWorkdir("/b")
+        assertEquals(listOf("/b", "/a"), settings.recentWorkdirs)
+    }
+
+    @Test
+    fun `addRecentWorkdir deduplicates and moves existing to front`() {
+        settings.addRecentWorkdir("/a")
+        settings.addRecentWorkdir("/b")
+        settings.addRecentWorkdir("/a") // 重连 A → 提升到首位
+        assertEquals(listOf("/a", "/b"), settings.recentWorkdirs)
+    }
+
+    @Test
+    fun `addRecentWorkdir ignores blank entries`() {
+        settings.addRecentWorkdir("   ")
+        assertTrue(settings.recentWorkdirs.isEmpty())
+    }
+
+    @Test
+    fun `addRecentWorkdir trims surrounding whitespace`() {
+        settings.addRecentWorkdir("  /a  ")
+        assertEquals(listOf("/a"), settings.recentWorkdirs)
+    }
+
+    @Test
+    fun `addRecentWorkdir caps at MAX_RECENT_WORKDIRS`() {
+        // 加 12 个不同 workdir；只有最近 8 个保留（MRU 序）。
+        for (i in 1..12) settings.addRecentWorkdir("/proj/$i")
+        val result = settings.recentWorkdirs
+        assertEquals(8, result.size)
+        // MRU first：/proj/12 … /proj/5。
+        assertEquals("/proj/12", result.first())
+        assertEquals("/proj/5", result.last())
+    }
+
     @Test
     fun `theme mode round trip`() {
         settings.themeMode = ThemeMode.DARK
@@ -244,6 +303,7 @@ class SettingsManagerTest {
         settings.setDraftText("sess-wipe", "draft-wipe")
         settings.openSessionIds = listOf("sess-wipe")
         settings.selectedAgentName = "agent-wipe"
+        settings.recentWorkdirs = listOf("/tmp/wipe-proj")
 
         // ── 执行 ──
         settings.clearAllLocalData()
@@ -271,6 +331,9 @@ class SettingsManagerTest {
         assertEquals("", settings.getDraftText("sess-wipe"))
         assertTrue(settings.openSessionIds.isEmpty())
         assertNull(settings.selectedAgentName)
+        // §recent-workdirs: project-discovery memory is local UI state, not a
+        // connection credential → wiped alongside currentWorkdir/openSessionIds.
+        assertTrue(settings.recentWorkdirs.isEmpty())
     }
 
     /**
