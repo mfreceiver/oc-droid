@@ -133,4 +133,118 @@ class DirectoryHeaderInterceptorTest {
             request.getHeader("X-Opencode-Skip-Dir")
         )
     }
+
+    // ---- ② directory query rewrite (GET/HEAD mirror into query string) ----
+
+    @Test
+    fun `GET mirrors directory into query when workdir is set`() {
+        hostConfig.setCurrentDirectory("/workdir/project")
+        server.enqueue(MockResponse().setBody("ok"))
+
+        client.newCall(Request.Builder().url(server.url("/file/status")).build())
+            .execute().use { /* drain */ }
+
+        val request = server.takeRequest()
+        assertEquals("/workdir/project", request.getHeader("X-Opencode-Directory"))
+        assertEquals(
+            "header is kept as double-insurance",
+            "/workdir/project",
+            request.requestUrl?.queryParameter("directory")
+        )
+    }
+
+    @Test
+    fun `GET under api path adds both directory and location directory query`() {
+        hostConfig.setCurrentDirectory("/workdir/project")
+        server.enqueue(MockResponse().setBody("ok"))
+
+        client.newCall(Request.Builder().url(server.url("/api/session/abc")).build())
+            .execute().use { /* drain */ }
+
+        val request = server.takeRequest()
+        assertEquals("/workdir/project", request.requestUrl?.queryParameter("directory"))
+        assertEquals(
+            "/workdir/project",
+            request.requestUrl?.queryParameter("location[directory]")
+        )
+    }
+
+    @Test
+    fun `GET outside api path does not add location directory query`() {
+        hostConfig.setCurrentDirectory("/workdir/project")
+        server.enqueue(MockResponse().setBody("ok"))
+
+        client.newCall(Request.Builder().url(server.url("/file/status")).build())
+            .execute().use { /* drain */ }
+
+        val request = server.takeRequest()
+        assertEquals("/workdir/project", request.requestUrl?.queryParameter("directory"))
+        assertNull(request.requestUrl?.queryParameter("location[directory]"))
+    }
+
+    @Test
+    fun `POST does not mirror directory into query`() {
+        hostConfig.setCurrentDirectory("/workdir/project")
+        server.enqueue(MockResponse().setBody("ok"))
+
+        client.newCall(
+            Request.Builder().url(server.url("/session/abc/prompt_async"))
+                .post(okhttp3.RequestBody.create(null, ByteArray(0)))
+                .build()
+        ).execute().use { /* drain */ }
+
+        val request = server.takeRequest()
+        assertEquals("POST keeps the header", "/workdir/project", request.getHeader("X-Opencode-Directory"))
+        assertNull("POST must not add directory query", request.requestUrl?.queryParameter("directory"))
+    }
+
+    @Test
+    fun `GET preserves caller-supplied directory query without overwrite`() {
+        hostConfig.setCurrentDirectory("/workdir/project")
+        server.enqueue(MockResponse().setBody("ok"))
+
+        client.newCall(
+            Request.Builder().url(server.url("/file/status?directory=/explicit/dir")).build()
+        ).execute().use { /* drain */ }
+
+        val request = server.takeRequest()
+        assertEquals(
+            "caller query must win, not be overwritten by the workdir",
+            "/explicit/dir",
+            request.requestUrl?.queryParameter("directory")
+        )
+    }
+
+    @Test
+    fun `GET with skip-dir and explicit header still mirrors explicit dir into query`() {
+        hostConfig.setCurrentDirectory("/workdir/project")
+        server.enqueue(MockResponse().setBody("ok"))
+
+        client.newCall(
+            Request.Builder().url(server.url("/file"))
+                .header(HttpHeaders.SKIP_DIR_HEADER, "1")
+                .header(HttpHeaders.DIRECTORY_HEADER, "/browse/target")
+                .build()
+        ).execute().use { /* drain */ }
+
+        val request = server.takeRequest()
+        assertEquals("/browse/target", request.getHeader("X-Opencode-Directory"))
+        assertEquals(
+            "browse-picker explicit dir is mirrored too (proxy-safe)",
+            "/browse/target",
+            request.requestUrl?.queryParameter("directory")
+        )
+    }
+
+    @Test
+    fun `GET with no workdir and no skip-dir adds neither header nor query`() {
+        server.enqueue(MockResponse().setBody("ok"))
+
+        client.newCall(Request.Builder().url(server.url("/file/status")).build())
+            .execute().use { /* drain */ }
+
+        val request = server.takeRequest()
+        assertNull(request.getHeader("X-Opencode-Directory"))
+        assertNull(request.requestUrl?.queryParameter("directory"))
+    }
 }
