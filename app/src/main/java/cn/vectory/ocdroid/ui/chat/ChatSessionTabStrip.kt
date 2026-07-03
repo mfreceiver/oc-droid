@@ -44,6 +44,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
@@ -347,11 +348,15 @@ private fun SessionTab(
                     )
                 }
                 Text(
-                    text = truncateTitle(session.displayName),
-                    // weight(1f) with default fill=true: the title expands to fill its
-                    // share so the dot stays left and the close-X pins to the tab's
-                    // right edge consistently regardless of title length.
+                    // The tab label bypasses the shared 15-char cap used by
+                    // ChatTopBar's breadcrumb: the tab's width is now the
+                    // limiting factor, so we let the text fill that width and
+                    // rely on maxLines=1 + TextOverflow.Ellipsis for genuine
+                    // overflow truncation. This gives wide tabs a longer title
+                    // and keeps the close-X pinned to the right edge.
+                    text = session.displayName,
                     modifier = Modifier.weight(1f),
+                    textAlign = TextAlign.Center,
                     style = MaterialTheme.typography.labelMedium,
                     color = if (isSelected) MaterialTheme.colorScheme.onSurface
                     else MaterialTheme.colorScheme.onSurfaceVariant,
