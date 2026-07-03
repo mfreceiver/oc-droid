@@ -1,6 +1,7 @@
 package cn.vectory.ocdroid
 
 import android.content.Intent
+import android.content.res.Configuration
 import android.os.Bundle
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
@@ -24,6 +25,7 @@ import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
@@ -154,13 +156,10 @@ class MainActivity : AppCompatActivity() {
                 ThemeMode.DARK -> true
                 ThemeMode.SYSTEM -> isSystemInDarkTheme()
             }
-            // Single full-screen pane in ALL sizes. The former tablet/landscape
-            // split-pane (sidebar) layouts were removed; the Activity is locked
-            // to portrait (AndroidManifest screenOrientation), so orientation
-            // changes no longer apply. A single pane keeps the global
-            // currentDirectory unambiguous (the Sessions file-browse overlay is
-            // full-screen, so Chat is never interactable during a browse — no
-            // desync), and matches the product decision to drop the sidebar.
+            // Phase 7：portrait 锁已移除（AndroidManifest），横屏下 PhoneLayout 渲染
+            // 左 1/3 SessionsScreen 面板 + 右 ChatScreen 两栏（见 PhoneLayout 的
+            // isLandscape 分支）；竖屏保持单栏全屏。configChanges 让旋转走 Compose
+            // recompose 而非 Activity 重建。文件浏览器 overlay 仍全屏覆盖（两栏下亦然）。
             // §B3: compute the M3 WindowSizeClass once per configuration from
             // the Activity (the canonical entry point — `calculateWindowSizeClass`
             // is the stable 1.2.0+ API for deriving Compact / Medium / Expanded
@@ -238,6 +237,12 @@ private fun PhoneLayout(viewModel: MainViewModel, initialPage: Int = 0) {
         mutableStateOf(initialPage.coerceIn(0, screens.lastIndex))
     }
 
+    // Phase 7 横屏分栏：仅横屏生效。默认收起（Q3），会话按钮切换显隐；选中会话后
+    // 保持打开（Q4，chat pane 永远在右，无需切换）。竖屏保持原导航行为（Q2）。
+    val configuration = LocalConfiguration.current
+    val isLandscape = configuration.orientation == Configuration.ORIENTATION_LANDSCAPE
+    var landscapePanelVisible by rememberSaveable { mutableStateOf(false) }
+
     fun switchToPage(page: Int) {
         val clamped = page.coerceIn(0, screens.lastIndex)
         navPage = clamped
@@ -263,6 +268,13 @@ private fun PhoneLayout(viewModel: MainViewModel, initialPage: Int = 0) {
         switchToPage(screens.indexOf(Screen.Chat))
     }
 
+    // Phase 7: 横屏面板打开时，back 先关面板（不退出 app）。navPage==Chat 守卫
+    // 必需——landscapePanelVisible 是 rememberSaveable，从 Chat 进 Settings 后仍
+    // 可能残留 true；无此守卫会吃掉 Settings 的首次 back（去关不可见面板）。
+    BackHandler(enabled = isLandscape && landscapePanelVisible && navPage == screens.indexOf(Screen.Chat)) {
+        landscapePanelVisible = false
+    }
+
     Box(modifier = Modifier.fillMaxSize()) {
         Scaffold(
             contentWindowInsets = WindowInsets(0, 0, 0, 0)
@@ -276,15 +288,44 @@ private fun PhoneLayout(viewModel: MainViewModel, initialPage: Int = 0) {
                     .padding(padding)
             ) { page ->
                 when (screens[page]) {
-                    Screen.Chat -> ChatScreen(
-                        viewModel = viewModel,
-                        onNavigateToSettings = {
-                            switchToPage(screens.indexOf(Screen.Settings))
-                        },
-                        onNavigateToSessions = {
-                            switchToPage(screens.indexOf(Screen.Sessions))
+                    Screen.Chat -> {
+                        // 横屏：会话按钮切换左 1/3 面板；竖屏：按钮跳转全屏 SessionsScreen。
+                        val onSessionAction: () -> Unit = if (isLandscape) {
+                            { landscapePanelVisible = !landscapePanelVisible }
+                        } else {
+                            { switchToPage(screens.indexOf(Screen.Sessions)) }
                         }
-                    )
+                        val showPanel = isLandscape && landscapePanelVisible
+                        Row(modifier = Modifier.fillMaxSize()) {
+                            if (showPanel) {
+                                Box(modifier = Modifier.weight(1f).fillMaxHeight()) {
+                                    SessionsScreen(
+                                        viewModel = viewModel,
+                                        // Q4: panel 选中会话保持打开；chat pane 永远在右，
+                                        // onSwitchToChat 在面板内 no-op。
+                                        onSwitchToChat = { },
+                                        showBackNavigation = false,
+                                    )
+                                }
+                            }
+                            // ChatScreen 包在稳定位置 Box 内：横↔竖旋转不换子树，
+                            // 保留 ChatScreen 本地 remember{} 状态（滚动位置/pager 等）。
+                            // （评审 maxer B1：不用 if/else 换子树。）
+                            Box(
+                                modifier = Modifier
+                                    .weight(if (showPanel) 2f else 1f)
+                                    .fillMaxHeight()
+                            ) {
+                                ChatScreen(
+                                    viewModel = viewModel,
+                                    onNavigateToSettings = {
+                                        switchToPage(screens.indexOf(Screen.Settings))
+                                    },
+                                    onNavigateToSessions = onSessionAction
+                                )
+                            }
+                        }
+                    }
                     Screen.Sessions -> SessionsScreen(
                         viewModel = viewModel,
                         onSwitchToChat = { switchToPage(screens.indexOf(Screen.Chat)) }
@@ -323,4 +364,5 @@ private fun PhoneLayout(viewModel: MainViewModel, initialPage: Int = 0) {
         }
     }
 }
+
 

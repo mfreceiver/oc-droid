@@ -1,0 +1,8 @@
+{
+  "agent": "glmer", "scope": "phase6-dialog-sheet", "date": "2026-07-04",
+  "reviewed_commit": "69c7c25", "version_target": null,
+  "verdict": "pass", "score": 9.6,
+  "blocking_issues": [],
+  "non_blocking_issues": ["scroll Column weight(1f) 已补（极端尺寸 footer 可见性）", "缺模拟器实跑"],
+  "notes": "第2轮通过。第1轮 7.8（action row 在 scroll 内 + swipe-dismiss 硬切）→ footer 移出 scroll + hide() 动画 + skipPartiallyExpanded=true + 决策注释。第2轮补 weight(1f)。"
+}

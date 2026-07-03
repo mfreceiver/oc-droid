@@ -50,7 +50,13 @@ import java.util.Locale
 @Composable
 fun SessionsScreen(
     viewModel: MainViewModel,
-    onSwitchToChat: () -> Unit = {}
+    onSwitchToChat: () -> Unit = {},
+    /**
+     * Phase 7：横屏左 1/3 面板内渲染时设 false，隐藏 TopAppBar 的 navigationIcon
+     * （面板始终与 chat pane 并列，无需"返回 chat"——onSwitchToChat 在面板内为 no-op）。
+     * 竖屏全屏渲染时默认 true。
+     */
+    showBackNavigation: Boolean = true
 ) {
     // §R-17 Stage 3 (+ follow-up debt cleanup): subscribe to the relevant
     // slice Flows directly instead of the whole-app AppState. SessionsScreen
@@ -194,14 +200,16 @@ fun SessionsScreen(
                     Text(stringResource(R.string.nav_sessions))
                 },
                 navigationIcon = {
-                    // Back to Chat (the destination-aware entry point). The
-                    // Sessions screen is no longer swipe-reachable — this is
-                    // the primary way back to the conversation.
-                    IconButton(onClick = onSwitchToChat) {
-                        Icon(
-                            Icons.Default.Forum,
-                            contentDescription = stringResource(R.string.common_back)
-                        )
+                    if (showBackNavigation) {
+                        // Back to Chat (the destination-aware entry point). The
+                        // Sessions screen is no longer swipe-reachable — this is
+                        // the primary way back to the conversation.
+                        IconButton(onClick = onSwitchToChat) {
+                            Icon(
+                                Icons.Default.Forum,
+                                contentDescription = stringResource(R.string.common_back)
+                            )
+                        }
                     }
                 },
                 actions = {
