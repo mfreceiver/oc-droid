@@ -1,0 +1,15 @@
+{
+  "agent": "glmer",
+  "scope": "release",
+  "date": "2026-07-03",
+  "reviewed_commit": "24e296e",
+  "version_target": "0.2.16",
+  "verdict": "pass",
+  "score": 9.7,
+  "blocking_issues": [],
+  "non_blocking_issues": [
+    "ChatScreen.kt:468 — guard 在 collect 块内读 pagerState.currentPage，隐式依赖协程调度即时性（snapshotFlow emission 与 collect 同协程 lockstep，无实际风险；未来若 collect 体改派发到其他 dispatcher 需复查）。",
+    "ChatScreen.kt:459-465 — 注释把 guard 框定为修复'特定 transient'，但该 transient 从 Pager 实现角度难精确复现；建议改述为'settledPage==currentPage 的 settle 不变量强制'，更贴近实际语义，避免误导维护者 hunt 可能不存在的 race。"
+  ],
+  "notes": "两处改动正确、低风险。Guard 是 sound 的收紧不变量（仅在 settledPage==currentPage 时驱动 select），对 swipe/tab-tap/close-right/初始加载/draft-mode 全路径无回归；快速多页 swipe 中间页被 guard 跳过（正确）。title 改动保留 ellipsis 兜底，close-X fixed-size 不被挤压，center 对齐视觉合理；truncateTitle 仅剩 ChatTopBar breadcrumb 一个 caller 未受影响。check.sh green。"
+}
