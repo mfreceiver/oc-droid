@@ -48,7 +48,6 @@ import cn.vectory.ocdroid.ui.MainViewModel
 import cn.vectory.ocdroid.ui.METADATA_MARKER_ROLES
 import cn.vectory.ocdroid.ui.injectMetadataMarkers
 import cn.vectory.ocdroid.ui.isStaleQuestionPart
-import cn.vectory.ocdroid.ui.theme.opencode
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.flow.drop
@@ -586,7 +585,6 @@ private fun GapDivider(
     onClick: () -> Unit,
     modifier: Modifier = Modifier
 ) {
-    val oc = MaterialTheme.opencode
     val interactionSource = remember { MutableInteractionSource() }
     val isPressed by interactionSource.collectIsPressedAsState()
     val alpha by animateFloatAsState(
@@ -615,14 +613,14 @@ private fun GapDivider(
             // Left rule
             Surface(
                 modifier = Modifier.weight(1f).height(1.dp),
-                color = oc.borderBase
+                color = MaterialTheme.colorScheme.outline
             ) {}
             // Center chip
             Surface(
                 modifier = Modifier.padding(horizontal = 12.dp),
                 shape = RoundedCornerShape(6.dp),
                 color = Color.Transparent,
-                border = BorderStroke(1.dp, oc.borderBase)
+                border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline)
             ) {
                 Row(
                     modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
@@ -647,7 +645,7 @@ private fun GapDivider(
             // Right rule
             Surface(
                 modifier = Modifier.weight(1f).height(1.dp),
-                color = oc.borderBase
+                color = MaterialTheme.colorScheme.outline
             ) {}
         }
     }

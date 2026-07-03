@@ -3,27 +3,14 @@ package cn.vectory.ocdroid.ui.theme
 import androidx.compose.ui.graphics.Color
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Material 3 color system — v2 "oc-2" skin (global retheme, R-F).
+// Material 3 color system — Phase 2 Dynamic Color 改造后的「pre-12 回退固定方案」。
 //
-// Strategy (docs/v2-redesign-plan.md §2.1/§2.2): keep M3 ColorScheme as the
-// color carrier (avoid touching every `MaterialTheme.colorScheme.xxx` call
-// site), swap the values to v2 tokens. v2-specific semantics that M3 slots
-// can't express (layer-01/02/03, faint, code-accent, border-focus, state-*,
-// bg-contrast) live in [OpencodeColors], provided via [LocalOpencodeColors].
+// 这些 Dark*/Light* Color 值仅在 Android < 12（无 Dynamic Color API）时作为
+// DarkColorScheme / LightColorScheme 的填充值。Android 12+ 走系统壁纸派生的
+// dynamicLightColorScheme / dynamicDarkColorScheme，本文件的颜色值不生效。
 //
-// Numeric values come from docs/opencode-web-style-reference.md §2.4. Brand
-// identity colors ([BrandPrimary] etc.) and functional diff colors
-// ([AddedLine] etc.) are intentionally kept unchanged.
+// 语义固定色（agent/diff/status，不跟随壁纸）见 [SemanticColors]。
 // ─────────────────────────────────────────────────────────────────────────────
-
-/**
- * Brand identity. Kept at the original electric blue for any UI that still
- * references it directly. Note: v2's accent (`#3b5cf6`) is now exposed via
- * [LightPrimary]/[DarkPrimary] and [OpencodeColors.accentText], NOT via this
- * constant — decoupled so [BrandPrimary] stays a stable legacy reference.
- */
-val BrandPrimary = Color(0xFF3B82F6)
-val BrandGold = Color(0xFFD9A621)
 
 /**
  * Stop button red. Material's default error red read as too dark AND too pure at
@@ -141,23 +128,7 @@ val LightInversePrimary = Color(0xFF9DB5F5)
 val LightScrim = Color(0xFF000000)
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Functional colors (diff viewer, git file status). These carry concrete
-// semantic meaning (added/removed/modified) and are intentionally NOT part of
-// the brand accent system.
-//
-// R-27: 这些色已迁移到 [OpencodeColors]（明暗双套）。下方顶层 val 保留为
-// **deprecated 别名**指向 [LightOpencodeColors] 对应字段——仅为兼容潜在的
-// 外部引用，新代码请改用 `MaterialTheme.opencode.addedFile` 等 token。
+// Functional colors (diff viewer, git file status) 已迁移到 [SemanticColors]
+// （Phase 2：原 OpencodeColors 明暗双套合并为单一中亮度值）。本文件不再承载
+// 语义固定色——它们集中在 [SemanticColors] object。
 // ─────────────────────────────────────────────────────────────────────────────
-@Deprecated("R-27: 改用 MaterialTheme.opencode.addedLine（明暗双套）", ReplaceWith("LightOpencodeColors.addedLine"))
-val AddedLine get() = LightOpencodeColors.addedLine
-@Deprecated("R-27: 改用 MaterialTheme.opencode.deletedLine（明暗双套）", ReplaceWith("LightOpencodeColors.deletedLine"))
-val DeletedLine get() = LightOpencodeColors.deletedLine
-@Deprecated("R-27: 改用 MaterialTheme.opencode.modifiedFile（明暗双套）", ReplaceWith("LightOpencodeColors.modifiedFile"))
-val ModifiedFile get() = LightOpencodeColors.modifiedFile
-@Deprecated("R-27: 改用 MaterialTheme.opencode.addedFile（明暗双套）", ReplaceWith("LightOpencodeColors.addedFile"))
-val AddedFile get() = LightOpencodeColors.addedFile
-@Deprecated("R-27: 改用 MaterialTheme.opencode.deletedFile（明暗双套）", ReplaceWith("LightOpencodeColors.deletedFile"))
-val DeletedFile get() = LightOpencodeColors.deletedFile
-@Deprecated("R-27: 改用 MaterialTheme.opencode.untrackedFile（明暗双套）", ReplaceWith("LightOpencodeColors.untrackedFile"))
-val UntrackedFile get() = LightOpencodeColors.untrackedFile

@@ -16,7 +16,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.res.stringResource
 import cn.vectory.ocdroid.R
 import cn.vectory.ocdroid.data.model.FileNode
-import cn.vectory.ocdroid.ui.theme.opencode
+import cn.vectory.ocdroid.ui.theme.SemanticColors
 
 @Composable
 internal fun FileBrowserPane(
@@ -41,12 +41,11 @@ internal fun FileRow(
     status: String?,
     onClick: () -> Unit
 ) {
-    val oc = MaterialTheme.opencode
     val statusColor = when (status) {
-        "added" -> oc.addedFile
-        "modified" -> oc.modifiedFile
-        "deleted" -> oc.deletedFile
-        else -> if (status == "untracked") oc.untrackedFile else null
+        "added" -> SemanticColors.addedFile
+        "modified" -> SemanticColors.modifiedFile
+        "deleted" -> SemanticColors.deletedFile
+        else -> if (status == "untracked") SemanticColors.untrackedFile else null
     }
 
     ListItem(

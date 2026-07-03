@@ -16,7 +16,6 @@ import androidx.compose.ui.unit.dp
 import cn.vectory.ocdroid.data.model.Message
 import cn.vectory.ocdroid.data.model.Part
 import cn.vectory.ocdroid.data.repository.OpenCodeRepository
-import cn.vectory.ocdroid.ui.theme.opencode
 
 // ── Per-message row + Part dispatcher ────────────────────────────────────
 // MessageRow lays out a single turn (column of parts + footer caption +
@@ -234,7 +233,7 @@ internal fun MessageRow(
             Text(
                 text = footerText,
                 style = MaterialTheme.typography.labelSmall,
-                color = MaterialTheme.opencode.faint,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
                 modifier = Modifier.padding(end = 4.dp, top = 4.dp)
             )
         }

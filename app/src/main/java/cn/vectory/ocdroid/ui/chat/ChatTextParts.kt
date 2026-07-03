@@ -47,7 +47,6 @@ import com.mikepenz.markdown.m3.Markdown
 import cn.vectory.ocdroid.data.repository.OpenCodeRepository
 import cn.vectory.ocdroid.ui.theme.LocalMarkdownFontSizes
 import cn.vectory.ocdroid.ui.theme.markdownTypography
-import cn.vectory.ocdroid.ui.theme.opencode
 import cn.vectory.ocdroid.ui.util.DataUriImageTransformer
 import cn.vectory.ocdroid.ui.util.HttpImageHolder
 import cn.vectory.ocdroid.ui.util.MarkdownImageResolver
@@ -230,11 +229,10 @@ internal fun TextPart(
         // user's side from the assistant's full-width markdown. BoxWithConstraints
         // gives us the precise 0.82 multiplier (short prompts stay natural-width
         // via widthIn rather than being stretched to 82%).
-        val oc = MaterialTheme.opencode
         BoxWithConstraints(modifier = modifier.fillMaxWidth()) {
             val maxBubble = maxWidth * 0.82f
             Surface(
-                color = oc.layer02,
+                color = MaterialTheme.colorScheme.surfaceContainerLow,
                 shape = RoundedCornerShape(10.dp),
                 modifier = Modifier
                     .align(Alignment.CenterEnd)
@@ -465,12 +463,11 @@ internal fun WrappedCodeBlock(model: MarkdownComponentModel) {
  */
 @Composable
 internal fun CodeBlockSurface(code: String, language: String) {
-    val oc = MaterialTheme.opencode
     Surface(
         modifier = Modifier.fillMaxWidth(),
         shape = RoundedCornerShape(6.dp),
-        color = oc.layer02,
-        border = BorderStroke(1.dp, oc.borderBase)
+        color = MaterialTheme.colorScheme.surfaceContainerLow,
+        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline)
     ) {
         Box(modifier = Modifier.fillMaxWidth()) {
             SelectionContainer {
@@ -542,7 +539,6 @@ internal fun WrappedTable(model: MarkdownComponentModel) {
     val node = model.node
     val content = model.content
     val style = model.typography.table
-    val oc = MaterialTheme.opencode
     val cellPadding = LocalMarkdownDimens.current.tableCellPadding
     val header = remember(node) { node.findChildOfType(HEADER) }
     val bodyRows = remember(node) { node.children.filter { it.type == ROW } }
@@ -559,7 +555,7 @@ internal fun WrappedTable(model: MarkdownComponentModel) {
     BoxWithConstraints(
         modifier = Modifier
             .fillMaxWidth()
-            .background(oc.layer02, RoundedCornerShape(6.dp))
+            .background(MaterialTheme.colorScheme.surfaceContainerLow, RoundedCornerShape(6.dp))
     ) {
         // Horizontal-scroll only when the capped columns genuinely overflow the
         // available width; otherwise let the table sit at its (capped) natural
@@ -579,7 +575,7 @@ internal fun WrappedTable(model: MarkdownComponentModel) {
                 maxColumnWidth = maxColumnWidth,
                 cellPadding = cellPadding,
                 style = style,
-                dividerColor = oc.borderBase,
+                dividerColor = MaterialTheme.colorScheme.outline,
                 content = content
             )
         }

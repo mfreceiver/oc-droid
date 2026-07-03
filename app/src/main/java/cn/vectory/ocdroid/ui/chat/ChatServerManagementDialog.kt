@@ -39,8 +39,8 @@ import androidx.compose.ui.unit.dp
 import cn.vectory.ocdroid.R
 import cn.vectory.ocdroid.data.model.HostProfile
 import cn.vectory.ocdroid.ui.TunnelActivationState
-import cn.vectory.ocdroid.ui.theme.opencode
 import cn.vectory.ocdroid.ui.util.formatBytes
+import cn.vectory.ocdroid.ui.theme.SemanticColors
 
 @Composable
 internal fun ServerManagementDialog(
@@ -57,7 +57,6 @@ internal fun ServerManagementDialog(
     onNavigateToSettings: () -> Unit,
     onDismiss: () -> Unit
 ) {
-    val oc = MaterialTheme.opencode
     AlertDialog(
         onDismissRequest = onDismiss,
         title = { Text(stringResource(R.string.server_dialog_title)) },
@@ -73,7 +72,7 @@ internal fun ServerManagementDialog(
                     Text(
                         stringResource(R.string.server_dialog_no_hosts),
                         style = MaterialTheme.typography.bodyMedium,
-                        color = oc.faint
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
                 } else {
                     hostProfiles.forEach { profile ->
@@ -82,7 +81,7 @@ internal fun ServerManagementDialog(
                             // Current host: non-clickable display only
                             Surface(
                                 shape = RoundedCornerShape(8.dp),
-                                color = oc.layer02,
+                                color = MaterialTheme.colorScheme.surfaceContainerLow,
                                 modifier = Modifier.fillMaxWidth()
                             ) {
                                 Row(
@@ -99,13 +98,13 @@ internal fun ServerManagementDialog(
                                             text = profile.name,
                                             style = MaterialTheme.typography.bodyMedium,
                                             fontWeight = FontWeight.Bold,
-                                            color = oc.accentText
+                                            color = MaterialTheme.colorScheme.primary
                                         )
                                         serverVersion?.let { version ->
                                             Text(
                                                 text = "v$version",
                                                 style = MaterialTheme.typography.bodySmall,
-                                                color = oc.faint
+                                                color = MaterialTheme.colorScheme.onSurfaceVariant
                                             )
                                         }
                                     }
@@ -113,7 +112,7 @@ internal fun ServerManagementDialog(
                                         Icons.Filled.Check,
                                         contentDescription = null,
                                         modifier = Modifier.size(16.dp),
-                                        tint = oc.stateSuccessFg
+                                        tint = SemanticColors.stateSuccessFg()
                                     )
                                 }
                             }
@@ -157,12 +156,12 @@ internal fun ServerManagementDialog(
                     Text(
                         text = "↑ ${formatBytes(trafficSent)}",
                         style = MaterialTheme.typography.labelSmall,
-                        color = oc.faint
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
                     Text(
                         text = "↓ ${formatBytes(trafficReceived)}",
                         style = MaterialTheme.typography.labelSmall,
-                        color = oc.faint
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
                 }
 
@@ -176,14 +175,14 @@ internal fun ServerManagementDialog(
                         Icon(
                             Icons.Default.Settings,
                             contentDescription = stringResource(R.string.server_dialog_system_settings),
-                            tint = oc.faint
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant
                         )
                     }
                     IconButton(onClick = onRefresh) {
                         Icon(
                             Icons.Default.Refresh,
                             contentDescription = stringResource(R.string.chat_action_refresh_messages),
-                            tint = oc.faint
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant
                         )
                     }
                     if (showTunnelAuth) {
@@ -196,13 +195,13 @@ internal fun ServerManagementDialog(
                                 CircularProgressIndicator(
                                     modifier = Modifier.size(18.dp),
                                     strokeWidth = 2.dp,
-                                    color = oc.faint
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
                                 )
                             } else {
                                 Icon(
                                     Icons.Default.VpnKey,
                                     contentDescription = stringResource(R.string.server_dialog_activate_tunnel),
-                                    tint = oc.faint
+                                    tint = MaterialTheme.colorScheme.onSurfaceVariant
                                 )
                             }
                         }

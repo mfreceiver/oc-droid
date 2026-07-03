@@ -36,7 +36,6 @@ import cn.vectory.ocdroid.ui.theme.BundledMonoFamily
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import cn.vectory.ocdroid.data.model.Part
-import cn.vectory.ocdroid.ui.theme.opencode
 import cn.vectory.ocdroid.ui.util.DataUriImageTransformer
 
 // ── File / folder / image attachment cards ───────────────────────────────
@@ -80,9 +79,8 @@ internal fun ImageFilePart(part: Part, modifier: Modifier = Modifier.fillMaxWidt
 @Composable
 internal fun FileAttachmentPart(part: Part, modifier: Modifier = Modifier.fillMaxWidth()) {
     // §5.6 v2: layer01 chip at 6dp radius with accentText doc icon.
-    val oc = MaterialTheme.opencode
     Surface(
-        color = oc.layer01,
+        color = MaterialTheme.colorScheme.surfaceContainerLowest,
         shape = RoundedCornerShape(6.dp),
         modifier = modifier.padding(vertical = 4.dp)
     ) {
@@ -93,7 +91,7 @@ internal fun FileAttachmentPart(part: Part, modifier: Modifier = Modifier.fillMa
             Icon(
                 imageVector = Icons.Default.Description,
                 contentDescription = null,
-                tint = oc.accentText,
+                tint = MaterialTheme.colorScheme.primary,
                 modifier = Modifier.size(16.dp)
             )
             Spacer(modifier = Modifier.width(8.dp))
@@ -154,10 +152,9 @@ internal fun FileCard(
     }
 
     // §5.3 v2 file card: layer01 surface at 6dp with borderBase, accentText icon.
-    val oc = MaterialTheme.opencode
     Surface(
-        color = oc.layer01,
-        border = BorderStroke(1.dp, oc.borderBase),
+        color = MaterialTheme.colorScheme.surfaceContainerLowest,
+        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline),
         shape = RoundedCornerShape(6.dp),
         modifier = modifier
             .padding(vertical = 4.dp)
@@ -180,7 +177,7 @@ internal fun FileCard(
                 imageVector = if (isDirectoryRead) Icons.Default.Folder else Icons.Default.Description,
                 contentDescription = iconDescription,
                 modifier = Modifier.size(16.dp),
-                tint = oc.accentText
+                tint = MaterialTheme.colorScheme.primary
             )
             Spacer(modifier = Modifier.width(8.dp))
             Text(
@@ -223,7 +220,6 @@ internal fun FolderContents(
     folderName: String,
     entries: List<ToolCardClassifier.DirectoryEntry>
 ) {
-    val oc = MaterialTheme.opencode
     val sorted = remember(entries) {
         entries.sortedWith(
             compareByDescending<ToolCardClassifier.DirectoryEntry> { it.isDirectory }
@@ -258,7 +254,7 @@ internal fun FolderContents(
                         imageVector = if (entry.isDirectory) Icons.Default.Folder else Icons.Default.Description,
                         contentDescription = null,
                         modifier = Modifier.size(18.dp),
-                        tint = oc.accentText
+                        tint = MaterialTheme.colorScheme.primary
                     )
                     Spacer(modifier = Modifier.width(10.dp))
                     Text(

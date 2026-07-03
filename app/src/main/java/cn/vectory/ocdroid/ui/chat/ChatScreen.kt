@@ -67,7 +67,6 @@ import cn.vectory.ocdroid.ui.currentSession
 import cn.vectory.ocdroid.ui.currentSessionStatus
 import cn.vectory.ocdroid.ui.showTimed
 import cn.vectory.ocdroid.ui.visibleMessages
-import cn.vectory.ocdroid.ui.theme.opencode
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
@@ -573,7 +572,7 @@ fun ChatScreen(
         // Thin separator between the top bar (session tabs) and the chat area.
         // On phone the chat-area Surface has 0dp shadow elevation, so without
         // this divider the boundary reads as ambiguous.
-        HorizontalDivider(color = MaterialTheme.opencode.borderBase)
+        HorizontalDivider(color = MaterialTheme.colorScheme.outline)
 
         // In draft mode (no session yet but a workdir has been chosen), the
         // chat area is intentionally empty — the user is mid-composition and

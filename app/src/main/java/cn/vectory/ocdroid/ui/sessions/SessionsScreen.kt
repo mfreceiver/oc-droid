@@ -41,7 +41,7 @@ import cn.vectory.ocdroid.data.model.Session
 import cn.vectory.ocdroid.data.model.SessionStatus
 import cn.vectory.ocdroid.ui.MainViewModel
 import cn.vectory.ocdroid.ui.chat.workdirTone
-import cn.vectory.ocdroid.ui.theme.opencode
+import cn.vectory.ocdroid.ui.theme.SemanticColors
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.map
 import java.text.SimpleDateFormat
@@ -548,7 +548,6 @@ private fun SessionCard(
         if (updatedText != null) add(updatedText)
     }
 
-    val oc = MaterialTheme.opencode
 
     ElevatedCard(
         modifier = Modifier
@@ -588,7 +587,7 @@ private fun SessionCard(
                 Icon(
                     Icons.AutoMirrored.Filled.Chat,
                     contentDescription = null,
-                    tint = workdirTone(session.directory, oc),
+                    tint = workdirTone(session.directory),
                     modifier = Modifier.size(20.dp)
                 )
             },
@@ -655,8 +654,8 @@ private fun EmptyRow(text: String) {
 private fun SessionStatusDot(status: SessionStatus?) {
     if (status == null || status.isIdle) return
     val color = when {
-        status.isBusy -> Color(0xFFFFA000) // amber/orange — readable on card surface
-        status.isRetry -> Color(0xFFE53935) // red — retry/error semantics
+        status.isBusy -> SemanticColors.stateWarningFg() // amber — 主题感知对比度
+        status.isRetry -> MaterialTheme.colorScheme.error // red — retry/error 语义
         else -> return
     }
     // busy pulses alpha 0.4 ↔ 1.0; retry stays solid.

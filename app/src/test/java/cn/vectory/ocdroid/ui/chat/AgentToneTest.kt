@@ -1,6 +1,6 @@
 package cn.vectory.ocdroid.ui.chat
 
-import cn.vectory.ocdroid.ui.theme.LightOpencodeColors
+import cn.vectory.ocdroid.ui.theme.SemanticColors
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
@@ -10,11 +10,11 @@ class AgentToneTest {
 
     @Test
     fun `known agent 'ask' returns its mapped color`() {
-        // 已知 agent 不再走固定色，统一 hash → agentPalette(16)。
+        // 已知 agent 不再走固定色，统一 hash → SemanticColors.agentPalette(16)。
         val result = agentTone("ask")
         assertTrue(
             "Expected result from agentPalette but got $result",
-            LightOpencodeColors.agentPalette.contains(result)
+            SemanticColors.agentPalette.contains(result)
         )
     }
 
@@ -23,7 +23,7 @@ class AgentToneTest {
         val result = agentTone("build")
         assertTrue(
             "Expected result from agentPalette but got $result",
-            LightOpencodeColors.agentPalette.contains(result)
+            SemanticColors.agentPalette.contains(result)
         )
     }
 
@@ -32,7 +32,7 @@ class AgentToneTest {
         val result = agentTone("docs")
         assertTrue(
             "Expected result from agentPalette but got $result",
-            LightOpencodeColors.agentPalette.contains(result)
+            SemanticColors.agentPalette.contains(result)
         )
     }
 
@@ -41,7 +41,7 @@ class AgentToneTest {
         val result = agentTone("plan")
         assertTrue(
             "Expected result from agentPalette but got $result",
-            LightOpencodeColors.agentPalette.contains(result)
+            SemanticColors.agentPalette.contains(result)
         )
     }
 
@@ -60,7 +60,7 @@ class AgentToneTest {
         assertNotNull(result)
         assertTrue(
             "Expected result from agentPalette but got $result",
-            LightOpencodeColors.agentPalette.contains(result)
+            SemanticColors.agentPalette.contains(result)
         )
     }
 
@@ -70,7 +70,7 @@ class AgentToneTest {
         assertNotNull(result)
         assertTrue(
             "Expected result from agentPalette but got $result",
-            LightOpencodeColors.agentPalette.contains(result)
+            SemanticColors.agentPalette.contains(result)
         )
     }
 
@@ -86,7 +86,7 @@ class AgentToneTest {
     @Test
     fun `different names can produce different colors`() {
         // At least two distinct names should produce different palette colors
-        // (probability of collision for 12-palette, 100 names is negligible)
+        // (probability of collision for 16-palette, 50 names is negligible)
         val results = (0 until 50).map { agentTone("agent-$it") }.toSet()
         assertTrue("Expected at least 2 distinct colors, got ${results.size}", results.size >= 2)
     }
@@ -95,16 +95,15 @@ class AgentToneTest {
 
     @Test
     fun `workdirTone returns palette color and is deterministic`() {
-        val oc = LightOpencodeColors
         val dir = "/home/user/code/opencode-android"
-        val first = workdirTone(dir, oc)
+        val first = workdirTone(dir)
         assertTrue(
             "Expected result from agentPalette but got $first",
-            oc.agentPalette.contains(first)
+            SemanticColors.agentPalette.contains(first)
         )
         // 同 directory 必须同色（hash 确定性）
         repeat(50) {
-            assertEquals("workdirTone must be deterministic on iteration $it", first, workdirTone(dir, oc))
+            assertEquals("workdirTone must be deterministic on iteration $it", first, workdirTone(dir))
         }
     }
 }

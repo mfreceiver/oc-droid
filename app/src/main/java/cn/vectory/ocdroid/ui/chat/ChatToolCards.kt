@@ -48,7 +48,6 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import cn.vectory.ocdroid.R
 import cn.vectory.ocdroid.data.model.Part
-import cn.vectory.ocdroid.ui.theme.opencode
 
 // ── Tool cards: ToolCard (general), BasicTool (single-line), ErrorCard ────
 // ToolCard is the generic collapsible card for tool parts (icon + name +
@@ -145,13 +144,12 @@ internal fun ToolCard(
     // generic) is preserved, but the v2 neutral look means titles and icons
     // read as muted; only the status indicator uses stateSuccessFg /
     // stateDangerFg to encode tool outcome.
-    val oc = MaterialTheme.opencode
 
     Surface(
         modifier = modifier.padding(vertical = 2.dp),
         shape = RoundedCornerShape(6.dp),
-        color = oc.layer02,
-        border = BorderStroke(1.dp, oc.borderBase)
+        color = MaterialTheme.colorScheme.surfaceContainerLow,
+        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline)
     ) {
         CompositionLocalProvider(LocalContentColor provides MaterialTheme.colorScheme.onSurfaceVariant) {
             Column(modifier = Modifier.padding(horizontal = 8.dp, vertical = 8.dp)) {
@@ -183,7 +181,7 @@ internal fun ToolCard(
                             Icons.Default.Warning,
                             contentDescription = "Tool error",
                             modifier = Modifier.size(14.dp),
-                            tint = oc.stateDangerFg
+                            tint = MaterialTheme.colorScheme.error
                         )
                     }
                     if (firstFile != null) {
@@ -193,7 +191,7 @@ internal fun ToolCard(
                                 Icons.AutoMirrored.Filled.OpenInNew,
                                 contentDescription = stringResource(R.string.files_show_in_files),
                                 modifier = Modifier.size(14.dp),
-                                tint = oc.accentText
+                                tint = MaterialTheme.colorScheme.primary
                             )
                         }
                     }
@@ -226,7 +224,7 @@ internal fun ToolCard(
                             Text(
                                 "Todo updated · $completed/${todos.size}",
                                 style = MaterialTheme.typography.bodySmall,
-                                color = oc.accentText
+                                color = MaterialTheme.colorScheme.primary
                             )
                         }
                     } else {
@@ -262,7 +260,7 @@ internal fun ToolCard(
                                     text = path.wrappablePath(),
                                     style = MaterialTheme.typography.bodySmall,
                                     fontFamily = BundledMonoFamily,
-                                    color = oc.accentText,
+                                    color = MaterialTheme.colorScheme.primary,
                                     softWrap = true,
                                     modifier = Modifier.weight(1f)
                                 )
@@ -271,7 +269,7 @@ internal fun ToolCard(
                                         Icons.AutoMirrored.Filled.OpenInNew,
                                         contentDescription = stringResource(R.string.files_show_in_files),
                                         modifier = Modifier.size(14.dp),
-                                        tint = oc.accentText
+                                        tint = MaterialTheme.colorScheme.primary
                                     )
                                 }
                             }
@@ -320,7 +318,6 @@ internal fun BasicTool(
     val isError = status == "error"
     val expanded = expandedParts[expandedKey] ?: false
 
-    val oc = MaterialTheme.opencode
 
     val isBash = lowerTool.startsWith("bash") || lowerTool.startsWith("terminal") ||
         lowerTool.startsWith("cmd") || lowerTool.startsWith("shell")
@@ -365,8 +362,8 @@ internal fun BasicTool(
     Surface(
         modifier = modifier.padding(vertical = 2.dp),
         shape = RoundedCornerShape(6.dp),
-        color = oc.layer02,
-        border = BorderStroke(1.dp, oc.borderBase)
+        color = MaterialTheme.colorScheme.surfaceContainerLow,
+        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline)
     ) {
         Column {
             Row(
@@ -425,7 +422,7 @@ internal fun BasicTool(
                         Icons.Default.Warning,
                         contentDescription = "Tool error",
                         modifier = Modifier.size(14.dp),
-                        tint = oc.stateDangerFg
+                        tint = MaterialTheme.colorScheme.error
                     )
                 }
                 if (canExpand) {
@@ -476,7 +473,7 @@ internal fun BasicTool(
                             Icons.Default.ExpandLess,
                             contentDescription = "Collapse",
                             modifier = Modifier.size(14.dp),
-                            tint = oc.faint
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant
                         )
                     }
                 }
@@ -489,7 +486,7 @@ internal fun BasicTool(
 
 /**
  * Compact error card with a danger-tinted border. Follows the same transparent
- * shell pattern as other tool cards, but the border uses [oc.stateDangerFg] to
+ * shell pattern as other tool cards, but the border uses [MaterialTheme.colorScheme.error] to
  * signal a problem. The text is selectable for easy copy-paste.
  */
 @Composable
@@ -497,12 +494,11 @@ internal fun ErrorCard(
     text: String,
     modifier: Modifier = Modifier.fillMaxWidth()
 ) {
-    val oc = MaterialTheme.opencode
     Surface(
         modifier = modifier.padding(vertical = 2.dp),
         shape = RoundedCornerShape(6.dp),
         color = Color.Transparent,
-        border = BorderStroke(1.dp, oc.stateDangerFg)
+        border = BorderStroke(1.dp, MaterialTheme.colorScheme.error)
     ) {
         Row(
             modifier = Modifier.padding(horizontal = 8.dp, vertical = 8.dp),
@@ -512,7 +508,7 @@ internal fun ErrorCard(
                 Icons.Default.ErrorOutline,
                 contentDescription = null,
                 modifier = Modifier.size(14.dp),
-                tint = oc.stateDangerFg
+                tint = MaterialTheme.colorScheme.error
             )
             Spacer(modifier = Modifier.width(6.dp))
             SelectionContainer {

@@ -50,7 +50,6 @@ import cn.vectory.ocdroid.data.model.TodoItem
 import cn.vectory.ocdroid.ui.theme.LocalIsDarkTheme
 import cn.vectory.ocdroid.ui.theme.LocalMarkdownFontSizes
 import cn.vectory.ocdroid.ui.theme.markdownTypography
-import cn.vectory.ocdroid.ui.theme.opencode
 import cn.vectory.ocdroid.ui.util.DataUriImageTransformer
 import cn.vectory.ocdroid.ui.util.MarkdownImageResolver
 
@@ -74,13 +73,12 @@ internal fun ReasoningCard(
     // §5.1 v3 reasoning card: fully transparent, no icon, no tinted body.
     // Reads as quiet auxiliary context — same visual weight as BasicTool.
     // Outer borderBase provides containment; no layer01 panel.
-    val oc = MaterialTheme.opencode
     val isDark = LocalIsDarkTheme.current
     Surface(
         modifier = modifier.padding(vertical = 2.dp),
         shape = RoundedCornerShape(6.dp),
-        color = oc.layer03,
-        border = BorderStroke(1.dp, oc.borderBase)
+        color = MaterialTheme.colorScheme.surfaceContainer,
+        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline)
     ) {
         Column {
             Row(
@@ -250,7 +248,7 @@ internal fun ReasoningCard(
                         Icons.Default.ExpandLess,
                         contentDescription = "Collapse",
                         modifier = Modifier.size(14.dp),
-                        tint = oc.faint
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant
                     )
                 }
             }

@@ -39,7 +39,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import cn.vectory.ocdroid.R
-import cn.vectory.ocdroid.ui.theme.opencode
+import cn.vectory.ocdroid.ui.theme.SemanticColors
 
 /**
  * §s3-markers: synthetic metadata markers rendered inline in the chat
@@ -84,12 +84,11 @@ private fun MarkerChip(
     label: String,
     modifier: Modifier = Modifier
 ) {
-    val oc = MaterialTheme.opencode
     val prefixRes = when (role) {
         "model-switched" -> R.string.chat_marker_model_prefix
         else -> R.string.chat_marker_agent_prefix
     }
-    val iconTint = if (role == "model-switched") oc.stateInfoFg else oc.stateSuccessFg
+    val iconTint = if (role == "model-switched") SemanticColors.stateInfoFg() else SemanticColors.stateSuccessFg()
     Box(
         modifier = modifier
             .fillMaxWidth()
@@ -99,7 +98,7 @@ private fun MarkerChip(
         Surface(
             shape = RoundedCornerShape(50),
             color = Color.Transparent,
-            border = androidx.compose.foundation.BorderStroke(1.dp, oc.borderBase)
+            border = androidx.compose.foundation.BorderStroke(1.dp, MaterialTheme.colorScheme.outline)
         ) {
             Row(
                 modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
@@ -135,7 +134,6 @@ private fun CompactionDivider(
     label: String,
     modifier: Modifier = Modifier
 ) {
-    val oc = MaterialTheme.opencode
     var expanded by rememberSaveable { mutableStateOf(false) }
     Column(modifier = modifier.fillMaxWidth()) {
         Row(
@@ -147,7 +145,7 @@ private fun CompactionDivider(
         ) {
             Surface(
                 modifier = Modifier.weight(1f).height(1.dp),
-                color = oc.borderBase
+                color = MaterialTheme.colorScheme.outline
             ) {}
             Row(
                 modifier = Modifier.padding(horizontal = 12.dp),
@@ -170,7 +168,7 @@ private fun CompactionDivider(
             }
             Surface(
                 modifier = Modifier.weight(1f).height(1.dp),
-                color = oc.borderBase
+                color = MaterialTheme.colorScheme.outline
             ) {}
         }
         AnimatedVisibility(

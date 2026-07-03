@@ -33,7 +33,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import cn.vectory.ocdroid.R
 import cn.vectory.ocdroid.data.model.Part
-import cn.vectory.ocdroid.ui.theme.opencode
+import cn.vectory.ocdroid.ui.theme.SemanticColors
 
 // ── Patch card + merged context tool group ───────────────────────────────
 // PatchCard is the collapsible diff-stats card for a single file-edit part
@@ -103,14 +103,13 @@ internal fun PatchCard(
     // Diff stats colored green/red — parity with MultiFilePatchAccordion
     // header (stateSuccessFg / stateDangerFg). Prior §5.4 v3 desaturated
     // them to onSurfaceVariant; updated per user request for consistency.
-    val oc = MaterialTheme.opencode
     Surface(
         modifier = modifier
             .padding(vertical = 2.dp)
             .testTag("toolcard.patch.$basename"),
         shape = RoundedCornerShape(6.dp),
-        color = oc.layer02,
-        border = BorderStroke(1.dp, oc.borderBase)
+        color = MaterialTheme.colorScheme.surfaceContainerLow,
+        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline)
     ) {
         Column {
             Row(
@@ -152,7 +151,7 @@ internal fun PatchCard(
                     Text(
                         text = "+$additions",
                         style = MaterialTheme.typography.labelSmall,
-                        color = oc.stateSuccessFg,
+                        color = SemanticColors.stateSuccessFg(),
                         fontFamily = BundledMonoFamily
                     )
                 }
@@ -161,7 +160,7 @@ internal fun PatchCard(
                     Text(
                         text = "-$deletions",
                         style = MaterialTheme.typography.labelSmall,
-                        color = oc.stateDangerFg,
+                        color = MaterialTheme.colorScheme.error,
                         fontFamily = BundledMonoFamily
                     )
                 }
@@ -201,7 +200,7 @@ internal fun PatchCard(
                                         Icons.AutoMirrored.Filled.OpenInNew,
                                         contentDescription = stringResource(R.string.files_show_in_files),
                                         modifier = Modifier.size(14.dp),
-                                        tint = oc.accentText
+                                        tint = MaterialTheme.colorScheme.primary
                                     )
                                 }
                             }
@@ -257,12 +256,11 @@ internal fun ContextToolGroup(
 
     val stateWord = if (isRunning) "Exploring" else "Explored"
 
-    val oc = MaterialTheme.opencode
     Surface(
         modifier = modifier.padding(vertical = 2.dp),
         shape = RoundedCornerShape(6.dp),
-        color = oc.layer02,
-        border = BorderStroke(1.dp, oc.borderBase)
+        color = MaterialTheme.colorScheme.surfaceContainerLow,
+        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline)
     ) {
         Column {
             Row(
@@ -335,7 +333,7 @@ internal fun ContextToolGroup(
                             Icons.Default.ExpandLess,
                             contentDescription = "Collapse",
                             modifier = Modifier.size(14.dp),
-                            tint = oc.faint
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant
                         )
                     }
                 }

@@ -61,7 +61,7 @@ import cn.vectory.ocdroid.data.model.TodoItem
 import cn.vectory.ocdroid.ui.ContextUsage
 import cn.vectory.ocdroid.ui.TunnelActivationState
 import cn.vectory.ocdroid.ui.resolveModelDisplayName
-import cn.vectory.ocdroid.ui.theme.opencode
+import cn.vectory.ocdroid.ui.theme.SemanticColors
 
 internal data class ChatTopBarState(
     val sessions: List<Session>,
@@ -256,7 +256,6 @@ internal fun ChatTopBar(
                         val parentTitle = state.parentSessionTitle
                             ?: stringResource(R.string.chat_parent_session)
                         val currentTitle = currentSession?.displayName.orEmpty()
-                        val oc = MaterialTheme.opencode
                         Row(
                             verticalAlignment = Alignment.CenterVertically,
                             modifier = Modifier.widthIn(max = TITLE_SLOT_MAX_WIDTH)
@@ -276,7 +275,7 @@ internal fun ChatTopBar(
                             Text(
                                 text = " / ",
                                 style = MaterialTheme.typography.labelMedium,
-                                color = oc.faint
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
                             Text(
                                 text = currentTitle,
@@ -377,16 +376,15 @@ internal fun ChatTopBar(
                 // live connection state. Tapping opens the existing
                 // ServerManagementDialog (host picker + refresh + tunnel + the
                 // "System Settings" navigation entry).
-                // R-24: the status colours are sourced from LocalOpencodeColors
-                // state-* tokens (which have explicit light + dark values), so
-                // the badge adapts to dark mode and matches the v2 palette.
+                // R-24: the status colours are sourced from SemanticColors
+                // state-* constants (Phase 2：固定语义常量) + M3 colorScheme.error,
+                // so the badge adapts to dark mode.
                 // none (not connected AND no connectionPhase) → no badge at all.
-                val oc = MaterialTheme.opencode
                 val badgeColor = when {
-                    state.isConnected -> oc.stateSuccessFg
-                    state.isConnecting -> oc.stateInfoFg
+                    state.isConnected -> SemanticColors.stateSuccessFg()
+                    state.isConnecting -> SemanticColors.stateInfoFg()
                     state.connectionPhase == null -> null
-                    else -> oc.stateDangerFg
+                    else -> MaterialTheme.colorScheme.error
                 }
                 IconButton(onClick = { showServerDialog = true }) {
                     val serverIcon: @Composable () -> Unit = {

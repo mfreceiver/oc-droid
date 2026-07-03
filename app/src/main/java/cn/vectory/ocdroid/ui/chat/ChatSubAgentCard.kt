@@ -39,7 +39,6 @@ import cn.vectory.ocdroid.R
 import cn.vectory.ocdroid.data.model.Part
 import cn.vectory.ocdroid.ui.theme.LocalMarkdownFontSizes
 import cn.vectory.ocdroid.ui.theme.markdownTypography
-import cn.vectory.ocdroid.ui.theme.opencode
 import cn.vectory.ocdroid.ui.util.DataUriImageTransformer
 
 // ── Sub-agent card + completed-task card + task XML parsing ──────────────
@@ -106,13 +105,12 @@ internal fun SubAgentCard(
     val canOpen = sessionId != null
     val tagSuffix = sessionId?.let { ".$it" } ?: ""
 
-    val oc = MaterialTheme.opencode
-    val statusErrorColor = oc.stateDangerFg
+    val statusErrorColor = MaterialTheme.colorScheme.error
 
     // Agent tone — name hashed into the unified 16-color agentPalette (方案B).
     // 同一 agent 名永远同色（hash 确定性），随明暗主题切换。无 agent 名时回退
     // 到 accentText。
-    val tone = if (subAgentName != null) agentTone(subAgentName, oc) else oc.accentText
+    val tone = if (subAgentName != null) agentTone(subAgentName) else MaterialTheme.colorScheme.primary
 
     Surface(
         modifier = modifier
@@ -120,8 +118,8 @@ internal fun SubAgentCard(
             .testTag("toolcard.subagent$tagSuffix")
             .then(if (canOpen) Modifier.clickable { onOpenSubAgent(sessionId!!) } else Modifier),
         shape = RoundedCornerShape(6.dp),
-        color = oc.layer02,
-        border = BorderStroke(1.dp, oc.borderBase)
+        color = MaterialTheme.colorScheme.surfaceContainerLow,
+        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline)
     ) {
         Column(modifier = Modifier.padding(horizontal = 8.dp, vertical = 8.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
@@ -149,13 +147,15 @@ internal fun SubAgentCard(
                 }
                 if (isRunning || isError) Spacer(modifier = Modifier.width(4.dp))
 
-                // Agent name — colored by agentTone (same hue as the leading
-                // icon) and bolded so the @mention reads as a strong label.
+                // Agent name — bold label. 用 MaterialTheme.colorScheme.primary
+                // 而非 tone：tone 来自 agentPalette（为图标身份区分设计，浅色背景
+                // 上作文本对比度不足）。primary 在所有 M3 scheme 下保证可读；
+                // agent 身份色由上面的 AccountTree 图标（tint=tone）承载。
                 if (subAgentName != null) {
                     Text(
                         text = "@$subAgentName",
                         style = MaterialTheme.typography.labelSmall,
-                        color = tone,
+                        color = MaterialTheme.colorScheme.primary,
                         fontWeight = FontWeight.Bold,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis
@@ -311,12 +311,11 @@ internal fun CompletedTaskCard(
     val expanded = expandedParts[expandedKey] ?: false
     val isError = taskResult.state.equals("error", ignoreCase = true)
 
-    val oc = MaterialTheme.opencode
     Surface(
         modifier = modifier.padding(vertical = 2.dp),
         shape = RoundedCornerShape(6.dp),
-        color = oc.layer02,
-        border = BorderStroke(1.dp, oc.borderBase)
+        color = MaterialTheme.colorScheme.surfaceContainerLow,
+        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline)
     ) {
         Column(modifier = Modifier.padding(horizontal = 8.dp, vertical = 8.dp)) {
             Row(
@@ -329,7 +328,7 @@ internal fun CompletedTaskCard(
                     if (isError) Icons.Default.ErrorOutline else Icons.Default.CheckCircle,
                     contentDescription = null,
                     modifier = Modifier.size(14.dp),
-                    tint = if (isError) oc.stateDangerFg else MaterialTheme.colorScheme.onSurfaceVariant
+                    tint = if (isError) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant
                 )
                 Spacer(modifier = Modifier.width(4.dp))
                 Text(
@@ -375,7 +374,7 @@ internal fun CompletedTaskCard(
                         Icons.Default.ExpandLess,
                         contentDescription = "Collapse",
                         modifier = Modifier.size(14.dp),
-                        tint = oc.faint
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant
                     )
                 }
             }

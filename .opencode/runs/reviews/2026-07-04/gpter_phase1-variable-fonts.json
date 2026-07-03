@@ -1,0 +1,16 @@
+{
+  "agent": "gpter",
+  "scope": "phase1-variable-fonts",
+  "date": "2026-07-04",
+  "reviewed_commit": "6cb4855",
+  "version_target": null,
+  "verdict": "pass",
+  "score": 9.5,
+  "blocking_issues": [],
+  "non_blocking_issues": [
+    "markdown fenced/inline/streaming code 仍未截图回归，适合作为 QA 放行项而非代码阻断",
+    "CJK 字重仍依赖 Android 平台 fallback，当前注释已诚实标明；若后续实测错配再调整",
+    "systemFontFamily() 对任意用户输入字体名仍可能退化为 Normal/默认字体（平台限制，注释已覆盖）"
+  ],
+  "notes": "第2轮复审。第1轮 8.7 关切（注释过度承诺 FontFamily 语义、'覆盖全 weight 范围'不准确、APK 子集化）经修复后解决：注释不再过度承诺，4档 helper 与默认 bundled 结构一致，拉丁/CJK fallback 风险合理降级为需实测验证项。"
+}

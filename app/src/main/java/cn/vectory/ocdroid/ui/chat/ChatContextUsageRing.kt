@@ -14,7 +14,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import cn.vectory.ocdroid.ui.ContextUsage
-import cn.vectory.ocdroid.ui.theme.opencode
+import cn.vectory.ocdroid.ui.theme.SemanticColors
 
 @Composable
 internal fun ContextUsageRing(usage: ContextUsage?) {
@@ -26,14 +26,14 @@ internal fun ContextUsageRing(usage: ContextUsage?) {
     //   0.50 ..< 0.75         → orange
     //   >= 0.75               → error (red)
     // R-24: colours come from theme tokens so they adapt to light/dark. Green
-    // → stateSuccessFg, orange → stateWarningFg (both have explicit light +
-    // dark values in OpencodeColors); red/blue reuse M3 colorScheme.
-    val oc = MaterialTheme.opencode
+    // → SemanticColors.stateSuccessFg(), orange → SemanticColors.stateWarningFg()
+    // (Phase 2：@Composable 主题感知双值，明暗均保证 WCAG 对比度); red/blue reuse
+    // M3 colorScheme (error/primary，随 Dynamic Color)。
     val ringColor = when {
         usage == null -> MaterialTheme.colorScheme.onSurfaceVariant
         usage.percentage >= 0.75f -> MaterialTheme.colorScheme.error
-        usage.percentage >= 0.50f -> oc.stateWarningFg
-        usage.percentage >= 0.25f -> oc.stateSuccessFg
+        usage.percentage >= 0.50f -> SemanticColors.stateWarningFg()
+        usage.percentage >= 0.25f -> SemanticColors.stateSuccessFg()
         else -> MaterialTheme.colorScheme.primary
     }
     val trackColor = MaterialTheme.colorScheme.onSurfaceVariant.copy(

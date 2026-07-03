@@ -52,7 +52,6 @@ import cn.vectory.ocdroid.R
 import cn.vectory.ocdroid.data.model.Session
 import cn.vectory.ocdroid.data.model.TodoItem
 import cn.vectory.ocdroid.ui.ContextUsage
-import cn.vectory.ocdroid.ui.theme.opencode
 
 private const val SESSION_TITLE_MAX_CHARS = 15
 
@@ -181,7 +180,6 @@ internal fun SessionTabStrip(
     // would trip an out-of-bounds when drawing the indicator.
     if (openSessions.isEmpty()) return
 
-    val oc = MaterialTheme.opencode
     // Accent colour: current session's workdir hash. Falls back to the v2
     // accentText when no session is active so the selected tab still tints
     // with a sane colour.
@@ -195,7 +193,7 @@ internal fun SessionTabStrip(
     // not occur. Keeping child-workdir here (rather than plumbing the parent
     // workdir through) is the lower-risk choice and matches the existing
     // call site which already passes currentSession.directory.
-    val accentColor = currentWorkdir?.let { workdirTone(it, oc) } ?: oc.accentText
+    val accentColor = currentWorkdir?.let { workdirTone(it) } ?: MaterialTheme.colorScheme.primary
 
     // §problem-1 fix: resolve which tab reads as "active". currentSessionId may
     // belong to a sub-agent not present in openSessions (§17.2 filters to root
@@ -305,7 +303,6 @@ private fun SessionTab(
     actions: ChatTopBarActions,
     modifier: Modifier = Modifier
 ) {
-    val oc = MaterialTheme.opencode
     Tab(
         selected = isSelected,
         onClick = { actions.onSelectSession(session.id) },
@@ -338,8 +335,8 @@ private fun SessionTab(
                 // the compact 36dp row.
                 if (session.id in unreadSessions) {
                     val dotColor = session.directory
-                        ?.let { workdirTone(it, oc) }
-                        ?: oc.accentText
+                        ?.let { workdirTone(it) }
+                        ?: MaterialTheme.colorScheme.primary
                     Box(
                         modifier = Modifier
                             .padding(end = 6.dp)

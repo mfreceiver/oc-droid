@@ -48,7 +48,6 @@ import androidx.compose.ui.platform.LocalContext
 import cn.vectory.ocdroid.ui.theme.BundledMonoFamily
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
-import cn.vectory.ocdroid.ui.theme.opencode
 import cn.vectory.ocdroid.util.DebugLog
 import kotlinx.coroutines.delay
 import java.text.SimpleDateFormat
@@ -56,7 +55,6 @@ import java.util.Locale
 
 @Composable
 internal fun DebugLogSection(hideHeader: Boolean = false) {
-    val oc = MaterialTheme.opencode
     val liveEntries by DebugLog.entries.collectAsStateWithLifecycle()
     val context = LocalContext.current
     var copied by remember { mutableStateOf(false) }
@@ -113,11 +111,11 @@ internal fun DebugLogSection(hideHeader: Boolean = false) {
                         Text(
                             "（已暂停）",
                             style = MaterialTheme.typography.labelSmall,
-                            color = oc.stateDangerFg
+                            color = MaterialTheme.colorScheme.error
                         )
                     }
                 }
-                Text(countText, style = MaterialTheme.typography.labelSmall, color = oc.faint)
+                Text(countText, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
 
             Spacer(modifier = Modifier.height(12.dp))
@@ -217,17 +215,17 @@ internal fun DebugLogSection(hideHeader: Boolean = false) {
                     item {
                         Text(
                             if (liveEntries.isEmpty()) "（暂无日志）" else "（当前过滤下无日志）",
-                            color = oc.faint,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
                             style = MaterialTheme.typography.bodySmall
                         )
                     }
                 }
                 items(items = filtered, key = { entry -> entry.seq }) { entry ->
                     val levelColor = when (entry.level) {
-                        DebugLog.Level.DEBUG -> oc.faint
+                        DebugLog.Level.DEBUG -> MaterialTheme.colorScheme.onSurfaceVariant
                         DebugLog.Level.INFO -> MaterialTheme.colorScheme.onSurface
-                        DebugLog.Level.WARN -> oc.stateDangerFg
-                        DebugLog.Level.ERROR -> oc.stateDangerFg
+                        DebugLog.Level.WARN -> MaterialTheme.colorScheme.error
+                        DebugLog.Level.ERROR -> MaterialTheme.colorScheme.error
                     }
                     Text(
                         text = "[${sdf.format(entry.timeMs)}] ${entry.tag}/${entry.level}: ${entry.message}",
@@ -249,7 +247,6 @@ private fun LevelChip(
     selected: DebugLog.Level,
     onSelect: (DebugLog.Level) -> Unit
 ) {
-    val oc = MaterialTheme.opencode
     val isSelected = selected == level
     FilterChip(
         selected = isSelected,
@@ -257,9 +254,9 @@ private fun LevelChip(
         label = { Text(label) },
         colors = FilterChipDefaults.filterChipColors(
             selectedContainerColor = MaterialTheme.colorScheme.surface,
-            selectedLabelColor = oc.accentText,
-            selectedLeadingIconColor = oc.accentText,
-            selectedTrailingIconColor = oc.accentText
+            selectedLabelColor = MaterialTheme.colorScheme.primary,
+            selectedLeadingIconColor = MaterialTheme.colorScheme.primary,
+            selectedTrailingIconColor = MaterialTheme.colorScheme.primary
         )
     )
 }

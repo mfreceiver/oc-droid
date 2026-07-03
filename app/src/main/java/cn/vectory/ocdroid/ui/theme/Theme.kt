@@ -1,11 +1,14 @@
 package cn.vectory.ocdroid.ui.theme
 
 import android.app.Activity
+import android.os.Build
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.darkColorScheme
+import androidx.compose.material3.dynamicDarkColorScheme
+import androidx.compose.material3.dynamicLightColorScheme
 import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
@@ -40,11 +43,12 @@ import dagger.hilt.components.SingletonComponent
  */
 val LocalIsDarkTheme = staticCompositionLocalOf { false }
 
-// Full Material 3 color schemes — v2 "oc-2" skin. Dynamic color (Material You)
-// is deliberately NOT used: the brand is a fixed electric blue across every
-// device, matching the iOS client which also pins its own primary blue rather
-// than following the system accent. v2-specific semantic colors
-// ([OpencodeColors]) are layered on top via [LocalOpencodeColors].
+// Material 3 color schemes — Phase 2 Dynamic Color 全量改造。
+//
+// Android 12+ (API 31) 使用系统壁纸派生的 Dynamic Color（Material You）；
+// pre-12 回退到下方的固定 DarkColorScheme / LightColorScheme。
+// 原"固定电光蓝品牌色 / 与 iOS 客户端对齐"的设计已废弃——全量改为原生
+// 色彩体系。语义固定色（agent/diff/status）见 [SemanticColors]，不跟随壁纸。
 
 private val DarkColorScheme = darkColorScheme(
     primary = DarkPrimary,
@@ -178,8 +182,16 @@ fun OpenCodeTheme(
     uiContentScale: Float = 1f,
     content: @Composable () -> Unit
 ) {
-    val colorScheme = if (darkTheme) DarkColorScheme else LightColorScheme
-    val opencodeColors = if (darkTheme) DarkOpencodeColors else LightOpencodeColors
+    // Phase 2 Dynamic Color：Android 12+ 跟随系统壁纸派生 ColorScheme；
+    // pre-12 回退到固定 DarkColorScheme / LightColorScheme。
+    val context = LocalContext.current
+    val colorScheme = remember(darkTheme, context) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            if (darkTheme) dynamicDarkColorScheme(context) else dynamicLightColorScheme(context)
+        } else {
+            if (darkTheme) DarkColorScheme else LightColorScheme
+        }
+    }
 
     // v2 §20 / D5 font scaffold: read the 4 font keys from the Hilt singleton
     // [SettingsManager] and assemble a FontFamily. Defaults are empty (=
@@ -242,7 +254,6 @@ fun OpenCodeTheme(
 
     CompositionLocalProvider(
         LocalMarkdownFontSizes provides markdownFontSizes,
-        LocalOpencodeColors provides opencodeColors,
         LocalAppFontFamily provides appFontFamily,
         LocalIsDarkTheme provides darkTheme,
         // §ui-scale: only provide the overridden Density when a non-identity

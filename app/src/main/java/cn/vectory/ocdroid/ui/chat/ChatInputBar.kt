@@ -55,7 +55,6 @@ import cn.vectory.ocdroid.R
 import cn.vectory.ocdroid.data.api.CommandInfo
 import cn.vectory.ocdroid.data.model.QuestionRequest
 import cn.vectory.ocdroid.ui.MainViewModel
-import cn.vectory.ocdroid.ui.theme.opencode
 
 @Composable
 internal fun ChatInputBar(
@@ -127,7 +126,6 @@ internal fun ChatInputBar(
         }
     }
 
-    val oc = MaterialTheme.opencode
     // §9: the primary button is SEND whenever there is something to send —
     // including while the agent is running, so the user can append/steer a
     // running turn (matches the official web/TUI behaviour: the server's
@@ -149,7 +147,7 @@ internal fun ChatInputBar(
     // §9: composer card — rounded 10, surface (bg-base), 2dp elevation.
     Surface(
         modifier = Modifier.fillMaxWidth().imePadding(),
-        color = oc.layer02,
+        color = MaterialTheme.colorScheme.surfaceContainerLow,
         shape = RoundedCornerShape(10.dp),
         shadowElevation = 2.dp
     ) {
@@ -263,8 +261,8 @@ internal fun ChatInputBar(
                         }
                     },
                     enabled = canStop || canSend,
-                    containerColor = oc.bgContrast,
-                    contentColor = Color.White,
+                    containerColor = MaterialTheme.colorScheme.inverseSurface,
+                    contentColor = MaterialTheme.colorScheme.inverseOnSurface,
                     dimWhenDisabled = true,
                     icon = sendIcon,
                     contentDescription = sendContentDescription
