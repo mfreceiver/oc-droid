@@ -27,7 +27,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.res.stringResource
-import androidx.compose.ui.text.font.FontFamily
+import cn.vectory.ocdroid.ui.theme.BundledMonoFamily
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import cn.vectory.ocdroid.R
@@ -100,7 +100,7 @@ internal fun ThinkingCapsule(
                 Text(
                     text = formatElapsed(nowMillis - startedAtMillis),
                     style = MaterialTheme.typography.labelMedium,
-                    fontFamily = FontFamily.Monospace,
+                    fontFamily = BundledMonoFamily,
                     color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.8f),
                     maxLines = 1
                 )

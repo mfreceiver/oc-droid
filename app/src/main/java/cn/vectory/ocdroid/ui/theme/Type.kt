@@ -160,7 +160,7 @@ val Typography: Typography = AppTypography
  * 标题权重按 v2：h1/h2 = SemiBold (600)，h3 = Medium (500)。
  *
  * 字体 family 默认从 [LocalAppFontFamily] 取（评审 I5 审计：不硬编码
- * [FontFamily.Default]）；`code`/`inlineCode` 固定用 [FontFamily.Monospace]。
+ * [FontFamily.Default]）；`code`/`inlineCode` 固定用 [BundledMonoFamily]。
  */
 @Composable
 fun markdownTypography(sizes: MarkdownFontSizes) = markdownTypography(sizes, LocalAppFontFamily.current)
@@ -191,8 +191,8 @@ fun markdownTypography(
     bullet = TextStyle(fontFamily = family, fontSize = sizes.body.sp, lineHeight = (sizes.body * 1.4f).sp),
     list = TextStyle(fontFamily = family, fontSize = sizes.body.sp, lineHeight = (sizes.body * 1.4f).sp),
     table = TextStyle(fontFamily = family, fontSize = sizes.body.sp, lineHeight = (sizes.body * 1.3f).sp),
-    code = TextStyle(fontSize = sizes.code.sp, fontFamily = FontFamily.Monospace, lineHeight = (sizes.code * 1.4f).sp),
-    inlineCode = TextStyle(fontSize = sizes.inlineCode.sp, fontFamily = FontFamily.Monospace),
+    code = TextStyle(fontSize = sizes.code.sp, fontFamily = BundledMonoFamily, lineHeight = (sizes.code * 1.4f).sp),
+    inlineCode = TextStyle(fontSize = sizes.inlineCode.sp, fontFamily = BundledMonoFamily),
     quote = TextStyle(fontFamily = family, fontSize = sizes.quote.sp, lineHeight = (sizes.quote * 1.4f).sp),
 )
 
@@ -210,8 +210,8 @@ fun markdownTypographyCompact() = markdownTypography(
     h5 = MaterialTheme.typography.titleMedium,
     h6 = MaterialTheme.typography.titleSmall,
     text = MaterialTheme.typography.bodyLarge,
-    code = MaterialTheme.typography.bodyMedium.copy(fontFamily = FontFamily.Monospace),
-    inlineCode = MaterialTheme.typography.bodyLarge.copy(fontFamily = FontFamily.Monospace),
+    code = MaterialTheme.typography.bodyMedium.copy(fontFamily = BundledMonoFamily),
+    inlineCode = MaterialTheme.typography.bodyLarge.copy(fontFamily = BundledMonoFamily),
     quote = MaterialTheme.typography.bodyMedium,
     paragraph = MaterialTheme.typography.bodyLarge,
     ordered = MaterialTheme.typography.bodyLarge,

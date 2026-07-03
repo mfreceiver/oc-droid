@@ -28,7 +28,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
-import androidx.compose.ui.text.font.FontFamily
+import cn.vectory.ocdroid.ui.theme.BundledMonoFamily
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import cn.vectory.ocdroid.R
@@ -142,7 +142,7 @@ internal fun PatchCard(
                     text = basename,
                     style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.onSurface,
-                    fontFamily = FontFamily.Monospace,
+                    fontFamily = BundledMonoFamily,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
                     modifier = Modifier.weight(1f)
@@ -153,7 +153,7 @@ internal fun PatchCard(
                         text = "+$additions",
                         style = MaterialTheme.typography.labelSmall,
                         color = oc.stateSuccessFg,
-                        fontFamily = FontFamily.Monospace
+                        fontFamily = BundledMonoFamily
                     )
                 }
                 if (deletions > 0) {
@@ -162,7 +162,7 @@ internal fun PatchCard(
                         text = "-$deletions",
                         style = MaterialTheme.typography.labelSmall,
                         color = oc.stateDangerFg,
-                        fontFamily = FontFamily.Monospace
+                        fontFamily = BundledMonoFamily
                     )
                 }
                 Icon(
@@ -190,7 +190,7 @@ internal fun PatchCard(
                                 Text(
                                     text = path.wrappablePath(),
                                     style = MaterialTheme.typography.bodySmall,
-                                    fontFamily = FontFamily.Monospace,
+                                    fontFamily = BundledMonoFamily,
                                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                                     softWrap = true,
                                     overflow = TextOverflow.Visible,
@@ -210,7 +210,7 @@ internal fun PatchCard(
                         Text(
                             text = primaryPath.wrappablePath(),
                             style = MaterialTheme.typography.bodySmall,
-                            fontFamily = FontFamily.Monospace,
+                            fontFamily = BundledMonoFamily,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                             softWrap = true,
                             overflow = TextOverflow.Visible

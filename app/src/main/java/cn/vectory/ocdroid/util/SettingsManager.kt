@@ -170,12 +170,14 @@ class SettingsManager @Inject constructor(
         set(value) = encryptedPrefs.edit().putFloat(KEY_UI_CONTENT_SCALE, value.coerceIn(UI_SCALE_MIN, UI_SCALE_MAX)).apply()
 
     /**
-     * v2 字体脚手架（`docs/v2-redesign-plan.md` §20 / D5）。
+     * 字体脚手架（v2 §20 / D5；Phase 1 Expressive 字体路线 B 更新）。
      *
-     * 4 键默认空字符串（= 系统字体）。本期只建存储 + 组装管线，不做 picker /
-     * 不打包字体资源。空 → [cn.vectory.ocdroid.ui.theme] 内的
-     * `resolveFontFamily` 回退到 `FontFamily.Default`；非空 → 作为系统字体族名
-     * 尝试加载（Android 对任意族名支持有限，评审已接受为已知偏差）。
+     * 4 键默认空字符串（= 使用 bundled 可变字体）。Phase 1 已 bundle Noto Sans VF
+     * （常规）+ JetBrains Mono VF（等宽）到 res/font/。空 →
+     * [cn.vectory.ocdroid.ui.theme.OpenCodeTheme] 内的 `resolveFontFamilyOrNull`
+     * 回退到 `BundledSansFamily`（Noto Sans VF）；非空 → 经 `systemFontFamily()`
+     * 作为 4 档 weight 系统字体族名加载（Android 对任意族名 weight 支持有限，
+     * 自定义名可能回落 Normal，平台限制）。
      *
      * - [fontLatin] / [fontCJK]：作用于全应用 Typography（含顶栏、卡片等）。
      * - [markdownFontLatin] / [markdownFontCJK]：作用于聊天 markdown 渲染。

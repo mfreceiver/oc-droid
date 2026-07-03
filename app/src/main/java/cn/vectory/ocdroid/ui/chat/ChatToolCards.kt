@@ -43,7 +43,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.res.stringResource
-import androidx.compose.ui.text.font.FontFamily
+import cn.vectory.ocdroid.ui.theme.BundledMonoFamily
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import cn.vectory.ocdroid.R
@@ -239,7 +239,7 @@ internal fun ToolCard(
                             Text(
                                 text = input,
                                 style = MaterialTheme.typography.bodySmall,
-                                fontFamily = FontFamily.Monospace,
+                                fontFamily = BundledMonoFamily,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
                         }
@@ -248,7 +248,7 @@ internal fun ToolCard(
                             Text(
                                 text = output,
                                 style = MaterialTheme.typography.bodySmall,
-                                fontFamily = FontFamily.Monospace,
+                                fontFamily = BundledMonoFamily,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
                         }
@@ -261,7 +261,7 @@ internal fun ToolCard(
                                 Text(
                                     text = path.wrappablePath(),
                                     style = MaterialTheme.typography.bodySmall,
-                                    fontFamily = FontFamily.Monospace,
+                                    fontFamily = BundledMonoFamily,
                                     color = oc.accentText,
                                     softWrap = true,
                                     modifier = Modifier.weight(1f)
@@ -448,7 +448,7 @@ internal fun BasicTool(
                             Text(
                                 text = "$ $command",
                                 style = MaterialTheme.typography.bodySmall,
-                                fontFamily = FontFamily.Monospace,
+                                fontFamily = BundledMonoFamily,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
                         }
@@ -460,7 +460,7 @@ internal fun BasicTool(
                         Text(
                             text = output,
                             style = MaterialTheme.typography.bodySmall,
-                            fontFamily = FontFamily.Monospace,
+                            fontFamily = BundledMonoFamily,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
                     }

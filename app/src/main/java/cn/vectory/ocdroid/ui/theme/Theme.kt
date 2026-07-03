@@ -20,6 +20,7 @@ import androidx.compose.ui.unit.Density
 import androidx.compose.ui.text.font.DeviceFontFamilyName
 import androidx.compose.ui.text.font.Font
 import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.font.FontWeight
 import androidx.core.view.WindowCompat
 import cn.vectory.ocdroid.util.MarkdownFontSizes
 import cn.vectory.ocdroid.util.SettingsManager
@@ -122,19 +123,34 @@ private val LightColorScheme = lightColorScheme(
 )
 
 /**
+ * Build a 4-weight system font family for a given PostScript/family name.
+ *
+ * 镜像 [BundledSansFamily] 的 4 档结构，使 override 路径（用户设置 fontLatin/fontCJK）
+ * 也保留 weight 匹配——避免用户一旦设置字体偏好，所有 Typography slot 退化为 Normal
+ * weight（单条 FontFamily 不响应 fontWeight）。实际 weight 合成由平台 Typeface.create
+ * 处理：对系统内建族名（sans-serif 等）响应 weight；对任意自定义名可能回落 Normal，
+ * 这是平台限制，本应用无法绕开。
+ */
+private fun systemFontFamily(name: String): FontFamily = FontFamily(
+    Font(DeviceFontFamilyName(name), weight = FontWeight.Normal),
+    Font(DeviceFontFamilyName(name), weight = FontWeight.Medium),
+    Font(DeviceFontFamilyName(name), weight = FontWeight.SemiBold),
+    Font(DeviceFontFamilyName(name), weight = FontWeight.Bold),
+)
+
+/**
  * Resolve a stored font-family preference to a Compose [FontFamily].
  *
- * v2 字体脚手架（§20 / D5）：本期只存键、不承诺完整解析（评审注：Android
- * 对任意系统字体族名支持有限）。返回 `null` 表示"未设置，用系统默认"，
- * 让调用方做优先级合并；非空 → 作为系统字体名加载（[DeviceFontFamilyName]）。
+ * 返回 4 档 weight 系统字体族（[systemFontFamily]），与 [BundledSansFamily] 结构对称。
+ * 返回 `null` 表示"未设置，用 bundled 默认"，让调用方做优先级合并。
  *
  * 优先级见 [OpenCodeTheme]：先 markdown 键（聊天是主文本面），后 app 键。
  */
 private fun resolveFontFamilyOrNull(latin: String?, cjk: String?): FontFamily? {
     val latinTrimmed = latin?.trim().orEmpty()
-    if (latinTrimmed.isNotEmpty()) return FontFamily(Font(DeviceFontFamilyName(latinTrimmed)))
+    if (latinTrimmed.isNotEmpty()) return systemFontFamily(latinTrimmed)
     val cjkTrimmed = cjk?.trim().orEmpty()
-    if (cjkTrimmed.isNotEmpty()) return FontFamily(Font(DeviceFontFamilyName(cjkTrimmed)))
+    if (cjkTrimmed.isNotEmpty()) return systemFontFamily(cjkTrimmed)
     return null
 }
 
@@ -184,12 +200,12 @@ fun OpenCodeTheme(
         settings.markdownFontCJK,
     ) {
         // For the scaffold, prefer markdown-specific keys when set (they target
-        // the markdown rendering path which is the dominant text surface in the
-        // chat), then fall back to the app-wide keys. All four default to empty
-        // (= FontFamily.Default), so the common case is unchanged.
+        // the markdown rendering path which is the dominant text surface in
+        // the chat), then fall back to the app-wide keys. All four default to empty
+        // (= bundled Noto Sans VF), so the common case uses the bundled variable font.
         resolveFontFamilyOrNull(settings.markdownFontLatin, settings.markdownFontCJK)
             ?: resolveFontFamilyOrNull(settings.fontLatin, settings.fontCJK)
-            ?: FontFamily.Default
+            ?: BundledSansFamily
     }
     val typography = remember(appFontFamily) { appTypography(appFontFamily) }
 

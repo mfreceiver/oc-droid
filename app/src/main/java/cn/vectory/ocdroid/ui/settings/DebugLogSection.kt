@@ -45,7 +45,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.text.font.FontFamily
+import cn.vectory.ocdroid.ui.theme.BundledMonoFamily
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import cn.vectory.ocdroid.ui.theme.opencode
@@ -232,7 +232,7 @@ internal fun DebugLogSection(hideHeader: Boolean = false) {
                     Text(
                         text = "[${sdf.format(entry.timeMs)}] ${entry.tag}/${entry.level}: ${entry.message}",
                         style = MaterialTheme.typography.labelSmall,
-                        fontFamily = FontFamily.Monospace,
+                        fontFamily = BundledMonoFamily,
                         color = levelColor
                     )
                 }

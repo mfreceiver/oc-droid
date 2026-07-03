@@ -32,7 +32,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.testTag
-import androidx.compose.ui.text.font.FontFamily
+import cn.vectory.ocdroid.ui.theme.BundledMonoFamily
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import cn.vectory.ocdroid.data.model.Part
@@ -186,7 +186,7 @@ internal fun FileCard(
             Text(
                 text = basename,
                 style = MaterialTheme.typography.labelMedium,
-                fontFamily = FontFamily.Monospace,
+                fontFamily = BundledMonoFamily,
                 color = MaterialTheme.colorScheme.onSurface,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
@@ -234,7 +234,7 @@ internal fun FolderContents(
         Text(
             text = folderName,
             style = MaterialTheme.typography.titleMedium,
-            fontFamily = FontFamily.Monospace,
+            fontFamily = BundledMonoFamily,
             color = MaterialTheme.colorScheme.onSurface,
             modifier = Modifier.padding(bottom = 8.dp)
         )
@@ -264,7 +264,7 @@ internal fun FolderContents(
                     Text(
                         text = entry.name,
                         style = MaterialTheme.typography.bodyMedium,
-                        fontFamily = FontFamily.Monospace,
+                        fontFamily = BundledMonoFamily,
                         color = MaterialTheme.colorScheme.onSurface,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis

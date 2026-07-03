@@ -31,7 +31,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.testTag
-import androidx.compose.ui.text.font.FontFamily
+import cn.vectory.ocdroid.ui.theme.BundledMonoFamily
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import cn.vectory.ocdroid.R
@@ -155,7 +155,7 @@ internal fun MultiFilePatchAccordion(
                         text = "+$totalAdd",
                         style = MaterialTheme.typography.labelSmall,
                         color = oc.stateSuccessFg,
-                        fontFamily = FontFamily.Monospace
+                        fontFamily = BundledMonoFamily
                     )
                 }
                 if (totalDel > 0) {
@@ -164,7 +164,7 @@ internal fun MultiFilePatchAccordion(
                         text = "-$totalDel",
                         style = MaterialTheme.typography.labelSmall,
                         color = oc.stateDangerFg,
-                        fontFamily = FontFamily.Monospace
+                        fontFamily = BundledMonoFamily
                     )
                 }
                 Spacer(modifier = Modifier.weight(1f))
@@ -203,7 +203,7 @@ internal fun MultiFilePatchAccordion(
                                 style = MaterialTheme.typography.labelMedium,
                                 color = if (isDelete) MaterialTheme.colorScheme.onSurfaceVariant
                                 else MaterialTheme.colorScheme.onSurface,
-                                fontFamily = FontFamily.Monospace,
+                                fontFamily = BundledMonoFamily,
                                 maxLines = 1,
                                 overflow = TextOverflow.Ellipsis,
                                 modifier = Modifier.weight(1f)
@@ -222,7 +222,7 @@ internal fun MultiFilePatchAccordion(
                                         text = "+$fileAdd",
                                         style = MaterialTheme.typography.labelSmall,
                                         color = oc.stateSuccessFg,
-                                        fontFamily = FontFamily.Monospace
+                                        fontFamily = BundledMonoFamily
                                     )
                                 }
                                 if (fileDel > 0) {
@@ -231,7 +231,7 @@ internal fun MultiFilePatchAccordion(
                                         text = "-$fileDel",
                                         style = MaterialTheme.typography.labelSmall,
                                         color = oc.stateDangerFg,
-                                        fontFamily = FontFamily.Monospace
+                                        fontFamily = BundledMonoFamily
                                     )
                                 }
                             }
@@ -246,7 +246,7 @@ internal fun MultiFilePatchAccordion(
                             Text(
                                 text = path,
                                 style = MaterialTheme.typography.bodySmall,
-                                fontFamily = FontFamily.Monospace,
+                                fontFamily = BundledMonoFamily,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                                 modifier = Modifier.weight(1f)
                             )

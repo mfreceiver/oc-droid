@@ -48,7 +48,7 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
-import androidx.compose.ui.text.font.FontFamily
+import cn.vectory.ocdroid.ui.theme.BundledMonoFamily
 import androidx.compose.ui.unit.dp
 import androidx.core.content.FileProvider
 import cn.vectory.ocdroid.R
@@ -265,7 +265,7 @@ private fun PreviewPlainText(content: String) {
             Text(
                 text = content,
                 style = MaterialTheme.typography.bodySmall,
-                fontFamily = FontFamily.Monospace
+                fontFamily = BundledMonoFamily
             )
         }
     }

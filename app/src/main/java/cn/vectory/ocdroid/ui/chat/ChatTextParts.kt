@@ -31,7 +31,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.Layout
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.TextStyle
-import androidx.compose.ui.text.font.FontFamily
+import cn.vectory.ocdroid.ui.theme.BundledMonoFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Constraints
@@ -487,7 +487,7 @@ internal fun CodeBlockSurface(code: String, language: String) {
                             bottom = 8.dp
                         ),
                     style = MaterialTheme.typography.bodySmall,
-                    fontFamily = FontFamily.Monospace,
+                    fontFamily = BundledMonoFamily,
                     color = MaterialTheme.colorScheme.onSurface,
                     softWrap = true,
                     overflow = TextOverflow.Visible
@@ -503,7 +503,7 @@ internal fun CodeBlockSurface(code: String, language: String) {
                         .align(Alignment.TopEnd)
                         .padding(horizontal = 6.dp, vertical = 2.dp),
                     style = MaterialTheme.typography.labelSmall,
-                    fontFamily = FontFamily.Monospace,
+                    fontFamily = BundledMonoFamily,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
             }

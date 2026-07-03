@@ -28,7 +28,7 @@ import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.res.stringResource
-import androidx.compose.ui.text.font.FontFamily
+import cn.vectory.ocdroid.ui.theme.BundledMonoFamily
 import androidx.compose.ui.unit.dp
 import cn.vectory.ocdroid.R
 import cn.vectory.ocdroid.data.model.PermissionRequest
@@ -69,7 +69,7 @@ internal fun ChatPermissionCard(
                         Text(
                             it,
                             style = MaterialTheme.typography.bodySmall,
-                            fontFamily = FontFamily.Monospace,
+                            fontFamily = BundledMonoFamily,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
                     }
