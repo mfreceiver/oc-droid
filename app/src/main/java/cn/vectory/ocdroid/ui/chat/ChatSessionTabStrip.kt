@@ -7,7 +7,6 @@ package cn.vectory.ocdroid.ui.chat
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Row
@@ -66,10 +65,8 @@ private const val SELECTED_TAB_FILL_ALPHA = 0.22f
 // without dominating the TopAppBar, yet wide enough to show a truncated title
 // plus the 24dp close affordance. 96dp is the practical minimum: it leaves
 // room for the close target, a 2dp spacer, a few truncated characters and M3
-// Tab's internal horizontal padding. 168dp caps a 15-character title so a
-// single tab does not stretch far beyond its useful content.
+// Tab's internal horizontal padding.
 private val TAB_MIN_WIDTH = 96.dp
-private val TAB_MAX_WIDTH = 168.dp
 private val TAB_ROW_EDGE_PADDING = 8.dp
 
 /**
@@ -107,8 +104,8 @@ internal fun resolveEffectiveSelectedId(
 
 /**
  * Layout mode for the session tab strip. The mode is chosen by measuring the
- * available content width against the minimum and maximum tab widths; it is
- * pure arithmetic with no Compose dependency so it can be unit tested.
+ * available content width against the minimum tab width; it is pure arithmetic
+ * with no Compose dependency so it can be unit tested.
  */
 internal sealed interface SessionTabLayout {
     /** Tabs cannot fit at their minimum width → horizontal scrolling. */
@@ -116,25 +113,19 @@ internal sealed interface SessionTabLayout {
 
     /** Tabs fit and should expand evenly to fill the strip with [Modifier.weight]. */
     data object FitWeighted : SessionTabLayout
-
-    /** Tabs fit and each has enough room to reach its maximum width. */
-    data object FitClampedToMax : SessionTabLayout
 }
 
 /**
  * Pure layout resolver for the session tab strip (§tab-layout). Returns the
- * mode that should be used given [contentWidth], [tabCount], and the tab width
- * constraints [minWidth] / [maxWidth].
+ * mode that should be used given [contentWidth], [tabCount], and [minWidth].
  */
 internal fun resolveSessionTabLayout(
     contentWidth: Dp,
     tabCount: Int,
     minWidth: Dp,
-    maxWidth: Dp,
 ): SessionTabLayout = when {
     tabCount <= 0 -> SessionTabLayout.FitWeighted
     minWidth * tabCount > contentWidth -> SessionTabLayout.OverflowScroll
-    contentWidth / tabCount >= maxWidth -> SessionTabLayout.FitClampedToMax
     else -> SessionTabLayout.FitWeighted
 }
 
@@ -240,8 +231,7 @@ internal fun SessionTabStrip(
         when (resolveSessionTabLayout(
             contentWidth = contentWidth,
             tabCount = openSessions.size,
-            minWidth = TAB_MIN_WIDTH,
-            maxWidth = TAB_MAX_WIDTH
+            minWidth = TAB_MIN_WIDTH
         )) {
             SessionTabLayout.OverflowScroll -> {
                 PrimaryScrollableTabRow(
@@ -273,26 +263,6 @@ internal fun SessionTabStrip(
                             unreadSessions = unreadSessions,
                             actions = actions,
                             modifier = Modifier.width(TAB_MIN_WIDTH)
-                        )
-                    }
-                }
-            }
-            SessionTabLayout.FitClampedToMax -> {
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(horizontal = TAB_ROW_EDGE_PADDING),
-                    horizontalArrangement = Arrangement.SpaceEvenly,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    openSessions.forEach { session ->
-                        SessionTab(
-                            session = session,
-                            isSelected = session.id == effectiveSelectedId,
-                            accentColor = accentColor,
-                            unreadSessions = unreadSessions,
-                            actions = actions,
-                            modifier = Modifier.width(TAB_MAX_WIDTH)
                         )
                     }
                 }
@@ -378,6 +348,7 @@ private fun SessionTab(
                 }
                 Text(
                     text = truncateTitle(session.displayName),
+                    modifier = Modifier.weight(1f, fill = false),
                     style = MaterialTheme.typography.labelMedium,
                     color = if (isSelected) MaterialTheme.colorScheme.onSurface
                     else MaterialTheme.colorScheme.onSurfaceVariant,
