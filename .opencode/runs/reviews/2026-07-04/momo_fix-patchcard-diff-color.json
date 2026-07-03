@@ -1,0 +1,25 @@
+{
+  "agent": "momo",
+  "scope": "fix-patchcard-diff-color",
+  "date": "2026-07-04",
+  "reviewed_commit": "a129b2d (uncommitted working tree)",
+  "version_target": "",
+  "verdict": "pass",
+  "score": 9.6,
+  "blocking_issues": [],
+  "non_blocking_issues": [
+    {
+      "severity": "nit",
+      "location": "ChatPatchCards.kt:103-105",
+      "issue": "注释 'reverted per user request' 措辞不准确——这不是 git revert 操作（没有回到更早版本的代码），而是按新需求做的新设计变更。'reverted' 可能让后续维护者误以为有对应 revert commit。",
+      "suggestion": "改为 'updated per user request for consistency' 或 'changed per user request'。"
+    },
+    {
+      "severity": "nit",
+      "location": "ChatPatchCards.kt:159-160 vs MultiFilePatchAccordion.kt:161-162",
+      "issue": "deletions-only 场景（additions=0, deletions>0）下，basename 与 -$N 之间仅有 4dp（deletions 分支的 Spacer），而 additions 存在时有 6dp。MultiFilePatchAccordion 有相同模式（已对齐），但若追求绝对间距一致可考虑统一。",
+      "suggestion": "优先级极低，当前与基准一致，无需本次修复。"
+    }
+  ],
+  "notes": "纯视觉配色变更，实现正确，与对齐基准完全一致，无阻塞问题。已核实：(1) oc 来自 MaterialTheme.opencode（staticCompositionLocalOf），与 MaterialTheme.colorScheme 在同一 recomposition pass 解析，无 dark/light 切换脱节风险；(2) basename 的 weight(1f) 独占 Row 剩余空间，拆分 Text 前后布局稳定；(3) countDiffLines 的 +++/--- 过滤可能导致极罕见的 under-count（非 over-count），但仅在 server 未提供 additions/deletions 的兜底路径触发，且为既有逻辑；(4) 全仓确认 onSurfaceVariant 不用于任何 diff stat 渲染，改完后无不一致遗留。"
+}

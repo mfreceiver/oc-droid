@@ -100,8 +100,9 @@ internal fun PatchCard(
 
     val expanded = expandedParts[expandedKey] ?: false
 
-    // §5.4 v3 patch card: fully transparent, diff stats desaturated to
-    // onSurfaceVariant (no green/red pop). Same visual weight as BasicTool.
+    // Diff stats colored green/red — parity with MultiFilePatchAccordion
+    // header (stateSuccessFg / stateDangerFg). Prior §5.4 v3 desaturated
+    // them to onSurfaceVariant; updated per user request for consistency.
     val oc = MaterialTheme.opencode
     Surface(
         modifier = modifier
@@ -146,16 +147,21 @@ internal fun PatchCard(
                     overflow = TextOverflow.Ellipsis,
                     modifier = Modifier.weight(1f)
                 )
-                if (additions > 0 || deletions > 0) {
+                if (additions > 0) {
                     Spacer(modifier = Modifier.width(6.dp))
                     Text(
-                        text = buildString {
-                            if (additions > 0) append("+$additions")
-                            if (additions > 0 && deletions > 0) append(" ")
-                            if (deletions > 0) append("-$deletions")
-                        },
+                        text = "+$additions",
                         style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        color = oc.stateSuccessFg,
+                        fontFamily = FontFamily.Monospace
+                    )
+                }
+                if (deletions > 0) {
+                    Spacer(modifier = Modifier.width(4.dp))
+                    Text(
+                        text = "-$deletions",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = oc.stateDangerFg,
                         fontFamily = FontFamily.Monospace
                     )
                 }
