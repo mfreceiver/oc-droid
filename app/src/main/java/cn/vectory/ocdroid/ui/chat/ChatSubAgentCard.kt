@@ -32,6 +32,7 @@ import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.animation.animateContentSize
 import com.mikepenz.markdown.compose.components.markdownComponents
 import com.mikepenz.markdown.m3.Markdown
 import cn.vectory.ocdroid.R
@@ -39,6 +40,7 @@ import cn.vectory.ocdroid.data.model.Part
 import cn.vectory.ocdroid.ui.theme.LocalMarkdownFontSizes
 import cn.vectory.ocdroid.ui.theme.markdownTypography
 import cn.vectory.ocdroid.ui.util.DataUriImageTransformer
+import cn.vectory.ocdroid.ui.theme.AppMotion
 
 // ── Sub-agent card + completed-task card + task XML parsing ──────────────
 // SubAgentCard renders a `task` tool part (the only bordered tool card in the
@@ -316,7 +318,7 @@ internal fun CompletedTaskCard(
         color = MaterialTheme.colorScheme.surfaceContainerLow,
         border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline)
     ) {
-        Column(modifier = Modifier.padding(horizontal = 8.dp, vertical = 8.dp)) {
+        Column(modifier = Modifier.padding(horizontal = 8.dp, vertical = 8.dp).animateContentSize(AppMotion.expandSizeSpec)) {
             Row(
                 modifier = Modifier
                     .fillMaxWidth()

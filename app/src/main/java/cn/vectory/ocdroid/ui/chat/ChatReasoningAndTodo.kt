@@ -42,6 +42,7 @@ import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.animation.animateContentSize
 import com.mikepenz.markdown.compose.components.markdownComponents
 import com.mikepenz.markdown.m3.Markdown
 import cn.vectory.ocdroid.R
@@ -51,6 +52,7 @@ import cn.vectory.ocdroid.ui.theme.LocalMarkdownFontSizes
 import cn.vectory.ocdroid.ui.theme.markdownTypography
 import cn.vectory.ocdroid.ui.util.DataUriImageTransformer
 import cn.vectory.ocdroid.ui.util.MarkdownImageResolver
+import cn.vectory.ocdroid.ui.theme.AppMotion
 
 // ── Reasoning card + inline todo list ────────────────────────────────────
 // ReasoningCard renders the assistant's chain-of-thought (collapsible, quiet
@@ -79,7 +81,7 @@ internal fun ReasoningCard(
         color = MaterialTheme.colorScheme.surfaceContainer,
         border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline)
     ) {
-        Column {
+        Column(modifier = Modifier.then(if (isStreaming) Modifier else Modifier.animateContentSize(AppMotion.expandSizeSpec))) {
             Row(
                 modifier = Modifier
                     .fillMaxWidth()

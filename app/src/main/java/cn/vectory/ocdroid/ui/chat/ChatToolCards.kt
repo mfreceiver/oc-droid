@@ -45,8 +45,10 @@ import androidx.compose.ui.res.stringResource
 import cn.vectory.ocdroid.ui.theme.BundledMonoFamily
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.animation.animateContentSize
 import cn.vectory.ocdroid.R
 import cn.vectory.ocdroid.data.model.Part
+import cn.vectory.ocdroid.ui.theme.AppMotion
 
 // ── Tool cards: ToolCard (general), BasicTool (single-line), ErrorCard ────
 // ToolCard is the generic collapsible card for tool parts (icon + name +
@@ -151,7 +153,7 @@ internal fun ToolCard(
         border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline)
     ) {
         CompositionLocalProvider(LocalContentColor provides MaterialTheme.colorScheme.onSurfaceVariant) {
-            Column(modifier = Modifier.padding(horizontal = 8.dp, vertical = 8.dp)) {
+            Column(modifier = Modifier.padding(horizontal = 8.dp, vertical = 8.dp).then(if (isRunning) Modifier else Modifier.animateContentSize(AppMotion.expandSizeSpec))) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Icon(
                         icon,
@@ -364,7 +366,7 @@ internal fun BasicTool(
         color = MaterialTheme.colorScheme.surfaceContainerLow,
         border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline)
     ) {
-        Column {
+        Column(modifier = Modifier.then(if (isRunning) Modifier else Modifier.animateContentSize(AppMotion.expandSizeSpec))) {
             Row(
                 modifier = Modifier
                     .fillMaxWidth()

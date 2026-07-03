@@ -16,6 +16,7 @@ import androidx.compose.animation.fadeOut
 import androidx.compose.animation.shrinkVertically
 import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.slideOutVertically
+import androidx.compose.ui.unit.IntSize
 
 // ─────────────────────────────────────────────────────────────────────────────
 // AppMotion — Phase 3 动效 token 系统。
@@ -32,8 +33,8 @@ import androidx.compose.animation.slideOutVertically
 // 常用 Float 档位预缓存为 val 常量（standardSmall / standardMedium），避免在热路径
 // （高频重组的 Composable 如 ChatTopBar / MainActivity nav crossfade）每次调用分配
 // 新 TweenSpec 对象。泛型工厂 standard<T>()/emphasized<T>()/springMedium<T>() 保留给
-// 非 Float 类型（Rect/IntOffset/IntSize）以及为 Phase 5（SharedTransition）/ Phase 6
-// （Card morph）预留——当前无调用方是有意的前瞻 API。
+// 非 Float 类型（Rect/IntOffset/IntSize）以及为 Phase 6（Card morph）/ Phase 7
+// （横屏分栏 SharedTransition）预留——当前无调用方是有意的前瞻 API。
 //
 // 豁免：MetadataMarker.kt 的行内详情展开用 Compose 默认 fadeIn()+expandVertically()
 // （spring-based，无魔法数），不纳入 token 化——其行为物理感与本 token 系统的
@@ -68,6 +69,9 @@ object AppMotion {
     /** 标准 MEDIUM 时长 Float spec。 */
     val standardMedium: FiniteAnimationSpec<Float> =
         tween(durationMillis = DURATION_MEDIUM, easing = StandardEasing)
+    /** animateContentSize 用：SHORT emphasized IntSize spec（卡片展开/折叠的容器尺寸变化）。 */
+    val expandSizeSpec: FiniteAnimationSpec<IntSize> =
+        tween(durationMillis = DURATION_SMALL, easing = EmphasizedDecelerateEasing)
 
     // ── 泛型工厂（非 Float 类型用，如 Rect / IntOffset / Color）────────────
     /** Standard 过渡泛型版（FastOutSlowIn）。默认中时长。 */

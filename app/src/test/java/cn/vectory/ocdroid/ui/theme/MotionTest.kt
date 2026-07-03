@@ -4,6 +4,7 @@ import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.FiniteAnimationSpec
 import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.TweenSpec
+import androidx.compose.ui.unit.IntSize
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -93,6 +94,20 @@ class MotionTest {
         assertTrue(spec is TweenSpec<*>)
         val tween = spec as TweenSpec<Float>
         assertEquals(LinearEasing, tween.easing)
+    }
+
+    @Test
+    fun `expandSizeSpec is TweenSpec IntSize with SHORT duration + EmphasizedDecelerate easing`() {
+        val spec = AppMotion.expandSizeSpec
+        assertTrue(spec is TweenSpec<*>)
+        val tween = spec as TweenSpec<*> as TweenSpec<IntSize>
+        assertEquals(AppMotion.DURATION_SMALL, tween.durationMillis)
+        assertEquals(AppMotion.EmphasizedDecelerateEasing, tween.easing)
+    }
+
+    @Test
+    fun `expandSizeSpec is process-singleton (shared by all expandable cards)`() {
+        assertTrue(AppMotion.expandSizeSpec === AppMotion.expandSizeSpec)
     }
 
     @Test

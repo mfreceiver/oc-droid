@@ -30,9 +30,11 @@ import androidx.compose.ui.res.stringResource
 import cn.vectory.ocdroid.ui.theme.BundledMonoFamily
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.animation.animateContentSize
 import cn.vectory.ocdroid.R
 import cn.vectory.ocdroid.data.model.Part
 import cn.vectory.ocdroid.ui.theme.SemanticColors
+import cn.vectory.ocdroid.ui.theme.AppMotion
 
 // ── Patch card + merged context tool group ───────────────────────────────
 // PatchCard is the collapsible diff-stats card for a single file-edit part
@@ -97,6 +99,7 @@ internal fun PatchCard(
         }
     }
 
+    val isRunning = part.stateDisplay == "running"
     val expanded = expandedParts[expandedKey] ?: false
 
     // Diff stats colored green/red — parity with MultiFilePatchAccordion
@@ -110,7 +113,7 @@ internal fun PatchCard(
         color = MaterialTheme.colorScheme.surfaceContainerLow,
         border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline)
     ) {
-        Column {
+        Column(modifier = Modifier.then(if (isRunning) Modifier else Modifier.animateContentSize(AppMotion.expandSizeSpec))) {
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -261,7 +264,7 @@ internal fun ContextToolGroup(
         color = MaterialTheme.colorScheme.surfaceContainerLow,
         border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline)
     ) {
-        Column {
+        Column(modifier = Modifier.then(if (isRunning) Modifier else Modifier.animateContentSize(AppMotion.expandSizeSpec))) {
             Row(
                 modifier = Modifier
                     .fillMaxWidth()

@@ -36,7 +36,9 @@ import androidx.compose.ui.unit.dp
 import cn.vectory.ocdroid.R
 import cn.vectory.ocdroid.data.model.Part
 import cn.vectory.ocdroid.ui.theme.SemanticColors
+import cn.vectory.ocdroid.ui.theme.AppMotion
 import androidx.compose.ui.res.stringResource
+import androidx.compose.animation.animateContentSize
 
 /**
  * §6 (R-E) Multi-file `apply_patch` accordion.
@@ -75,6 +77,8 @@ internal fun MultiFilePatchAccordion(
     val files = remember(parts) { parts.flatMap { it.files ?: emptyList() } }
     if (files.isEmpty()) return
 
+    val isRunning = parts.any { it.stateDisplay == "running" }
+
     // Aggregate diff totals for the header. Per-file additions/deletions come
     // from FileChange when the server provided them; missing values count as 0.
     val (totalAdd, totalDel) = remember(files) {
@@ -112,7 +116,7 @@ internal fun MultiFilePatchAccordion(
         color = MaterialTheme.colorScheme.surfaceContainerLow,
         border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline)
     ) {
-        Column {
+        Column(modifier = Modifier.then(if (isRunning) Modifier else Modifier.animateContentSize(AppMotion.expandSizeSpec))) {
             // Header: "N files" + aggregate +N -M + expand/collapse-all toggle.
             Row(
                 modifier = Modifier
