@@ -304,6 +304,11 @@ data class CommandInfo(
      * array-of-strings form. Returns null for any other shape (object, scalar,
      * or absent) rather than throwing — callers should treat null as "no
      * usable hints". Returns the strings unfiltered.
+     *
+     * Tolerant parsing: only top-level [JsonPrimitive] elements are collected
+     * as strings. Nested objects, arrays, and other non-primitive elements are
+     * intentionally dropped rather than throwing, so callers should not expect
+     * a 1:1 element count with the raw [hints] array.
      */
     val hintsAsStringList: List<String>?
         get() = (hints as? kotlinx.serialization.json.JsonArray)

@@ -46,6 +46,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import cn.vectory.ocdroid.R
 import cn.vectory.ocdroid.data.model.Session
@@ -102,6 +103,39 @@ internal fun resolveEffectiveSelectedId(
     currentSessionId != null && openSessions.any { it.id == currentSessionId } -> currentSessionId
     parentSessionId != null && openSessions.any { it.id == parentSessionId } -> parentSessionId
     else -> null
+}
+
+/**
+ * Layout mode for the session tab strip. The mode is chosen by measuring the
+ * available content width against the minimum and maximum tab widths; it is
+ * pure arithmetic with no Compose dependency so it can be unit tested.
+ */
+internal sealed interface SessionTabLayout {
+    /** Tabs cannot fit at their minimum width → horizontal scrolling. */
+    data object OverflowScroll : SessionTabLayout
+
+    /** Tabs fit and should expand evenly to fill the strip with [Modifier.weight]. */
+    data object FitWeighted : SessionTabLayout
+
+    /** Tabs fit and each has enough room to reach its maximum width. */
+    data object FitClampedToMax : SessionTabLayout
+}
+
+/**
+ * Pure layout resolver for the session tab strip (§tab-layout). Returns the
+ * mode that should be used given [contentWidth], [tabCount], and the tab width
+ * constraints [minWidth] / [maxWidth].
+ */
+internal fun resolveSessionTabLayout(
+    contentWidth: Dp,
+    tabCount: Int,
+    minWidth: Dp,
+    maxWidth: Dp,
+): SessionTabLayout = when {
+    tabCount <= 0 -> SessionTabLayout.FitWeighted
+    minWidth * tabCount > contentWidth -> SessionTabLayout.OverflowScroll
+    contentWidth / tabCount >= maxWidth -> SessionTabLayout.FitClampedToMax
+    else -> SessionTabLayout.FitWeighted
 }
 
 /**
@@ -190,87 +224,96 @@ internal fun SessionTabStrip(
     // is not itself a root session.
     val currentRootIndex = openSessions.indexOfFirst { it.id == currentSessionId }
     val parentRootIndex = openSessions.indexOfFirst { it.id == parentSessionId }
-    var lastRootIndex by remember { mutableIntStateOf(0) }
+    var lastRootIndex by remember { mutableIntStateOf(-1) }
     LaunchedEffect(currentRootIndex) {
         if (currentRootIndex >= 0) lastRootIndex = currentRootIndex
     }
     val scrollHintIndex = when {
         currentRootIndex >= 0 -> currentRootIndex
-        lastRootIndex in openSessions.indices -> lastRootIndex
+        lastRootIndex >= 0 -> lastRootIndex
         parentRootIndex >= 0 -> parentRootIndex
         else -> 0
     }
 
     BoxWithConstraints(modifier = modifier.fillMaxWidth()) {
-        // Decide layout mode by comparing the minimum-width demand of all tabs
-        // against the content width offered by the TopAppBar (strip width minus
-        // the preserved 8dp edge padding). Only when the tabs cannot even fit
-        // at their minimum width do we fall back to horizontal scrolling;
-        // otherwise we expand them evenly to fill the strip.
         val contentWidth = (maxWidth - TAB_ROW_EDGE_PADDING * 2).coerceAtLeast(0.dp)
-        val overflow = TAB_MIN_WIDTH * openSessions.size > contentWidth
-
-        if (overflow) {
-            PrimaryScrollableTabRow(
-                selectedTabIndex = scrollHintIndex,
-                modifier = Modifier.fillMaxWidth(),
-                // This is the TopAppBar's second row, so drop the default
-                // surface fill + bottom divider — the strip must blend with
-                // the bar above.
-                containerColor = Color.Transparent,
-                divider = {},
-                // contentColor tints the (now-empty) default indicator slot
-                // and the tab ripple; keep the accentColour for consistency.
-                contentColor = accentColor,
-                // §fix-2: disable the M3 default indicator — the selected tab
-                // draws a translucent filled background instead of an
-                // underline, so there is no full-width indicator to span the
-                // close button.
-                indicator = {},
-                // Match the former LazyRow's 8dp horizontal content padding
-                // instead of the M3 default 52dp, which would push the
-                // first/last tabs far from the strip edges.
-                edgePadding = TAB_ROW_EDGE_PADDING
-            ) {
-                openSessions.forEach { session ->
-                    SessionTab(
-                        session = session,
-                        isSelected = session.id == effectiveSelectedId,
-                        accentColor = accentColor,
-                        unreadSessions = unreadSessions,
-                        actions = actions,
-                        modifier = Modifier.width(TAB_MIN_WIDTH)
-                    )
+        when (resolveSessionTabLayout(
+            contentWidth = contentWidth,
+            tabCount = openSessions.size,
+            minWidth = TAB_MIN_WIDTH,
+            maxWidth = TAB_MAX_WIDTH
+        )) {
+            SessionTabLayout.OverflowScroll -> {
+                PrimaryScrollableTabRow(
+                    selectedTabIndex = scrollHintIndex,
+                    modifier = Modifier.fillMaxWidth(),
+                    // This is the TopAppBar's second row, so drop the default
+                    // surface fill + bottom divider — the strip must blend with
+                    // the bar above.
+                    containerColor = Color.Transparent,
+                    divider = {},
+                    // contentColor tints the (now-empty) default indicator slot
+                    // and the tab ripple; keep the accentColour for consistency.
+                    contentColor = accentColor,
+                    // §fix-2: disable the M3 default indicator — the selected tab
+                    // draws a translucent filled background instead of an
+                    // underline, so there is no full-width indicator to span the
+                    // close button.
+                    indicator = {},
+                    // Match the former LazyRow's 8dp horizontal content padding
+                    // instead of the M3 default 52dp, which would push the
+                    // first/last tabs far from the strip edges.
+                    edgePadding = TAB_ROW_EDGE_PADDING
+                ) {
+                    openSessions.forEach { session ->
+                        SessionTab(
+                            session = session,
+                            isSelected = session.id == effectiveSelectedId,
+                            accentColor = accentColor,
+                            unreadSessions = unreadSessions,
+                            actions = actions,
+                            modifier = Modifier.width(TAB_MIN_WIDTH)
+                        )
+                    }
                 }
             }
-        } else {
-            val perTab = contentWidth / openSessions.size
-            val expandsToMax = perTab >= TAB_MAX_WIDTH
-
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = TAB_ROW_EDGE_PADDING),
-                horizontalArrangement = if (expandsToMax) {
-                    Arrangement.SpaceEvenly
-                } else {
-                    Arrangement.Start
-                },
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                openSessions.forEach { session ->
-                    SessionTab(
-                        session = session,
-                        isSelected = session.id == effectiveSelectedId,
-                        accentColor = accentColor,
-                        unreadSessions = unreadSessions,
-                        actions = actions,
-                        modifier = if (expandsToMax) {
-                            Modifier.width(TAB_MAX_WIDTH)
-                        } else {
-                            Modifier.width(perTab)
-                        }
-                    )
+            SessionTabLayout.FitClampedToMax -> {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = TAB_ROW_EDGE_PADDING),
+                    horizontalArrangement = Arrangement.SpaceEvenly,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    openSessions.forEach { session ->
+                        SessionTab(
+                            session = session,
+                            isSelected = session.id == effectiveSelectedId,
+                            accentColor = accentColor,
+                            unreadSessions = unreadSessions,
+                            actions = actions,
+                            modifier = Modifier.width(TAB_MAX_WIDTH)
+                        )
+                    }
+                }
+            }
+            SessionTabLayout.FitWeighted -> {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = TAB_ROW_EDGE_PADDING),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    openSessions.forEach { session ->
+                        SessionTab(
+                            session = session,
+                            isSelected = session.id == effectiveSelectedId,
+                            accentColor = accentColor,
+                            unreadSessions = unreadSessions,
+                            actions = actions,
+                            modifier = Modifier.weight(1f)
+                        )
+                    }
                 }
             }
         }
