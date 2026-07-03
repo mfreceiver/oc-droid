@@ -6,7 +6,6 @@ import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.widthIn
@@ -28,9 +27,15 @@ import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.layout.Layout
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.Constraints
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.delay
@@ -507,21 +512,30 @@ internal fun CodeBlockSurface(code: String, language: String) {
 }
 
 /**
- * #table-wrap — markdown TABLE renderer that WRAPS cell text instead of
- * ellipsizing it, with a per-column max width. Replaces mikepenz's default
- * [MarkdownTable] whose header/row cells use `maxLines = 1,
- * overflow = TextOverflow.Ellipsis` (single-line truncation — the "缩略" the
- * user saw). Each column is `widthIn(max = TABLE_COLUMN_MAX_WIDTH)` (NOT
- * `weight(1f)`), so:
- *   - few-column tables are NOT stretched wall-to-wall (they sit left at their
- *     natural width, capped per column);
- *   - long cell content soft-wraps onto extra lines instead of being cut.
- * When the columns' total max width exceeds the available width, the whole
- * table scrolls horizontally (each column keeps its cap, cells still wrap).
+ * #table-align — markdown TABLE renderer that WRAPS cell text (no ellipsis) AND
+ * keeps every column aligned across rows.
  *
- * Cell inline content (bold/`code`/links/images) is rendered via mikepenz's
- * [MarkdownTableBasicText] (the same pipeline the default table uses), so we
- * only change the LAYOUT + line policy, not the inline rendering.
+ * Background: mikepenz's default [MarkdownTable] aligns columns by giving every
+ * cell `weight(1f)` (equal-width columns stretched wall-to-wall) but truncates
+ * cell text at one line (`maxLines = 1, Ellipsis`). An earlier version of this
+ * component kept wrapping but used per-cell `widthIn(max = …)` with NO weight.
+ * Because every table row was an independent [androidx.compose.foundation.layout.Row]
+ * measured separately, each cell took its own content's intrinsic width and the
+ * SAME logical column ended up with different widths in different rows →
+ * misaligned columns (regression introduced by the "表格换行" change).
+ *
+ * Fix: the whole table is laid out through a single custom [Layout]
+ * ([TableGrid]). It measures every cell once at the per-column cap, derives a
+ * SHARED width per column (the widest cell in that column, capped), then
+ * re-measures every cell at exactly that shared width. Wrapping is therefore
+ * consistent and every column lines up vertically. Because columns use a fixed
+ * shared width (not `weight`), a few-column table still sits at its natural
+ * width on the left instead of stretching wall-to-wall. When the capped column
+ * total exceeds the available width the whole table scrolls horizontally (each
+ * column keeps its shared cap, cells still wrap).
+ *
+ * Cell inline content (bold/`code`/links) still flows through mikepenz's
+ * [MarkdownTableBasicText], so only the LAYOUT + line policy changed.
  */
 @Composable
 internal fun WrappedTable(model: MarkdownComponentModel) {
@@ -531,20 +545,24 @@ internal fun WrappedTable(model: MarkdownComponentModel) {
     val oc = MaterialTheme.opencode
     val cellPadding = LocalMarkdownDimens.current.tableCellPadding
     val header = remember(node) { node.findChildOfType(HEADER) }
-    val rows = remember(node) { node.children.filter { it.type == ROW } }
-    val columnsCount = remember(node) {
-        header?.children?.count { it.type == CELL } ?: 0
+    val bodyRows = remember(node) { node.children.filter { it.type == ROW } }
+    val columnsCount = remember(node, header, bodyRows) {
+        val headerCols = header?.children?.count { it.type == CELL } ?: 0
+        val bodyCols = bodyRows.maxOfOrNull { it.children.count { c -> c.type == CELL } } ?: 0
+        maxOf(headerCols, bodyCols)
     }
-    // Per-column max width (the user's "每列最大宽度"). Cells wrap up to this;
-    // a column never exceeds it regardless of content length.
+    if (columnsCount == 0) return
+
+    // Per-column max width cap: cells wrap up to this; a column never exceeds it.
     val maxColumnWidth = 160.dp
+
     BoxWithConstraints(
         modifier = Modifier
             .fillMaxWidth()
             .background(oc.layer02, RoundedCornerShape(6.dp))
     ) {
         // Horizontal-scroll only when the capped columns genuinely overflow the
-        // available width; otherwise let the table sit at its natural (capped)
+        // available width; otherwise let the table sit at its (capped) natural
         // width, left-aligned.
         val useScroll = maxColumnWidth * columnsCount > maxWidth
         Column(
@@ -554,49 +572,168 @@ internal fun WrappedTable(model: MarkdownComponentModel) {
                 Modifier.fillMaxWidth()
             }
         ) {
-            header?.let { h ->
-                WrappedTableRow(
-                    content = content,
-                    rowNode = h,
-                    style = style.copy(fontWeight = FontWeight.Bold),
-                    maxColumnWidth = maxColumnWidth,
-                    cellPadding = cellPadding
-                )
-                HorizontalDivider(color = oc.borderBase)
-            }
-            rows.forEach { row ->
-                WrappedTableRow(
-                    content = content,
-                    rowNode = row,
-                    style = style,
-                    maxColumnWidth = maxColumnWidth,
-                    cellPadding = cellPadding
-                )
-            }
+            TableGrid(
+                headerNode = header,
+                bodyRows = bodyRows,
+                columnsCount = columnsCount,
+                maxColumnWidth = maxColumnWidth,
+                cellPadding = cellPadding,
+                style = style,
+                dividerColor = oc.borderBase,
+                content = content
+            )
         }
     }
 }
 
+/**
+ * Single custom [Layout] that gives every column ONE shared width across the
+ * header row + all body rows. Children are emitted row-major (header cells,
+ * then each body row's cells) followed by an optional header divider; the
+ * measure policy measures all cells twice (intrinsic → shared width) so columns
+ * align while long cells still soft-wrap.
+ */
 @Composable
-private fun WrappedTableRow(
-    content: String,
-    rowNode: org.intellij.markdown.ast.ASTNode,
-    style: androidx.compose.ui.text.TextStyle,
-    maxColumnWidth: androidx.compose.ui.unit.Dp,
-    cellPadding: androidx.compose.ui.unit.Dp
+private fun TableGrid(
+    headerNode: org.intellij.markdown.ast.ASTNode?,
+    bodyRows: List<org.intellij.markdown.ast.ASTNode>,
+    columnsCount: Int,
+    maxColumnWidth: Dp,
+    cellPadding: Dp,
+    style: TextStyle,
+    dividerColor: Color,
+    content: String
 ) {
-    Row(verticalAlignment = Alignment.Top) {
-        rowNode.children.filter { it.type == CELL }.forEach { cell ->
-            Column(modifier = Modifier.padding(cellPadding).widthIn(max = maxColumnWidth)) {
-                // WRAP instead of ellipsize: maxLines = MAX + overflow = Visible.
-                MarkdownTableBasicText(
-                    content = content,
-                    cell = cell,
-                    style = style,
-                    maxLines = Int.MAX_VALUE,
-                    overflow = TextOverflow.Visible
-                )
+    val density = LocalDensity.current
+    val capPx = with(density) { maxColumnWidth.roundToPx() }
+    val dividerThicknessPx = with(density) { 1.dp.roundToPx() }
+
+    // Flat (rowIndex, colIndex, isHeader, cellNode) list, row-major.
+    val cells: List<TableEntry> = remember(headerNode, bodyRows, columnsCount) {
+        buildList {
+            headerNode?.children?.filter { it.type == CELL }
+                ?.forEachIndexed { c, cell ->
+                    if (c < columnsCount) add(TableEntry(rowIndex = 0, colIndex = c, isHeader = true, cell))
+                }
+            bodyRows.forEachIndexed { r, row ->
+                row.children.filter { it.type == CELL }.forEachIndexed { c, cell ->
+                    if (c < columnsCount) add(TableEntry(rowIndex = r + 1, colIndex = c, isHeader = false, cell))
+                }
             }
         }
     }
+    val hasDivider = headerNode != null
+    val rowCount = remember(cells) { (cells.maxOfOrNull { it.rowIndex } ?: 0) + 1 }
+
+    Layout(
+        content = {
+            cells.forEach { entry ->
+                Column(modifier = Modifier.padding(cellPadding)) {
+                    // WRAP instead of ellipsize: maxLines = MAX + overflow = Visible.
+                    MarkdownTableBasicText(
+                        content = content,
+                        cell = entry.cell,
+                        style = if (entry.isHeader) style.copy(fontWeight = FontWeight.Bold) else style,
+                        maxLines = Int.MAX_VALUE,
+                        overflow = TextOverflow.Visible
+                    )
+                }
+            }
+            if (hasDivider) {
+                HorizontalDivider(color = dividerColor)
+            }
+        },
+        measurePolicy = { measurables, constraints ->
+            val totalCells = cells.size
+            // Last measurable is the divider when present.
+            val dividerMeasurable = if (hasDivider) measurables.getOrNull(totalCells) else null
+            val cellMeasurables = if (hasDivider && dividerMeasurable != null) {
+                measurables.subList(0, totalCells)
+            } else {
+                measurables
+            }
+
+            // Pass 1: measure every cell at the cap to learn intrinsic widths.
+            val capConstraints = Constraints(
+                minWidth = 0,
+                maxWidth = capPx,
+                minHeight = 0,
+                maxHeight = Constraints.Infinity
+            )
+            val intrinsic = Array(totalCells) { i -> cellMeasurables[i].measure(capConstraints) }
+
+            // Shared column width = widest cell in that column (already ≤ cap).
+            val colWidths = IntArray(columnsCount)
+            for (i in 0 until totalCells) {
+                val c = cells[i].colIndex
+                if (intrinsic[i].width > colWidths[c]) colWidths[c] = intrinsic[i].width
+            }
+
+            // Pass 2: re-measure every cell at its column's exact shared width so
+            // wrapping (and thus row height) reflects the aligned column.
+            val placeables = Array(totalCells) { i ->
+                val w = colWidths[cells[i].colIndex]
+                cellMeasurables[i].measure(
+                    Constraints(minWidth = w, maxWidth = w, minHeight = 0, maxHeight = Constraints.Infinity)
+                )
+            }
+
+            // Row height = tallest cell in that row.
+            val rowHeights = IntArray(rowCount)
+            for (i in 0 until totalCells) {
+                val r = cells[i].rowIndex
+                if (placeables[i].height > rowHeights[r]) rowHeights[r] = placeables[i].height
+            }
+
+            val tableWidth = colWidths.sum()
+            val tableHeight = rowHeights.sum() + if (hasDivider) dividerThicknessPx else 0
+            val boundedWidth = if (constraints.hasBoundedWidth) {
+                tableWidth.coerceAtMost(constraints.maxWidth)
+            } else {
+                tableWidth
+            }
+
+            // Divider fills the table width.
+            val dividerPlaceable = dividerMeasurable?.measure(
+                Constraints(
+                    minWidth = tableWidth,
+                    maxWidth = tableWidth,
+                    minHeight = 0,
+                    maxHeight = Constraints.Infinity
+                )
+            )
+
+            layout(boundedWidth, tableHeight) {
+                // Column x-offsets (prefix sum).
+                val colX = IntArray(columnsCount)
+                var acc = 0
+                for (c in 0 until columnsCount) {
+                    colX[c] = acc
+                    acc += colWidths[c]
+                }
+                // Row y-offsets (prefix sum), inserting the divider after the header.
+                val rowY = IntArray(rowCount)
+                var accY = 0
+                for (r in 0 until rowCount) {
+                    rowY[r] = accY
+                    accY += rowHeights[r]
+                    if (hasDivider && r == 0) {
+                        dividerPlaceable?.placeRelative(0, accY)
+                        accY += dividerThicknessPx
+                    }
+                }
+                for (i in 0 until totalCells) {
+                    val e = cells[i]
+                    placeables[i].placeRelative(colX[e.colIndex], rowY[e.rowIndex])
+                }
+            }
+        }
+    )
 }
+
+private data class TableEntry(
+    val rowIndex: Int,
+    val colIndex: Int,
+    val isHeader: Boolean,
+    val cell: org.intellij.markdown.ast.ASTNode
+)
