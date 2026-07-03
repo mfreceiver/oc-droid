@@ -1,0 +1,17 @@
+{
+  "agent": "oracle",
+  "scope": "release",
+  "date": "2026-07-03",
+  "reviewed_commit": "23cd8b5",
+  "version_target": "0.2.13",
+  "verdict": "pass",
+  "score": 8.5,
+  "blocking_issues": [],
+  "non_blocking_issues": [
+    "ChatSessionTabStrip.kt:247 — fit-mode integer division (contentWidth / size) truncates fractional Dp, may leave up to (size-1)dp gap at right edge in Arrangement.Start; cosmetic only, not a regression.",
+    "ChatSessionTabStrip.kt:193 — lastRootIndex initialised to 0 cannot distinguish 'unset' from 'tab 0 explicitly selected'; first load into a sub-agent (deep-link) may scroll to tab 0 while highlighting a parent; resolves on next root-tab tap; low impact.",
+    "ChatSessionTabStrip.kt:204-277 — BoxWithConstraints overflow/fit-mode width math has no unit test (only on-device/manual); acceptable given no-UI-test-in-CI constraint.",
+    "OpenCodeApi.kt:309-310 — hintsAsStringList silently drops non-primitive JSON elements via (it as? JsonPrimitive)?.content; intentional tolerant parsing, only matters if server emits structured hint entries."
+  ],
+  "notes": "Release bundles three independently-developed, disjoint change sets, all merged to main with check.sh green (600+ unit tests). ② directory query rewrite correctly mirrors GET/HEAD only, never overwrites caller query, adds location[directory] for /api/ paths, aligned with upstream sdk/js rewrite() — 10 MockWebServer tests cover all modes. ③ ServerCompatProfile semver parse is tolerant + fail-open, wired into ConnectionCoordinator health path; CommandInfo.hints restored as tolerant JsonElement? — 15 new tests. Session tab min/max width uses BoxWithConstraints with sound overflow threshold and a shared SessionTab composable; empty-list guard and scroll-centre decoupling preserved in both modes. Constructor-param additions (MainViewModel, ConnectionCoordinator) are mechanical with all test fixtures updated. No behaviour removed or silently changed. ChatScreen draft-guard fix is a genuine bugfix."
+}
