@@ -1,7 +1,9 @@
 package cn.vectory.ocdroid.ui.chat
 
 import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.padding
@@ -13,7 +15,6 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
@@ -106,16 +107,26 @@ internal fun ThinkingCapsule(
             }
 
             if (showAbort) {
-                // §glm-2 (WCAG 2.5.5): the default IconButton is a 48dp touch
-                // target, matching the repo's R-12 convention used by the primary
-                // send/stop button. The Icon visual stays compact (16dp) so the
-                // capsule keeps its quiet density. No outer Box wrapper needed.
-                IconButton(onClick = onAbort) {
+                // §size: 28dp touch target aligns the capsule height with the
+                // compacting capsule (no abort button) for visual parity. We use
+                // Box+clickable instead of IconButton because M3's IconButton
+                // forces a 48dp minimum container, which inflated the thinking
+                // capsule by ~20dp versus its compact sibling. This mirrors the
+                // repo's established compact-affordance convention
+                // (ChatImageAttachmentStrip 36dp, ChatSessionTabStrip 24dp):
+                // abort is a secondary action on a transient overlay, not a
+                // primary button, so a sub-48dp target is acceptable here.
+                Box(
+                    modifier = Modifier
+                        .size(28.dp)
+                        .clickable(onClick = onAbort),
+                    contentAlignment = Alignment.Center
+                ) {
                     Icon(
                         imageVector = Icons.Default.Stop,
                         contentDescription = stringResource(R.string.chat_interrupt_agent),
                         tint = StopRed,
-                        modifier = Modifier.size(16.dp)
+                        modifier = Modifier.size(14.dp)
                     )
                 }
             }
