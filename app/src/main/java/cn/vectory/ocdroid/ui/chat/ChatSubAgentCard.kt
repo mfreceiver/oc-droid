@@ -116,14 +116,14 @@ internal fun SubAgentCard(
 
     Surface(
         modifier = modifier
-            .padding(vertical = 1.dp)
+            .padding(vertical = 2.dp)
             .testTag("toolcard.subagent$tagSuffix")
             .then(if (canOpen) Modifier.clickable { onOpenSubAgent(sessionId!!) } else Modifier),
         shape = RoundedCornerShape(6.dp),
         color = oc.layer02,
         border = BorderStroke(1.dp, oc.borderBase)
     ) {
-        Column(modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)) {
+        Column(modifier = Modifier.padding(horizontal = 8.dp, vertical = 8.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 // Leading icon — mirrors web's task icon
                 Icon(

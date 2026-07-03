@@ -77,7 +77,7 @@ internal fun ReasoningCard(
     val oc = MaterialTheme.opencode
     val isDark = LocalIsDarkTheme.current
     Surface(
-        modifier = modifier.padding(vertical = 1.dp),
+        modifier = modifier.padding(vertical = 2.dp),
         shape = RoundedCornerShape(6.dp),
         color = oc.layer03,
         border = BorderStroke(1.dp, oc.borderBase)
@@ -86,7 +86,7 @@ internal fun ReasoningCard(
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(horizontal = 8.dp, vertical = 4.dp)
+                    .padding(horizontal = 8.dp, vertical = 8.dp)
                     .then(
                         // The card is always tappable to expand/collapse,
                         // including while streaming (so the user can watch the
