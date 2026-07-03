@@ -370,9 +370,59 @@ internal fun ChatMessageList(
     // page, and matches the product decision that most users rarely need deep
     // history. Messages are not persisted — re-fetched fresh on each open.
 
-    LazyColumn(
-        state = listState,
-        modifier = Modifier.fillMaxSize(),
+    // §Phase8-nav: 消息结构计算提到 LazyColumn body 之外，供消息导航 FAB 将
+    // messageId 映射到 LazyColumn item index（reverseLayout 下 index 0 = 最新）。
+    //
+    // remember 覆盖 messages/partsByMessage/streamingReasoningPart/sessionIsRunning
+    // 不变的情况；但 streamingPartTexts 在 SSE 流式时每 ~100ms 变化（SessionSync
+    // 每次 emit 新 Map），仍会触发 reversedMessages 重建。这是预期的——重建是 O(n)
+    // 单遍 filterNot，100 条消息下 ~10-20μs，远低于 LazyColumn item 渲染成本，可
+    // 忽略（评审 maxer/gpter 实测确认）。userMessageLcIndices 的 O(n²) indexOf 已
+    // 改为单遍 withIndex（真线性），是该热路径上唯一的算法性优化。
+    val streamingOffset = if (streamingReasoningPart != null) 1 else 0
+    val reversedMessages = remember(messages, partsByMessage, streamingPartTexts, streamingReasoningPart, sessionIsRunning) {
+        messages.reversed().filterNot { msg ->
+            val msgParts = partsByMessage[msg.id].orEmpty()
+            val isStreamingMsg = msgParts.any { it.id in streamingPartTexts } ||
+                streamingReasoningPart?.messageId == msg.id ||
+                (!msg.isUser && msgParts.isEmpty() && sessionIsRunning)
+            isRenderableEmptyMessage(
+                isUser = msg.isUser,
+                partsForMessage = msgParts,
+                isStreaming = isStreamingMsg
+            )
+        }
+    }
+    val showGap = gapInfo != null && gapInfo.open
+    val gapInsertIndex = if (showGap) {
+        val idx = reversedMessages.indexOfFirst { it.id == gapInfo!!.tailOldestId }
+        if (idx >= 0) idx + 1 else -1
+    } else -1
+    val beforeGap = if (gapInsertIndex > 0) reversedMessages.subList(0, gapInsertIndex) else reversedMessages
+    val afterGap = if (gapInsertIndex > 0) reversedMessages.subList(gapInsertIndex, reversedMessages.size) else emptyList()
+    // 用户消息的 LC index（IntArray，stable 类型供 ChatMessageNavFab 跳过重组）。
+    // 单遍 O(n) withIndex 计算（不用 indexOf 避免 O(n²)）。gap 条件用 gapInsertIndex>0
+    // 与渲染侧（LazyColumn 的 gap-divider item）对齐，避免 off-by-one。
+    val userMessageLcIndices: IntArray = remember(reversedMessages, streamingOffset, gapInsertIndex) {
+        val result = ArrayList<Int>()
+        for ((revIdx, msg) in reversedMessages.withIndex()) {
+            if (!msg.isUser) continue
+            val lcIdx = if (gapInsertIndex <= 0 || revIdx < gapInsertIndex) {
+                streamingOffset + revIdx
+            } else {
+                // afterGap 区：streamingOffset + beforeGap.size (=gapInsertIndex) + 1(gap divider) + (revIdx - gapInsertIndex)
+                streamingOffset + gapInsertIndex + 1 + (revIdx - gapInsertIndex)
+            }
+            result.add(lcIdx)
+        }
+        result.toIntArray()
+    }
+
+    // §Phase8-nav: Box 包裹 LazyColumn + 导航 FAB overlay（右侧中下）。
+    Box(modifier = Modifier.fillMaxSize()) {
+        LazyColumn(
+            state = listState,
+            modifier = Modifier.fillMaxSize(),
         reverseLayout = true,
         // §4.1 v2 spacing: 16dp between turns (each item is one turn = one
         // MessageRow). Combined with MessageRow's own vertical=4dp padding,
@@ -411,67 +461,9 @@ internal fun ChatMessageList(
                 }
             }
         }
-        // §Phase1C gap divider: when a gap is open, split the reversed message
-        // list so the divider renders at the seam between the new tail and the
-        // older local history. Messages are oldest-first; reversed for the
-        // LazyColumn (newest-first). tailOldestId is the oldest message in the
-        // fetched tail window — the divider goes AFTER it in oldest-first order,
-        // which means BEFORE it in the reversed (display) order.
-        // Render-layer empty-message filter: drop assistant messages that have
-        // no renderable content (the "blank timestamp-only bubble" defect).
-        // This is display-only — the underlying `messages` list / chat state is
-        // untouched. A v0.2.5 streaming placeholder (a Part with text=null) is
-        // protected: that Part lives in partsByMessage so partsForMessage is
-        // non-empty, and the isStreaming guard covers any transient pre-part
-        // window. Does NOT affect the standalone streaming-reasoning item
-        // above (separate item{} block keyed "streaming-reasoning").
-        val reversedMessages = messages.reversed().filterNot { msg ->
-            val msgParts = partsByMessage[msg.id].orEmpty()
-            // §flicker-fix-D (root cause confirmed empirically w/ deepseek-v4-flash):
-            // the server creates the assistant message (message.updated insert)
-            // BEFORE emitting its first part (step-start arrives ~1s later).
-            // During that "pre-part window" partsByMessage[msg.id] is empty AND
-            // no streaming part references this message yet, so the original
-            // guards (own-parts-in-overlay / streamingReasoningPart messageId)
-            // are both false → isRenderableEmptyMessage dropped the empty
-            // assistant row → LazyColumn item vanished → height collapsed →
-            // next state emission re-added it → flicker.
-            //
-            // Earlier iteration used streamingPartTexts.isNotEmpty() as the
-            // keep-signal, but two reviewers (maxer R1, glmer S-1) independently
-            // proved that is a no-op in the pre-part window: the §user-part-guard
-            // removes the user-input-echo part from the overlay, so the overlay
-            // is empty exactly during the window we need to cover. The correct
-            // signal is the SESSION busy/retry status (set at send time, true
-            // through idle) — it spans the whole turn including the pre-part gap.
-            //
-            // Safety: while the session is running, keep an empty non-user
-            // message — it is necessarily the in-progress assistant turn (old
-            // assistant messages always retain their parts across reloads; the
-            // placeholder-survival merge in MainViewModelMessageActions preserves
-            // partsByMessage for non-streaming messages). Once the turn
-            // finalizes the status flips idle → sessionIsRunning=false → a
-            // genuinely empty assistant message (e.g. a server error) is dropped
-            // again, preserving the original "blank timestamp bubble" defect fix.
-            val streamingActive = streamingPartTexts.isNotEmpty() || streamingReasoningPart != null
-            val isStreamingMsg = msgParts.any { it.id in streamingPartTexts } ||
-                streamingReasoningPart?.messageId == msg.id ||
-                (!msg.isUser && msgParts.isEmpty() && sessionIsRunning)
-            isRenderableEmptyMessage(
-                isUser = msg.isUser,
-                partsForMessage = msgParts,
-                isStreaming = isStreamingMsg
-            )
-        }
-        val showGap = gapInfo != null && gapInfo.open
-        val gapInsertIndex = if (showGap) {
-            val idx = reversedMessages.indexOfFirst { it.id == gapInfo!!.tailOldestId }
-            if (idx >= 0) idx + 1 else -1
-        } else -1
-
-        val beforeGap = if (gapInsertIndex > 0) reversedMessages.subList(0, gapInsertIndex) else reversedMessages
-        val afterGap = if (gapInsertIndex > 0) reversedMessages.subList(gapInsertIndex, reversedMessages.size) else emptyList()
-
+        // §Phase8-nav: reversedMessages / beforeGap / afterGap / showGap 已提到
+        // LazyColumn 外（供消息导航 FAB 复用）。下方 §flicker-fix-D 的 empty-message
+        // 过滤逻辑见外层 hoisted 块。gap divider 语义不变。
         items(beforeGap, key = { it.id }) { message ->
             // §s3-markers: synthetic metadata-marker messages render as
             // inline rows (agent / model chip or compaction divider) instead
@@ -567,6 +559,15 @@ internal fun ChatMessageList(
                 }
             }
         }
+    }
+        // §Phase8-nav: 消息导航 FAB（右侧中下；键盘打开/无用户消息时自隐）。
+        ChatMessageNavFab(
+            listState = listState,
+            userMessageLcIndices = userMessageLcIndices,
+            modifier = Modifier
+                .align(Alignment.BottomEnd)
+                .padding(end = 12.dp, bottom = 96.dp),
+        )
     }
 }
 
