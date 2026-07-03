@@ -7,7 +7,9 @@ package cn.vectory.ocdroid.ui.chat
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
@@ -57,6 +59,17 @@ private const val SESSION_TITLE_MAX_CHARS = 15
 // tint is visible but the title text stays clearly readable on both light and
 // dark surfaces.
 private const val SELECTED_TAB_FILL_ALPHA = 0.22f
+
+// Width constraints for each session tab. The 36dp-high strip is a compact
+// secondary nav row, so tabs should be narrow enough to fit several on screen
+// without dominating the TopAppBar, yet wide enough to show a truncated title
+// plus the 24dp close affordance. 96dp is the practical minimum: it leaves
+// room for the close target, a 2dp spacer, a few truncated characters and M3
+// Tab's internal horizontal padding. 168dp caps a 15-character title so a
+// single tab does not stretch far beyond its useful content.
+private val TAB_MIN_WIDTH = 96.dp
+private val TAB_MAX_WIDTH = 168.dp
+private val TAB_ROW_EDGE_PADDING = 8.dp
 
 /**
  * Shared title-truncation helper used by the title-slot parent breadcrumb
@@ -188,102 +201,170 @@ internal fun SessionTabStrip(
         else -> 0
     }
 
-    PrimaryScrollableTabRow(
-        selectedTabIndex = scrollHintIndex,
-        modifier = modifier.fillMaxWidth(),
-        // This is the TopAppBar's second row, so drop the default surface
-        // fill + bottom divider — the strip must blend with the bar above.
-        containerColor = Color.Transparent,
-        divider = {},
-        // contentColor tints the (now-empty) default indicator slot and the
-        // tab ripple; keep the accentColour for visual consistency.
-        contentColor = accentColor,
-        // §fix-2: disable the M3 default indicator — the selected tab draws a
-        // translucent filled background instead of an underline, so there is
-        // no full-width indicator to span the close button.
-        indicator = {},
-        // Match the former LazyRow's 8dp horizontal content padding instead
-        // of the M3 default 52dp (TabRowDefaults.ScrollableTabRowEdgePadding),
-        // which would push the first/last tabs far from the strip edges.
-        edgePadding = 8.dp
-    ) {
-        openSessions.forEach { session ->
-            val isSelected = session.id == effectiveSelectedId
-            Tab(
-                selected = isSelected,
-                onClick = { actions.onSelectSession(session.id) },
-                // Compact 36dp height — this is a secondary nav row, not the
-                // primary tab surface. Modifier.height overrides the M3
-                // default 48dp (heightIn min) by clamping both min and max.
-                // §fix-2: selected tabs get a translucent filled background
-                // tinted with the workdir-hash colour; unselected tabs stay
-                // transparent so the strip blends with the TopAppBar surface.
-                modifier = Modifier
-                    .height(36.dp)
-                    .background(
-                        color = if (isSelected) {
-                            accentColor.copy(alpha = SELECTED_TAB_FILL_ALPHA)
-                        } else {
-                            Color.Transparent
-                        },
-                        shape = RoundedCornerShape(8.dp)
-                    ),
-                // §fix-2: text colour stays theme onSurface / onSurfaceVariant
-                // (weight differentiates selection); the hash colour now lives
-                // on the filled tab background + unread dot.
-                selectedContentColor = MaterialTheme.colorScheme.onSurface,
-                unselectedContentColor = MaterialTheme.colorScheme.onSurfaceVariant,
-                text = {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        // §problem-10: unread dot uses the *session's own*
-                        // workdir hash, not the global currentWorkdir accent,
-                        // so each dot keeps a stable colour as the user
-                        // switches tabs. 5dp fits the compact 36dp row.
-                        if (session.id in unreadSessions) {
-                            val dotColor = session.directory
-                                ?.let { workdirTone(it, oc) }
-                                ?: oc.accentText
-                            Box(
-                                modifier = Modifier
-                                    .padding(end = 6.dp)
-                                    .size(5.dp)
-                                    .background(color = dotColor, shape = CircleShape)
-                            )
-                        }
-                        Text(
-                            text = truncateTitle(session.displayName),
-                            style = MaterialTheme.typography.labelMedium,
-                            color = if (isSelected) MaterialTheme.colorScheme.onSurface
-                            else MaterialTheme.colorScheme.onSurfaceVariant,
-                            fontWeight = if (isSelected) FontWeight.SemiBold
-                            else FontWeight.Normal,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis
-                        )
-                        Spacer(modifier = Modifier.width(2.dp))
-                        // §fix-3: compact close affordance. 24dp touch target is
-                        // a deliberate compromise — noticeably narrower than the
-                        // prior 28dp (so each tab keeps room for the title) while
-                        // staying within the small-target range reviewers accept
-                        // for a secondary, non-data-destructive affordance.
-                        Box(
-                            modifier = Modifier
-                                .size(24.dp)
-                                .clickable(onClick = { actions.onCloseSession(session.id) }),
-                            contentAlignment = Alignment.Center
-                        ) {
-                            Icon(
-                                Icons.Default.Close,
-                                contentDescription = stringResource(R.string.common_close),
-                                modifier = Modifier.size(11.dp),
-                                tint = MaterialTheme.colorScheme.onSurfaceVariant
-                            )
-                        }
-                    }
+    BoxWithConstraints(modifier = modifier.fillMaxWidth()) {
+        // Decide layout mode by comparing the minimum-width demand of all tabs
+        // against the content width offered by the TopAppBar (strip width minus
+        // the preserved 8dp edge padding). Only when the tabs cannot even fit
+        // at their minimum width do we fall back to horizontal scrolling;
+        // otherwise we expand them evenly to fill the strip.
+        val contentWidth = (maxWidth - TAB_ROW_EDGE_PADDING * 2).coerceAtLeast(0.dp)
+        val overflow = TAB_MIN_WIDTH * openSessions.size > contentWidth
+
+        if (overflow) {
+            PrimaryScrollableTabRow(
+                selectedTabIndex = scrollHintIndex,
+                modifier = Modifier.fillMaxWidth(),
+                // This is the TopAppBar's second row, so drop the default
+                // surface fill + bottom divider — the strip must blend with
+                // the bar above.
+                containerColor = Color.Transparent,
+                divider = {},
+                // contentColor tints the (now-empty) default indicator slot
+                // and the tab ripple; keep the accentColour for consistency.
+                contentColor = accentColor,
+                // §fix-2: disable the M3 default indicator — the selected tab
+                // draws a translucent filled background instead of an
+                // underline, so there is no full-width indicator to span the
+                // close button.
+                indicator = {},
+                // Match the former LazyRow's 8dp horizontal content padding
+                // instead of the M3 default 52dp, which would push the
+                // first/last tabs far from the strip edges.
+                edgePadding = TAB_ROW_EDGE_PADDING
+            ) {
+                openSessions.forEach { session ->
+                    SessionTab(
+                        session = session,
+                        isSelected = session.id == effectiveSelectedId,
+                        accentColor = accentColor,
+                        unreadSessions = unreadSessions,
+                        actions = actions,
+                        modifier = Modifier.width(TAB_MIN_WIDTH)
+                    )
                 }
-            )
+            }
+        } else {
+            val perTab = contentWidth / openSessions.size
+            val expandsToMax = perTab >= TAB_MAX_WIDTH
+
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = TAB_ROW_EDGE_PADDING),
+                horizontalArrangement = if (expandsToMax) {
+                    Arrangement.SpaceEvenly
+                } else {
+                    Arrangement.Start
+                },
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                openSessions.forEach { session ->
+                    SessionTab(
+                        session = session,
+                        isSelected = session.id == effectiveSelectedId,
+                        accentColor = accentColor,
+                        unreadSessions = unreadSessions,
+                        actions = actions,
+                        modifier = if (expandsToMax) {
+                            Modifier.width(TAB_MAX_WIDTH)
+                        } else {
+                            Modifier.width(perTab)
+                        }
+                    )
+                }
+            }
         }
     }
+}
+
+/**
+ * Single session tab shared by the scrollable and expanding layouts. The caller
+ * supplies the width modifier; everything else (36dp height, selection fill,
+ * title + unread dot + close-X content) stays identical in both modes.
+ */
+@Composable
+private fun SessionTab(
+    session: Session,
+    isSelected: Boolean,
+    accentColor: Color,
+    unreadSessions: Set<String>,
+    actions: ChatTopBarActions,
+    modifier: Modifier = Modifier
+) {
+    val oc = MaterialTheme.opencode
+    Tab(
+        selected = isSelected,
+        onClick = { actions.onSelectSession(session.id) },
+        // Compact 36dp height — this is a secondary nav row, not the primary
+        // tab surface. Modifier.height overrides the M3 default 48dp
+        // (heightIn min) by clamping both min and max. §fix-2: selected tabs
+        // get a translucent filled background tinted with the workdir-hash
+        // colour; unselected tabs stay transparent so the strip blends with
+        // the TopAppBar surface.
+        modifier = modifier
+            .height(36.dp)
+            .background(
+                color = if (isSelected) {
+                    accentColor.copy(alpha = SELECTED_TAB_FILL_ALPHA)
+                } else {
+                    Color.Transparent
+                },
+                shape = RoundedCornerShape(8.dp)
+            ),
+        // §fix-2: text colour stays theme onSurface / onSurfaceVariant (weight
+        // differentiates selection); the hash colour now lives on the filled
+        // tab background + unread dot.
+        selectedContentColor = MaterialTheme.colorScheme.onSurface,
+        unselectedContentColor = MaterialTheme.colorScheme.onSurfaceVariant,
+        text = {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                // §problem-10: unread dot uses the *session's own* workdir
+                // hash, not the global currentWorkdir accent, so each dot
+                // keeps a stable colour as the user switches tabs. 5dp fits
+                // the compact 36dp row.
+                if (session.id in unreadSessions) {
+                    val dotColor = session.directory
+                        ?.let { workdirTone(it, oc) }
+                        ?: oc.accentText
+                    Box(
+                        modifier = Modifier
+                            .padding(end = 6.dp)
+                            .size(5.dp)
+                            .background(color = dotColor, shape = CircleShape)
+                    )
+                }
+                Text(
+                    text = truncateTitle(session.displayName),
+                    style = MaterialTheme.typography.labelMedium,
+                    color = if (isSelected) MaterialTheme.colorScheme.onSurface
+                    else MaterialTheme.colorScheme.onSurfaceVariant,
+                    fontWeight = if (isSelected) FontWeight.SemiBold
+                    else FontWeight.Normal,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+                Spacer(modifier = Modifier.width(2.dp))
+                // §fix-3: compact close affordance. 24dp touch target is a
+                // deliberate compromise — noticeably narrower than the prior
+                // 28dp (so each tab keeps room for the title) while staying
+                // within the small-target range reviewers accept for a
+                // secondary, non-data-destructive affordance.
+                Box(
+                    modifier = Modifier
+                        .size(24.dp)
+                        .clickable(onClick = { actions.onCloseSession(session.id) }),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Icon(
+                        Icons.Default.Close,
+                        contentDescription = stringResource(R.string.common_close),
+                        modifier = Modifier.size(11.dp),
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            }
+        }
+    )
 }
 
 /**
