@@ -1,0 +1,17 @@
+{
+  "agent": "glmer",
+  "scope": "release",
+  "date": "2026-07-03",
+  "reviewed_commit": "e623f04",
+  "version_target": "0.2.14",
+  "verdict": "pass",
+  "score": 9.7,
+  "blocking_issues": [],
+  "non_blocking_issues": [
+    "SessionTabLayoutTest.kt: 实际 12 个 @Test（任务/check.sh 报告称 11）；release notes 引用计数时核对。",
+    "OpenCodeApi.kt:306-311 — hintsAsStringList KDoc 'unfiltered' vs 'dropped' 首读易歧义，建议改为 'without content-level filtering'。",
+    "OpenCodeApi.kt:315 — JsonNull 技术上是 JsonPrimitive（.content='null'），含 null 元素的 hints 数组会被收为 'null'；纯理论，记录备查。",
+    "ChatSessionTabStrip.kt:239 — 若未来嵌入无界水平容器，BoxWithConstraints.maxWidth=Dp.Infinity 会落到 FitClampedToMax 且 Row.fillMaxWidth 行为未定义；当前唯一调用点(ChatTopBar)有界，不触发。"
+  ],
+  "notes": "四项修复全部正确完整，阈值数学精确，边界测试穷尽，无回归。weight(1f) 在有界 Row+全 weighted 子节点下彻底消除右边缘 gap；-1 sentinel 干净修复首载子代理误滚；resolver 阈值在边界测试中精确钉死。9.7 而非 10 因 4 项可选建议 + 无法 git diff 字节级终审的不确定项。建议放行 0.2.14。"
+}
