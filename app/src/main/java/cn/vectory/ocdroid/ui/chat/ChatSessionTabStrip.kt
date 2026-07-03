@@ -348,7 +348,10 @@ private fun SessionTab(
                 }
                 Text(
                     text = truncateTitle(session.displayName),
-                    modifier = Modifier.weight(1f, fill = false),
+                    // weight(1f) with default fill=true: the title expands to fill its
+                    // share so the dot stays left and the close-X pins to the tab's
+                    // right edge consistently regardless of title length.
+                    modifier = Modifier.weight(1f),
                     style = MaterialTheme.typography.labelMedium,
                     color = if (isSelected) MaterialTheme.colorScheme.onSurface
                     else MaterialTheme.colorScheme.onSurfaceVariant,

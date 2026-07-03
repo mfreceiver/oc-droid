@@ -153,13 +153,13 @@ class MainActivity : AppCompatActivity() {
                 ThemeMode.DARK -> true
                 ThemeMode.SYSTEM -> isSystemInDarkTheme()
             }
-            // Single full-screen pane in ALL orientations/sizes. The former
-            // tablet/landscape split-pane (sidebar) layouts were removed: in
-            // landscape the screen simply rotates. A single pane keeps the
-            // global currentDirectory unambiguous (the Sessions file-browse
-            // overlay is full-screen, so Chat is never interactable during a
-            // browse — no desync), and matches the product decision to drop the
-            // sidebar feature.
+            // Single full-screen pane in ALL sizes. The former tablet/landscape
+            // split-pane (sidebar) layouts were removed; the Activity is locked
+            // to portrait (AndroidManifest screenOrientation), so orientation
+            // changes no longer apply. A single pane keeps the global
+            // currentDirectory unambiguous (the Sessions file-browse overlay is
+            // full-screen, so Chat is never interactable during a browse — no
+            // desync), and matches the product decision to drop the sidebar.
             // §B3: compute the M3 WindowSizeClass once per configuration from
             // the Activity (the canonical entry point — `calculateWindowSizeClass`
             // is the stable 1.2.0+ API for deriving Compact / Medium / Expanded
