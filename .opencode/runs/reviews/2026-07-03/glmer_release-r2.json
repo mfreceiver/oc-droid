@@ -1,0 +1,12 @@
+{
+  "agent": "glmer",
+  "scope": "release",
+  "date": "2026-07-03",
+  "reviewed_commit": "064b2a7",
+  "version_target": "0.2.15",
+  "verdict": "pass",
+  "score": 9.7,
+  "blocking_issues": [],
+  "non_blocking_issues": [],
+  "notes": "Two-pass coverage of v0.2.14..064b2a7. Full review of the 3 substantive commits (c0eabec portrait lock / 7bf43eb close-X restore + remove max-width / 9dd884f flicker fix) scored 9.6 pass with 2 non-blocking items (close-X fill=false floating; stale landscape comment). Delta review of polish commit 064b2a7 (fill=true pin-close-X-right + comment fix) scored 9.7 pass and resolved both prior non-blocking items. Flicker fix confirmed: rememberUpdatedState(rootSessions/parent) breaks the close+swipe oscillation, effect stays keyed only on pagerState, no stale capture remains. close-X pinned right + dot left + title ellipsizes in both OverflowScroll and FitWeighted modes. TAB_MAX_WIDTH fully removed, zero dangling refs, resolver 2-outcome exhaustive. Manifest portrait lock no configChanges interaction. check.sh green."
+}
