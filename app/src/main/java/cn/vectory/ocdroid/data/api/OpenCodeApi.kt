@@ -2,6 +2,7 @@ package cn.vectory.ocdroid.data.api
 
 import cn.vectory.ocdroid.data.model.*
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonElement
 import retrofit2.Response
 import retrofit2.http.*
 
@@ -280,16 +281,35 @@ data class SummarizeRequest(
 data class CommandInfo(
     val name: String,
     val description: String? = null,
-    val agent: String? = null
-    // §fix(command-recognition): the `hints` field is NOT declared here.
-    // server 1.17.11 returns `hints` as a JSON ARRAY of strings (e.g.
-    // ["$ARGUMENTS"]), but an earlier schema typed it as a CommandHints
-    // OBJECT. That type mismatch made kotlinx.serialization throw on every
-    // command entry → getCommands() failed → the client fell back to only the
-    // 4 hardcoded local commands, so user-added / custom commands never
-    // appeared in autocomplete. Since hints is unused client-side, we drop the
-    // field entirely; ignoreUnknownKeys=true skips the server's hints safely.
-)
+    val agent: String? = null,
+    // ③ ServerCompat: `hints` is now captured (previously dropped — see the
+    // history note below) as a raw [JsonElement] so the model never throws
+    // regardless of the shape the server sends. Empirically (1.17.8–1.17.13)
+    // the server emits `hints` as a JSON ARRAY of strings (e.g.
+    // ["$ARGUMENTS"]); an earlier schema typed it as a [CommandHints] OBJECT.
+    // Both forms (and any future third form) decode into JsonElement without
+    // loss, and a typed view can be derived later when a UI consumer needs it
+    // (see [hintsAsStringList]). Restoring the field also stops silently
+    // discarding server data the client currently renders no opinion on.
+    //
+    // History: the field was previously NOT declared because the array-vs-
+    // object mismatch made kotlinx.serialization throw on every command entry
+    // → getCommands() failed → autocomplete fell back to 4 hardcoded local
+    // commands. With `hints: JsonElement?` + ignoreUnknownKeys, neither shape
+    // can break deserialization.
+    val hints: JsonElement? = null
+) {
+    /**
+     * Convenience typed view of [hints] when it is the current server's
+     * array-of-strings form. Returns null for any other shape (object, scalar,
+     * or absent) rather than throwing — callers should treat null as "no
+     * usable hints". Returns the strings unfiltered.
+     */
+    val hintsAsStringList: List<String>?
+        get() = (hints as? kotlinx.serialization.json.JsonArray)
+            ?.mapNotNull { (it as? kotlinx.serialization.json.JsonPrimitive)?.content }
+            ?.takeIf { it.isNotEmpty() }
+}
 
 @kotlinx.serialization.Serializable
 data class CommandHints(

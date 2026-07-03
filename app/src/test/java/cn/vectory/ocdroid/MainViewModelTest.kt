@@ -140,7 +140,7 @@ class MainViewModelTest {
     }
 
     private fun createViewModel(): MainViewModel {
-        return MainViewModel(repository, settingsManager, hostProfileStore, trafficTracker, appLifecycleMonitor)
+        return MainViewModel(repository, settingsManager, hostProfileStore, trafficTracker, appLifecycleMonitor, cn.vectory.ocdroid.data.repository.ServerCompatProfile())
     }
 
     private fun updateState(viewModel: MainViewModel, transform: (AppState) -> AppState) {

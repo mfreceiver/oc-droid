@@ -769,8 +769,16 @@ class OpenCodeRepositoryTest {
         repository.getFileStatus()
 
         val request = server.takeRequest()
-        assertEquals("/file/status", request.path)
+        assertTrue(
+            "path must target /file/status (② now appends a directory query)",
+            request.path?.startsWith("/file/status") == true
+        )
         assertEquals("/workdir/project", request.getHeader("X-Opencode-Directory"))
+        assertEquals(
+            "② directory is mirrored into the query for proxy-safe routing",
+            "/workdir/project",
+            request.requestUrl?.queryParameter("directory")
+        )
     }
 
     @Test

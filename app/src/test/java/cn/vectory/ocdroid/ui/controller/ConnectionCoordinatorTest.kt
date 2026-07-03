@@ -108,6 +108,7 @@ class ConnectionCoordinatorTest {
             repository = repository,
             settingsManager = settingsManager,
             callbacks = callbacks,
+            serverCompatProfile = cn.vectory.ocdroid.data.repository.ServerCompatProfile(),
             clock = { now }
         )
         // Defaults: no directory fetch on loadInitialData (so the directory

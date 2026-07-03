@@ -51,7 +51,8 @@ class MainViewModel @Inject constructor(
     internal val settingsManager: SettingsManager,
     private val hostProfileStore: HostProfileStore,
     internal val trafficTracker: TrafficTracker,
-    private val appLifecycleMonitor: AppLifecycleMonitor
+    private val appLifecycleMonitor: AppLifecycleMonitor,
+    private val serverCompatProfile: cn.vectory.ocdroid.data.repository.ServerCompatProfile
 ) : ViewModel(), ForegroundCatchUpCallbacks, ComposerCallbacks, SessionSwitcherCallbacks, HostProfileCallbacks, ConnectionCoordinatorCallbacks, SessionSyncCoordinatorCallbacks {
 
     // §R-17 M2: _state keeps carrying every AppState field (the connection/
@@ -232,7 +233,8 @@ class MainViewModel @Inject constructor(
             slices = sliceFlows,
             repository = repository,
             settingsManager = settingsManager,
-            callbacks = this
+            callbacks = this,
+            serverCompatProfile = serverCompatProfile
         )
 
     /**
