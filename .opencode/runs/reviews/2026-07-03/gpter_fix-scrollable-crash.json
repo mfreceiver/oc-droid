@@ -1,0 +1,14 @@
+{
+  "agent": "gpter",
+  "scope": "fix-scrollable-crash",
+  "date": "2026-07-03",
+  "reviewed_commit": "3f510c1",
+  "version_target": "0.2.17",
+  "verdict": "pass",
+  "score": 9.5,
+  "blocking_issues": [],
+  "non_blocking_issues": [
+    "ChatReasoningAndTodo.kt comment slightly overstated that all scrollState LaunchedEffects are streaming-gated (the observer at L161-166 is not strictly gated, but harmless once verticalScroll is removed). Wording adjusted."
+  ],
+  "notes": "APPROVE on all three fixes (ChatScreen error-detail dialog height cap, ChatReasoningAndTodo conditional verticalScroll, DebugLogSection load-bearing comment). Modifier order verified correct (heightIn before verticalScroll). Cap values consistent with sibling dialogs. No new infinite-height risk."
+}

@@ -1,0 +1,15 @@
+{
+  "agent": "glmer",
+  "scope": "fix-scrollable-crash",
+  "date": "2026-07-03",
+  "reviewed_commit": "3f510c1",
+  "version_target": "0.2.17",
+  "verdict": "pass",
+  "score": 9.7,
+  "blocking_issues": [],
+  "non_blocking_issues": [
+    "Streaming branch hard 280.dp cap uses only ~280dp on very tall screens during streaming — documented as intentional UX choice (L182-183). No change needed.",
+    "Out-of-scope: other heightIn(max=...) sites (ChatInputBar.kt:351, ModelManagementSection.kt:159, ChatTopBar.kt x3) not exhaustively parent-traced, but all marked bounded in prior audit."
+  ],
+  "notes": "APPROVE on all three fixes. Verified Fix 1 matches ChatServerManagementDialog byte-for-byte. Fix 2 strictly safer: both ReasoningCard call sites (ChatMessageContent.kt:400 isStreaming=true, ChatMessageRow.kt:313 isStreaming=false) never share a composable instance — transition is unmount/remount, not in-place modifier swap. Fix 3 parent claim verified (SettingsScreen.kt:109-114 is verticalScroll). No new unbounded-measurement risk."
+}
