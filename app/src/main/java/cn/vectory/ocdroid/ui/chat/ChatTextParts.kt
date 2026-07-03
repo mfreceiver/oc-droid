@@ -10,7 +10,6 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.LocalContentColor
@@ -233,7 +232,7 @@ internal fun TextPart(
             val maxBubble = maxWidth * 0.82f
             Surface(
                 color = MaterialTheme.colorScheme.surfaceContainerLow,
-                shape = RoundedCornerShape(10.dp),
+                shape = MaterialTheme.shapes.large,
                 modifier = Modifier
                     .align(Alignment.CenterEnd)
                     .widthIn(max = maxBubble)
@@ -465,7 +464,7 @@ internal fun WrappedCodeBlock(model: MarkdownComponentModel) {
 internal fun CodeBlockSurface(code: String, language: String) {
     Surface(
         modifier = Modifier.fillMaxWidth(),
-        shape = RoundedCornerShape(6.dp),
+        shape = MaterialTheme.shapes.small,
         color = MaterialTheme.colorScheme.surfaceContainerLow,
         border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline)
     ) {
@@ -555,7 +554,7 @@ internal fun WrappedTable(model: MarkdownComponentModel) {
     BoxWithConstraints(
         modifier = Modifier
             .fillMaxWidth()
-            .background(MaterialTheme.colorScheme.surfaceContainerLow, RoundedCornerShape(6.dp))
+            .background(MaterialTheme.colorScheme.surfaceContainerLow, MaterialTheme.shapes.small)
     ) {
         // Horizontal-scroll only when the capped columns genuinely overflow the
         // available width; otherwise let the table sit at its (capped) natural

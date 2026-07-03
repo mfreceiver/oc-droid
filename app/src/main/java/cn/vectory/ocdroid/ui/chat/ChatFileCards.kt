@@ -10,7 +10,6 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ChevronRight
 import androidx.compose.material.icons.filled.Description
@@ -62,7 +61,7 @@ internal fun ImageFilePart(part: Part, modifier: Modifier = Modifier.fillMaxWidt
             modifier = Modifier
                 .fillMaxWidth()
                 // §5.6 v2: markdown image radius = 4dp.
-                .clip(RoundedCornerShape(4.dp)),
+                .clip(MaterialTheme.shapes.extraSmall),
             contentScale = ContentScale.FillWidth
         )
         part.filename?.let { filename ->
@@ -81,7 +80,7 @@ internal fun FileAttachmentPart(part: Part, modifier: Modifier = Modifier.fillMa
     // §5.6 v2: layer01 chip at 6dp radius with accentText doc icon.
     Surface(
         color = MaterialTheme.colorScheme.surfaceContainerLowest,
-        shape = RoundedCornerShape(6.dp),
+        shape = MaterialTheme.shapes.small,
         modifier = modifier.padding(vertical = 4.dp)
     ) {
         Row(
@@ -155,7 +154,7 @@ internal fun FileCard(
     Surface(
         color = MaterialTheme.colorScheme.surfaceContainerLowest,
         border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline),
-        shape = RoundedCornerShape(6.dp),
+        shape = MaterialTheme.shapes.small,
         modifier = modifier
             .padding(vertical = 4.dp)
             .testTag(tag)

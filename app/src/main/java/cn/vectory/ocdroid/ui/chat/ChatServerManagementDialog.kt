@@ -15,7 +15,6 @@ import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Check
@@ -80,7 +79,7 @@ internal fun ServerManagementDialog(
                         if (isSelected) {
                             // Current host: non-clickable display only
                             Surface(
-                                shape = RoundedCornerShape(8.dp),
+                                shape = MaterialTheme.shapes.medium,
                                 color = MaterialTheme.colorScheme.surfaceContainerLow,
                                 modifier = Modifier.fillMaxWidth()
                             ) {
@@ -120,7 +119,7 @@ internal fun ServerManagementDialog(
                             // Other hosts: tappable to switch
                             Surface(
                                 onClick = { onSelectHost(profile.id) },
-                                shape = RoundedCornerShape(8.dp),
+                                shape = MaterialTheme.shapes.medium,
                                 color = Color.Transparent,
                                 modifier = Modifier.fillMaxWidth()
                             ) {

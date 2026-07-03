@@ -4,7 +4,6 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.CircleShape
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
@@ -47,7 +46,7 @@ fun QuestionCardView(
             modifier = Modifier
                 .fillMaxWidth()
                 .padding(horizontal = 16.dp, vertical = 8.dp),
-            shape = RoundedCornerShape(12.dp),
+            shape = MaterialTheme.shapes.extraLarge,
             colors = CardDefaults.cardColors(
                 containerColor = MaterialTheme.colorScheme.surfaceVariant
             )
@@ -90,7 +89,6 @@ fun QuestionCardView(
     var isSending by remember(question.id) { mutableStateOf(false) }
 
     val accent = MaterialTheme.colorScheme.primary
-    val cornerRadius = 12.dp
 
     val currentQuestion = question.questions[currentTab]
     val currentAnswers = answers[currentTab]
@@ -237,7 +235,7 @@ fun QuestionCardView(
         modifier = Modifier
             .fillMaxWidth()
             .padding(horizontal = 16.dp, vertical = 8.dp),
-        shape = RoundedCornerShape(cornerRadius),
+        shape = MaterialTheme.shapes.extraLarge,
         colors = CardDefaults.cardColors(
             containerColor = MaterialTheme.colorScheme.surfaceVariant
         )
@@ -318,7 +316,7 @@ fun QuestionCardView(
                     Row(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .clip(RoundedCornerShape(8.dp))
+                            .clip(MaterialTheme.shapes.medium)
                             .background(if (selected) accent.copy(alpha = 0.08f) else Color.Transparent)
                             .clickable { selectOption(option) }
                             .padding(vertical = 10.dp, horizontal = 12.dp),
@@ -358,7 +356,7 @@ fun QuestionCardView(
                         Row(
                             modifier = Modifier
                                 .fillMaxWidth()
-                                .clip(RoundedCornerShape(8.dp))
+                                .clip(MaterialTheme.shapes.medium)
                                 .background(if (isCustomActiveNow) accent.copy(alpha = 0.08f) else Color.Transparent)
                                 .clickable { activateCustom() }
                                 .padding(vertical = 10.dp, horizontal = 12.dp),

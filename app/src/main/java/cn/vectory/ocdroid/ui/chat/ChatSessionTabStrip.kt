@@ -320,7 +320,7 @@ private fun SessionTab(
                 } else {
                     Color.Transparent
                 },
-                shape = RoundedCornerShape(8.dp)
+                shape = MaterialTheme.shapes.medium
             ),
         // §fix-2: text colour stays theme onSurface / onSurfaceVariant (weight
         // differentiates selection); the hash colour now lives on the filled

@@ -14,7 +14,6 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ChevronRight
@@ -76,7 +75,7 @@ internal fun ReasoningCard(
     val isDark = LocalIsDarkTheme.current
     Surface(
         modifier = modifier.padding(vertical = 2.dp),
-        shape = RoundedCornerShape(6.dp),
+        shape = MaterialTheme.shapes.small,
         color = MaterialTheme.colorScheme.surfaceContainer,
         border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline)
     ) {
@@ -170,7 +169,7 @@ internal fun ReasoningCard(
                 // outer border provides containment. Matches BasicTool's flat style.
                 Surface(
                     modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 2.dp),
-                    shape = RoundedCornerShape(6.dp),
+                    shape = MaterialTheme.shapes.small,
                     color = Color.Transparent
                 ) {
                     // Cap the body height + scroll so long streaming reasoning

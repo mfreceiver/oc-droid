@@ -14,7 +14,6 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Dns
@@ -492,7 +491,7 @@ internal fun ChatTopBar(
                                 actions.onSelectAgent(agent.name)
                                 showAgentDialog = false
                             },
-                            shape = RoundedCornerShape(8.dp),
+                            shape = MaterialTheme.shapes.medium,
                             color = if (isSelected) MaterialTheme.colorScheme.surfaceVariant
                             else Color.Transparent,
                             modifier = Modifier.fillMaxWidth()
@@ -632,7 +631,7 @@ private fun ModelPickerDialog(
                             (currentModel.modelId == modelId || currentModel.modelId == model.id)
                         Surface(
                             onClick = { onSwitchModel(provider.id, modelId) },
-                            shape = RoundedCornerShape(8.dp),
+                            shape = MaterialTheme.shapes.medium,
                             color = if (isSelected) MaterialTheme.colorScheme.surfaceVariant
                             else Color.Transparent,
                             modifier = Modifier.fillMaxWidth()

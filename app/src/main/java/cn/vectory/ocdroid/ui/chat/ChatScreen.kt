@@ -15,7 +15,6 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.pager.HorizontalPager
 import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
@@ -594,7 +593,7 @@ fun ChatScreen(
         val isWide = LocalWindowSizeClass.current
             ?.let { it.widthSizeClass != WindowWidthSizeClass.Compact }
             ?: (LocalConfiguration.current.screenWidthDp >= 600)
-        val cardShape = if (isWide) RoundedCornerShape(10.dp) else RectangleShape
+        val cardShape = if (isWide) MaterialTheme.shapes.large else RectangleShape
         Surface(
             modifier = Modifier
                 .weight(1f)

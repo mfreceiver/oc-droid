@@ -16,7 +16,6 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Send
@@ -148,7 +147,7 @@ internal fun ChatInputBar(
     Surface(
         modifier = Modifier.fillMaxWidth().imePadding(),
         color = MaterialTheme.colorScheme.surfaceContainerLow,
-        shape = RoundedCornerShape(10.dp),
+        shape = MaterialTheme.shapes.large,
         shadowElevation = 2.dp
     ) {
         // Horizontal 16 inset lives on the Column so the command panel,
@@ -340,7 +339,7 @@ private fun CommandSuggestionsPanel(
         modifier = Modifier
             .fillMaxWidth()
             .padding(bottom = 4.dp),
-        shape = RoundedCornerShape(12.dp),
+        shape = MaterialTheme.shapes.extraLarge,
         color = MaterialTheme.colorScheme.surfaceVariant,
         tonalElevation = 1.dp
     ) {
@@ -413,7 +412,7 @@ private fun ChatPrimaryActionButton(
         Box(
             modifier = Modifier
                 .size(28.dp)
-                .clip(RoundedCornerShape(6.dp))
+                .clip(MaterialTheme.shapes.small)
                 .background(containerColor.copy(alpha = effectiveAlpha)),
             contentAlignment = Alignment.Center
         ) {

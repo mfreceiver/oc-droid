@@ -20,7 +20,6 @@ import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
@@ -618,7 +617,7 @@ private fun GapDivider(
             // Center chip
             Surface(
                 modifier = Modifier.padding(horizontal = 12.dp),
-                shape = RoundedCornerShape(6.dp),
+                shape = MaterialTheme.shapes.small,
                 color = Color.Transparent,
                 border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline)
             ) {
