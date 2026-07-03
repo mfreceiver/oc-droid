@@ -42,7 +42,6 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.sp
 import com.mikepenz.markdown.compose.components.markdownComponents
 import com.mikepenz.markdown.m3.Markdown
@@ -178,15 +177,39 @@ internal fun ReasoningCard(
                 ) {
                     // Cap the body height + scroll so long streaming reasoning
                     // never overflows the screen (the "内容外溢" symptom) WHILE
-                    // streaming. On completion the cap is released (Dp.Unspecified
-                    // = no upper bound) so a long finished chain-of-thought shows
-                    // at its full natural height per the user's decision.
+                    // streaming. On completion both the cap and the internal
+                    // scroll are dropped so a long finished chain-of-thought
+                    // shows at its full natural height per the user's decision
+                    // (it rides the parent chat LazyColumn's scroll instead).
                     SelectionContainer {
                         CompositionLocalProvider(LocalContentColor provides MaterialTheme.colorScheme.onSurfaceVariant) {
+                            // §scroll-safety: verticalScroll may only be applied
+                            // together with a finite heightIn cap. While streaming
+                            // we cap at 280.dp so long chain-of-thought scrolls
+                            // internally without overflowing the screen. Once
+                            // finished we DROP both the cap and the scroll — the
+                            // body renders at its full natural height and rides
+                            // the parent chat LazyColumn's scroll. Applying
+                            // verticalScroll without the cap (the previous
+                            // `heightIn(max = Dp.Unspecified)` branch) yields an
+                            // unbounded scrollable that only happens to not crash
+                            // because the LazyColumn item viewport bounds it; any
+                            // reuse outside a bounded parent would trigger
+                            // "Vertically scrollable component was measured with
+                            // an infinity maximum height constraints". The
+                            // auto-scroll effect below is streaming-gated, and
+                            // the remaining scrollState observer (which only
+                            // records user-scroll-away intent) is harmless once
+                            // the scroll modifier is removed, so dropping the
+                            // modifier when finished is safe.
                             Box(
                                 modifier = Modifier
-                                    .heightIn(max = if (isStreaming) 280.dp else Dp.Unspecified)
-                                    .verticalScroll(scrollState)
+                                    .then(
+                                        if (isStreaming) Modifier
+                                            .heightIn(max = 280.dp)
+                                            .verticalScroll(scrollState)
+                                        else Modifier
+                                    )
                                     .padding(8.dp)
                             ) {
                                 if (isStreaming) {

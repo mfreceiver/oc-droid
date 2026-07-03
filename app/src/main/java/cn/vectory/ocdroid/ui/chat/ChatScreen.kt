@@ -10,6 +10,7 @@ import androidx.compose.foundation.layout.BoxScope
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.pager.HorizontalPager
 import androidx.compose.foundation.pager.rememberPagerState
@@ -642,11 +643,22 @@ fun ChatScreen(
                 title = { Text("错误详情") },
                 text = {
                     SelectionContainer {
-                        Text(
-                            text = detail,
-                            style = MaterialTheme.typography.bodySmall,
-                            modifier = Modifier.verticalScroll(rememberScrollState())
-                        )
+                        // AlertDialog's text slot has unbounded height, so the
+                        // scrollable must be capped with heightIn before
+                        // verticalScroll — otherwise "Vertically scrollable
+                        // component was measured with an infinity maximum height
+                        // constraints" crash. Mirrors ChatServerManagementDialog /
+                        // ModelManagementDialog pattern.
+                        Column(
+                            modifier = Modifier
+                                .heightIn(max = 400.dp)
+                                .verticalScroll(rememberScrollState())
+                        ) {
+                            Text(
+                                text = detail,
+                                style = MaterialTheme.typography.bodySmall
+                            )
+                        }
                     }
                 },
                 confirmButton = {

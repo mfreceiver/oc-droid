@@ -199,6 +199,13 @@ internal fun DebugLogSection(hideHeader: Boolean = false) {
             // SimpleDateFormat.format() on every recomposition. That was a
             // 10–50% CPU hotspot during high-frequency SSE streams while
             // Settings was open.
+            //
+            // §scroll-safety: the .heightIn(max = 360.dp) below is LOAD-BEARING.
+            // This LazyColumn is hosted inside SettingsScreen's
+            // Column(Modifier.verticalScroll(...)), whose children receive an
+            // infinite max-height constraint. Without this cap the LazyColumn
+            // would crash with "Vertically scrollable component was measured
+            // with an infinity maximum height constraints". Do NOT remove it.
             val logListState = rememberLazyListState()
             LazyColumn(
                 modifier = Modifier
