@@ -456,8 +456,16 @@ fun ChatScreen(
             .distinctUntilChanged()
             .collect { page ->
                 val session = rootSessionsLatest.getOrNull(page)
+                // §close-left-guard: only drive a selection when the pager has
+                // truly settled on the page it currently shows. After closing a
+                // tab LEFT of the current one, the list shifts and settledPage
+                // can transiently lag currentPage (which the external-sync
+                // effect has already corrected via scrollToPage). Requiring
+                // page == currentPage filters that stale emission so we don't
+                // fire a one-frame onSelectSession on the shifted neighbour.
                 if (session != null && currentSessionIdLatest != null &&
-                    session.id != currentSessionIdLatest && parentLatest == null
+                    session.id != currentSessionIdLatest && parentLatest == null &&
+                    page == pagerState.currentPage
                 ) {
                     topBarActions.onSelectSession(session.id)
                 }
