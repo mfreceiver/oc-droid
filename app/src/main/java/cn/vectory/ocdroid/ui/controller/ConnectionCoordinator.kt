@@ -183,94 +183,133 @@ internal class ConnectionCoordinator(
      * backoff (1s, 2s, 4s, ...); default callers pass retries=0 (one-shot),
      * only [coldStartReconnect] opts into retries.
      *
+     * [onSettled] is invoked EXACTLY ONCE when the probe reaches a terminal
+     * state — `true` on a healthy connect, `false` on failure / retry
+     * exhaustion / ViewModel cancellation mid-backoff. Used by callers that
+     * need a success/failure follow-up (e.g. [MainViewModel.refreshCurrentSession]
+     * surfaces a "已刷新" toast when the user-initiated refresh confirms the
+     * server is reachable). Default is null (no callback) so existing call
+     * sites keep compiling unchanged.
+     *
      * `isActive` is checked so ViewModel cancellation aborts cleanly mid-backoff.
      */
-    fun testConnection(force: Boolean = false, retries: Int = 0) {
+    fun testConnection(force: Boolean = false, retries: Int = 0, onSettled: ((Boolean) -> Unit)? = null) {
         val now = clock()
-        if (!force && now - lastHealthCheckTime < 30_000) return
+        if (!force && now - lastHealthCheckTime < 30_000) {
+            // Throttled: do not probe, do not invoke onSettled (no new info).
+            return
+        }
         lastHealthCheckTime = now
         scope.launch {
-            // §R-17 M2: error stays on _state (consumed app-wide);
-            // connectionPhase/isConnecting moved to connectionFlow. Atomicity
-            // (RFC §4 strategy A): the two updates run back-to-back on the same
-            // dispatcher; the intermediate state (error cleared, phase not yet
-            // "connecting") is legal and transient.
-            updateState { it.copy(error = null) }
-            writeConnection { it.copy(isConnecting = true, connectionPhase = "connecting") }
-            // NOTE: configureRepositoryForCurrentProfile() was intentionally
-            // removed here. Every caller already configures the repository
-            // before invoking testConnection (cold start via applySavedSettings;
-            // host-switch paths call configureRepositoryForProfile directly).
-            // Re-calling it here chained cancelSseForReconfigure ->
-            // onHostReconfigured, which reset ForegroundCatchUpController.
-            // sseHasConnectedOnce and swallowed the 15s-5min foreground gap
-            // catch-up (real bug, pre-existing).
-            // Retry loop: attempt 1 is always made; up to `retries` extra
-            // attempts follow on failure/unhealthy with exponential backoff
-            // (1s, 2s, 4s, ...). Default callers pass retries=0 (one-shot),
-            // preserving the original single-attempt semantics; only
-            // coldStartReconnect() opts into retries. isActive is checked so
-            // ViewModel cancellation aborts cleanly mid-backoff.
-            val maxAttempts = 1 + retries.coerceAtLeast(0)
-            var attempt = 0
-            var backoffMs = 1000L
-            while (isActive) {
-                attempt++
-                if (attempt > 1) {
-                    writeConnection {
-                        it.copy(connectionPhase = "reconnecting (attempt $attempt/$maxAttempts)")
-                    }
-                }
-                val healthResult = repository.checkHealth()
-                if (healthResult.isSuccess) {
-                    val health = healthResult.getOrNull()
-                    if (health != null && health.healthy) {
-                        // ③ populate the compat profile from the freshly-probed
-                        // version before any consumer (initial-data loaders, SSE)
-                        // runs, so capability flags are settled for this connect.
-                        serverCompatProfile.update(health.version)
+            // §onSettled-exactly-once (gpt-1 🔴 / glm-1): the original post-loop
+            // `onSettled?.invoke(false)` was UNREACHABLE on cancellation —
+            // `delay()` / `checkHealth()` throw CancellationException when the
+            // scope is cancelled, propagating out of launch and skipping the
+            // post-loop line. Wrap in try/finally with a `settled` guard so
+            // every exit path (success return, failure return, OR cancellation
+            // mid-backoff/mid-probe) invokes onSettled exactly once. The
+            // finally runs during cancellation WITHOUT swallowing the
+            // CancellationException (it re-propagates after the lambda call),
+            // preserving structured-concurrency teardown.
+            var settled = false
+            try {
+                // §R-17 M2: error stays on _state (consumed app-wide);
+                // connectionPhase/isConnecting moved to connectionFlow. Atomicity
+                // (RFC §4 strategy A): the two updates run back-to-back on the same
+                // dispatcher; the intermediate state (error cleared, phase not yet
+                // "connecting") is legal and transient.
+                updateState { it.copy(error = null) }
+                writeConnection { it.copy(isConnecting = true, connectionPhase = "connecting") }
+                // NOTE: configureRepositoryForCurrentProfile() was intentionally
+                // removed here. Every caller already configures the repository
+                // before invoking testConnection (cold start via applySavedSettings;
+                // host-switch paths call configureRepositoryForProfile directly).
+                // Re-calling it here chained cancelSseForReconfigure ->
+                // onHostReconfigured, which reset ForegroundCatchUpController.
+                // sseHasConnectedOnce and swallowed the 15s-5min foreground gap
+                // catch-up (real bug, pre-existing).
+                // Retry loop: attempt 1 is always made; up to `retries` extra
+                // attempts follow on failure/unhealthy with exponential backoff
+                // (1s, 2s, 4s, ...). Default callers pass retries=0 (one-shot),
+                // preserving the original single-attempt semantics; only
+                // coldStartReconnect() opts into retries. isActive is checked so
+                // ViewModel cancellation aborts cleanly mid-backoff.
+                val maxAttempts = 1 + retries.coerceAtLeast(0)
+                var attempt = 0
+                var backoffMs = 1000L
+                while (isActive) {
+                    attempt++
+                    if (attempt > 1) {
                         writeConnection {
+                            it.copy(connectionPhase = "reconnecting (attempt $attempt/$maxAttempts)")
+                        }
+                    }
+                    val healthResult = repository.checkHealth()
+                    if (healthResult.isSuccess) {
+                        val health = healthResult.getOrNull()
+                        if (health != null && health.healthy) {
+                            // ③ populate the compat profile from the freshly-probed
+                            // version before any consumer (initial-data loaders, SSE)
+                            // runs, so capability flags are settled for this connect.
+                            serverCompatProfile.update(health.version)
+                            writeConnection {
+                                it.copy(
+                                    isConnected = true,
+                                    serverVersion = health.version,
+                                    isConnecting = false,
+                                    connectionPhase = "connected"
+                                )
+                            }
+                            loadInitialData()
+                            startSSE()
+                            settled = true
+                            onSettled?.invoke(true)
+                            return@launch
+                        }
+                        // Healthy=false: surface the version if present but keep
+                        // retrying (server may still be coming up on cold start).
+                        if (health != null) {
+                            serverCompatProfile.update(health.version)
+                            writeConnection { it.copy(serverVersion = health.version) }
+                        }
+                    }
+                    if (attempt >= maxAttempts || !isActive) {
+                        // §R-17 M2: error on _state; connection fields on
+                        // connectionFlow. Intermediate state legal (error set
+                        // before phase flips to "disconnected" — both still
+                        // describe the same failure).
+                        updateState {
                             it.copy(
-                                isConnected = true,
-                                serverVersion = health.version,
-                                isConnecting = false,
-                                connectionPhase = "connected"
+                                error = healthResult.exceptionOrNull()?.let { e ->
+                                    errorMessageOrFallback(e, "Connection failed")
+                                }
                             )
                         }
-                        loadInitialData()
-                        startSSE()
+                        writeConnection {
+                            it.copy(
+                                isConnected = false,
+                                isConnecting = false,
+                                connectionPhase = "disconnected"
+                            )
+                        }
+                        settled = true
+                        onSettled?.invoke(false)
                         return@launch
                     }
-                    // Healthy=false: surface the version if present but keep
-                    // retrying (server may still be coming up on cold start).
-                    if (health != null) {
-                        serverCompatProfile.update(health.version)
-                        writeConnection { it.copy(serverVersion = health.version) }
-                    }
+                    delay(backoffMs)
+                    backoffMs *= 2
                 }
-                if (attempt >= maxAttempts || !isActive) {
-                    // §R-17 M2: error on _state; connection fields on
-                    // connectionFlow. Intermediate state legal (error set
-                    // before phase flips to "disconnected" — both still
-                    // describe the same failure).
-                    updateState {
-                        it.copy(
-                            error = healthResult.exceptionOrNull()?.let { e ->
-                                errorMessageOrFallback(e, "Connection failed")
-                            }
-                        )
-                    }
-                    writeConnection {
-                        it.copy(
-                            isConnected = false,
-                            isConnecting = false,
-                            connectionPhase = "disconnected"
-                        )
-                    }
-                    return@launch
-                }
-                delay(backoffMs)
-                backoffMs *= 2
+                // Loop exited because isActive flipped false — terminal failure.
+                settled = true
+                onSettled?.invoke(false)
+            } finally {
+                // Cancellation path (CancellationException propagated out of
+                // delay/checkHealth): the body's settled flag stayed false.
+                // Invoke the callback so the caller's exactly-once contract
+                // holds; the CancellationException re-propagates after this
+                // finally (we do NOT catch/swallow it). refresh-path callers
+                // treat false as a no-op (their lambda only acts on true).
+                if (!settled) onSettled?.invoke(false)
             }
         }
     }

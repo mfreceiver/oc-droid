@@ -154,7 +154,7 @@ internal fun ToolCard(
         border = BorderStroke(1.dp, oc.borderBase)
     ) {
         CompositionLocalProvider(LocalContentColor provides MaterialTheme.colorScheme.onSurfaceVariant) {
-            Column(modifier = Modifier.padding(horizontal = 8.dp, vertical = 6.dp)) {
+            Column(modifier = Modifier.padding(horizontal = 8.dp, vertical = 8.dp)) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Icon(
                         icon,
@@ -363,7 +363,7 @@ internal fun BasicTool(
     }
 
     Surface(
-        modifier = modifier.padding(vertical = 1.dp),
+        modifier = modifier.padding(vertical = 2.dp),
         shape = RoundedCornerShape(6.dp),
         color = oc.layer02,
         border = BorderStroke(1.dp, oc.borderBase)
@@ -372,7 +372,7 @@ internal fun BasicTool(
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(horizontal = 8.dp, vertical = 4.dp)
+                    .padding(horizontal = 8.dp, vertical = 8.dp)
                     .then(
                         if (canExpand) Modifier.clickable { onToggleExpand(expandedKey, expanded) }
                         else Modifier
@@ -499,13 +499,13 @@ internal fun ErrorCard(
 ) {
     val oc = MaterialTheme.opencode
     Surface(
-        modifier = modifier.padding(vertical = 1.dp),
+        modifier = modifier.padding(vertical = 2.dp),
         shape = RoundedCornerShape(6.dp),
         color = Color.Transparent,
         border = BorderStroke(1.dp, oc.stateDangerFg)
     ) {
         Row(
-            modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
+            modifier = Modifier.padding(horizontal = 8.dp, vertical = 8.dp),
             verticalAlignment = Alignment.Top
         ) {
             Icon(

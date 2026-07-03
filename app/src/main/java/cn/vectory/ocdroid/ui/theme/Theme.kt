@@ -14,7 +14,9 @@ import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalView
+import androidx.compose.ui.unit.Density
 import androidx.compose.ui.text.font.DeviceFontFamilyName
 import androidx.compose.ui.text.font.Font
 import androidx.compose.ui.text.font.FontFamily
@@ -140,6 +142,24 @@ private fun resolveFontFamilyOrNull(latin: String?, cjk: String?): FontFamily? {
 fun OpenCodeTheme(
     darkTheme: Boolean = isSystemInDarkTheme(),
     markdownFontSizes: MarkdownFontSizes = MarkdownFontSizes(),
+    /**
+     * §ui-scale (M3 canonical pattern — see
+     * developer.android.com/develop/ui/compose/accessibility/scalable-content):
+     * two independent axes applied via a LocalDensity override wrapping the
+     * entire app content. Both layer ON TOP OF the system accessibility font
+     * size (LocalDensity.current.fontScale already carries the OS setting).
+     *
+     *  - [uiFontScale]: multiplies fontScale ONLY → text resizes, layout /
+     *    padding / icon sizes stay fixed. Range 0.85–1.3, default 1.0.
+     *  - [uiContentScale]: multiplies density → dp dimensions AND sp text
+     *    together (true "zoom"). Range 0.85–1.3, default 1.0.
+     *
+     * NOT implemented as per-WindowSizeClass Typography swaps: M3 explicitly
+     * prescribes a consistent type scale across all window widths; window-size-
+     * class is for LAYOUT decisions (list-detail, nav rail), not type scaling.
+     */
+    uiFontScale: Float = 1f,
+    uiContentScale: Float = 1f,
     content: @Composable () -> Unit
 ) {
     val colorScheme = if (darkTheme) DarkColorScheme else LightColorScheme
@@ -187,11 +207,33 @@ fun OpenCodeTheme(
         }
     }
 
+    // §ui-scale: derive the overridden Density from the CURRENT LocalDensity
+    // (which already carries the system accessibility fontScale + the device
+    // density) so both OS-level settings are respected as the base we
+    // multiply on top of. Computed here (not in remember) because
+    // LocalDensity.current can change across configuration changes; reading
+    // it fresh each recomposition keeps the override correct after a system
+    // font-size / display-size change. Both factors default to 1.0 → identity
+    // (no override effect, zero overhead path skipped below).
+    val baseDensity = LocalDensity.current
+    val scaledDensity = remember(baseDensity, uiFontScale, uiContentScale) {
+        Density(
+            density = baseDensity.density * uiContentScale,
+            fontScale = baseDensity.fontScale * uiFontScale
+        )
+    }
+    val needsScale = uiFontScale != 1f || uiContentScale != 1f
+
     CompositionLocalProvider(
         LocalMarkdownFontSizes provides markdownFontSizes,
         LocalOpencodeColors provides opencodeColors,
         LocalAppFontFamily provides appFontFamily,
         LocalIsDarkTheme provides darkTheme,
+        // §ui-scale: only provide the overridden Density when a non-identity
+        // factor is set. The identity path (both == 1f) skips the provider so
+        // the default LocalDensity passes through unchanged — zero behavioral
+        // risk for users who never touch the sliders.
+        *(if (needsScale) arrayOf(LocalDensity provides scaledDensity) else emptyArray()),
     ) {
         MaterialTheme(
             colorScheme = colorScheme,

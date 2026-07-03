@@ -87,6 +87,12 @@ data class AppState(
      */
     @Deprecated("mirror from settingsFlow; M4 removes AppState", level = DeprecationLevel.WARNING)
     val disabledModels: Set<String> = emptySet(),
+    /** §ui-scale: deprecated mirror of [SettingsState.uiFontScale]. */
+    @Deprecated("mirror from settingsFlow; M4 removes AppState", level = DeprecationLevel.WARNING)
+    val uiFontScale: Float = 1f,
+    /** §ui-scale: deprecated mirror of [SettingsState.uiContentScale]. */
+    @Deprecated("mirror from settingsFlow; M4 removes AppState", level = DeprecationLevel.WARNING)
+    val uiContentScale: Float = 1f,
     @Deprecated("mirror from M4 slice; M5 removes AppState", level = DeprecationLevel.WARNING)
     val pendingPermissions: List<PermissionRequest> = emptyList(),
     @Deprecated("mirror from M4 slice; M5 removes AppState", level = DeprecationLevel.WARNING)
@@ -94,6 +100,18 @@ data class AppState(
     @Deprecated("mirror from composerFlow; M4 removes AppState", level = DeprecationLevel.WARNING)
     val inputText: String = "",
     val error: String? = null,
+    /**
+     * §success-channel: cross-domain, one-shot success notification (mirrors
+     * the role of [error] for success cases). Tunnel-activation success and
+     * refresh-success toasts ride this field instead of being jammed into
+     * [error] (which ChatScreen renders as a "发生错误" snackbar).
+     *
+     * Lifecycle: written by the originating action (HostProfileController's
+     * tunnel activation, refreshCurrentSession's testConnection callback);
+     * cleared by ChatScreen's LaunchedEffect after the snackbar finishes.
+     * Same consume-on-read model as [error].
+     */
+    val successMessage: String? = null,
     @Deprecated("mirror from settingsFlow; M4 removes AppState", level = DeprecationLevel.WARNING)
     val themeMode: ThemeMode = ThemeMode.SYSTEM,
     @Deprecated("mirror from settingsFlow; M4 removes AppState", level = DeprecationLevel.WARNING)

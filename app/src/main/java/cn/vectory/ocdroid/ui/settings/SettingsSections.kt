@@ -27,6 +27,7 @@ import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.SegmentedButton
 import androidx.compose.material3.SegmentedButtonDefaults
 import androidx.compose.material3.SingleChoiceSegmentedButtonRow
+import androidx.compose.material3.Slider
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -42,6 +43,7 @@ import cn.vectory.ocdroid.R
 import cn.vectory.ocdroid.ui.ConnectionState
 import cn.vectory.ocdroid.data.model.HostProfile
 import cn.vectory.ocdroid.ui.util.formatBytes
+import cn.vectory.ocdroid.util.SettingsManager
 import cn.vectory.ocdroid.util.ThemeMode
 
 @Composable
@@ -137,7 +139,16 @@ internal fun ConnectionProfileSection(
 @Composable
 internal fun AppearanceSection(
     themeMode: ThemeMode,
-    onThemeSelected: (ThemeMode) -> Unit
+    onThemeSelected: (ThemeMode) -> Unit,
+    /**
+     * §ui-scale: the two M3-canonical scale axes (font-only + content/density).
+     * Applied via LocalDensity override in OpenCodeTheme. Range clamped at the
+     * SettingsManager layer to [SettingsManager.UI_SCALE_MIN]–[MAX].
+     */
+    uiFontScale: Float = 1f,
+    uiContentScale: Float = 1f,
+    onFontScaleChange: (Float) -> Unit = {},
+    onContentScaleChange: (Float) -> Unit = {}
 ) {
     SectionHeader(title = stringResource(R.string.settings_appearance))
 
@@ -174,6 +185,60 @@ internal fun AppearanceSection(
                 )
             }
         }
+    }
+
+    Spacer(modifier = Modifier.height(20.dp))
+
+    // §ui-scale: two sliders following the official Android scalable-content
+    // guidance. Font scale = text only; content scale = everything (dp + sp).
+    // Live-applied via OpenCodeTheme's LocalDensity override, so dragging the
+    // slider visibly resizes the whole app in real time (the root composition
+    // recomposes because MainActivity subscribes to settingsFlow).
+    val percentFmt = remember { java.text.DecimalFormat("0%") }
+    Text(stringResource(R.string.settings_ui_font_scale), style = MaterialTheme.typography.labelMedium)
+    Row(
+        modifier = Modifier.fillMaxWidth().padding(top = 4.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Slider(
+            value = uiFontScale,
+            onValueChange = onFontScaleChange,
+            valueRange = SettingsManager.UI_SCALE_MIN..SettingsManager.UI_SCALE_MAX,
+            steps = 8, // 0.85–1.3 in ~0.05 steps
+            modifier = Modifier.weight(1f)
+        )
+        Spacer(modifier = Modifier.width(12.dp))
+        Text(
+            text = percentFmt.format(uiFontScale),
+            style = MaterialTheme.typography.labelMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.width(44.dp),
+            textAlign = androidx.compose.ui.text.style.TextAlign.End
+        )
+    }
+
+    Spacer(modifier = Modifier.height(12.dp))
+
+    Text(stringResource(R.string.settings_ui_content_scale), style = MaterialTheme.typography.labelMedium)
+    Row(
+        modifier = Modifier.fillMaxWidth().padding(top = 4.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Slider(
+            value = uiContentScale,
+            onValueChange = onContentScaleChange,
+            valueRange = SettingsManager.UI_SCALE_MIN..SettingsManager.UI_SCALE_MAX,
+            steps = 8,
+            modifier = Modifier.weight(1f)
+        )
+        Spacer(modifier = Modifier.width(12.dp))
+        Text(
+            text = percentFmt.format(uiContentScale),
+            style = MaterialTheme.typography.labelMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.width(44.dp),
+            textAlign = androidx.compose.ui.text.style.TextAlign.End
+        )
     }
 }
 

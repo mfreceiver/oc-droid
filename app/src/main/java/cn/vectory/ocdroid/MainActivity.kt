@@ -171,7 +171,13 @@ class MainActivity : AppCompatActivity() {
             val windowSizeClass = calculateWindowSizeClass(this)
             OpenCodeTheme(
                 darkTheme = darkTheme,
-                markdownFontSizes = settings.markdownFontSizes
+                markdownFontSizes = settings.markdownFontSizes,
+                // §ui-scale: pass the persisted UI scale factors so the
+                // LocalDensity override in OpenCodeTheme reacts to slider
+                // changes (settingsFlow is collected above → recomposes this
+                // root on every change → OpenCodeTheme re-derives scaledDensity).
+                uiFontScale = settings.uiFontScale,
+                uiContentScale = settings.uiContentScale
             ) {
                 CompositionLocalProvider(LocalWindowSizeClass provides windowSizeClass) {
                     PhoneLayout(viewModel = viewModel, initialPage = lastNavPage)

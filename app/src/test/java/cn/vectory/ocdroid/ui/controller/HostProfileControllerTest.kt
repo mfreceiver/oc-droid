@@ -619,7 +619,9 @@ class HostProfileControllerTest {
         runPending()
 
         assertEquals(TunnelActivationState.Success, slices.connection.value.tunnelActivationState)
-        assertEquals(TUNNEL_SUCCESS_TOAST, state.value.error)
+        // §success-channel: success now rides AppState.successMessage (not
+        // error) so ChatScreen renders a positive toast instead of "发生错误".
+        assertEquals(TUNNEL_SUCCESS_TOAST, state.value.successMessage)
         coVerify { repository.activateTunnel(profile.serverUrl, "real-pw", profile.allowInsecureConnections) }
     }
 

@@ -116,7 +116,17 @@ data class SettingsState(
      * current host. Used by Settings → Model management and the chat
      * quick-switch picker to hide unchecked models.
      */
-    val disabledModels: Set<String> = emptySet()
+    val disabledModels: Set<String> = emptySet(),
+    /**
+     * §ui-scale: user-adjustable UI scale factors (M3 LocalDensity override
+     * pattern). [uiFontScale] multiplies fontScale (text only);
+     * [uiContentScale] multiplies density (dp dimensions + sp text together).
+     * Both default 1.0; clamped to SettingsManager.UI_SCALE_MIN–MAX. Seeded
+     * from SettingsManager on connect; persisted via the setters in
+     * MainViewModel. Read by MainActivity → OpenCodeTheme → LocalDensity.
+     */
+    val uiFontScale: Float = 1f,
+    val uiContentScale: Float = 1f
 )
 
 /**
@@ -154,7 +164,16 @@ data class ChatState(
      val isCompacting: Boolean = false,
      /** §compact: System.currentTimeMillis when compaction started, for the
       * capsule timer and the idle-clear guard floor. */
-     val compactStartedAt: Long = 0L
+     val compactStartedAt: Long = 0L,
+     /**
+      * §3-scroll-memory: monotonically incremented by
+      * [MainViewModel.performGlobalColdStartRefresh] so the ChatScreen layer
+      * observes a change and clears its hoisted per-session scroll-position
+      * cache. Not mirrored to AppState (only consumed by ChatScreen via
+      * [MainViewModel.chatFlow]); follows the same write-only-to-slice
+      * pattern as [isCompacting] / [compactStartedAt].
+      */
+     val refreshNonce: Long = 0L
  )
 
 /**

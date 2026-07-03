@@ -11,6 +11,8 @@
     <string name="settings_theme_light">浅色</string>
     <string name="settings_theme_dark">深色</string>
     <string name="settings_follow_system">跟随系统</string>
+    <string name="settings_ui_font_scale">字号</string>
+    <string name="settings_ui_content_scale">界面缩放</string>
     <string name="settings_language">语言</string>
     <string name="settings_language_english">English</string>
     <string name="settings_language_chinese">中文</string>

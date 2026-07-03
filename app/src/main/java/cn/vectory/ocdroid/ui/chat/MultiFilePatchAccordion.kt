@@ -119,7 +119,7 @@ internal fun MultiFilePatchAccordion(
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(horizontal = 10.dp, vertical = 4.dp)
+                    .padding(horizontal = 10.dp, vertical = 8.dp)
                     .clickable { expanded = !expanded },
                 verticalAlignment = Alignment.CenterVertically
             ) {
@@ -132,18 +132,18 @@ internal fun MultiFilePatchAccordion(
                 Spacer(modifier = Modifier.width(6.dp))
                 Text(
                     text = toolLabel,
-                    style = MaterialTheme.typography.labelMedium,
+                    style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     maxLines = 1
                 )
                 Text(
                     text = " · ",
-                    style = MaterialTheme.typography.labelMedium,
+                    style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
                 Text(
                     text = "${files.size} files",
-                    style = MaterialTheme.typography.labelMedium,
+                    style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.onSurface,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,

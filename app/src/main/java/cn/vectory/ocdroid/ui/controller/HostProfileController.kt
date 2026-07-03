@@ -390,7 +390,12 @@ internal class HostProfileController(
                 .onSuccess {
                     updateState {
                         it.copy(
-                            error = TUNNEL_SUCCESS_TOAST,
+                            // §success-channel: ride the dedicated successMessage
+                            // field (NOT error) so ChatScreen renders a success
+                            // snackbar instead of "发生错误" + "查看". The sticky
+                            // tunnelActivationState=Success still drives the
+                            // ServerManagementDialog's success indicator.
+                            successMessage = TUNNEL_SUCCESS_TOAST,
                             tunnelActivationState = TunnelActivationState.Success
                         )
                     }

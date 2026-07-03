@@ -11,6 +11,8 @@
     <string name="settings_theme_light">Light</string>
     <string name="settings_theme_dark">Dark</string>
     <string name="settings_follow_system">System</string>
+    <string name="settings_ui_font_scale">Font size</string>
+    <string name="settings_ui_content_scale">Display size</string>
     <string name="settings_language">Language</string>
     <string name="settings_language_english">English</string>
     <string name="settings_language_chinese">中文</string>

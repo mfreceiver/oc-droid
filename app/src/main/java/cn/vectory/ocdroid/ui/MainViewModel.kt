@@ -38,10 +38,12 @@ import kotlinx.coroutines.withContext
 import java.util.Locale
 import javax.inject.Inject
 
-/** Toast message shown on successful tunnel activation. ChatScreen compares
- *  the current `error` against this to pick the Success severity — both the
- *  success and error toasts ride the `error` field, so the message identity
- *  (not the sticky tunnelActivationState) drives severity. */
+/** Success message shown on successful tunnel activation. HostProfileController
+ *  writes this into `AppState.successMessage` (NOT `error`) so ChatScreen's
+ *  success-snackbar branch renders it as a positive toast. The sticky
+ *  `tunnelActivationState` (Success) separately drives the ServerManagementDialog
+ *  indicator. Kept as a named constant so the success-toast text and the
+ *  dialog state stay decoupled. */
 const val TUNNEL_SUCCESS_TOAST = "隧道激活成功"
 
 @HiltViewModel
@@ -336,7 +338,13 @@ class MainViewModel @Inject constructor(
             agents = next.agents,
             providers = next.providers,
             availableCommands = next.availableCommands,
-            disabledModels = next.disabledModels
+            disabledModels = next.disabledModels,
+            // §ui-scale (glm-1 🟠): mirror to keep AppState↔slice symmetry with
+            // applySettingsSlice (which already mirrors these). No current
+            // consumer reads AppState.uiFontScale, but the asymmetry was a
+            // latent trap for M4 consumers.
+            uiFontScale = next.uiFontScale,
+            uiContentScale = next.uiContentScale
         )
     }
 
@@ -802,8 +810,11 @@ class MainViewModel @Inject constructor(
     // R-16 M4: delegated to [connectionCoordinator]. The full state machine
     // (30s throttle, exponential-backoff retry, health probe, on-success
     // loadInitialData + startSSE, on-failure error surface) now lives there.
-    fun testConnection(force: Boolean = false, retries: Int = 0) {
-        connectionCoordinator.testConnection(force = force, retries = retries)
+    // §success-channel: onSettled is forwarded so refreshCurrentSession can
+    // surface a "已刷新" success toast when the user-initiated probe confirms
+    // the server is reachable.
+    fun testConnection(force: Boolean = false, retries: Int = 0, onSettled: ((Boolean) -> Unit)? = null) {
+        connectionCoordinator.testConnection(force = force, retries = retries, onSettled = onSettled)
     }
 
     /**
@@ -1112,11 +1123,31 @@ class MainViewModel @Inject constructor(
      * hatch when they distrust the live SSE state: a deliberate "forget
      * everything, start fresh" that only costs traffic for sessions actually
      * revisited.
+     *
+     * §4-A + §1-addendum: also force a [testConnection] so a stale red badge
+     * recovers (the original cold-start path doesn't run on refresh, leaving
+     * `isConnected` stuck on disconnected even though the server is reachable).
+     * On success the [onSettled] callback writes a one-shot successMessage so
+     * the user sees a "已刷新" snackbar — positive feedback that the refresh
+     * actually worked (not just silently reloaded).
      */
     fun refreshCurrentSession() {
         val sessionId = _chatFlow.value.currentSessionId ?: return
         if (_chatFlow.value.isLoadingMessages) return
         performGlobalColdStartRefresh(currentId = sessionId)
+        testConnection(force = true, onSettled = { ok ->
+            // §1-addendum (gpt-1 race fix): only surface "已刷新" if health
+            // succeeded AND the concurrent message reload has also settled
+            // cleanly (no in-flight load, no error). testConnection's
+            // onSettled(true) fires on health-OK independent of
+            // performGlobalColdStartRefresh's async loadMessages — without
+            // this gate, a server that's healthy but whose message fetch
+            // failed would show "已刷新" alongside "Failed to load messages",
+            // which is misleading ("已刷新" implies the session view is current).
+            if (ok && !_chatFlow.value.isLoadingMessages && _state.value.error == null) {
+                updateState { it.copy(successMessage = "已刷新") }
+            }
+        })
     }
 
     /**
@@ -1133,6 +1164,11 @@ class MainViewModel @Inject constructor(
         // skipping here is safe; the banner/action remains for a retry.
         if (_chatFlow.value.isLoadingMessages) return
         clearSessionWindowCache()
+        // §3-scroll-memory: bump the refresh nonce so ChatScreen clears its
+        // hoisted per-session scroll-position cache. Manual refresh = full
+        // forget (per product decision: the cached position is no longer
+        // meaningful after a window reset).
+        writeChat { it.copy(refreshNonce = it.refreshNonce + 1) }
         updateState {
             it.copy(
                 streamingPartTexts = emptyMap(),
@@ -1640,6 +1676,34 @@ class MainViewModel @Inject constructor(
         writeSettings { it.copy(markdownFontSizes = sizes) }
     }
 
+    /**
+     * §ui-scale: persist + push the font-only scale factor (multiplies
+     * LocalDensity.fontScale; text resizes, layout/padding/icon sizes stay
+     * fixed). Clamped to [SettingsManager.UI_SCALE_MIN]–[MAX] at the
+     * SettingsManager layer. Flows reactively to OpenCodeTheme via
+     * MainActivity's settingsFlow subscription.
+     */
+    fun setUiFontScale(scale: Float) {
+        // §ui-scale (gpt-1): clamp defensively at the write site too (not just
+        // in SettingsManager) so settingsFlow never transiently holds an
+        // out-of-range value if a future caller bypasses the slider bounds.
+        val clamped = scale.coerceIn(SettingsManager.UI_SCALE_MIN, SettingsManager.UI_SCALE_MAX)
+        settingsManager.uiFontScale = clamped
+        writeSettings { it.copy(uiFontScale = clamped) }
+    }
+
+    /**
+     * §ui-scale: persist + push the content scale factor (multiplies
+     * LocalDensity.density → dp dimensions AND sp text scale together — true
+     * "zoom everything"). Same persistence/reactivity path as
+     * [setUiFontScale].
+     */
+    fun setUiContentScale(scale: Float) {
+        val clamped = scale.coerceIn(SettingsManager.UI_SCALE_MIN, SettingsManager.UI_SCALE_MAX)
+        settingsManager.uiContentScale = clamped
+        writeSettings { it.copy(uiContentScale = clamped) }
+    }
+
     fun respondPermission(sessionId: String, permissionId: String, response: PermissionResponse) {
         viewModelScope.launch {
             repository.respondPermission(sessionId, permissionId, response)
@@ -1727,6 +1791,15 @@ class MainViewModel @Inject constructor(
 
     fun clearError() {
         updateState { it.copy(error = null) }
+    }
+
+    /**
+     * §success-channel: clear the one-shot success message after the consumer
+     * (ChatScreen snackbar) has shown it. Mirrors [clearError]'s consume-on-read
+     * lifecycle so a stale success message never re-fires on recomposition.
+     */
+    fun clearSuccessMessage() {
+        updateState { it.copy(successMessage = null) }
     }
 
     /**

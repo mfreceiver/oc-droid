@@ -35,6 +35,8 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.mutableStateListOf
+import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.rememberUpdatedState
@@ -97,6 +99,15 @@ fun ChatScreen(
     // and cancel the slice-migration recomposition-isolation gains.
     val appStateError by viewModel.state
         .map { it.error }
+        .distinctUntilChanged()
+        .collectAsStateWithLifecycle(initialValue = null)
+    // §success-channel: subscribe to AppState.successMessage (cross-domain,
+    // one-shot, same map+distinctUntilChanged pattern as appStateError) so
+    // tunnel-activation success and refresh-success render as a positive
+    // snackbar instead of being jammed through `error` and misrendered as
+    // "发生错误".
+    val appStateSuccess by viewModel.state
+        .map { it.successMessage }
         .distinctUntilChanged()
         .collectAsStateWithLifecycle(initialValue = null)
     val connection by viewModel.connectionFlow.collectAsStateWithLifecycle()
@@ -312,6 +323,54 @@ fun ChatScreen(
     // §kimo#6: remember the compact lambda so ChatTopBar can skip when stable.
     val onContextCompact = remember(viewModel) { { viewModel.compactSession() } }
 
+    // §3-scroll-memory: hoisted per-session scroll-position cache. Owned HERE
+    // (above the HorizontalPager) so the pager disposing & recreating a page's
+    // ChatMessageList on currentSessionId flip no longer drops the user's
+    // scroll position for the page they swiped away from. Previously these
+    // were `remember{}` blocks INSIDE ChatMessageList — bound to its
+    // composition lifetime — so a horizontal swipe A→B discarded A's saved
+    // position (the A page's ChatMessageList was disposed when its
+    // `sessionId == chat.currentSessionId` guard flipped to false) and B
+    // started fresh. Hoisting fixes the disposal; the saved-position restore
+    // logic inside ChatMessageList reads/writes these via params.
+    val savedPositions = remember { mutableStateMapOf<String, Pair<Int, Int>>() }
+    val accessOrder = remember { mutableStateListOf<String>() }
+    // §3-clear: when a session leaves `openSessionIds` (close tab / archive /
+    // SSE-driven removal) drop its cached scroll position — the user has
+    // signalled they're done with it, and a future reopen should land on the
+    // default latest-message view instead of a stale offset for a different
+    // message window. Keyed on openSessionIds structural equality (NOT pointer
+    // identity — LaunchedEffect compares keys by equals(); List<String>
+    // participates in equals so a same-content replacement does NOT re-fire).
+    // (gpt-1 fix): the prior `if (open.isNotEmpty())` guard skipped cleanup
+    // when the LAST session closed — leaving stale entries that a reopen would
+    // wrongly restore. Removed: on cold start savedPositions is itself empty,
+    // so `keys - open` = empty - empty = empty → natural no-op; the guard was
+    // both unnecessary and harmful.
+    LaunchedEffect(sessionList.openSessionIds) {
+        val open = sessionList.openSessionIds.toSet()
+        val stale = savedPositions.keys - open
+        if (stale.isNotEmpty()) {
+            stale.forEach { id ->
+                savedPositions.remove(id)
+                accessOrder.remove(id)
+            }
+        }
+    }
+    // §3-clear: manual refresh = full forget (per product decision: the cached
+    // position is no longer meaningful after a window reset). The nonce is a
+    // monotonic counter incremented in performGlobalColdStartRefresh; observing
+    // it via distinctUntilChanged-like LaunchedEffect(key) re-fires on each
+    // bump. Initial composition (nonce == 0) is skipped so cold start doesn't
+    // pointlessly clear an already-empty cache.
+    val refreshNonce = chat.refreshNonce
+    LaunchedEffect(refreshNonce) {
+        if (refreshNonce > 0L) {
+            savedPositions.clear()
+            accessOrder.clear()
+        }
+    }
+
     // §pager: native HorizontalPager for swipe-to-switch. Each page maps to
     // one root session; adjacent pages are visible during the drag for a book-
     // like pager feel. Sub-agent sessions fall back to direct content.
@@ -396,6 +455,20 @@ fun ChatScreen(
                 onAction = { errorDetail = error }
             )
             questionSubmitError = null
+        }
+    }
+    // §success-channel: surface AppState.successMessage as a SHORT positive
+    // snackbar. No "查看" action (success messages are short by design —
+    // "隧道激活成功" / "已刷新"), 2.5s duration so it auto-dismisses quickly
+    // without lingering like the 10s error variant. Consumes on read so a
+    // stale value can't re-fire on recomposition.
+    LaunchedEffect(appStateSuccess) {
+        appStateSuccess?.let { message ->
+            snackbarHostState.showTimed(
+                message = message,
+                durationMillis = 2_500L
+            )
+            viewModel.clearSuccessMessage()
         }
     }
     // §Phase1E stale notice — now a 3s M3 Snackbar (was a top-aligned
@@ -561,7 +634,9 @@ fun ChatScreen(
                                 ChatMessageList(
                                     viewModel = viewModel,
                                     onFileClick = onChatFileClick,
-                                    onTabVisibilityChange = { tabVisible = it }
+                                    onTabVisibilityChange = { tabVisible = it },
+                                    savedPositions = savedPositions,
+                                    accessOrder = accessOrder
                                 )
                             } else {
                                 // Adjacent session — messages are not loaded
@@ -580,7 +655,9 @@ fun ChatScreen(
                         ChatMessageList(
                             viewModel = viewModel,
                             onFileClick = onChatFileClick,
-                            onTabVisibilityChange = { tabVisible = it }
+                            onTabVisibilityChange = { tabVisible = it },
+                            savedPositions = savedPositions,
+                            accessOrder = accessOrder
                         )
                     } else if (!isDraft) {
                         ChatEmptyState(

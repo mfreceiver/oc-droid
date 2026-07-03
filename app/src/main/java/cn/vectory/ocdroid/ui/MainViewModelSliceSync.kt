@@ -62,9 +62,20 @@ internal fun syncSlicesFromAppState(state: AppState, slices: SliceFlows) {
         agents = state.agents,
         providers = state.providers,
         availableCommands = state.availableCommands,
-        disabledModels = state.disabledModels
+        disabledModels = state.disabledModels,
+        uiFontScale = state.uiFontScale,
+        uiContentScale = state.uiContentScale
     )
-    slices.chat.value = ChatState(
+    // §slice-only-preserve (glm-1 🔴 / gpt-1): ChatState carries three fields
+    // that are NOT mirrored to AppState (isCompacting, compactStartedAt,
+    // refreshNonce) because they're write-only-to-slice by design. Rebuilding
+    // ChatState wholesale here via `ChatState(...)` reset those to their
+    // defaults on every updateState call — clobbering performGlobalColdStartRefresh's
+    // refreshNonce bump (the §3 scroll-clear signal never reached ChatScreen)
+    // and latently breaking isCompacting (any SSE updateState during compaction
+    // would flip the capsule off). Use .copy() so only AppState-represented
+    // fields are overwritten; slice-only fields keep their current value.
+    slices.chat.value = slices.chat.value.copy(
         currentSessionId = state.currentSessionId,
         messages = state.messages,
         partsByMessage = state.partsByMessage,
@@ -134,6 +145,8 @@ internal fun aggregateFromSlices(slices: SliceFlows, seed: AppState): AppState =
     providers = slices.settings.value.providers,
     availableCommands = slices.settings.value.availableCommands,
     disabledModels = slices.settings.value.disabledModels,
+    uiFontScale = slices.settings.value.uiFontScale,
+    uiContentScale = slices.settings.value.uiContentScale,
     currentSessionId = slices.chat.value.currentSessionId,
     messages = slices.chat.value.messages,
     partsByMessage = slices.chat.value.partsByMessage,
@@ -249,6 +262,8 @@ internal fun applySettingsSlice(
         agents = next.agents,
         providers = next.providers,
         availableCommands = next.availableCommands,
-        disabledModels = next.disabledModels
+        disabledModels = next.disabledModels,
+        uiFontScale = next.uiFontScale,
+        uiContentScale = next.uiContentScale
     )
 }

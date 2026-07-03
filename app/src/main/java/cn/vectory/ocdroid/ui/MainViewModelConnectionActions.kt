@@ -83,7 +83,13 @@ internal fun applySavedSettings(
             selectedAgentName = seedAgent,
             themeMode = settingsManager.themeMode,
             markdownFontSizes = settingsManager.markdownFontSizes,
-            disabledModels = seedDisabledModels
+            disabledModels = seedDisabledModels,
+            // §ui-scale: seed the persisted UI scale factors so OpenCodeTheme
+            // (subscribed via MainActivity → settingsFlow) applies them on
+            // cold start. Updates thereafter flow through setUiFontScale /
+            // setUiContentScale → writeSettings → applySettingsSlice.
+            uiFontScale = settingsManager.uiFontScale,
+            uiContentScale = settingsManager.uiContentScale
         )
     }
     // §R-17 M2 (RFC §4 strategy A): write the connection slice AND mirror it

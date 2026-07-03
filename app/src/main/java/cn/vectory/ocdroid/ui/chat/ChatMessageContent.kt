@@ -28,12 +28,12 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateListOf
-import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
+import androidx.compose.runtime.snapshots.SnapshotStateList
+import androidx.compose.runtime.snapshots.SnapshotStateMap
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -63,7 +63,14 @@ import kotlinx.coroutines.flow.drop
 internal fun ChatMessageList(
     viewModel: MainViewModel,
     onFileClick: (String) -> Unit,
-    onTabVisibilityChange: (Boolean) -> Unit = {}
+    onTabVisibilityChange: (Boolean) -> Unit = {},
+    // §3-scroll-memory: hoisted per-session scroll-position cache + its
+    // access-order LRU ledger. Lifted out of this composable (previously
+    // local `remember{}` blocks) so the HorizontalPager page slot disposing
+    // and recreating ChatMessageList on currentSessionId flip no longer
+    // drops the cached positions. Owned by ChatScreen; mutated here.
+    savedPositions: SnapshotStateMap<String, Pair<Int, Int>>,
+    accessOrder: SnapshotStateList<String>
 ) {
     // §R-17 Stage 2: subscribe to chatFlow + sessionListFlow directly so SSE
     // streaming deltas (streamingPartTexts mutation) only recompose this list,
@@ -131,23 +138,21 @@ internal fun ChatMessageList(
 
     val listState = rememberLazyListState()
     var shouldAutoScroll by remember { mutableStateOf(true) }
-    // #3 — per-session scroll-position memory. The map is remembered at a
-    // stable call site, so it survives session switches (the listState, by
-    // contrast, is a single instance reused across sessions because Compose
-    // keeps ChatMessageList in the composition as long as currentSessionId !=
-    // null). Before opening a sub-session the user's last scroll offset in the
-    // parent is recorded here; returning to the parent restores it instead of
-    // jumping to the latest message.
+    // §3-scroll-memory: per-session scroll-position memory is now HOISTED to
+    // ChatScreen (above the HorizontalPager) so the pager disposing this
+    // composable on a currentSessionId flip no longer drops the cache. The
+    // `savedPositions` map + `accessOrder` LRU ledger are received as params.
+    // Before opening a sub-session the user's last scroll offset in the
+    // parent is recorded via the mirror effect below; returning to the parent
+    // restores it instead of jumping to the latest message.
     //
-    // 🟡 Lifecycle constraint (glmer 🟡-6): this cache is bound to the
-    // ChatMessageList composable staying in composition. It is NOT persisted
-    // across process death or full ChatScreen disposal (e.g. navigation away
-    // from the chat tab, config change without saved-state handling). That is
-    // acceptable for the parent→sub→parent restore use-case; cross-process
-    // restoration is handled by the server-side message list re-fetch + the
-    // `shouldAutoScroll = true` fresh-open fallback. Capacity is bounded by
-    // MAX_SAVED_SESSIONS (LRU eviction) to avoid unbounded growth for heavy
-    // users that open many sub-sessions.
+    // 🟡 Lifecycle constraint (glmer 🟡-6) — RESOLVED by hoisting: the cache
+    // used to be bound to ChatMessageList's composition, so navigation away
+    // from the chat tab / config change wiped it. It now survives as long as
+    // ChatScreen stays in composition. NOT persisted across process death
+    // (acceptable: cold start lands on the latest-message view + the
+    // server-side message re-fetch seeds a fresh window). Capacity is bounded
+    // by MAX_SAVED_SESSIONS (LRU eviction) to avoid unbounded growth.
     //
     // 🟡 True LRU via accessOrder list (kimo 9.4 复审): SnapshotStateMap has
     // **HashMap semantics — its iteration order is NOT insertion order** (per
@@ -158,11 +163,13 @@ internal fun ChatMessageList(
     // and preserves order) as an explicit access-order ledger: every write or
     // restore-read of a sessionId moves its id to the tail; eviction pops from
     // the head. This gives true LRU semantics.
-    val savedPositions = remember { mutableStateMapOf<String, Pair<Int, Int>>() }
-    val accessOrder = remember { mutableStateListOf<String>() }
-    // Session id for which we still owe a scroll-position restore once its
-    // messages have materialised. Set synchronously on session enter, consumed
-    // by the contentVersion effect after the message list is populated.
+    //
+    // pendingRestoreSession is the only piece of scroll state that stays
+    // LOCAL to ChatMessageList: it tracks "we owe the user a programmatic
+    // scroll-to-saved-position once this session's messages materialise",
+    // which is per-composable-instance (a fresh ChatMessageList instance
+    // starts with no restore pending; the LaunchedEffect(sessionId) below
+    // queues one from the hoisted savedPositions if a saved entry exists).
     var pendingRestoreSession by remember { mutableStateOf<String?>(null) }
     val contentVersion = remember(messages, partsByMessage, streamingPartTexts, streamingReasoningPart, isLoading) {
         messages.size +

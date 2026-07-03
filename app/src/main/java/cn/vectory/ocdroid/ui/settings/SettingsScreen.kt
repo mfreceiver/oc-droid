@@ -67,6 +67,16 @@ fun SettingsScreen(
         .map { it.disabledModels }
         .distinctUntilChanged()
         .collectAsStateWithLifecycle(initialValue = emptySet())
+    // §ui-scale: subscribe to the two scale factors so the Appearance sliders
+    // render the live value + dispatch changes through the ViewModel setters.
+    val uiFontScale by viewModel.settingsFlow
+        .map { it.uiFontScale }
+        .distinctUntilChanged()
+        .collectAsStateWithLifecycle(initialValue = 1f)
+    val uiContentScale by viewModel.settingsFlow
+        .map { it.uiContentScale }
+        .distinctUntilChanged()
+        .collectAsStateWithLifecycle(initialValue = 1f)
     val traffic by viewModel.trafficFlow.collectAsStateWithLifecycle()
     val connection by viewModel.connectionFlow.collectAsStateWithLifecycle()
 
@@ -135,7 +145,11 @@ fun SettingsScreen(
 
             AppearanceSection(
                 themeMode = themeMode,
-                onThemeSelected = viewModel::setThemeMode
+                onThemeSelected = viewModel::setThemeMode,
+                uiFontScale = uiFontScale,
+                uiContentScale = uiContentScale,
+                onFontScaleChange = viewModel::setUiFontScale,
+                onContentScaleChange = viewModel::setUiContentScale
             )
 
             Spacer(modifier = Modifier.height(12.dp))

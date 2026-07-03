@@ -105,6 +105,31 @@ class SettingsManager @Inject constructor(
         set(value) = encryptedPrefs.edit().putString(KEY_THEME, value.name).apply()
 
     /**
+     * §ui-scale: user-adjustable UI scale factors (M3 canonical pattern —
+     * applied via CompositionLocalProvider(LocalDensity provides Density(...))
+     * in OpenCodeTheme). Two independent axes per the official Android
+     * scalable-content guidance:
+     *
+     *  - [uiFontScale]: multiplies LocalDensity.fontScale ONLY → text resizes,
+     *    layout/padding/icon sizes stay fixed. Good for "make text bigger
+     *    without reflowing the layout".
+     *  - [uiContentScale]: multiplies LocalDensity.density → everything (dp-
+     *    based dimensions AND sp text) resizes together. True "zoom" — good
+     *    for tablet users who want the whole UI larger.
+     *
+     * Both layer ON TOP OF the system accessibility font size (the base
+     * LocalDensity.fontScale already carries the OS setting). Range clamped to
+     * [UI_SCALE_MIN]–[UI_SCALE_MAX]; default 1.0 (no change).
+     */
+    var uiFontScale: Float
+        get() = encryptedPrefs.getFloat(KEY_UI_FONT_SCALE, 1f).coerceIn(UI_SCALE_MIN, UI_SCALE_MAX)
+        set(value) = encryptedPrefs.edit().putFloat(KEY_UI_FONT_SCALE, value.coerceIn(UI_SCALE_MIN, UI_SCALE_MAX)).apply()
+
+    var uiContentScale: Float
+        get() = encryptedPrefs.getFloat(KEY_UI_CONTENT_SCALE, 1f).coerceIn(UI_SCALE_MIN, UI_SCALE_MAX)
+        set(value) = encryptedPrefs.edit().putFloat(KEY_UI_CONTENT_SCALE, value.coerceIn(UI_SCALE_MIN, UI_SCALE_MAX)).apply()
+
+    /**
      * v2 字体脚手架（`docs/v2-redesign-plan.md` §20 / D5）。
      *
      * 4 键默认空字符串（= 系统字体）。本期只建存储 + 组装管线，不做 picker /
@@ -327,6 +352,11 @@ class SettingsManager @Inject constructor(
         private const val KEY_CURRENT_WORKDIR = "current_workdir"
         private const val KEY_AGENT_NAME = "agent_name"
         private const val KEY_THEME = "theme"
+        private const val KEY_UI_FONT_SCALE = "ui_font_scale"
+        private const val KEY_UI_CONTENT_SCALE = "ui_content_scale"
+        /** §ui-scale: clamp range for both font + content scale sliders. */
+        const val UI_SCALE_MIN = 0.85f
+        const val UI_SCALE_MAX = 1.3f
         private const val KEY_SESSION_DRAFTS = "session_drafts"
         private const val KEY_SESSION_AGENTS = "session_agents"
         private const val KEY_MARKDOWN_FONT_SIZES = "markdown_font_sizes_json"

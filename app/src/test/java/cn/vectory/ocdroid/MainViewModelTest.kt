@@ -2775,6 +2775,14 @@ class MainViewModelTest {
         val fresh = MessageWithParts(info = Message(id = "m_fresh", role = "assistant"))
         coEvery { repository.getMessagesPaged("session-A", any(), any()) } returns
             Result.success(MessagesPage(listOf(fresh), null))
+        // §4-A: refreshCurrentSession now also forces a testConnection probe
+        // (so a stale red badge recovers). Mock checkHealth as a FAILURE so the
+        // probe's failure path runs (writes error+disconnected, which this test
+        // ignores) WITHOUT cascading into loadInitialData/startSSE (which would
+        // hit unmocked repository calls). The message-reload assertions below
+        // are about the cold-start refresh, independent of the probe outcome.
+        coEvery { repository.checkHealth() } returns
+            Result.failure(IllegalStateException("offline"))
 
         val viewModel = createViewModel()
         updateState(viewModel) {
@@ -2799,6 +2807,42 @@ class MainViewModelTest {
         assertNull(viewModel.chatFlow.value.olderMessagesCursor)
         // Gap wiped — a cold-start snapshot has no断层 reference.
         assertNull(viewModel.chatFlow.value.gapInfo)
+        // §3 (glm-1 🔴 regression guard): refreshNonce MUST survive the
+        // performGlobalColdStartRefresh → updateState chain. Before the
+        // syncSlicesFromAppState .copy() fix, the wholesale ChatState rebuild
+        // reset refreshNonce to 0, so ChatScreen's clear-on-refresh signal
+        // never fired. Asserting > 0 here locks the fix in.
+        assertTrue(
+            "refreshNonce incremented by performGlobalColdStartRefresh (got ${viewModel.chatFlow.value.refreshNonce})",
+            viewModel.chatFlow.value.refreshNonce > 0L
+        )
+    }
+
+    @Test
+    fun `refreshCurrentSession surfaces 已刷新 success toast when health and messages both succeed`() = runTest {
+        // §1-addendum + §4-A (glm-1 coverage gap): the success path —
+        // checkHealth healthy AND message reload settled cleanly — must post
+        // successMessage="已刷新". The prior test only covered the failure
+        // branch (checkHealth mocked offline), leaving onSettled(true) →
+        // successMessage entirely untested.
+        val fresh = MessageWithParts(info = Message(id = "m_fresh", role = "assistant"))
+        coEvery { repository.getMessagesPaged("session-A", any(), any()) } returns
+            Result.success(MessagesPage(listOf(fresh), null))
+        // Healthy probe → onSettled(true). loadInitialData sub-callers are
+        // stubbed in setUp (getAgents/getProviders/getCommands/etc.).
+        coEvery { repository.checkHealth() } returns
+            Result.success(HealthResponse(healthy = true, version = "1.0"))
+
+        val viewModel = createViewModel()
+        updateState(viewModel) { it.copy(currentSessionId = "session-A") }
+
+        viewModel.refreshCurrentSession()
+        advanceUntilIdle()
+
+        // Both health AND messages succeeded → "已刷新" toast posted.
+        assertEquals("已刷新", viewModel.state.value.successMessage)
+        // Badge recovered (the §4-A motivation).
+        assertTrue("badge recovered to connected", viewModel.connectionFlow.value.isConnected)
     }
 
     @Test
