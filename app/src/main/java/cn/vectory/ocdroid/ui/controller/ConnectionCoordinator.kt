@@ -5,6 +5,7 @@ import android.util.Log
 import cn.vectory.ocdroid.data.api.CommandInfo
 import cn.vectory.ocdroid.data.model.SSEEvent
 import cn.vectory.ocdroid.data.repository.OpenCodeRepository
+import cn.vectory.ocdroid.data.repository.ServerCompatProfile
 import cn.vectory.ocdroid.ui.AppState
 import cn.vectory.ocdroid.ui.ConnectionState
 import cn.vectory.ocdroid.ui.SliceFlows
@@ -120,6 +121,9 @@ internal class ConnectionCoordinator(
     private val repository: OpenCodeRepository,
     private val settingsManager: SettingsManager,
     private val callbacks: ConnectionCoordinatorCallbacks,
+    // ③ ServerCompat: populated from the health probe so future shim migrations
+    // can read version-derived capability flags instead of guessing a version.
+    private val serverCompatProfile: ServerCompatProfile,
     // Injected clock so the 30s health-check throttle is deterministically
     // testable without depending on wall-clock latency. Defaults to
     // System::currentTimeMillis in production (preserves the exact pre-extraction
@@ -221,6 +225,10 @@ internal class ConnectionCoordinator(
                 if (healthResult.isSuccess) {
                     val health = healthResult.getOrNull()
                     if (health != null && health.healthy) {
+                        // ③ populate the compat profile from the freshly-probed
+                        // version before any consumer (initial-data loaders, SSE)
+                        // runs, so capability flags are settled for this connect.
+                        serverCompatProfile.update(health.version)
                         writeConnection {
                             it.copy(
                                 isConnected = true,
@@ -236,6 +244,7 @@ internal class ConnectionCoordinator(
                     // Healthy=false: surface the version if present but keep
                     // retrying (server may still be coming up on cold start).
                     if (health != null) {
+                        serverCompatProfile.update(health.version)
                         writeConnection { it.copy(serverVersion = health.version) }
                     }
                 }
