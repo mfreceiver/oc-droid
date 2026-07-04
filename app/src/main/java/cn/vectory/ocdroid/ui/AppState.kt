@@ -69,6 +69,7 @@ data class AppState(
     val hasMoreMessages: Boolean = true,
     @Deprecated("mirror from M4 slice; M5 removes AppState", level = DeprecationLevel.WARNING)
     val isLoadingMessages: Boolean = false,
+    val messagesLoadFailed: Boolean = false,
     /**
      * §model-selection: mirror of [ChatState.currentModel] (the model bound
      * to the active session, inferred from the latest assistant message).

@@ -2,6 +2,7 @@
 
 package cn.vectory.ocdroid.ui.chat
 
+import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.WindowInsets
@@ -45,6 +46,8 @@ import kotlinx.coroutines.launch
 internal fun ChatMessageNavFab(
     listState: LazyListState,
     userMessageLcIndices: IntArray,
+    visible: Boolean,
+    onInteract: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     // Q12: 无用户消息 → 隐藏。
@@ -54,6 +57,7 @@ internal fun ChatMessageNavFab(
 
     val scope = rememberCoroutineScope()
 
+    AnimatedVisibility(visible = visible) {
     Column(
         modifier = modifier,
         horizontalAlignment = Alignment.End,
@@ -64,6 +68,7 @@ internal fun ChatMessageNavFab(
             onClick = {
                 val cur = listState.firstVisibleItemIndex
                 val target = userMessageLcIndices.firstOrNull { it > cur }
+                onInteract()
                 scope.launch {
                     if (target != null) {
                         // §issue-2: reverseLayout 下 scrollToItem 把 target 放到
@@ -92,6 +97,7 @@ internal fun ChatMessageNavFab(
             onClick = {
                 val cur = listState.firstVisibleItemIndex
                 val target = userMessageLcIndices.lastOrNull { it < cur }
+                onInteract()
                 scope.launch {
                     if (target != null) {
                         listState.animateScrollToItem(target)
@@ -110,5 +116,6 @@ internal fun ChatMessageNavFab(
                 contentDescription = "Next user message",
             )
         }
+    }
     }
 }

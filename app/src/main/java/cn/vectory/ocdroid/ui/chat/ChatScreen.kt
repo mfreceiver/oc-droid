@@ -701,6 +701,14 @@ fun ChatScreen(
                             onAbort = viewModel::abortSession
                         )
                     }
+
+                    // §user-req: 手动刷新/连接期间显示胶囊提示
+                    ThinkingCapsuleOverlay(
+                        visible = connection.isConnecting && !connection.isConnected,
+                        text = "连接中…",
+                        startedAtMillis = null,
+                        onAbort = { }
+                    )
                 }
 
         // §error-detail: dialog showing the full error text when the user taps
@@ -737,7 +745,11 @@ fun ChatScreen(
                 }
             )
         }
+            }
+        }
 
+        // §user-req: ChatInputBar 移到 Surface 外部（与 Surface 同级，作为
+        // 顶层 Column 的下一个 child），避免被聊天卡片的背景/圆角/elevation 包裹。
         // Input bar is enabled whenever there is either a concrete session OR
         // a draft workdir (so the user can type the first message that will
         // materialise the session).
@@ -771,8 +783,6 @@ fun ChatScreen(
                     }
                 }
             )
-        }
-            }
         }
 
         sessionList.pendingPermissions.firstOrNull()?.let { permission ->

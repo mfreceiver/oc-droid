@@ -15,12 +15,14 @@ import androidx.compose.material.icons.filled.VisibilityOff
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.ListItem
 import androidx.compose.material3.ListItemDefaults
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Switch
@@ -124,6 +126,14 @@ internal fun HostProfilesManagerScreen(
                 runCatching { viewModel.deleteHostProfile(profile.id) }
                     .onFailure { error = it.message ?: deleteFailedText }
                 editingProfile = null
+            },
+            // §user-req: 表单"测试连接"按钮直连 MainViewModel.testConnectionForm。
+            // 注意：表单里若未编辑密码（passwordEdited=false），authPassword
+            // 是空串——testConnectionForm 会拿空密码探测；这是预期行为，因为
+            // 已保存的密码不会回填到表单（write-only）。用户若要带 Basic Auth
+            // 测试，需在点测试前在密码框里重新输入。
+            onTestConnection = { url, user, pass, insecure, callback ->
+                viewModel.testConnectionForm(url, user, pass, insecure, callback)
             }
         )
     }
@@ -255,7 +265,18 @@ internal fun HostProfileEditorDialog(
         tunnelEdited: Boolean
     ) -> Unit,
     canDelete: Boolean = false,
-    onDelete: () -> Unit = {}
+    onDelete: () -> Unit = {},
+    // §user-req: 一次性"测试连接"回调。调用方（HostProfilesManagerScreen）
+    // 把 MainViewModel.testConnectionForm 注入进来；Dialog 不持有 ViewModel
+    // 引用，保持纯 UI 组件可测试性。默认 no-op 以兼容不关心此能力的调用方
+    // （如 SettingsSectionsInstrumentedTest）。
+    onTestConnection: (
+        baseUrl: String,
+        username: String?,
+        password: String?,
+        allowInsecure: Boolean,
+        onResult: (Boolean, String) -> Unit
+    ) -> Unit = { _, _, _, _, _ -> }
 ) {
     var name by remember(initial.id) { mutableStateOf(initial.name) }
     var serverUrl by remember(initial.id) { mutableStateOf(initial.serverUrl) }
@@ -389,14 +410,52 @@ internal fun HostProfileEditorDialog(
                     Spacer(modifier = Modifier.width(8.dp))
                     Switch(checked = allowInsecure, onCheckedChange = { allowInsecure = it })
                 }
-                if (allowInsecure) {
-                    Spacer(modifier = Modifier.height(4.dp))
+                Spacer(modifier = Modifier.height(12.dp))
+                // §user-req: 一次性"测试连接"按钮。用 onTestConnection 回调
+                // 探测当前表单值（不保存、不切换 host）。结果以彩色小字回显在
+                // 按钮下方；测试进行中按钮禁用并显示进度圈。
+                var testStatus by remember(initial.id) { mutableStateOf<Pair<Boolean, String>?>(null) }
+                var isTesting by remember(initial.id) { mutableStateOf(false) }
+                OutlinedButton(
+                    onClick = {
+                        isTesting = true
+                        testStatus = null
+                        onTestConnection(
+                            serverUrl,
+                            authUsername.ifBlank { null },
+                            authPassword.ifBlank { null },
+                            allowInsecure
+                        ) { success, msg ->
+                            isTesting = false
+                            testStatus = success to msg
+                        }
+                    },
+                    enabled = !isTesting && serverUrl.isNotBlank(),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    if (isTesting) {
+                        CircularProgressIndicator(
+                            modifier = Modifier.size(16.dp),
+                            strokeWidth = 2.dp
+                        )
+                        Spacer(modifier = Modifier.width(8.dp))
+                    }
+                    Text("测试连接")
+                }
+                testStatus?.let { (success, msg) ->
                     Text(
-                        stringResource(R.string.host_insecure_warning),
-                        color = MaterialTheme.colorScheme.error,
-                        style = MaterialTheme.typography.bodySmall
+                        text = msg,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = if (success) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.error,
+                        modifier = Modifier.padding(top = 4.dp)
                     )
                 }
+                Text(
+                    text = "编辑已有配置时请重新输入密码后再测试",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(top = 2.dp)
+                )
             }
         },
         // Bottom action row: [Delete(red)] ... [Cancel] [Save].

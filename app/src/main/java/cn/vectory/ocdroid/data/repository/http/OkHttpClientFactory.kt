@@ -22,15 +22,15 @@ import javax.inject.Singleton
  * Client variants:
  *  - [restClient]: base chain + response-size guard (OOM P0) + 30 s read.
  *  - [sseClient]: base chain + 0 read timeout (SSE long connection).
- *  - [tunnelClient]: SSL + 15 s/15 s timeouts, no interceptors (form POST auth).
- *  - [healthClient]: SSL + 15 s/15 s timeouts, no interceptors (one-shot probe).
+ *  - [tunnelClient]: SSL + 10 s/10 s timeouts, no interceptors (form POST auth).
+ *  - [healthClient]: SSL + 10 s/10 s timeouts, no interceptors (one-shot probe).
  *
  * The base chain (see [baseBuilder]) composes, in order:
  *  1. SSL + cache (per [allowInsecure]).
  *  2. R-07 log gate: `BASIC` in DEBUG builds, `NONE` in release.
  *  3. [DirectoryHeaderInterceptor] → [AuthInterceptor] → [CacheControlInterceptor].
  *  4. [TrafficCountingInterceptor].
- *  5. `connectTimeout(15 s)`.
+ *  5. `connectTimeout(10 s)`.
  *
  * R-04: `readTimeout` and the size guard are NOT in the base chain (REST and
  * SSE differ); they are layered by each variant.
@@ -98,7 +98,7 @@ class OkHttpClientFactory @Inject constructor(
             .addInterceptor(authInterceptor)
             .addInterceptor(cacheControlInterceptor)
             .addInterceptor(trafficCountingInterceptor)
-            .connectTimeout(15, TimeUnit.SECONDS)
+            .connectTimeout(10, TimeUnit.SECONDS)
     }
 
     /** REST client: base chain + §OOM P0 body-size cap + 30 s read timeout. */
@@ -124,7 +124,7 @@ class OkHttpClientFactory @Inject constructor(
 
     /**
      * One-shot health-probe client: SSL via the shared entry point + 15 s /
-     * 15 s timeouts, NO base interceptors — used by `checkHealthFor` to
+     * 10 s timeouts, NO base interceptors — used by `checkHealthFor` to
      * probe an arbitrary baseUrl without mutating the host profile, so the
      * directory / auth / cache interceptors (which all read the live
      * `HostConfig`) would be misleading here. The probe caller supplies
@@ -135,8 +135,8 @@ class OkHttpClientFactory @Inject constructor(
     private fun bareClient(allowInsecure: Boolean): OkHttpClient =
         OkHttpClient.Builder()
             .apply { applySsl(sslConfigFactory.sslConfigFor(allowInsecure)) }
-            .connectTimeout(15, TimeUnit.SECONDS)
-            .readTimeout(15, TimeUnit.SECONDS)
+            .connectTimeout(10, TimeUnit.SECONDS)
+            .readTimeout(10, TimeUnit.SECONDS)
             .build()
 
     companion object {

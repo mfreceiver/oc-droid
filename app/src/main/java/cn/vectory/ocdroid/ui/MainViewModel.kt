@@ -825,6 +825,39 @@ class MainViewModel @Inject constructor(
     }
 
     /**
+     * §user-req: 测试表单中的连接信息（不保存、不切换 host、不激活隧道）。
+     * 用 checkHealthFor 直接探测，返回成功/失败消息。
+     *
+     * 与 [testConnection] 的区别：[testConnection] 是面向当前激活 host 的完整
+     * 连接状态机（成功后 startSSE / loadInitialData，失败后写 AppState.error）；
+     * 而本函数只做一次性健康探测，结果通过 [onResult] 回调返回给调用方
+     * （HostProfileEditorDialog 的"测试连接"按钮），不触碰任何全局状态。
+     *
+     * HealthResponse.version 可空（旧服务器可能不返回），回调消息做了 null 安全。
+     */
+    fun testConnectionForm(
+        baseUrl: String,
+        username: String?,
+        password: String?,
+        allowInsecure: Boolean,
+        onResult: (success: Boolean, message: String) -> Unit
+    ) {
+        viewModelScope.launch {
+            val result = repository.checkHealthFor(baseUrl, username, password, allowInsecure)
+            result
+                .onSuccess { health ->
+                    if (health.healthy) {
+                        val msg = health.version?.let { v -> "连接成功 (v$v)" } ?: "连接成功"
+                        onResult(true, msg)
+                    } else {
+                        onResult(false, "服务器不可用 (healthy=false)")
+                    }
+                }
+                .onFailure { e -> onResult(false, e.message ?: "连接失败") }
+        }
+    }
+
+    /**
      * Cold-start entry point: force a connection check with up to 3 retries
      * (exponential backoff 1s/2s/4s) so a slow-to-wake server (common when
      * the OpenCode server itself is bootstrapping) still comes up instead of

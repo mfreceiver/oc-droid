@@ -197,8 +197,9 @@ class OpenCodeRepository @Inject constructor(
         username: String? = null,
         password: String? = null,
         allowInsecure: Boolean = false
-    ): Result<HealthResponse> = runSuspendCatching {
-        val client = clientFactory.healthClient(allowInsecure)
+    ): Result<HealthResponse> = withContext(Dispatchers.IO) {
+        runSuspendCatching {
+            val client = clientFactory.healthClient(allowInsecure)
         val normalizedUrl = (if (baseUrl.startsWith("http")) baseUrl else "http://$baseUrl")
             .trimEnd('/') + "/global/health"
         val requestBuilder = Request.Builder()
@@ -214,6 +215,7 @@ class OpenCodeRepository @Inject constructor(
             val body = res.body?.string().orEmpty()
             if (body.isBlank()) error("Empty response body")
             json.decodeFromString(HealthResponse.serializer(), body)
+        }
         }
     }
 

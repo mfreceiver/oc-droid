@@ -7,6 +7,7 @@ import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -27,6 +28,7 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -136,6 +138,9 @@ internal fun ChatMessageList(
 
     val listState = rememberLazyListState()
     var followBottom by remember { mutableStateOf(true) }
+    // §navFab-visibility: 只在用户手动滑动时显示 NavFab，3s 无交互后隐藏
+    var navFabVisible by remember { mutableStateOf(false) }
+    var navFabTick by remember { mutableIntStateOf(0) }
     // §3-scroll-memory: per-session scroll-position memory is now HOISTED to
     // ChatScreen (above the HorizontalPager) so the pager disposing this
     // composable on a currentSessionId flip no longer drops the cache. The
@@ -319,6 +324,25 @@ internal fun ChatMessageList(
                 val atExactBottom = index == 0 && offset <= 24
                 followBottom = if (canBack) atExactBottom else true
             }
+    }
+
+    // §navFab-visibility: 用户手动滑动时显示 NavFab，3s 无交互后自动隐藏
+    LaunchedEffect(listState, sessionId) {
+        if (sessionId == null) return@LaunchedEffect
+        snapshotFlow { listState.isScrollInProgress }
+            .collect { scrolling ->
+                if (scrolling) {
+                    navFabVisible = true
+                    navFabTick++
+                }
+            }
+    }
+    // §navFab-autohide: 3s 无交互（滑动或按钮点击）后隐藏
+    LaunchedEffect(navFabTick) {
+        if (navFabVisible) {
+            delay(3000)
+            navFabVisible = false
+        }
     }
 
     // #3 — on session enter, decide intent: a "return" (saved position exists)
@@ -590,6 +614,30 @@ internal fun ChatMessageList(
                 }
             }
         }
+        // §cold-load: 首次加载期间显示 spinner + "加载中…"
+        if (isLoading && messages.isEmpty()) {
+            item {
+                Box(
+                    modifier = Modifier.fillMaxWidth().padding(32.dp),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                        CircularProgressIndicator(
+                            modifier = Modifier.size(32.dp),
+                            strokeWidth = 2.dp,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        Spacer(modifier = Modifier.height(12.dp))
+                        Text(
+                            text = "加载中…",
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                }
+            }
+        }
+        // §empty: 加载完成但无消息
         if (!isLoading && messages.isEmpty()) {
             item {
                 Box(
@@ -597,9 +645,9 @@ internal fun ChatMessageList(
                     contentAlignment = Alignment.Center
                 ) {
                     Text(
-                        text = "No messages yet. Send a message to start.",
+                        text = "暂无消息",
                         style = MaterialTheme.typography.bodyMedium,
-                        color = MaterialTheme.colorScheme.outline
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
                 }
             }
@@ -609,6 +657,8 @@ internal fun ChatMessageList(
         ChatMessageNavFab(
             listState = listState,
             userMessageLcIndices = userMessageLcIndices,
+            visible = navFabVisible,
+            onInteract = { navFabTick++ },
             modifier = Modifier
                 .align(Alignment.BottomEnd)
                 .padding(end = 12.dp, bottom = 96.dp),

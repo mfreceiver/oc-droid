@@ -38,7 +38,6 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.RectangleShape
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.vector.ImageVector
@@ -234,8 +233,11 @@ internal fun ChatInputBar(
                     )
                 }
 
-                // §9: primary send / stop — 28×28, rounded 6, bg-contrast bottom,
-                // white icon; disabled at 0.5 alpha.
+                // §9: primary send / stop. R-12 (WCAG 2.5.5): the outer Box is
+                // a 48dp touch target (the highest-frequency button in the app),
+                // while the inner icon preserves the compact visual density.
+                // §user-req: 去底色——不再有 containerColor/.background，按钮
+                // 仅渲染 onSurfaceVariant 图标（disabled 时 0.5 alpha）。
                 // §#4: when a system question is pending and its hoisted answers
                 // are valid, the button submits the question instead of a normal
                 // send/stop. Question submit takes priority over a typed prompt
@@ -261,8 +263,6 @@ internal fun ChatInputBar(
                         }
                     },
                     enabled = canStop || canSend,
-                    containerColor = MaterialTheme.colorScheme.inverseSurface,
-                    contentColor = MaterialTheme.colorScheme.inverseOnSurface,
                     dimWhenDisabled = true,
                     icon = sendIcon,
                     contentDescription = sendContentDescription
@@ -381,8 +381,6 @@ private fun CommandSuggestionsPanel(
 private fun ChatPrimaryActionButton(
     onClick: () -> Unit,
     enabled: Boolean,
-    containerColor: Color,
-    contentColor: Color,
     dimWhenDisabled: Boolean,
     icon: ImageVector,
     contentDescription: String
@@ -410,20 +408,12 @@ private fun ChatPrimaryActionButton(
             },
         contentAlignment = Alignment.Center
     ) {
-        Box(
-            modifier = Modifier
-                .size(28.dp)
-                .clip(MaterialTheme.shapes.small)
-                .background(containerColor.copy(alpha = effectiveAlpha)),
-            contentAlignment = Alignment.Center
-        ) {
-            Icon(
-                icon,
-                contentDescription = null,
-                tint = contentColor.copy(alpha = effectiveAlpha),
-                modifier = Modifier.size(16.dp)
-            )
-        }
+        Icon(
+            icon,
+            contentDescription = null,
+            tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = effectiveAlpha),
+            modifier = Modifier.size(22.dp)
+        )
     }
 }
 

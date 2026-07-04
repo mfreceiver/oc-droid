@@ -126,7 +126,7 @@
     <string name="host_profile_basic_auth_password">Basic Auth 密码（可选）</string>
     <string name="host_profile_tunnel_password">隧道密码</string>
     <string name="host_profile_tunnel_password_label">认证密码（内网穿透）</string>
-    <string name="host_allow_insecure_title">接受不安全连接</string>
+    <string name="host_allow_insecure_title">不安全HTTPS连接</string>
     <string name="host_allow_insecure_summary">跳过该主机的 TLS 证书与主机名校验</string>
     <string name="host_insecure_warning">警告：关闭证书校验。仅用于受信任的自签名/内网服务器，存在中间人攻击风险。</string>
     <string name="host_profile_untitled">未命名</string>

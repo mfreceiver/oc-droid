@@ -18,6 +18,7 @@ import cn.vectory.ocdroid.util.SettingsManager
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.isActive
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
 /**
@@ -404,6 +405,11 @@ internal class HostProfileController(
                         )
                     }
                     Log.d(TAG, "Tunnel activated successfully for ${profile.serverUrl}")
+                    // §user-req: tunnel 激活后自动冷启动级刷新。1.5s 经验值——cloudflared
+                    // 类守护进程在 activate API 返回后需要短暂时间建立路由。coldStartReconnect
+                    // 自带 3 次退避重试（1/2/4s）兜底，即使首次探测失败也会在 ~7s 内成功。
+                    delay(1500)
+                    callbacks.coldStartReconnect()
                 }
                 .onFailure { error ->
                     val msg = errorMessageOrFallback(error, "未知错误（无异常信息）")

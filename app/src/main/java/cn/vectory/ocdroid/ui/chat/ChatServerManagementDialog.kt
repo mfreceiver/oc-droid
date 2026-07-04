@@ -17,7 +17,6 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.VpnKey
@@ -90,30 +89,20 @@ internal fun ServerManagementDialog(
                                         .padding(12.dp),
                                     verticalAlignment = Alignment.CenterVertically
                                 ) {
-                                    Column(
-                                        modifier = Modifier.weight(1f),
-                                        verticalArrangement = Arrangement.spacedBy(2.dp)
-                                    ) {
-                                        Text(
-                                            text = profile.name,
-                                            style = MaterialTheme.typography.bodyMedium,
-                                            fontWeight = FontWeight.Bold,
-                                            color = MaterialTheme.colorScheme.primary
-                                        )
-                                        serverVersion?.let { version ->
-                                            Text(
-                                                text = "v$version",
-                                                style = MaterialTheme.typography.bodySmall,
-                                                color = MaterialTheme.colorScheme.onSurfaceVariant
-                                            )
-                                        }
-                                    }
-                                    Icon(
-                                        Icons.Filled.Check,
-                                        contentDescription = null,
-                                        modifier = Modifier.size(16.dp),
-                                        tint = SemanticColors.stateSuccessFg()
+                                    Text(
+                                        text = profile.name,
+                                        style = MaterialTheme.typography.bodyMedium,
+                                        fontWeight = FontWeight.Bold,
+                                        color = MaterialTheme.colorScheme.primary,
+                                        modifier = Modifier.weight(1f)
                                     )
+                                    serverVersion?.let { version ->
+                                        Text(
+                                            text = "v$version",
+                                            style = MaterialTheme.typography.bodySmall,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                                        )
+                                    }
                                 }
                             }
                         } else {

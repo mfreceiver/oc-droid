@@ -2328,6 +2328,9 @@ class MainViewModelTest {
         every { hostProfileStore.currentProfile() } returns profileWithTunnel
         every { settingsManager.getTunnelPassword("profile-1") } returns "tunnel-secret"
         coEvery { repository.activateTunnel("http://server.test", "tunnel-secret") } returns Result.success(Unit)
+        // §tunnel-refresh: mock checkHealth for auto coldStartReconnect after tunnel activation
+        coEvery { repository.checkHealth() } returns
+            Result.success(HealthResponse(healthy = true, version = "1.0"))
 
         val viewModel = createViewModel()
         advanceUntilIdle()
