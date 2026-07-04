@@ -1520,8 +1520,14 @@ class MainViewModel @Inject constructor(
         settingsManager.setDraftText(sessionId, "")
         writeComposer { it.copy(inputText = "") }
 
-        val agent = _settingsFlow.value.selectedAgentName
-        val model: Message.ModelInfo? = null
+        // §model-selection (V1-per-prompt, aligned with official packages/app):
+        // agent is per-session — prefer the session-bound choice, fall back to the
+        // global default. model is the session's intended-next-model (persisted per
+        // session via SettingsManager); both are attached to THIS prompt's request
+        // body, NOT set via a server-side switch endpoint.
+        val agent = settingsManager.getAgentForSession(sessionId)
+            ?: _settingsFlow.value.selectedAgentName
+        val model: Message.ModelInfo? = _chatFlow.value.currentModel
         val currentSession = currentSession(_sessionListFlow.value.sessions, _chatFlow.value.currentSessionId)
 
         fun dispatchSend() {
@@ -1686,25 +1692,20 @@ class MainViewModel @Inject constructor(
     }
 
     /**
-     * §model-selection: switches the model bound to the current session via
-     * `POST /api/session/{id}/model`. On success updates `currentModel` so
-     * the top-bar picker reflects the new selection. On failure surfaces an
-     * error via AppState.error.
+     * §model-selection (V1-per-prompt): records the user's model choice for the
+     * current session as a LOCAL per-session preference (persisted via
+     * [SettingsManager.setModelForSession]) and updates the in-memory
+     * [ChatState.currentModel] so the picker reflects it immediately. The chosen
+     * model is attached to the next outgoing prompt's PromptRequest.model by
+     * [dispatchSendMessage]; there is NO server-side switch call (the previous
+     * V2 `POST /api/session/{id}/model` path was removed to align with the
+     * official packages/app V1-per-prompt model).
      */
     fun switchSessionModel(providerId: String, modelId: String) {
         val sessionId = _chatFlow.value.currentSessionId ?: return
-        viewModelScope.launch {
-            repository.switchModel(sessionId, providerId, modelId)
-                .onSuccess {
-                    writeChat {
-                        it.copy(currentModel = Message.ModelInfo(providerId = providerId, modelId = modelId))
-                    }
-                }
-                .onFailure { error ->
-                    updateState {
-                        it.copy(error = "Failed to switch model: ${errorMessageOrFallback(error, "unknown error")}")
-                    }
-                }
+        settingsManager.setModelForSession(sessionId, providerId, modelId)
+        writeChat {
+            it.copy(currentModel = Message.ModelInfo(providerId = providerId, modelId = modelId))
         }
     }
 

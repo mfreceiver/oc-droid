@@ -191,7 +191,13 @@ internal fun launchLoadMessages(
                             // active session by inferring it from the latest
                             // assistant message's resolvedModel. Surfaces in
                             // the chat top-bar context menu.
-                            currentModel = inferCurrentModel(mergedMessages)
+                            // §model-selection (V1-per-prompt): the per-session stored model is the
+                            // intended-next-model and wins over inference — this preserves a pending
+                            // user switch across periodic reloads during streaming. Inference from the
+                            // latest assistant message is the fallback for sessions first opened on
+                            // another client (no local stored choice yet).
+                            currentModel = settingsManager?.getModelForSession(sessionId)
+                                ?: inferCurrentModel(mergedMessages)
                         )
                     }
                     DebugLog.d("Sync", "merged: before=$beforeMergeSize after=${state.value.messages.size}")

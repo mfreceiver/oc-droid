@@ -5,6 +5,7 @@ import android.content.SharedPreferences
 import android.util.Log
 import androidx.security.crypto.EncryptedSharedPreferences
 import androidx.security.crypto.MasterKey
+import cn.vectory.ocdroid.data.model.Message
 import cn.vectory.ocdroid.data.model.SessionCacheEntry
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.serialization.encodeToString
@@ -315,6 +316,38 @@ class SettingsManager @Inject constructor(
     }
 
     /**
+     * §model-selection: per-session intended-next-model override, persisted across
+     * cold starts. Stored as a JSON map `sessionId -> "providerId/modelId"` mirroring
+     * the per-session agent map. Returns null when no model has been chosen for the
+     * session (caller falls back to inferring from the latest assistant message).
+     *
+     * Model: V1-per-prompt semantics — the stored value is the model that will be
+     * attached to the NEXT outgoing prompt's [PromptRequest.model]; it is NOT a
+     * server-side session binding.
+     */
+    fun getModelForSession(sessionId: String): Message.ModelInfo? {
+        val json = encryptedPrefs.getString(KEY_SESSION_MODELS, null) ?: return null
+        return try {
+            val raw = Json.decodeFromString<Map<String, String>>(json)[sessionId] ?: return null
+            val parts = raw.split("/", limit = 2)
+            if (parts.size != 2) null else Message.ModelInfo(providerId = parts[0], modelId = parts[1])
+        } catch (e: Exception) {
+            null
+        }
+    }
+
+    fun setModelForSession(sessionId: String, providerId: String, modelId: String) {
+        val json = encryptedPrefs.getString(KEY_SESSION_MODELS, null)
+        val map: MutableMap<String, String> = try {
+            json?.let { Json.decodeFromString<Map<String, String>>(it).toMutableMap() } ?: mutableMapOf()
+        } catch (e: Exception) {
+            mutableMapOf()
+        }
+        map[sessionId] = "$providerId/$modelId"
+        encryptedPrefs.edit().putString(KEY_SESSION_MODELS, Json.encodeToString(map)).apply()
+    }
+
+    /**
      * §model-selection: per-baseUrl disabled-model set. Models the user has
      * unchecked in Settings → Model management; those entries are hidden from
      * the chat quick-switch picker. Storage key format:
@@ -404,6 +437,7 @@ class SettingsManager @Inject constructor(
         const val UI_SCALE_MAX = 1.3f
         private const val KEY_SESSION_DRAFTS = "session_drafts"
         private const val KEY_SESSION_AGENTS = "session_agents"
+        private const val KEY_SESSION_MODELS = "session_models"
         private const val KEY_MARKDOWN_FONT_SIZES = "markdown_font_sizes_json"
         private const val KEY_FONT_LATIN = "font_latin"
         private const val KEY_FONT_CJK = "font_cjk"

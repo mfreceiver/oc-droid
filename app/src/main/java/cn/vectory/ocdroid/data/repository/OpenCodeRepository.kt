@@ -5,8 +5,6 @@ import cn.vectory.ocdroid.data.api.SSEClient
 import cn.vectory.ocdroid.data.api.*
 import cn.vectory.ocdroid.data.api.v2.OpenCodeApiV2
 import cn.vectory.ocdroid.data.api.v2.ModelInfoV2
-import cn.vectory.ocdroid.data.api.v2.ModelRefV2
-import cn.vectory.ocdroid.data.api.v2.SwitchModelRequest
 import cn.vectory.ocdroid.data.model.*
 import cn.vectory.ocdroid.data.repository.http.AuthInterceptor
 import cn.vectory.ocdroid.data.repository.http.CacheControlInterceptor
@@ -407,21 +405,6 @@ class OpenCodeRepository @Inject constructor(
      * for the context-limit index.
      */
     suspend fun getModels(): Result<List<ModelInfoV2>> = runSuspendCatching { apiV2.getModels().data }
-
-    /**
-     * §model-selection: switches the model bound to [sessionId] via the v2
-     * `POST /api/session/{sessionID}/model` endpoint. Server expects
-     * `{"model":{"providerID":"<p>","id":"<m>"}}` and returns 204 No Content
-     * on success.
-     */
-    suspend fun switchModel(
-        sessionId: String,
-        providerId: String,
-        modelId: String
-    ): Result<Unit> = runSuspendCatching {
-        val response = apiV2.switchModel(sessionId, SwitchModelRequest(ModelRefV2(id = modelId, providerId = providerId)))
-        if (!response.isSuccessful) throw IOException("switchModel HTTP ${response.code()}")
-    }
 
     suspend fun getAgents(): Result<List<AgentInfo>> = runSuspendCatching { api.getAgents() }
 

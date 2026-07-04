@@ -121,6 +121,13 @@ class MainViewModelTest {
         every { settingsManager.setDraftText(any(), any()) } just runs
         every { settingsManager.getAgentForSession(any()) } returns null
         every { settingsManager.setAgentForSession(any(), any()) } just runs
+        // §model-selection (V1-per-prompt): relaxed mock returns a non-null
+        // child mock for getModelForSession's nullable ModelInfo? return, which
+        // would leak into ChatState.currentModel via launchLoadMessages' merge
+        // and break send-time model=null verification. Explicitly stub null —
+        // mirrors getAgentForSession above.
+        every { settingsManager.getModelForSession(any()) } returns null
+        every { settingsManager.setModelForSession(any(), any(), any()) } just runs
 
         every { repository.connectSSE() } returns emptyFlow()
         coEvery { repository.getSessions(any()) } returns Result.success(emptyList())
