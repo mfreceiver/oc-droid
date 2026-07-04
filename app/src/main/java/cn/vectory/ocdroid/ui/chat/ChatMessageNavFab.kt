@@ -85,10 +85,16 @@ internal fun ChatMessageNavFab(
             horizontalAlignment = Alignment.End,
             verticalArrangement = Arrangement.spacedBy(10.dp),
         ) {
-            // 上 = 上一条（更旧）：最小的大于 firstVisibleItemIndex 的用户 index。
+            // 上 = 上一条（更旧）：最小的大于「当前居中 item index」的用户 index。
             FloatingActionButton(
                 onClick = {
-                    val cur = listState.firstVisibleItemIndex
+                    // §fix-nav-cursor: 游标用「视口内最靠近中线的用户消息」index，
+                    // 而非 firstVisibleItemIndex / 任意居中 item。居中跳转后比 target 更新
+                    // 的消息仍留在视口内，若用 firstVisibleItemIndex（或非用户 item 的
+                    // centerIdx）做游标，会反复锁定同一条用户消息（"卡在一组对话上"）。
+                    // 用可见用户消息做锚点：已可见的视为"已读"，UP/DOWN 跳到更旧/更新
+                    // 的下一条。无可见用户消息时回退到 centerIdx。
+                    val cur = navAnchorIndex(listState, userMessageLcIndices)
                     val target = userMessageLcIndices.firstOrNull { it > cur }
                     onInteract()
                     // §fix-nav-race (kimo 🟡-1): onJumpStart 必须在 followBottom 写入
@@ -116,10 +122,11 @@ internal fun ChatMessageNavFab(
                     contentDescription = "Previous user message",
                 )
             }
-            // 下 = 下一条（更新）：最大的小于 firstVisibleItemIndex 的用户 index。
+            // 下 = 下一条（更新）：最大的小于「当前居中 item index」的用户 index。
             FloatingActionButton(
                 onClick = {
-                    val cur = listState.firstVisibleItemIndex
+                    // §fix-nav-cursor: 同 UP，游标用可见用户消息锚点。
+                    val cur = navAnchorIndex(listState, userMessageLcIndices)
                     val target = userMessageLcIndices.lastOrNull { it < cur }
                     onInteract()
                     // §fix-nav-race (kimo 🟡-1): onJumpStart 先于 followBottom 写入。
@@ -192,14 +199,20 @@ private suspend fun jumpToCenteredListState(
 /**
  * §fix-nav-center: 把 [target] 平滑滚动到视口中部。
  *
- * @param currentOffset target 当前 top-edge 相对视口顶部的像素偏移。
+ * @param currentOffset target 当前相对视口（reverseLayout 下从视觉底部起算）的偏移（px）。
  * @param itemSize target 的实测高度（px）。
  * @param viewportHeight 视口主轴高度（px）。
  *
  * 居中目标：desiredOffset = (viewportHeight - itemSize) / 2。
- * 滚动量 shift = desiredOffset - currentOffset。reverseLayout 下 animateScrollBy(shift)
- * 直接把 target 的 offset 改变 shift（正→下移，负→上移）；LazyListState 自动钳制到
- * 可滚动范围——两端空间不足时 shift 被部分或完全吸收，target 停在"尽量靠中"的位置。
+ *
+ * §fix-nav-sign（核心）：reverseLayout 下 `animateScrollBy(delta)` 与 item offset **反向**
+ * ——正向 delta（scrollOffset 增大 / 向更旧滚动）会让内容整体下移、item 的 offset **减小**。
+ * 即 offset_change = -delta。因此要把 offset 从 currentOffset 改到 desiredOffset，需：
+ *   -delta = desiredOffset - currentOffset  →  delta = currentOffset - desiredOffset
+ * 旧代码误用 `animateScrollBy(desiredOffset - currentOffset)`（正向），把 target 推出
+ * 视口（offset 变负 / 越过顶部），触发硬保证 scrollToItem 回弹（"滑到底→再滑一点→弹回"症状）。
+ *
+ * LazyListState 自动钳制 delta 到可滚动范围——两端空间不足时 target 停在"尽量靠中"的位置。
  */
 private suspend fun centerTarget(
     listState: androidx.compose.foundation.lazy.LazyListState,
@@ -210,11 +223,43 @@ private suspend fun centerTarget(
 ) {
     if (itemSize <= 0f || itemSize >= viewportHeight) return // 比视口还高 → 无法居中，保留原位
     val desiredOffset = (viewportHeight - itemSize) / 2f
-    val shift = desiredOffset - currentOffset
-    if (abs(shift) < 1f) return // 已足够居中
-    listState.animateScrollBy(shift)
+    // §fix-nav-sign: delta = currentOffset - desiredOffset（reverseLayout 反向）。
+    val delta = currentOffset - desiredOffset
+    if (abs(delta) < 1f) return // 已足够居中
+    listState.animateScrollBy(delta)
     // §hard-guarantee: 变高 item 下居中量近似，极端情况可能把 target 推出视口。
     if (listState.layoutInfo.visibleItemsInfo.none { it.index == target }) {
         listState.scrollToItem(target)
     }
+}
+
+/**
+ * §fix-nav-cursor: 返回 NavFab 上/下跳转的"当前游标"——视口内**最靠近视口中线的
+ * 用户消息** index；无可见用户消息时回退到最靠近中线的任意 item index。
+ *
+ * 用可见用户消息做锚点：已进入视口的用户消息视为"已读"，UP/DOWN 据此跳到更旧/更新
+ * 的下一条，避免反复锁定同一条（"卡在一组对话上"bug）。回退分支处理用户滚到两条
+ * 用户消息之间（无用户消息可见）的情况。
+ */
+private fun navAnchorIndex(
+    listState: androidx.compose.foundation.lazy.LazyListState,
+    userMessageLcIndices: IntArray,
+): Int {
+    val layout = listState.layoutInfo
+    val vh = layout.viewportSize.height.toFloat()
+    if (vh <= 0f) return listState.firstVisibleItemIndex
+    val half = vh / 2f
+    fun dist(info: androidx.compose.foundation.lazy.LazyListItemInfo): Float {
+        val c = info.offset + info.size / 2f
+        return if (c >= half) c - half else half - c
+    }
+    // 优先：可见用户消息中最靠近中线的。
+    val visibleSet = layout.visibleItemsInfo
+    val closestUser = userMessageLcIndices
+        .asList()
+        .mapNotNull { idx -> visibleSet.firstOrNull { it.index == idx } }
+        .minByOrNull { dist(it) }
+    if (closestUser != null) return closestUser.index
+    // 回退：无可见用户消息 → 最靠近中线的任意 item。
+    return visibleSet.minByOrNull { dist(it) }?.index ?: listState.firstVisibleItemIndex
 }
