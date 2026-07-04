@@ -221,6 +221,16 @@ internal fun TextPart(
     workspaceDirectory: String? = null,
     isStreaming: Boolean = false
 ) {
+    // §empty-msg defensive: a Part whose final text is blank renders nothing.
+    // Covers (1) a placeholder text Part carried into a persisted session with
+    // text=null/"" — the message-level [isEffectivelyRenderableEmpty] catches
+    // the all-parts-blank case, but a single blank text Part inside a multi-
+    // part message would otherwise leave a blank padded Surface/Box; (2) the
+    // brief streaming window where the override is "" (placeholder part
+    // inserted, no delta yet). The moment the first token arrives text
+    // becomes non-blank and this composable re-renders normally. Both the
+    // user-bubble and assistant-markdown branches are guarded.
+    if (text.isBlank()) return
     if (isUser) {
         // §4.2 v2 user bubble: right-aligned, layer02 background, 10dp radius,
         // padding 8x12, max ~82% of row width. No blue tint, no left bar — the

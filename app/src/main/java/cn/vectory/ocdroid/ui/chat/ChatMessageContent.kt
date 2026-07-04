@@ -42,7 +42,7 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import cn.vectory.ocdroid.data.model.Message
 import cn.vectory.ocdroid.data.model.Part
-import cn.vectory.ocdroid.data.model.isRenderableEmptyMessage
+import cn.vectory.ocdroid.data.model.isEffectivelyRenderableEmpty
 import cn.vectory.ocdroid.data.repository.OpenCodeRepository
 import cn.vectory.ocdroid.ui.GapInfo
 import cn.vectory.ocdroid.ui.MainViewModel
@@ -451,11 +451,17 @@ internal fun ChatMessageList(
             val isStreamingMsg = msgParts.any { it.id in streamingPartTexts } ||
                 streamingReasoningPart?.messageId == msg.id ||
                 (!msg.isUser && msgParts.isEmpty() && sessionIsRunning)
-            isRenderableEmptyMessage(
-                isUser = msg.isUser,
-                partsForMessage = msgParts,
-                isStreaming = isStreamingMsg
-            )
+            // §empty-msg: user messages are never filtered here. Streaming
+            // assistant messages are kept — the items block renders an inline
+            // "生成中…" placeholder for the in-flight empty shell (msgParts
+            // empty + sessionIsRunning) and full content for the rest. For
+            // NON-streaming assistant messages, drop both the no-parts shell
+            // (legacy case) and the persistent empty shell whose parts exist
+            // but carry no renderable content (e.g. a placeholder text Part
+            // with text=null returned by the server after a reload). The
+            // streaming guard above robustly protects live turns whose
+            // streamingPartTexts/reasoning are still filling in.
+            !msg.isUser && !isStreamingMsg && isEffectivelyRenderableEmpty(msgParts)
         }
     }
     val showGap = gapInfo != null && gapInfo.open
@@ -544,19 +550,30 @@ internal fun ChatMessageList(
                     modifier = Modifier.fillMaxWidth()
                 )
             } else {
-                MessageRow(
-                    message = message,
-                    parts = partsByMessage[message.id].orEmpty(),
-                    streamingPartTexts = streamingPartTexts,
-                    streamingReasoningPartId = streamingReasoningPart?.id,
-                    repository = repository,
-                    workspaceDirectory = workspaceDirectory,
-                    onFileClick = onFileClick,
-                    onOpenSubAgent = onOpenSubAgent,
-                    expandedParts = expandedParts,
-                    onToggleExpand = onToggleExpand,
-                    staleQuestionPartKeys = staleQuestionPartKeys
-                )
+                // §empty-msg: in-flight empty assistant shell (message.updated
+                // arrived, first part hasn't) renders a lightweight loading
+                // row instead of a bare timestamp bubble. Matches the streaming
+                // guard in reversedMessages above so the row is consistently
+                // kept there and rendered here.
+                val msgParts = partsByMessage[message.id].orEmpty()
+                val isInFlightEmpty = !message.isUser && msgParts.isEmpty() && sessionIsRunning
+                if (isInFlightEmpty) {
+                    InFlightEmptyLoading()
+                } else {
+                    MessageRow(
+                        message = message,
+                        parts = msgParts,
+                        streamingPartTexts = streamingPartTexts,
+                        streamingReasoningPartId = streamingReasoningPart?.id,
+                        repository = repository,
+                        workspaceDirectory = workspaceDirectory,
+                        onFileClick = onFileClick,
+                        onOpenSubAgent = onOpenSubAgent,
+                        expandedParts = expandedParts,
+                        onToggleExpand = onToggleExpand,
+                        staleQuestionPartKeys = staleQuestionPartKeys
+                    )
+                }
             }
         }
         if (gapInsertIndex > 0) {
@@ -576,19 +593,25 @@ internal fun ChatMessageList(
                     modifier = Modifier.fillMaxWidth()
                 )
             } else {
-                MessageRow(
-                    message = message,
-                    parts = partsByMessage[message.id].orEmpty(),
-                    streamingPartTexts = streamingPartTexts,
-                    streamingReasoningPartId = streamingReasoningPart?.id,
-                    repository = repository,
-                    workspaceDirectory = workspaceDirectory,
-                    onFileClick = onFileClick,
-                    onOpenSubAgent = onOpenSubAgent,
-                    expandedParts = expandedParts,
-                    onToggleExpand = onToggleExpand,
-                    staleQuestionPartKeys = staleQuestionPartKeys
-                )
+                val msgParts = partsByMessage[message.id].orEmpty()
+                val isInFlightEmpty = !message.isUser && msgParts.isEmpty() && sessionIsRunning
+                if (isInFlightEmpty) {
+                    InFlightEmptyLoading()
+                } else {
+                    MessageRow(
+                        message = message,
+                        parts = msgParts,
+                        streamingPartTexts = streamingPartTexts,
+                        streamingReasoningPartId = streamingReasoningPart?.id,
+                        repository = repository,
+                        workspaceDirectory = workspaceDirectory,
+                        onFileClick = onFileClick,
+                        onOpenSubAgent = onOpenSubAgent,
+                        expandedParts = expandedParts,
+                        onToggleExpand = onToggleExpand,
+                        staleQuestionPartKeys = staleQuestionPartKeys
+                    )
+                }
             }
         }
         if (messages.isNotEmpty() && hasMoreMessages) {
@@ -664,6 +687,39 @@ internal fun ChatMessageList(
             modifier = Modifier
                 .align(Alignment.BottomEnd)
                 .padding(end = 16.dp, bottom = 16.dp),
+        )
+    }
+}
+
+/**
+ * §empty-msg: lightweight inline loading row rendered for an assistant message
+ * shell that has arrived (message.updated) but whose first part has not —
+ * `partsByMessage[id]` is empty and the session is still busy. Replaces the
+ * bare timestamp bubble the prior logic rendered (which looked like an empty
+ * reply). NOT rendered for completed messages whose parts are all blank —
+ * those are filtered out of [ChatMessageList]'s `reversedMessages` entirely
+ * by [isEffectivelyRenderableEmpty]. Padding mirrors MessageRow's
+ * horizontal=16dp / vertical=4dp so the loading row paces with surrounding
+ * turns; "生成中…" uses labelSmall + onSurfaceVariant for a quiet affordance.
+ */
+@Composable
+private fun InFlightEmptyLoading(modifier: Modifier = Modifier) {
+    Row(
+        modifier = modifier
+            .fillMaxWidth()
+            .padding(horizontal = 16.dp, vertical = 4.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        CircularProgressIndicator(
+            modifier = Modifier.size(14.dp),
+            strokeWidth = 2.dp,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+        Spacer(modifier = Modifier.width(8.dp))
+        Text(
+            text = "生成中…",
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
         )
     }
 }

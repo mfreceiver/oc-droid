@@ -104,6 +104,45 @@ fun isRenderableEmptyMessage(
     isStreaming: Boolean
 ): Boolean = !isUser && partsForMessage.isEmpty() && !isStreaming
 
+/**
+ * True when every part in [partsForMessage] carries no renderable content.
+ *
+ * Covers the persistent empty-message case that [isRenderableEmptyMessage]
+ * misses: after a session goes idle and the REST reload replaces the streaming
+ * overlay (which had carried the live text), the assistant message is left
+ * with server-side parts that are all blank — a placeholder text Part with
+ * `text=null`, a tool Part whose state never resolved, etc. Such a message
+ * has non-empty `parts` (so [isRenderableEmptyMessage] returns false) yet
+ * renders as a blank padded bubble. This helper inspects each part's content:
+ *
+ *   - text / reasoning → blank [Part.text]
+ *   - tool             → blank tool name AND output AND inputSummary
+ *   - patch            → no navigable file paths AND blank output
+ *   - file             → blank filename
+ *   - any other type   → treated as empty (defensive)
+ *
+ * An empty list is trivially effectively-empty. Pure (no Compose / state
+ * dependency) so it is unit-testable in isolation. The streaming in-flight
+ * case (parts empty + session busy) is NOT routed through this helper —
+ * ChatMessageList renders an inline "生成中…" placeholder for it instead of
+ * filtering, so the user sees ongoing activity rather than a disappeared row.
+ */
+fun isEffectivelyRenderableEmpty(partsForMessage: List<Part>): Boolean {
+    if (partsForMessage.isEmpty()) return true
+    return partsForMessage.all { part ->
+        when {
+            part.isText || part.isReasoning -> part.text.isNullOrBlank()
+            part.isTool -> part.tool.isNullOrBlank() &&
+                part.toolOutput.isNullOrBlank() &&
+                part.toolInputSummary.isNullOrBlank()
+            part.isPatch -> part.filePathsForNavigationFiltered.isEmpty() &&
+                part.toolOutput.isNullOrBlank()
+            part.isFile -> part.filename.isNullOrBlank()
+            else -> true
+        }
+    }
+}
+
 @Serializable
 data class MessageWithParts(
     val info: Message,
