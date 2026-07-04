@@ -116,7 +116,8 @@ versionName = "0.2.4"     // 当前版本
 3. bump 版本号：`scripts/bump-version.sh`。
 4. `./gradlew assembleRelease` 产出签名 APK。
 5. 产物归档到 `APK/oc-droid-<versionName>.apk`。
-6. `commit` + 打 tag `v<versionName>`。
+6. **生成 changelog**：从上个 tag 到 HEAD 的 conventional commits 按 `feat/fix/docs/test/...` 分组，写入 `APK/oc-droid-<versionName>.md`。
+7. `commit` + 打 tag `v<versionName>`（tag 注释用该 changelog）。
 
 ```bash
 ./scripts/release.sh patch       # patch | minor | major
@@ -145,17 +146,17 @@ cp app/build/outputs/apk/release/app-release.apk "APK/oc-droid-$VERSION.apk"
 
 ### 6.3 发版到自建 Gitea（用 tea CLI）
 
-本机已装 `tea` CLI（`/home/mar/tools/tea/tea`）：
+本机已装 `tea` CLI（`/home/mar/tools/tea/tea`）。`release.sh` 已自动生成 changelog 文件 `APK/oc-droid-$VERSION.md`，发布时用 `-f`（note-file）传入：
 
 ```bash
 TAG="v$VERSION"   # 如 v0.2.3
-git tag -a "$TAG" -m "Release $VERSION"
+git tag -a "$TAG" -F "APK/oc-droid-$VERSION.md"   # tag 注释也用 changelog
 git push origin "$TAG"
 
 /home/mar/tools/tea/tea releases create -r mfreceiver/oc-droid \
   --tag "$TAG" \
   -t "$TAG" \
-  -n "Release $TAG" \
+  -f "APK/oc-droid-$VERSION.md" \
   -a "APK/oc-droid-$VERSION.apk"
 ```
 

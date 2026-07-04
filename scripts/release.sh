@@ -10,8 +10,9 @@
 #   3. bump 版本号（调用 bump-version.sh）
 #   4. assembleRelease（自动读 local.properties 签名配置）
 #   5. 产物归档到 APK/oc-droid-<versionName>.apk
-#   6. commit + tag
-#   7. 打印 push / tea 命令（不自动执行——对外发布需人工确认）
+#   6. 生成 changelog（从上个 tag..HEAD 的 conventional commits 分组）→ APK/oc-droid-<versionName>.md
+#   7. commit + tag（tag 注释与 Gitea release note 都用该 changelog）
+#   8. 打印 push / tea 命令（不自动执行——对外发布需人工确认）
 #
 # 发版前评审 gate（结构化评审产物）见 .opencode/policies/review-gate.md。
 # 本脚本不强制阻断于评审产物，是否强制评审由用户在发版前自行把控。
@@ -58,7 +59,49 @@ APK_DST="APK/oc-droid-$VERSION.apk"
 cp "$APK_SRC" "$APK_DST"
 echo "✅ 产物: $APK_DST"
 
-# --- 6. commit + tag ---
+# --- 6. 生成 changelog（从上个 tag..HEAD 的 conventional commits 分组）---
+NOTE_FILE="APK/oc-droid-$VERSION.md"
+PREV_TAG=$(git describe --tags --abbrev=0 2>/dev/null || true)
+CL_RANGE=""
+[[ -n "$PREV_TAG" ]] && CL_RANGE="$PREV_TAG..HEAD"
+
+FEATS=""; FIXES=""; DOCS=""; TESTS=""; REFACTORS=""; PERFS=""; MISC=""
+cc_re='^([a-zA-Z]+)(\([^)]*\))?!?:[[:space:]](.+)$'
+while IFS= read -r subject; do
+  [[ -z "$subject" ]] && continue
+  case "$subject" in release:*) continue ;; esac
+  if [[ "$subject" =~ $cc_re ]]; then
+    ctype="${BASH_REMATCH[1]}"; cdesc="${BASH_REMATCH[3]}"
+  else
+    ctype="other"; cdesc="$subject"
+  fi
+  case "$ctype" in
+    feat)       FEATS+="- $cdesc"$'\n' ;;
+    fix)        FIXES+="- $cdesc"$'\n' ;;
+    docs)       DOCS+="- $cdesc"$'\n' ;;
+    test|tests) TESTS+="- $cdesc"$'\n' ;;
+    refactor)   REFACTORS+="- $cdesc"$'\n' ;;
+    perf)       PERFS+="- $cdesc"$'\n' ;;
+    chore|ci|build|style|revert) MISC+="- $cdesc"$'\n' ;;
+    release)    ;;
+    *)          MISC+="- $cdesc"$'\n' ;;
+  esac
+done < <(git log --no-merges ${CL_RANGE:+$CL_RANGE} --pretty=tformat:"%s")
+
+cl_emit() { [[ -z "$2" ]] && return 0; printf '### %s\n\n%s\n' "$1" "$2"; }
+{
+  printf 'Release v%s\n\n' "$VERSION"
+  cl_emit "Features"      "$FEATS"
+  cl_emit "Bug Fixes"     "$FIXES"
+  cl_emit "Documentation" "$DOCS"
+  cl_emit "Tests"         "$TESTS"
+  cl_emit "Refactor"      "$REFACTORS"
+  cl_emit "Performance"   "$PERFS"
+  cl_emit "Miscellaneous" "$MISC"
+} > "$NOTE_FILE"
+echo "✅ Changelog: $NOTE_FILE（自 ${PREV_TAG:-<root>} 以来）"
+
+# --- 7. commit + tag ---
 git add app/build.gradle.kts
 git commit -m "release: $VERSION
 
@@ -66,9 +109,9 @@ versionName: $VERSION
 versionCode: $(awk -F'= ' '/versionCode *= */{print $2; exit}' app/build.gradle.kts | tr -d ' ')"
 
 TAG="v$VERSION"
-git tag -a "$TAG" -m "Release $VERSION"
+git tag -a "$TAG" -F "$NOTE_FILE"
 
-# --- 7. 对外发布命令（人工执行） ---
+# --- 8. 对外发布命令（人工执行） ---
 echo ""
 echo "════════════════════════════════════════════════════════════"
 echo "✅ 发版准备完成: $VERSION (tag $TAG)"
@@ -76,6 +119,6 @@ echo ""
 echo "确认无误后执行（push + Gitea Release）:"
 echo "  git push origin main && git push origin $TAG"
 echo "  /home/mar/tools/tea/tea releases create -r mfreceiver/oc-droid \\"
-echo "    --tag $TAG -t $TAG -n \"Release $TAG\" \\"
+echo "    --tag $TAG -t $TAG -f \"$NOTE_FILE\" \\"
 echo "    -a \"$APK_DST\""
 echo "════════════════════════════════════════════════════════════"
