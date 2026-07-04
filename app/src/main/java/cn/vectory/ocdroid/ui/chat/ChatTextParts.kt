@@ -1,6 +1,5 @@
 package cn.vectory.ocdroid.ui.chat
 
-import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Box
@@ -27,6 +26,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.RectangleShape
 import androidx.compose.ui.layout.Layout
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.TextStyle
@@ -430,7 +430,7 @@ private fun MarkdownComponentModel.codeFenceLanguage(): String {
  * Trade-off (per spec): we lose syntax highlighting (dev.snipme highlights) in
  * exchange for full content visibility — long code lines soft-wrap onto the
  * next line instead of being clipped or pushed off-screen. The muted layer02
- * background + borderBase outline matches the Quiet Tech card styling used by
+ * background + rectangular tonal surface matches the Quiet Tech card styling used by
  * the other tool cards. Content stays selectable.
  *
  * Mix-approach investigation (#9 step 1): mikepenz's highlighted renderers
@@ -455,7 +455,7 @@ internal fun WrappedCodeBlock(model: MarkdownComponentModel) {
 /**
  * The reusable code-block renderer shared by [WrappedCodeBlock] (completed
  * markdown) and the streaming code segments (see [splitCodeAndProse]). A
- * muted layer02 surface + borderBase outline, monospace Text with softWrap so
+ * muted layer02 surface + rectangular tonal surface, monospace Text with softWrap so
  * long lines wrap instead of horizontally scrolling/clipping, and an optional
  * language badge in the top-right corner. Content stays selectable. See
  * [WrappedCodeBlock] for the syntax-highlighting trade-off rationale (#9).
@@ -464,9 +464,8 @@ internal fun WrappedCodeBlock(model: MarkdownComponentModel) {
 internal fun CodeBlockSurface(code: String, language: String) {
     Surface(
         modifier = Modifier.fillMaxWidth(),
-        shape = MaterialTheme.shapes.small,
-        color = MaterialTheme.colorScheme.surfaceContainerLow,
-        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline)
+        shape = RectangleShape,
+        color = MaterialTheme.colorScheme.surfaceContainerLow
     ) {
         Box(modifier = Modifier.fillMaxWidth()) {
             SelectionContainer {
@@ -554,7 +553,7 @@ internal fun WrappedTable(model: MarkdownComponentModel) {
     BoxWithConstraints(
         modifier = Modifier
             .fillMaxWidth()
-            .background(MaterialTheme.colorScheme.surfaceContainerLow, MaterialTheme.shapes.small)
+            .background(MaterialTheme.colorScheme.surfaceContainerLow)
     ) {
         // Horizontal-scroll only when the capped columns genuinely overflow the
         // available width; otherwise let the table sit at its (capped) natural

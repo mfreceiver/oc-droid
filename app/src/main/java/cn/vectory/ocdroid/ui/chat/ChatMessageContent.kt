@@ -303,14 +303,19 @@ internal fun ChatMessageList(
     // scrollToItem(0) → canScrollBackward=false → (if we set true here) →
     // followBottom=true → next tick auto-scrolls → repeat. The true→false
     // transition is safe (only happens on real user scroll-away). The
-    // false→true transition is handled by the direction detector (user
-    // scrolls to index 0) or the jump-to-bottom FAB tap.
+    // false→true transition is handled by: direction detector (index
+    // reaches 0 via cross-item scroll), jump-to-bottom FAB tap, or session-
+    // enter (fresh session). Within-item-0 scroll-back-to-bottom does NOT
+    // re-enable followBottom (user taps FAB instead — matches WhatsApp/
+    // Telegram behavior where scrolling away requires explicit re-follow).
     LaunchedEffect(listState, sessionId) {
         if (sessionId == null) return@LaunchedEffect
         delay(300)
         snapshotFlow { listState.canScrollBackward }
+            .drop(1)
             .collect { canBack ->
                 if (pendingRestoreSession == sessionId) return@collect
+                if (listState.layoutInfo.totalItemsCount == 0) return@collect
                 if (canBack) followBottom = false
             }
     }

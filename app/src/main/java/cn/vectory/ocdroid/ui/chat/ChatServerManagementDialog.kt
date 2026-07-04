@@ -32,6 +32,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.RectangleShape
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -79,7 +80,7 @@ internal fun ServerManagementDialog(
                         if (isSelected) {
                             // Current host: non-clickable display only
                             Surface(
-                                shape = MaterialTheme.shapes.medium,
+                                shape = RectangleShape,
                                 color = MaterialTheme.colorScheme.surfaceContainerLow,
                                 modifier = Modifier.fillMaxWidth()
                             ) {
@@ -119,7 +120,7 @@ internal fun ServerManagementDialog(
                             // Other hosts: tappable to switch
                             Surface(
                                 onClick = { onSelectHost(profile.id) },
-                                shape = MaterialTheme.shapes.medium,
+                                shape = RectangleShape,
                                 color = Color.Transparent,
                                 modifier = Modifier.fillMaxWidth()
                             ) {

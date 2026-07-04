@@ -1,6 +1,5 @@
 package cn.vectory.ocdroid.ui.chat
 
-import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -24,6 +23,7 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
+import androidx.compose.ui.graphics.RectangleShape
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
@@ -109,9 +109,8 @@ internal fun PatchCard(
         modifier = modifier
             .padding(vertical = 2.dp)
             .testTag("toolcard.patch.$basename"),
-        shape = MaterialTheme.shapes.small,
-        color = MaterialTheme.colorScheme.surfaceContainerLow,
-        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline)
+        shape = RectangleShape,
+        color = MaterialTheme.colorScheme.surfaceContainerLow
     ) {
         Column(modifier = Modifier.then(if (isRunning) Modifier else Modifier.animateContentSize(AppMotion.expandSizeSpec))) {
             Row(
@@ -260,9 +259,8 @@ internal fun ContextToolGroup(
 
     Surface(
         modifier = modifier.padding(vertical = 2.dp),
-        shape = MaterialTheme.shapes.small,
-        color = MaterialTheme.colorScheme.surfaceContainerLow,
-        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline)
+        shape = RectangleShape,
+        color = MaterialTheme.colorScheme.surfaceContainerLow
     ) {
         Column(modifier = Modifier.then(if (isRunning) Modifier else Modifier.animateContentSize(AppMotion.expandSizeSpec))) {
             Row(

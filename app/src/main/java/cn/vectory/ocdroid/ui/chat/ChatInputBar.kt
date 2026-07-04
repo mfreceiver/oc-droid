@@ -39,6 +39,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.RectangleShape
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.res.stringResource
@@ -339,7 +340,7 @@ private fun CommandSuggestionsPanel(
         modifier = Modifier
             .fillMaxWidth()
             .padding(bottom = 4.dp),
-        shape = MaterialTheme.shapes.extraLarge,
+        shape = RectangleShape,
         color = MaterialTheme.colorScheme.surfaceVariant,
         tonalElevation = 1.dp
     ) {

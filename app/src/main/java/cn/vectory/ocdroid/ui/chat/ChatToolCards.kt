@@ -1,6 +1,5 @@
 package cn.vectory.ocdroid.ui.chat
 
-import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -40,6 +39,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.RectangleShape
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.res.stringResource
 import cn.vectory.ocdroid.ui.theme.BundledMonoFamily
@@ -148,9 +148,8 @@ internal fun ToolCard(
 
     Surface(
         modifier = modifier.padding(vertical = 2.dp),
-        shape = MaterialTheme.shapes.small,
-        color = MaterialTheme.colorScheme.surfaceContainerLow,
-        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline)
+        shape = RectangleShape,
+        color = MaterialTheme.colorScheme.surfaceContainerLow
     ) {
         CompositionLocalProvider(LocalContentColor provides MaterialTheme.colorScheme.onSurfaceVariant) {
             Column(modifier = Modifier.padding(horizontal = 8.dp, vertical = 8.dp).then(if (isRunning) Modifier else Modifier.animateContentSize(AppMotion.expandSizeSpec))) {
@@ -362,9 +361,8 @@ internal fun BasicTool(
 
     Surface(
         modifier = modifier.padding(vertical = 2.dp),
-        shape = MaterialTheme.shapes.small,
-        color = MaterialTheme.colorScheme.surfaceContainerLow,
-        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline)
+        shape = RectangleShape,
+        color = MaterialTheme.colorScheme.surfaceContainerLow
     ) {
         Column(modifier = Modifier.then(if (isRunning) Modifier else Modifier.animateContentSize(AppMotion.expandSizeSpec))) {
             Row(
@@ -497,9 +495,8 @@ internal fun ErrorCard(
 ) {
     Surface(
         modifier = modifier.padding(vertical = 2.dp),
-        shape = MaterialTheme.shapes.small,
-        color = Color.Transparent,
-        border = BorderStroke(1.dp, MaterialTheme.colorScheme.error)
+        shape = RectangleShape,
+        color = MaterialTheme.colorScheme.errorContainer
     ) {
         Row(
             modifier = Modifier.padding(horizontal = 8.dp, vertical = 8.dp),
@@ -509,14 +506,14 @@ internal fun ErrorCard(
                 Icons.Default.ErrorOutline,
                 contentDescription = null,
                 modifier = Modifier.size(14.dp),
-                tint = MaterialTheme.colorScheme.error
+                tint = MaterialTheme.colorScheme.onErrorContainer
             )
             Spacer(modifier = Modifier.width(6.dp))
             SelectionContainer {
                 Text(
                     text = text,
                     style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    color = MaterialTheme.colorScheme.onErrorContainer,
                     softWrap = true
                 )
             }

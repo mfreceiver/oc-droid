@@ -1,6 +1,5 @@
 package cn.vectory.ocdroid.ui.chat
 
-import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -38,6 +37,7 @@ import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.RectangleShape
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.unit.dp
@@ -77,9 +77,8 @@ internal fun ReasoningCard(
     val isDark = LocalIsDarkTheme.current
     Surface(
         modifier = modifier.padding(vertical = 2.dp),
-        shape = MaterialTheme.shapes.small,
-        color = MaterialTheme.colorScheme.surfaceContainer,
-        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline)
+        shape = RectangleShape,
+        color = MaterialTheme.colorScheme.surfaceContainer
     ) {
         Column(modifier = Modifier.then(if (isStreaming) Modifier else Modifier.animateContentSize(AppMotion.expandSizeSpec))) {
             Row(
@@ -171,7 +170,7 @@ internal fun ReasoningCard(
                 // outer border provides containment. Matches BasicTool's flat style.
                 Surface(
                     modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 2.dp),
-                    shape = MaterialTheme.shapes.small,
+                    shape = RectangleShape,
                     color = Color.Transparent
                 ) {
                     // Cap the body height + scroll so long streaming reasoning

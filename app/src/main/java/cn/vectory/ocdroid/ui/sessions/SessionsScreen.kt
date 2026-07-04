@@ -29,6 +29,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.RectangleShape
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -551,7 +552,7 @@ private fun SessionCard(
     }
 
 
-    ElevatedCard(
+    Surface(
         modifier = Modifier
             .fillMaxWidth()
             .padding(horizontal = 8.dp, vertical = 4.dp)
@@ -559,7 +560,8 @@ private fun SessionCard(
                 onClick = onClick,
                 onLongClick = onLongClick
             ),
-        elevation = CardDefaults.elevatedCardElevation(defaultElevation = 1.dp)
+        shape = RectangleShape,
+        color = MaterialTheme.colorScheme.surfaceContainerLow
     ) {
         // A1: converged the custom title/subtitle Row onto the M3 ListItem.
         // leadingContent = agent icon, headlineContent = title, supportingContent

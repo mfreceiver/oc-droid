@@ -1,6 +1,5 @@
 package cn.vectory.ocdroid.ui.chat
 
-import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Column
@@ -27,6 +26,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
+import androidx.compose.ui.graphics.RectangleShape
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.layout.ContentScale
@@ -150,11 +150,10 @@ internal fun FileCard(
         else -> "Write file $basename"
     }
 
-    // §5.3 v2 file card: layer01 surface at 6dp with borderBase, accentText icon.
+    // §5.3 v2 file card: layer01 surface at rectangular surfaceContainerLowest, accentText icon.
     Surface(
         color = MaterialTheme.colorScheme.surfaceContainerLowest,
-        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline),
-        shape = MaterialTheme.shapes.small,
+        shape = RectangleShape,
         modifier = modifier
             .padding(vertical = 4.dp)
             .testTag(tag)
