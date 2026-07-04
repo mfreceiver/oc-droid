@@ -373,6 +373,9 @@ internal fun ChatMessageList(
         }
         // §navfab-redesign: 会话切换隐藏"跳到最新"按钮（新会话从默认跟底状态开始）。
         navFabVisible = false
+        // §navfab-guard (gpter 🟡): 防御性重置程序化滚动守卫——兜底任何未预见的
+        // onJumpDone 未配对路径，避免 navJumping 卡 true 让方向检测器跨会话失效。
+        navJumping = false
     }
 
     LaunchedEffect(contentVersion) {
@@ -448,8 +451,7 @@ internal fun ChatMessageList(
     // page, and matches the product decision that most users rarely need deep
     // history. Messages are not persisted — re-fetched fresh on each open.
 
-    // §Phase8-nav: 消息结构计算提到 LazyColumn body 之外，供消息导航 FAB 将
-    // messageId 映射到 LazyColumn item index（reverseLayout 下 index 0 = 最新）。
+    // 消息结构计算提到 LazyColumn body 之外（gap 分割需要 beforeGap/afterGap）。
     //
     // remember 覆盖 messages/partsByMessage/streamingReasoningPart/sessionIsRunning
     // 不变的情况；但 streamingPartTexts 在 SSE 流式时每 ~100ms 变化（SessionSync
