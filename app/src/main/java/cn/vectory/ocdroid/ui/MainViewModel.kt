@@ -1322,6 +1322,12 @@ class MainViewModel @Inject constructor(
                 streamingReasoningPart = null
             )
         }
+        // §fix-draft-model-leak: 清掉上一会话遗留的 currentModel。否则从会话 A
+        // （currentModel=由 A 的 assistant 推断）进入草稿、不切模型直接发时，草稿
+        // 物化路径会把 A 的推断模型持久化到新会话 B（glmer 评审非阻塞项）。清空后，
+        // 草稿态 currentModel=null：选择器显示默认、首条发送 model=null 走服务端默认、
+        // 物化时 currentModel?.let 不持久化、loadMessages 从首条 assistant 正常推断。
+        writeChat { it.copy(currentModel = null) }
         // §R-17 M3 (RFC §4 strategy A): composer slice — enter draft mode
         // (draftWorkdir=workdir) and reset input/attachments. Intermediate state
         // legal (chat fields cleared above; composer flipped below).

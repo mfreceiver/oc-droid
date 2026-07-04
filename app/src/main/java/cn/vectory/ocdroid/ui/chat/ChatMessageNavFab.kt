@@ -90,19 +90,10 @@ internal fun ChatMessageNavFab(
                             // §issue-2: reverseLayout 下 scrollToItem 把 target 放到
                             // 视觉底部（scroll start）。追加 animateScrollBy（负向 = 向更新方向）把它推到
                             // 视觉顶部，方便用户向下（更新方向）阅读后续回复。
-                            listState.animateScrollToItem(target)
-                            // §fix-nav-bounce: 钳制"推向视觉顶部"的滚动量，避免对近底部
-                            // 目标过冲到 index 0（最新消息）从而丢失刚跳转到的用户消息——
-                            // 即"跳转后回弹到底部"bug。上限取 (target-1)*itemSize：保证
-                            // 跳完后 firstVisibleItemIndex >= target-1，target 始终可见，
-                            // 绝不越过 target 到达 index 0。
-                            val push = cappedNavPush(listState, target)
-                            if (push > 0f) listState.animateScrollBy(-push)
+                            jumpToListState(listState, target)
                         } else {
                             val topIdx = (listState.layoutInfo.totalItemsCount - 1).coerceAtLeast(0)
-                            listState.animateScrollToItem(topIdx)
-                            val push = cappedNavPush(listState, topIdx)
-                            if (push > 0f) listState.animateScrollBy(-push)
+                            jumpToListState(listState, topIdx)
                         }
                     }
                 },
@@ -127,10 +118,8 @@ internal fun ChatMessageNavFab(
                     if (target == null) onNavigateBottom()
                     scope.launch {
                         if (target != null) {
-                            listState.animateScrollToItem(target)
-                            // §fix-nav-bounce: 同 up 分支，钳制负向滚动避免过冲到 index 0。
-                            val push = cappedNavPush(listState, target)
-                            if (push > 0f) listState.animateScrollBy(-push)
+                            // §fix-nav-bounce: 同 up 分支，钳制负向滚动 + 滚后可见性硬保证。
+                            jumpToListState(listState, target)
                         } else {
                             // Q8: 已在最新用户消息，继续按下 → 跳到列表最底（最新消息）。
                             listState.animateScrollToItem(0)
@@ -149,19 +138,44 @@ internal fun ChatMessageNavFab(
 }
 
 /**
- * §fix-nav-bounce: 跳转到 [target] 后"推向视觉顶部"的安全滚动量（px）。
+ * §fix-nav-bounce: 跳转到 [target] 并把它推向视觉顶部，带回弹防护 + 可见性硬保证。
+ *
+ * 步骤：
+ *  1. [animateScrollToItem] 把 target 放到视觉底部（reverseLayout scroll start）。
+ *  2. [cappedNavPush] 计算推向视觉顶部的安全滚动量，负向 [animateScrollBy] 执行——
+ *     把 target 推高，方便用户向下（更新方向）阅读后续回复。
+ *  3. §hard-guarantee 变高 item 下 cappedNavPush 的尺寸上限是近似（itemSize 取首项
+ *     代理），极端变高列表仍可能把 target 推出视口或越过 index 0。此处做硬保证：
+ *     若跳完后 target 不在可见窗口，回滚到 target（保证目标可见，宁可少推）。
+ */
+private suspend fun jumpToListState(
+    listState: androidx.compose.foundation.lazy.LazyListState,
+    target: Int,
+) {
+    listState.animateScrollToItem(target)
+    val push = cappedNavPush(listState, target)
+    if (push > 0f) listState.animateScrollBy(-push)
+    if (listState.layoutInfo.visibleItemsInfo.none { it.index == target }) {
+        listState.scrollToItem(target)
+    }
+}
+
+/**
+ * §fix-nav-bounce: 跳转到 [target] 后"推向视觉顶部"的安全滚动量（px）。纯同步读，
+ * 非 suspend。
  *
  * 原实现固定 `-0.8 * viewportHeight`，对靠近底部的目标会越过 index 0 被
  * LazyListState 钳到最新消息，丢失刚跳转到的用户消息（"跳转后回弹"bug）。
  *
  * 这里把推量钳为 `min(0.8 * vh, (target - 1) * itemSize)`：
  *  - 远离底部的目标（target 大）：0.8vh 通常更小，行为不变，仍推到视觉顶部附近。
- *  - 靠近底部的目标（target 小）：被 (target-1)*itemSize 限制，保证跳完后
- *    firstVisibleItemIndex >= target-1，target 始终在视口内，绝不回弹到 index 0。
+ *  - 靠近底部的目标（target 小）：被 (target-1)*itemSize 限制；等高 item 下跳完
+ *    落在 index ≥ 1（不回弹到 0）。
  *
- * itemSize 取 visibleItemsInfo 的首项尺寸（行高基本一致）；拿不到时返回 0（不推）。
+ * itemSize 取 visibleItemsInfo 的首项尺寸作为代理；变高 item 下该上限是近似（偏
+ * 保守），最终可见性由 [jumpToListState] 的硬保证兜底。拿不到尺寸时返回 0（不推）。
  */
-private suspend fun cappedNavPush(
+private fun cappedNavPush(
     listState: androidx.compose.foundation.lazy.LazyListState,
     target: Int,
 ): Float {

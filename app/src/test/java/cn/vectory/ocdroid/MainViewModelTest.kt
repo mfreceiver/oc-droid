@@ -457,6 +457,28 @@ class MainViewModelTest {
     }
 
     @Test
+    fun `createSessionInWorkdir clears currentModel to prevent cross-session leak`() = runTest {
+        val viewModel = createViewModel()
+        // Simulate coming from a session whose inferred model lingered in ChatState.
+        viewModel.switchSessionModel("zhipuai-coding-plan", "glm-5.2")
+        assertEquals(
+            Message.ModelInfo("zhipuai-coding-plan", "glm-5.2"),
+            viewModel.chatFlow.value.currentModel
+        )
+
+        // Enter draft mode for a new project.
+        viewModel.createSessionInWorkdir("/tmp/other-project")
+        advanceUntilIdle()
+
+        // §fix-draft-model-leak: currentModel MUST be cleared so the prior session's
+        // model is neither shown in the draft picker nor persisted on materialisation
+        // when the user sends without explicitly switching.
+        assertNull(viewModel.chatFlow.value.currentModel)
+        // No session exists → nothing persisted.
+        verify(exactly = 0) { settingsManager.setModelForSession(any(), any(), any()) }
+    }
+
+    @Test
     fun `sendMessage attaches per-session stored model to prompt`() = runTest {
         coEvery { repository.sendMessage(any(), any(), any(), any(), any()) } returns Result.success(Unit)
         coEvery { repository.getSessions(100) } returns Result.success(
