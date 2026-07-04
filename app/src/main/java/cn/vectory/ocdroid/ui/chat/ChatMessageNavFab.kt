@@ -163,19 +163,24 @@ internal fun ChatMessageNavFab(
 
 /**
  * §fix-nav-center: 跳转到 [target] 并尽量把它居中到视口中部；列表两端空间不足时
- * 自动降级为"尽量靠中"（LazyListState 钳制 animateScrollBy 到可滚动范围），等价
- * 于用户要求的"空间不足→保持原位不调整"。
+ * 自动降级为"尽量靠中"（LazyListState 钳制到可滚动范围），等价于用户要求的
+ * "空间不足→保持原位不调整"。
+ *
+ * §fix-nav-onestep（核心）：用 `animateScrollToItem(target, desiredOffset)` **单段**
+ * 动画直接滚到居中位置，避免旧实现 `animateScrollToItem(target) + animateScrollBy`
+ * 两段动画被用户看到"先滑到底部再跳到中间"。
  *
  * 步骤：
- *  1. 若 [target] 已在可见窗口内 → 跳过 animateScrollToItem，只做居中微调
- *     （单段平滑动画）。避免短列表下的弹簧动画抖动（"画面闪动"症状）。
- *  2. 若 [target] 不在可见窗口 → [animateScrollToItem] 把 target 平滑带到
- *     scroll-start（reverseLayout 下 = 视觉底部）。
- *  3. [centerTarget] 计算居中所需的滚动量并单段 [animateScrollBy] 执行。reverseLayout
- *     下 offset 与 scrollBy 的关系为 `scrollBy = newOffset - oldOffset`（轴向翻转），
- *     故 shift = desiredOffset - currentOffset 直接传入即可。
- *  4. §hard-guarantee 变高 item 下居中量是近似，极端情况可能把 target 推出视口；
- *     此处做硬保证：若 target 跳完后不可见，瞬时 scrollToItem(target) 回到 scroll-start。
+ *  1. 若 [target] 已可见 → 直接 centerTarget（单段 animateScrollBy 居中微调）。
+ *  2. 若 [target] 不可见 → 用可见 item 的尺寸估算 itemSize，算 desiredOffset =
+ *     (vh - itemSize)/2，调 animateScrollToItem(target, desiredOffset) 一段直达。
+ *     - scrollOffset 语义：item 滚动后在其滚动起点（reverseLayout = 视觉底部）之上
+ *       的偏移 = visibleItemsInfo.offset，故传入 desiredOffset 即让 target 落在
+ *       desiredOffset 处 ≈ 居中。
+ *  3. 变高 item 下 itemSize 是估算（取首个可见 item），落点可能略偏；animateScrollToItem
+ *     落定后用实测尺寸做一次小幅 centerTarget 精修（等高 item 下 delta≈0 被 <1f
+ *     守卫跳过，无第二段可见动画）。
+ *  4. §hard-guarantee：极端情况 target 不可见 → scrollToItem(target) 兜底。
  */
 private suspend fun jumpToCenteredListState(
     listState: androidx.compose.foundation.lazy.LazyListState,
@@ -184,15 +189,26 @@ private suspend fun jumpToCenteredListState(
     val vh = listState.layoutInfo.viewportSize.height.toFloat()
     if (vh <= 0f) return
     val visible = listState.layoutInfo.visibleItemsInfo.firstOrNull { it.index == target }
-    if (visible == null) {
-        // target 不在可见窗口 → 先平滑带到 scroll-start，再居中。
-        listState.animateScrollToItem(target)
-        val info = listState.layoutInfo.visibleItemsInfo.firstOrNull { it.index == target }
-            ?: return
-        centerTarget(listState, target, info.offset.toFloat(), info.size.toFloat(), vh)
-    } else {
-        // target 已可见 → 直接居中微调（不触发 scrollToItem 的弹簧动画）。
+    if (visible != null) {
+        // target 已可见 → 直接居中微调（单段 animateScrollBy，不触发 scrollToItem）。
         centerTarget(listState, target, visible.offset.toFloat(), visible.size.toFloat(), vh)
+        return
+    }
+    // target 不可见 → 单段 animateScrollToItem 直达居中位置。
+    val estimate = listState.layoutInfo.visibleItemsInfo.firstOrNull()?.size?.toFloat()
+    if (estimate == null || estimate <= 0f || estimate >= vh) {
+        // 拿不到尺寸或比视口还高 → 只能带到 scroll-start。
+        listState.animateScrollToItem(target)
+        return
+    }
+    val desiredOffset = ((vh - estimate) / 2f).toInt().coerceAtLeast(0)
+    listState.animateScrollToItem(target, desiredOffset)
+    // 精修：用 target 落定后的实测尺寸校正居中（等高 item 下无操作）。
+    val info = listState.layoutInfo.visibleItemsInfo.firstOrNull { it.index == target }
+    if (info == null) {
+        listState.scrollToItem(target)
+    } else {
+        centerTarget(listState, target, info.offset.toFloat(), info.size.toFloat(), vh)
     }
 }
 
