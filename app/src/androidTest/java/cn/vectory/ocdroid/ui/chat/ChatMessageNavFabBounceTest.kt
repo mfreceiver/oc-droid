@@ -370,4 +370,98 @@ class ChatMessageNavFabBounceTest {
             )
         }
     }
+
+    /**
+     * §fix-nav-onestep (gpter 🔴-1 / glmer O-1): variable-height items must center the
+     * off-screen jump target in ONE step via the instant scrollToItem correction (not a
+     * second animateScrollBy refine that would replay the two-step bug).
+     *
+     * Scenario: items alternate tall (300dp, simulating long assistant replies) and short
+     * (80dp, user messages). User rows at indices 1, 5, 9. From the bottom, UP jumps to a
+     * tall-or-mixed region. After the jump the target must be (a) visible, (b) centered per
+     * its ACTUAL measured size (offset ≈ (vh - actualSize)/2), proving the instant
+     * scrollToItem(target, realDesired) correction ran — not left at the estimate-based offset.
+     *
+     * This also guards the regression where someone reintroduces centerTarget(animateScrollBy)
+     * in the off-screen branch: with variable heights the estimate-based offset would differ
+     * from the actual-centered offset, and this assertion would catch the un-refined landing.
+     */
+    @Test
+    fun navFabUpJump_variableHeightItems_centersByActualSize() {
+        val userIndices = setOf(1, 5, 9)
+        val tag = "chatList"
+        lateinit var listState: androidx.compose.foundation.lazy.LazyListState
+
+        composeRule.setContent {
+            val ls = rememberLazyListState()
+            listState = ls
+            Surface(modifier = Modifier.fillMaxSize()) {
+                Box(Modifier.fillMaxSize()) {
+                    LazyColumn(
+                        state = ls,
+                        reverseLayout = true,
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .requiredHeight(500.dp)
+                            .testTag(tag)
+                    ) {
+                        items(15) { idx ->
+                            val isUser = idx in userIndices
+                            // Variable heights: user messages short (80dp), others tall (300dp).
+                            Box(
+                                Modifier
+                                    .fillMaxSize()
+                                    .height(if (isUser) 80.dp else 300.dp)
+                                    .background(if (isUser) Color(0xFFE3F2FD) else Color.White),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Text("${if (isUser) "USER " else ""}item $idx")
+                            }
+                        }
+                    }
+                    ChatMessageNavFab(
+                        listState = ls,
+                        userMessageLcIndices = intArrayOf(1, 5, 9),
+                        visible = true,
+                        onInteract = { },
+                        onNavigateUp = { },
+                        onNavigateBottom = { },
+                        onJumpStart = { },
+                        onJumpEnd = { },
+                        modifier = Modifier.align(Alignment.BottomEnd),
+                    )
+                }
+            }
+        }
+
+        composeRule.waitForIdle()
+
+        // Start at bottom.
+        val startIdx = composeRule.runOnIdle { listState.firstVisibleItemIndex }
+        assertTrue("expected start at bottom, got $startIdx", startIdx == 0)
+
+        // UP → jump to the next older user message (skips index 1 which is visible at bottom).
+        composeRule.onNodeWithContentDescription("Previous user message").performClick()
+        composeRule.waitForIdle()
+
+        // The jumped-to target must be visible and centered per its ACTUAL size (80dp user msg),
+        // not left at an estimate-based offset (which assumed ~300dp from the surrounding tall items).
+        val landed = composeRule.runOnIdle {
+            val vh = listState.layoutInfo.viewportSize.height.toFloat()
+            val info = listState.layoutInfo.visibleItemsInfo.firstOrNull { it.index in userIndices }
+            Triple(vh, info?.offset?.toFloat(), info?.size?.toFloat())
+        }
+        val (vh, off, size) = landed
+        assertTrue("no user message visible after variable-height UP jump", off != null && size != null)
+        if (vh > 0f && off != null && size != null) {
+            val desired = (vh - size) / 2f
+            // Tolerance: within the item's own height (80dp user msg). The instant scrollToItem
+            // correction should land very close to exact center; a large deviation means the
+            // correction was skipped (target left at estimate-based offset = un-refined).
+            assertTrue(
+                "variable-height UP jump target not centered by actual size — offset=$off desired=$desired size=$size vh=$vh (instant-correction regression)",
+                kotlin.math.abs(off - desired) <= size
+            )
+        }
+    }
 }

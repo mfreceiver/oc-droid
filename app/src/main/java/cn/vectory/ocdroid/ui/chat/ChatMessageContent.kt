@@ -404,6 +404,11 @@ internal fun ChatMessageList(
         }
         // §fix-nav-pin: 会话切换重置历史导航锁存——新会话从默认跟底状态开始。
         navPinnedAway = false
+        // §fix-nav-leak (glmer S-1): 会话切换兜底清零跳转计数——防御任何未预见的
+        // onJumpStart/onJumpEnd 未配对路径（如 scope 在协程体调度前被取消），避免
+        // navJumpDepth 卡 >0 导致三个观察者跨会话永久失效。onJumpStart 已移入 launch
+        // try 块（结构性防泄漏），此处为 belt-and-suspenders 兜底。
+        navJumpDepth = 0
     }
 
     LaunchedEffect(contentVersion) {

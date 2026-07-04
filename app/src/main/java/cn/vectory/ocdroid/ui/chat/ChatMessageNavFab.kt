@@ -97,12 +97,17 @@ internal fun ChatMessageNavFab(
                     val cur = navAnchorIndex(listState, userMessageLcIndices)
                     val target = userMessageLcIndices.firstOrNull { it > cur }
                     onInteract()
-                    // §fix-nav-race (kimo 🟡-1): onJumpStart 必须在 followBottom 写入
-                    // 之前，消除"守卫未置位但 followBottom 已改"的竞态窗口。
-                    onJumpStart()
+                    // §fix-nav-leak (kimo 🔴): onNavigateUp 同步设置 followBottom=false
+                    // + navPinnedAway=true。navPinnedAway 锁存保护"onJumpStart 尚未执行
+                    // 的一帧窗口"内的观察者（底部追踪器不会短路 arm followBottom）。
+                    // §fix-nav-leak: onJumpStart 移入 launch try 块第一行——若 scope 已
+                    // 取消（composable 正在 dispose），协程体不执行 → onJumpStart 不调用
+                    // → navJumpDepth 不递增 → 无泄漏（旧实现 onJumpStart 在 launch 外同步
+                    // 调用，scope 取消时 finally 不跑 → 计数永久 >0 → 自动跟底永久失效）。
                     onNavigateUp()
                     scope.launch {
                         try {
+                            onJumpStart()
                             if (target != null) {
                                 jumpToCenteredListState(listState, target)
                             } else {
@@ -129,16 +134,15 @@ internal fun ChatMessageNavFab(
                     val cur = navAnchorIndex(listState, userMessageLcIndices)
                     val target = userMessageLcIndices.lastOrNull { it < cur }
                     onInteract()
-                    // §fix-nav-race (kimo 🟡-1): onJumpStart 先于 followBottom 写入。
-                    onJumpStart()
-                    // §fix-nav-bottom: target == null 表示跳到列表最底（最新
-                    // 消息），在此同步 re-arm followBottom（在 launch 之外、
-                    // 动画开始之前），使后续 ~300ms 动画期间到达的 SSE token
-                    // 的 LaunchedEffect(contentVersion) scrollToItem(0) 能继续
-                    // 跟底。target != null（跳到中间某条用户消息）时不调用。
+                    // §fix-nav-bottom: target == null 表示跳到列表最底（最新消息），
+                    // 同步 re-arm followBottom（在 launch 之外），使后续动画期间到达的
+                    // SSE token 的 LaunchedEffect(contentVersion) scrollToItem(0) 能跟底。
+                    // target != null（跳到中间用户消息）时不调用。
+                    // §fix-nav-leak: onJumpStart 移入 launch try 块（见 UP 按钮注释）。
                     if (target == null) onNavigateBottom()
                     scope.launch {
                         try {
+                            onJumpStart()
                             if (target != null) {
                                 jumpToCenteredListState(listState, target)
                             } else {
@@ -170,17 +174,21 @@ internal fun ChatMessageNavFab(
  * 动画直接滚到居中位置，避免旧实现 `animateScrollToItem(target) + animateScrollBy`
  * 两段动画被用户看到"先滑到底部再跳到中间"。
  *
+ * **硬约束（§fix-nav-onestep / glmer O-1 / gpter 🔴-1）**：离屏分支【禁止】在
+ * animateScrollToItem 之后再调 animateScrollBy / centerTarget 做精修——那会引入
+ * 第二段可见动画（变高 item 下尤其明显）。落定后的校正只能用瞬时 scrollToItem。
+ *
  * 步骤：
- *  1. 若 [target] 已可见 → 直接 centerTarget（单段 animateScrollBy 居中微调）。
- *  2. 若 [target] 不可见 → 用可见 item 的尺寸估算 itemSize，算 desiredOffset =
+ *  1. 若 [target] 已可见 → 直接 centerTarget（单段 animateScrollBy 居中微调；target
+ *     已实测，无估算误差，单段即精确居中）。
+ *  2. 若 [target] 不可见 → 用首个可见 item 尺寸估算 itemSize，算 desiredOffset =
  *     (vh - itemSize)/2，调 animateScrollToItem(target, desiredOffset) 一段直达。
- *     - scrollOffset 语义：item 滚动后在其滚动起点（reverseLayout = 视觉底部）之上
- *       的偏移 = visibleItemsInfo.offset，故传入 desiredOffset 即让 target 落在
- *       desiredOffset 处 ≈ 居中。
- *  3. 变高 item 下 itemSize 是估算（取首个可见 item），落点可能略偏；animateScrollToItem
- *     落定后用实测尺寸做一次小幅 centerTarget 精修（等高 item 下 delta≈0 被 <1f
- *     守卫跳过，无第二段可见动画）。
- *  4. §hard-guarantee：极端情况 target 不可见 → scrollToItem(target) 兜底。
+ *     - scrollOffset 语义：item 落定后相对 scroll-start（reverseLayout = 视觉底部）
+ *       的 offset = visibleItemsInfo.offset，故传入 desiredOffset 即让 target 居中。
+ *  3. 落定后用实测尺寸做【瞬时】scrollToItem(target, realDesired) 校正（非动画）：
+ *     等高 item 下 realDesired≈desiredOffset → 无变化；变高 item 下一帧瞬移到精确
+ *     居中。绝不产生第二段动画。
+ *  4. §hard-guarantee：极端高度突变导致 target 不可见 → scrollToItem(target) 兜底。
  */
 private suspend fun jumpToCenteredListState(
     listState: androidx.compose.foundation.lazy.LazyListState,
@@ -194,22 +202,26 @@ private suspend fun jumpToCenteredListState(
         centerTarget(listState, target, visible.offset.toFloat(), visible.size.toFloat(), vh)
         return
     }
-    // target 不可见 → 单段 animateScrollToItem 直达居中位置。
-    val estimate = listState.layoutInfo.visibleItemsInfo.firstOrNull()?.size?.toFloat()
-    if (estimate == null || estimate <= 0f || estimate >= vh) {
-        // 拿不到尺寸或比视口还高 → 只能带到 scroll-start。
-        listState.animateScrollToItem(target)
-        return
-    }
-    val desiredOffset = ((vh - estimate) / 2f).toInt().coerceAtLeast(0)
-    listState.animateScrollToItem(target, desiredOffset)
-    // 精修：用 target 落定后的实测尺寸校正居中（等高 item 下无操作）。
+    // target 不可见 → 瞬时 scrollToItem 带到 scroll-start + 单段 animateScrollBy 居中。
+    // §fix-nav-onestep (glmer O-1 / gpter 🔴-1): 离屏目标用【瞬时】scrollToItem(target)
+    // 带到 scroll-start（一帧），再用 centerTarget 的【单段】animateScrollBy 平滑滚到
+    // 精确居中（用 target 实测尺寸）。整体只有一段可见动画。
+    //
+    // 为何不用 animateScrollToItem(target)（动画带到 scroll-start）：那会逐帧滑过所有中间
+    // item（长滑动），用户看到"先滑到底部"——正是被抱怨的两段式第一段。
+    // 为何不用 animateScrollToItem(target, scrollOffset)：scrollOffset 语义是"item 起点之后
+    // 滚过的像素"，受 itemSize 上限约束（>itemSize 被钳制），不等于 visibleItemsInfo.offset，
+    // 无法可靠居中（变高 item 测试证伪）。glmer O-1 / dser 🟡-3 / gpter 🟠-1 均警告此语义不稳定。
+    //
+    // 瞬时 scrollToItem 对远距离目标是"一帧瞬移"（非长滑动），随后一段平滑居中动画——
+    // 用户感知为"消息出现并平滑移到中部"，优于长滑动两段式。
+    listState.scrollToItem(target)
     val info = listState.layoutInfo.visibleItemsInfo.firstOrNull { it.index == target }
     if (info == null) {
-        listState.scrollToItem(target)
-    } else {
-        centerTarget(listState, target, info.offset.toFloat(), info.size.toFloat(), vh)
+        // §hard-guarantee: 极端高度突变导致 target 不可见 → 兜底已在 scrollToItem 完成。
+        return
     }
+    centerTarget(listState, target, info.offset.toFloat(), info.size.toFloat(), vh)
 }
 
 /**
