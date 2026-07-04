@@ -27,6 +27,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.RectangleShape
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.testTag
@@ -121,7 +122,11 @@ internal fun SubAgentCard(
             .testTag("toolcard.subagent$tagSuffix")
             .then(if (canOpen) Modifier.clickable { onOpenSubAgent(sessionId!!) } else Modifier),
         shape = RectangleShape,
-        color = MaterialTheme.colorScheme.surfaceContainerLow
+        // §issue-2: surfaceContainer (not surfaceContainerLow) so the sub-agent
+        // card reads with the same emphasis as ReasoningCard — M3's
+        // surfaceContainerLow tonal step is too faint to register as a filled
+        // card against the chat background.
+        color = MaterialTheme.colorScheme.surfaceContainer
     ) {
         Column(modifier = Modifier.padding(horizontal = 8.dp, vertical = 8.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
@@ -295,54 +300,126 @@ internal fun parseTaskXml(output: String?): TaskXmlResult? {
 }
 
 /**
- * §issue-4: Non-expandable inline rendering for background subagent task
- * completion blocks (server injects `<task>` XML via ops.prompt as user-role
- * text). Rendered as assistant speech (left-aligned, time-only footer) —
- * B-class style (no background, no card emphasis).
+ * §issue-3: renders background subagent task completion blocks (server injects
+ * `<task>` XML via ops.prompt as user-role text) in the **system tool style**
+ * — visually identical to [BasicTool]: transparent Surface + header row
+ * `[icon] Title · subtitle [chevron]` + expandable markdown body.
  *
- * Shows: icon + "Task completed/failed" header + always-visible task_result
- * body as markdown. No expand/collapse.
+ * Previously this was a B-class no-background inline text row with an
+ * always-visible body. The new layout is collapsible:
+ *  - collapsed: single line `✓/⚠ Task completed/failed · <first line of result>`
+ *  - expanded: header + full task_result body rendered as markdown + centered
+ *    collapse footer (mirrors BasicTool's footer affordance).
+ *
+ * Expand state is externalized via [expandedParts] / [onToggleExpand] (same
+ * mechanism as BasicTool) keyed by [expandedKey], so the chat list owns the
+ * state and survives recomposition.
  */
 @Composable
 internal fun CompletedTaskCard(
     taskResult: TaskXmlResult,
+    expandedParts: Map<String, Boolean>,
+    onToggleExpand: (String, Boolean) -> Unit,
+    expandedKey: String,
     modifier: Modifier = Modifier.fillMaxWidth()
 ) {
     val isError = taskResult.state.equals("error", ignoreCase = true)
-    Column(modifier = modifier.padding(vertical = 2.dp)) {
-        Row(
-            modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Icon(
-                if (isError) Icons.Default.ErrorOutline else Icons.Default.CheckCircle,
-                contentDescription = null,
-                modifier = Modifier.size(14.dp),
-                tint = if (isError) MaterialTheme.colorScheme.error
-                       else MaterialTheme.colorScheme.onSurfaceVariant
-            )
-            Spacer(modifier = Modifier.width(4.dp))
-            Text(
-                text = stringResource(if (isError) R.string.task_failed else R.string.task_completed),
-                style = MaterialTheme.typography.labelSmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                maxLines = 1
-            )
-        }
-        val bodyText = taskResult.taskResult ?: ""
-        if (bodyText.isNotBlank()) {
-            val fontSizes = LocalMarkdownFontSizes.current
-            CompositionLocalProvider(LocalContentColor provides MaterialTheme.colorScheme.onSurfaceVariant) {
-                Markdown(
-                    content = bodyText,
-                    typography = markdownTypography(fontSizes),
-                    components = markdownComponents(
-                        codeBlock = { WrappedCodeBlock(it) },
-                        codeFence = { WrappedCodeBlock(it) },
-                        table = { WrappedTable(it) }
-                    ),
-                    imageTransformer = DataUriImageTransformer
+    val expanded = expandedParts[expandedKey] ?: false
+    val bodyText = taskResult.taskResult ?: ""
+    // subtitle: first non-blank line of the task_result, capped — gives the
+    // collapsed row a useful preview without echoing the whole body. Null when
+    // the result is empty so the row renders title-only (no dangling " · ").
+    val subtitle = remember(bodyText) {
+        bodyText.lineSequence()
+            .firstOrNull { it.isNotBlank() }
+            ?.trim()
+            ?.take(80)
+            ?.takeIf { it.isNotEmpty() }
+    }
+
+    Surface(
+        modifier = modifier.padding(vertical = 2.dp),
+        shape = RectangleShape,
+        color = Color.Transparent
+    ) {
+        Column(modifier = Modifier.animateContentSize(AppMotion.expandSizeSpec)) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 8.dp, vertical = 8.dp)
+                    .clickable { onToggleExpand(expandedKey, expanded) },
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Icon(
+                    if (isError) Icons.Default.ErrorOutline else Icons.Default.CheckCircle,
+                    contentDescription = null,
+                    modifier = Modifier.size(14.dp),
+                    tint = if (isError) MaterialTheme.colorScheme.error
+                           else MaterialTheme.colorScheme.onSurfaceVariant
                 )
+                Spacer(modifier = Modifier.width(6.dp))
+                Text(
+                    text = stringResource(if (isError) R.string.task_failed else R.string.task_completed),
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurface,
+                    maxLines = 1
+                )
+                if (subtitle != null) {
+                    Text(
+                        text = " · ",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Text(
+                        text = subtitle,
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.weight(1f)
+                    )
+                } else {
+                    Spacer(modifier = Modifier.weight(1f))
+                }
+                Icon(
+                    if (expanded) Icons.Default.KeyboardArrowDown else Icons.Default.ChevronRight,
+                    contentDescription = if (expanded) "Collapse" else "Expand",
+                    modifier = Modifier.size(18.dp),
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+
+            if (expanded && bodyText.isNotBlank()) {
+                val fontSizes = LocalMarkdownFontSizes.current
+                Column(modifier = Modifier.padding(start = 8.dp, top = 2.dp, end = 8.dp, bottom = 6.dp)) {
+                    CompositionLocalProvider(LocalContentColor provides MaterialTheme.colorScheme.onSurfaceVariant) {
+                        Markdown(
+                            content = bodyText,
+                            typography = markdownTypography(fontSizes),
+                            components = markdownComponents(
+                                codeBlock = { WrappedCodeBlock(it) },
+                                codeFence = { WrappedCodeBlock(it) },
+                                table = { WrappedTable(it) }
+                            ),
+                            imageTransformer = DataUriImageTransformer
+                        )
+                    }
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable { onToggleExpand(expandedKey, true) }
+                            .padding(top = 4.dp, bottom = 2.dp),
+                        horizontalArrangement = Arrangement.Center,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Icon(
+                            Icons.Default.ExpandLess,
+                            contentDescription = "Collapse",
+                            modifier = Modifier.size(14.dp),
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                }
             }
         }
     }

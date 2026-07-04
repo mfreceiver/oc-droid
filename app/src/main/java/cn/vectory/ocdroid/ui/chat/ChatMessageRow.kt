@@ -298,6 +298,9 @@ internal fun PartView(
             ) {
                 CompletedTaskCard(
                     taskResult = taskXml,
+                    expandedParts = expandedParts,
+                    onToggleExpand = onToggleExpand,
+                    expandedKey = "task|$expandKey",
                     modifier = Modifier.widthIn(max = cardMax)
                 )
             } else if (isUser || !textContent.contains("<task_result>")) {
