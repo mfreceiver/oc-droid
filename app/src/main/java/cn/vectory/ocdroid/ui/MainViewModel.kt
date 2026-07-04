@@ -1426,6 +1426,14 @@ class MainViewModel @Inject constructor(
                         // slice/mirror drift if the slice was touched elsewhere).
                         writeComposer { it.copy(draftWorkdir = null) }
                         settingsManager.currentSessionId = session.id
+                        // §fix-draft-model-switch: 用户可能在草稿态（currentSessionId
+                        // 为 null）就切了模型，此时 switchSessionModel 只能更新 in-memory
+                        // currentModel。草稿物化为真实 session 后，把该选择补持久化到新
+                        // session id，使 dispatchSendMessage 经 getModelForSession 读到它、
+                        // 且后续 loadMessages 不回退到推断。
+                        _chatFlow.value.currentModel?.let { model ->
+                            settingsManager.setModelForSession(session.id, model.providerId, model.modelId)
+                        }
                         // Fix #5: persist the freshly-created session's metadata
                         // into sessionCache so its tab survives restart (mirrors
                         // selectSession). The upsert above already added `session`
@@ -1707,11 +1715,15 @@ class MainViewModel @Inject constructor(
      * official packages/app V1-per-prompt model).
      */
     fun switchSessionModel(providerId: String, modelId: String) {
-        val sessionId = _chatFlow.value.currentSessionId ?: return
-        settingsManager.setModelForSession(sessionId, providerId, modelId)
-        writeChat {
-            it.copy(currentModel = Message.ModelInfo(providerId = providerId, modelId = modelId))
-        }
+        val sessionId = _chatFlow.value.currentSessionId
+        val model = Message.ModelInfo(providerId = providerId, modelId = modelId)
+        // §fix-draft-model-switch: draft 模式下（首条消息发送前 currentSessionId
+        // 仍为 null，但 UI 已显示模型选择器）也要更新 in-memory currentModel——
+        // 这样选择器立即反映新选择，且下一条消息的 dispatchSend() 兜底
+        // (getModelForSession ?: currentModel) 能用到它。仅当真实 session 存在时
+        // 才持久化到 SettingsManager；草稿在 sendMessage 物化时会补持久化。
+        sessionId?.let { settingsManager.setModelForSession(it, providerId, modelId) }
+        writeChat { it.copy(currentModel = model) }
     }
 
     fun toggleSessionExpanded(sessionId: String) {

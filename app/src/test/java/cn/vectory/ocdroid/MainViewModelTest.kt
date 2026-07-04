@@ -384,6 +384,78 @@ class MainViewModelTest {
         )
     }
 
+    // ── §fix-draft-model-switch regression ─────────────────────────────────
+    // createSessionInWorkdir intentionally keeps currentSessionId == null until
+    // the first send (draft mode), but the chat top bar + model picker are
+    // already interactive. Previously switchSessionModel early-returned on the
+    // null currentSessionId, silently dropping the user's model choice. These
+    // two tests lock the fix: (D1) the in-memory currentModel still updates in
+    // draft mode; (D2) the choice is persisted once the draft materialises into
+    // a real session on first send.
+
+    @Test
+    fun `switchSessionModel in draft mode updates currentModel without persisting`() = runTest {
+        val viewModel = createViewModel()
+        viewModel.createSessionInWorkdir("/tmp/project")
+        advanceUntilIdle()
+
+        // Draft mode sanity: no session yet.
+        assertNull(viewModel.chatFlow.value.currentSessionId)
+
+        viewModel.switchSessionModel("openai", "gpt-5")
+
+        // In-memory currentModel MUST update so the picker reflects the choice
+        // and dispatchSend()'s (getModelForSession ?: currentModel) fallback
+        // uses it on the first send.
+        assertEquals(
+            Message.ModelInfo("openai", "gpt-5"),
+            viewModel.chatFlow.value.currentModel
+        )
+        // No real session exists yet → must NOT persist (no valid session id).
+        verify(exactly = 0) { settingsManager.setModelForSession(any(), any(), any()) }
+    }
+
+    @Test
+    fun `draft model choice is persisted when session materialises on first send`() = runTest {
+        coEvery { repository.createSession(any()) } returns Result.success(
+            Session(id = "draft-1", directory = "/tmp/project")
+        )
+        coEvery { repository.sendMessage(any(), any(), any(), any(), any()) } returns Result.success(Unit)
+        // scheduleTitleRefreshAfterFirstMessage calls getSession after a delay;
+        // relaxed mock returns Object → ClassCastException, so stub explicitly.
+        coEvery { repository.getSession(any()) } returns Result.success(
+            Session(id = "draft-1", directory = "/tmp/project")
+        )
+
+        val viewModel = createViewModel()
+        viewModel.createSessionInWorkdir("/tmp/project")
+        advanceUntilIdle()
+
+        // User switches the model while still in draft (currentSessionId == null).
+        viewModel.switchSessionModel("openai", "gpt-5")
+        assertEquals(Message.ModelInfo("openai", "gpt-5"), viewModel.chatFlow.value.currentModel)
+
+        // First send materialises the draft into a real session.
+        viewModel.setInputText("hi")
+        viewModel.sendMessage()
+        advanceUntilIdle()
+
+        // The in-memory draft choice MUST be persisted to the now-real session
+        // id, so subsequent loadMessages reads it via getModelForSession instead
+        // of falling back to inference.
+        verify { settingsManager.setModelForSession("draft-1", "openai", "gpt-5") }
+        // And the outgoing prompt carries the chosen model.
+        coVerify {
+            repository.sendMessage(
+                "draft-1",
+                "hi",
+                any(),
+                Message.ModelInfo("openai", "gpt-5"),
+                any()
+            )
+        }
+    }
+
     @Test
     fun `sendMessage attaches per-session stored model to prompt`() = runTest {
         coEvery { repository.sendMessage(any(), any(), any(), any(), any()) } returns Result.success(Unit)
