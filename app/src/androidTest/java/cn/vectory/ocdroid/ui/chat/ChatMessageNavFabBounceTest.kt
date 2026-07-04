@@ -468,18 +468,23 @@ class ChatMessageNavFabBounceTest {
     }
 
     /**
-     * §fix-nav-onestep (gpter 🔴-2, all reviewers): the off-screen jump must be a SINGLE
-     * scroll-animation session, not two. This is the ONLY behavioral way to catch a
-     * two-step regression (someone reverting to `animateScrollToItem(target) +
-     * centerTarget(animateScrollBy)`), which the final-state assertions above cannot detect
-     * because the final centered position is identical either way.
+     * §fix-nav-onestep (gpter 🔴-2, all reviewers): the off-screen jump should be a SINGLE
+     * scroll-animation session, not two. This is a PARTIAL behavioral guard for the
+     * single-animation invariant.
      *
-     * Mechanism: `isScrollInProgress` is true only during ANIMATED scrolls
-     * (animateScrollBy / animateScrollToItem). Instant `scrollToItem` does NOT trigger it.
-     * - Current single-step impl: scrollToItem(target) [instant, no isScrollInProgress] +
-     *   centerTarget(animateScrollBy) [1 session] → exactly **1** rising edge.
-     * - Two-step regression: animateScrollToItem(target) [1 session] + centerTarget
-     *   (animateScrollBy) [2nd session] → **2** rising edges → test fails.
+     * Mechanism: `isScrollInProgress` is true only during ANIMATED scrolls. Instant
+     * `scrollToItem` does NOT trigger it. Current single-step impl (scrollToItem +
+     * animateScrollBy) → 1 rising edge; passes.
+     *
+     * **Known limitation (verified by mutation testing)**: a two-step regression using
+     * `animateScrollToItem(target) + centerTarget(animateScrollBy)` (two CONSECUTIVE suspend
+     * animations) can still pass this test, because snapshotFlow may merge the brief
+     * `isScrollInProgress=false` frame between the two animations into a single observed
+     * `true` span (only 1 rising edge). Mutation test confirmed: reverting to two-step did
+     * NOT fail this assertion. Therefore the single-animation invariant is PRIMARILY enforced
+     * by the `jumpToCenteredListState` KDoc hard-constraint (forbids animateScrollToItem in
+     * the off-screen branch) + code review. This test remains as a partial guard (catches
+     * regressions with an inter-animation gap) and documents the intent.
      *
      * Assertion: after an off-screen UP jump, the number of distinct scroll-animation
      * sessions must be exactly 1.
