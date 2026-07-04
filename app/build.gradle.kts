@@ -29,8 +29,8 @@ android {
         applicationId = "cn.vectory.ocdroid"
         minSdk = 26
         targetSdk = 34
-        versionCode = 31
-        versionName = "0.3.5"
+        versionCode = 32
+        versionName = "0.3.6"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         // Integration test credentials from .env (dynamic, not in code)
