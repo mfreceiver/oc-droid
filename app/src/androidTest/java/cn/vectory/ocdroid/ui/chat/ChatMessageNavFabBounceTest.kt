@@ -41,15 +41,35 @@ import org.junit.Test
  * Reproduction (pre-fix):
  *  1. List at bottom (index 0), followBottom = true.
  *  2. Position list just above bottom (index 1) → tracker sets followBottom=false.
- *  3. Tap "Previous user message" → NavFab animateScrollToItem(target=2) +
- *     animateScrollBy(-0.8vh). The 0.8-viewport negative scroll overshoots
- *     past index 0 and clamps to the bottom.
- *  4. Tracker sees index == 0 → re-arms followBottom = true.
+ *  3. Tap "Previous user message" → NavFab jumps to target=2 (first user index
+ *     > 1) and centers it.
+ *  4. Tracker (unguarded pre-fix) re-arms followBottom=true on the jump's scroll
+ *     frames or, post-jump, via the canScrollBackward==false shortcut on a short
+ *     list when the next layout change (simulated token) re-emits.
  *  5. contentVersion bumps (simulated streaming token) → auto-scroll effect
- *     scrollToItem(0) → list pinned at bottom = BOUNCE.
+ *     scrollToItem(0) → item 2 pushed off-screen (250dp viewport) = BOUNCE.
  *
- * Assertion: after the jump + a content tick, the list must NOT be back at
- * index 0 — the user's jump target must be preserved.
+ * §fix-nav-guard (kimo 🟡-2): the production fix uses a ref-counted
+ * `navJumpDepth` guard that the NavFab increments via onJumpStart / decrements
+ * via onJumpEnd (try/finally, cancel-safe) and all three scroll observers
+ * (direction detector, bottom-position tracker, contentVersion auto-scroll)
+ * respect (`> 0` → skip).
+ *
+ * §fix-nav-pin (glmer R-2): a `navPinnedAway` latch set by onNavigateUp makes
+ * the bottom tracker require genuine atExactBottom before re-arming
+ * followBottom (defeating the canScrollBackward==false→true shortcut that
+ * caused the post-jump residual bounce in streaming short-list sessions).
+ *
+ * §fix-nav-test (glmer R-1): the viewport is pinned (requiredHeight 250dp) so
+ * the assertion is device-independent, and the assertion checks the real fix
+ * semantics (target still visible + followBottom not re-armed) instead of the
+ * broken `firstVisibleItemIndex > 0` which false-passed on large viewports.
+ *
+ * Assertion: after the jump + a content tick, the target item must still be
+ * visible and followBottom must remain false — the user's jump is preserved.
+ *
+ * NB: this is an androidTest (not in check.sh). It must be run via
+ * ./gradlew connectedDebugAndroidTest on an emulator per AGENTS.md.
  */
 class ChatMessageNavFabBounceTest {
 
@@ -62,6 +82,10 @@ class ChatMessageNavFabBounceTest {
         // and observe followBottom.
         var contentVersion by mutableIntStateOf(0)
         var followBottom by mutableStateOf(true)
+        // §fix-nav-guard (kimo 🟡-2): ref-counted programmatic-jump depth, mirroring production.
+        var navJumpDepth by mutableIntStateOf(0)
+        // §fix-nav-pin (glmer R-2): history-pin latch, mirroring production.
+        var navPinnedAway by mutableStateOf(false)
         val tag = "chatList"
         lateinit var listState: androidx.compose.foundation.lazy.LazyListState
 
@@ -69,8 +93,8 @@ class ChatMessageNavFabBounceTest {
             val ls = rememberLazyListState()
             listState = ls
 
-            // --- Bottom-position tracker (faithful copy of ChatMessageContent.kt:310-327).
-            // NB: no "programmatic scroll in progress" guard — this is the bug. ---
+            // --- Bottom-position tracker (faithful copy of ChatMessageContent.kt
+            // bottom tracker). §fix-nav-guard + §fix-nav-pin mirror production. ---
             LaunchedEffect(ls) {
                 delay(300)
                 snapshotFlow {
@@ -82,16 +106,23 @@ class ChatMessageNavFabBounceTest {
                 }
                     .drop(1)
                     .collect { (canBack, index, offset) ->
+                        if (navJumpDepth > 0) return@collect
                         if (ls.layoutInfo.totalItemsCount == 0) return@collect
                         val atExactBottom = index == 0 && offset <= 24
-                        followBottom = if (canBack) atExactBottom else true
+                        if (navPinnedAway) {
+                            followBottom = atExactBottom
+                            if (atExactBottom) navPinnedAway = false
+                        } else {
+                            followBottom = if (canBack) atExactBottom else true
+                        }
                     }
             }
 
             // --- contentVersion auto-scroll (faithful copy of the non-streaming
-            // branch of ChatMessageContent.kt:365-429). followBottom read inside
-            // the effect, keyed on contentVersion — same as production. ---
+            // branch of ChatMessageContent contentVersion effect). §fix-nav-guard
+            // skips while navJumpDepth > 0 — same as production. ---
             LaunchedEffect(contentVersion) {
+                if (navJumpDepth > 0) return@LaunchedEffect
                 if (followBottom) {
                     ls.animateScrollToItem(0)
                 }
@@ -99,11 +130,17 @@ class ChatMessageNavFabBounceTest {
 
             Surface(modifier = Modifier.fillMaxSize()) {
                 Box(Modifier.fillMaxSize()) {
+                    // §fix-nav-test-viewport (glmer R-1): pin the LazyColumn height so the
+                    // test is deterministic across devices. 250dp fits 2.5 × 100dp items:
+                    // after scrollToItem(0) item 2 is pushed off-screen (above viewport),
+                    // so a bounce is detectable as "target not visible"; after a successful
+                    // centered jump item 2 stays visible.
                     LazyColumn(
                         state = ls,
                         reverseLayout = true,
                         modifier = Modifier
                             .fillMaxSize()
+                            .requiredHeight(250.dp)
                             .testTag(tag)
                     ) {
                         items(30) { idx ->
@@ -128,8 +165,10 @@ class ChatMessageNavFabBounceTest {
                         userMessageLcIndices = intArrayOf(2, 15, 25),
                         visible = true,
                         onInteract = { },
-                        onNavigateUp = { followBottom = false },
-                        onNavigateBottom = { followBottom = true },
+                        onNavigateUp = { followBottom = false; navPinnedAway = true },
+                        onNavigateBottom = { followBottom = true; navPinnedAway = false },
+                        onJumpStart = { navJumpDepth++ },
+                        onJumpEnd = { if (navJumpDepth > 0) navJumpDepth-- },
                         modifier = Modifier.align(Alignment.BottomEnd),
                     )
                 }
@@ -144,32 +183,44 @@ class ChatMessageNavFabBounceTest {
 
         // 2. Position just above bottom (index 1) → tracker sets followBottom=false.
         //    Deterministic (does not depend on gesture landing point).
-        composeRule.runOnIdle {
-            kotlinx.coroutines.runBlocking { listState.scrollToItem(1) }
-        }
+        //    NB: scrollToItem is non-suspending — no runBlocking needed.
+        composeRule.runOnIdle { listState.scrollToItem(1) }
         composeRule.waitForIdle()
         idx = composeRule.runOnIdle { listState.firstVisibleItemIndex }
         assertTrue("positioning failed (index=$idx)", idx == 1)
 
-        // 3. Tap "Previous user message" → NavFab jumps to target=2 (first user
-        //    index > 1) then animateScrollBy(-0.8vh) overshoots to index 0.
+        // 3. Tap "Previous user message" → NavFab jumpToCenteredListState(target=2).
+        //    §fix-nav-pin: onNavigateUp sets followBottom=false + navPinnedAway=true;
+        //    onJumpStart increments navJumpDepth; the centered jump leaves item 2
+        //    visible (pinned 250dp viewport keeps it on-screen post-center).
         composeRule.onNodeWithContentDescription("Previous user message").performClick()
         composeRule.waitForIdle()
 
-        val afterJump = composeRule.runOnIdle { listState.firstVisibleItemIndex }
-
         // 4. Simulate a streaming token → restarts the contentVersion effect.
+        //    Pre-fix: tracker re-arms followBottom=true (canBack path or short-list
+        //    shortcut) → effect scrollToItem(0) → item 2 pushed off-screen = BOUNCE.
+        //    Post-fix: navJumpDepth guard + navPinnedAway latch keep followBottom=false
+        //    → effect skips → item 2 stays visible.
         composeRule.runOnIdle { contentVersion++ }
         composeRule.waitForIdle()
 
-        val final = composeRule.runOnIdle { listState.firstVisibleItemIndex }
+        val targetVisible = composeRule.runOnIdle {
+            listState.layoutInfo.visibleItemsInfo.any { it.index == 2 }
+        }
+        val fbAfter = composeRule.runOnIdle { followBottom }
 
-        // Desired: the user jumped to an OLDER user message; the list must NOT
-        // be back at index 0 (bottom). Pre-fix this fails because the jump
-        // overshoots to 0 and the re-armed followBottom pins it there.
+        // §fix-nav-test-assert (glmer R-1): assert on the actual fix semantics —
+        // (a) the jump target is still on screen (no bounce yanked it away), and
+        // (b) followBottom was NOT re-armed by the tracker (the structural R-2 fix).
+        // The old `final > 0` assertion was broken: in a large viewport item 0
+        // remains visible after centering → firstVisibleItemIndex == 0 → false pass.
         assertTrue(
-            "NavFab up-jump bounced back to bottom — afterJump=$afterJump final=$final",
-            final > 0
+            "NavFab up-jump bounced — target item 2 not visible after content tick (followBottom=$fbAfter)",
+            targetVisible
+        )
+        assertTrue(
+            "followBottom re-armed after up-jump (should stay false while pinned to history)",
+            !fbAfter
         )
     }
 }

@@ -20,6 +20,7 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
+import kotlin.math.abs
 import kotlinx.coroutines.launch
 
 /**
@@ -35,12 +36,24 @@ import kotlinx.coroutines.launch
  *  - 键盘打开时隐藏（Q11）
  *  - 当前会话无用户消息时隐藏（Q12）
  *
+ * §fix-nav-center: 跳转后尽量把目标用户消息居中显示在视口中部；当目标处于列表
+ * 两端、可滚动余量不足以居中时，LazyListState 会自动把 animateScrollBy 钳制到
+ * 可滚动范围（等价于"空间不足→保持原位不调整"）。目标已可见时跳过
+ * animateScrollToItem，直接做居中微调——避免短列表下的弹簧动画抖动。
+ *
  * reverseLayout 语义：LazyColumn index 0 = 最新（视觉底部），index 大 = 更旧
  * （视觉顶部）。故「上 = 更旧 = 更大 index」，「下 = 更新 = 更小 index」。
  *
  * @param userMessageLcIndices 用户消息的 LazyColumn item index，**升序**
  *  （[0] = 最新用户消息的 index，[last] = 最旧用户消息的 index）。
  *  IntArray（stable 类型）让本 Composable 在参数不变时跳过重组。
+ *
+ * @param onJumpStart / onJumpStart §fix-nav-guard: 跳转动画开始前 / 结束后（含
+ *  异常取消）的回调。调用方据此置位"程序化滚动进行中"标志，使 ChatMessageList
+ *  里的 followBottom 追踪器与 contentVersion 自动滚动 effect 在跳转期间跳过
+ *  各自的写入 / 滚动——否则它们会在动画期间重新 arm followBottom，下一个
+ *  contentVersion tick 的 scrollToItem(0) 会把列表拽回最新消息（"跳转后弹回
+ *  底部"bug）。
  */
 @Composable
 internal fun ChatMessageNavFab(
@@ -48,17 +61,11 @@ internal fun ChatMessageNavFab(
     userMessageLcIndices: IntArray,
     visible: Boolean,
     onInteract: () -> Unit,
-    // §fix-nav-yank: 用户点"上"主动向上导航时调用，调用方据此把
-    // followBottom 置 false，避免程序化向上滚动被方向检测器忽略后，
-    // 下一个 SSE token 的 LaunchedEffect(contentVersion) scrollToItem(0)
-    // 把列表拽回底部（"跳转向上后自动弹回"）。
     onNavigateUp: () -> Unit,
-    // §fix-nav-bottom: 对称于 onNavigateUp。用户点"下"跳到列表最底
-    // （最新消息，target == null 分支）时调用，调用方据此把 followBottom
-    // 置 true，使 ~300ms 的 animateScrollToItem(0) 期间到达的 SSE token
-    // 仍能自动跟到底（之前可能被"上"按钮置 false）。跳到中间某条用户消息
-    // （target != null）时不调用——用户在读历史，followBottom 应保持 false。
     onNavigateBottom: () -> Unit,
+    // §fix-nav-guard: 见上，程序化跳转进行中标志的置位 / 清零回调。
+    onJumpStart: () -> Unit,
+    onJumpEnd: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     // Q12: 无用户消息 → 隐藏。
@@ -84,16 +91,21 @@ internal fun ChatMessageNavFab(
                     val cur = listState.firstVisibleItemIndex
                     val target = userMessageLcIndices.firstOrNull { it > cur }
                     onInteract()
+                    // §fix-nav-race (kimo 🟡-1): onJumpStart 必须在 followBottom 写入
+                    // 之前，消除"守卫未置位但 followBottom 已改"的竞态窗口。
+                    onJumpStart()
                     onNavigateUp()
                     scope.launch {
-                        if (target != null) {
-                            // §issue-2: reverseLayout 下 scrollToItem 把 target 放到
-                            // 视觉底部（scroll start）。追加 animateScrollBy（负向 = 向更新方向）把它推到
-                            // 视觉顶部，方便用户向下（更新方向）阅读后续回复。
-                            jumpToListState(listState, target)
-                        } else {
-                            val topIdx = (listState.layoutInfo.totalItemsCount - 1).coerceAtLeast(0)
-                            jumpToListState(listState, topIdx)
+                        try {
+                            if (target != null) {
+                                jumpToCenteredListState(listState, target)
+                            } else {
+                                // Q7: 已在最旧一条用户消息 → 跳到列表最顶端（load-more 位置）。
+                                val topIdx = (listState.layoutInfo.totalItemsCount - 1).coerceAtLeast(0)
+                                jumpToCenteredListState(listState, topIdx)
+                            }
+                        } finally {
+                            onJumpEnd()
                         }
                     }
                 },
@@ -110,6 +122,8 @@ internal fun ChatMessageNavFab(
                     val cur = listState.firstVisibleItemIndex
                     val target = userMessageLcIndices.lastOrNull { it < cur }
                     onInteract()
+                    // §fix-nav-race (kimo 🟡-1): onJumpStart 先于 followBottom 写入。
+                    onJumpStart()
                     // §fix-nav-bottom: target == null 表示跳到列表最底（最新
                     // 消息），在此同步 re-arm followBottom（在 launch 之外、
                     // 动画开始之前），使后续 ~300ms 动画期间到达的 SSE token
@@ -117,12 +131,15 @@ internal fun ChatMessageNavFab(
                     // 跟底。target != null（跳到中间某条用户消息）时不调用。
                     if (target == null) onNavigateBottom()
                     scope.launch {
-                        if (target != null) {
-                            // §fix-nav-bounce: 同 up 分支，钳制负向滚动 + 滚后可见性硬保证。
-                            jumpToListState(listState, target)
-                        } else {
-                            // Q8: 已在最新用户消息，继续按下 → 跳到列表最底（最新消息）。
-                            listState.animateScrollToItem(0)
+                        try {
+                            if (target != null) {
+                                jumpToCenteredListState(listState, target)
+                            } else {
+                                // Q8: 已在最新用户消息，继续按下 → 跳到列表最底（最新消息）。
+                                listState.animateScrollToItem(0)
+                            }
+                        } finally {
+                            onJumpEnd()
                         }
                     }
                 },
@@ -138,51 +155,66 @@ internal fun ChatMessageNavFab(
 }
 
 /**
- * §fix-nav-bounce: 跳转到 [target] 并把它推向视觉顶部，带回弹防护 + 可见性硬保证。
+ * §fix-nav-center: 跳转到 [target] 并尽量把它居中到视口中部；列表两端空间不足时
+ * 自动降级为"尽量靠中"（LazyListState 钳制 animateScrollBy 到可滚动范围），等价
+ * 于用户要求的"空间不足→保持原位不调整"。
  *
  * 步骤：
- *  1. [animateScrollToItem] 把 target 放到视觉底部（reverseLayout scroll start）。
- *  2. [cappedNavPush] 计算推向视觉顶部的安全滚动量，负向 [animateScrollBy] 执行——
- *     把 target 推高，方便用户向下（更新方向）阅读后续回复。
- *  3. §hard-guarantee 变高 item 下 cappedNavPush 的尺寸上限是近似（itemSize 取首项
- *     代理），极端变高列表仍可能把 target 推出视口或越过 index 0。此处做硬保证：
- *     若跳完后 target 不在可见窗口，回滚到 target（保证目标可见，宁可少推）。
+ *  1. 若 [target] 已在可见窗口内 → 跳过 animateScrollToItem，只做居中微调
+ *     （单段平滑动画）。避免短列表下的弹簧动画抖动（"画面闪动"症状）。
+ *  2. 若 [target] 不在可见窗口 → [animateScrollToItem] 把 target 平滑带到
+ *     scroll-start（reverseLayout 下 = 视觉底部）。
+ *  3. [centerTarget] 计算居中所需的滚动量并单段 [animateScrollBy] 执行。reverseLayout
+ *     下 offset 与 scrollBy 的关系为 `scrollBy = newOffset - oldOffset`（轴向翻转），
+ *     故 shift = desiredOffset - currentOffset 直接传入即可。
+ *  4. §hard-guarantee 变高 item 下居中量是近似，极端情况可能把 target 推出视口；
+ *     此处做硬保证：若 target 跳完后不可见，瞬时 scrollToItem(target) 回到 scroll-start。
  */
-private suspend fun jumpToListState(
+private suspend fun jumpToCenteredListState(
     listState: androidx.compose.foundation.lazy.LazyListState,
     target: Int,
 ) {
-    listState.animateScrollToItem(target)
-    val push = cappedNavPush(listState, target)
-    if (push > 0f) listState.animateScrollBy(-push)
-    if (listState.layoutInfo.visibleItemsInfo.none { it.index == target }) {
-        listState.scrollToItem(target)
+    val vh = listState.layoutInfo.viewportSize.height.toFloat()
+    if (vh <= 0f) return
+    val visible = listState.layoutInfo.visibleItemsInfo.firstOrNull { it.index == target }
+    if (visible == null) {
+        // target 不在可见窗口 → 先平滑带到 scroll-start，再居中。
+        listState.animateScrollToItem(target)
+        val info = listState.layoutInfo.visibleItemsInfo.firstOrNull { it.index == target }
+            ?: return
+        centerTarget(listState, target, info.offset.toFloat(), info.size.toFloat(), vh)
+    } else {
+        // target 已可见 → 直接居中微调（不触发 scrollToItem 的弹簧动画）。
+        centerTarget(listState, target, visible.offset.toFloat(), visible.size.toFloat(), vh)
     }
 }
 
 /**
- * §fix-nav-bounce: 跳转到 [target] 后"推向视觉顶部"的安全滚动量（px）。纯同步读，
- * 非 suspend。
+ * §fix-nav-center: 把 [target] 平滑滚动到视口中部。
  *
- * 原实现固定 `-0.8 * viewportHeight`，对靠近底部的目标会越过 index 0 被
- * LazyListState 钳到最新消息，丢失刚跳转到的用户消息（"跳转后回弹"bug）。
+ * @param currentOffset target 当前 top-edge 相对视口顶部的像素偏移。
+ * @param itemSize target 的实测高度（px）。
+ * @param viewportHeight 视口主轴高度（px）。
  *
- * 这里把推量钳为 `min(0.8 * vh, (target - 1) * itemSize)`：
- *  - 远离底部的目标（target 大）：0.8vh 通常更小，行为不变，仍推到视觉顶部附近。
- *  - 靠近底部的目标（target 小）：被 (target-1)*itemSize 限制；等高 item 下跳完
- *    落在 index ≥ 1（不回弹到 0）。
- *
- * itemSize 取 visibleItemsInfo 的首项尺寸作为代理；变高 item 下该上限是近似（偏
- * 保守），最终可见性由 [jumpToListState] 的硬保证兜底。拿不到尺寸时返回 0（不推）。
+ * 居中目标：desiredOffset = (viewportHeight - itemSize) / 2。
+ * 滚动量 shift = desiredOffset - currentOffset。reverseLayout 下 animateScrollBy(shift)
+ * 直接把 target 的 offset 改变 shift（正→下移，负→上移）；LazyListState 自动钳制到
+ * 可滚动范围——两端空间不足时 shift 被部分或完全吸收，target 停在"尽量靠中"的位置。
  */
-private fun cappedNavPush(
+private suspend fun centerTarget(
     listState: androidx.compose.foundation.lazy.LazyListState,
     target: Int,
-): Float {
-    val vh = listState.layoutInfo.viewportSize.height.toFloat().coerceAtLeast(0f)
-    val itemSize = listState.layoutInfo.visibleItemsInfo.firstOrNull()?.size?.toFloat() ?: 0f
-    if (vh <= 0f || itemSize <= 0f || target <= 1) return 0f
-    val desired = 0.8f * vh
-    val maxWithoutOvershoot = (target - 1) * itemSize
-    return desired.coerceAtMost(maxWithoutOvershoot)
+    currentOffset: Float,
+    itemSize: Float,
+    viewportHeight: Float,
+) {
+    if (itemSize <= 0f || itemSize >= viewportHeight) return // 比视口还高 → 无法居中，保留原位
+    val desiredOffset = (viewportHeight - itemSize) / 2f
+    val shift = desiredOffset - currentOffset
+    if (abs(shift) < 1f) return // 已足够居中
+    listState.animateScrollBy(shift)
+    // §hard-guarantee: 变高 item 下居中量近似，极端情况可能把 target 推出视口。
+    if (listState.layoutInfo.visibleItemsInfo.none { it.index == target }) {
+        listState.scrollToItem(target)
+    }
 }

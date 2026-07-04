@@ -141,6 +141,23 @@ internal fun ChatMessageList(
     // §navFab-visibility: 只在用户手动滑动时显示 NavFab，3s 无交互后隐藏
     var navFabVisible by remember { mutableStateOf(false) }
     var navFabTick by remember { mutableIntStateOf(0) }
+    // §fix-nav-guard: NavFab 程序化跳转进行中标志（引用计数，kimo 🟡-2）。
+    // onJumpStart++ / onJumpEnd--，所有守卫判断 > 0——快速连击时多个并发跳转
+    // 共享计数，最后一个动画结束才真正解除守卫，避免首个 finally 把标志清零后
+    // 第二个动画暴露给观察者。置位期间，下方的方向检测器、底部位置追踪器与
+    // contentVersion 自动滚动 effect 都跳过各自的 followBottom 写入 /
+    // scrollToItem(0)。否则跳转动画的逐帧 firstVisibleItemIndex 变化会被追踪器
+    // 当作用户手势重新 arm followBottom，下一个 contentVersion tick 把列表拽回
+    // 最新消息（"跳转后弹回底部"bug）。
+    var navJumpDepth by remember { mutableIntStateOf(0) }
+    // §fix-nav-pin (glmer R-2): 用户经 NavFab"上"按钮主动跳到历史后置位的锁存。
+    // 置位期间底部追踪器不再用 canScrollBackward==false → followBottom=true 短路
+    // （该短路在短列表 / 跳转落点靠近底部时会无条件 arm followBottom，跳转结束后
+    // 下一个 SSE token 增长 item 高度 → 追踪器重新 emit → followBottom=true →
+    // contentVersion tick scrollToItem(0) 把列表拽回最新消息 = 场景 1 残留回弹）。
+    // 锁存要求"真正回到底部（atExactBottom）"才 re-arm followBottom 并自清；由
+    // onNavigateUp 置位，由 onNavigateBottom / 方向检测器回到底部 / 会话切换清零。
+    var navPinnedAway by remember { mutableStateOf(false) }
     // §3-scroll-memory: per-session scroll-position memory is now HOISTED to
     // ChatScreen (above the HorizontalPager) so the pager disposing this
     // composable on a currentSessionId flip no longer drops the cache. The
@@ -268,6 +285,13 @@ internal fun ChatMessageList(
         var prevIndex = listState.firstVisibleItemIndex
         snapshotFlow { listState.firstVisibleItemIndex }
             .collect { index ->
+                // §fix-nav-guard: NavFab 程序化跳转期间不计入方向判断——跳转动画
+                // 的逐帧 index 变化不是用户手势，据此改 followBottom 会与 NavFab
+                // 的 onNavigateUp/down 设置冲突并导致回弹。
+                if (navJumpDepth > 0) {
+                    prevIndex = index
+                    return@collect
+                }
                 // Guard: saved-position restore 期间的程序化滚动不计入方向判断。
                 if (pendingRestoreSession == sessionId) {
                     prevIndex = index
@@ -291,7 +315,11 @@ internal fun ChatMessageList(
                     }
                     delta < 0 -> {
                         onTabVisibilityChange(false)   // 向下滚（看更新）→ hide
-                        if (index == 0) followBottom = true  // §Q4: scrolled back to bottom
+                        // §Q4: scrolled back to bottom. §fix-nav-pin: 同时清锁存。
+                        if (index == 0) {
+                            followBottom = true
+                            navPinnedAway = false
+                        }
                     }
                 }
             }
@@ -319,10 +347,24 @@ internal fun ChatMessageList(
         }
             .drop(1)
             .collect { (canBack, index, offset) ->
+                // §fix-nav-guard: NavFab 跳转进行中时跳过——否则跳转落点（尤其
+                // 短列表 canScrollBackward=false）会被误判为"绝对底部"从而
+                // followBottom=true，下一个 contentVersion tick 把列表拽回最新消息。
+                if (navJumpDepth > 0) return@collect
                 if (pendingRestoreSession == sessionId) return@collect
                 if (listState.layoutInfo.totalItemsCount == 0) return@collect
                 val atExactBottom = index == 0 && offset <= 24
-                followBottom = if (canBack) atExactBottom else true
+                // §fix-nav-pin (glmer R-2): 用户经 NavFab 主动跳到历史后，禁止
+                // canBack=false 短路强制 followBottom=true（短列表 / 跳转落点靠
+                // 近底部时该短路会把 onNavigateUp 设的 false 覆盖回 true，跳转
+                // 结束后下一个 contentVersion tick 即回弹）。要求真正回到底部
+                // （atExactBottom）才 re-arm，并清锁存恢复正常追踪语义。
+                if (navPinnedAway) {
+                    followBottom = atExactBottom
+                    if (atExactBottom) navPinnedAway = false
+                } else {
+                    followBottom = if (canBack) atExactBottom else true
+                }
             }
     }
 
@@ -360,6 +402,8 @@ internal fun ChatMessageList(
             pendingRestoreSession = null
             followBottom = true
         }
+        // §fix-nav-pin: 会话切换重置历史导航锁存——新会话从默认跟底状态开始。
+        navPinnedAway = false
     }
 
     LaunchedEffect(contentVersion) {
@@ -405,6 +449,10 @@ internal fun ChatMessageList(
         } == true
         if (followBottom && !streamingReasoningExpanded &&
             (messages.isNotEmpty() || streamingReasoningPart != null)) {
+            // §fix-nav-guard: NavFab 程序化跳转进行中时绝不抢跑自动跟底——否则
+            // 跳转动画期间到达的 contentVersion tick 会 scrollToItem(0) 把列表
+            // 拽回最新消息，覆盖用户刚跳到的目标位置（"跳转后弹回"症状）。
+            if (navJumpDepth > 0) return@LaunchedEffect
             // 闪屏修复：流式输出（reasoning 进行中 / streamingPartTexts 非空）时
             // 用瞬时 scrollToItem 代替 animateScrollToItem。
             //
@@ -682,8 +730,14 @@ internal fun ChatMessageList(
             userMessageLcIndices = userMessageLcIndices,
             visible = navFabVisible,
             onInteract = { navFabTick++ },
-            onNavigateUp = { followBottom = false },
-            onNavigateBottom = { followBottom = true },
+            // §fix-nav-pin (glmer R-2): 上跳置锁存（禁止追踪器强制 followBottom=true），
+            // 下跳到底清锁存（恢复正常跟底）。
+            onNavigateUp = { followBottom = false; navPinnedAway = true },
+            onNavigateBottom = { followBottom = true; navPinnedAway = false },
+            // §fix-nav-guard (kimo 🟡-2): 引用计数，并发跳转共享，finally 保证异常
+            // /取消也递减；最后一个动画结束才真正解除守卫。
+            onJumpStart = { navJumpDepth++ },
+            onJumpEnd = { if (navJumpDepth > 0) navJumpDepth-- },
             modifier = Modifier
                 .align(Alignment.BottomEnd)
                 .padding(end = 16.dp, bottom = 16.dp),
