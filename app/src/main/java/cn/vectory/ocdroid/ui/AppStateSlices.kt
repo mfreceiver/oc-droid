@@ -148,10 +148,15 @@ data class ChatState(
     val gapInfo: GapInfo? = null,
     val staleNotice: Boolean = false,
     /**
-     * §model-selection: the model currently bound to the active session, as
-     * inferred from the latest assistant message's [Message.resolvedModel].
+     * §model-selection (V1-per-prompt): the intended-next-model for the active
+     * session — sent with the next outgoing prompt's PromptRequest.model.
      * Surfaced in the chat top-bar context menu + the model picker dialog.
-     * Updated by `switchSessionModel` success and after each message load.
+     * Updated synchronously by `switchSessionModel` (local persist + state write)
+     * and after each message load. The per-session stored value (persisted via
+     * [cn.vectory.ocdroid.util.SettingsManager.getModelForSession]) wins over
+     * inference; inference from the latest assistant message's
+     * [Message.resolvedModel] is the fallback for sessions first opened on
+     * another client (no local stored choice yet).
      */
      val currentModel: Message.ModelInfo? = null,
      /**

@@ -237,7 +237,16 @@ internal class SessionSwitcher(
                 streamingPartTexts = emptyMap(),
                 streamingReasoningPart = null,
                 gapInfo = null,
-                staleNotice = false
+                staleNotice = false,
+                // §model-selection (V1-per-prompt): drop the outgoing session's
+                // currentModel so dispatchSendMessage (which reads
+                // _chatFlow.value.currentModel synchronously) can't leak it
+                // across tabs during the window before launchLoadMessages
+                // completes for the newly-selected session. The authoritative
+                // per-session value is reloaded from SettingsManager by
+                // launchLoadMessages (stored wins) / dispatchSendMessage
+                // (getModelForSession preferred).
+                currentModel = null
             )
         }
         // Restore the selected session's draft into the composer slice.

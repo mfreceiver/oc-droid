@@ -357,6 +357,97 @@ class MainViewModelTest {
         assertNull(viewModel.state.value.error)
     }
 
+    // ── §model-selection (V1-per-prompt) positive coverage ───────────────────
+    // The legacy send tests all assert model=null; these three cover the new
+    // per-session model path end-to-end: persistence + immediate reflection
+    // (T1), send-time attachment (T2), and stored-wins-over-infer on load (T3).
+
+    @Test
+    fun `switchSessionModel persists per-session and updates currentModel immediately`() = runTest {
+        coEvery { repository.getSessions(100) } returns Result.success(
+            listOf(Session(id = "session-1", directory = "/tmp/project"))
+        )
+
+        val viewModel = createViewModel()
+        viewModel.selectSession("session-1")
+        advanceUntilIdle()
+
+        viewModel.switchSessionModel("openai", "gpt-5")
+
+        // V1-per-prompt: choice is persisted LOCALLY per session (no server call).
+        verify { settingsManager.setModelForSession("session-1", "openai", "gpt-5") }
+        // Synchronous in-memory update so the picker reflects the choice with no
+        // launch/await (switchSessionModel is a plain fun, not a suspend/coroutine).
+        assertEquals(
+            Message.ModelInfo("openai", "gpt-5"),
+            viewModel.chatFlow.value.currentModel
+        )
+    }
+
+    @Test
+    fun `sendMessage attaches per-session stored model to prompt`() = runTest {
+        coEvery { repository.sendMessage(any(), any(), any(), any(), any()) } returns Result.success(Unit)
+        coEvery { repository.getSessions(100) } returns Result.success(
+            listOf(Session(id = "session-1", directory = "/tmp/project"))
+        )
+        // Per-session stored model. Registered AFTER setUp's global
+        // `getModelForSession(any()) returns null`; MockK resolves the last
+        // matching stub, so the precise-sessionId stub wins (same override
+        // pattern as getMessagesPaged("session-1", ...) at line ~1444).
+        every { settingsManager.getModelForSession("session-1") } returns
+            Message.ModelInfo("openai", "gpt-5")
+
+        val viewModel = createViewModel()
+        viewModel.selectSession("session-1")
+        advanceUntilIdle()
+        viewModel.setInputText("hi")
+
+        viewModel.sendMessage()
+        advanceUntilIdle()
+
+        coVerify {
+            repository.sendMessage(
+                "session-1",
+                "hi",
+                any(),
+                Message.ModelInfo("openai", "gpt-5"),
+                any()
+            )
+        }
+    }
+
+    @Test
+    fun `loadMessages stored per-session model wins over inference`() = runTest {
+        val messages = listOf(
+            MessageWithParts(info = Message(id = "u1", role = "user")),
+            MessageWithParts(
+                info = Message(
+                    id = "a1",
+                    role = "assistant",
+                    // Inferred candidate (the fallback path): inferCurrentModel
+                    // would return this if no stored value were present.
+                    model = Message.ModelInfo("openai", "gpt-5")
+                )
+            )
+        )
+        coEvery { repository.getMessagesPaged("session-1", any(), any()) } returns
+            Result.success(MessagesPage(messages, null))
+        // Stored per-session model — MUST win over the assistant-message inference.
+        every { settingsManager.getModelForSession("session-1") } returns
+            Message.ModelInfo("anthropic", "claude")
+
+        val viewModel = createViewModel()
+        updateState(viewModel) { it.copy(currentSessionId = "session-1") }
+
+        viewModel.loadMessages("session-1")
+        advanceUntilIdle()
+
+        assertEquals(
+            Message.ModelInfo("anthropic", "claude"),
+            viewModel.chatFlow.value.currentModel
+        )
+    }
+
     @Test
     fun `sendMessage ignores duplicate sends while request is in flight`() = runTest {
         coEvery { repository.sendMessage(any(), any(), any(), any(), any()) } coAnswers {

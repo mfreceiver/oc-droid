@@ -103,12 +103,14 @@ class OpenCodeRepository @Inject constructor(
 
     /**
      * §model-selection: a SECOND Retrofit instance rooted at
-     * `<baseUrl>/api/` for the v2 model endpoints (GET /api/model,
-     * POST /api/session/{id}/model). Built with the SAME OkHttp [restHttp]
-     * client as [api] so auth / cache / traffic interceptors apply uniformly.
-     * Lives on its own interface ([OpenCodeApiV2]) and its own Retrofit root
-     * so the legacy message path ([api].getMessages / promptAsync) is
-     * untouched.
+     * `<baseUrl>/api/` for the v2 model list endpoint (GET /api/model). Built
+     * with the SAME OkHttp [restHttp] client as [api] so auth / cache / traffic
+     * interceptors apply uniformly. Lives on its own interface ([OpenCodeApiV2])
+     * and its own Retrofit root so the legacy message path ([api].getMessages /
+     * promptAsync) is untouched. (The previous `POST /api/session/{id}/model`
+     * switch endpoint was removed to align with the official packages/app
+     * V1-per-prompt model — the model is now attached per-prompt via
+     * PromptRequest.model, not switched server-side per session.)
      */
     private var v2Retrofit: Retrofit = buildV2Retrofit(restHttp, hostConfig.baseUrl)
     private var apiV2: OpenCodeApiV2 = v2Retrofit.create(OpenCodeApiV2::class.java)

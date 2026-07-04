@@ -158,10 +158,14 @@ internal data class ChatTopBarActions(
      */
     val onNavigateToSessions: () -> Unit = {},
     /**
-     * §model-selection: switch the current session to the model identified by
-     * `(providerId, modelId)`. Wired to
-     * [cn.vectory.ocdroid.ui.MainViewModel.switchSessionModel] which POSTs
-     * /api/session/{id}/model.
+     * §model-selection (V1-per-prompt): switch the current session to the model
+     * identified by `(providerId, modelId)`. Wired to
+     * [cn.vectory.ocdroid.ui.MainViewModel.switchSessionModel], which persists
+     * the choice LOCALLY via [cn.vectory.ocdroid.util.SettingsManager.setModelForSession]
+     * and updates [cn.vectory.ocdroid.ui.ChatState.currentModel] for immediate picker feedback. The
+     * chosen model is sent with the NEXT outgoing prompt as its
+     * PromptRequest.model (V1-per-prompt, aligned with the official packages/app);
+     * there is NO server-side switch call.
      */
     val onSwitchModel: (providerId: String, modelId: String) -> Unit = { _, _ -> },
 )

@@ -386,8 +386,8 @@ class SettingsManager @Inject constructor(
      *  - per-host tunnel passwords (`tunnel_password_*`)
      *
      * WIPED: open tabs, session metadata cache, drafts, per-session agents,
-     * current session/workdir, nav page, theme + font preferences, traffic
-     * counters — everything not listed above.
+     * per-session models, current session/workdir, nav page, theme + font
+     * preferences, traffic counters — everything not listed above.
      *
      * Implementation iterates the live key set and `.remove()`s each non-
      * preserved key in a single batched edit. This deliberately avoids

@@ -1520,17 +1520,22 @@ class MainViewModel @Inject constructor(
         settingsManager.setDraftText(sessionId, "")
         writeComposer { it.copy(inputText = "") }
 
-        // §model-selection (V1-per-prompt, aligned with official packages/app):
-        // agent is per-session — prefer the session-bound choice, fall back to the
-        // global default. model is the session's intended-next-model (persisted per
-        // session via SettingsManager); both are attached to THIS prompt's request
-        // body, NOT set via a server-side switch endpoint.
-        val agent = settingsManager.getAgentForSession(sessionId)
-            ?: _settingsFlow.value.selectedAgentName
-        val model: Message.ModelInfo? = _chatFlow.value.currentModel
         val currentSession = currentSession(_sessionListFlow.value.sessions, _chatFlow.value.currentSessionId)
 
         fun dispatchSend() {
+            // §model-selection (V1-per-prompt, aligned with official packages/app):
+            // agent is per-session — prefer the session-bound choice, fall back to the
+            // global default. model prefers the per-session stored intended-next-model
+            // (indexed by sessionId, so switch-tab-safe) and falls back to the in-memory
+            // ChatState.currentModel (display-only / inference). Reading these INSIDE
+            // dispatchSend() (not at the top of dispatchSendMessage) so the archived-
+            // session async-unarchive path also reads the freshest values. Both are
+            // attached to THIS prompt's request body, NOT set via a server-side switch
+            // endpoint.
+            val agent = settingsManager.getAgentForSession(sessionId)
+                ?: _settingsFlow.value.selectedAgentName
+            val model: Message.ModelInfo? = settingsManager.getModelForSession(sessionId)
+                ?: _chatFlow.value.currentModel
             launchSendMessage(
                 scope = viewModelScope,
                 repository = repository,
