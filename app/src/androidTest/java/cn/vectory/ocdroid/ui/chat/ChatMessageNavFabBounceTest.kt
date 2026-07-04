@@ -380,7 +380,9 @@ class ChatMessageNavFabBounceTest {
      * (80dp, user messages). User rows at indices 1, 5, 9. From the bottom, UP jumps to a
      * tall-or-mixed region. After the jump the target must be (a) visible, (b) centered per
      * its ACTUAL measured size (offset ≈ (vh - actualSize)/2), proving the instant
-     * scrollToItem(target, realDesired) correction ran — not left at the estimate-based offset.
+     * scrollToItem(target) + centerTarget(animateScrollBy) path ran — not left at the
+     * estimate-based offset (the disproven animateScrollToItem(target, scrollOffset)
+     * approach would have clamped scrollOffset and left target at offset 0).
      *
      * This also guards the regression where someone reintroduces centerTarget(animateScrollBy)
      * in the off-screen branch: with variable heights the estimate-based offset would differ
@@ -463,5 +465,98 @@ class ChatMessageNavFabBounceTest {
                 kotlin.math.abs(off - desired) <= size
             )
         }
+    }
+
+    /**
+     * §fix-nav-onestep (gpter 🔴-2, all reviewers): the off-screen jump must be a SINGLE
+     * scroll-animation session, not two. This is the ONLY behavioral way to catch a
+     * two-step regression (someone reverting to `animateScrollToItem(target) +
+     * centerTarget(animateScrollBy)`), which the final-state assertions above cannot detect
+     * because the final centered position is identical either way.
+     *
+     * Mechanism: `isScrollInProgress` is true only during ANIMATED scrolls
+     * (animateScrollBy / animateScrollToItem). Instant `scrollToItem` does NOT trigger it.
+     * - Current single-step impl: scrollToItem(target) [instant, no isScrollInProgress] +
+     *   centerTarget(animateScrollBy) [1 session] → exactly **1** rising edge.
+     * - Two-step regression: animateScrollToItem(target) [1 session] + centerTarget
+     *   (animateScrollBy) [2nd session] → **2** rising edges → test fails.
+     *
+     * Assertion: after an off-screen UP jump, the number of distinct scroll-animation
+     * sessions must be exactly 1.
+     */
+    @Test
+    fun navFabOffscreenJump_isSingleScrollAnimationSession() {
+        val tag = "chatList"
+        lateinit var listState: androidx.compose.foundation.lazy.LazyListState
+        // Counted inside composition via a snapshotFlow on isScrollInProgress.
+        val sessionCount = java.util.concurrent.atomic.AtomicInteger(0)
+
+        composeRule.setContent {
+            val ls = rememberLazyListState()
+            listState = ls
+            // §fix-nav-session: count rising edges of isScrollInProgress (each animated
+            // scroll = one true→…→false cycle; a rising edge starts a session).
+            LaunchedEffect(ls) {
+                var prev = false
+                snapshotFlow { ls.isScrollInProgress }.collect { progress ->
+                    if (progress && !prev) sessionCount.incrementAndGet()
+                    prev = progress
+                }
+            }
+            Surface(modifier = Modifier.fillMaxSize()) {
+                Box(Modifier.fillMaxSize()) {
+                    LazyColumn(
+                        state = ls,
+                        reverseLayout = true,
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .requiredHeight(400.dp)
+                            .testTag(tag)
+                    ) {
+                        items(30) { idx ->
+                            val isUser = idx in setOf(2, 15, 25)
+                            Box(
+                                Modifier
+                                    .fillMaxSize()
+                                    .height(100.dp)
+                                    .background(if (isUser) Color(0xFFE3F2FD) else Color.White),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Text("${if (isUser) "USER " else ""}item $idx")
+                            }
+                        }
+                    }
+                    ChatMessageNavFab(
+                        listState = ls,
+                        userMessageLcIndices = intArrayOf(2, 15, 25),
+                        visible = true,
+                        onInteract = { },
+                        onNavigateUp = { },
+                        onNavigateBottom = { },
+                        onJumpStart = { },
+                        onJumpEnd = { },
+                        modifier = Modifier.align(Alignment.BottomEnd),
+                    )
+                }
+            }
+        }
+
+        composeRule.waitForIdle()
+        // Reset counter after initial settle (composition / layout may have caused early edges).
+        sessionCount.set(0)
+
+        // Start at bottom, tap UP → off-screen target (skips visible user msg 2, jumps to 15).
+        val startIdx = composeRule.runOnIdle { listState.firstVisibleItemIndex }
+        assertTrue("expected start at bottom, got $startIdx", startIdx == 0)
+
+        composeRule.onNodeWithContentDescription("Previous user message").performClick()
+        composeRule.waitForIdle()
+
+        val sessions = composeRule.runOnIdle { sessionCount.get() }
+        assertTrue(
+            "off-screen UP jump used $sessions scroll-animation sessions (expected 1) — " +
+                "two-step regression detected (animateScrollToItem + animateScrollBy would give 2)",
+            sessions == 1
+        )
     }
 }

@@ -170,25 +170,25 @@ internal fun ChatMessageNavFab(
  * 自动降级为"尽量靠中"（LazyListState 钳制到可滚动范围），等价于用户要求的
  * "空间不足→保持原位不调整"。
  *
- * §fix-nav-onestep（核心）：用 `animateScrollToItem(target, desiredOffset)` **单段**
- * 动画直接滚到居中位置，避免旧实现 `animateScrollToItem(target) + animateScrollBy`
- * 两段动画被用户看到"先滑到底部再跳到中间"。
+ * §fix-nav-onestep（核心，gpter 🔴 / glmer O-1）：离屏分支用**瞬时 scrollToItem(target)
+ * + 单段 animateScrollBy** 居中，确保**只有一段可见动画**，杜绝用户抱怨的"先滑到底部
+ * 再弹到中部"两段式。
  *
- * **硬约束（§fix-nav-onestep / glmer O-1 / gpter 🔴-1）**：离屏分支【禁止】在
- * animateScrollToItem 之后再调 animateScrollBy / centerTarget 做精修——那会引入
- * 第二段可见动画（变高 item 下尤其明显）。落定后的校正只能用瞬时 scrollToItem。
+ * **硬约束**：离屏分支【禁止】调 animateScrollToItem(target)（会逐帧长滑动 = 两段式
+ * 第一段）或 animateScrollToItem(target, scrollOffset)（scrollOffset 语义是"item 起点之后
+ * 滚过的像素"、受 itemSize 上限约束、≠ visibleItemsInfo.offset，变高 item 测试已证伪）。
+ * 离屏分支只能：瞬时 scrollToItem(target) + centerTarget(animateScrollBy)。
  *
  * 步骤：
- *  1. 若 [target] 已可见 → 直接 centerTarget（单段 animateScrollBy 居中微调；target
- *     已实测，无估算误差，单段即精确居中）。
- *  2. 若 [target] 不可见 → 用首个可见 item 尺寸估算 itemSize，算 desiredOffset =
- *     (vh - itemSize)/2，调 animateScrollToItem(target, desiredOffset) 一段直达。
- *     - scrollOffset 语义：item 落定后相对 scroll-start（reverseLayout = 视觉底部）
- *       的 offset = visibleItemsInfo.offset，故传入 desiredOffset 即让 target 居中。
- *  3. 落定后用实测尺寸做【瞬时】scrollToItem(target, realDesired) 校正（非动画）：
- *     等高 item 下 realDesired≈desiredOffset → 无变化；变高 item 下一帧瞬移到精确
- *     居中。绝不产生第二段动画。
- *  4. §hard-guarantee：极端高度突变导致 target 不可见 → scrollToItem(target) 兜底。
+ *  1. 若 [target] 已可见 → 直接 centerTarget（单段 animateScrollBy 居中微调；target 已
+ *     实测，无估算误差，单段即精确居中）。
+ *  2. 若 [target] 不可见 → 瞬时 scrollToItem(target) [一帧，target 到 scroll-start，
+ *     非动画、不触发 isScrollInProgress] → 读 target 实测 offset/size → centerTarget
+ *     单段 animateScrollBy 平滑滚到精确居中。整体只有一段可见动画。
+ *     - reverseLayout 下 animateScrollBy(delta) 使 offset 变化 -delta（正向 delta=向更旧
+ *       滚动=内容下移=offset 减小），故 centerTarget 内 delta = currentOffset - desiredOffset。
+ *  3. §hard-guarantee：centerTarget 内部若极端情况把 target 推出视口 → scrollToItem(target)
+ *     兜底（正常几何不触发）。
  */
 private suspend fun jumpToCenteredListState(
     listState: androidx.compose.foundation.lazy.LazyListState,
