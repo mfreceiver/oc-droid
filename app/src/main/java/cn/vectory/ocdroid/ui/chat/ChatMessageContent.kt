@@ -135,7 +135,7 @@ internal fun ChatMessageList(
     val sessionId = chatState.currentSessionId
 
     val listState = rememberLazyListState()
-    var shouldAutoScroll by remember { mutableStateOf(true) }
+    var followBottom by remember { mutableStateOf(true) }
     // §3-scroll-memory: per-session scroll-position memory is now HOISTED to
     // ChatScreen (above the HorizontalPager) so the pager disposing this
     // composable on a currentSessionId flip no longer drops the cache. The
@@ -177,13 +177,12 @@ internal fun ChatMessageList(
             (if (isLoading) 1 else 0)
     }
 
-    LaunchedEffect(listState) {
-        snapshotFlow {
-            listState.firstVisibleItemIndex == 0 && listState.firstVisibleItemScrollOffset <= 24
-        }.collect { atBottom ->
-            shouldAutoScroll = atBottom
-        }
-    }
+    // §Q4: The former snapshotFlow atBottom tracker that continuously set
+    // followBottom is REMOVED. It caused a feedback latch: programmatic
+    // scrollToItem(0) → index 0 → snapshotFlow emits atBottom=true →
+    // followBottom=true → next contentVersion tick auto-scrolls again.
+    // followBottom is now updated only by real user gestures via the
+    // direction detector (|delta|>3 + pendingRestoreSession guards).
 
     // #3 — continuously mirror the current scroll offset against the active
     // session id. There is no "before session change" hook in Compose, so a
@@ -268,15 +267,51 @@ internal fun ChatMessageList(
                     prevIndex = index
                     return@collect
                 }
+                // §glmer-1: skip when list is empty (slow load race — avoid
+                // false direction from initial -1→0 index jump).
+                if (listState.layoutInfo.totalItemsCount == 0) {
+                    prevIndex = index
+                    return@collect
+                }
                 val delta = index - prevIndex
                 prevIndex = index
                 // Guard: 单帧大跳（auto-scroll 残留 / 极端 fling 边界）。
                 val absDelta = if (delta < 0) -delta else delta
                 if (absDelta > 3) return@collect
                 when {
-                    delta > 0 -> onTabVisibilityChange(true)   // 向上滚（看更旧）→ show
-                    delta < 0 -> onTabVisibilityChange(false)  // 向下滚（看更新）→ hide
+                    delta > 0 -> {
+                        onTabVisibilityChange(true)   // 向上滚（看更旧）→ show
+                        followBottom = false           // §Q4: user scrolled away from bottom
+                    }
+                    delta < 0 -> {
+                        onTabVisibilityChange(false)   // 向下滚（看更新）→ hide
+                        if (index == 0) followBottom = true  // §Q4: scrolled back to bottom
+                    }
                 }
+            }
+    }
+
+    // §Q4-gpter: canScrollBackward tracker — catches within-item-0 scrolls
+    // that the direction detector (which only watches firstVisibleItemIndex)
+    // misses. When the streaming message (index 0) is very tall, the user can
+    // scroll up to read its top while firstVisibleItemIndex stays 0. In that
+    // case canScrollBackward changes from false to true, and we set
+    // followBottom = false.
+    //
+    // ONE-DIRECTIONAL LATCH: this tracker ONLY sets followBottom to false,
+    // never to true. This prevents the programmatic-scroll feedback latch:
+    // scrollToItem(0) → canScrollBackward=false → (if we set true here) →
+    // followBottom=true → next tick auto-scrolls → repeat. The true→false
+    // transition is safe (only happens on real user scroll-away). The
+    // false→true transition is handled by the direction detector (user
+    // scrolls to index 0) or the jump-to-bottom FAB tap.
+    LaunchedEffect(listState, sessionId) {
+        if (sessionId == null) return@LaunchedEffect
+        delay(300)
+        snapshotFlow { listState.canScrollBackward }
+            .collect { canBack ->
+                if (pendingRestoreSession == sessionId) return@collect
+                if (canBack) followBottom = false
             }
     }
 
@@ -290,10 +325,10 @@ internal fun ChatMessageList(
         val saved = sessionId?.let { savedPositions[it] }
         if (saved != null) {
             pendingRestoreSession = sessionId
-            shouldAutoScroll = false
+            followBottom = false
         } else {
             pendingRestoreSession = null
-            shouldAutoScroll = true
+            followBottom = true
         }
     }
 
@@ -306,7 +341,7 @@ internal fun ChatMessageList(
             val saved = savedPositions[restoreFor]
             if (saved != null) {
                 pendingRestoreSession = null
-                shouldAutoScroll = false
+                followBottom = false
                 // 🟡 True LRU (kimo 9.4): a restore is also an "access" — move
                 // this id to the tail so an actively-revisited session is not
                 // evicted by a later sibling-session write.
@@ -321,7 +356,7 @@ internal fun ChatMessageList(
                 // LRU tick between the session-switch (which set
                 // pendingRestoreSession) and this effect firing. Clear the
                 // pending flag and fall through to the follow-bottom branch so
-                // we don't get stuck with shouldAutoScroll=false at whatever
+                // we don't get stuck with followBottom=false at whatever
                 // residual index the listState happens to be on.
                 pendingRestoreSession = null
             }
@@ -338,7 +373,7 @@ internal fun ChatMessageList(
             val key = sr.messageId?.let { "$it|${sr.id}" } ?: "streaming|${sr.id}"
             expandedParts[key] == true
         } == true
-        if (shouldAutoScroll && !streamingReasoningExpanded &&
+        if (followBottom && !streamingReasoningExpanded &&
             (messages.isNotEmpty() || streamingReasoningPart != null)) {
             // 闪屏修复：流式输出（reasoning 进行中 / streamingPartTexts 非空）时
             // 用瞬时 scrollToItem 代替 animateScrollToItem。
@@ -567,6 +602,15 @@ internal fun ChatMessageList(
             modifier = Modifier
                 .align(Alignment.BottomEnd)
                 .padding(end = 12.dp, bottom = 96.dp),
+        )
+        // §Q4: jump-to-bottom FAB — shown when user scrolled away from latest.
+        ChatJumpToBottomFab(
+            visible = !followBottom,
+            listState = listState,
+            onJump = { followBottom = true },
+            modifier = Modifier
+                .align(Alignment.BottomCenter)
+                .padding(bottom = 72.dp),
         )
     }
 }

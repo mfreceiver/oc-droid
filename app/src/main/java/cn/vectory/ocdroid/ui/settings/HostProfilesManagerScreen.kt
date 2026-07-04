@@ -314,7 +314,16 @@ internal fun HostProfileEditorDialog(
                         passwordEdited = true
                         authPassword = it
                     },
-                    placeholder = { Text("（可选）") },
+                    placeholder = {
+                        // Mirror the tunnel-password field: the password is
+                        // write-only (never echoed back), but show masked dots
+                        // when a password is already stored so reopening the
+                        // editor doesn't look like the credential vanished.
+                        Text(
+                            if (initial.basicAuth != null && !passwordEdited) "••••••••"
+                            else "（可选）"
+                        )
+                    },
                     singleLine = true,
                     modifier = Modifier.fillMaxWidth(),
                     visualTransformation = if (showBasicPassword) VisualTransformation.None else PasswordVisualTransformation(),

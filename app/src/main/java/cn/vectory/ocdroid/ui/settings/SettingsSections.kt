@@ -1,6 +1,5 @@
 package cn.vectory.ocdroid.ui.settings
 
-import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -10,20 +9,21 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Dns
+import androidx.compose.material.icons.outlined.Refresh
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.ListItem
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.SegmentedButton
 import androidx.compose.material3.SegmentedButtonDefaults
 import androidx.compose.material3.SingleChoiceSegmentedButtonRow
@@ -57,82 +57,61 @@ internal fun ConnectionProfileSection(
         SectionHeader(title = stringResource(R.string.settings_connection_profile))
     }
 
-    Card(
-        modifier = Modifier.fillMaxWidth(),
-        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
-    ) {
-        Column(modifier = Modifier.padding(16.dp)) {
-            // A3: profile summary collapsed onto an M3 ListItem (leading host
-            // icon, headline = display name, supporting = server URL, trailing
-            // = live connection badge). The Card container and the
-            // "Manage Connections" action below are intentionally kept.
-            ListItem(
-                leadingContent = {
+    ListItem(
+        leadingContent = {
+            Icon(
+                Icons.Default.Dns,
+                contentDescription = null,
+                tint = MaterialTheme.colorScheme.primary
+            )
+        },
+        headlineContent = {
+            Text(
+                profile.displayName,
+                style = MaterialTheme.typography.titleMedium
+            )
+        },
+        supportingContent = {
+            Text(
+                profile.serverUrl,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 1
+            )
+        },
+        trailingContent = {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                if (connectionState.isConnected) {
                     Icon(
-                        Icons.Default.Dns,
+                        Icons.Default.CheckCircle,
                         contentDescription = null,
-                        tint = MaterialTheme.colorScheme.primary
+                        tint = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.size(20.dp)
                     )
-                },
-                headlineContent = {
+                    Spacer(modifier = Modifier.width(4.dp))
                     Text(
-                        profile.displayName,
-                        style = MaterialTheme.typography.titleMedium
+                        stringResource(R.string.settings_connected),
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.primary
                     )
-                },
-                supportingContent = {
-                    Text(
-                        profile.serverUrl,
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        maxLines = 1
-                    )
-                },
-                // Connected badge + version surfaces the live server status on
-                // the right of the profile row. The Test Connection action lives
-                // on the per-row icons inside Manage Connections now, so it is
-                // intentionally not duplicated here.
-                //
-                // §R-17 Stage 3 follow-up: reads isConnected / serverVersion
-                // from the connection-domain slice (ConnectionState) instead of
-                // the whole-app AppState.
-                trailingContent = {
-                    if (connectionState.isConnected) {
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            Icon(
-                                Icons.Default.CheckCircle,
-                                contentDescription = null,
-                                tint = MaterialTheme.colorScheme.primary,
-                                modifier = Modifier.size(20.dp)
-                            )
-                            Spacer(modifier = Modifier.width(4.dp))
-                            Text(
-                                stringResource(R.string.settings_connected),
-                                style = MaterialTheme.typography.labelMedium,
-                                color = MaterialTheme.colorScheme.primary
-                            )
-                            connectionState.serverVersion?.let { version ->
-                                Text(
-                                    " (v$version)",
-                                    style = MaterialTheme.typography.labelSmall,
-                                    color = MaterialTheme.colorScheme.outline
-                                )
-                            }
-                        }
+                    connectionState.serverVersion?.let { version ->
+                        Text(
+                            " (v$version)",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.outline
+                        )
                     }
                 }
-            )
-
-            Spacer(modifier = Modifier.height(16.dp))
-
-            OutlinedButton(
-                onClick = onManageProfiles,
-                modifier = Modifier.fillMaxWidth()
-            ) {
-                Text(stringResource(R.string.settings_manage_profiles))
+                IconButton(onClick = onManageProfiles) {
+                    Icon(
+                        Icons.AutoMirrored.Filled.KeyboardArrowRight,
+                        contentDescription = stringResource(R.string.settings_manage_profiles),
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
             }
         }
-    }
+    )
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -253,37 +232,23 @@ internal fun TrafficSection(
         SectionHeader(title = stringResource(R.string.settings_traffic))
     }
 
-    Card(
-        modifier = Modifier.fillMaxWidth(),
-        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
-    ) {
-        Column(modifier = Modifier.padding(16.dp)) {
-            // Single-line summary: ↑ sent (upload) / ↓ received (download).
-            // No Chinese labels and no total row — the two arrows + formatted
-            // values are enough at a glance.
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(24.dp, Alignment.CenterHorizontally),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Text(
-                    "↑ ${formatBytes(sent)}",
-                    style = MaterialTheme.typography.bodyMedium
+    ListItem(
+        headlineContent = {
+            Text(
+                "↑ ${formatBytes(sent)}   ↓ ${formatBytes(received)}",
+                style = MaterialTheme.typography.bodyMedium
+            )
+        },
+        trailingContent = {
+            IconButton(onClick = onReset) {
+                Icon(
+                    Icons.Outlined.Refresh,
+                    contentDescription = stringResource(R.string.settings_traffic_reset),
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant
                 )
-                Text(
-                    "↓ ${formatBytes(received)}",
-                    style = MaterialTheme.typography.bodyMedium
-                )
-            }
-            Spacer(modifier = Modifier.height(16.dp))
-            OutlinedButton(
-                onClick = onReset,
-                modifier = Modifier.fillMaxWidth()
-            ) {
-                Text(stringResource(R.string.settings_traffic_reset))
             }
         }
-    }
+    )
 }
 
 /**
@@ -399,11 +364,4 @@ internal fun SectionHeader(title: String) {
         style = MaterialTheme.typography.titleMedium
     )
     Spacer(modifier = Modifier.height(16.dp))
-}
-
-@Composable
-internal fun SettingsSectionDivider() {
-    Spacer(modifier = Modifier.height(32.dp))
-    HorizontalDivider()
-    Spacer(modifier = Modifier.height(32.dp))
 }

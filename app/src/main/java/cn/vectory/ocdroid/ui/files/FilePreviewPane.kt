@@ -6,6 +6,7 @@ import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.util.Base64
 import androidx.compose.foundation.Image
+import androidx.compose.foundation.background
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.gestures.rememberTransformableState
 import androidx.compose.foundation.gestures.transformable
@@ -25,7 +26,6 @@ import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -165,34 +165,42 @@ internal fun FilePreviewPane(
             }
         )
 
-        HorizontalDivider()
-
-        when {
-            imagePayload != null -> ImageViewer(bitmap = imagePayload.bitmap)
-            // R-02a: while the image is decoding (or failed to decode) keep the
-            // user on a spinner / placeholder. Without this guard the `when`
-            // would fall through to PreviewPlainText and dump the raw base64
-            // source onto the screen for one or more frames.
-            previewKind == FilePreviewUtils.PreviewContentKind.IMAGE -> ImageDecodePlaceholder()
-            previewKind == FilePreviewUtils.PreviewContentKind.MARKDOWN -> when (markdownPreviewMode) {
-                MarkdownPreviewMode.Web -> MarkdownWebPreviewPane(
-                    content = content,
-                    filePath = path,
-                    repository = repository,
-                    sessionDirectory = sessionDirectory,
-                    onOpenNative = { markdownPreviewMode = MarkdownPreviewMode.Native },
-                    onOpenSource = { markdownPreviewMode = MarkdownPreviewMode.Source }
-                )
-                MarkdownPreviewMode.Native -> PreviewMarkdown(
-                    content = content,
-                    filePath = path,
-                    repository = repository,
-                    sessionDirectory = sessionDirectory
-                )
-                MarkdownPreviewMode.Source -> PreviewPlainText(content = content)
+        // §A-2: replaced the hairline HorizontalDivider under the TopAppBar with
+        // a tonal surface. The body sits on surfaceContainerLow so it reads as
+        // distinct from the TopAppBar's surface without a drawn line.
+        Box(
+            modifier = Modifier
+                .weight(1f)
+                .fillMaxWidth()
+                .background(MaterialTheme.colorScheme.surfaceContainerLow)
+        ) {
+            when {
+                imagePayload != null -> ImageViewer(bitmap = imagePayload.bitmap)
+                // R-02a: while the image is decoding (or failed to decode) keep the
+                // user on a spinner / placeholder. Without this guard the `when`
+                // would fall through to PreviewPlainText and dump the raw base64
+                // source onto the screen for one or more frames.
+                previewKind == FilePreviewUtils.PreviewContentKind.IMAGE -> ImageDecodePlaceholder()
+                previewKind == FilePreviewUtils.PreviewContentKind.MARKDOWN -> when (markdownPreviewMode) {
+                    MarkdownPreviewMode.Web -> MarkdownWebPreviewPane(
+                        content = content,
+                        filePath = path,
+                        repository = repository,
+                        sessionDirectory = sessionDirectory,
+                        onOpenNative = { markdownPreviewMode = MarkdownPreviewMode.Native },
+                        onOpenSource = { markdownPreviewMode = MarkdownPreviewMode.Source }
+                    )
+                    MarkdownPreviewMode.Native -> PreviewMarkdown(
+                        content = content,
+                        filePath = path,
+                        repository = repository,
+                        sessionDirectory = sessionDirectory
+                    )
+                    MarkdownPreviewMode.Source -> PreviewPlainText(content = content)
+                }
+                previewKind == FilePreviewUtils.PreviewContentKind.BINARY -> PreviewBinaryFallback()
+                else -> PreviewPlainText(content = content)
             }
-            previewKind == FilePreviewUtils.PreviewContentKind.BINARY -> PreviewBinaryFallback()
-            else -> PreviewPlainText(content = content)
         }
     }
 }

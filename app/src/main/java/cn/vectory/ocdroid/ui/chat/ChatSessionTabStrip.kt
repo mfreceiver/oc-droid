@@ -32,6 +32,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.PrimaryScrollableTabRow
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Tab
+import androidx.compose.material3.TabRowDefaults
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -54,11 +55,6 @@ import cn.vectory.ocdroid.data.model.TodoItem
 import cn.vectory.ocdroid.ui.ContextUsage
 
 private const val SESSION_TITLE_MAX_CHARS = 15
-
-// Fill opacity for the selected tab background. Kept low so the workdir-hash
-// tint is visible but the title text stays clearly readable on both light and
-// dark surfaces.
-private const val SELECTED_TAB_FILL_ALPHA = 0.22f
 
 // Width constraints for each session tab. The 36dp-high strip is a compact
 // secondary nav row, so tabs should be narrow enough to fit several on screen
@@ -145,11 +141,11 @@ internal fun resolveSessionTabLayout(
  * the hint stays at the previously selected root index, so the strip keeps its
  * current scroll position instead of jumping to the leftmost tab.
  *
- * **Indicator + colours**: the M3 default indicator is disabled
- * (`indicator = {}`); the selected tab self-draws a translucent filled
- * background tinted with the workdir-hash colour ([workdirTone]). Unselected
- * tabs keep their plain background. The selected title text uses theme
- * `onSurface` + SemiBold, unselected uses `onSurfaceVariant`.
+ * **Indicator + colours**: the native M3 [TabRowDefaults.SecondaryIndicator]
+ * is rendered under the active tab, tinted with the workdir-hash colour
+ * ([workdirTone]). Tabs themselves carry no filled background. The selected
+ * title text uses theme `onSurface` + SemiBold, unselected uses
+ * `onSurfaceVariant`.
  *
  * **Tab height**: each `Tab` is constrained to 36dp (via `Modifier.height`)
  * for a compact second-row strip; the inner close-X touch target and icon are
@@ -241,14 +237,22 @@ internal fun SessionTabStrip(
                     // the bar above.
                     containerColor = Color.Transparent,
                     divider = {},
-                    // contentColor tints the (now-empty) default indicator slot
-                    // and the tab ripple; keep the accentColour for consistency.
+                    // contentColor tints the indicator + tab ripple; keep the
+                    // accentColour for consistency.
                     contentColor = accentColor,
-                    // §fix-2: disable the M3 default indicator — the selected tab
-                    // draws a translucent filled background instead of an
-                    // underline, so there is no full-width indicator to span the
-                    // close button.
-                    indicator = {},
+                    // §fix-2: restore the native M3 SecondaryIndicator under the
+                    // active tab. Driven by scrollHintIndex (decoupled from
+                    // sub-agent highlight) so the underline tracks the
+                    // scroll-centre tab. In M3 1.4 the indicator lambda's
+                    // receiver is TabIndicatorScope, so tabIndicatorOffset is a
+                    // scope member (no import) and takes the tabIndex directly.
+                    indicator = {
+                        TabRowDefaults.SecondaryIndicator(
+                            modifier = Modifier.tabIndicatorOffset(scrollHintIndex),
+                            height = 3.dp,
+                            color = accentColor
+                        )
+                    },
                     // Match the former LazyRow's 8dp horizontal content padding
                     // instead of the M3 default 52dp, which would push the
                     // first/last tabs far from the strip edges.
@@ -291,8 +295,8 @@ internal fun SessionTabStrip(
 
 /**
  * Single session tab shared by the scrollable and expanding layouts. The caller
- * supplies the width modifier; everything else (36dp height, selection fill,
- * title + unread dot + close-X content) stays identical in both modes.
+ * supplies the width modifier; everything else (36dp height, title + unread
+ * dot + close-X content) stays identical in both modes.
  */
 @Composable
 private fun SessionTab(
@@ -308,23 +312,14 @@ private fun SessionTab(
         onClick = { actions.onSelectSession(session.id) },
         // Compact 36dp height — this is a secondary nav row, not the primary
         // tab surface. Modifier.height overrides the M3 default 48dp
-        // (heightIn min) by clamping both min and max. §fix-2: selected tabs
-        // get a translucent filled background tinted with the workdir-hash
-        // colour; unselected tabs stay transparent so the strip blends with
-        // the TopAppBar surface.
-        modifier = modifier
-            .height(36.dp)
-            .background(
-                color = if (isSelected) {
-                    accentColor.copy(alpha = SELECTED_TAB_FILL_ALPHA)
-                } else {
-                    Color.Transparent
-                },
-                shape = MaterialTheme.shapes.medium
-            ),
+        // (heightIn min) by clamping both min and max. §fix-2: the native M3
+        // SecondaryIndicator on PrimaryScrollableTabRow now marks the active
+        // tab; SessionTab itself stays background-free so the strip blends
+        // with the TopAppBar surface.
+        modifier = modifier.height(36.dp),
         // §fix-2: text colour stays theme onSurface / onSurfaceVariant (weight
-        // differentiates selection); the hash colour now lives on the filled
-        // tab background + unread dot.
+        // differentiates selection); the hash colour now lives on the indicator
+        // underline + unread dot.
         selectedContentColor = MaterialTheme.colorScheme.onSurface,
         unselectedContentColor = MaterialTheme.colorScheme.onSurfaceVariant,
         text = {

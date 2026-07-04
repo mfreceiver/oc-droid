@@ -141,7 +141,7 @@ fun SettingsScreen(
             )
             Spacer(modifier = Modifier.height(12.dp))
 
-            SettingsSectionDivider()
+            Spacer(modifier = Modifier.height(24.dp))
 
             AppearanceSection(
                 themeMode = themeMode,
@@ -164,7 +164,7 @@ fun SettingsScreen(
                 }
             )
 
-            SettingsSectionDivider()
+            Spacer(modifier = Modifier.height(24.dp))
 
             // ── 调试 (Debug): debug log + danger zone under one header. ──
             SectionHeader(title = stringResource(R.string.settings_section_debug))
@@ -175,7 +175,7 @@ fun SettingsScreen(
                 hideHeader = true
             )
 
-            SettingsSectionDivider()
+            Spacer(modifier = Modifier.height(24.dp))
 
             AboutSection()
         }

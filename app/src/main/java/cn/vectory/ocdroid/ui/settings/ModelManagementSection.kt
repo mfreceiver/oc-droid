@@ -16,9 +16,6 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ChevronRight
 import androidx.compose.material3.AlertDialog
-import androidx.compose.material3.Card
-import androidx.compose.material3.CardDefaults
-import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Switch
@@ -66,19 +63,14 @@ internal fun ModelManagementSection(
 
     val (disabledCount, totalModels) = modelCatalogCounts(providers, disabledModels)
     if (totalModels == 0) {
-        // Inline empty-state card (no dialog to open when there is nothing to
-        // edit).
-        Card(
-            modifier = Modifier.fillMaxWidth(),
-            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
-        ) {
-            Text(
-                stringResource(R.string.settings_model_management_empty),
-                style = MaterialTheme.typography.bodyMedium,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                modifier = Modifier.padding(16.dp)
-            )
-        }
+        // Inline empty-state message (no dialog to open when there is nothing
+        // to edit).
+        Text(
+            stringResource(R.string.settings_model_management_empty),
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.padding(16.dp)
+        )
         return
     }
 
@@ -162,7 +154,7 @@ private fun ModelManagementDialog(
                 catalog.forEachIndexed { providerIndex, provider ->
                     if (providerIndex > 0) {
                         Spacer(modifier = Modifier.height(12.dp))
-                        HorizontalDivider()
+                        Spacer(modifier = Modifier.height(8.dp))
                         Spacer(modifier = Modifier.height(12.dp))
                     }
                     ProviderBlock(

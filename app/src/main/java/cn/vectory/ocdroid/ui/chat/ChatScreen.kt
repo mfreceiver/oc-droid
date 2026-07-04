@@ -20,7 +20,6 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
@@ -568,11 +567,6 @@ fun ChatScreen(
             onContextCompact = onContextCompact
         )
 
-        // Thin separator between the top bar (session tabs) and the chat area.
-        // On phone the chat-area Surface has 0dp shadow elevation, so without
-        // this divider the boundary reads as ambiguous.
-        HorizontalDivider(color = MaterialTheme.colorScheme.outline)
-
         // In draft mode (no session yet but a workdir has been chosen), the
         // chat area is intentionally empty — the user is mid-composition and
         // the session will materialise on first send. We do not render the
@@ -599,7 +593,7 @@ fun ChatScreen(
                 .weight(1f)
                 .fillMaxWidth()
                 .then(if (isWide) Modifier.padding(8.dp) else Modifier),
-            color = MaterialTheme.colorScheme.surface,
+            color = MaterialTheme.colorScheme.surfaceContainerLow,
             shape = cardShape,
             shadowElevation = if (isWide) 2.dp else 0.dp,
             tonalElevation = if (isWide) 1.dp else 0.dp
