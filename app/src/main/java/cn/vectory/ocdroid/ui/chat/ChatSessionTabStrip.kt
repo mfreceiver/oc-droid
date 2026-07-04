@@ -7,6 +7,7 @@ package cn.vectory.ocdroid.ui.chat
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Row
@@ -45,7 +46,6 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
@@ -331,44 +331,53 @@ private fun SessionTab(
                         ?: MaterialTheme.colorScheme.primary
                     Box(
                         modifier = Modifier
-                            .padding(end = 5.dp)
+                            .padding(end = 4.dp)
                             .size(5.dp)
                             .background(color = dotColor, shape = CircleShape)
                     )
                 }
-                // §chat-session-tab-selected: vertical accent bar that replaces
-                // the removed underline + translucent fill. Always rendered as a
-                // constant-width placeholder (3dp + padding) so the Row's total
-                // width never changes when isSelected flips — the centered title
-                // keeps a stable container and start position, no horizontal
-                // jitter. Visually "shown when selected, transparent when not",
-                // keeping the crisp active signal.
-                Box(
-                    modifier = Modifier
-                        .padding(start = if (session.id in unreadSessions) 3.dp else 0.dp, end = 6.dp)
-                        .width(3.dp)
-                        .height(16.dp)
-                        .clip(RoundedCornerShape(2.dp))
-                        .background(if (isSelected) accentColor else Color.Transparent)
-                )
-                Text(
-                    // The tab label bypasses the shared 15-char cap used by
-                    // ChatTopBar's breadcrumb: the tab's width is now the
-                    // limiting factor, so we let the text fill that width and
-                    // rely on maxLines=1 + TextOverflow.Ellipsis for genuine
-                    // overflow truncation. This gives wide tabs a longer title
-                    // and keeps the close-X pinned to the right edge.
-                    text = session.displayName,
+                // §chat-session-tab-selected: the title + vertical accent bar
+                // form a single centred group. The bar sits immediately left
+                // of the text (4dp gap) so it reads as part of the label, not
+                // as a detached strip at the tab edge. The group is centred
+                // within the remaining middle space, while the unread dot and
+                // close-X stay pinned to the outer edges.
+                Row(
                     modifier = Modifier.weight(1f),
-                    textAlign = TextAlign.Center,
-                    style = MaterialTheme.typography.labelMedium,
-                    color = if (isSelected) MaterialTheme.colorScheme.onSurface
-                    else MaterialTheme.colorScheme.onSurfaceVariant,
-                    fontWeight = if (isSelected) FontWeight.Bold
-                    else FontWeight.Normal,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis
-                )
+                    horizontalArrangement = Arrangement.Center,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    // Vertical accent bar that replaces the removed underline +
+                    // translucent fill. Always rendered as a constant-width
+                    // placeholder so the group's total width never changes when
+                    // isSelected flips — the title keeps a stable position, no
+                    // horizontal jitter. Visually "shown when selected,
+                    // transparent when not", keeping the crisp active signal.
+                    Box(
+                        modifier = Modifier
+                            .width(3.dp)
+                            .height(16.dp)
+                            .clip(RoundedCornerShape(2.dp))
+                            .background(if (isSelected) accentColor else Color.Transparent)
+                    )
+                    Spacer(modifier = Modifier.width(4.dp))
+                    Text(
+                        // The tab label bypasses the shared 15-char cap used by
+                        // ChatTopBar's breadcrumb: the tab's width is now the
+                        // limiting factor, so we let the text fill that width and
+                        // rely on maxLines=1 + TextOverflow.Ellipsis for genuine
+                        // overflow truncation. This gives wide tabs a longer title
+                        // and keeps the close-X pinned to the right edge.
+                        text = session.displayName,
+                        style = MaterialTheme.typography.labelMedium,
+                        color = if (isSelected) MaterialTheme.colorScheme.onSurface
+                        else MaterialTheme.colorScheme.onSurfaceVariant,
+                        fontWeight = if (isSelected) FontWeight.Bold
+                        else FontWeight.Normal,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                }
                 Spacer(modifier = Modifier.width(2.dp))
                 // §fix-3: compact close affordance. 24dp touch target is a
                 // deliberate compromise — noticeably narrower than the prior
