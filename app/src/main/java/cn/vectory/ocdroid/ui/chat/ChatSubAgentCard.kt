@@ -340,7 +340,7 @@ internal fun CompletedTaskCard(
     Surface(
         modifier = modifier.padding(vertical = 2.dp),
         shape = RectangleShape,
-        color = Color.Transparent
+        color = if (expanded) MaterialTheme.colorScheme.surfaceContainerLow else Color.Transparent
     ) {
         Column(modifier = Modifier.animateContentSize(AppMotion.expandSizeSpec)) {
             Row(

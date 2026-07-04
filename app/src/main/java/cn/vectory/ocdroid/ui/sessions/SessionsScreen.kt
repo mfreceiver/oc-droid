@@ -13,12 +13,12 @@ import androidx.compose.material.icons.automirrored.filled.Chat
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.AddComment
 import androidx.compose.material.icons.filled.Archive
+import androidx.compose.material.icons.filled.CreateNewFolder
 import androidx.compose.material.icons.filled.FolderOpen
 import androidx.compose.material.icons.filled.Forum
 import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.Inbox
 import androidx.compose.material.icons.filled.KeyboardArrowDown
-import androidx.compose.material.icons.filled.LibraryAdd
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -206,18 +206,6 @@ fun SessionsScreen(
                             )
                         }
                     }
-                },
-                actions = {
-                    // Connect-new-project affordance lives in the TopAppBar so
-                    // it is reachable from anywhere on the Sessions page (no
-                    // matter whether the workdir list is empty or populated).
-                    IconButton(onClick = { showNewWorkdirDialog = true }) {
-                        Icon(
-                            Icons.Default.LibraryAdd,
-                            contentDescription = stringResource(R.string.sessions_connect_new_action),
-                            tint = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                    }
                 }
             )
         }
@@ -257,7 +245,18 @@ fun SessionsScreen(
             item(key = "workdirs_header") {
                 SectionHeader(
                     icon = Icons.Default.Inbox,
-                    title = stringResource(R.string.sessions_tab_workdirs)
+                    title = stringResource(R.string.sessions_tab_workdirs),
+                    trailing = {
+                        // §entry-relocate: "连接新项目"入口从 TopAppBar 移到此处，
+                        // 图标换 CreateNewFolder（文件夹+加号，"添加目录"语义最清晰）。
+                        IconButton(onClick = { showNewWorkdirDialog = true }) {
+                            Icon(
+                                Icons.Default.CreateNewFolder,
+                                contentDescription = stringResource(R.string.sessions_connect_new_action),
+                                tint = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                    }
                 )
             }
 
@@ -493,7 +492,11 @@ fun SessionsScreen(
 }
 
 @Composable
-private fun SectionHeader(icon: androidx.compose.ui.graphics.vector.ImageVector, title: String) {
+private fun SectionHeader(
+    icon: androidx.compose.ui.graphics.vector.ImageVector,
+    title: String,
+    trailing: @Composable (() -> Unit)? = null,
+) {
     Row(
         modifier = Modifier
             .fillMaxWidth()
@@ -512,6 +515,13 @@ private fun SectionHeader(icon: androidx.compose.ui.graphics.vector.ImageVector,
             style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.SemiBold),
             color = MaterialTheme.colorScheme.onSurface
         )
+        // §entry-relocate: 把"连接新项目"入口从 TopAppBar 移到"已连接的项目"
+        // 标题行尾部，语义更清晰（紧邻它所作用的对象）。trailing 槽可选，其它
+        // SectionHeader 不传 → 行为不变。
+        if (trailing != null) {
+            Spacer(modifier = Modifier.weight(1f))
+            trailing()
+        }
     }
 }
 

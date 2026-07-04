@@ -114,7 +114,7 @@ internal fun MultiFilePatchAccordion(
             .padding(vertical = 2.dp)
             .testTag("toolcard.multi_patch.${files.size}"),
         shape = RectangleShape,
-        color = Color.Transparent
+        color = if (expanded) MaterialTheme.colorScheme.surfaceContainerLow else Color.Transparent
     ) {
         Column(modifier = Modifier.then(if (isRunning) Modifier else Modifier.animateContentSize(AppMotion.expandSizeSpec))) {
             // Header: "N files" + aggregate +N -M + expand/collapse-all toggle.
@@ -125,32 +125,37 @@ internal fun MultiFilePatchAccordion(
                     .clickable { expanded = !expanded },
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                Icon(
-                    Icons.Default.Edit,
-                    contentDescription = null,
-                    modifier = Modifier.size(14.dp),
-                    tint = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-                Spacer(modifier = Modifier.width(6.dp))
-                Text(
-                    text = toolLabel,
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    maxLines = 1
-                )
-                Text(
-                    text = " · ",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-                Text(
-                    text = "${files.size} files",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurface,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier.weight(1f, fill = false)
-                )
+                Row(
+                    modifier = Modifier.weight(1f, fill = false),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Icon(
+                        Icons.Default.Edit,
+                        contentDescription = null,
+                        modifier = Modifier.size(14.dp),
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Text(
+                        text = toolLabel,
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 1
+                    )
+                    Text(
+                        text = " · ",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Text(
+                        text = "${files.size} files",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurface,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                }
+                Spacer(modifier = Modifier.weight(1f))
                 if (totalAdd > 0) {
                     Spacer(modifier = Modifier.width(6.dp))
                     Text(
@@ -169,7 +174,6 @@ internal fun MultiFilePatchAccordion(
                         fontFamily = BundledMonoFamily
                     )
                 }
-                Spacer(modifier = Modifier.weight(1f))
                 Icon(
                     if (expanded) Icons.Default.KeyboardArrowDown else Icons.Default.ChevronRight,
                     contentDescription = if (expanded) "Collapse all" else "Expand all",

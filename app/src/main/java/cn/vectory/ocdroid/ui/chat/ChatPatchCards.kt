@@ -111,7 +111,7 @@ internal fun PatchCard(
             .padding(vertical = 2.dp)
             .testTag("toolcard.patch.$basename"),
         shape = RectangleShape,
-        color = Color.Transparent
+        color = if (expanded) MaterialTheme.colorScheme.surfaceContainerLow else Color.Transparent
     ) {
         Column(modifier = Modifier.then(if (isRunning) Modifier else Modifier.animateContentSize(AppMotion.expandSizeSpec))) {
             Row(
@@ -260,7 +260,7 @@ internal fun ContextToolGroup(
     Surface(
         modifier = modifier.padding(vertical = 2.dp),
         shape = RectangleShape,
-        color = Color.Transparent
+        color = if (expanded) MaterialTheme.colorScheme.surfaceContainerLow else Color.Transparent
     ) {
         Column(modifier = Modifier.then(if (isRunning) Modifier else Modifier.animateContentSize(AppMotion.expandSizeSpec))) {
             Row(

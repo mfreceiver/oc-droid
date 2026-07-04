@@ -149,7 +149,7 @@ internal fun ToolCard(
     Surface(
         modifier = modifier.padding(vertical = 2.dp),
         shape = RectangleShape,
-        color = Color.Transparent
+        color = if (expanded) MaterialTheme.colorScheme.surfaceContainerLow else Color.Transparent
     ) {
         CompositionLocalProvider(LocalContentColor provides MaterialTheme.colorScheme.onSurfaceVariant) {
             Column(modifier = Modifier.padding(horizontal = 8.dp, vertical = 8.dp).then(if (isRunning) Modifier else Modifier.animateContentSize(AppMotion.expandSizeSpec))) {
@@ -362,7 +362,7 @@ internal fun BasicTool(
     Surface(
         modifier = modifier.padding(vertical = 2.dp),
         shape = RectangleShape,
-        color = Color.Transparent
+        color = if (expanded && canExpand) MaterialTheme.colorScheme.surfaceContainerLow else Color.Transparent
     ) {
         Column(modifier = Modifier.then(if (isRunning) Modifier else Modifier.animateContentSize(AppMotion.expandSizeSpec))) {
             Row(

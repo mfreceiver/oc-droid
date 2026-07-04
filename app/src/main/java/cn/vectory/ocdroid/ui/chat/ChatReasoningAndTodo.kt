@@ -171,7 +171,7 @@ internal fun ReasoningCard(
                 Surface(
                     modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 2.dp),
                     shape = RectangleShape,
-                    color = Color.Transparent
+                    color = MaterialTheme.colorScheme.surfaceContainerLow
                 ) {
                     // Cap the body height + scroll so long streaming reasoning
                     // never overflows the screen (the "内容外溢" symptom) WHILE
