@@ -166,12 +166,12 @@ internal fun ChatMessageNavFab(
 }
 
 /**
- * §fix-nav-center: 跳转到 [target] 并尽量把它居中到视口中部；列表两端空间不足时
- * 自动降级为"尽量靠中"（LazyListState 钳制到可滚动范围），等价于用户要求的
- * "空间不足→保持原位不调整"。
+ * §fix-nav-top: 跳转到 [target] 并把它置顶到视口**视觉顶端**（回复在其下方铺开）；
+ * 列表空间不足时自动降级为"尽量靠顶"（LazyListState 钳制到可滚动范围），等价于
+ * 用户要求的"空间不足→保持原位不调整"。
  *
  * §fix-nav-onestep（核心，gpter 🔴 / glmer O-1）：离屏分支用**瞬时 scrollToItem(target)
- * + 单段 animateScrollBy** 居中，确保**只有一段可见动画**，杜绝用户抱怨的"先滑到底部
+ * + 单段 animateScrollBy** 置顶，确保**只有一段可见动画**，杜绝用户抱怨的"先滑到底部
  * 再弹到中部"两段式。
  *
  * **硬约束**：离屏分支【禁止】调 animateScrollToItem(target)（会逐帧长滑动 = 两段式
@@ -180,11 +180,11 @@ internal fun ChatMessageNavFab(
  * 离屏分支只能：瞬时 scrollToItem(target) + centerTarget(animateScrollBy)。
  *
  * 步骤：
- *  1. 若 [target] 已可见 → 直接 centerTarget（单段 animateScrollBy 居中微调；target 已
- *     实测，无估算误差，单段即精确居中）。
+ *  1. 若 [target] 已可见 → 直接 centerTarget（单段 animateScrollBy 置顶微调；target 已
+ *     实测，无估算误差，单段即精确置顶）。
  *  2. 若 [target] 不可见 → 瞬时 scrollToItem(target) [一帧，target 到 scroll-start，
  *     非动画、不触发 isScrollInProgress] → 读 target 实测 offset/size → centerTarget
- *     单段 animateScrollBy 平滑滚到精确居中。整体只有一段可见动画。
+ *     单段 animateScrollBy 平滑滚到精确置顶。整体只有一段可见动画。
  *     - reverseLayout 下 animateScrollBy(delta) 使 offset 变化 -delta（正向 delta=向更旧
  *       滚动=内容下移=offset 减小），故 centerTarget 内 delta = currentOffset - desiredOffset。
  *  3. §hard-guarantee：centerTarget 内部若极端情况把 target 推出视口 → scrollToItem(target)
@@ -225,22 +225,23 @@ private suspend fun jumpToCenteredListState(
 }
 
 /**
- * §fix-nav-center: 把 [target] 平滑滚动到视口中部。
+ * §fix-nav-top: 把 [target] 平滑滚动到视口**视觉顶端**（紧贴上沿，回复在其下方铺开）。
  *
  * @param currentOffset target 当前相对视口（reverseLayout 下从视觉底部起算）的偏移（px）。
  * @param itemSize target 的实测高度（px）。
  * @param viewportHeight 视口主轴高度（px）。
  *
- * 居中目标：desiredOffset = (viewportHeight - itemSize) / 2。
+ * 置顶目标：desiredOffset = viewportHeight - itemSize（target 顶边贴视口顶端，
+ * offset 从底部起算 = vh - itemSize）。target 占据顶部 itemSize 像素，下方剩余空间
+ * 显示更新的内容（reverseLayout 下更新=视觉下方=助手回复），便于阅读。
  *
  * §fix-nav-sign（核心）：reverseLayout 下 `animateScrollBy(delta)` 与 item offset **反向**
  * ——正向 delta（scrollOffset 增大 / 向更旧滚动）会让内容整体下移、item 的 offset **减小**。
  * 即 offset_change = -delta。因此要把 offset 从 currentOffset 改到 desiredOffset，需：
  *   -delta = desiredOffset - currentOffset  →  delta = currentOffset - desiredOffset
- * 旧代码误用 `animateScrollBy(desiredOffset - currentOffset)`（正向），把 target 推出
- * 视口（offset 变负 / 越过顶部），触发硬保证 scrollToItem 回弹（"滑到底→再滑一点→弹回"症状）。
  *
- * LazyListState 自动钳制 delta 到可滚动范围——两端空间不足时 target 停在"尽量靠中"的位置。
+ * LazyListState 自动钳制 delta 到可滚动范围——目标靠近最新端、下方更新内容不足以
+ * 填满视口时，target 停在"尽量靠顶"的位置（"空间不足→保持原位"语义）。
  */
 private suspend fun centerTarget(
     listState: androidx.compose.foundation.lazy.LazyListState,
@@ -249,13 +250,13 @@ private suspend fun centerTarget(
     itemSize: Float,
     viewportHeight: Float,
 ) {
-    if (itemSize <= 0f || itemSize >= viewportHeight) return // 比视口还高 → 无法居中，保留原位
-    val desiredOffset = (viewportHeight - itemSize) / 2f
+    if (itemSize <= 0f || itemSize >= viewportHeight) return // 比视口还高 → 无法置顶，保留原位
+    val desiredOffset = viewportHeight - itemSize // §fix-nav-top: 置顶（非居中）
     // §fix-nav-sign: delta = currentOffset - desiredOffset（reverseLayout 反向）。
     val delta = currentOffset - desiredOffset
-    if (abs(delta) < 1f) return // 已足够居中
+    if (abs(delta) < 1f) return // 已在置顶位置
     listState.animateScrollBy(delta)
-    // §hard-guarantee: 变高 item 下居中量近似，极端情况可能把 target 推出视口。
+    // §hard-guarantee: 变高 item / 钳制边界极端情况可能把 target 推出视口。
     if (listState.layoutInfo.visibleItemsInfo.none { it.index == target }) {
         listState.scrollToItem(target)
     }

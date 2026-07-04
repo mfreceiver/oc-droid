@@ -199,31 +199,27 @@ class ChatMessageNavFabBounceTest {
         composeRule.onNodeWithContentDescription("Previous user message").performClick()
         composeRule.waitForIdle()
 
-        // Record whichever user message the jump actually centered (adaptive —
-        // robust to cursor-logic changes, §fix-nav-cursor).
+        // Record whichever user message the jump actually placed at the TOP
+        // (adaptive — robust to cursor-logic changes, §fix-nav-cursor / §fix-nav-top).
         val userIndices = setOf(2, 15, 25)
-        val centeredUser = composeRule.runOnIdle {
-            val vh = listState.layoutInfo.viewportSize.height.toFloat()
-            val half = vh / 2f
+        val jumpedUser = composeRule.runOnIdle {
+            // §fix-nav-top: the jumped target sits at the visual top = largest offset.
             listState.layoutInfo.visibleItemsInfo
                 .filter { it.index in userIndices }
-                .minByOrNull { info ->
-                    val c = info.offset + info.size / 2f
-                    if (c >= half) c - half else half - c
-                }?.index
+                .maxByOrNull { it.offset }?.index
         }
-        assertTrue("no user message centered after up-jump", centeredUser != null)
+        assertTrue("no user message at top after up-jump", jumpedUser != null)
 
         // 4. Simulate a streaming token → restarts the contentVersion effect.
         //    Pre-fix: tracker re-arms followBottom=true → effect scrollToItem(0) →
-        //    centered user pushed off-screen = BOUNCE.
+        //    jumped user pushed off-screen = BOUNCE.
         //    Post-fix: navJumpDepth guard + navPinnedAway latch keep followBottom=false
-        //    → effect skips → centered user stays visible.
+        //    → effect skips → jumped user stays visible.
         composeRule.runOnIdle { contentVersion++ }
         composeRule.waitForIdle()
 
         val targetVisible = composeRule.runOnIdle {
-            listState.layoutInfo.visibleItemsInfo.any { it.index == centeredUser }
+            listState.layoutInfo.visibleItemsInfo.any { it.index == jumpedUser }
         }
         val fbAfter = composeRule.runOnIdle { followBottom }
 
@@ -231,7 +227,7 @@ class ChatMessageNavFabBounceTest {
         // (a) the centered user message is still on screen (no bounce), and
         // (b) followBottom was NOT re-armed by the tracker (the R-2 latch fix).
         assertTrue(
-            "NavFab up-jump bounced — centered user $centeredUser not visible after content tick (followBottom=$fbAfter)",
+            "NavFab up-jump bounced — jumped user $jumpedUser not visible after content tick (followBottom=$fbAfter)",
             targetVisible
         )
         assertTrue(
@@ -305,14 +301,10 @@ class ChatMessageNavFabBounceTest {
         composeRule.waitForIdle()
 
         fun centeredUser(): Int? = composeRule.runOnIdle {
-            val vh = listState.layoutInfo.viewportSize.height.toFloat()
-            val half = vh / 2f
+            // §fix-nav-top: the jumped target sits at the visual top = largest offset.
             listState.layoutInfo.visibleItemsInfo
                 .filter { it.index in userIndices }
-                .minByOrNull { info ->
-                    val c = info.offset + info.size / 2f
-                    if (c >= half) c - half else half - c
-                }?.index
+                .maxByOrNull { it.offset }?.index
         }
 
         // Start at bottom.
@@ -362,10 +354,11 @@ class ChatMessageNavFabBounceTest {
         }
         val (vh, off1, size1) = centeredOffsetInfo
         if (off1 != null && size1 != null && vh > 0f) {
-            val desired = (vh - size1) / 2f
-            val tol = size1   // generous: within one item height of center
+            // §fix-nav-top: target should be at the visual TOP (offset ≈ vh - size), not centered.
+            val desired = vh - size1
+            val tol = size1   // generous: within one item height of top
             assertTrue(
-                "UP #1 target $after1 not centered — offset=$off1 desired=$desired vh=$vh (sign-bug regression: target pinned at edge then bounced)",
+                "UP #1 target $after1 not at top — offset=$off1 desired=$desired vh=$vh (sign-bug regression: target pinned at bottom then bounced)",
                 kotlin.math.abs(off1 - desired) <= tol
             )
         }
@@ -456,12 +449,12 @@ class ChatMessageNavFabBounceTest {
         val (vh, off, size) = landed
         assertTrue("no user message visible after variable-height UP jump", off != null && size != null)
         if (vh > 0f && off != null && size != null) {
-            val desired = (vh - size) / 2f
-            // Tolerance: within the item's own height (80dp user msg). The instant scrollToItem
-            // correction should land very close to exact center; a large deviation means the
-            // correction was skipped (target left at estimate-based offset = un-refined).
+            // §fix-nav-top: target should be at the visual TOP (offset ≈ vh - size).
+            val desired = vh - size
+            // Tolerance: within the item's own height. The instant scrollToItem + animateScrollBy
+            // should land near exact top; a large deviation means the correction was skipped.
             assertTrue(
-                "variable-height UP jump target not centered by actual size — offset=$off desired=$desired size=$size vh=$vh (instant-correction regression)",
+                "variable-height UP jump target not at top — offset=$off desired=$desired size=$size vh=$vh (instant-correction regression)",
                 kotlin.math.abs(off - desired) <= size
             )
         }
