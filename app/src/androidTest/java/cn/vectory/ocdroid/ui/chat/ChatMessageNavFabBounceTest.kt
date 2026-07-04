@@ -76,6 +76,7 @@ class ChatMessageNavFabBounceTest {
                         listState = ls,
                         visible = true,
                         onJump = { },
+                        onJumpDone = { },
                         modifier = Modifier.align(Alignment.BottomEnd),
                     )
                 }

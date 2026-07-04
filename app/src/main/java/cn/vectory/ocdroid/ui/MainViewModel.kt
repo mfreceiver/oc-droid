@@ -840,8 +840,12 @@ class MainViewModel @Inject constructor(
      * host 时表单密码为空——此时回退到已保存的密码（按 profileId 从加密存储读出），
      * 使"改了 URL 但没重输密码"的场景也能正确带 Basic Auth 测试。
      *
-     * @param profileId 正在编辑的 host profile id（新建时传 null）。仅当表单 password
-     *  为空时用它回退查已保存密码。
+     * §fix-401-credential (gpter 🔴): 仅当用户**未编辑密码字段**（passwordEdited=false）
+     * 时才回退已保存密码。用户主动清空/修改密码时（passwordEdited=true）用表单值
+     * （可能为 null = 无 auth）——避免把已保存凭据误发到用户改过的新 URL（安全）。
+     *
+     * @param profileId 正在编辑的 host profile id（新建时传 null）。
+     * @param passwordEdited 用户是否动过密码输入框（区分"未碰"与"主动清空"）。
      */
     fun testConnectionForm(
         baseUrl: String,
@@ -849,12 +853,13 @@ class MainViewModel @Inject constructor(
         password: String?,
         allowInsecure: Boolean,
         profileId: String?,
+        passwordEdited: Boolean,
         onResult: (success: Boolean, message: String) -> Unit
     ) {
         viewModelScope.launch {
-            // §fix-401: 表单密码为空 + 在编辑已有 profile → 回退已保存密码。
-            val effectivePassword = password
-                ?: profileId?.let { settingsManager.basicAuthPassword(it) }
+            val effectivePassword = resolveTestConnectionPassword(
+                password, passwordEdited, profileId
+            ) { settingsManager.basicAuthPassword(it) }
             val result = repository.checkHealthFor(baseUrl, username, effectivePassword, allowInsecure)
             result
                 .onSuccess { health ->
@@ -2072,4 +2077,25 @@ class MainViewModel @Inject constructor(
         // R-16 M2b: SESSION_WINDOW_CACHE_CAPACITY moved to
         // SessionSwitcher.companion (the cache now lives there).
     }
+}
+
+/**
+ * §fix-401-credential (gpter 🔴): 纯函数——解析"测试连接"应使用的有效密码。
+ *
+ * 规则（区分"未碰密码框"与"主动清空"，避免凭据泄漏）：
+ *  - passwordEdited=true（用户动过框）→ 用表单值（可能 null = 无 auth）。**不回退**已保存
+ *    密码——避免用户改了 URL/清空密码后仍把旧凭据发到新地址。
+ *  - passwordEdited=false（未碰，编辑已有 host 时的常态）→ 表单值为空 → 回退已保存密码
+ *    （write-only 字段不回填，"改 URL 不重输密码"也能正确带 Basic Auth 测试）。
+ *
+ * 抽成顶层纯函数便于单测覆盖凭据路径（曾实际出 401 的安全敏感逻辑）。
+ */
+internal fun resolveTestConnectionPassword(
+    formPassword: String?,
+    passwordEdited: Boolean,
+    profileId: String?,
+    savedPasswordLookup: (String) -> String?,
+): String? = when {
+    passwordEdited -> formPassword
+    else -> formPassword ?: profileId?.let { savedPasswordLookup(it) }
 }

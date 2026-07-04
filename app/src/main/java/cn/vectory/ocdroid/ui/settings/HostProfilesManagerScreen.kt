@@ -128,10 +128,11 @@ internal fun HostProfilesManagerScreen(
                 editingProfile = null
             },
             // §user-req + §fix-401: 表单"测试连接"按钮直连 MainViewModel.testConnectionForm。
-            // 密码 write-only 不回填表单；编辑已有 host 时表单密码为空，VM 据 profileId
-            // 回退查已保存密码，使"改 URL 不重输密码"也能正确带 Basic Auth 测试。
-            onTestConnection = { url, user, pass, insecure, profileId, callback ->
-                viewModel.testConnectionForm(url, user, pass, insecure, profileId, callback)
+            // 密码 write-only 不回填表单；编辑已有 host 且未碰密码框时 VM 据 profileId
+            // 回退查已保存密码。用户主动清空/改密码（passwordEdited=true）则按表单值测，
+            // 不回退旧凭据（安全）。
+            onTestConnection = { url, user, pass, insecure, profileId, passwordEdited, callback ->
+                viewModel.testConnectionForm(url, user, pass, insecure, profileId, passwordEdited, callback)
             }
         )
     }
@@ -274,8 +275,9 @@ internal fun HostProfileEditorDialog(
         password: String?,
         allowInsecure: Boolean,
         profileId: String?,
+        passwordEdited: Boolean,
         onResult: (Boolean, String) -> Unit
-    ) -> Unit = { _, _, _, _, _, _ -> }
+    ) -> Unit = { _, _, _, _, _, _, _ -> }
 ) {
     var name by remember(initial.id) { mutableStateOf(initial.name) }
     var serverUrl by remember(initial.id) { mutableStateOf(initial.serverUrl) }
@@ -426,7 +428,10 @@ internal fun HostProfileEditorDialog(
                             allowInsecure,
                             // §fix-401: 编辑已有 profile 且未改密码时，表单密码为空——
                             // 传 profileId 让 VM 回退查已保存密码（write-only 字段不回填）。
-                            initial.id.takeIf { initial.basicAuth != null }
+                            initial.id.takeIf { initial.basicAuth != null },
+                            // §fix-401-credential (gpter 🔴): 区分"未碰密码框"与"主动清空"——
+                            // 仅未碰时回退已保存密码；主动清空则按无 auth 测试（不发旧凭据）。
+                            passwordEdited
                         ) { success, msg ->
                             isTesting = false
                             testStatus = success to msg
@@ -452,12 +457,8 @@ internal fun HostProfileEditorDialog(
                         modifier = Modifier.padding(top = 4.dp)
                     )
                 }
-                Text(
-                    text = "编辑已有配置时请重新输入密码后再测试",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    modifier = Modifier.padding(top = 2.dp)
-                )
+                // §fix-401: 旧提示"编辑已有配置时请重新输入密码后再测试"已移除——
+                // 现在 VM 会在未编辑密码时自动回退已保存密码，无需用户重输。
             }
         },
         // Bottom action row: [Delete(red)] ... [Cancel] [Save].

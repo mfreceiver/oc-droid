@@ -142,6 +142,10 @@ internal fun ChatMessageList(
     // 往最新方向滚）时浮现；按一次、到底部、或静置 3s 后隐藏（见下方各 effect）。
     var navFabVisible by remember { mutableStateOf(false) }
     var navFabTick by remember { mutableIntStateOf(0) }
+    // §navfab-guard: NavFab 跳到最新动画进行中标志。置位期间方向检测器跳过——避免
+    // NavFab 自己的 animateScrollToItem(0)（每帧 delta<0）被误判为"用户向新滑动"
+    // 而重新点亮按钮（按下后闪烁/重现）。按下时 onJump 置位、动画 finally 清零。
+    var navJumping by remember { mutableStateOf(false) }
     // §3-scroll-memory: per-session scroll-position memory is now HOISTED to
     // ChatScreen (above the HorizontalPager) so the pager disposing this
     // composable on a currentSessionId flip no longer drops the cache. The
@@ -269,6 +273,11 @@ internal fun ChatMessageList(
         var prevIndex = listState.firstVisibleItemIndex
         snapshotFlow { listState.firstVisibleItemIndex }
             .collect { index ->
+                // §navfab-guard: NavFab 跳转动画期间忽略——避免程序化滚动被误判为手势。
+                if (navJumping) {
+                    prevIndex = index
+                    return@collect
+                }
                 // Guard: saved-position restore 期间的程序化滚动不计入方向判断。
                 if (pendingRestoreSession == sessionId) {
                     prevIndex = index
@@ -289,6 +298,8 @@ internal fun ChatMessageList(
                     delta > 0 -> {
                         onTabVisibilityChange(true)   // 向上滚（看更旧）→ show
                         followBottom = false           // §Q4: user scrolled away from bottom
+                        // §navfab-redesign: 向旧滑动 → 隐藏"跳到最新"（仅向新滑动时浮现）。
+                        navFabVisible = false
                     }
                     delta < 0 -> {
                         onTabVisibilityChange(false)   // 向下滚（看更新）→ hide
@@ -444,9 +455,7 @@ internal fun ChatMessageList(
     // 不变的情况；但 streamingPartTexts 在 SSE 流式时每 ~100ms 变化（SessionSync
     // 每次 emit 新 Map），仍会触发 reversedMessages 重建。这是预期的——重建是 O(n)
     // 单遍 filterNot，100 条消息下 ~10-20μs，远低于 LazyColumn item 渲染成本，可
-    // 忽略（评审 maxer/gpter 实测确认）。userMessageLcIndices 的 O(n²) indexOf 已
-    // 改为单遍 withIndex（真线性），是该热路径上唯一的算法性优化。
-    val streamingOffset = if (streamingReasoningPart != null) 1 else 0
+    // 忽略（评审 maxer/gpter 实测确认）。
     val reversedMessages = remember(messages, partsByMessage, streamingPartTexts, streamingReasoningPart, sessionIsRunning) {
         messages.reversed().filterNot { msg ->
             val msgParts = partsByMessage[msg.id].orEmpty()
@@ -658,15 +667,18 @@ internal fun ChatMessageList(
         }
     }
         // §navfab-redesign: 单键"跳到最新"FAB（右侧下；键盘打开时自隐）。可见性
-        // 由方向检测器驱动（向新滑动浮现、到底部/3s/按下后隐藏）。按下跳到底部后
-        // onJump 把 navFabVisible 置 false（按一次即消失）+ navFabTick 重置自动隐藏计时。
+        // 由方向检测器驱动（向新滑动浮现、到底部/3s/按下后隐藏）。onJump 按下即
+        // 同步隐藏（navFabVisible=false）+ 置 navJumping 守卫 + followBottom=true；
+        // onJumpDone 在动画 finally 清除守卫。
         ChatMessageNavFab(
             listState = listState,
             visible = navFabVisible,
             onJump = {
                 navFabVisible = false
+                navJumping = true
                 followBottom = true
             },
+            onJumpDone = { navJumping = false },
             modifier = Modifier
                 .align(Alignment.BottomEnd)
                 .padding(end = 16.dp, bottom = 16.dp),

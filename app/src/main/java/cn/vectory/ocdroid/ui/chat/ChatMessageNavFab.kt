@@ -34,13 +34,16 @@ import kotlinx.coroutines.launch
  * reverseLayout 语义：index 0 = 最新 = 视觉底部，故"跳到最新"= 滚到 index 0。
  *
  * @param visible 由 ChatMessageList 控制（向新滑动时 true，到底部/3s/按下后 false）。
- * @param onJump 跳转完成后调用，调用方据此隐藏按钮（按一次即消失）。
+ * @param onJump 按下时**同步**调用（动画开始前）——调用方据此立即隐藏按钮 + 置程序化
+ *  滚动守卫 + re-arm followBottom（"按一次即消失"）。
+ * @param onJumpDone 跳转动画结束后（含取消）调用——调用方据此清除程序化滚动守卫。
  */
 @Composable
 internal fun ChatMessageNavFab(
     listState: LazyListState,
     visible: Boolean,
     onJump: () -> Unit,
+    onJumpDone: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     // 键盘打开 → 不渲染。
@@ -53,9 +56,16 @@ internal fun ChatMessageNavFab(
     AnimatedVisibility(visible = visible, modifier = modifier) {
         FloatingActionButton(
             onClick = {
+                // §navfab-press: onJump 同步先执行——立即隐藏按钮（按一次即消失）+
+                // 置守卫，避免动画期间方向检测器重新点亮按钮（闪烁）。
+                onJump()
                 scope.launch {
-                    listState.animateScrollToItem(0)
-                    onJump()
+                    try {
+                        listState.animateScrollToItem(0)
+                    } finally {
+                        // §navfab-guard: 无论动画正常完成还是被取消（会话切换），清守卫。
+                        onJumpDone()
+                    }
                 }
             },
             modifier = Modifier.size(40.dp),
