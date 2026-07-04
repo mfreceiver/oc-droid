@@ -1,0 +1,16 @@
+{
+  "agent": "dser",
+  "scope": "fix-fab-and-draft-model",
+  "date": "2026-07-04",
+  "reviewed_commit": "c02de25",
+  "version_target": "0.3.7",
+  "verdict": "pass",
+  "score": 8.5,
+  "blocking_issues": [],
+  "non_blocking_issues": [
+    "cappedNavPush itemSize sampled from visibleItemsInfo.firstOrNull() (item at visual top after scrollToItem, not necessarily target); approximate for heterogeneous heights but errs conservative.",
+    "createSessionInWorkdir preserves previous session's ChatState.currentModel; fix now persists this inherited model on materialization. Not a regression (visible model + send-time fallback match before/after); users entering draft from a model-specific session may carry that model without explicit choice. Cross-session leak prevented by SessionSwitcher.switchTo Step 2 clearing currentModel on session switch.",
+    "cappedNavPush marked suspend but performs only synchronous reads of listState.layoutInfo; could be a plain function."
+  ],
+  "notes": "Both fixes correctly reasoned/implemented. cappedNavPush safe conservative clamp across all three call sites. switchSessionModel draft-mode update + materialization persistence at correct point (after session.id known, before dispatchSend). Model-resolution chain complete with no stale-state gaps."
+}

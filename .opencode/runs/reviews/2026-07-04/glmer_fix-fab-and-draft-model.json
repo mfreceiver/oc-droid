@@ -1,0 +1,17 @@
+{
+  "agent": "glmer",
+  "scope": "fix-fab-and-draft-model",
+  "date": "2026-07-04",
+  "reviewed_commit": "c02de25",
+  "version_target": "0.3.7",
+  "verdict": "pass-with-fixes",
+  "score": 8.0,
+  "blocking_issues": [],
+  "non_blocking_issues": [
+    "Cross-session inferred-model leak on draft materialization: createSessionInWorkdir does NOT clear currentModel, so a stale inference from a prior session gets persisted to the freshly-materialized session when the user never explicitly switched. Recommend clearing currentModel in createSessionInWorkdir OR gating materialization-persistence on an explicit-switch flag.",
+    "cappedNavPush itemSize estimate assumes uniform item heights; the firstVisibleItemIndex >= target-1 guarantee is approximate for non-uniform lists.",
+    "Test D2 verifies repository.sendMessage receives the model via the currentModel fallback (getModelForSession globally null in setUp), not via the just-persisted value; proves the setModelForSession call but not that persistence is load-bearing for THIS send.",
+    "Leftover println debug in ChatMessageNavFabBounceTest (removed pre-release)."
+  ],
+  "notes": "Both fixes logically correct; tests faithful/deterministic. switchSessionModel draft-mode update + materialization-persistence ordering sound (SharedPreferences.apply() updates in-memory cache synchronously). Inferred-model leak is most material but cosmetic/user-correctable and partly pre-existing; shippable for 0.3.7."
+}

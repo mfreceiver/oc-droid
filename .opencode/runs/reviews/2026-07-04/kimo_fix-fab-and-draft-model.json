@@ -1,0 +1,17 @@
+{
+  "agent": "kimo",
+  "scope": "fix-fab-and-draft-model",
+  "date": "2026-07-04",
+  "reviewed_commit": "c02de25",
+  "version_target": "0.3.7",
+  "verdict": "pass-with-fixes",
+  "score": 8.0,
+  "blocking_issues": [],
+  "non_blocking_issues": [
+    "cappedNavPush uses visibleItemsInfo.firstOrNull()?.size as a uniform proxy for items 1..target-1; with variable-height messages the cap can overestimate and still overshoot to index 0 in edge cases.",
+    "cappedNavPush comment claims firstVisibleItemIndex >= target-1, but with uniform item sizes the scroll lands at index 1; comment is arithmetically misleading.",
+    "createSessionInWorkdir does not clear ChatState.currentModel, so a draft opened after a real session can leak the previous session's model (pre-existing, more visible now).",
+    "Instrumented bounce test asserts final index > 0; an afterJump > 0 assertion + variable-height scenario would strengthen coverage."
+  ],
+  "notes": "Both fixes directionally correct; tests faithfully exercise the bugs. draft-model persistence ordering (setModelForSession before dispatchSendMessage) is safe and synchronous."
+}
