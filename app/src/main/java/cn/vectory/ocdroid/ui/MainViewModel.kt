@@ -835,15 +835,27 @@ class MainViewModel @Inject constructor(
      *
      * HealthResponse.version 可空（旧服务器可能不返回），回调消息做了 null 安全。
      */
+    /**
+     * §fix-401: 表单"测试连接"探测。密码为 write-only（不回填表单），故编辑已有
+     * host 时表单密码为空——此时回退到已保存的密码（按 profileId 从加密存储读出），
+     * 使"改了 URL 但没重输密码"的场景也能正确带 Basic Auth 测试。
+     *
+     * @param profileId 正在编辑的 host profile id（新建时传 null）。仅当表单 password
+     *  为空时用它回退查已保存密码。
+     */
     fun testConnectionForm(
         baseUrl: String,
         username: String?,
         password: String?,
         allowInsecure: Boolean,
+        profileId: String?,
         onResult: (success: Boolean, message: String) -> Unit
     ) {
         viewModelScope.launch {
-            val result = repository.checkHealthFor(baseUrl, username, password, allowInsecure)
+            // §fix-401: 表单密码为空 + 在编辑已有 profile → 回退已保存密码。
+            val effectivePassword = password
+                ?: profileId?.let { settingsManager.basicAuthPassword(it) }
+            val result = repository.checkHealthFor(baseUrl, username, effectivePassword, allowInsecure)
             result
                 .onSuccess { health ->
                     if (health.healthy) {

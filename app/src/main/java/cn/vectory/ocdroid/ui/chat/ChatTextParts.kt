@@ -231,16 +231,16 @@ internal fun TextPart(
     // user-bubble and assistant-markdown branches are guarded.
     if (text.isBlank()) return
     if (isUser) {
-        // §4.2 v2 user bubble: right-aligned, layer02 background, 10dp radius,
-        // padding 8x12, max ~82% of row width. No blue tint, no left bar — the
-        // muted neutral surface + right alignment is enough to distinguish the
-        // user's side from the assistant's full-width markdown. BoxWithConstraints
-        // gives us the precise 0.82 multiplier (short prompts stay natural-width
-        // via widthIn rather than being stretched to 82%).
+        // §4.2 v3 user bubble: right-aligned, primaryContainer background, 10dp
+        // radius, padding 8x12, max ~82% of row width. primaryContainer gives a
+        // subtle but clear tint that survives fast scrolling so the user's own
+        // messages pop against the assistant's full-width markdown. No left bar.
+        // BoxWithConstraints gives us the precise 0.82 multiplier (short prompts
+        // stay natural-width via widthIn rather than being stretched to 82%).
         BoxWithConstraints(modifier = modifier.fillMaxWidth()) {
             val maxBubble = maxWidth * 0.82f
             Surface(
-                color = MaterialTheme.colorScheme.surfaceContainerLow,
+                color = MaterialTheme.colorScheme.primaryContainer,
                 shape = MaterialTheme.shapes.large,
                 modifier = Modifier
                     .align(Alignment.CenterEnd)
@@ -251,7 +251,7 @@ internal fun TextPart(
                         text = text,
                         modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
                         style = MaterialTheme.typography.bodyMedium,
-                        color = MaterialTheme.colorScheme.onSurface
+                        color = MaterialTheme.colorScheme.onPrimaryContainer
                     )
                 }
             }

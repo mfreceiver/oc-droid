@@ -127,13 +127,11 @@ internal fun HostProfilesManagerScreen(
                     .onFailure { error = it.message ?: deleteFailedText }
                 editingProfile = null
             },
-            // §user-req: 表单"测试连接"按钮直连 MainViewModel.testConnectionForm。
-            // 注意：表单里若未编辑密码（passwordEdited=false），authPassword
-            // 是空串——testConnectionForm 会拿空密码探测；这是预期行为，因为
-            // 已保存的密码不会回填到表单（write-only）。用户若要带 Basic Auth
-            // 测试，需在点测试前在密码框里重新输入。
-            onTestConnection = { url, user, pass, insecure, callback ->
-                viewModel.testConnectionForm(url, user, pass, insecure, callback)
+            // §user-req + §fix-401: 表单"测试连接"按钮直连 MainViewModel.testConnectionForm。
+            // 密码 write-only 不回填表单；编辑已有 host 时表单密码为空，VM 据 profileId
+            // 回退查已保存密码，使"改 URL 不重输密码"也能正确带 Basic Auth 测试。
+            onTestConnection = { url, user, pass, insecure, profileId, callback ->
+                viewModel.testConnectionForm(url, user, pass, insecure, profileId, callback)
             }
         )
     }
@@ -275,8 +273,9 @@ internal fun HostProfileEditorDialog(
         username: String?,
         password: String?,
         allowInsecure: Boolean,
+        profileId: String?,
         onResult: (Boolean, String) -> Unit
-    ) -> Unit = { _, _, _, _, _ -> }
+    ) -> Unit = { _, _, _, _, _, _ -> }
 ) {
     var name by remember(initial.id) { mutableStateOf(initial.name) }
     var serverUrl by remember(initial.id) { mutableStateOf(initial.serverUrl) }
@@ -424,7 +423,10 @@ internal fun HostProfileEditorDialog(
                             serverUrl,
                             authUsername.ifBlank { null },
                             authPassword.ifBlank { null },
-                            allowInsecure
+                            allowInsecure,
+                            // §fix-401: 编辑已有 profile 且未改密码时，表单密码为空——
+                            // 传 profileId 让 VM 回退查已保存密码（write-only 字段不回填）。
+                            initial.id.takeIf { initial.basicAuth != null }
                         ) { success, msg ->
                             isTesting = false
                             testStatus = success to msg
