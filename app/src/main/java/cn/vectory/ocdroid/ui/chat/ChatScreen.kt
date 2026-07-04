@@ -243,6 +243,15 @@ fun ChatScreen(
     val curHostProfile = currentHostProfile(host.hostProfiles, host.currentHostProfileId)
     val topBarState by remember {
         derivedStateOf {
+            // §tunnel-reactivity: recompute curHostProfile / curSession INSIDE the
+            // lambda (not captured from the outer scope). remember{} creates the
+            // DerivedState once; outer vals are captured by value at first
+            // composition and would go stale on host/session switch (the tunnel
+            // activate button / parent title failed to update until recompose-
+            // from-scratch). Reading host.*/sessionList.*/chat.* State here makes
+            // derivedStateOf re-evaluate with fresh values.
+            val curHostProfile = currentHostProfile(host.hostProfiles, host.currentHostProfileId)
+            val curSession = currentSession(sessionList.sessions, chat.currentSessionId)
             // Resolve openSessionIds to actual Session objects for the
             // top-bar tab strip. Filtered to root sessions (parentId == null)
             // so sub-agents never duplicate the title-slot breadcrumb. Also

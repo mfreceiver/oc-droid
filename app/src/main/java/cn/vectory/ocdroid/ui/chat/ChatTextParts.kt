@@ -677,6 +677,28 @@ private fun TableGrid(
                 if (w > colWidths[c]) colWidths[c] = w
             }
 
+            // §table-fill-width: when the table's natural width is less than the
+            // available width (bounded, non-scrolling case), scale all columns up
+            // proportionally so the table fills the screen instead of sitting
+            // left-aligned at its narrow natural width. Rounding remainder goes
+            // onto the last column so the total exactly matches the available width.
+            if (constraints.hasBoundedWidth && constraints.maxWidth != Constraints.Infinity) {
+                val naturalTotal = colWidths.sum()
+                val available = constraints.maxWidth
+                if (naturalTotal > 0 && naturalTotal < available) {
+                    var assigned = 0
+                    val scaled = IntArray(columnsCount)
+                    for (c in 0 until columnsCount) {
+                        scaled[c] = (colWidths[c].toLong() * available / naturalTotal).toInt().coerceAtLeast(0)
+                        assigned += scaled[c]
+                    }
+                    if (columnsCount > 0) {
+                        scaled[columnsCount - 1] += (available - assigned)
+                    }
+                    for (c in 0 until columnsCount) colWidths[c] = scaled[c].coerceAtLeast(0)
+                }
+            }
+
             // Pass 2: single measure per cell at the shared column width so
             // wrapping (and thus row height) reflects the aligned column.
             val placeables = Array(totalCells) { i ->

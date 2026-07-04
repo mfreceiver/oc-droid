@@ -154,7 +154,7 @@ internal fun ServerManagementDialog(
                     )
                 }
 
-                // --- Action icon row: Settings / Refresh / Tunnel ---
+                // --- Action icon row: Settings / Tunnel / Refresh ---
                 Spacer(modifier = Modifier.height(4.dp))
                 Row(
                     modifier = Modifier.fillMaxWidth(),
@@ -164,13 +164,6 @@ internal fun ServerManagementDialog(
                         Icon(
                             Icons.Default.Settings,
                             contentDescription = stringResource(R.string.server_dialog_system_settings),
-                            tint = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                    }
-                    IconButton(onClick = onRefresh) {
-                        Icon(
-                            Icons.Default.Refresh,
-                            contentDescription = stringResource(R.string.chat_action_refresh_messages),
                             tint = MaterialTheme.colorScheme.onSurfaceVariant
                         )
                     }
@@ -194,6 +187,13 @@ internal fun ServerManagementDialog(
                                 )
                             }
                         }
+                    }
+                    IconButton(onClick = onRefresh) {
+                        Icon(
+                            Icons.Default.Refresh,
+                            contentDescription = stringResource(R.string.chat_action_refresh_messages),
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
                     }
                 }
             }

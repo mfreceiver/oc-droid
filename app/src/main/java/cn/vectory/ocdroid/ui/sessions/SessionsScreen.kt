@@ -1,10 +1,6 @@
 package cn.vectory.ocdroid.ui.sessions
 
 import androidx.compose.animation.AnimatedVisibility
-import androidx.compose.animation.core.RepeatMode
-import androidx.compose.animation.core.animateFloat
-import androidx.compose.animation.core.infiniteRepeatable
-import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.combinedClickable
@@ -39,8 +35,6 @@ import cn.vectory.ocdroid.data.model.Session
 import cn.vectory.ocdroid.data.model.SessionStatus
 import cn.vectory.ocdroid.ui.MainViewModel
 import cn.vectory.ocdroid.ui.chat.workdirTone
-import cn.vectory.ocdroid.ui.theme.SemanticColors
-import cn.vectory.ocdroid.ui.theme.AppMotion
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.map
 import java.text.SimpleDateFormat
@@ -656,32 +650,14 @@ private fun EmptyRow(text: String) {
  */
 @Composable
 private fun SessionStatusDot(status: SessionStatus?) {
-    if (status == null || status.isIdle) return
-    val color = when {
-        status.isBusy -> SemanticColors.stateWarningFg() // amber — 主题感知对比度
-        status.isRetry -> MaterialTheme.colorScheme.error // red — retry/error 语义
-        else -> return
-    }
-    // busy pulses alpha 0.4 ↔ 1.0; retry stays solid.
-    val alpha = if (status.isBusy) {
-        val transition = rememberInfiniteTransition(label = "busyPulse")
-        transition.animateFloat(
-            initialValue = 0.4f,
-            targetValue = 1f,
-            animationSpec = infiniteRepeatable(
-                animation = AppMotion.linearPulse(),
-                repeatMode = RepeatMode.Reverse
-            ),
-            label = "busyPulseAlpha"
-        ).value
-    } else {
-        1f
-    }
+    // §user-req: busy dot removed — only retry/error renders a status indicator.
+    // idle / null / busy → nothing rendered.
+    if (status == null || status.isIdle || status.isBusy) return
     Box(
         modifier = Modifier
             .padding(start = 8.dp)
             .size(8.dp)
-            .background(color = color.copy(alpha = alpha), shape = CircleShape)
+            .background(color = MaterialTheme.colorScheme.error, shape = CircleShape)
     )
 }
 
