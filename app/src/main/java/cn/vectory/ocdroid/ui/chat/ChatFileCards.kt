@@ -26,6 +26,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.RectangleShape
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -79,7 +80,7 @@ internal fun ImageFilePart(part: Part, modifier: Modifier = Modifier.fillMaxWidt
 internal fun FileAttachmentPart(part: Part, modifier: Modifier = Modifier.fillMaxWidth()) {
     // §5.6 v2: layer01 chip at 6dp radius with accentText doc icon.
     Surface(
-        color = MaterialTheme.colorScheme.surfaceContainerLowest,
+        color = Color.Transparent,
         shape = MaterialTheme.shapes.small,
         modifier = modifier.padding(vertical = 4.dp)
     ) {
@@ -152,7 +153,7 @@ internal fun FileCard(
 
     // §5.3 v2 file card: layer01 surface at rectangular surfaceContainerLowest, accentText icon.
     Surface(
-        color = MaterialTheme.colorScheme.surfaceContainerLowest,
+        color = Color.Transparent,
         shape = RectangleShape,
         modifier = modifier
             .padding(vertical = 4.dp)
@@ -181,7 +182,6 @@ internal fun FileCard(
             Text(
                 text = basename,
                 style = MaterialTheme.typography.labelMedium,
-                fontFamily = BundledMonoFamily,
                 color = MaterialTheme.colorScheme.onSurface,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,

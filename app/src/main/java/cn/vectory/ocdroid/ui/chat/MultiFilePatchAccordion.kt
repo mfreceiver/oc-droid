@@ -27,6 +27,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.RectangleShape
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.testTag
@@ -113,14 +114,14 @@ internal fun MultiFilePatchAccordion(
             .padding(vertical = 2.dp)
             .testTag("toolcard.multi_patch.${files.size}"),
         shape = RectangleShape,
-        color = MaterialTheme.colorScheme.surfaceContainerLow
+        color = Color.Transparent
     ) {
         Column(modifier = Modifier.then(if (isRunning) Modifier else Modifier.animateContentSize(AppMotion.expandSizeSpec))) {
             // Header: "N files" + aggregate +N -M + expand/collapse-all toggle.
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(horizontal = 10.dp, vertical = 8.dp)
+                    .padding(horizontal = 8.dp, vertical = 8.dp)
                     .clickable { expanded = !expanded },
                 verticalAlignment = Alignment.CenterVertically
             ) {
@@ -188,7 +189,7 @@ internal fun MultiFilePatchAccordion(
                     val fileDel = fc.deletions ?: 0
                     val isDelete = fc.status?.lowercase() == "delete"
 
-                    Column(modifier = Modifier.padding(horizontal = 10.dp)) {
+                    Column(modifier = Modifier.padding(horizontal = 8.dp)) {
                         Row(
                             modifier = Modifier
                                 .fillMaxWidth()
@@ -204,7 +205,6 @@ internal fun MultiFilePatchAccordion(
                                 style = MaterialTheme.typography.labelMedium,
                                 color = if (isDelete) MaterialTheme.colorScheme.onSurfaceVariant
                                 else MaterialTheme.colorScheme.onSurface,
-                                fontFamily = BundledMonoFamily,
                                 maxLines = 1,
                                 overflow = TextOverflow.Ellipsis,
                                 modifier = Modifier.weight(1f)

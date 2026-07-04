@@ -19,10 +19,12 @@ import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
+import androidx.compose.material3.LocalContentColor
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.graphics.RectangleShape
@@ -293,89 +295,54 @@ internal fun parseTaskXml(output: String?): TaskXmlResult? {
 }
 
 /**
- * Compact card for background subagent task completion blocks that arrive as
- * user-role text messages (server injects `<task>` XML via ops.prompt).
- * Collapsed by default: icon + "Task completed" / "Task failed" + chevron.
- * Tapping expands to show the task_result / task_error body.
+ * §issue-4: Non-expandable inline rendering for background subagent task
+ * completion blocks (server injects `<task>` XML via ops.prompt as user-role
+ * text). Rendered as assistant speech (left-aligned, time-only footer) —
+ * B-class style (no background, no card emphasis).
+ *
+ * Shows: icon + "Task completed/failed" header + always-visible task_result
+ * body as markdown. No expand/collapse.
  */
 @Composable
 internal fun CompletedTaskCard(
     taskResult: TaskXmlResult,
-    messageId: String,
-    partId: String,
-    expandedParts: Map<String, Boolean>,
-    onToggleExpand: (String, Boolean) -> Unit,
     modifier: Modifier = Modifier.fillMaxWidth()
 ) {
-    val expandedKey = "task|${messageId}|${partId}"
-    val expanded = expandedParts[expandedKey] ?: false
     val isError = taskResult.state.equals("error", ignoreCase = true)
-
-    Surface(
-        modifier = modifier.padding(vertical = 2.dp),
-        shape = RectangleShape,
-        color = MaterialTheme.colorScheme.surfaceContainerLow
-    ) {
-        Column(modifier = Modifier.padding(horizontal = 8.dp, vertical = 8.dp).animateContentSize(AppMotion.expandSizeSpec)) {
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .clickable { onToggleExpand(expandedKey, expanded) },
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Icon(
-                    if (isError) Icons.Default.ErrorOutline else Icons.Default.CheckCircle,
-                    contentDescription = null,
-                    modifier = Modifier.size(14.dp),
-                    tint = if (isError) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant
+    Column(modifier = modifier.padding(vertical = 2.dp)) {
+        Row(
+            modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Icon(
+                if (isError) Icons.Default.ErrorOutline else Icons.Default.CheckCircle,
+                contentDescription = null,
+                modifier = Modifier.size(14.dp),
+                tint = if (isError) MaterialTheme.colorScheme.error
+                       else MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            Spacer(modifier = Modifier.width(4.dp))
+            Text(
+                text = stringResource(if (isError) R.string.task_failed else R.string.task_completed),
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 1
+            )
+        }
+        val bodyText = taskResult.taskResult ?: ""
+        if (bodyText.isNotBlank()) {
+            val fontSizes = LocalMarkdownFontSizes.current
+            CompositionLocalProvider(LocalContentColor provides MaterialTheme.colorScheme.onSurfaceVariant) {
+                Markdown(
+                    content = bodyText,
+                    typography = markdownTypography(fontSizes),
+                    components = markdownComponents(
+                        codeBlock = { WrappedCodeBlock(it) },
+                        codeFence = { WrappedCodeBlock(it) },
+                        table = { WrappedTable(it) }
+                    ),
+                    imageTransformer = DataUriImageTransformer
                 )
-                Spacer(modifier = Modifier.width(4.dp))
-                Text(
-                    text = stringResource(if (isError) R.string.task_failed else R.string.task_completed),
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurface,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis
-                )
-                Spacer(modifier = Modifier.weight(1f))
-                Icon(
-                    if (expanded) Icons.Default.KeyboardArrowDown else Icons.Default.ChevronRight,
-                    contentDescription = if (expanded) "Collapse" else "Expand",
-                    modifier = Modifier.size(18.dp),
-                    tint = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-            }
-            if (expanded) {
-                val bodyText = taskResult.taskResult ?: ""
-                if (bodyText.isNotBlank()) {
-                    val fontSizes = LocalMarkdownFontSizes.current
-                    Spacer(modifier = Modifier.size(4.dp))
-                    Markdown(
-                        content = bodyText,
-                        typography = markdownTypography(fontSizes),
-                        components = markdownComponents(
-                            codeBlock = { WrappedCodeBlock(it) },
-                            codeFence = { WrappedCodeBlock(it) },
-                            table = { WrappedTable(it) }
-                        ),
-                        imageTransformer = DataUriImageTransformer
-                    )
-                }
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .clickable { onToggleExpand(expandedKey, true) }
-                        .padding(top = 2.dp, bottom = 2.dp),
-                    horizontalArrangement = Arrangement.Center,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Icon(
-                        Icons.Default.ExpandLess,
-                        contentDescription = "Collapse",
-                        modifier = Modifier.size(14.dp),
-                        tint = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                }
             }
         }
     }

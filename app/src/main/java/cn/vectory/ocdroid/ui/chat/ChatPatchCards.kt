@@ -23,6 +23,7 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.RectangleShape
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.testTag
@@ -110,7 +111,7 @@ internal fun PatchCard(
             .padding(vertical = 2.dp)
             .testTag("toolcard.patch.$basename"),
         shape = RectangleShape,
-        color = MaterialTheme.colorScheme.surfaceContainerLow
+        color = Color.Transparent
     ) {
         Column(modifier = Modifier.then(if (isRunning) Modifier else Modifier.animateContentSize(AppMotion.expandSizeSpec))) {
             Row(
@@ -142,7 +143,6 @@ internal fun PatchCard(
                     text = basename,
                     style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.onSurface,
-                    fontFamily = BundledMonoFamily,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
                     modifier = Modifier.weight(1f)
@@ -260,7 +260,7 @@ internal fun ContextToolGroup(
     Surface(
         modifier = modifier.padding(vertical = 2.dp),
         shape = RectangleShape,
-        color = MaterialTheme.colorScheme.surfaceContainerLow
+        color = Color.Transparent
     ) {
         Column(modifier = Modifier.then(if (isRunning) Modifier else Modifier.animateContentSize(AppMotion.expandSizeSpec))) {
             Row(

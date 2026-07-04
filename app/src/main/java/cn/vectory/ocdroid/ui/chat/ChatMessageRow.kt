@@ -59,6 +59,15 @@ internal fun MessageRow(
     streamingReasoningPartId: String? = null
 ) {
     val isUser = message.isUser
+    // §issue-4: task completion messages arrive as user-role but should
+    // render as assistant (left-aligned, time-only footer, no model info).
+    val isTaskCompletionMsg = isUser && parts.any { p ->
+        p.isText && (p.text ?: "").contains("<task") &&
+        parseTaskXml(p.text)?.state?.let {
+            it.equals("completed", ignoreCase = true) ||
+            it.equals("error", ignoreCase = true)
+        } == true
+    }
 
     // §card-width (v0.2.12): responsive card width = 2/3 of the available row
     // width, capped at 480dp for tablets. Replaces the old fixed 220dp cap.
@@ -69,7 +78,7 @@ internal fun MessageRow(
         val cardMax = minOf(maxWidth * 2f / 3f, 480.dp)
         Column(
             modifier = Modifier.fillMaxWidth(),
-            horizontalAlignment = if (isUser) Alignment.End else Alignment.Start
+            horizontalAlignment = if (isUser && !isTaskCompletionMsg) Alignment.End else Alignment.Start
         ) {
         // No "OpenCode" speaker title — the user's blue left bar vs the
         // assistant's container-less reply already make it clear who's speaking,
@@ -214,7 +223,7 @@ internal fun MessageRow(
         //  - User: "<modelId> <created hh:mm>" so the user can see which agent
         //    model handled the turn and when the prompt was sent.
         val timeInfo = message.time
-        val footerText = if (isUser) {
+        val footerText = if (isUser && !isTaskCompletionMsg) {
             val modelId = message.resolvedModel?.modelId
             val sendTime = timeInfo?.created?.let(::formatHm)
             when {
@@ -289,13 +298,9 @@ internal fun PartView(
             ) {
                 CompletedTaskCard(
                     taskResult = taskXml,
-                    messageId = messageId,
-                    partId = part.id,
-                    expandedParts = expandedParts,
-                    onToggleExpand = onToggleExpand,
                     modifier = Modifier.widthIn(max = cardMax)
                 )
-            } else if (isUser || !textContent.contains("<task_result>", ignoreCase = true)) {
+            } else if (isUser || !textContent.contains("<task_result>")) {
                 TextPart(
                     text = textContent,
                     isUser = isUser,
