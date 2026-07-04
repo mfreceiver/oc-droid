@@ -32,7 +32,6 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.PrimaryScrollableTabRow
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Tab
-import androidx.compose.material3.TabRowDefaults
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -42,6 +41,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
@@ -141,11 +141,11 @@ internal fun resolveSessionTabLayout(
  * the hint stays at the previously selected root index, so the strip keeps its
  * current scroll position instead of jumping to the leftmost tab.
  *
- * **Indicator + colours**: the native M3 [TabRowDefaults.SecondaryIndicator]
- * is rendered under the active tab, tinted with the workdir-hash colour
- * ([workdirTone]). Tabs themselves carry no filled background. The selected
- * title text uses theme `onSurface` + SemiBold, unselected uses
- * `onSurfaceVariant`.
+ * **Indicator + colours**: the selected tab is marked by a vertical accent
+ * bar at the left edge of its title plus Bold weight; there is no underline
+ * and no background fill. The bar uses the workdir-hash colour
+ * ([workdirTone]). The selected title text uses theme `onSurface` + Bold,
+ * unselected uses `onSurfaceVariant` + Normal.
  *
  * **Tab height**: each `Tab` is constrained to 36dp (via `Modifier.height`)
  * for a compact second-row strip; the inner close-X touch target and icon are
@@ -240,19 +240,13 @@ internal fun SessionTabStrip(
                     // contentColor tints the indicator + tab ripple; keep the
                     // accentColour for consistency.
                     contentColor = accentColor,
-                    // §fix-2: restore the native M3 SecondaryIndicator under the
-                    // active tab. Driven by scrollHintIndex (decoupled from
-                    // sub-agent highlight) so the underline tracks the
-                    // scroll-centre tab. In M3 1.4 the indicator lambda's
-                    // receiver is TabIndicatorScope, so tabIndicatorOffset is a
-                    // scope member (no import) and takes the tabIndex directly.
-                    indicator = {
-                        TabRowDefaults.SecondaryIndicator(
-                            modifier = Modifier.tabIndicatorOffset(scrollHintIndex),
-                            height = 3.dp,
-                            color = accentColor
-                        )
-                    },
+                    // §chat-session-tab-selected: the active tab is marked by a
+                    // vertical accent bar inside the tab label (plus Bold weight)
+                    // instead of the native SecondaryIndicator underline, so we
+                    // intentionally drop the indicator here. There is no
+                    // scroll-centre hint; the selected tab keeps the strip
+                    // visually anchored.
+                    indicator = {},
                     // Match the former LazyRow's 8dp horizontal content padding
                     // instead of the M3 default 52dp, which would push the
                     // first/last tabs far from the strip edges.
@@ -312,18 +306,17 @@ private fun SessionTab(
         onClick = { actions.onSelectSession(session.id) },
         // Compact 36dp height — this is a secondary nav row, not the primary
         // tab surface. Modifier.height overrides the M3 default 48dp
-        // (heightIn min) by clamping both min and max. §fix-2: the native M3
-        // SecondaryIndicator on PrimaryScrollableTabRow now marks the active
-        // tab; SessionTab itself stays background-free so the strip blends
-        // with the TopAppBar surface.
+        // (heightIn min) by clamping both min and max. §chat-session-tab-selected:
+        // the selected tab is marked by the vertical accent bar inside its
+        // title (see text slot below); SessionTab itself carries no background
+        // so the strip blends with the TopAppBar surface.
         modifier = modifier
             .height(36.dp)
-            .background(
-                color = if (isSelected) accentColor.copy(alpha = 0.15f) else Color.Transparent
-            ),
-        // §issue-4: restore hash-colour highlight on selected tab (translucent
-        // accent fill). Combined with the SecondaryIndicator underline for a
-        // clear "this tab is active" signal. Text colour: onSurface/onSurfaceVariant.
+            .background(Color.Transparent),
+        // §chat-session-tab-selected: no background fill on the tab itself —
+        // the selection signal is the vertical accent bar at the title's left
+        // edge plus Bold weight (see text slot below). Text colour:
+        // onSurface/onSurfaceVariant.
         selectedContentColor = MaterialTheme.colorScheme.onSurface,
         unselectedContentColor = MaterialTheme.colorScheme.onSurfaceVariant,
         text = {
@@ -338,11 +331,26 @@ private fun SessionTab(
                         ?: MaterialTheme.colorScheme.primary
                     Box(
                         modifier = Modifier
-                            .padding(end = 6.dp)
+                            .padding(end = 5.dp)
                             .size(5.dp)
                             .background(color = dotColor, shape = CircleShape)
                     )
                 }
+                // §chat-session-tab-selected: vertical accent bar that replaces
+                // the removed underline + translucent fill. Always rendered as a
+                // constant-width placeholder (3dp + padding) so the Row's total
+                // width never changes when isSelected flips — the centered title
+                // keeps a stable container and start position, no horizontal
+                // jitter. Visually "shown when selected, transparent when not",
+                // keeping the crisp active signal.
+                Box(
+                    modifier = Modifier
+                        .padding(start = if (session.id in unreadSessions) 3.dp else 0.dp, end = 6.dp)
+                        .width(3.dp)
+                        .height(16.dp)
+                        .clip(RoundedCornerShape(2.dp))
+                        .background(if (isSelected) accentColor else Color.Transparent)
+                )
                 Text(
                     // The tab label bypasses the shared 15-char cap used by
                     // ChatTopBar's breadcrumb: the tab's width is now the
@@ -356,7 +364,7 @@ private fun SessionTab(
                     style = MaterialTheme.typography.labelMedium,
                     color = if (isSelected) MaterialTheme.colorScheme.onSurface
                     else MaterialTheme.colorScheme.onSurfaceVariant,
-                    fontWeight = if (isSelected) FontWeight.SemiBold
+                    fontWeight = if (isSelected) FontWeight.Bold
                     else FontWeight.Normal,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis

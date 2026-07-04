@@ -1,6 +1,5 @@
 package cn.vectory.ocdroid.ui.chat
 
-import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
@@ -37,7 +36,6 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.RectangleShape
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.vector.ImageVector
@@ -143,11 +141,11 @@ internal fun ChatInputBar(
     // a confirm dialog instead of aborting immediately.
     var showStopConfirm by rememberSaveable { mutableStateOf(false) }
 
-    // §9: composer card — rounded 10, surface (bg-base), 2dp elevation.
+    // §9: composer card — 直角（RectangleShape），用户要求清除圆角。
     Surface(
         modifier = Modifier.fillMaxWidth().imePadding(),
         color = MaterialTheme.colorScheme.surfaceContainerLow,
-        shape = MaterialTheme.shapes.large,
+        shape = RectangleShape,
         shadowElevation = 2.dp
     ) {
         // Horizontal 16 inset lives on the Column so the command panel,

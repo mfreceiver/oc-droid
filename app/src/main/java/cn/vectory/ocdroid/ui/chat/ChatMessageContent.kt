@@ -659,9 +659,11 @@ internal fun ChatMessageList(
             userMessageLcIndices = userMessageLcIndices,
             visible = navFabVisible,
             onInteract = { navFabTick++ },
+            onNavigateUp = { followBottom = false },
+            onNavigateBottom = { followBottom = true },
             modifier = Modifier
                 .align(Alignment.BottomEnd)
-                .padding(end = 12.dp, bottom = 96.dp),
+                .padding(end = 16.dp, bottom = 16.dp),
         )
     }
 }
