@@ -39,7 +39,6 @@ import cn.vectory.ocdroid.R
 import cn.vectory.ocdroid.data.model.HostProfile
 import cn.vectory.ocdroid.ui.TunnelActivationState
 import cn.vectory.ocdroid.ui.util.formatBytes
-import cn.vectory.ocdroid.ui.theme.SemanticColors
 
 @Composable
 internal fun ServerManagementDialog(

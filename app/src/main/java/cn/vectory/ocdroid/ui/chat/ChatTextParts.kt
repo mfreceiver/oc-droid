@@ -36,7 +36,6 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Constraints
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.delay
 import com.mikepenz.markdown.compose.LocalMarkdownDimens
 import com.mikepenz.markdown.compose.components.MarkdownComponentModel
@@ -533,11 +532,13 @@ internal fun CodeBlockSurface(code: String, language: String) {
  * ([TableGrid]). It measures every cell once at the per-column cap, derives a
  * SHARED width per column (the widest cell in that column, capped), then
  * re-measures every cell at exactly that shared width. Wrapping is therefore
- * consistent and every column lines up vertically. Because columns use a fixed
- * shared width (not `weight`), a few-column table still sits at its natural
- * width on the left instead of stretching wall-to-wall. When the capped column
- * total exceeds the available width the whole table scrolls horizontally (each
- * column keeps its shared cap, cells still wrap).
+ * consistent and every column lines up vertically. Columns use a fixed shared
+ * width (not `weight`); when the capped column total is LESS than the available
+ * width, all columns are scaled up proportionally to fill the screen (remainder
+ * onto the last column) — so a few-column table stretches wall-to-wall instead
+ * of sitting at a narrow natural width. When the capped column total EXCEEDS
+ * the available width the whole table scrolls horizontally (each column keeps
+ * its shared cap, cells still wrap).
  *
  * Cell inline content (bold/`code`/links) still flows through mikepenz's
  * [MarkdownTableBasicText], so only the LAYOUT + line policy changed.
@@ -566,8 +567,8 @@ internal fun WrappedTable(model: MarkdownComponentModel) {
             .background(MaterialTheme.colorScheme.surfaceContainerLow)
     ) {
         // Horizontal-scroll only when the capped columns genuinely overflow the
-        // available width; otherwise let the table sit at its (capped) natural
-        // width, left-aligned.
+        // available width; otherwise the columns are scaled up proportionally
+        // inside TableGrid to fill the available width (see measurePolicy).
         val useScroll = maxColumnWidth * columnsCount > maxWidth
         Column(
             modifier = if (useScroll) {

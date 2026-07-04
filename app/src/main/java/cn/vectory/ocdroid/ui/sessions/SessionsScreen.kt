@@ -591,8 +591,9 @@ private fun SessionCard(
             },
             trailingContent = {
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    // M6: status indicator. busy → pulsing orange dot, retry →
-                    // solid red dot, idle/none → nothing (avoid visual noise).
+                    // M6: status indicator. retry → solid red dot;
+                    // busy / idle / null → nothing (busy dot removed per §user-req;
+                    // a running session is already signalled elsewhere).
                     SessionStatusDot(status)
                     if (isUnread) {
                         // Small unread dot. Positioned to the LEFT of the
@@ -641,12 +642,11 @@ private fun EmptyRow(text: String) {
 /**
  * M6: Small (~8dp) status indicator rendered on the right edge of a session
  * card's title row, just before the unread dot. Mapping:
- * - busy → orange dot with a gentle alpha pulse (visually signals "working").
- *   A pulse is used instead of the spec's "rotation" because rotation is
- *   imperceptible on a featureless circle; pulsing is the conventional
- *   busy/live idiom and reads at 8dp.
- * - retry → solid red dot (no animation; distinguishes it from busy).
- * - idle / null → nothing rendered (avoids noise per the spec's suggestion).
+ * - retry → solid red dot (retry/error semantic).
+ * - busy / idle / null → nothing rendered. The busy dot was removed per
+ *   §user-req; a running session is already surfaced via the chat surface
+ *   (streaming indicator / "生成中…" placeholder), so a duplicate list-side
+ *   busy marker was visual noise.
  */
 @Composable
 private fun SessionStatusDot(status: SessionStatus?) {
