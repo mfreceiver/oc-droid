@@ -181,8 +181,9 @@ internal fun ChatMessageList(
     // followBottom is REMOVED. It caused a feedback latch: programmatic
     // scrollToItem(0) → index 0 → snapshotFlow emits atBottom=true →
     // followBottom=true → next contentVersion tick auto-scrolls again.
-    // followBottom is now updated only by real user gestures via the
-    // direction detector (|delta|>3 + pendingRestoreSession guards).
+    // followBottom is updated by the unified bottom-position tracker below
+    // (canScrollBackward + index + offset) and the direction detector (tab
+    // visibility). Latch-safe via atExactBottom guard.
 
     // #3 — continuously mirror the current scroll offset against the active
     // session id. There is no "before session change" hook in Compose, so a
@@ -291,32 +292,32 @@ internal fun ChatMessageList(
             }
     }
 
-    // §Q4-gpter: canScrollBackward tracker — catches within-item-0 scrolls
-    // that the direction detector (which only watches firstVisibleItemIndex)
-    // misses. When the streaming message (index 0) is very tall, the user can
-    // scroll up to read its top while firstVisibleItemIndex stays 0. In that
-    // case canScrollBackward changes from false to true, and we set
-    // followBottom = false.
+    // §Q4-scroll-track: unified bottom-position tracker. Watches
+    // canScrollBackward + firstVisibleItemIndex + scrollOffset together so
+    // ANY position change triggers an update. Uses atExactBottom guard to
+    // distinguish "user genuinely at bottom" from "content grew above but
+    // user hasn't moved" (maxer S-1 fix).
     //
-    // ONE-DIRECTIONAL LATCH: this tracker ONLY sets followBottom to false,
-    // never to true. This prevents the programmatic-scroll feedback latch:
-    // scrollToItem(0) → canScrollBackward=false → (if we set true here) →
-    // followBottom=true → next tick auto-scrolls → repeat. The true→false
-    // transition is safe (only happens on real user scroll-away). The
-    // false→true transition is handled by: direction detector (index
-    // reaches 0 via cross-item scroll), jump-to-bottom FAB tap, or session-
-    // enter (fresh session). Within-item-0 scroll-back-to-bottom does NOT
-    // re-enable followBottom (user taps FAB instead — matches WhatsApp/
-    // Telegram behavior where scrolling away requires explicit re-follow).
+    // followBottom = if (canBack) atExactBottom else true:
+    //   canBack=false → true (absolute bottom)
+    //   canBack=true + atExactBottom → true (at bottom despite content above)
+    //   canBack=true + !atExactBottom → false (user scrolled away)
     LaunchedEffect(listState, sessionId) {
         if (sessionId == null) return@LaunchedEffect
         delay(300)
-        snapshotFlow { listState.canScrollBackward }
+        snapshotFlow {
+            Triple(
+                listState.canScrollBackward,
+                listState.firstVisibleItemIndex,
+                listState.firstVisibleItemScrollOffset
+            )
+        }
             .drop(1)
-            .collect { canBack ->
+            .collect { (canBack, index, offset) ->
                 if (pendingRestoreSession == sessionId) return@collect
                 if (listState.layoutInfo.totalItemsCount == 0) return@collect
-                if (canBack) followBottom = false
+                val atExactBottom = index == 0 && offset <= 24
+                followBottom = if (canBack) atExactBottom else true
             }
     }
 
@@ -443,10 +444,14 @@ internal fun ChatMessageList(
     // 用户消息的 LC index（IntArray，stable 类型供 ChatMessageNavFab 跳过重组）。
     // 单遍 O(n) withIndex 计算（不用 indexOf 避免 O(n²)）。gap 条件用 gapInsertIndex>0
     // 与渲染侧（LazyColumn 的 gap-divider item）对齐，避免 off-by-one。
-    val userMessageLcIndices: IntArray = remember(reversedMessages, streamingOffset, gapInsertIndex) {
+    val userMessageLcIndices: IntArray = remember(reversedMessages, partsByMessage, streamingOffset, gapInsertIndex) {
         val result = ArrayList<Int>()
         for ((revIdx, msg) in reversedMessages.withIndex()) {
             if (!msg.isUser) continue
+            // §issue-1: 排除"子任务完成"等系统生成消息（role=user 但含 tool/task
+            // parts）。真正的用户消息只有文本 parts。
+            val parts = partsByMessage[msg.id].orEmpty()
+            if (parts.any { it.isTool }) continue
             val lcIdx = if (gapInsertIndex <= 0 || revIdx < gapInsertIndex) {
                 streamingOffset + revIdx
             } else {
@@ -607,15 +612,6 @@ internal fun ChatMessageList(
             modifier = Modifier
                 .align(Alignment.BottomEnd)
                 .padding(end = 12.dp, bottom = 96.dp),
-        )
-        // §Q4: jump-to-bottom FAB — shown when user scrolled away from latest.
-        ChatJumpToBottomFab(
-            visible = !followBottom,
-            listState = listState,
-            onJump = { followBottom = true },
-            modifier = Modifier
-                .align(Alignment.BottomCenter)
-                .padding(bottom = 72.dp),
         )
     }
 }

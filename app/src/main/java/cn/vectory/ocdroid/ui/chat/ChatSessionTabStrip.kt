@@ -316,10 +316,14 @@ private fun SessionTab(
         // SecondaryIndicator on PrimaryScrollableTabRow now marks the active
         // tab; SessionTab itself stays background-free so the strip blends
         // with the TopAppBar surface.
-        modifier = modifier.height(36.dp),
-        // §fix-2: text colour stays theme onSurface / onSurfaceVariant (weight
-        // differentiates selection); the hash colour now lives on the indicator
-        // underline + unread dot.
+        modifier = modifier
+            .height(36.dp)
+            .background(
+                color = if (isSelected) accentColor.copy(alpha = 0.15f) else Color.Transparent
+            ),
+        // §issue-4: restore hash-colour highlight on selected tab (translucent
+        // accent fill). Combined with the SecondaryIndicator underline for a
+        // clear "this tab is active" signal. Text colour: onSurface/onSurfaceVariant.
         selectedContentColor = MaterialTheme.colorScheme.onSurface,
         unselectedContentColor = MaterialTheme.colorScheme.onSurfaceVariant,
         text = {

@@ -7,6 +7,7 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.isImeVisible
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.gestures.animateScrollBy
 import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.KeyboardArrowDown
@@ -65,12 +66,17 @@ internal fun ChatMessageNavFab(
                 val target = userMessageLcIndices.firstOrNull { it > cur }
                 scope.launch {
                     if (target != null) {
+                        // §issue-2: reverseLayout 下 scrollToItem 把 target 放到
+                        // 视觉底部（scroll start）。追加 animateScrollBy（负向 = 向更新方向）把它推到
+                        // 视觉顶部，方便用户向下（更新方向）阅读后续回复。
                         listState.animateScrollToItem(target)
+                        val vh = listState.layoutInfo.viewportSize.height.toFloat()
+                        listState.animateScrollBy(-vh * 0.8f)
                     } else {
-                        // Q7: 已在最旧用户消息，继续按上 → 回到最顶端（load-more/
-                        // 最旧消息处）。不自动触发 loadMore（用户手动点）。
                         val topIdx = (listState.layoutInfo.totalItemsCount - 1).coerceAtLeast(0)
                         listState.animateScrollToItem(topIdx)
+                        val vh = listState.layoutInfo.viewportSize.height.toFloat()
+                        listState.animateScrollBy(-vh * 0.8f)
                     }
                 }
             },
@@ -89,6 +95,8 @@ internal fun ChatMessageNavFab(
                 scope.launch {
                     if (target != null) {
                         listState.animateScrollToItem(target)
+                        val vh = listState.layoutInfo.viewportSize.height.toFloat()
+                        listState.animateScrollBy(-vh * 0.8f)
                     } else {
                         // Q8: 已在最新用户消息，继续按下 → 跳到列表最底（最新消息）。
                         listState.animateScrollToItem(0)
