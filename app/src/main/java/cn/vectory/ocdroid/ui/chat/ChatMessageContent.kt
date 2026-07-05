@@ -366,21 +366,16 @@ internal fun ChatMessageList(
         }
     }
 
-    // #3 — on session enter, decide intent: a "return" (saved position exists)
-    // queues a restore and disables follow-bottom; a fresh open enables
-    // follow-bottom. Only the synchronous state writes happen here; the actual
-    // scroll is deferred to the contentVersion effect so it runs against a
-    // populated message list (indices are valid), not the transiently-empty
-    // list seen mid-load.
+    // #3 — on session enter, always follow-bottom (jump to latest). The previous
+    // design restored a saved scroll position, but that restore ran ~250ms after
+    // the first frame (via the contentVersion effect), causing a visible scroll
+    // jump = the horizontal-swipe tab flicker. Saved-position restore is now
+    // removed entirely; every tab switch lands on the latest message. Only the
+    // synchronous state writes happen here; the actual scroll is deferred to the
+    // contentVersion effect so it runs against a populated message list.
     LaunchedEffect(sessionId) {
-        val saved = sessionId?.let { savedPositions[it] }
-        if (saved != null) {
-            pendingRestoreSession = sessionId
-            followBottom = false
-        } else {
-            pendingRestoreSession = null
-            followBottom = true
-        }
+        pendingRestoreSession = null
+        followBottom = true
         // §navfab-redesign: 会话切换隐藏"跳到最新"按钮（新会话从默认跟底状态开始）。
         navFabVisible = false
         // §navfab-guard (gpter 🟡): 防御性重置程序化滚动守卫——兜底任何未预见的
@@ -389,34 +384,9 @@ internal fun ChatMessageList(
     }
 
     LaunchedEffect(contentVersion) {
-        // #3 — apply a queued restore once the target session's messages are
-        // loaded, then return early so we don't also fire the follow-bottom
-        // scroll for this same contentVersion tick.
-        val restoreFor = pendingRestoreSession
-        if (restoreFor != null && restoreFor == sessionId && messages.isNotEmpty()) {
-            val saved = savedPositions[restoreFor]
-            if (saved != null) {
-                pendingRestoreSession = null
-                followBottom = false
-                // 🟡 True LRU (kimo 9.4): a restore is also an "access" — move
-                // this id to the tail so an actively-revisited session is not
-                // evicted by a later sibling-session write.
-                accessOrder.remove(restoreFor)
-                accessOrder.add(restoreFor)
-                // Clamp is handled by LazyListState when the index exceeds the
-                // current item count (e.g. if new messages shifted the list).
-                listState.scrollToItem(saved.first, saved.second)
-                return@LaunchedEffect
-            } else {
-                // 🟡 Defensive (glmer 🟡-1): the saved entry was evicted by an
-                // LRU tick between the session-switch (which set
-                // pendingRestoreSession) and this effect firing. Clear the
-                // pending flag and fall through to the follow-bottom branch so
-                // we don't get stuck with followBottom=false at whatever
-                // residual index the listState happens to be on.
-                pendingRestoreSession = null
-            }
-        }
+        // §flicker-fix: saved-position restore removed — always follow-bottom to
+        // the latest message. (pendingRestoreSession is always null now; the
+        // restore branch that used to live here is intentionally gone.)
         // §symptom3-fix: when the user expands the in-progress streaming
         // reasoning card (to read the chain-of-thought from its beginning),
         // pause the bottom-pinning auto-follow. Otherwise the per-token

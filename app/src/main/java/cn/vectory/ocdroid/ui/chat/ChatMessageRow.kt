@@ -220,15 +220,19 @@ internal fun MessageRow(
         }
         // Footer caption — replaces the previous provider/model label.
         //  - Assistant: completion time (hh:mm), falling back to created time.
-        //  - User: "<modelId> <created hh:mm>" so the user can see which agent
-        //    model handled the turn and when the prompt was sent.
+        //  - User: "<agent>·<modelId> <created hh:mm>" so the user can see which
+        //    agent + model handled the turn and when the prompt was sent. The
+        //    middot joins agent and model only when both are present; each is
+        //    omitted individually when the server did not echo it.
         val timeInfo = message.time
         val footerText = if (isUser && !isTaskCompletionMsg) {
+            val agentName = message.agent
             val modelId = message.resolvedModel?.modelId
             val sendTime = timeInfo?.created?.let(::formatHm)
+            val amParts = listOfNotNull(agentName, modelId).joinToString("·")
             when {
-                modelId != null && sendTime != null -> "$modelId $sendTime"
-                modelId != null -> modelId
+                amParts.isNotEmpty() && sendTime != null -> "$amParts $sendTime"
+                amParts.isNotEmpty() -> amParts
                 sendTime != null -> sendTime
                 else -> null
             }
