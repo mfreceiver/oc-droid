@@ -1,12 +1,12 @@
 package cn.vectory.ocdroid.ui.controller
 
+import android.util.Log
 import cn.vectory.ocdroid.data.model.Message
 import cn.vectory.ocdroid.data.model.Part
 import cn.vectory.ocdroid.data.model.QuestionRequest
 import cn.vectory.ocdroid.data.model.Session
 import cn.vectory.ocdroid.data.model.SSEEvent
 import cn.vectory.ocdroid.data.model.SSEPayload
-import cn.vectory.ocdroid.ui.AppState
 import cn.vectory.ocdroid.ui.ChatState
 import cn.vectory.ocdroid.ui.ComposerState
 import cn.vectory.ocdroid.ui.ConnectionState
@@ -14,16 +14,20 @@ import cn.vectory.ocdroid.ui.FileState
 import cn.vectory.ocdroid.ui.HostState
 import cn.vectory.ocdroid.ui.SessionListState
 import cn.vectory.ocdroid.ui.SettingsState
+import cn.vectory.ocdroid.ui.SharedEffectBus
 import cn.vectory.ocdroid.ui.SliceFlows
 import cn.vectory.ocdroid.ui.TrafficState
 import cn.vectory.ocdroid.ui.UnreadState
-import cn.vectory.ocdroid.ui.syncSlicesFromAppState
 import cn.vectory.ocdroid.util.SettingsManager
 import io.mockk.mockk
+import io.mockk.mockkStatic
 import io.mockk.unmockkAll
 import io.mockk.verify
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.toList
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.TestScope
+import kotlinx.coroutines.test.UnconfinedTestDispatcher
 import kotlinx.serialization.json.JsonObjectBuilder
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.add
@@ -40,32 +44,53 @@ import org.junit.Before
 import org.junit.Test
 
 /**
- * R-16 M4: independent unit test for [SessionSyncCoordinator].
+ * R-16 M4 → R-17 batch3b: independent unit test for [SessionSyncCoordinator].
  *
  * Zero reflection — the coordinator is driven entirely through its public
- * [SessionSyncCoordinator.handleEvent] API and asserted via direct
- * `MutableStateFlow<AppState>` reads + the [RecordingSessionSyncCoordinatorCallbacks]
- * spy. The dispatch body is a verbatim move of the pre-extraction
- * `handleIncomingSseEvent`, so these cases are the behaviour-equivalence proof
- * that the SSE fold (message patch/insert, session upsert, status badge, part
- * streaming overlay, permission/question/todo, server.connected catch-up
- * trigger) is byte-for-byte preserved. AppState + SliceFlows are real so
- * `updateAndSync` runs and the coordinator's state writes are observable.
- * Follows the [HostProfileControllerTest] / [SessionSwitcherTest] pattern.
+ * [SessionSyncCoordinator.handleEvent] API and asserted via direct slice
+ * StateFlow reads + the captured [ControllerEffect]s on a real
+ * [SharedEffectBus]. A collector launched in [setUp] drains every emitted
+ * effect into [collectedEffects] so the test bodies can filter by effect
+ * type. non-fatal issues now go through the inlined
+ * [cn.vectory.ocdroid.ui.reportNonFatalIssue] helper (which calls
+ * `android.util.Log.w`) — these tests `mockkStatic(Log::class)` in setUp and
+ * use `verify { Log.w(...) }` for the assertions that used to count
+ * `onNonFatalIssue` callback invocations.
+ *
+ * The dispatch body is a verbatim move of the pre-extraction
+ * `handleIncomingSseEvent`, so these cases are the behaviour-equivalence
+ * proof that the SSE fold (message patch/insert, session upsert, status
+ * badge, part streaming overlay, permission/question/todo, server.connected
+ * catch-up trigger) is byte-for-byte preserved. SliceFlows are real so the
+ * coordinator's state writes are observable.
  */
 @Suppress("DEPRECATION")
+@OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
 class SessionSyncCoordinatorTest {
 
-    private lateinit var state: MutableStateFlow<AppState>
     private lateinit var slices: SliceFlows
-    private lateinit var callbacks: RecordingSessionSyncCoordinatorCallbacks
+    private lateinit var effects: SharedEffectBus
+    private lateinit var collectedEffects: MutableList<ControllerEffect>
     private lateinit var settingsManager: SettingsManager
     private lateinit var scope: TestScope
     private lateinit var coordinator: SessionSyncCoordinator
+    /**
+     * §R-17 batch2 step e final: in-test fixture carrying the prior snapshot
+     * so successive `seed { ... }` calls compose against the prior state.
+     * Production no longer has an AppState mirror; this fixture exists only
+     * to drive the seed() transform chain.
+     */
+    private var appStateFixture: SeedFixture = SeedFixture()
 
     @Before
     fun setUp() {
-        state = MutableStateFlow(AppState())
+        // §batch 3b: reportNonFatalIssue now runs inline in the coordinator and
+        // calls android.util.Log.w. Stub it so the JVM test harness doesn't
+        // throw on the android.util.Log statics.
+        mockkStatic(Log::class)
+        io.mockk.every { Log.w(any<String>(), any<String>()) } returns 0
+        io.mockk.every { Log.w(any<String>(), any<String>(), any<Throwable>()) } returns 0
+        appStateFixture = SeedFixture()
         slices = SliceFlows(
             connection = MutableStateFlow(ConnectionState()),
             traffic = MutableStateFlow(TrafficState()),
@@ -78,9 +103,13 @@ class SessionSyncCoordinatorTest {
             host = MutableStateFlow(HostState())
         )
         settingsManager = mockk(relaxed = true)
-        callbacks = RecordingSessionSyncCoordinatorCallbacks()
-        scope = TestScope()
-        coordinator = SessionSyncCoordinator(scope, state, slices, settingsManager, callbacks)
+        effects = SharedEffectBus()
+        collectedEffects = mutableListOf()
+        scope = TestScope(UnconfinedTestDispatcher())
+        // Drain every emitted effect into collectedEffects so the test bodies
+        // can filter by type. Launched in scope so it auto-cancels at test end.
+        scope.launch(start = kotlinx.coroutines.CoroutineStart.UNDISPATCHED) { effects.effectsConsumed.toList(collectedEffects) }
+        coordinator = SessionSyncCoordinator(scope, slices, settingsManager, effects)
     }
 
     @After
@@ -89,12 +118,84 @@ class SessionSyncCoordinatorTest {
     }
 
     /**
-     * Seeds AppState then propagates to the slices (the coordinator reads
-     * slices). R-17 M5: controllers no longer read the AppState mirror.
+     * §R-17 batch2 step e final: seed slices directly from a SeedFixture.
+     * The fixture carries the prior snapshot so successive `seed { ... }` calls
+     * compose against the prior state. The coordinator reads slices only.
      */
-    private fun seed(transform: (AppState) -> AppState) {
-        state.value = transform(state.value)
-        syncSlicesFromAppState(state.value, slices)
+    private fun seed(transform: (SeedFixture) -> SeedFixture) {
+        appStateFixture = transform(appStateFixture)
+        val s = appStateFixture
+        slices.connection.value = ConnectionState(
+            isConnected = s.isConnected,
+            isConnecting = s.isConnecting,
+            serverVersion = s.serverVersion,
+            connectionPhase = s.connectionPhase,
+            tunnelActivationState = s.tunnelActivationState
+        )
+        slices.traffic.value = TrafficState(
+            trafficSent = s.trafficSent,
+            trafficReceived = s.trafficReceived
+        )
+        slices.composer.value = ComposerState(
+            inputText = s.inputText,
+            imageAttachments = s.imageAttachments,
+            sendingSessionIds = s.sendingSessionIds,
+            draftWorkdir = s.draftWorkdir
+        )
+        slices.file.value = FileState(
+            filePathToShowInFiles = s.filePathToShowInFiles,
+            filePreviewOriginRoute = s.filePreviewOriginRoute,
+            fileBrowserOpen = s.fileBrowserOpen,
+            fileBrowserWorkdir = s.fileBrowserWorkdir
+        )
+        slices.settings.value = SettingsState(
+            themeMode = s.themeMode,
+            markdownFontSizes = s.markdownFontSizes,
+            selectedAgentName = s.selectedAgentName,
+            agents = s.agents,
+            providers = s.providers,
+            availableCommands = s.availableCommands,
+            disabledModels = s.disabledModels,
+            uiFontScale = s.uiFontScale,
+            uiContentScale = s.uiContentScale
+        )
+        slices.chat.value = slices.chat.value.copy(
+            currentSessionId = s.currentSessionId,
+            messages = s.messages,
+            partsByMessage = s.partsByMessage,
+            streamingPartTexts = s.streamingPartTexts,
+            streamingReasoningPart = s.streamingReasoningPart,
+            olderMessagesCursor = s.olderMessagesCursor,
+            hasMoreMessages = s.hasMoreMessages,
+            isLoadingMessages = s.isLoadingMessages,
+            gapInfo = s.gapInfo,
+            staleNotice = s.staleNotice,
+            currentModel = s.currentModel
+        )
+        slices.sessionList.value = SessionListState(
+            sessions = s.sessions,
+            sessionStatuses = s.sessionStatuses,
+            expandedSessionIds = s.expandedSessionIds,
+            loadedSessionLimit = s.loadedSessionLimit,
+            hasMoreSessions = s.hasMoreSessions,
+            isLoadingMoreSessions = s.isLoadingMoreSessions,
+            isRefreshingSessions = s.isRefreshingSessions,
+            pendingPermissions = s.pendingPermissions,
+            pendingQuestions = s.pendingQuestions,
+            childSessions = s.childSessions,
+            directorySessions = s.directorySessions,
+            openSessionIds = s.openSessionIds,
+            sessionTodos = s.sessionTodos
+        )
+        slices.unread.value = UnreadState(
+            unreadSessions = s.unreadSessions,
+            tempClearedUnread = s.tempClearedUnread,
+            lastViewedTime = s.lastViewedTime
+        )
+        slices.host.value = HostState(
+            hostProfiles = s.hostProfiles,
+            currentHostProfileId = s.currentHostProfileId
+        )
     }
 
     /** Current-session guard: many folds only touch the current session's view. */
@@ -111,10 +212,10 @@ class SessionSyncCoordinatorTest {
     fun `server connected routes to onServerConnected and is a no-op in the dispatch table`() {
         coordinator.handleEvent(event("server.connected") {})
 
-        assertEquals(1, callbacks.onServerConnectedCalls)
+        assertEquals(1, collectedEffects.filterIsInstance<ControllerEffect.ServerConnected>().size)
         // No state mutation, no other callback.
-        assertTrue(callbacks.onRefreshMessagesCalls.isEmpty())
-        assertEquals(0, callbacks.onNonFatalIssueCalls)
+        assertTrue(collectedEffects.filterIsInstance<ControllerEffect.LoadMessages>().isEmpty())
+        verify(exactly = 0) { Log.w(any<String>(), any<String>()) }
     }
 
     // ── session.created / session.updated (upsert) ─────────────────────────
@@ -144,7 +245,7 @@ class SessionSyncCoordinatorTest {
             put("session", JsonPrimitive("not-an-object"))
         })
 
-        assertEquals(1, callbacks.onNonFatalIssueCalls)
+        verify(exactly = 1) { Log.w(any<String>(), match<String> { it.contains("session.created") }) }
         assertTrue(slices.sessionList.value.sessions.isEmpty())
     }
 
@@ -281,7 +382,11 @@ class SessionSyncCoordinatorTest {
 
         assertNotNull(slices.sessionList.value.sessionStatuses["session-1"])
         assertTrue(slices.sessionList.value.sessionStatuses["session-1"]!!.isBusy)
-        assertEquals(listOf("session-1" to true), callbacks.onRefreshMessagesCalls)
+        assertEquals(
+            listOf("session-1" to true),
+            collectedEffects.filterIsInstance<ControllerEffect.LoadMessages>()
+                .map { it.sessionId to it.resetLimit }
+        )
     }
 
     @Test
@@ -294,7 +399,7 @@ class SessionSyncCoordinatorTest {
         })
 
         assertTrue(slices.sessionList.value.sessionStatuses["session-2"]!!.isBusy)
-        assertTrue(callbacks.onRefreshMessagesCalls.isEmpty())
+        assertTrue(collectedEffects.filterIsInstance<ControllerEffect.LoadMessages>().isEmpty())
     }
 
     @Test
@@ -313,7 +418,11 @@ class SessionSyncCoordinatorTest {
         })
 
         assertFalse(slices.sessionList.value.sessionStatuses["session-1"]!!.isBusy)
-        assertEquals(listOf("session-1" to true), callbacks.onRefreshMessagesCalls)
+        assertEquals(
+            listOf("session-1" to true),
+            collectedEffects.filterIsInstance<ControllerEffect.LoadMessages>()
+                .map { it.sessionId to it.resetLimit }
+        )
     }
 
     @Test
@@ -326,7 +435,7 @@ class SessionSyncCoordinatorTest {
         })
 
         assertFalse(slices.sessionList.value.sessionStatuses["session-1"]!!.isBusy)
-        assertTrue(callbacks.onRefreshMessagesCalls.isEmpty())
+        assertTrue(collectedEffects.filterIsInstance<ControllerEffect.LoadMessages>().isEmpty())
     }
 
     @Test
@@ -349,7 +458,7 @@ class SessionSyncCoordinatorTest {
             put("status", JsonPrimitive("not-an-object"))
         })
 
-        assertEquals(1, callbacks.onNonFatalIssueCalls)
+        verify(exactly = 1) { Log.w(any<String>(), match<String> { it.contains("session.status") }) }
     }
 
     // ── message.created (forward-compat branch) ────────────────────────────
@@ -362,7 +471,11 @@ class SessionSyncCoordinatorTest {
             put("sessionID", JsonPrimitive("session-1"))
         })
 
-        assertEquals(listOf("session-1" to true), callbacks.onRefreshMessagesCalls)
+        assertEquals(
+            listOf("session-1" to true),
+            collectedEffects.filterIsInstance<ControllerEffect.LoadMessages>()
+                .map { it.sessionId to it.resetLimit }
+        )
     }
 
     @Test
@@ -374,7 +487,7 @@ class SessionSyncCoordinatorTest {
         })
 
         assertTrue(slices.unread.value.unreadSessions.contains("session-2"))
-        assertTrue(callbacks.onRefreshMessagesCalls.isEmpty())
+        assertTrue(collectedEffects.filterIsInstance<ControllerEffect.LoadMessages>().isEmpty())
     }
 
     @Test
@@ -410,7 +523,7 @@ class SessionSyncCoordinatorTest {
 
         assertEquals(listOf("m1", "m2"), slices.chat.value.messages.map { it.id })
         // No reload issued — patch is in-place.
-        assertTrue(callbacks.onRefreshMessagesCalls.isEmpty())
+        assertTrue(collectedEffects.filterIsInstance<ControllerEffect.LoadMessages>().isEmpty())
     }
 
     @Test
@@ -562,7 +675,11 @@ class SessionSyncCoordinatorTest {
         // 仅触发 reload(resetLimit=false) 刷新权威快照。
         assertEquals(seeded, slices.chat.value.streamingPartTexts)
         assertEquals(seededReasoning, slices.chat.value.streamingReasoningPart)
-        assertEquals(listOf("session-1" to false), callbacks.onRefreshMessagesCalls)
+        assertEquals(
+            listOf("session-1" to false),
+            collectedEffects.filterIsInstance<ControllerEffect.LoadMessages>()
+                .map { it.sessionId to it.resetLimit }
+        )
     }
 
     @Test
@@ -580,7 +697,7 @@ class SessionSyncCoordinatorTest {
         })
 
         assertTrue(slices.chat.value.streamingPartTexts.isEmpty())
-        assertTrue(callbacks.onRefreshMessagesCalls.isEmpty())
+        assertTrue(collectedEffects.filterIsInstance<ControllerEffect.LoadMessages>().isEmpty())
     }
 
     // ── message.part.delta (web independent event) ──────────────────────────
@@ -611,7 +728,7 @@ class SessionSyncCoordinatorTest {
         scope.testScheduler.advanceUntilIdle()
 
         assertEquals("Hello, world!", slices.chat.value.streamingPartTexts["part-1"])
-        assertTrue(callbacks.onRefreshMessagesCalls.isEmpty())
+        assertTrue(collectedEffects.filterIsInstance<ControllerEffect.LoadMessages>().isEmpty())
     }
 
     @Test
@@ -733,7 +850,11 @@ class SessionSyncCoordinatorTest {
             put("part", buildJsonObject { put("type", JsonPrimitive("text")) })
         })
         assertEquals("streaming", slices.chat.value.streamingPartTexts["part-1"])
-        assertEquals(listOf("session-1" to false), callbacks.onRefreshMessagesCalls)
+        assertEquals(
+            listOf("session-1" to false),
+            collectedEffects.filterIsInstance<ControllerEffect.LoadMessages>()
+                .map { it.sessionId to it.resetLimit }
+        )
 
         // session.status idle: overlay still non-empty → idle finalization fires
         // reload(resetLimit=true), which is the safety net that ultimately clears
@@ -743,7 +864,11 @@ class SessionSyncCoordinatorTest {
             put("status", buildJsonObject { put("type", JsonPrimitive("idle")) })
         })
         assertFalse(slices.sessionList.value.sessionStatuses["session-1"]!!.isBusy)
-        assertEquals(listOf("session-1" to false, "session-1" to true), callbacks.onRefreshMessagesCalls)
+        assertEquals(
+            listOf("session-1" to false, "session-1" to true),
+            collectedEffects.filterIsInstance<ControllerEffect.LoadMessages>()
+                .map { it.sessionId to it.resetLimit }
+        )
     }
 
     @Test
@@ -765,7 +890,7 @@ class SessionSyncCoordinatorTest {
     @Test
     fun `permission asked refreshes pending permissions via the callback`() {
         coordinator.handleEvent(event("permission.asked") {})
-        assertEquals(1, callbacks.onLoadPendingPermissionsCalls)
+        assertEquals(1, collectedEffects.filterIsInstance<ControllerEffect.LoadPendingPermissions>().size)
     }
 
     @Test
@@ -876,34 +1001,7 @@ class SessionSyncCoordinatorTest {
     @Test
     fun `an unknown event type is silently ignored`() {
         coordinator.handleEvent(event("plugin.added") { put("sessionID", JsonPrimitive("session-1")) })
-        assertEquals(0, callbacks.onNonFatalIssueCalls)
-        assertTrue(callbacks.onRefreshMessagesCalls.isEmpty())
-    }
-
-    // ── RecordingSessionSyncCoordinatorCallbacks ────────────────────────────
-
-    /**
-     * Handwritten spy (per the codebase's zero-reflection test convention) that
-     * records every [SessionSyncCoordinatorCallbacks] invocation so tests can
-     * assert on side effects (reload requests, permission refresh, catch-up
-     * trigger, non-fatal logging).
-     */
-    private class RecordingSessionSyncCoordinatorCallbacks : SessionSyncCoordinatorCallbacks {
-        var onServerConnectedCalls = 0
-        var onLoadPendingPermissionsCalls = 0
-        var onNonFatalIssueCalls = 0
-        val onRefreshMessagesCalls = mutableListOf<Pair<String, Boolean>>()
-        val onNonFatalIssues = mutableListOf<String>()
-
-        override fun onServerConnected() { onServerConnectedCalls++ }
-        override fun onRefreshMessages(sessionId: String, resetLimit: Boolean) {
-            onRefreshMessagesCalls += sessionId to resetLimit
-        }
-        override fun onRefreshSessions() {}
-        override fun onLoadPendingPermissions() { onLoadPendingPermissionsCalls++ }
-        override fun onNonFatalIssue(message: String) {
-            onNonFatalIssueCalls++
-            onNonFatalIssues += message
-        }
+        verify(exactly = 0) { Log.w(any<String>(), any<String>()) }
+        assertTrue(collectedEffects.filterIsInstance<ControllerEffect.LoadMessages>().isEmpty())
     }
 }

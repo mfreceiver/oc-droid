@@ -3,6 +3,7 @@ package cn.vectory.ocdroid
 import android.app.Application
 import android.content.ComponentCallbacks2
 import cn.vectory.ocdroid.di.AppLifecycleMonitor
+import cn.vectory.ocdroid.ui.AppCore
 import cn.vectory.ocdroid.ui.util.HttpImageHolder
 import cn.vectory.ocdroid.util.AppLocaleController
 import cn.vectory.ocdroid.util.CrashLogger
@@ -19,6 +20,10 @@ class OpenCodeApp : Application() {
      */
     @Inject
     lateinit var appLifecycleMonitor: AppLifecycleMonitor
+
+    /** §R-17 batch3: injected so cleanup() can be called on process teardown. */
+    @Inject
+    lateinit var appCore: AppCore
 
     override fun onCreate() {
         super.onCreate()
@@ -42,6 +47,13 @@ class OpenCodeApp : Application() {
         // first real WebView (MarkdownWebPreviewPane) now pays the one-time
         // init cost when the user actually opens a markdown web preview,
         // which is an acceptable, lazy trade-off. See MarkdownWebPreviewPane.
+    }
+
+    override fun onTerminate() {
+        super.onTerminate()
+        // §R-17 batch3: best-effort teardown (framework does not guarantee
+        // onTerminate is called; OS process death reclaims everything regardless).
+        appCore.cleanup()
     }
 
     override fun onTrimMemory(level: Int) {

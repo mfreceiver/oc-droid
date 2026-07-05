@@ -109,7 +109,14 @@ private fun ResolvedMarkdownWebPreview(
                 text = content,
                 markdownFilePath = resolverMarkdownPath,
                 workspaceDirectory = sessionDirectory,
-                fetchContent = { path -> repository.getFileContent(path).getOrThrow() }
+                // §R-17 batch4: explicit directory parameter — see
+                // FilePreviewPane.PreviewMarkdown for the null-directory throw
+                // rationale (MarkdownImageResolver collapses failed matches).
+                fetchContent = { path ->
+                    val dir = sessionDirectory
+                        ?: throw IllegalStateException("No session directory bound for preview")
+                    repository.getFileContent(dir, path).getOrThrow()
+                }
             )
         } catch (e: Exception) {
             error = e.message ?: "Failed to resolve Markdown images"

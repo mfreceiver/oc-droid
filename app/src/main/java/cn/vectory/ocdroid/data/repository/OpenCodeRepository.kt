@@ -171,10 +171,24 @@ class OpenCodeRepository @Inject constructor(
     /**
      * Set the current workdir directory context injected into directory-scoped
      * requests via the `X-Opencode-Directory` header. Pass null to clear it.
+     *
+     * §R-17 batch4: kept (deprecated) because [DirectoryHeaderInterceptor] still
+     * uses it as the fallback for non-file routes that did NOT opt out via
+     * `X-Opencode-Skip-Dir` (e.g. SSE, /question, /command). File routes
+     * (/file, /file/content, /file/status, /find/file) now take an EXPLICIT
+     * `directory` parameter — do NOT rely on this setter for them.
      */
+    @Deprecated("R-17 batch4: use explicit directory parameter on file API calls")
     fun setCurrentDirectory(dir: String?) = hostConfig.setCurrentDirectory(dir)
 
-    /** Returns the currently configured workdir directory, or null when unset. */
+    /**
+     * Returns the currently configured workdir directory, or null when unset.
+     *
+     * §R-17 batch4: deprecated for the same reason as [setCurrentDirectory] —
+     * file callers should track the directory themselves; this remains for the
+     * interceptor + SSE routing + the host-profile restore path.
+     */
+    @Deprecated("R-17 batch4: use explicit directory parameter on file API calls")
     fun getCurrentDirectory(): String? = hostConfig.currentDirectory
 
     suspend fun checkHealth(): Result<HealthResponse> = runSuspendCatching { api.getHealth() }
@@ -443,8 +457,14 @@ class OpenCodeRepository @Inject constructor(
         api.getSessionTodos(sessionId)
     }
 
-    suspend fun getFileTree(path: String? = null): Result<List<FileNode>> = runSuspendCatching {
-        api.getFileTree(path ?: "")
+    /**
+     * §R-17 batch4: lists files under [directory] (absolute workdir) at the
+     * relative [path]. The directory is passed EXPLICITLY to the server via
+     * `?directory` + the `X-Opencode-Skip-Dir` marker on the API method, so
+     * this no longer depends on the global [setCurrentDirectory] state.
+     */
+    suspend fun getFileTree(directory: String, path: String? = null): Result<List<FileNode>> = runSuspendCatching {
+        api.getFileTree(path ?: "", directory)
     }
 
     /**
@@ -458,16 +478,19 @@ class OpenCodeRepository @Inject constructor(
         api.getFileTreeForDirectory(directory, path ?: "")
     }
 
-    suspend fun getFileContent(path: String): Result<FileContent> = runSuspendCatching {
-        api.getFileContent(path)
+    /** §R-17 batch4: see [getFileTree] for the explicit-directory rationale. */
+    suspend fun getFileContent(directory: String, path: String): Result<FileContent> = runSuspendCatching {
+        api.getFileContent(path, directory)
     }
 
-    suspend fun getFileStatus(): Result<List<FileStatusEntry>> = runSuspendCatching {
-        api.getFileStatus()
+    /** §R-17 batch4: see [getFileTree] for the explicit-directory rationale. */
+    suspend fun getFileStatus(directory: String): Result<List<FileStatusEntry>> = runSuspendCatching {
+        api.getFileStatus(directory)
     }
 
-    suspend fun findFile(query: String, limit: Int = 50): Result<List<String>> = runSuspendCatching {
-        api.findFile(query, limit)
+    /** §R-17 batch4: see [getFileTree] for the explicit-directory rationale. */
+    suspend fun findFile(directory: String, query: String, limit: Int = 50): Result<List<String>> = runSuspendCatching {
+        api.findFile(query, limit, directory)
     }
 
     fun connectSSE(): Flow<Result<SSEEvent>> =

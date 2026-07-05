@@ -45,6 +45,8 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.stringResource
+import cn.vectory.ocdroid.R
 import cn.vectory.ocdroid.ui.theme.BundledMonoFamily
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -82,7 +84,7 @@ internal fun DebugLogSection(hideHeader: Boolean = false) {
     }
 
     if (!hideHeader) {
-        SectionHeader(title = "调试日志")
+        SectionHeader(title = stringResource(R.string.debug_log_title))
     }
 
     Card(
@@ -105,11 +107,11 @@ internal fun DebugLogSection(hideHeader: Boolean = false) {
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text("调试日志", style = MaterialTheme.typography.titleMedium)
+                    Text(stringResource(R.string.debug_log_title), style = MaterialTheme.typography.titleMedium)
                     if (paused) {
                         Spacer(modifier = Modifier.width(8.dp))
                         Text(
-                            "（已暂停）",
+                            stringResource(R.string.debug_log_paused_suffix),
                             style = MaterialTheme.typography.labelSmall,
                             color = MaterialTheme.colorScheme.error
                         )
@@ -128,7 +130,7 @@ internal fun DebugLogSection(hideHeader: Boolean = false) {
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                LevelChip("全部", DebugLog.Level.DEBUG, minLevel) { minLevel = it }
+                LevelChip(stringResource(R.string.debug_log_level_all), DebugLog.Level.DEBUG, minLevel) { minLevel = it }
                 LevelChip("INFO+", DebugLog.Level.INFO, minLevel) { minLevel = it }
                 LevelChip("WARN+", DebugLog.Level.WARN, minLevel) { minLevel = it }
             }
@@ -156,7 +158,7 @@ internal fun DebugLogSection(hideHeader: Boolean = false) {
                 ) {
                     Icon(Icons.Default.ContentCopy, contentDescription = null, modifier = Modifier.size(16.dp))
                     Spacer(modifier = Modifier.width(4.dp))
-                    Text(if (copied) "已复制" else "复制")
+                    Text(if (copied) stringResource(R.string.debug_log_copied) else stringResource(R.string.debug_log_copy))
                 }
 
                 OutlinedButton(
@@ -176,7 +178,7 @@ internal fun DebugLogSection(hideHeader: Boolean = false) {
                         modifier = Modifier.size(16.dp)
                     )
                     Spacer(modifier = Modifier.width(4.dp))
-                    Text(if (paused) "继续" else "暂停")
+                    Text(if (paused) stringResource(R.string.debug_log_resume) else stringResource(R.string.debug_log_pause))
                 }
 
                 OutlinedButton(
@@ -185,7 +187,7 @@ internal fun DebugLogSection(hideHeader: Boolean = false) {
                 ) {
                     Icon(Icons.Default.Delete, contentDescription = null, modifier = Modifier.size(16.dp))
                     Spacer(modifier = Modifier.width(4.dp))
-                    Text("清除")
+                    Text(stringResource(R.string.debug_log_clear))
                 }
             }
 
@@ -214,7 +216,7 @@ internal fun DebugLogSection(hideHeader: Boolean = false) {
                 if (filtered.isEmpty()) {
                     item {
                         Text(
-                            if (liveEntries.isEmpty()) "（暂无日志）" else "（当前过滤下无日志）",
+                            if (liveEntries.isEmpty()) stringResource(R.string.debug_log_empty) else stringResource(R.string.debug_log_empty_filtered),
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                             style = MaterialTheme.typography.bodySmall
                         )

@@ -57,8 +57,14 @@ import cn.vectory.ocdroid.data.model.Part
 import cn.vectory.ocdroid.data.model.SessionStatus
 import cn.vectory.ocdroid.ui.files.FilesScreen
 import cn.vectory.ocdroid.ui.files.FilesViewModel
-import cn.vectory.ocdroid.ui.MainViewModel
+import cn.vectory.ocdroid.ui.ChatViewModel
+import cn.vectory.ocdroid.ui.ComposerViewModel
+import cn.vectory.ocdroid.ui.ConnectionViewModel
+import cn.vectory.ocdroid.ui.HostViewModel
+import cn.vectory.ocdroid.ui.OrchestratorViewModel
+import cn.vectory.ocdroid.ui.SessionViewModel
 import cn.vectory.ocdroid.ui.TunnelActivationState
+import cn.vectory.ocdroid.ui.UiEvent
 import cn.vectory.ocdroid.ui.computeContextUsage
 import cn.vectory.ocdroid.ui.currentHostProfile
 import cn.vectory.ocdroid.ui.currentSession
@@ -66,7 +72,6 @@ import cn.vectory.ocdroid.ui.currentSessionStatus
 import cn.vectory.ocdroid.ui.showTimed
 import cn.vectory.ocdroid.ui.visibleMessages
 import kotlinx.coroutines.flow.distinctUntilChanged
-import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.delay
 
@@ -83,39 +88,34 @@ val LocalWindowSizeClass = staticCompositionLocalOf<WindowSizeClass?> { null }
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun ChatScreen(
-    viewModel: MainViewModel,
+    chatVM: ChatViewModel,
+    composerVM: ComposerViewModel,
+    connectionVM: ConnectionViewModel,
+    sessionVM: SessionViewModel,
+    hostVM: HostViewModel,
+    orchestratorVM: OrchestratorViewModel,
     onNavigateToSettings: () -> Unit = {},
     onNavigateToSessions: () -> Unit = {}
 ) {
-    // §R-17 M5: AppState no longer carries the per-domain mirror fields.
-    // ChatScreen reads the authoritative slice flows directly. The only AppState
-    // field still consumed here is the cross-domain `error`.
-    // §R-17 M5.1 (kimo 🟠#1): subscribe ONLY to error (map+distinctUntilChanged)
-    // instead of the whole AppState — the mirror double-write makes `_state` emit
-    // on every keystroke / SSE delta, which would recompose ChatScreen each time
-    // and cancel the slice-migration recomposition-isolation gains.
-    val appStateError by viewModel.state
-        .map { it.error }
-        .distinctUntilChanged()
-        .collectAsStateWithLifecycle(initialValue = null)
-    // §success-channel: subscribe to AppState.successMessage (cross-domain,
-    // one-shot, same map+distinctUntilChanged pattern as appStateError) so
-    // tunnel-activation success and refresh-success render as a positive
-    // snackbar instead of being jammed through `error` and misrendered as
-    // "发生错误".
-    val appStateSuccess by viewModel.state
-        .map { it.successMessage }
-        .distinctUntilChanged()
-        .collectAsStateWithLifecycle(initialValue = null)
-    val connection by viewModel.connectionFlow.collectAsStateWithLifecycle()
-    val traffic by viewModel.trafficFlow.collectAsStateWithLifecycle()
-    val composer by viewModel.composerFlow.collectAsStateWithLifecycle()
-    val file by viewModel.fileFlow.collectAsStateWithLifecycle()
-    val settings by viewModel.settingsFlow.collectAsStateWithLifecycle()
-    val chat by viewModel.chatFlow.collectAsStateWithLifecycle()
-    val sessionList by viewModel.sessionListFlow.collectAsStateWithLifecycle()
-    val unread by viewModel.unreadFlow.collectAsStateWithLifecycle()
-    val host by viewModel.hostFlow.collectAsStateWithLifecycle()
+    // §R-17 batch3e: ChatScreen injects the 6 domain VMs directly and calls
+    // domain methods on them — no `viewModel.core.<method>()` bypass. All VMs
+    // share the same AppCore singleton (Hilt-scoped), so slice reads return
+    // the same flows regardless of which VM is asked.
+    //
+    // §batch2 history: ChatScreen used to subscribe to AppState.error /
+    // AppState.successMessage (removed). One-shot error/success toasts ride
+    // orchestratorVM.uiEvents (a SharedFlow<UiEvent>) — collected below in a
+    // single LaunchedEffect(Unit) so each event fires the snackbar exactly
+    // once. The slice-flow subscriptions below stay as-is.
+    val connection by chatVM.connectionFlow.collectAsStateWithLifecycle()
+    val traffic by orchestratorVM.trafficFlow.collectAsStateWithLifecycle()
+    val composer by composerVM.composerFlow.collectAsStateWithLifecycle()
+    val file by orchestratorVM.fileFlow.collectAsStateWithLifecycle()
+    val settings by orchestratorVM.settingsFlow.collectAsStateWithLifecycle()
+    val chat by chatVM.chatFlow.collectAsStateWithLifecycle()
+    val sessionList by chatVM.sessionListFlow.collectAsStateWithLifecycle()
+    val unread by chatVM.unreadFlow.collectAsStateWithLifecycle()
+    val host by orchestratorVM.hostFlow.collectAsStateWithLifecycle()
     var showFileBrowser by remember { mutableStateOf(false) }
     // §顶部 session tab 联动显隐：状态产生在 ChatMessageList（listState 所在），
     // 消费在 ChatTopBar（AnimatedVisibility 包裹 SessionTabStrip）。这里在
@@ -133,7 +133,7 @@ fun ChatScreen(
     // §G4 会话切换时重置 tab 可见——避免从隐藏态切到新会话后 tab 仍不可见。
     LaunchedEffect(chat.currentSessionId) { tabVisible = true }
     // §R-17 Stage 2: expandedParts collect moved INTO ChatMessageList (it now
-    // subscribes to viewModel.expandedParts directly), so ChatScreen no longer
+    // subscribes to viewModel.core.expandedParts directly), so ChatScreen no longer
     // needs to observe it — toggling a card recomposes only ChatMessageList.
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
@@ -146,7 +146,7 @@ fun ChatScreen(
         contract = ActivityResultContracts.GetMultipleContents()
     ) { uris ->
         scope.launch {
-            viewModel.addImageAttachments(loadImageAttachments(context, uris))
+            composerVM.addImageAttachments(loadImageAttachments(context, uris))
         }
     }
 
@@ -157,8 +157,8 @@ fun ChatScreen(
     // recompose regardless of slice state. showFileBrowser is a
     // remember{mutableStateOf} delegate whose setter is referentially stable,
     // so capturing it inside remember(viewModel) is safe.
-    val onChatFileClick: (String) -> Unit = remember(viewModel) {
-        { path -> viewModel.showFileInFiles(path, "chat"); showFileBrowser = true }
+    val onChatFileClick: (String) -> Unit = remember(orchestratorVM) {
+        { path -> orchestratorVM.showFileInFiles(path, "chat"); showFileBrowser = true }
     }
     val onAddImages: () -> Unit = remember(imagePickerLauncher) {
         { imagePickerLauncher.launch("image/*") }
@@ -200,7 +200,19 @@ fun ChatScreen(
     val parent = curSession?.parentId
     var lastParent by remember { mutableStateOf<String?>(null) }
     if (parent != null) lastParent = parent
-    BackHandler(enabled = parent != null) { lastParent?.let { viewModel.selectSession(it) } }
+    BackHandler(enabled = parent != null) { lastParent?.let { sessionVM.selectSession(it) } }
+
+    // Hoisted string resources (snackbar messages are read inside non-composable
+    // coroutine lambdas below — BackHandler callback + LaunchedEffect blocks —
+    // where @Composable stringResource() cannot be called directly).
+    val exitConfirmMessage = stringResource(R.string.chat_exit_confirm)
+    val errorMessage = stringResource(R.string.chat_error_occurred)
+    val errorActionLabel = stringResource(R.string.chat_view)
+    val staleNoticeMessage = stringResource(R.string.chat_stale_notice)
+    val staleNoticeActionLabel = stringResource(R.string.common_refresh)
+    // Hoisted so the replyQuestion onError callback (non-composable lambda) can
+    // use a localized string without Context.getString inside composition.
+    val submitFailedMessage = stringResource(R.string.question_submit_failed)
 
     // §Feature B: root-session double-confirm before system back exits the app.
     // First back shows a 1s snackbar and disables this handler; a second back
@@ -209,7 +221,7 @@ fun ChatScreen(
         pendingExit = true
         scope.launch {
             snackbarHostState.showTimed(
-                message = "退出请再次滑动",
+                message = exitConfirmMessage,
                 durationMillis = 1000L
             )
         }
@@ -312,22 +324,22 @@ fun ChatScreen(
     // identity re-builds the actions bundle. The VM method references and the
     // wrapping lambdas only capture viewModel (itself stable), so they do not
     // need to be keys.
-    val topBarActions = remember(viewModel, onNavigateToSettings, onNavigateToSessions) {
+    val topBarActions = remember(sessionVM, composerVM, onNavigateToSettings, onNavigateToSessions) {
         ChatTopBarActions(
-            onSelectSession = viewModel::selectSession,
-            onCloseSession = viewModel::closeSession,
-            onSelectAgent = viewModel::selectAgent,
+            onSelectSession = sessionVM::selectSession,
+            onCloseSession = sessionVM::closeSession,
+            onSelectAgent = composerVM::selectAgent,
             onNavigateToSettings = onNavigateToSettings,
             onNavigateToSessions = onNavigateToSessions,
-            onRefreshMessages = { viewModel.refreshCurrentSession() },
-            onRefreshTrafficStats = viewModel::refreshTrafficStats,
-            onSelectHost = { viewModel.selectHostProfile(it) },
-            onActivateTunnel = { viewModel.activateTunnelForCurrentHost() },
-            onSwitchModel = { providerId, modelId -> viewModel.switchSessionModel(providerId, modelId) },
+            onRefreshMessages = { chatVM.refreshCurrentSession() },
+            onRefreshTrafficStats = orchestratorVM::refreshTrafficStats,
+            onSelectHost = { hostVM.selectHostProfile(it) },
+            onActivateTunnel = { hostVM.activateTunnelForCurrentHost() },
+            onSwitchModel = { providerId, modelId -> composerVM.switchSessionModel(providerId, modelId) },
         )
     }
     // §kimo#6: remember the compact lambda so ChatTopBar can skip when stable.
-    val onContextCompact = remember(viewModel) { { viewModel.compactSession() } }
+    val onContextCompact = remember(chatVM) { { chatVM.compactSession() } }
 
     // §3-scroll-memory: hoisted per-session scroll-position cache. Owned HERE
     // (above the HorizontalPager) so the pager disposing & recreating a page's
@@ -398,7 +410,7 @@ fun ChatScreen(
     // here (root ChatScreen scope) so BOTH ChatInputBar (inside the chat
     // Surface) and QuestionCardView (sibling of the Surface) can read/write
     // the same state. The bottom ChatInputBar primary button submits the
-    // question via viewModel.replyQuestion, in lockstep with QuestionCardView's
+    // question via viewModel.core.replyQuestion, in lockstep with QuestionCardView's
     // own Submit. questionAnswersValid requires EVERY sub-question to have an
     // effective answer (matches the multi-tab Next→Submit flow: Submit only
     // fires when all tabs are answered).
@@ -427,26 +439,37 @@ fun ChatScreen(
         // observing pendingQuestion becoming null is the success signal.
         isSubmittingQuestion = false
     }
-    // §C1: surface AppState.error via a 3s Snackbar (was a top-aligned AppToast
-    // that auto-dismissed after 3s, then a Long-duration M3 Snackbar). The
-    // LaunchedEffect key is the error value, so a new error relaunches the
-    // effect — showTimed suspends until the snackbar finishes (action tap or
-    // 3s timeout), at which point we clear the source via viewModel.clearError()
-    // (the onDismiss-equivalent). SnackbarHostState serializes concurrent
-    // showSnackbar calls, so a simultaneous global-error + question-error still
-    // displays in turn.
-    LaunchedEffect(appStateError) {
-        appStateError?.let { error ->
-            // §error-detail: all errors show a generic snackbar + "查看" action
-            // that opens a detail dialog with the full message. 10s duration
-            // (not the default 3s) so the user has time to notice and tap.
-            snackbarHostState.showTimed(
-                message = "发生错误",
-                durationMillis = 10_000L,
-                actionLabel = "查看",
-                onAction = { errorDetail = error }
-            )
-            viewModel.clearError()
+    // §C1 / §R-17 batch2: surface UiEvent.Error / UiEvent.Success via a 3s/2.5s
+    // M3 Snackbar. Collection lives in ONE LaunchedEffect(Unit) so each event
+    // fires the snackbar exactly once (the SharedFlow is one-shot, consumed on
+    // emission — no clearError/clearSuccessMessage to call afterwards). The
+    // Error branch reuses the §error-detail "查看" action; Success is short
+    // ("隧道激活成功" / "已刷新") with no action. SnackbarHostState serializes
+    // concurrent showSnackbar calls so simultaneous Error + Success still
+    // display in turn.
+    LaunchedEffect(Unit) {
+        orchestratorVM.uiEvents.collect { event ->
+            when (event) {
+                is UiEvent.Error -> {
+                    // §error-detail: all errors show a generic snackbar + "查看"
+                    // action that opens a detail dialog with the full message.
+                    // 10s duration (not the default 3s) so the user has time to
+                    // notice and tap.
+                    snackbarHostState.showTimed(
+                        message = errorMessage,
+                        durationMillis = 10_000L,
+                        actionLabel = errorActionLabel,
+                        onAction = { errorDetail = event.message }
+                    )
+                }
+                is UiEvent.Success -> {
+                    // §success-channel: positive snackbar, 2.5s, no action.
+                    snackbarHostState.showTimed(
+                        message = event.message,
+                        durationMillis = 2_500L
+                    )
+                }
+            }
         }
     }
     // §C1: bottom-bar question-submit failure → same pattern as above; clears
@@ -455,26 +478,12 @@ fun ChatScreen(
     LaunchedEffect(questionSubmitError) {
         questionSubmitError?.let { error ->
             snackbarHostState.showTimed(
-                message = "发生错误",
+                message = errorMessage,
                 durationMillis = 10_000L,
-                actionLabel = "查看",
+                actionLabel = errorActionLabel,
                 onAction = { errorDetail = error }
             )
             questionSubmitError = null
-        }
-    }
-    // §success-channel: surface AppState.successMessage as a SHORT positive
-    // snackbar. No "查看" action (success messages are short by design —
-    // "隧道激活成功" / "已刷新"), 2.5s duration so it auto-dismisses quickly
-    // without lingering like the 10s error variant. Consumes on read so a
-    // stale value can't re-fire on recomposition.
-    LaunchedEffect(appStateSuccess) {
-        appStateSuccess?.let { message ->
-            snackbarHostState.showTimed(
-                message = message,
-                durationMillis = 2_500L
-            )
-            viewModel.clearSuccessMessage()
         }
     }
     // §Phase1E stale notice — now a 3s M3 Snackbar (was a top-aligned
@@ -488,9 +497,9 @@ fun ChatScreen(
     LaunchedEffect(chat.staleNotice, chat.currentSessionId) {
         if (chat.staleNotice && chat.currentSessionId != null) {
             snackbarHostState.showTimed(
-                message = "长时间未查看，仅显示最新内容。",
-                actionLabel = "刷新",
-                onAction = { viewModel.refreshCurrentSession() }
+                message = staleNoticeMessage,
+                actionLabel = staleNoticeActionLabel,
+                onAction = { chatVM.refreshCurrentSession() }
             )
         }
     }
@@ -500,7 +509,7 @@ fun ChatScreen(
     LaunchedEffect(currentSessionIsRunning, chat.isCompacting) {
         if (chat.isCompacting && !currentSessionIsRunning) {
             if (System.currentTimeMillis() - chat.compactStartedAt > 3000) {
-                viewModel.clearCompacting()
+                chatVM.clearCompacting()
             }
         }
     }
@@ -633,7 +642,9 @@ fun ChatScreen(
                             val sessionId = session?.id
                             if (sessionId != null && sessionId == chat.currentSessionId) {
                                 ChatMessageList(
-                                    viewModel = viewModel,
+                                    chatVM = chatVM,
+                                    composerVM = composerVM,
+                                    sessionVM = sessionVM,
                                     onFileClick = onChatFileClick,
                                     onTabVisibilityChange = { tabVisible = it },
                                     savedPositions = savedPositions,
@@ -654,7 +665,9 @@ fun ChatScreen(
                         // Single root session, sub-agent session, or pager
                         // disabled — render the message list directly.
                         ChatMessageList(
-                            viewModel = viewModel,
+                            chatVM = chatVM,
+                            composerVM = composerVM,
+                            sessionVM = sessionVM,
                             onFileClick = onChatFileClick,
                             onTabVisibilityChange = { tabVisible = it },
                             savedPositions = savedPositions,
@@ -669,8 +682,8 @@ fun ChatScreen(
                                 ?: curHostProfile?.serverUrl
                                     ?.substringAfter("://")
                                     ?.substringBefore("/")
-                                ?: "server",
-                            onConnect = { viewModel.testConnection() }
+                                    ?: "server",
+                            onConnect = { connectionVM.testConnection() }
                         )
                     }
 
@@ -697,7 +710,7 @@ fun ChatScreen(
                     if (chat.isCompacting) {
                         ThinkingCapsuleOverlay(
                             visible = true,
-                            text = "压缩中…",
+                            text = stringResource(R.string.chat_compacting),
                             startedAtMillis = chat.compactStartedAt.takeIf { it > 0 },
                             onAbort = {},
                             showAbort = false
@@ -707,14 +720,14 @@ fun ChatScreen(
                             visible = currentSessionIsRunning && currentActivity != null,
                             text = currentActivity?.text ?: "",
                             startedAtMillis = currentActivity?.startedAtMillis,
-                            onAbort = viewModel::abortSession
+                            onAbort = chatVM::abortSession
                         )
                     }
 
                     // §user-req: 手动刷新/连接期间显示胶囊提示
                     ThinkingCapsuleOverlay(
                         visible = connection.isConnecting && !connection.isConnected,
-                        text = "连接中…",
+                        text = stringResource(R.string.chat_connecting_status),
                         startedAtMillis = null,
                         onAbort = { }
                     )
@@ -726,7 +739,7 @@ fun ChatScreen(
         errorDetail?.let { detail ->
             AlertDialog(
                 onDismissRequest = { errorDetail = null },
-                title = { Text("错误详情") },
+                title = { Text(stringResource(R.string.chat_error_details)) },
                 text = {
                     SelectionContainer {
                         // AlertDialog's text slot has unbounded height, so the
@@ -764,7 +777,9 @@ fun ChatScreen(
         // materialise the session).
         if (chat.currentSessionId != null || composer.draftWorkdir != null) {
             ChatInputBar(
-                viewModel = viewModel,
+                chatVM = chatVM,
+                composerVM = composerVM,
+                orchestratorVM = orchestratorVM,
                 isBusy = currentSessionIsRunning || chat.isCompacting,
                 onAddImages = onAddImages,
                 pendingQuestion = pendingQuestion,
@@ -784,9 +799,9 @@ fun ChatScreen(
                             // replyQuestion has no onSuccess callback — success
                             // is observed via LaunchedEffect(pendingQuestion?.id)
                             // releasing the guard when the question is removed.
-                            viewModel.replyQuestion(pq.id, questionAnswers) {
+                            orchestratorVM.replyQuestion(pq.id, questionAnswers) {
                                 isSubmittingQuestion = false
-                                questionSubmitError = context.getString(R.string.question_submit_failed)
+                                questionSubmitError = submitFailedMessage
                             }
                         }
                     }
@@ -798,7 +813,7 @@ fun ChatScreen(
             ChatPermissionCard(
                 permission = permission,
                 onRespond = { response ->
-                    viewModel.respondPermission(permission.sessionId, permission.id, response)
+                    orchestratorVM.respondPermission(permission.sessionId, permission.id, response)
                 }
             )
         }
@@ -816,12 +831,12 @@ fun ChatScreen(
                         // (card's isSending via onError, isSubmittingQuestion here); success
                         // → pendingQuestion→null → LaunchedEffect above resets.
                         isSubmittingQuestion = true
-                        viewModel.replyQuestion(question.id, answers) {
+                        orchestratorVM.replyQuestion(question.id, answers) {
                             isSubmittingQuestion = false
                             onError()
                         }
                     },
-                    onReject = { viewModel.rejectQuestion(question.id) },
+                    onReject = { orchestratorVM.rejectQuestion(question.id) },
                     // §#4: receive the live answer snapshot so the bottom-bar
                     // primary button can submit the question in lockstep with
                     // this card's own Submit. [questionAnswers] is the same
@@ -853,11 +868,11 @@ fun ChatScreen(
                 pathToShow = file.filePathToShowInFiles,
                 sessionDirectory = curSession?.directory,
                 onCloseFile = {
-                    viewModel.clearFileToShow()
+                    orchestratorVM.clearFileToShow()
                     showFileBrowser = false
                 },
                 onFileClick = { path ->
-                    viewModel.showFileInFiles(path, "chat")
+                    orchestratorVM.showFileInFiles(path, "chat")
                 }
             )
         }

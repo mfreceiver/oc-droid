@@ -520,11 +520,18 @@ class OpenCodeRepositoryTest {
                 .setHeader("Content-Type", "application/json")
         )
 
-        val result = repository.getFileContent("docs/README.md")
+        // §R-17 batch4: file API now takes an explicit `directory` parameter
+        // (first positional arg); it is mirrored into the query by the
+        // Skip-Dir-aware interceptor.
+        val result = repository.getFileContent(directory = "/workdir/project", path = "docs/README.md")
 
         assertTrue(result.isSuccess)
         assertEquals("# Hello", result.getOrThrow().content)
-        assertEquals("/file/content?path=docs%2FREADME.md", server.takeRequest().path)
+        val request = server.takeRequest()
+        assertEquals("/file/content?path=docs%2FREADME.md&directory=%2Fworkdir%2Fproject", request.path)
+        // §R-17 batch4: file routes carry Skip-Dir, so X-Opencode-Directory is
+        // NOT injected from the global HostConfig state — it must be absent.
+        assertNull(request.getHeader("X-Opencode-Directory"))
     }
 
     @Test
@@ -587,20 +594,20 @@ class OpenCodeRepositoryTest {
         )
         server.enqueue(jsonResponse(json.encodeToString(nodes)))
 
-        val result = repository.getFileTree("app/src")
+        val result = repository.getFileTree(directory = "/workdir/project", path = "app/src")
 
         assertTrue(result.isSuccess)
         val tree = result.getOrThrow()
         assertEquals(2, tree.size)
         assertEquals("app/src/Main.kt", tree[1].path)
-        assertEquals("/file?path=app%2Fsrc", server.takeRequest().path)
+        assertEquals("/file?path=app%2Fsrc&directory=%2Fworkdir%2Fproject", server.takeRequest().path)
     }
 
     @Test
     fun `getFileTree returns empty list`() = runBlocking {
         server.enqueue(jsonResponse("[]"))
 
-        val result = repository.getFileTree("missing")
+        val result = repository.getFileTree(directory = "/workdir/project", path = "missing")
 
         assertTrue(result.isSuccess)
         assertTrue(result.getOrThrow().isEmpty())
@@ -614,41 +621,50 @@ class OpenCodeRepositoryTest {
         )
         server.enqueue(jsonResponse(json.encodeToString(statuses)))
 
-        val result = repository.getFileStatus()
+        val result = repository.getFileStatus(directory = "/workdir/project")
 
         assertTrue(result.isSuccess)
         val list = result.getOrThrow()
         assertEquals(2, list.size)
         assertEquals("M", list[0].status)
-        assertEquals("/file/status", server.takeRequest().path)
+        // §R-17 batch4: file routes pass the explicit directory via ?query
+        // (Skip-Dir marker prevents the interceptor from injecting the
+        // header from the global state).
+        assertTrue(
+            "path must target /file/status with directory query",
+            server.takeRequest().path?.startsWith("/file/status?directory=") == true
+        )
     }
 
     @Test
     fun `getFileStatus fails on server error`() = runBlocking {
         server.enqueue(MockResponse().setResponseCode(500))
 
-        val result = repository.getFileStatus()
+        val result = repository.getFileStatus(directory = "/workdir/project")
 
         assertTrue(result.isFailure)
     }
 
+    // §R-17 batch4 fix: findFile has zero production callers (API + Repository
+    // wrapper exist but no UI/controller/VM uses them). Tests retained to verify
+    // the API contract is correct if/when a file-search UI feature is added.
     @Test
     fun `findFile returns matches and forwards query params`() = runBlocking {
         val matches = listOf("app/src/Main.kt", "app/src/test/MainTest.kt")
         server.enqueue(jsonResponse(json.encodeToString(matches)))
 
-        val result = repository.findFile(query = "Main", limit = 2)
+        val result = repository.findFile(directory = "/workdir/project", query = "Main", limit = 2)
 
         assertTrue(result.isSuccess)
         assertEquals(matches, result.getOrThrow())
-        assertEquals("/find/file?query=Main&limit=2", server.takeRequest().path)
+        assertEquals("/find/file?query=Main&limit=2&directory=%2Fworkdir%2Fproject", server.takeRequest().path)
     }
 
     @Test
     fun `findFile fails on server error`() = runBlocking {
         server.enqueue(MockResponse().setResponseCode(500))
 
-        val result = repository.findFile("Main")
+        val result = repository.findFile(directory = "/workdir/project", query = "Main")
 
         assertTrue(result.isFailure)
     }
@@ -747,13 +763,22 @@ class OpenCodeRepositoryTest {
     }
 
     // --- directory dimension (X-Opencode-Directory) ---
+    //
+    // §R-17 batch4: file routes (/file, /file/content, /file/status,
+    // /find/file) now take an EXPLICIT `directory` parameter + Skip-Dir marker,
+    // so they no longer participate in the global-currentDirectory injection.
+    // The tests below exercise the STILL-injected routes (e.g. /question)
+    // whose DirectoryHeaderInterceptor fallback to HostConfig._currentDirectory
+    // remains the source of truth for SSE / non-file directory routing.
 
     @Test
+    @Suppress("DEPRECATION")
     fun `getCurrentDirectory returns null by default`() {
         assertNull(repository.getCurrentDirectory())
     }
 
     @Test
+    @Suppress("DEPRECATION")
     fun `setCurrentDirectory stores and returns the value`() {
         repository.setCurrentDirectory("/workdir/project")
         assertEquals("/workdir/project", repository.getCurrentDirectory())
@@ -762,16 +787,19 @@ class OpenCodeRepositoryTest {
     }
 
     @Test
+    @Suppress("DEPRECATION")
     fun `setCurrentDirectory injects directory header on scoped requests`() = runBlocking {
         repository.setCurrentDirectory("/workdir/project")
         server.enqueue(jsonResponse("[]"))
 
-        repository.getFileStatus()
+        // /question is a non-Skip-Dir route — it still receives the global
+        // directory header + the ?directory query mirror from the interceptor.
+        repository.getPendingQuestions()
 
         val request = server.takeRequest()
         assertTrue(
-            "path must target /file/status (② now appends a directory query)",
-            request.path?.startsWith("/file/status") == true
+            "path must target /question (② now appends a directory query)",
+            request.path?.startsWith("/question") == true
         )
         assertEquals("/workdir/project", request.getHeader("X-Opencode-Directory"))
         assertEquals(
@@ -782,10 +810,11 @@ class OpenCodeRepositoryTest {
     }
 
     @Test
+    @Suppress("DEPRECATION")
     fun `directory header is omitted when no directory is set`() = runBlocking {
         server.enqueue(jsonResponse("[]"))
 
-        repository.getFileStatus()
+        repository.getPendingQuestions()
 
         val request = server.takeRequest()
         assertNull(request.getHeader("X-Opencode-Directory"))
@@ -803,7 +832,6 @@ class OpenCodeRepositoryTest {
         assertNull("skip-dir endpoint must not carry directory header", request.getHeader("X-Opencode-Directory"))
         assertNull("skip-dir marker must be stripped before sending", request.getHeader("X-Opencode-Skip-Dir"))
     }
-
     @Test
     fun `activateTunnel success posts form body and returns success`() = runBlocking {
         server.enqueue(MockResponse().setResponseCode(200))
@@ -874,18 +902,24 @@ class OpenCodeRepositoryTest {
     }
 
     @Test
+    @Suppress("DEPRECATION")
     fun `configure resets current directory to null`() = runBlocking {
         repository.setCurrentDirectory("/workdir/project")
         repository.configure(baseUrl = server.url("/").toString().trimEnd('/'))
         server.enqueue(jsonResponse("[]"))
 
-        repository.getFileStatus()
+        // §R-17 batch4: /question still participates in the global directory
+        // injection (no Skip-Dir marker), so it surfaces the post-configure
+        // null currentDirectory as the absence of the X-Opencode-Directory
+        // header. (File routes can no longer verify this — they have Skip-Dir.)
+        repository.getPendingQuestions()
 
         val request = server.takeRequest()
         assertNull(request.getHeader("X-Opencode-Directory"))
     }
 
     @Test
+    @Suppress("DEPRECATION")
     fun `directory injection coexists with Basic Auth header`() = runBlocking {
         repository.configure(
             baseUrl = server.url("/").toString().trimEnd('/'),
@@ -895,7 +929,7 @@ class OpenCodeRepositoryTest {
         repository.setCurrentDirectory("/workdir/project")
         server.enqueue(jsonResponse("[]"))
 
-        repository.getFileStatus()
+        repository.getPendingQuestions()
 
         val request = server.takeRequest()
         assertEquals("/workdir/project", request.getHeader("X-Opencode-Directory"))

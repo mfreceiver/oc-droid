@@ -1,83 +1,59 @@
 package cn.vectory.ocdroid.ui.controller
 
-import android.os.Looper
 import cn.vectory.ocdroid.data.model.ComposerImageAttachment
-import cn.vectory.ocdroid.ui.AppState
 import cn.vectory.ocdroid.ui.ChatState
 import cn.vectory.ocdroid.ui.ComposerState
+import cn.vectory.ocdroid.util.SettingsManager
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.update
 
 /**
- * R-16 M2: callbacks the [ComposerController] invokes back into MainViewModel
- * for SettingsManager side effects (draft persistence, workdir clearance).
- * Defined as an interface rather than direct injection so the controller never
- * holds a reference to MainViewModel or SettingsManager — avoiding the
- * circular dependency flagged in R-16 §7.3.
+ * R-16 M2 → R-17 batch3b: owns the composer-domain state mutation logic.
  *
- * Follows the [ForegroundCatchUpCallbacks] pattern from M1.
- */
-interface ComposerCallbacks {
-    /** Persists the draft text for [sessionId] to SettingsManager. */
-    fun saveDraft(sessionId: String, text: String)
-
-    /** Clears the persisted workdir (SettingsManager.currentWorkdir = null). */
-    fun clearPersistedWorkdir()
-}
-
-/**
- * R-16 M2: owns the composer-domain state mutation logic.
+ * **Migration (batch 3b)**: the [ComposerCallbacks] interface was eliminated
+ * (rule A — both methods could be served by [SettingsManager] directly). The
+ * controller now injects [settingsManager] and writes through it instead of
+ * routing the side effect back up to the orchestrator.
  *
  * Moved from MainViewModel:
  *  - setInputText / addImageAttachments / removeImageAttachment
  *  - clearDraftIfActive
  *  - togglePartExpand / clearExpandedParts
  *
- * The MutableStateFlows stay declared in MainViewModel (they are referenced
- * by the R-17 [SliceFlows] container and the public `composerFlow` /
- * `expandedParts` pass-throughs). This controller receives them by reference
- * and is the single writer — ownership is logical (only this class mutates
- * these flows) rather than physical.
+ * The MutableStateFlows stay declared in the orchestrator (they are
+ * referenced by the R-17 [cn.vectory.ocdroid.ui.SliceFlows] container and the
+ * public `composerFlow` / `expandedParts` pass-throughs). This controller
+ * receives them by reference and is the single writer — ownership is logical
+ * (only this class mutates these flows) rather than physical.
  *
  * The complex send/edit path (sendMessage / dispatchSendMessage /
- * editFromMessage / executeCommand / selectAgent) stays in MainViewModel —
- * each orchestrates across session creation, message loading, and
- * cross-slice state, so pulling them in would just turn every helper they
- * call into a callback. A follow-up can migrate them once a SessionSwitcher
- * owns the session-list slice.
+ * editFromMessage / executeCommand / selectAgent) stays in the orchestrator —
+ * each orchestrates across session creation, message loading, and cross-slice
+ * state, so pulling them in would just turn every helper they call into a
+ * callback.
  *
- * `writeComposer` mirrors MainViewModel's M3 helper: writes the slice AND
- * the deprecated AppState fields in one synchronous call so `state.value`
- * stays consistent (RFC R-17 §4 strategy A, §9.2 — no dispatcher batch
- * reliance).
+ * `writeComposer` mirrors the orchestrator's M3 helper: writes the composer
+ * slice via `composerFlow.update` so subscribers see a consistent value (RFC
+ * R-17 §4 strategy A, §9.2 — no dispatcher batch reliance).
  */
 internal class ComposerController(
-    private val state: MutableStateFlow<AppState>,
     private val composerFlow: MutableStateFlow<ComposerState>,
     private val chatFlow: MutableStateFlow<ChatState>,
     private val expandedParts: MutableStateFlow<Map<String, Boolean>>,
-    private val callbacks: ComposerCallbacks
+    private val settingsManager: SettingsManager,
 ) {
     /**
-     * §R-17 M3→M5: write the composer slice AND mirror it onto AppState. The
-     * slice is the authoritative read path; the mirror write is retained so the
-     * free helpers that read `state.value.draftWorkdir` see consistent values.
+     * §R-17 M3→M5→batch2: writes the composer slice only (slice is the
+     * authoritative read path). The deprecated AppState mirror write was
+     * removed in R-17 batch2 sub-step d (Fixer C).
      */
-    @Suppress("DEPRECATION")
     private fun writeComposer(transform: (ComposerState) -> ComposerState) {
-        check(Looper.myLooper() === Looper.getMainLooper()) { "writeComposer must be called on the main thread" }
-        val next = transform(composerFlow.value)
-        composerFlow.value = next
-        state.value = state.value.copy(
-            inputText = next.inputText,
-            imageAttachments = next.imageAttachments,
-            sendingSessionIds = next.sendingSessionIds,
-            draftWorkdir = next.draftWorkdir
-        )
+        composerFlow.update(transform)
     }
 
     fun setInputText(text: String) {
         writeComposer { it.copy(inputText = text) }
-        chatFlow.value.currentSessionId?.let { callbacks.saveDraft(it, text) }
+        chatFlow.value.currentSessionId?.let { settingsManager.setDraftText(it, text) }
     }
 
     fun addImageAttachments(attachments: List<ComposerImageAttachment>) {
@@ -91,13 +67,13 @@ internal class ComposerController(
 
     /**
      * Drops an in-progress draft (draftWorkdir set + no concrete session yet).
-     * Clears the persisted workdir via callback so a discarded draft doesn't
-     * leave the repository re-scoped to an abandoned project on resume/cold
-     * start. No-op when there is no active draft.
+     * Clears the persisted workdir via [settingsManager] so a discarded draft
+     * doesn't leave the repository re-scoped to an abandoned project on
+     * resume/cold start. No-op when there is no active draft.
      */
     fun clearDraftIfActive() {
         if (composerFlow.value.draftWorkdir == null || chatFlow.value.currentSessionId != null) return
-        callbacks.clearPersistedWorkdir()
+        settingsManager.currentWorkdir = null
         writeComposer {
             it.copy(draftWorkdir = null, inputText = "", imageAttachments = emptyList())
         }

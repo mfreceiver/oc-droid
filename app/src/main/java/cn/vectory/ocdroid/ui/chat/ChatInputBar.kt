@@ -51,18 +51,22 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import cn.vectory.ocdroid.R
 import cn.vectory.ocdroid.data.api.CommandInfo
 import cn.vectory.ocdroid.data.model.QuestionRequest
-import cn.vectory.ocdroid.ui.MainViewModel
+import cn.vectory.ocdroid.ui.ChatViewModel
+import cn.vectory.ocdroid.ui.ComposerViewModel
+import cn.vectory.ocdroid.ui.OrchestratorViewModel
 
 @Composable
 internal fun ChatInputBar(
-    viewModel: MainViewModel,
+    chatVM: ChatViewModel,
+    composerVM: ComposerViewModel,
+    orchestratorVM: OrchestratorViewModel,
     isBusy: Boolean,
     onAddImages: () -> Unit,
     // §#4: when a pending system question is active and the hoisted answers
     // satisfy its requirements, the primary send button submits the question
     // (via onSubmitQuestion) instead of dispatching a normal prompt. This
     // routes the user's instinctive tap on the bottom button into
-    // viewModel.replyQuestion, mirroring QuestionCardView's own Submit.
+    // orchestratorVM.replyQuestion, mirroring QuestionCardView's own Submit.
     pendingQuestion: QuestionRequest? = null,
     questionAnswersValid: Boolean = false,
     // 🟠-2: while a question submit is in flight (bottom-bar path), the
@@ -80,16 +84,16 @@ internal fun ChatInputBar(
     // could not skip ChatInputBar on unrelated AppState changes). Reading them
     // from the slice Flow here lets the Compose runtime skip this composable
     // whenever neither slice emits.
-    val composerState by viewModel.composerFlow.collectAsStateWithLifecycle()
-    val settingsState by viewModel.settingsFlow.collectAsStateWithLifecycle()
+    val composerState by composerVM.composerFlow.collectAsStateWithLifecycle()
+    val settingsState by composerVM.settingsFlow.collectAsStateWithLifecycle()
     val text = composerState.inputText
     val imageAttachments = composerState.imageAttachments
     val availableCommands = settingsState.availableCommands
-    val onTextChange = viewModel::setInputText
-    val onSend = viewModel::sendMessage
-    val onRemoveImage = viewModel::removeImageAttachment
-    val onAbort = viewModel::abortSession
-    val onExecuteCommand = viewModel::executeCommand
+    val onTextChange = composerVM::setInputText
+    val onSend = chatVM::sendMessage
+    val onRemoveImage = composerVM::removeImageAttachment
+    val onAbort = chatVM::abortSession
+    val onExecuteCommand = orchestratorVM::executeCommand
 
     // §#4: canSend also covers the pending-question path — when a system
     // question is open and its hoisted answers are valid, the primary button

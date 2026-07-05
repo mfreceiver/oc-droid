@@ -77,16 +77,56 @@ internal val METADATA_MARKER_ROLES = setOf("agent-switched", "model-switched", "
  */
 fun visibleMessages(messages: List<Message>, currentSession: Session?): List<Message> {
     val revertMessageId = currentSession?.revert?.messageId
-    val reverted = if (revertMessageId == null) {
-        messages
-    } else {
-        messages.filter { message -> message.id < revertMessageId }
-    }
+    val reverted = messages.filterBeforeRevert(revertMessageId)
     // Filter out system / tool / environment messages — only user and
     // assistant messages are shown in the chat transcript, EXCEPT the
     // synthetic metadata-marker messages (§s3-markers) which carry one of
     // the [METADATA_MARKER_ROLES] roles and have no real parts.
     return reverted.filter { !it.isToolRole || it.role in METADATA_MARKER_ROLES }
+}
+
+/**
+ * §revert-fix: filters this list down to messages that come BEFORE the revert
+ * point [revertMessageId], using a monotonic time comparison instead of string
+ * id ordering. The opencode server issues message ids as strings (often UUIDs)
+ * whose lexicographic order does NOT reflect creation order, so the previous
+ * `id < revertMessageId` string comparison truncated the transcript at the
+ * wrong point. This helper:
+ *
+ *  1. Resolves the revert threshold as the `time.created` of the message whose
+ *     id == [revertMessageId]. The revert message ITSELF is always excluded
+ *     (mirrors the pre-time-based `id < revertMessageId` semantics). Messages
+ *     with no `time.created` are kept (cannot be ordered → conservative keep,
+ *     EXCEPT the revert message which is dropped by id). A timestamped message
+ *     is kept iff its `created < revertCreated`, OR its `created == revertCreated`
+ *     AND its list position is strictly before the revert message's position
+ *     (tie-break on index so the revert row is never kept).
+ *  2. When the revert message has no `time.created`, falls back to list index
+ *     order: keeps messages whose index is strictly before the revert message
+ *     (excludes the revert point itself).
+ *
+ * If [revertMessageId] is null OR is absent from the list, the input is
+ * returned unchanged (no cutoff can be applied).
+ */
+internal fun List<Message>.filterBeforeRevert(revertMessageId: String?): List<Message> {
+    if (revertMessageId == null) return this
+    val revertIndex = indexOfFirst { it.id == revertMessageId }
+    if (revertIndex < 0) return this
+    val revertCreated = this[revertIndex].time?.created
+    return if (revertCreated != null) {
+        // time-based: 保留 created < revertCreated 的，或 created == revertCreated 但列表
+        // 位置在 revert 之前的；排除 revert 自身（idx == revertIndex）。
+        filterIndexed { idx, msg ->
+            idx != revertIndex && (
+                msg.time?.created == null ||
+                msg.time!!.created < revertCreated ||
+                (msg.time!!.created == revertCreated && idx < revertIndex)
+            )
+        }
+    } else {
+        // index fallback: 按列表位置截断，排除 revert 自身
+        subList(0, revertIndex)
+    }
 }
 
 /**

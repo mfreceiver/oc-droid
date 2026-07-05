@@ -147,8 +147,10 @@ class SSEClient(
                             DebugLog.d("SSE", "event type=$type session=${event.payload.getString("sessionID") ?: "-"}")
                         }
                         trySend(Result.success(event))
-                    } catch (_: Exception) {
-                        // Skip malformed events silently
+                    } catch (e: Exception) {
+                        // Skip malformed events, but record so a recurring parse
+                        // failure shows up in the in-app debug log viewer.
+                        DebugLog.w("SSEClient", "Skipping malformed SSE event: ${e.message}")
                     }
                 }
             }

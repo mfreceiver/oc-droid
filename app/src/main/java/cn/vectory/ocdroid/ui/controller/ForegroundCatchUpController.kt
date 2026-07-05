@@ -1,65 +1,50 @@
 package cn.vectory.ocdroid.ui.controller
 
 import cn.vectory.ocdroid.di.AppLifecycleMonitor
+import cn.vectory.ocdroid.ui.ChatState
+import cn.vectory.ocdroid.ui.ComposerState
+import cn.vectory.ocdroid.ui.SharedEffectBus
 import cn.vectory.ocdroid.util.DebugLog
+import cn.vectory.ocdroid.util.SettingsManager
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.launchIn
 import kotlinx.coroutines.flow.onEach
+import kotlinx.coroutines.flow.update
 
 /**
- * Callbacks the controller invokes back into MainViewModel (or a future
- * Coordinator) to drive side effects. Defined as an interface rather than a
- * bundle of lambdas so the contract is explicit and the controller never holds
- * a reference to MainViewModel itself — avoiding the circular dependency
- * flagged in R-16 §7.3 (Controller ← MainViewModel that owns it).
+ * R-16 M1 → R-17 batch3b: owns the foreground/background three-tier catch-up
+ * state machine.
  *
- * Each method maps 1:1 to an existing MainViewModel private helper; the
- * implementations are wired in MainViewModel's property initialiser.
- */
-interface ForegroundCatchUpCallbacks {
-    /** Forces a health-check reconnect bypassing the 30s throttle (ON_START). */
-    fun forceReconnect()
-
-    /** Global cold-start reload of [currentId] (clears cache + message state). */
-    fun globalColdStartRefresh(currentId: String)
-
-    /** Sets the staleNotice banner (>5min absence tier). */
-    fun setStaleNotice()
-
-    /** Discards any in-progress draft before tearing down SSE. */
-    fun clearDraft()
-
-    /** Cancels the in-flight SSE feed (ON_STOP). */
-    fun cancelSse()
-
-    /** Gap-aware catch-up probe + tail reload (15s–5min tier / network-drop reconnect). */
-    fun catchUpAfterDisconnect(sessionId: String)
-
-    /** Current chat session id, or null (draft mode / freshly-closed last tab). */
-    fun currentSessionId(): String?
-}
-
-/**
- * R-16 M1: owns the foreground/background three-tier catch-up state machine.
+ * **Migration (batch 3b)**: the [ForegroundCatchUpCallbacks] interface was
+ * eliminated. The 4 cross-domain signals (forceReconnect /
+ * globalColdStartRefresh / cancelSse / catchUpAfterDisconnect) now emit
+ * [ControllerEffect]s on [effects] (rule B). The 3 same-domain operations
+ * (setStaleNotice / clearDraft / currentSessionId) now run inline against the
+ * injected [chatFlow] / [composerFlow] / [settingsManager] (rule A — they
+ * only touch state the controller can reach directly).
  *
  * Tiers (bucketed by how long the app was backgrounded, [backgroundedAtMs]):
  *  - `<15s`   → throttle (suppress SSE reconnect catch-up; rely on the live feed)
- *  - `15s–5min` → let the SSE reconnect's `server.connected` drive a gap-aware
+ *  - `15s–5min` → let the SSE reconnect's `server.connected` drive a gap aware
  *    catch-up (single entry point — no double-trigger)
  *  - `>5min`  → global cold-start reload of the current session + stale banner;
  *    suppress the reconnect catch-up (cold-start already loaded)
  *
  * State machine fields (previously @Volatile on MainViewModel) live HERE now;
- * MainViewModel no longer touches them directly. The controller subscribes to
- * [AppLifecycleMonitor.isInForeground] in its own init (so the subscription
- * lifecycle follows the controller, which follows the ViewModel).
+ * the orchestrator no longer touches them directly. The controller subscribes
+ * to [AppLifecycleMonitor.isInForeground] in its own init (so the subscription
+ * lifecycle follows the controller, which follows the orchestrator).
  *
  * RFC R-16 §C / §M1. Zero behaviour change vs the pre-extraction logic.
  */
 internal class ForegroundCatchUpController(
     private val appLifecycleMonitor: AppLifecycleMonitor,
     private val scope: CoroutineScope,
-    private val callbacks: ForegroundCatchUpCallbacks,
+    private val chatFlow: MutableStateFlow<ChatState>,
+    private val composerFlow: MutableStateFlow<ComposerState>,
+    private val settingsManager: SettingsManager,
+    private val effects: SharedEffectBus,
     // Injected clock so the three-tier thresholds (<15s / 15s–5min / >5min) are
     // deterministically testable without depending on wall-clock latency in
     // the unit test harness. Defaults to System::currentTimeMillis in production.
@@ -131,7 +116,7 @@ internal class ForegroundCatchUpController(
             // server.connected never arrived, the flag would linger and
             // suppress the NEXT cycle's catch-up — permanently hiding messages.
             suppressNextConnectCatchUp = false
-            callbacks.forceReconnect()
+            effects.effects.tryEmit(ControllerEffect.ForceReconnect)
             val now = clock()
             val bgGapMs = if (backgroundedAtMs > 0L) now - backgroundedAtMs else Long.MAX_VALUE
             when {
@@ -149,17 +134,19 @@ internal class ForegroundCatchUpController(
                     // Suppress the reconnect catch-up — cold-start already loaded.
                     lastLoadAtMs = now
                     suppressNextConnectCatchUp = true
-                    callbacks.currentSessionId()?.let { callbacks.globalColdStartRefresh(it) }
-                    callbacks.setStaleNotice()
+                    currentSessionId()?.let {
+                        effects.effects.tryEmit(ControllerEffect.GlobalColdStartRefresh(it))
+                    }
+                    setStaleNotice()
                 }
             }
         } else {
             // Discard any in-progress draft before tearing down SSE so a
             // backgrounded draft does not leak into the next foreground cycle.
-            callbacks.clearDraft()
+            clearDraft()
             backgroundedAtMs = clock()
             DebugLog.i("SSE", "cancelSse (background)")
-            callbacks.cancelSse()
+            effects.effects.tryEmit(ControllerEffect.CancelSse)
         }
     }
 
@@ -177,7 +164,9 @@ internal class ForegroundCatchUpController(
         val doCatchUp = sseHasConnectedOnce && !suppress
         DebugLog.i("SSE", "server.connected: sseHasConnectedOnce=$sseHasConnectedOnce suppress=$suppress → ${if (doCatchUp) "catch-up" else "skip"}")
         if (doCatchUp) {
-            callbacks.currentSessionId()?.let { callbacks.catchUpAfterDisconnect(it) }
+            currentSessionId()?.let {
+                effects.effects.tryEmit(ControllerEffect.CatchUpAfterDisconnect(it))
+            }
         }
         sseHasConnectedOnce = true
     }
@@ -185,13 +174,39 @@ internal class ForegroundCatchUpController(
     /**
      * §Phase1E: a host/profile switch is a fresh server — treat the next
      * connect as a cold start (skip catch-up; the reconfigure path loads
-     * sessions/messages itself). Called from MainViewModel's host-switch /
-     * reset paths.
+     * sessions/messages itself). Called from the host-switch / reset paths.
      */
     fun onHostReconfigured() {
         sseHasConnectedOnce = false
         suppressNextConnectCatchUp = false
     }
+
+    /**
+     * Inline (rule A) — writes the staleNotice banner directly to [chatFlow].
+     * Was a [ForegroundCatchUpCallbacks] method; eliminated in batch 3b.
+     */
+    private fun setStaleNotice() {
+        chatFlow.update { it.copy(staleNotice = true) }
+    }
+
+    /**
+     * Inline (rule A) — drops an in-progress draft before tearing down SSE so
+     * a backgrounded draft does not leak into the next foreground cycle.
+     * Mirrors [ComposerController.clearDraftIfActive]. Eliminated in batch 3b.
+     */
+    private fun clearDraft() {
+        if (composerFlow.value.draftWorkdir == null || chatFlow.value.currentSessionId != null) return
+        settingsManager.currentWorkdir = null
+        composerFlow.update {
+            it.copy(draftWorkdir = null, inputText = "", imageAttachments = emptyList())
+        }
+    }
+
+    /**
+     * Inline (rule A) — reads currentSessionId directly from [chatFlow].
+     * Eliminated in batch 3b.
+     */
+    private fun currentSessionId(): String? = chatFlow.value.currentSessionId
 
     companion object {
         /** Foreground reload throttle window: at most one reload per 15s. */

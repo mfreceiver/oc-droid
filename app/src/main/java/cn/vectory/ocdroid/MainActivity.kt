@@ -33,7 +33,12 @@ import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.map
-import cn.vectory.ocdroid.ui.MainViewModel
+import cn.vectory.ocdroid.ui.ChatViewModel
+import cn.vectory.ocdroid.ui.ComposerViewModel
+import cn.vectory.ocdroid.ui.ConnectionViewModel
+import cn.vectory.ocdroid.ui.HostViewModel
+import cn.vectory.ocdroid.ui.OrchestratorViewModel
+import cn.vectory.ocdroid.ui.SessionViewModel
 import cn.vectory.ocdroid.ui.chat.ChatScreen
 import cn.vectory.ocdroid.ui.chat.LocalWindowSizeClass
 import cn.vectory.ocdroid.ui.files.FilesScreen
@@ -83,13 +88,13 @@ private const val EXTRA_TEST_PASSWORD = "test_password"
 class MainActivity : AppCompatActivity() {
 
     /**
-     * Reference to the Activity-scoped [MainViewModel], populated inside
+     * Reference to the Activity-scoped [OrchestratorViewModel], populated inside
      * [onCreate]'s `setContent` block once Hilt constructs it. Held so that
      * [onNewIntent] (which fires on warm-start deep links from §18
      * notifications, with `launchMode="singleTop"`) can dispatch the session
      * extra without re-entering `setContent`.
      */
-    private var mainViewModel: MainViewModel? = null
+    private var mainViewModel: OrchestratorViewModel? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -102,7 +107,7 @@ class MainActivity : AppCompatActivity() {
         AppLocaleController.applySystemLocale()
         enableEdgeToEdge()
         setContent {
-            val viewModel: MainViewModel = hiltViewModel()
+            val viewModel: OrchestratorViewModel = hiltViewModel()
             mainViewModel = viewModel
             val lifecycleOwner = LocalLifecycleOwner.current
             // §18.1 cold-start deep link: if the launch Intent carries
@@ -140,15 +145,14 @@ class MainActivity : AppCompatActivity() {
                 // on every ON_START, doubling the AppLifecycleMonitor path.
                 viewModel.coldStartReconnect()
             }
-            // §R-17 M5.1 (kimo 🟠#1): subscribe ONLY to lastNavPage instead of the
-            // whole AppState. The mirror double-write makes `_state` emit on every
-            // keystroke / SSE delta; a full collect here would recompose this root
-            // composable each time, cancelling the slice-migration gains. The
-            // distinctUntilChanged + map keeps this composable inert unless the
-            // nav page actually changes.
-            val lastNavPage by viewModel.state
-                .map { it.lastNavPage }
-                .distinctUntilChanged()
+            // §R-17 batch2: subscribe to the dedicated NavState slice instead of
+            // AppState.lastNavPage (which has been removed). The slice is seeded
+            // from SettingsManager at VM construction and updated by
+            // setLastNavPage. distinctUntilChanged + map keeps this composable
+            // inert unless the nav page actually changes. remember{} so the flow
+            // operators aren't re-applied each recomposition
+            // (FlowOperatorInvokedInComposition).
+            val lastNavPage by remember { viewModel.navFlow.map { it.lastNavPage }.distinctUntilChanged() }
                 .collectAsStateWithLifecycle(initialValue = 0)
             val settings by viewModel.settingsFlow.collectAsStateWithLifecycle()
             val darkTheme = when (settings.themeMode) {
@@ -231,7 +235,7 @@ class MainActivity : AppCompatActivity() {
  * content does not bleed through.
  */
 @Composable
-private fun PhoneLayout(viewModel: MainViewModel, initialPage: Int = 0) {
+private fun PhoneLayout(viewModel: OrchestratorViewModel, initialPage: Int = 0) {
     val file by viewModel.fileFlow.collectAsStateWithLifecycle()
     var navPage by rememberSaveable {
         mutableStateOf(initialPage.coerceIn(0, screens.lastIndex))
@@ -299,8 +303,15 @@ private fun PhoneLayout(viewModel: MainViewModel, initialPage: Int = 0) {
                         Row(modifier = Modifier.fillMaxSize()) {
                             if (showPanel) {
                                 Box(modifier = Modifier.weight(1f).fillMaxHeight()) {
+                                    val sessionViewModel: SessionViewModel = hiltViewModel()
+                                    val composerVM: ComposerViewModel = hiltViewModel()
+                                    val orchestratorVM: OrchestratorViewModel = hiltViewModel()
+                                    val filesVM: FilesViewModel = hiltViewModel()
                                     SessionsScreen(
-                                        viewModel = viewModel,
+                                        viewModel = sessionViewModel,
+                                        composerVM = composerVM,
+                                        orchestratorVM = orchestratorVM,
+                                        repository = filesVM.repository,
                                         // Q4: panel 选中会话保持打开；chat pane 永远在右，
                                         // onSwitchToChat 在面板内 no-op。
                                         onSwitchToChat = { },
@@ -316,8 +327,19 @@ private fun PhoneLayout(viewModel: MainViewModel, initialPage: Int = 0) {
                                     .weight(if (showPanel) 2f else 1f)
                                     .fillMaxHeight()
                             ) {
+                                val chatViewModel: ChatViewModel = hiltViewModel()
+                                val composerVM: ComposerViewModel = hiltViewModel()
+                                val connectionVM: ConnectionViewModel = hiltViewModel()
+                                val sessionVM: SessionViewModel = hiltViewModel()
+                                val hostVM: HostViewModel = hiltViewModel()
+                                val orchestratorVM: OrchestratorViewModel = hiltViewModel()
                                 ChatScreen(
-                                    viewModel = viewModel,
+                                    chatVM = chatViewModel,
+                                    composerVM = composerVM,
+                                    connectionVM = connectionVM,
+                                    sessionVM = sessionVM,
+                                    hostVM = hostVM,
+                                    orchestratorVM = orchestratorVM,
                                     onNavigateToSettings = {
                                         switchToPage(screens.indexOf(Screen.Settings))
                                     },
@@ -326,14 +348,32 @@ private fun PhoneLayout(viewModel: MainViewModel, initialPage: Int = 0) {
                             }
                         }
                     }
-                    Screen.Sessions -> SessionsScreen(
-                        viewModel = viewModel,
-                        onSwitchToChat = { switchToPage(screens.indexOf(Screen.Chat)) }
-                    )
-                    Screen.Settings -> SettingsScreen(
-                        viewModel = viewModel,
-                        onBack = { switchToPage(screens.indexOf(Screen.Chat)) }
-                    )
+                    Screen.Sessions -> {
+                        val sessionViewModel: SessionViewModel = hiltViewModel()
+                        val composerVM: ComposerViewModel = hiltViewModel()
+                        val orchestratorVM: OrchestratorViewModel = hiltViewModel()
+                        val filesVM: FilesViewModel = hiltViewModel()
+                        SessionsScreen(
+                            viewModel = sessionViewModel,
+                            composerVM = composerVM,
+                            orchestratorVM = orchestratorVM,
+                            repository = filesVM.repository,
+                            onSwitchToChat = { switchToPage(screens.indexOf(Screen.Chat)) }
+                        )
+                    }
+                    Screen.Settings -> {
+                        val hostViewModel: HostViewModel = hiltViewModel()
+                        val composerVM: ComposerViewModel = hiltViewModel()
+                        val connectionVM: ConnectionViewModel = hiltViewModel()
+                        val orchestratorVM: OrchestratorViewModel = hiltViewModel()
+                        SettingsScreen(
+                            viewModel = hostViewModel,
+                            composerVM = composerVM,
+                            connectionVM = connectionVM,
+                            orchestratorVM = orchestratorVM,
+                            onBack = { switchToPage(screens.indexOf(Screen.Chat)) }
+                        )
+                    }
                 }
             }
         }

@@ -189,6 +189,14 @@ object HttpImageHolder {
             .joinToString("") { "%02x".format(it) }
             .take(32)
 
+    // §lint: CoroutineCreationDuringComposition — the launch here is a
+    // deliberate fire-and-forget disk decode on the long-lived prefetchScope
+    // (a class-level CoroutineScope that outlives composition). It populates
+    // the shared cachedBitmaps LRU for ALL composables, so cancelling on
+    // leave (LaunchedEffect semantics) would be wrong — a decode kicked off
+    // for one markdown image should complete to benefit sibling renders.
+    // Dedup is via inflightUrls (added before launch, removed in finally).
+    @Suppress("CoroutineCreationDuringComposition")
     @Composable
     fun load(url: String): ImageData? {
         // Fast path: already decoded into memory. Reading cacheVersion first

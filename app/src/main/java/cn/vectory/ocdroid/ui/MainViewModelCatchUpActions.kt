@@ -1,11 +1,17 @@
 package cn.vectory.ocdroid.ui
 
-import cn.vectory.ocdroid.data.model.Message
-import cn.vectory.ocdroid.data.model.Part
+/**
+ * §R-17 batch3d: Domain orchestration free functions. These are NOT the deleted
+ * batch-2 AppState mirror helpers (aggregateFromSlices/syncSlicesFromAppState etc.).
+ * They are coroutine-launch helpers called by the domain ViewModels and AppCore
+ * orchestration extensions to perform async operations (load/refresh/mutate).
+ * Future cleanup (batch3e+): may be inlined into individual VM private methods.
+ */
+
 import cn.vectory.ocdroid.data.repository.OpenCodeRepository
 import cn.vectory.ocdroid.util.SettingsManager
 import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 
 /**
@@ -20,7 +26,7 @@ import kotlinx.coroutines.launch
  *    traffic saving). Any pre-existing open gap is preserved as-is.
  * 3. Otherwise fetch the latest-4 (sentinel) and merge (resetLimit=false
  *    semantics: keep older history + cursor + streaming overlay), then run
-     *    gap detection. M2 / gpter 致命#4 (sentinel off-by-one): reload
+ *    gap detection. M2 / gpter 致命#4 (sentinel off-by-one): reload
  *    pulls 4 (3 display + 1 sentinel). If the anchor (pre-reload newest) is
  *    anywhere in the fetched window — INCLUDING the 4th sentinel slot — the
  *    tail is contiguous → no gap. This makes the "exactly N new" boundary
@@ -33,44 +39,47 @@ import kotlinx.coroutines.launch
  * Does NOT touch `olderMessagesCursor`/`hasMoreMessages` (resetLimit=false).
  * No-op when a load is already in flight (coalesced with [launchLoadMessages]
  * via the shared `isLoadingMessages` guard).
+ *
+ * §R-17 batch2 step e final: slices are the sole authoritative store; the
+ * `state` mirror + null-slices fallback were removed.
  */
 internal fun launchCatchUp(
     scope: CoroutineScope,
     repository: OpenCodeRepository,
-    state: MutableStateFlow<AppState>,
+    slices: SliceFlows,
     sessionId: String,
     settingsManager: SettingsManager? = null,
-    onCacheWindow: (sessionId: String, window: CachedSessionWindow) -> Unit = { _, _ -> },
-    // §R-17 M3: optional settings slice for direct-subscription consumers.
-    // Defaults to null so legacy test callers (CatchUpGapTest) keep compiling;
-    // when null, selectedAgentName is written only to the AppState mirror
-    // (production callers pass _settingsFlow so the slice stays in sync).
-    settingsFlow: MutableStateFlow<SettingsState>? = null
-, slices: SliceFlows? = null) {
+    onCacheWindow: (sessionId: String, window: CachedSessionWindow) -> Unit = { _, _ -> }
+) {
 
     // §Phase1B (gpt-2 S3 / glm-1 🟡-1): synchronous check-and-set (mirrors
     // launchLoadMessages) to close the race where two concurrent catch-up
     // triggers each pass the guard before either sets the flag, firing two
     // probes / tail reloads. Reset on every exit path (skip / success / fail).
-    if (state.value.isLoadingMessages) return
-    state.updateAndSync(slices) { it.copy(isLoadingMessages = true) }
+    // §R-17 batch2 step e final: slice-only read.
+    if (slices.chat.value.isLoadingMessages) return
+    slices.chat.update { c -> c.copy(isLoadingMessages = true) }
     scope.launch {
+        // §R-17 batch2 step e final: slice-only read.
         // Order-independent newest id (messages is oldest-first per ora-2).
-        val anchorNewestId = state.value.messages
+        val anchorNewestId = slices.chat.value.messages
             .maxByOrNull { it.time?.created ?: -1L }?.id
         val serverNewestId = repository.probeLatestMessageId(sessionId).getOrNull()
 
         // No newer message on the server → skip the 5-message reload entirely.
         // Preserve any already-open gap (it is still unresolved).
         if (anchorNewestId != null && serverNewestId != null && anchorNewestId == serverNewestId) {
-            state.updateAndSync(slices) { it.copy(isLoadingMessages = false) }
+            slices.chat.update { c -> c.copy(isLoadingMessages = false) }
             return@launch
         }
 
         repository.getMessagesPaged(sessionId, MainViewModelTimings.catchUpMessagePageSize, before = null)
             .onSuccess { page ->
-                if (sessionId != state.value.currentSessionId) {
-                    state.updateAndSync(slices) { it.copy(isLoadingMessages = false) }
+                // §R-17 batch2 step e final: slice-only reads throughout this
+                // synchronous onSuccess block (no writes between here and the
+                // slice update below).
+                if (sessionId != slices.chat.value.currentSessionId) {
+                    slices.chat.update { c -> c.copy(isLoadingMessages = false) }
                     return@onSuccess
                 }
                 // §preserveUnfetched merge (resetLimit=false): keep older loaded
@@ -83,14 +92,16 @@ internal fun launchCatchUp(
                     .minOrNull()
                 val fetchedMessages = page.items.map { m -> m.info }
                 val fetchedParts = page.items.associate { m -> m.info.id to m.parts }
-                val olderKept = state.value.messages.filter { m ->
+                val srcMessages = slices.chat.value.messages
+                val srcParts = slices.chat.value.partsByMessage
+                val olderKept = srcMessages.filter { m ->
                     m.id !in fetchedIds && (oldestFetchedCreated == null ||
                         m.time?.created == null ||
                         m.time.created < oldestFetchedCreated)
                 }
                 val olderKeptIds = olderKept.map { m -> m.id }.toHashSet()
                 val mergedMessages = olderKept + fetchedMessages
-                val mergedParts = state.value.partsByMessage.filterKeys { id -> id in olderKeptIds } + fetchedParts
+                val mergedParts = srcParts.filterKeys { id -> id in olderKeptIds } + fetchedParts
 
                 // M2 / gpter 致命#4 (sentinel gap detection): the anchor
                 // (pre-reload newest) ANYWHERE in the fetched 4-window — including
@@ -115,50 +126,53 @@ internal fun launchCatchUp(
                 val inferredAgentName = lastAssistant?.info?.agent
                 val agentName = settingsManager?.getAgentForSession(sessionId) ?: inferredAgentName
 
-                state.updateAndSync(slices) {
-                    it.copy(
+                // Capture preserved fields (resetLimit=false) for the cache snapshot.
+                val currentCursor = slices.chat.value.olderMessagesCursor
+                val currentHasMore = slices.chat.value.hasMoreMessages
+
+                slices.chat.update { c ->
+                    c.copy(
                         messages = mergedMessages,
                         partsByMessage = mergedParts,
                         isLoadingMessages = false,
-                        selectedAgentName = agentName ?: it.selectedAgentName,
-                        // resetLimit=false: preserve streaming overlay + history cursor.
-                        olderMessagesCursor = it.olderMessagesCursor,
-                        hasMoreMessages = it.hasMoreMessages,
+                        // resetLimit=false: preserve streaming overlay + history cursor
+                        // (omit from copy → slice retains current value).
                         gapInfo = newGap,
                         staleNotice = false
                     )
                 }
-                val postUpdate = state.value
+                // selectedAgentName lives in the settings slice (cross-slice write).
+                slices.settings.update { it.copy(selectedAgentName = agentName ?: it.selectedAgentName) }
                 onCacheWindow(
                     sessionId,
                     CachedSessionWindow(
-                        messages = postUpdate.messages,
-                        partsByMessage = postUpdate.partsByMessage,
-                        olderMessagesCursor = postUpdate.olderMessagesCursor,
-                        hasMoreMessages = postUpdate.hasMoreMessages
+                        messages = mergedMessages,
+                        partsByMessage = mergedParts,
+                        olderMessagesCursor = currentCursor,
+                        hasMoreMessages = currentHasMore
                     )
                 )
-                // §F4 (gpter 致命#4 / 设计 §1.3/§1.4): catchUp 发现 gap 后自动启动
-                // closeGap (step=3, maxSteps=5)。此时 isLoadingMessages 已在上一行
-                // state update 中被置 false，launchCloseGap 的 isLoading 守卫可正常
-                // 通过；它内部会重新置 isLoading=true 并 launch 独立协程走自动闭合循环。
-                // newGap==null (无 gap 或 anchor 在窗口内) 时不触发，避免无谓 fetch。
+                // §F4 (gpter 致命#4 / 设计 §1.3/§1.4): catchUp 发现 gap 後自動啟動
+                // closeGap (step=3, maxSteps=5)。此時 isLoadingMessages 已在上一行
+                // state update 中被置 false，launchCloseGap 的 isLoading 守衛可正常
+                // 通過；它內部會重新置 isLoading=true 並 launch 獨立協程走自動閉合循環。
+                // newGap==null (無 gap 或 anchor 在窗口內) 時不觸發，避免無謂 fetch。
                 if (newGap != null) {
                     launchCloseGap(
                         scope = scope,
                         repository = repository,
-                        state = state,
+                        slices = slices,
                         sessionId = sessionId,
                         onCacheWindow = onCacheWindow,
-                        slices = slices
                     )
                 }
             }
             .onFailure {
-                if (sessionId == state.value.currentSessionId) {
+                // §R-17 batch2 step e final: slice-only read.
+                if (sessionId == slices.chat.value.currentSessionId) {
                     reportNonFatalIssue("MainViewModel", "Catch-up tail reload failed")
                 }
-                state.updateAndSync(slices) { it.copy(isLoadingMessages = false) }
+                slices.chat.update { c -> c.copy(isLoadingMessages = false) }
             }
     }
 }
@@ -191,14 +205,15 @@ internal const val GAP_CLOSE_MAX_STEPS = 5
  * check runs on the RAW page (before dedup) since `before=` is inclusive and
  * the anchor may sit at the page boundary. State is written progressively
  * after each step so the divider follows the shrinking gap.
+ *
+ * §R-17 batch2 step e final: slices are the sole authoritative store.
  */
 internal fun launchCloseGap(
     scope: CoroutineScope,
     repository: OpenCodeRepository,
-    state: MutableStateFlow<AppState>,
+    slices: SliceFlows,
     sessionId: String,
-    onCacheWindow: (sessionId: String, window: CachedSessionWindow) -> Unit = { _, _ -> }
-, slices: SliceFlows? = null,
+    onCacheWindow: (sessionId: String, window: CachedSessionWindow) -> Unit = { _, _ -> },
     // §M2: parameterized step (default 3) replaces the old hardcoded
     // limit=5. SSE-mode callers that omit it get step=3 (acceptable per design
     // §1.4); callers pass step=3 explicitly.
@@ -208,41 +223,49 @@ internal fun launchCloseGap(
     maxSteps: Int = GAP_CLOSE_MAX_STEPS
 ) {
 
-    val gap0 = state.value.gapInfo ?: return
+    // §R-17 batch2 step e final: slice-only reads. Captured once; this block
+    // is synchronous up to the scope.launch below.
+    val gap0 = slices.chat.value.gapInfo ?: return
     if (!gap0.open) return
-    if (state.value.isLoadingMessages) return
+    if (slices.chat.value.isLoadingMessages) return
     if (step <= 0 || maxSteps <= 0) return // nothing to do; leave gap for manual
     if (gap0.tailOldestCursor == null) {
         // No more history to page — can't bridge; stop showing the divider.
-        state.updateAndSync(slices) { it.copy(gapInfo = gap0.copy(open = false)) }
+        slices.chat.update { c -> c.copy(gapInfo = gap0.copy(open = false)) }
         return
     }
-    state.updateAndSync(slices) { it.copy(isLoadingMessages = true) }
+    slices.chat.update { c -> c.copy(isLoadingMessages = true) }
     scope.launch {
         var stepsTaken = 0
         var gap = gap0
         var cursor: String? = gap0.tailOldestCursor
         while (true) {
-            if (sessionId != state.value.currentSessionId) break
+            // §R-17 batch2 step e final: fresh capture each iteration (the
+            // prior iteration's slice write may have updated the slice).
+            val currentSessionId = slices.chat.value.currentSessionId
+            if (sessionId != currentSessionId) break
             val c = cursor
             if (c == null) {
                 // History exhausted mid-walk without reaching the anchor →
                 // can't bridge; stop showing the divider.
-                state.updateAndSync(slices) { it.copy(gapInfo = it.gapInfo?.copy(open = false)) }
+                slices.chat.update { ch -> ch.copy(gapInfo = ch.gapInfo?.copy(open = false)) }
                 break
             }
             val page = repository.getMessagesPaged(sessionId, limit = step, before = c)
                 .getOrElse {
-                    if (sessionId == state.value.currentSessionId) {
+                    if (sessionId == currentSessionId) {
                         reportNonFatalIssue("MainViewModel", "Gap closure fetch failed")
                     }
-                    state.updateAndSync(slices) { it.copy(isLoadingMessages = false) }
+                    slices.chat.update { ch -> ch.copy(isLoadingMessages = false) }
                     return@launch
                 }
             stepsTaken += 1
             // Closure check BEFORE dedup (raw page — `before=` is inclusive).
             val closed = page.items.any { it.info.id == gap.anchorNewestId }
-            val existingIds = state.value.messages.map { it.id }.toHashSet()
+            // §R-17 batch2 step e final: fresh capture after the suspend
+            // (slice may have changed during the fetch).
+            val currentMessages = slices.chat.value.messages
+            val existingIds = currentMessages.map { it.id }.toHashSet()
             val bridged = page.items.filterNot { it.info.id in existingIds }
             val bridgedMessages = bridged.map { it.info }
             val bridgedParts = bridged.associate { it.info.id to it.parts }
@@ -253,42 +276,47 @@ internal fun launchCloseGap(
             // (tailOldestId) advances to the OLDEST id just loaded (the new
             // seam between filled-gap and any still-missing range).
             val newTailOldestId = bridged.minByOrNull { it.info.time?.created ?: Long.MAX_VALUE }?.info?.id
-            state.updateAndSync(slices) {
-                val insertIdx = it.messages.indexOfFirst { m -> m.id == gap.tailOldestId }
-                val mergedMessages = if (insertIdx >= 0) {
-                    it.messages.subList(0, insertIdx) + bridgedMessages + it.messages.subList(insertIdx, it.messages.size)
-                } else {
-                    bridgedMessages + it.messages
-                }
-                it.copy(
+            val insertIdx = currentMessages.indexOfFirst { m -> m.id == gap.tailOldestId }
+            val mergedMessages = if (insertIdx >= 0) {
+                currentMessages.subList(0, insertIdx) + bridgedMessages + currentMessages.subList(insertIdx, currentMessages.size)
+            } else {
+                bridgedMessages + currentMessages
+            }
+            val currentParts = slices.chat.value.partsByMessage
+            val newGap = if (closed) null else gap.copy(
+                tailOldestId = newTailOldestId ?: gap.tailOldestId,
+                tailOldestCursor = page.nextCursor
+            )
+            slices.chat.update { ch ->
+                ch.copy(
                     messages = mergedMessages,
-                    partsByMessage = bridgedParts + it.partsByMessage,
-                    gapInfo = if (closed) null else gap.copy(
-                        tailOldestId = newTailOldestId ?: gap.tailOldestId,
-                        tailOldestCursor = page.nextCursor
-                    )
+                    partsByMessage = bridgedParts + currentParts,
+                    gapInfo = newGap
                 )
             }
             if (closed) break
             // Prepare the next iteration. Re-read the just-written gap so the
             // divider advances; stop if state was unexpectedly cleared.
-            gap = state.value.gapInfo ?: break
+            gap = slices.chat.value.gapInfo ?: break
             cursor = page.nextCursor
             // §M2 budget cap: stop auto-closure after maxSteps and leave
             // the gap hint open for a manual tap (fresh budget on re-entry).
             if (stepsTaken >= maxSteps) break
         }
-        state.updateAndSync(slices) { it.copy(isLoadingMessages = false) }
-        val postUpdate = state.value
+        slices.chat.update { c -> c.copy(isLoadingMessages = false) }
+        // §R-17 batch2 step e final: slice-only reads for the cache snapshot.
+        val postMessages = slices.chat.value.messages
+        val postParts = slices.chat.value.partsByMessage
+        val postCursor = slices.chat.value.olderMessagesCursor
+        val postHasMore = slices.chat.value.hasMoreMessages
         onCacheWindow(
             sessionId,
             CachedSessionWindow(
-                messages = postUpdate.messages,
-                partsByMessage = postUpdate.partsByMessage,
-                olderMessagesCursor = postUpdate.olderMessagesCursor,
-                hasMoreMessages = postUpdate.hasMoreMessages
+                messages = postMessages,
+                partsByMessage = postParts,
+                olderMessagesCursor = postCursor,
+                hasMoreMessages = postHasMore
             )
         )
     }
 }
-

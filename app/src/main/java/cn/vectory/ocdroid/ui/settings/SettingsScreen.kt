@@ -21,7 +21,10 @@ import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import cn.vectory.ocdroid.R
-import cn.vectory.ocdroid.ui.MainViewModel
+import cn.vectory.ocdroid.ui.ComposerViewModel
+import cn.vectory.ocdroid.ui.ConnectionViewModel
+import cn.vectory.ocdroid.ui.HostViewModel
+import cn.vectory.ocdroid.ui.OrchestratorViewModel
 import cn.vectory.ocdroid.util.ThemeMode
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.map
@@ -35,14 +38,17 @@ import kotlinx.coroutines.flow.map
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun SettingsScreen(
-    viewModel: MainViewModel,
+    viewModel: HostViewModel,
+    composerVM: ComposerViewModel,
+    connectionVM: ConnectionViewModel,
+    orchestratorVM: OrchestratorViewModel,
     onBack: (() -> Unit)? = null
 ) {
     // §R-17 Stage 3 (+ follow-up debt cleanup): subscribe to the relevant
     // slice Flows directly so the host-profile picker / theme picker / traffic
     // counters / connection badge no longer recompose on every AppState
     // emission (SSE deltas, typing, session switches, etc.). The whole-app
-    // `viewModel.state` subscription has been removed entirely.
+    // `viewModel.core.state` subscription has been removed entirely.
     //
     // Field-level subscriptions (.map { it.field }.distinctUntilChanged()) are
     // used where a single field is read off a multi-field slice, so an
@@ -52,40 +58,33 @@ fun SettingsScreen(
     // projected to a field Flow. hostFlow / trafficFlow / connectionFlow are
     // consumed whole because every field on those small slices is read here.
     val host by viewModel.hostFlow.collectAsStateWithLifecycle()
-    val themeMode by viewModel.settingsFlow
-        .map { it.themeMode }
-        .distinctUntilChanged()
+    // §flow-remember: each settingsFlow projection is wrapped in remember{}
+    // so map/distinctUntilChanged aren't re-applied on every recomposition
+    // (FlowOperatorInvokedInComposition).
+    val themeMode by remember { orchestratorVM.settingsFlow.map { it.themeMode }.distinctUntilChanged() }
         .collectAsStateWithLifecycle(initialValue = ThemeMode.SYSTEM)
     // §model-selection: providers + disabledModels are read by the Model
     // management section. Subscribed here (not in the parent) so SSE /
     // composer deltas do not recompose SettingsScreen.
-    val providers by viewModel.settingsFlow
-        .map { it.providers }
-        .distinctUntilChanged()
+    val providers by remember { orchestratorVM.settingsFlow.map { it.providers }.distinctUntilChanged() }
         .collectAsStateWithLifecycle(initialValue = null)
-    val disabledModels by viewModel.settingsFlow
-        .map { it.disabledModels }
-        .distinctUntilChanged()
+    val disabledModels by remember { orchestratorVM.settingsFlow.map { it.disabledModels }.distinctUntilChanged() }
         .collectAsStateWithLifecycle(initialValue = emptySet())
     // §ui-scale: subscribe to the two scale factors so the Appearance sliders
     // render the live value + dispatch changes through the ViewModel setters.
-    val uiFontScale by viewModel.settingsFlow
-        .map { it.uiFontScale }
-        .distinctUntilChanged()
+    val uiFontScale by remember { orchestratorVM.settingsFlow.map { it.uiFontScale }.distinctUntilChanged() }
         .collectAsStateWithLifecycle(initialValue = 1f)
-    val uiContentScale by viewModel.settingsFlow
-        .map { it.uiContentScale }
-        .distinctUntilChanged()
+    val uiContentScale by remember { orchestratorVM.settingsFlow.map { it.uiContentScale }.distinctUntilChanged() }
         .collectAsStateWithLifecycle(initialValue = 1f)
-    val traffic by viewModel.trafficFlow.collectAsStateWithLifecycle()
-    val connection by viewModel.connectionFlow.collectAsStateWithLifecycle()
+    val traffic by orchestratorVM.trafficFlow.collectAsStateWithLifecycle()
+    val connection by connectionVM.connectionFlow.collectAsStateWithLifecycle()
 
     // Refresh traffic counters once when the Settings screen enters
     // composition so the displayed totals reflect the latest background
     // accumulation. The tracker keeps counting regardless; this just syncs
     // the snapshot for display.
     LaunchedEffect(Unit) {
-        viewModel.refreshTrafficStats()
+        orchestratorVM.refreshTrafficStats()
     }
 
     var showHostProfiles by remember { mutableStateOf(false) }
@@ -93,6 +92,7 @@ fun SettingsScreen(
     if (showHostProfiles) {
         HostProfilesManagerScreen(
             viewModel = viewModel,
+            connectionVM = connectionVM,
             profiles = host.hostProfiles,
             currentProfileId = host.currentHostProfileId,
             onBack = { showHostProfiles = false }
@@ -136,7 +136,7 @@ fun SettingsScreen(
             TrafficSection(
                 sent = traffic.trafficSent,
                 received = traffic.trafficReceived,
-                onReset = viewModel::resetTrafficStats,
+                onReset = orchestratorVM::resetTrafficStats,
                 hideHeader = true
             )
             Spacer(modifier = Modifier.height(12.dp))
@@ -145,11 +145,11 @@ fun SettingsScreen(
 
             AppearanceSection(
                 themeMode = themeMode,
-                onThemeSelected = viewModel::setThemeMode,
+                onThemeSelected = orchestratorVM::setThemeMode,
                 uiFontScale = uiFontScale,
                 uiContentScale = uiContentScale,
-                onFontScaleChange = viewModel::setUiFontScale,
-                onContentScaleChange = viewModel::setUiContentScale
+                onFontScaleChange = orchestratorVM::setUiFontScale,
+                onContentScaleChange = orchestratorVM::setUiContentScale
             )
 
             Spacer(modifier = Modifier.height(12.dp))
@@ -160,7 +160,7 @@ fun SettingsScreen(
                 providers = providers,
                 disabledModels = disabledModels,
                 onToggleModelDisabled = { providerId, modelId ->
-                    viewModel.toggleModelDisabled(providerId, modelId)
+                    composerVM.toggleModelDisabled(providerId, modelId)
                 }
             )
 

@@ -38,15 +38,20 @@ import androidx.compose.runtime.snapshots.SnapshotStateMap
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import cn.vectory.ocdroid.R
 import cn.vectory.ocdroid.data.model.Message
 import cn.vectory.ocdroid.data.model.Part
 import cn.vectory.ocdroid.data.model.isEffectivelyRenderableEmpty
 import cn.vectory.ocdroid.data.repository.OpenCodeRepository
 import cn.vectory.ocdroid.ui.GapInfo
-import cn.vectory.ocdroid.ui.MainViewModel
+import cn.vectory.ocdroid.ui.ChatViewModel
+import cn.vectory.ocdroid.ui.ComposerViewModel
+import cn.vectory.ocdroid.ui.SessionViewModel
 import cn.vectory.ocdroid.ui.METADATA_MARKER_ROLES
+import cn.vectory.ocdroid.ui.filterBeforeRevert
 import cn.vectory.ocdroid.ui.injectMetadataMarkers
 import cn.vectory.ocdroid.ui.isStaleQuestionPart
 import kotlinx.coroutines.delay
@@ -61,7 +66,9 @@ import kotlinx.coroutines.flow.drop
 
 @Composable
 internal fun ChatMessageList(
-    viewModel: MainViewModel,
+    chatVM: ChatViewModel,
+    composerVM: ComposerViewModel,
+    sessionVM: SessionViewModel,
     onFileClick: (String) -> Unit,
     onTabVisibilityChange: (Boolean) -> Unit = {},
     // §3-scroll-memory: hoisted per-session scroll-position cache + its
@@ -79,9 +86,9 @@ internal fun ChatMessageList(
     // Compose) passed from ChatScreen's AppState read, which forced a
     // recomposition on every AppState emission. Reading from the slice Flows
     // here lets the runtime skip this composable when neither slice emits.
-    val chatState by viewModel.chatFlow.collectAsStateWithLifecycle()
-    val sessionListState by viewModel.sessionListFlow.collectAsStateWithLifecycle()
-    val expandedParts by viewModel.expandedParts.collectAsStateWithLifecycle()
+    val chatState by chatVM.chatFlow.collectAsStateWithLifecycle()
+    val sessionListState by chatVM.sessionListFlow.collectAsStateWithLifecycle()
+    val expandedParts by chatVM.expandedParts.collectAsStateWithLifecycle()
 
     // visibleMessages is a cross-slice derived value: the revert message id
     // lives on the Session (sessionListFlow) but the messages list lives on
@@ -89,7 +96,7 @@ internal fun ChatMessageList(
     val currentSession = sessionListState.sessions.find { it.id == chatState.currentSessionId }
     val messages: List<Message> = remember(chatState.messages, currentSession?.revert?.messageId) {
         val revertMessageId = currentSession?.revert?.messageId
-        val reverted = if (revertMessageId == null) chatState.messages else chatState.messages.filter { it.id < revertMessageId }
+        val reverted = chatState.messages.filterBeforeRevert(revertMessageId)
         // §s3-markers: keep user/assistant turns + the synthetic metadata
         // marker roles, then interleave markers wherever agent/model
         // changed between consecutive turns.
@@ -114,12 +121,12 @@ internal fun ChatMessageList(
     } == true
     val hasMoreMessages: Boolean = chatState.hasMoreMessages
     val gapInfo: GapInfo? = chatState.gapInfo
-    val repository: OpenCodeRepository = viewModel.repository
+    val repository: OpenCodeRepository = chatVM.repository
     val workspaceDirectory: String? = currentSession?.directory
-    val onLoadMore: () -> Unit = viewModel::loadMoreMessages
-    val onOpenSubAgent: (String) -> Unit = viewModel::openSubAgent
-    val onToggleExpand: (String, Boolean) -> Unit = viewModel::togglePartExpand
-    val onCloseGap: () -> Unit = viewModel::closeGap
+    val onLoadMore: () -> Unit = chatVM::loadMoreMessages
+    val onOpenSubAgent: (String) -> Unit = sessionVM::openSubAgent
+    val onToggleExpand: (String, Boolean) -> Unit = composerVM::togglePartExpand
+    val onCloseGap: () -> Unit = chatVM::closeGap
 
     // §stale-question: compute the set of part ids that are stuck "running"
     // question parts WITHOUT a matching live QuestionRequest — these render
@@ -618,7 +625,7 @@ internal fun ChatMessageList(
                         CircularProgressIndicator(modifier = Modifier.size(24.dp))
                     } else {
                         Text(
-                            text = "加载更多历史",
+                            text = stringResource(R.string.chat_load_more_history),
                             style = MaterialTheme.typography.labelLarge,
                             color = MaterialTheme.colorScheme.primary,
                             modifier = Modifier
@@ -644,7 +651,7 @@ internal fun ChatMessageList(
                         )
                         Spacer(modifier = Modifier.height(12.dp))
                         Text(
-                            text = "加载中…",
+                            text = stringResource(R.string.chat_loading),
                             style = MaterialTheme.typography.bodyMedium,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
@@ -660,7 +667,7 @@ internal fun ChatMessageList(
                     contentAlignment = Alignment.Center
                 ) {
                     Text(
-                        text = "暂无消息",
+                        text = stringResource(R.string.chat_no_messages),
                         style = MaterialTheme.typography.bodyMedium,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
@@ -714,7 +721,7 @@ private fun InFlightEmptyLoading(modifier: Modifier = Modifier) {
         )
         Spacer(modifier = Modifier.width(8.dp))
         Text(
-            text = "生成中…",
+            text = stringResource(R.string.chat_generating),
             style = MaterialTheme.typography.labelSmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant
         )
@@ -786,7 +793,7 @@ private fun GapDivider(
                         Spacer(modifier = Modifier.width(6.dp))
                     }
                     Text(
-                        text = if (isLoading) "加载中…" else "可能有未加载的消息 · 点击加载",
+                        text = if (isLoading) stringResource(R.string.chat_loading) else stringResource(R.string.chat_gap_divider_hint),
                         style = MaterialTheme.typography.labelSmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = alpha)
                     )

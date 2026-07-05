@@ -89,6 +89,16 @@ android {
             isReturnDefaultValues = true
         }
     }
+    // §bug8 lint 配置：abortOnError=true 保持严格，warningsAsErrors=false 让警告
+    // 不阻断构建。HardcodedText 已完成 i18n 迁移，显式启用为 error 强制 0 字面量
+    // 回退。MissingTranslation 在尚未补齐所有 key 时无意义，禁用以避免噪音。
+    lint {
+        abortOnError = true
+        warningsAsErrors = false
+        disable += setOf("MissingTranslation")
+        // HardcodedText 已迁移完成，启用为 error
+        error += setOf("HardcodedText")
+    }
 }
 
 // R-22 kover 覆盖率门槛（防回归用）：阈值按 koverHtmlReport 实测基线设的略低值，
@@ -109,6 +119,13 @@ kover {
         }
     }
 }
+
+// R-22 §bug7: wire koverVerify into the `check` lifecycle task so the coverage
+// floor is enforced by any invocation of `./gradlew check` (and CI), not only
+// by an explicit `./gradlew koverVerify`. check.sh runs compileDebugKotlin +
+// testDebugUnitTest directly (not `check`), so this does not retro-fit kover
+// onto the default check.sh path — it closes the gap for `check`/CI callers.
+tasks.named("check").configure { dependsOn("koverVerify") }
 
 dependencies {
     implementation(libs.androidx.core.ktx)

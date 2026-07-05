@@ -1,6 +1,7 @@
 package cn.vectory.ocdroid.ui.util
 
 import cn.vectory.ocdroid.data.model.FileContent
+import cn.vectory.ocdroid.util.DebugLog
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
@@ -168,7 +169,8 @@ object MarkdownImageResolver {
                 workspacePath.resolve(path).normalize()
             }
             workspacePath.relativize(targetPath).toString()
-        } catch (_: Exception) {
+        } catch (e: Exception) {
+            DebugLog.w("MarkdownImageResolver", "relativizeAgainstWorkspace failed: ${e.message}")
             path
         }
     }

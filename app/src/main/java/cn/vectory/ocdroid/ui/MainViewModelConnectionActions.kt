@@ -1,21 +1,28 @@
 package cn.vectory.ocdroid.ui
 
+/**
+ * §R-17 batch3d: Domain orchestration free functions. These are NOT the deleted
+ * batch-2 AppState mirror helpers (aggregateFromSlices/syncSlicesFromAppState etc.).
+ * They are coroutine-launch helpers called by the domain ViewModels and AppCore
+ * orchestration extensions to perform async operations (load/refresh/mutate).
+ * Future cleanup (batch3e+): may be inlined into individual VM private methods.
+ */
+
 import cn.vectory.ocdroid.data.model.toSession
 import cn.vectory.ocdroid.data.repository.OpenCodeRepository
 import cn.vectory.ocdroid.data.repository.HostProfileStore
 import cn.vectory.ocdroid.util.SettingsManager
-import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.flow.MutableStateFlow
-import kotlinx.coroutines.launch
+import kotlinx.coroutines.flow.update
 
 internal fun applySavedSettings(
     repository: OpenCodeRepository,
     settingsManager: SettingsManager,
     hostProfileStore: HostProfileStore,
-    state: MutableStateFlow<AppState>,
     connectionFlow: MutableStateFlow<ConnectionState>,
-    settingsFlow: MutableStateFlow<SettingsState>
-, slices: SliceFlows? = null) {
+    settingsFlow: MutableStateFlow<SettingsState>,
+    slices: SliceFlows
+) {
 
     val currentProfile = hostProfileStore.currentProfile()
     val password = currentProfile.basicAuth?.passwordId?.let { settingsManager.basicAuthPassword(it) }
@@ -30,7 +37,7 @@ internal fun applySavedSettings(
     // and the connected project would "vanish" after restart).
     settingsManager.currentWorkdir?.let { repository.setCurrentDirectory(it) }
 
-    // Reuse the profile list once: it backs both AppState.hostProfiles and the
+    // Reuse the profile list once: it backs both the host slice and the
     // cold-start connectionPhase decision below.
     val profiles = hostProfileStore.profiles()
     // Seed sessions from the persisted metadata cache so tabs/title/
@@ -57,28 +64,34 @@ internal fun applySavedSettings(
     if (restoredCurrentSessionId != persistedCurrentSessionId) {
         settingsManager.currentSessionId = restoredCurrentSessionId
     }
-    state.updateAndSync(slices) {
+    // §R-17 batch2 step d → step e final: each domain written directly to its
+    // own slice via thread-safe MutableStateFlow.update. The AppState mirror
+    // is no longer written from here — slices are the sole authoritative
+    // store.
+    slices.chat.update {
+        it.copy(currentSessionId = restoredCurrentSessionId)
+    }
+    slices.host.update {
         it.copy(
-            currentSessionId = restoredCurrentSessionId,
-            lastNavPage = settingsManager.lastNavPage,
             hostProfiles = profiles,
-            currentHostProfileId = currentProfile.id,
-            openSessionIds = restoredOpenSessionIds,
-            sessions = restoredSessions
-            // §R-17 M2: connectionPhase moved to connectionFlow below.
-            // §R-17 M3: selectedAgentName/themeMode/markdownFontSizes moved to
-            // settingsFlow below.
+            currentHostProfileId = currentProfile.id
         )
     }
-    // §R-17 M3 (RFC §4 strategy A): seed the settings slice + mirror from
-    // persisted prefs. Runs synchronously alongside the _state.update above;
-    // intermediate state legal.
+    slices.sessionList.update {
+        it.copy(
+            openSessionIds = restoredOpenSessionIds,
+            sessions = restoredSessions
+        )
+    }
+    // §R-17 M3 (RFC §4 strategy A): seed the settings slice from persisted
+    // prefs. Runs synchronously alongside the slice updates above; intermediate
+    // state legal.
     val seedAgent = settingsManager.selectedAgentName ?: "build"
     // §model-selection: load per-baseUrl disabled-model set for the active
     // host so the chat quick-switch picker + Settings render the right
     // entries on cold start.
     val seedDisabledModels = settingsManager.getDisabledModels(currentProfile.serverUrl)
-    applySettingsSlice(state, settingsFlow) {
+    settingsFlow.update {
         it.copy(
             selectedAgentName = seedAgent,
             themeMode = settingsManager.themeMode,
@@ -87,31 +100,32 @@ internal fun applySavedSettings(
             // §ui-scale: seed the persisted UI scale factors so OpenCodeTheme
             // (subscribed via MainActivity → settingsFlow) applies them on
             // cold start. Updates thereafter flow through setUiFontScale /
-            // setUiContentScale → writeSettings → applySettingsSlice.
+            // setUiContentScale → writeSettings.
             uiFontScale = settingsManager.uiFontScale,
             uiContentScale = settingsManager.uiContentScale
         )
     }
-    // §R-17 M2 (RFC §4 strategy A): write the connection slice AND mirror it
-    // onto the deprecated AppState field synchronously (MainViewModel.state is
-    // a direct view over `state`; without this mirror the legacy
-    // `state.value.connectionPhase` readers — incl. reflection-based tests —
-    // would not observe the change until a coroutine dispatch). The two
-    // writes are back-to-back on the same (Main.immediate) thread; the
-    // intermediate state is legal.
+    // §R-17 M2 (RFC §4 strategy A): write the connection slice directly.
     // Signal "reconnecting" immediately when a profile is configured so the
     // empty-state UX can show a spinner instead of the bare connect button
     // while coldStartReconnect() is in flight.
     val connectionPhase = if (profiles.isNotEmpty()) "reconnecting" else null
-    @Suppress("DEPRECATION")
-    state.updateAndSync(slices) { it.copy(connectionPhase = connectionPhase) }
+    connectionFlow.update { it.copy(connectionPhase = connectionPhase) }
 }
 
 /**
- * §R-17 Stage 1: launchConnectionTest (dead code, glm-1 N2) was REMOVED here.
- * It had zero callers in main or test and only wrote the AppState mirror
- * without slice sync — reviving it requires routing connection writes through
- * MainViewModel.writeConnection (or accepting a SliceFlows param and using
- * updateAndSync).
+ * §R-17 batch3d: free-function extraction of the former
+ * AppCore.reloadDisabledModelsForCurrentHost body. Both
+ * [ComposerViewModel.reloadDisabledModelsForCurrentHost] and AppCore's
+ * effect-dispatch handler (ControllerEffect.HostProfileSwitched) call this so
+ * the body lives once.
  */
-
+internal fun applyReloadDisabledModelsForCurrentHost(
+    settingsManager: SettingsManager,
+    hostProfileStore: HostProfileStore,
+    slices: SliceFlows,
+) {
+    val baseUrl = hostProfileStore.currentProfile().serverUrl
+    val set = settingsManager.getDisabledModels(baseUrl)
+    slices.settings.update { it.copy(disabledModels = set) }
+}

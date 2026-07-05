@@ -6,18 +6,18 @@ import cn.vectory.ocdroid.data.model.HealthResponse
 import cn.vectory.ocdroid.data.model.SSEEvent
 import cn.vectory.ocdroid.data.model.Session
 import cn.vectory.ocdroid.data.repository.OpenCodeRepository
-import cn.vectory.ocdroid.ui.AppState
 import cn.vectory.ocdroid.ui.ChatState
 import cn.vectory.ocdroid.ui.ComposerState
 import cn.vectory.ocdroid.ui.ConnectionState
+import cn.vectory.ocdroid.ui.SharedEffectBus
 import cn.vectory.ocdroid.ui.FileState
 import cn.vectory.ocdroid.ui.HostState
 import cn.vectory.ocdroid.ui.SessionListState
 import cn.vectory.ocdroid.ui.SettingsState
 import cn.vectory.ocdroid.ui.SliceFlows
 import cn.vectory.ocdroid.ui.TrafficState
+import cn.vectory.ocdroid.ui.UiEvent
 import cn.vectory.ocdroid.ui.UnreadState
-import cn.vectory.ocdroid.ui.syncSlicesFromAppState
 import cn.vectory.ocdroid.util.SettingsManager
 import io.mockk.coEvery
 import io.mockk.coVerify
@@ -32,7 +32,10 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.flowOf
+import kotlinx.coroutines.flow.toList
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.TestScope
+import kotlinx.coroutines.test.UnconfinedTestDispatcher
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -62,24 +65,28 @@ import java.io.IOException
  * pre-extraction MainViewModel.testConnection.
  */
 @Suppress("DEPRECATION")
+@OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
 class ConnectionCoordinatorTest {
 
-    private lateinit var state: MutableStateFlow<AppState>
     private lateinit var connectionFlow: MutableStateFlow<ConnectionState>
     private lateinit var settingsFlow: MutableStateFlow<SettingsState>
     private lateinit var slices: SliceFlows
     private lateinit var repository: OpenCodeRepository
     private lateinit var settingsManager: SettingsManager
-    private lateinit var callbacks: RecordingConnectionCoordinatorCallbacks
+    private lateinit var effects: SharedEffectBus
+    private lateinit var collectedEffects: MutableList<ControllerEffect>
     private lateinit var scope: TestScope
     private var now: Long = 0L
     private lateinit var coordinator: ConnectionCoordinator
+    /** §R-17 batch2 / §batch 3b: captures UiEvents emitted on effects.uiEvents. */
+    private val recordedEvents = mutableListOf<UiEvent>()
 
     @Before
     fun setUp() {
-        // launchSseCollection's catch block calls Log.e.
+        // launchSseCollection's catch block calls Log.e; loadPendingQuestions /
+        // loadPendingPermissions inline paths now call Log.w on failure.
         mockkStatic(Log::class)
-        state = MutableStateFlow(AppState())
+        io.mockk.every { Log.w(any<String>(), any<String>()) } returns 0
         connectionFlow = MutableStateFlow(ConnectionState())
         settingsFlow = MutableStateFlow(SettingsState())
         slices = SliceFlows(
@@ -95,20 +102,23 @@ class ConnectionCoordinatorTest {
         )
         repository = mockk(relaxed = true)
         settingsManager = mockk(relaxed = true)
-        callbacks = RecordingConnectionCoordinatorCallbacks()
-        scope = TestScope()
+        effects = SharedEffectBus()
+        collectedEffects = mutableListOf()
+        scope = TestScope(UnconfinedTestDispatcher())
+        recordedEvents.clear()
+        scope.launch(start = kotlinx.coroutines.CoroutineStart.UNDISPATCHED) { effects.effectsConsumed.toList(collectedEffects) }
+        scope.launch(start = kotlinx.coroutines.CoroutineStart.UNDISPATCHED) { effects.uiEventsConsumed.toList(recordedEvents) }
         // Baseline clock well past the 30s throttle window from epoch 0 so the
         // first probe always proceeds (mirrors production's wall-clock ms).
         now = 100_000L
         coordinator = ConnectionCoordinator(
             scope = scope,
-            state = state,
             connectionFlow = connectionFlow,
             settingsFlow = settingsFlow,
             slices = slices,
             repository = repository,
             settingsManager = settingsManager,
-            callbacks = callbacks,
+            effects = effects,
             serverCompatProfile = cn.vectory.ocdroid.data.repository.ServerCompatProfile(),
             clock = { now }
         )
@@ -128,12 +138,6 @@ class ConnectionCoordinatorTest {
 
     private fun runPending() {
         scope.testScheduler.advanceUntilIdle()
-    }
-
-    // R-17 M5: seed AppState then propagate to slices (controllers read/write slices).
-    private fun seed(transform: (AppState) -> AppState) {
-        state.value = transform(state.value)
-        syncSlicesFromAppState(state.value, slices)
     }
 
     // ── testConnection: 30s health-check throttle ──────────────────────────
@@ -183,7 +187,9 @@ class ConnectionCoordinatorTest {
         // its reconfigure chain (cancelSseForReconfigure -> onHostReconfigured)
         // reset ForegroundCatchUpController.sseHasConnectedOnce and swallowed the
         // 15s-5min foreground gap catch-up. Callers configure the repo themselves.
-        assertEquals(0, callbacks.configureRepositoryForCurrentProfileCalls)
+        // §batch 3b: the method was removed entirely; assert no repository
+        // reconfigure happened.
+        verify(exactly = 0) { repository.configure(any(), any(), any(), any()) }
     }
 
     // ── testConnection: healthy / unhealthy / failure branches ──────────────
@@ -204,11 +210,12 @@ class ConnectionCoordinatorTest {
         // Mirrors on AppState too.
         assertTrue(slices.connection.value.isConnected)
         assertEquals("9.9", slices.connection.value.serverVersion)
-        // loadInitialData fan-out (loaders + loadCommands).
-        assertEquals(1, callbacks.loadSessionsCalls)
-        assertEquals(1, callbacks.loadAgentsCalls)
-        assertEquals(1, callbacks.loadProvidersCalls)
-        assertEquals(1, callbacks.loadPendingQuestionsCalls)
+        // §batch 3b: every loader fans out via [ControllerEffect]s.
+        assertEquals(1, collectedEffects.filterIsInstance<ControllerEffect.LoadSessions>().size)
+        assertEquals(1, collectedEffects.filterIsInstance<ControllerEffect.LoadAgents>().size)
+        assertEquals(1, collectedEffects.filterIsInstance<ControllerEffect.LoadProviders>().size)
+        assertEquals(1, collectedEffects.filterIsInstance<ControllerEffect.LoadPendingQuestions>().size)
+        assertEquals(1, collectedEffects.filterIsInstance<ControllerEffect.LoadPendingPermissions>().size)
         coVerify { repository.getCommands() }
         // SSE feed started.
         verify { repository.connectSSE() }
@@ -238,8 +245,8 @@ class ConnectionCoordinatorTest {
 
         assertFalse(connectionFlow.value.isConnected)
         assertEquals("disconnected", connectionFlow.value.connectionPhase)
-        assertNotNull(state.value.error)
-        assertTrue(state.value.error!!.contains("network down"))
+        val errorEvent = recordedEvents.filterIsInstance<UiEvent.Error>().single()
+        assertTrue(errorEvent.message.contains("network down"))
     }
 
     @Test
@@ -256,7 +263,10 @@ class ConnectionCoordinatorTest {
 
     @Test
     fun `testConnection on healthy clears the prior error`() {
-        seed { it.copy(error = "stale") }
+        // §R-17 batch2: error is now a one-shot UiEvent — there's no persistent
+        // error field to clear. This test stays as a regression guard: a healthy
+        // connect must NOT emit a fresh UiEvent.Error (it used to clear the
+        // legacy `state.error` field here).
         coEvery { repository.checkHealth() } returns Result.success(HealthResponse(healthy = true, version = "1.0"))
         every { repository.connectSSE() } returns flowOf()
         coEvery { repository.getCommands() } returns Result.success(emptyList())
@@ -264,7 +274,7 @@ class ConnectionCoordinatorTest {
         coordinator.testConnection()
         runPending()
 
-        assertNull(state.value.error)
+        assertTrue("healthy connect emits no error event", recordedEvents.filterIsInstance<UiEvent.Error>().isEmpty())
     }
 
     // ── coldStartReconnect ─────────────────────────────────────────────────
@@ -291,11 +301,13 @@ class ConnectionCoordinatorTest {
         coordinator.loadInitialData()
         runPending()
 
-        assertEquals(1, callbacks.loadSessionsCalls)
-        assertEquals(1, callbacks.loadAgentsCalls)
-        assertEquals(1, callbacks.loadProvidersCalls)
-        assertEquals(1, callbacks.loadPendingQuestionsCalls)
-        assertEquals(1, callbacks.loadPendingPermissionsCalls)
+        // §batch 3b: every loader is now a [ControllerEffect]; loadCommands
+        // stays inline.
+        assertEquals(1, collectedEffects.filterIsInstance<ControllerEffect.LoadSessions>().size)
+        assertEquals(1, collectedEffects.filterIsInstance<ControllerEffect.LoadAgents>().size)
+        assertEquals(1, collectedEffects.filterIsInstance<ControllerEffect.LoadProviders>().size)
+        assertEquals(1, collectedEffects.filterIsInstance<ControllerEffect.LoadPendingQuestions>().size)
+        assertEquals(1, collectedEffects.filterIsInstance<ControllerEffect.LoadPendingPermissions>().size)
         coVerify { repository.getCommands() }
     }
 
@@ -449,6 +461,11 @@ class ConnectionCoordinatorTest {
 
     // ── SSE lifecycle ──────────────────────────────────────────────────────
 
+    /** §batch 3b helper: extracts every SSE event the coordinator forwarded as
+     *  a [ControllerEffect.OnSseEvent]. */
+    private fun forwardedSseEvents(): List<SSEEvent> =
+        collectedEffects.filterIsInstance<ControllerEffect.OnSseEvent>().map { it.event }
+
     @Test
     fun `startSSE forwards each successful SSE event to the onSseEvent callback`() {
         val event = SSEEvent(payload = cn.vectory.ocdroid.data.model.SSEPayload(type = "session.created"))
@@ -457,7 +474,7 @@ class ConnectionCoordinatorTest {
         coordinator.startSSE()
         runPending()
 
-        assertEquals(listOf(event), callbacks.sseEvents)
+        assertEquals(listOf(event), forwardedSseEvents())
     }
 
     @Test
@@ -467,8 +484,8 @@ class ConnectionCoordinatorTest {
         coordinator.startSSE()
         runPending()
 
-        assertNotNull(state.value.error)
-        assertTrue(state.value.error!!.contains("SSE Error"))
+        val errorEvent = recordedEvents.filterIsInstance<UiEvent.Error>().single()
+        assertTrue(errorEvent.message.contains("SSE Error"))
     }
 
     @Test
@@ -478,8 +495,8 @@ class ConnectionCoordinatorTest {
         coordinator.startSSE()
         runPending()
 
-        assertNotNull(state.value.error)
-        assertTrue(state.value.error!!.contains("SSE Error"))
+        val errorEvent = recordedEvents.filterIsInstance<UiEvent.Error>().single()
+        assertTrue(errorEvent.message.contains("SSE Error"))
     }
 
     @Test
@@ -497,7 +514,7 @@ class ConnectionCoordinatorTest {
         runPending()
         flow1.tryEmit(Result.success(evt1)) // collected by the first job
         runPending()
-        assertEquals("first collector forwarded evt1", listOf(evt1), callbacks.sseEvents)
+        assertEquals("first collector forwarded evt1", listOf(evt1), forwardedSseEvents())
 
         coordinator.startSSE() // cancels job #1, launches job #2 on flow2
         runPending()
@@ -508,7 +525,7 @@ class ConnectionCoordinatorTest {
         assertEquals(
             "evt1 from the cancelled collector was NOT re-forwarded; evt2 forwarded",
             listOf(evt1, evt2),
-            callbacks.sseEvents
+            forwardedSseEvents()
         )
         verify(atLeast = 2) { repository.connectSSE() }
     }
@@ -526,7 +543,7 @@ class ConnectionCoordinatorTest {
         feed.tryEmit(Result.success(evt)) // collector cancelled → not forwarded
         runPending()
 
-        assertTrue("no event forwarded after cancelSse", callbacks.sseEvents.isEmpty())
+        assertTrue("no event forwarded after cancelSse", forwardedSseEvents().isEmpty())
     }
 
     @Test
@@ -541,44 +558,19 @@ class ConnectionCoordinatorTest {
         feed.tryEmit(Result.success(evt)) // cancelled → ignored
         runPending()
 
-        assertEquals(1, callbacks.onHostReconfiguredCalls)
-        assertTrue(callbacks.sseEvents.isEmpty())
+        assertEquals(1, collectedEffects.filterIsInstance<ControllerEffect.HostReconfigured>().size)
+        assertTrue(forwardedSseEvents().isEmpty())
     }
 
     @Test
     fun `cancelSseForReconfigure fires onHostReconfigured even with no active feed`() {
         coordinator.cancelSseForReconfigure()
-        assertEquals(1, callbacks.onHostReconfiguredCalls)
+        assertEquals(1, collectedEffects.filterIsInstance<ControllerEffect.HostReconfigured>().size)
     }
 
-    // ── RecordingConnectionCoordinatorCallbacks ────────────────────────────
-
-    /**
-     * Handwritten spy (per the codebase's zero-reflection test convention) that
-     * records every [ConnectionCoordinatorCallbacks] invocation + call order so
-     * tests can assert on side effects and ordering invariants.
-     */
-    private class RecordingConnectionCoordinatorCallbacks : ConnectionCoordinatorCallbacks {
-        var configureRepositoryForCurrentProfileCalls = 0
-        var loadSessionsCalls = 0
-        var loadAgentsCalls = 0
-        var loadProvidersCalls = 0
-        var loadPendingQuestionsCalls = 0
-        var loadPendingPermissionsCalls = 0
-        var onHostReconfiguredCalls = 0
-        val sseEvents = mutableListOf<SSEEvent>()
-        val callOrder = mutableListOf<String>()
-
-        override fun configureRepositoryForCurrentProfile() {
-            configureRepositoryForCurrentProfileCalls++
-            callOrder += "configureRepositoryForCurrentProfile"
-        }
-        override fun loadSessions() { loadSessionsCalls++; callOrder += "loadSessions" }
-        override fun loadAgents() { loadAgentsCalls++; callOrder += "loadAgents" }
-        override fun loadProviders() { loadProvidersCalls++; callOrder += "loadProviders" }
-        override fun loadPendingQuestions() { loadPendingQuestionsCalls++; callOrder += "loadPendingQuestions" }
-        override fun loadPendingPermissions() { loadPendingPermissionsCalls++; callOrder += "loadPendingPermissions" }
-        override fun onSseEvent(event: SSEEvent) { sseEvents += event }
-        override fun onHostReconfigured() { onHostReconfiguredCalls++; callOrder += "onHostReconfigured" }
-    }
+    // ── RecordingConnectionCoordinatorCallbacks (removed in batch 3b) ──────
+    // The handwritten spy was replaced by direct filtering on
+    // [collectedEffects] (plus the [forwardedSseEvents] helper for SSE event
+    // assertions) and repository coVerify for the inlined loaders. See the
+    // class kdoc at the top for the new pattern.
 }

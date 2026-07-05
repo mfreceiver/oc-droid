@@ -3,6 +3,7 @@ package cn.vectory.ocdroid.util
 import android.app.Application
 import android.os.Build
 import android.os.Process
+import androidx.core.content.pm.PackageInfoCompat
 import java.io.File
 import java.io.PrintWriter
 import java.io.StringWriter
@@ -50,7 +51,7 @@ object CrashLogger {
             pw.println("Time: ${Date()}")
             pw.println("Thread: ${thread.name}")
             pw.println("Device: ${Build.MANUFACTURER} ${Build.MODEL} (API ${Build.VERSION.SDK_INT})")
-            pw.println("App version: ${try { app.packageManager.getPackageInfo(app.packageName, 0).let { "${it.versionName} (${it.longVersionCode})" } } catch (_: Throwable) { "unknown" }}")
+            pw.println("App version: ${try { app.packageManager.getPackageInfo(app.packageName, 0).let { "${it.versionName} (${PackageInfoCompat.getLongVersionCode(it)})" } } catch (_: Throwable) { "unknown" }}")
             pw.println()
             pw.println("Runtime.maxMemory(): ${Runtime.getRuntime().maxMemory()}")
             pw.println("Runtime.totalMemory(): ${Runtime.getRuntime().totalMemory()}")

@@ -1,30 +1,39 @@
 package cn.vectory.ocdroid.ui
 
+/**
+ * §R-17 batch3d: Domain orchestration free functions. These are NOT the deleted
+ * batch-2 AppState mirror helpers (aggregateFromSlices/syncSlicesFromAppState etc.).
+ * They are coroutine-launch helpers called by the domain ViewModels and AppCore
+ * orchestration extensions to perform async operations (load/refresh/mutate).
+ * Future cleanup (batch3e+): may be inlined into individual VM private methods.
+ */
+
 import cn.vectory.ocdroid.data.model.ComposerImageAttachment
 import cn.vectory.ocdroid.data.model.Message
-import cn.vectory.ocdroid.data.model.Session
 import cn.vectory.ocdroid.data.repository.OpenCodeRepository
 import cn.vectory.ocdroid.util.SettingsManager
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 
 internal fun launchCreateSession(
     scope: CoroutineScope,
     repository: OpenCodeRepository,
-    state: MutableStateFlow<AppState>,
+    slices: SliceFlows,
     title: String?,
-    onSelectSession: (String) -> Unit
-, slices: SliceFlows? = null) {
+    onSelectSession: (String) -> Unit,
+    emit: EventEmitter = EventEmitter { }
+) {
 
     scope.launch {
         repository.createSession(title)
             .onSuccess { session ->
-                state.updateAndSync(slices) { it.copy(sessions = upsertSession(it.sessions, session)) }
+                slices.sessionList.update { sl -> sl.copy(sessions = upsertSession(sl.sessions, session)) }
                 onSelectSession(session.id)
             }
             .onFailure { error ->
-                state.updateAndSync(slices) { it.copy(error = "Failed to create session: ${errorMessageOrFallback(error, "unknown error")}") }
+                emit.emit(UiEvent.Error("Failed to create session: ${errorMessageOrFallback(error, "unknown error")}"))
             }
     }
 }
@@ -32,20 +41,21 @@ internal fun launchCreateSession(
 internal fun launchForkSession(
     scope: CoroutineScope,
     repository: OpenCodeRepository,
-    state: MutableStateFlow<AppState>,
+    slices: SliceFlows,
     sessionId: String,
     messageId: String?,
-    onSelectSession: (String) -> Unit
-, slices: SliceFlows? = null) {
+    onSelectSession: (String) -> Unit,
+    emit: EventEmitter = EventEmitter { }
+) {
 
     scope.launch {
         repository.forkSession(sessionId, messageId)
             .onSuccess { session ->
-                state.updateAndSync(slices) { it.copy(sessions = upsertSession(it.sessions, session)) }
+                slices.sessionList.update { sl -> sl.copy(sessions = upsertSession(sl.sessions, session)) }
                 onSelectSession(session.id)
             }
             .onFailure { error ->
-                state.updateAndSync(slices) { it.copy(error = "Failed to fork session: ${errorMessageOrFallback(error, "unknown error")}") }
+                emit.emit(UiEvent.Error("Failed to fork session: ${errorMessageOrFallback(error, "unknown error")}"))
             }
     }
 }
@@ -53,67 +63,73 @@ internal fun launchForkSession(
 internal fun launchSetSessionArchived(
     scope: CoroutineScope,
     repository: OpenCodeRepository,
-    state: MutableStateFlow<AppState>,
+    slices: SliceFlows,
     settingsManager: SettingsManager,
     sessionId: String,
-    archived: Boolean
-, slices: SliceFlows? = null) {
+    archived: Boolean,
+    emit: EventEmitter = EventEmitter { }
+) {
 
     scope.launch {
         val archivedValue = if (archived) System.currentTimeMillis() else -1L
-        val ids = sessionSubtreeIds(state.value.sessions, sessionId, parentFirst = !archived)
+        // §R-17 batch2 step e final: slice-only reads (slices are the sole
+        // authoritative store).
+        val ids = sessionSubtreeIds(slices.sessionList.value.sessions, sessionId, parentFirst = !archived)
         for (id in ids) {
             repository.updateSessionArchived(id, archivedValue)
                 .onSuccess { updated ->
-                    state.updateAndSync(slices) { current ->
-                        val newSessions = current.sessions.map { session -> if (session.id == id) updated else session }
-                        // Keep directorySessions in sync so an archived
-                        // session disappears from the connected-projects
-                        // list immediately (refreshDirectorySessions
-                        // repopulates this map on expand, but the local
-                        // copy must not hold a stale unarchived version).
-                        val newDirSessions = current.directorySessions.mapValues { (_, list) ->
-                            list.map { session -> if (session.id == id) updated else session }
-                        }
-                        if (archivedValue > 0) {
-                            // Archived: evict the id from the open-tabs list
-                            // (browser-tab close equivalent for archive) and
-                            // persist via the existing SettingsManager setter.
-                            // Mirrors closeSession's currentSessionId fallback:
-                            // if the archived session was current, clear it
-                            // (and the loaded message window) so the chat view
-                            // falls back to the empty state instead of
-                            // pointing at a now-archived session.
-                            val newOpenIds = current.openSessionIds.filter { it != id }
-                            if (newOpenIds != current.openSessionIds) {
-                                settingsManager.openSessionIds = newOpenIds
-                            }
-                            if (current.currentSessionId == id) {
-                                settingsManager.currentSessionId = null
-                                current.copy(
-                                    sessions = newSessions,
-                                    directorySessions = newDirSessions,
-                                    openSessionIds = newOpenIds,
-                                    currentSessionId = null,
-                                    messages = emptyList(),
-                                    partsByMessage = emptyMap()
-                                )
-                            } else {
-                                current.copy(
-                                    sessions = newSessions,
-                                    directorySessions = newDirSessions,
-                                    openSessionIds = newOpenIds
-                                )
-                            }
-                        } else {
-                            current.copy(sessions = newSessions, directorySessions = newDirSessions)
+                    // §R-17 batch2 step e final: fresh capture after the suspend;
+                    // used for all reads in this synchronous onSuccess block.
+                    val currentSessions = slices.sessionList.value.sessions
+                    val currentDirSessions = slices.sessionList.value.directorySessions
+                    val currentOpenIds = slices.sessionList.value.openSessionIds
+                    val currentCurrentId = slices.chat.value.currentSessionId
+
+                    val newSessions = currentSessions.map { session -> if (session.id == id) updated else session }
+                    // Keep directorySessions in sync so an archived session disappears
+                    // from the connected-projects list immediately (refreshDirectorySessions
+                    // repopulates this map on expand, but the local copy must not hold a
+                    // stale unarchived version).
+                    val newDirSessions = currentDirSessions.mapValues { (_, list) ->
+                        list.map { session -> if (session.id == id) updated else session }
+                    }
+                    val isArchive = archivedValue > 0
+                    // Archived: evict the id from the open-tabs list (browser-tab close
+                    // equivalent for archive) and persist via the existing SettingsManager
+                    // setter. Mirrors closeSession's currentSessionId fallback: if the
+                    // archived session was current, clear it (and the loaded message window)
+                    // so the chat view falls back to the empty state instead of pointing
+                    // at a now-archived session.
+                    val newOpenIds = if (isArchive) currentOpenIds.filter { it != id } else currentOpenIds
+                    if (isArchive && newOpenIds != currentOpenIds) {
+                        settingsManager.openSessionIds = newOpenIds
+                    }
+                    val clearCurrent = isArchive && currentCurrentId == id
+                    if (clearCurrent) {
+                        settingsManager.currentSessionId = null
+                    }
+
+                    slices.sessionList.update {
+                        it.copy(
+                            sessions = newSessions,
+                            directorySessions = newDirSessions,
+                            openSessionIds = newOpenIds
+                        )
+                    }
+                    if (clearCurrent) {
+                        // Cross-slice: currentSessionId/messages/partsByMessage are
+                        // chat-slice fields; the rest above are sessionList.
+                        slices.chat.update {
+                            it.copy(
+                                currentSessionId = null,
+                                messages = emptyList(),
+                                partsByMessage = emptyMap()
+                            )
                         }
                     }
                 }
                 .onFailure { error ->
-                    state.updateAndSync(slices) {
-                        it.copy(error = "Failed to ${if (archived) "archive" else "restore"} session: ${errorMessageOrFallback(error, "unknown error")}")
-                    }
+                    emit.emit(UiEvent.Error("Failed to ${if (archived) "archive" else "restore"} session: ${errorMessageOrFallback(error, "unknown error")}"))
                     return@launch
                 }
         }
@@ -132,11 +148,12 @@ private fun sessionSubtreeIds(sessions: List<cn.vectory.ocdroid.data.model.Sessi
 internal fun launchDeleteSession(
     scope: CoroutineScope,
     repository: OpenCodeRepository,
-    state: MutableStateFlow<AppState>,
+    slices: SliceFlows,
     settingsManager: SettingsManager,
     sessionId: String,
-    onSelectSession: (String) -> Unit
-, slices: SliceFlows? = null) {
+    onSelectSession: (String) -> Unit,
+    emit: EventEmitter = EventEmitter { }
+) {
 
     scope.launch {
         repository.deleteSession(sessionId)
@@ -147,15 +164,17 @@ internal fun launchDeleteSession(
                 // leaving it in directorySessions would let SessionsScreen's
                 // union render it — and re-selecting it would upsert a ghost
                 // copy of an already-deleted server session (#10).
-                state.updateAndSync(slices) {
-                    val newSessions = it.sessions.filter { s -> s.id != sessionId }
-                    val newDirSessions = it.directorySessions
-                        .mapValues { (_, list) -> list.filter { s -> s.id != sessionId } }
-                        .filterValues { it.isNotEmpty() }
-                    it.copy(sessions = newSessions, directorySessions = newDirSessions)
-                }
-                if (state.value.currentSessionId == sessionId) {
-                    val newCurrent = state.value.sessions.firstOrNull()?.id
+                // §R-17 batch2 step e final: slice-only reads.
+                val currentSessions = slices.sessionList.value.sessions
+                val currentDirSessions = slices.sessionList.value.directorySessions
+                val newSessions = currentSessions.filter { s -> s.id != sessionId }
+                val newDirSessions = currentDirSessions
+                    .mapValues { (_, list) -> list.filter { s -> s.id != sessionId } }
+                    .filterValues { it.isNotEmpty() }
+                slices.sessionList.update { sl -> sl.copy(sessions = newSessions, directorySessions = newDirSessions) }
+                val currentId = slices.chat.value.currentSessionId
+                if (currentId == sessionId) {
+                    val newCurrent = newSessions.firstOrNull()?.id
                     if (newCurrent != null) {
                         onSelectSession(newCurrent)
                     } else {
@@ -164,12 +183,12 @@ internal fun launchDeleteSession(
                         // in SettingsManager and would be restored on next
                         // launch / host switch, pointing at a deleted session.
                         settingsManager.currentSessionId = null
-                        state.updateAndSync(slices) { it.copy(currentSessionId = null, messages = emptyList(), partsByMessage = emptyMap()) }
+                        slices.chat.update { c -> c.copy(currentSessionId = null, messages = emptyList(), partsByMessage = emptyMap()) }
                     }
                 }
             }
             .onFailure { error ->
-                state.updateAndSync(slices) { it.copy(error = "Failed to delete session: ${errorMessageOrFallback(error, "unknown error")}") }
+                emit.emit(UiEvent.Error("Failed to delete session: ${errorMessageOrFallback(error, "unknown error")}"))
             }
     }
 }
@@ -177,8 +196,8 @@ internal fun launchDeleteSession(
 internal fun launchSendMessage(
     scope: CoroutineScope,
     repository: OpenCodeRepository,
-    state: MutableStateFlow<AppState>,
     composerFlow: MutableStateFlow<ComposerState>,
+    slices: SliceFlows,
     sessionId: String,
     text: String,
     attachments: List<ComposerImageAttachment> = emptyList(),
@@ -187,24 +206,24 @@ internal fun launchSendMessage(
     onRefreshMessages: (String, Boolean) -> Unit,
     onRefreshSessions: () -> Unit,
     onSuccess: (() -> Unit)? = null,
-    onComplete: (() -> Unit)? = null
-, slices: SliceFlows? = null) {
+    onComplete: (() -> Unit)? = null,
+    emit: EventEmitter = EventEmitter { }
+) {
 
     scope.launch {
         repository.sendMessage(sessionId, text, agent, model, attachments = attachments)
             .onSuccess {
-                state.updateAndSync(slices) {
-                    // §append-safe (glmer MAJOR-1): inputText is cleared
-                    // synchronously at dispatch time, so do NOT touch it here —
-                    // wiping now would destroy a follow-up the user typed during
-                    // the in-flight prompt_async window (the core send-while-
-                    // running workflow).
-                    it.copy(
-                        error = null,
-                        sessions = bumpSessionUpdated(it.sessions, sessionId, System.currentTimeMillis()),
-                        sessionStatuses = it.sessionStatuses + (sessionId to cn.vectory.ocdroid.data.model.SessionStatus(type = "busy"))
-                    )
-                }
+                // §R-17 batch2 step e final: slice-only reads.
+                val currentSessions = slices.sessionList.value.sessions
+                val currentStatuses = slices.sessionList.value.sessionStatuses
+                // §append-safe (glmer MAJOR-1): inputText is cleared
+                // synchronously at dispatch time, so do NOT touch it here —
+                // wiping now would destroy a follow-up the user typed during
+                // the in-flight prompt_async window (the core send-while-
+                // running workflow).
+                val newSessions = bumpSessionUpdated(currentSessions, sessionId, System.currentTimeMillis())
+                val newStatuses = currentStatuses + (sessionId to cn.vectory.ocdroid.data.model.SessionStatus(type = "busy"))
+                slices.sessionList.update { sl -> sl.copy(sessions = newSessions, sessionStatuses = newStatuses) }
                 onSuccess?.invoke()
                 onRefreshSessions()
                 // §15.1 (review N6): the post-send 1200ms double-refresh is
@@ -218,15 +237,13 @@ internal fun launchSendMessage(
             }
             .onFailure { error ->
                 // §R-17 M3: read composer slice for the restore-decision; error
-                // → _state, inputText → composer slice (mirror kept in sync).
+                // → UiEvent, inputText → composer slice.
                 // Restore the failed prompt only if the user has not typed
                 // something new since the synchronous dispatch clear.
                 val currentInput = composerFlow.value.inputText
                 val restored = if (currentInput.isBlank()) text else currentInput
-                state.updateAndSync(slices) { s ->
-                    s.copy(error = errorMessageOrFallback(error, "Failed to send message"))
-                }
-                applyComposerSlice(state, composerFlow) { it.copy(inputText = restored) }
+                emit.emit(UiEvent.Error(errorMessageOrFallback(error, "Failed to send message")))
+                composerFlow.update { it.copy(inputText = restored) }
             }
         onComplete?.invoke()
     }

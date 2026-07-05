@@ -2,7 +2,6 @@ package cn.vectory.ocdroid
 
 import cn.vectory.ocdroid.data.model.*
 import cn.vectory.ocdroid.data.api.PromptRequest
-import cn.vectory.ocdroid.ui.AppState
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 import org.junit.Assert.*

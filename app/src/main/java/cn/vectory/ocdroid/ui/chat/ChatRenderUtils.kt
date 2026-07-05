@@ -1,6 +1,7 @@
 package cn.vectory.ocdroid.ui.chat
 
 import androidx.compose.ui.unit.dp
+import cn.vectory.ocdroid.util.DebugLog
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -25,7 +26,8 @@ internal val MAX_CARD_WIDTH = 220.dp
  */
 internal fun formatHm(epochMs: Long): String = try {
     SimpleDateFormat("HH:mm", Locale.getDefault()).format(Date(epochMs))
-} catch (_: Exception) {
+} catch (e: Exception) {
+    DebugLog.w("ChatRenderUtils", "formatHm failed: ${e.message}")
     ""
 }
 

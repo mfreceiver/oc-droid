@@ -48,9 +48,9 @@ internal fun ChatEmptyState(
                 val phase = connectionPhase?.takeIf { it.isNotBlank() && it != "connecting" }
                 Text(
                     text = if (phase != null) {
-                        "正在重连 $hostName… / $phase"
+                        stringResource(R.string.chat_reconnecting_with_phase, hostName, phase)
                     } else {
-                        "正在重连 $hostName…"
+                        stringResource(R.string.chat_reconnecting, hostName)
                     },
                     style = MaterialTheme.typography.bodyLarge,
                     color = MaterialTheme.colorScheme.onSurfaceVariant

@@ -224,7 +224,15 @@ private fun PreviewMarkdown(
             text = normalizedContent,
             markdownFilePath = resolverMarkdownPath,
             workspaceDirectory = sessionDirectory,
-            fetchContent = { path -> repository.getFileContent(path).getOrThrow() }
+            // §R-17 batch4: explicit directory parameter — when no workdir is
+            // bound we cannot resolve local-file images, so the lambda throws
+            // and MarkdownImageResolver collapses that single match to null
+            // (the original markdown stays intact).
+            fetchContent = { path ->
+                val dir = sessionDirectory
+                    ?: throw IllegalStateException("No session directory bound for preview")
+                repository.getFileContent(dir, path).getOrThrow()
+            }
         )
         val finalText = resolvedContent ?: normalizedContent
         val httpsUrls = """!\[[^\]]*\]\((https?://[^)]+)\)""".toRegex().findAll(finalText).map { it.groupValues[1] }.toList().distinct()

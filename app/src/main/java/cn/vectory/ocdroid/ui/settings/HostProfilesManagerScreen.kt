@@ -45,7 +45,8 @@ import androidx.compose.ui.unit.dp
 import cn.vectory.ocdroid.R
 import cn.vectory.ocdroid.data.model.BasicAuthConfig
 import cn.vectory.ocdroid.data.model.HostProfile
-import cn.vectory.ocdroid.ui.MainViewModel
+import cn.vectory.ocdroid.ui.ConnectionViewModel
+import cn.vectory.ocdroid.ui.HostViewModel
 
 /**
  * HostProfile management sub-screen and its supporting composables: the
@@ -57,7 +58,8 @@ import cn.vectory.ocdroid.ui.MainViewModel
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 internal fun HostProfilesManagerScreen(
-    viewModel: MainViewModel,
+    viewModel: HostViewModel,
+    connectionVM: ConnectionViewModel,
     profiles: List<HostProfile>,
     currentProfileId: String?,
     onBack: () -> Unit
@@ -127,12 +129,12 @@ internal fun HostProfilesManagerScreen(
                     .onFailure { error = it.message ?: deleteFailedText }
                 editingProfile = null
             },
-            // §user-req + §fix-401: 表单"测试连接"按钮直连 MainViewModel.testConnectionForm。
+            // §user-req + §fix-401: 表单"测试连接"按钮直连 ConnectionViewModel.testConnectionForm。
             // 密码 write-only 不回填表单；编辑已有 host 且未碰密码框时 VM 据 profileId
             // 回退查已保存密码。用户主动清空/改密码（passwordEdited=true）则按表单值测，
             // 不回退旧凭据（安全）。
             onTestConnection = { url, user, pass, insecure, profileId, passwordEdited, callback ->
-                viewModel.testConnectionForm(url, user, pass, insecure, profileId, passwordEdited, callback)
+                connectionVM.testConnectionForm(url, user, pass, insecure, profileId, passwordEdited, callback)
             }
         )
     }
@@ -313,7 +315,7 @@ internal fun HostProfileEditorDialog(
                 OutlinedTextField(
                     value = serverUrl,
                     onValueChange = { serverUrl = it },
-                    placeholder = { Text("http://localhost:4096") },
+                    placeholder = { Text(stringResource(R.string.host_profile_url_placeholder)) },
                     singleLine = true,
                     modifier = Modifier.fillMaxWidth()
                 )
@@ -323,7 +325,7 @@ internal fun HostProfileEditorDialog(
                 OutlinedTextField(
                     value = authUsername,
                     onValueChange = { authUsername = it },
-                    placeholder = { Text("（可选）") },
+                    placeholder = { Text(stringResource(R.string.common_optional)) },
                     singleLine = true,
                     modifier = Modifier.fillMaxWidth()
                 )
@@ -342,8 +344,8 @@ internal fun HostProfileEditorDialog(
                         // when a password is already stored so reopening the
                         // editor doesn't look like the credential vanished.
                         Text(
-                            if (initial.basicAuth != null && !passwordEdited) "••••••••"
-                            else "（可选）"
+                            if (initial.basicAuth != null && !passwordEdited) stringResource(R.string.host_profile_password_masked_placeholder)
+                            else stringResource(R.string.common_optional)
                         )
                     },
                     singleLine = true,
@@ -374,8 +376,8 @@ internal fun HostProfileEditorDialog(
                         // vanished. The field stays write-only (the actual password
                         // is never echoed back), but the dots signal "data present".
                         Text(
-                            if (initial.tunnelPasswordId != null && !tunnelEdited) "••••••••"
-                            else "（可选）"
+                            if (initial.tunnelPasswordId != null && !tunnelEdited) stringResource(R.string.host_profile_password_masked_placeholder)
+                            else stringResource(R.string.common_optional)
                         )
                     },
                     singleLine = true,
@@ -447,7 +449,7 @@ internal fun HostProfileEditorDialog(
                         )
                         Spacer(modifier = Modifier.width(8.dp))
                     }
-                    Text("测试连接")
+                    Text(stringResource(R.string.host_profile_test_connection))
                 }
                 testStatus?.let { (success, msg) ->
                     Text(

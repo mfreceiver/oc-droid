@@ -53,6 +53,13 @@ fun FilesScreen(
         viewModel.refresh()
     }
 
+    // §R-17 batch4: bind the browser's directory context to the host session
+    // (chat current-session directory OR sessions-tab fileBrowserWorkdir).
+    // Re-binds + refreshes whenever the host passes a different workdir.
+    LaunchedEffect(sessionDirectory) {
+        viewModel.bindWorkdir(sessionDirectory)
+    }
+
     LaunchedEffect(pathToShow, sessionDirectory) {
         viewModel.syncPathToShow(pathToShow, sessionDirectory)
     }

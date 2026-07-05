@@ -1,9 +1,12 @@
 package cn.vectory.ocdroid.ui.controller
 
 import cn.vectory.ocdroid.data.model.ComposerImageAttachment
-import cn.vectory.ocdroid.ui.AppState
 import cn.vectory.ocdroid.ui.ChatState
 import cn.vectory.ocdroid.ui.ComposerState
+import cn.vectory.ocdroid.util.SettingsManager
+import io.mockk.every
+import io.mockk.mockk
+import io.mockk.verify
 import kotlinx.coroutines.flow.MutableStateFlow
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -12,40 +15,34 @@ import org.junit.Before
 import org.junit.Test
 
 /**
- * R-16 M2: independent unit test for [ComposerController].
+ * R-16 M2 → R-17 batch3b: independent unit test for [ComposerController].
  *
  * Zero reflection — the controller is driven entirely through its public API
  * (setInputText / addImageAttachments / removeImageAttachment /
  * clearDraftIfActive / togglePartExpand / clearExpandedParts) and asserted
- * via the [RecordingComposerCallbacks] spy + direct flow reads. Follows the
- * [ForegroundCatchUpControllerTest] pattern from M1.
- *
- * R-17 M5: the controller reads currentSessionId from [chatFlow] (slice) but
- * still mirrors composer writes onto [appState] (the free helpers read
- * `state.value.draftWorkdir`), so both are exercised.
+ * via direct flow reads + a mockk [SettingsManager]. The batch 3b migration
+ * eliminated [ComposerCallbacks]: the controller now calls
+ * [SettingsManager.setDraftText] / [SettingsManager.currentWorkdir] directly.
  */
 class ComposerControllerTest {
 
-    private lateinit var appState: MutableStateFlow<AppState>
     private lateinit var chatFlow: MutableStateFlow<ChatState>
     private lateinit var composerFlow: MutableStateFlow<ComposerState>
     private lateinit var expandedParts: MutableStateFlow<Map<String, Boolean>>
-    private lateinit var callbacks: RecordingComposerCallbacks
+    private lateinit var settingsManager: SettingsManager
     private lateinit var controller: ComposerController
 
     @Before
     fun setUp() {
-        appState = MutableStateFlow(AppState())
         chatFlow = MutableStateFlow(ChatState())
         composerFlow = MutableStateFlow(ComposerState())
         expandedParts = MutableStateFlow(emptyMap())
-        callbacks = RecordingComposerCallbacks()
+        settingsManager = mockk(relaxed = true)
         controller = ComposerController(
-            state = appState,
             composerFlow = composerFlow,
             chatFlow = chatFlow,
             expandedParts = expandedParts,
-            callbacks = callbacks
+            settingsManager = settingsManager,
         )
     }
 
@@ -64,9 +61,7 @@ class ComposerControllerTest {
 
         controller.setInputText("draft text")
 
-        assertEquals(1, callbacks.saveDraftCalls.size)
-        assertEquals("s1", callbacks.saveDraftCalls.single().first)
-        assertEquals("draft text", callbacks.saveDraftCalls.single().second)
+        verify { settingsManager.setDraftText("s1", "draft text") }
     }
 
     @Test
@@ -76,7 +71,7 @@ class ComposerControllerTest {
         controller.setInputText("no session")
 
         assertEquals("no session", composerFlow.value.inputText)
-        assertTrue("no draft saved when session is null", callbacks.saveDraftCalls.isEmpty())
+        verify(exactly = 0) { settingsManager.setDraftText(any(), any()) }
     }
 
     @Test
@@ -165,7 +160,9 @@ class ComposerControllerTest {
         assertEquals(null, composerFlow.value.draftWorkdir)
         assertEquals("", composerFlow.value.inputText)
         assertTrue(composerFlow.value.imageAttachments.isEmpty())
-        assertEquals(1, callbacks.clearPersistedWorkdirCalls)
+        // §batch 3b: clearPersistedWorkdir is now an inline SettingsManager
+        // currentWorkdir=null write (rule A) — verify the mock received it.
+        verify { settingsManager.currentWorkdir = null }
     }
 
     @Test
@@ -178,7 +175,7 @@ class ComposerControllerTest {
 
         // Input text preserved — this is NOT a draft session
         assertEquals("not a draft", composerFlow.value.inputText)
-        assertEquals(0, callbacks.clearPersistedWorkdirCalls)
+        verify(exactly = 0) { settingsManager.currentWorkdir = any() }
     }
 
     @Test
@@ -190,7 +187,7 @@ class ComposerControllerTest {
 
         // Should NOT clear — currentSessionId != null means the draft has materialised
         assertEquals("/tmp/proj", composerFlow.value.draftWorkdir)
-        assertEquals(0, callbacks.clearPersistedWorkdirCalls)
+        verify(exactly = 0) { settingsManager.currentWorkdir = any() }
     }
 
     // ── togglePartExpand ────────────────────────────────────────────────────
@@ -237,20 +234,5 @@ class ComposerControllerTest {
         controller.setInputText("new text")
 
         assertEquals(setOf("s1"), composerFlow.value.sendingSessionIds)
-    }
-
-    // ── RecordingComposerCallbacks ──────────────────────────────────────────
-
-    private class RecordingComposerCallbacks : ComposerCallbacks {
-        val saveDraftCalls = mutableListOf<Pair<String, String>>()
-        var clearPersistedWorkdirCalls = 0
-
-        override fun saveDraft(sessionId: String, text: String) {
-            saveDraftCalls.add(sessionId to text)
-        }
-
-        override fun clearPersistedWorkdir() {
-            clearPersistedWorkdirCalls++
-        }
     }
 }

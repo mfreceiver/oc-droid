@@ -56,6 +56,12 @@ class DirectoryHeaderInterceptor @Inject constructor(
         // Effective directory: when skip-dir is set, only an explicit caller
         // header is honored (never injected from the workdir). Otherwise the
         // current workdir drives injection (overwriting any stale value).
+        // §R-17 batch4: hostConfig.currentDirectory is deprecated; it remains
+        // the fallback for non-file routes (SSE / /question / /command) that
+        // have not opted out via X-Opencode-Skip-Dir. File routes now carry
+        // their own explicit `?directory` and a Skip-Dir marker, so they take
+        // the `if (skipDir)` branch above and never read this field.
+        @Suppress("DEPRECATION")
         val effectiveDir = if (skipDir) {
             original.header(HttpHeaders.DIRECTORY_HEADER)
         } else {

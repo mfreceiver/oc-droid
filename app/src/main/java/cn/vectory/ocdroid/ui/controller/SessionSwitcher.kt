@@ -1,120 +1,60 @@
 package cn.vectory.ocdroid.ui.controller
 
 import cn.vectory.ocdroid.data.model.Session
-import cn.vectory.ocdroid.ui.AppState
+import cn.vectory.ocdroid.data.repository.OpenCodeRepository
 import cn.vectory.ocdroid.ui.CachedSessionWindow
 import cn.vectory.ocdroid.ui.ComposerState
+import cn.vectory.ocdroid.ui.SharedEffectBus
 import cn.vectory.ocdroid.ui.SliceFlows
-import cn.vectory.ocdroid.ui.applyComposerSlice
-import cn.vectory.ocdroid.ui.updateAndSync
+import cn.vectory.ocdroid.ui.persistSessionCache
 import cn.vectory.ocdroid.ui.upsertSession
+import cn.vectory.ocdroid.util.SettingsManager
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.update
 
 /**
- * R-16 M2b: callbacks the [SessionSwitcher] invokes back into MainViewModel for
- * SettingsManager / repository side effects during session switching. Defined
- * as an interface rather than direct injection so the controller never holds a
- * reference to MainViewModel, SettingsManager, or OpenCodeRepository — avoiding
- * the circular dependency flagged in R-16 §7.3.
+ * R-16 M2b → R-17 batch3b: owns the session-switching state machine — the
+ * full 8-step `selectSession` flow extracted from the orchestrator.
  *
- * Follows the [ForegroundCatchUpCallbacks] / [ComposerCallbacks] pattern.
+ * **Migration (batch 3b)**: the [SessionSwitcherCallbacks] interface was
+ * eliminated. Methods that purely touched [SettingsManager] / repository
+ * (rule A — saveDraft / getDraft / setCurrentSessionId / setOpenSessionIds /
+ * persistSessionCache / syncCurrentDirectory) now run inline against the
+ * injected [settingsManager] / [repository]. The cross-domain methods that
+ * reach sibling controllers (loadChildSessions / loadMessages /
+ * loadSessionStatus / loadPendingQuestions / onClearDeltaBuffers) emit
+ * [ControllerEffect]s on [effects] instead (rule B).
  *
- * Each method maps 1:1 to an existing MainViewModel private helper or
- * SettingsManager call inside the original `selectSession`; the implementations
- * are wired in MainViewModel's property initialiser.
- */
-interface SessionSwitcherCallbacks {
-    /** Persists the draft text for [sessionId] via SettingsManager.setDraftText. */
-    fun saveDraft(sessionId: String, text: String)
-
-    /** Returns the persisted draft text for [sessionId] from SettingsManager. */
-    fun getDraft(sessionId: String): String
-
-    /** Writes [sessionId] to SettingsManager.currentSessionId. */
-    fun setCurrentSessionId(sessionId: String?)
-
-    /** Writes [ids] to SettingsManager.openSessionIds. */
-    fun setOpenSessionIds(ids: List<String>)
-
-    /**
-     * Persists the session-metadata cache via the `persistSessionCache` free
-     * helper. The implementation reads `currentWorkdir` from SettingsManager
-     * internally so the controller doesn't need a SettingsManager reference.
-     */
-    fun persistSessionCache(sessions: List<Session>, openIds: List<String>, currentId: String?)
-
-    /** Sets the repository's working directory to [directory] (null = default). */
-    fun syncCurrentDirectory(directory: String?)
-
-    /** Loads child (sub-agent) sessions for [sessionId] from the repository. */
-    fun loadChildSessions(sessionId: String)
-
-    /** Loads the message window for [sessionId] (cold or incremental merge). */
-    fun loadMessages(sessionId: String, resetLimit: Boolean)
-
-    /** Loads the current session-status map from the repository. */
-    fun loadSessionStatus()
-
-    /**
-     * §stale-question: refreshes the pending-questions list from the server
-     * (GET /question). Called by [SessionSwitcher.switchTo] so the staleness
-     * comparison for question tool parts uses fresh data when the user lands
-     * on a session, and any live question the new session is asking surfaces
-     * immediately (instead of waiting for the next SSE event or full reconnect).
-     *
-     * Note: we REFRESH, not clear-and-reload. Clearing first was rejected
-     * (reviewer consensus, glmer most rigorous): if the async load fails
-     * (network), an empty list would wipe a LIVE question delivered earlier
-     * via SSE `question.asked`, making its QuestionCardView disappear and the
-     * part mis-render as "Interrupted" until the next reconnect. The
-     * onSuccess path atomically replaces the list; onFailure leaves state
-     * unchanged. Cross-session leakage is a non-issue because (a)
-     * `partsByMessage` is already cleared in Step 2 of [switchTo] so the
-     * outgoing session's parts don't participate in the stale calc, and (b)
-     * stale matching is by `messageId+callId`, not sessionId.
-     */
-    fun loadPendingQuestions()
-
-    /**
-     * M5 跟进 (§4.2): drops all pending streaming-delta buffers in
-     * [SessionSyncCoordinator]. Called by [SessionSwitcher.switchTo] when
-     * LEAVING the outgoing session so its pending delta flush jobs can't
-     * write into the newly-selected session's state. Idempotent.
-     */
-    fun onClearDeltaBuffers()
-}
-
-/**
- * R-16 M2b: owns the session-switching state machine — the full 8-step
- * `selectSession` flow extracted from MainViewModel.
- *
- * **Moved from MainViewModel:**
+ * **Moved from the orchestrator:**
  *  - `sessionWindowCache` (LRU LinkedHashMap) + all cache helpers
  *    (captureCurrentSessionWindow / writeSessionWindow / peekSessionWindow /
  *    clearSessionWindowCache / sessionWindowCacheSize).
  *  - `switchTo(sessionId)` — the complete selectSession flow (8 steps).
  *
  * **Constructor params** follow the [ComposerController] pattern: the slice
- * `MutableStateFlow`s (`state` / `composerFlow` / `expandedParts` / `slices`)
- * stay declared in MainViewModel (referenced by the R-17 `SliceFlows`
- * container and the public pass-throughs) but are received here by reference.
- * SessionSwitcher is the single writer during a switch. All external side
- * effects (SettingsManager, repository, persistence) flow through
- * [SessionSwitcherCallbacks].
+ * `MutableStateFlow`s (`composerFlow` / `expandedParts` / `slices`) stay
+ * declared in the orchestrator (referenced by the R-17 `SliceFlows` container
+ * and the public pass-throughs) but are received here by reference.
+ * SessionSwitcher is the single writer during a switch. Side effects that
+ * cross into other controllers flow through [effects]; same-domain state
+ * (drafts / open-tab list / directory) writes through [settingsManager] /
+ * [repository] directly.
  *
- * **Zero behaviour change** vs the pre-extraction `MainViewModel.selectSession`:
- * the 8 steps, their ordering, and the `tempClearedUnread` /
- * `previousWasBusyAndCleared` re-marking logic are transcribed line-for-line.
+ * **Zero behaviour change** vs the pre-extraction
+ * `orchestrator.selectSession`: the 8 steps, their ordering, and the
+ * `tempClearedUnread` / `previousWasBusyAndCleared` re-marking logic are
+ * transcribed line-for-line.
  *
  * RFC reference: R-16 §E / §M2.
  */
 @Suppress("DEPRECATION")
 internal class SessionSwitcher(
-    private val state: MutableStateFlow<AppState>,
     private val composerFlow: MutableStateFlow<ComposerState>,
     private val expandedParts: MutableStateFlow<Map<String, Boolean>>,
     private val slices: SliceFlows,
-    private val callbacks: SessionSwitcherCallbacks,
+    private val settingsManager: SettingsManager,
+    private val repository: OpenCodeRepository,
+    private val effects: SharedEffectBus,
     // Injectable clock so lastViewedTime is deterministically testable.
     private val clock: () -> Long = { System.currentTimeMillis() }
 ) {
@@ -150,7 +90,7 @@ internal class SessionSwitcher(
     /**
      * Writes [window] for [sessionId] into the LRU cache. Called from
      * launchLoadMessages / launchLoadMoreMessages after a successful fetch+merge
-     * (via the `onCacheWindow` callback threaded through MainViewModel).
+     * (via the `onCacheWindow` callback threaded through the orchestrator).
      */
     internal fun writeSessionWindow(sessionId: String, window: CachedSessionWindow) {
         sessionWindowCache[sessionId] = window
@@ -162,7 +102,7 @@ internal class SessionSwitcher(
      * before switching away. Reads only; never mutates [state].
      */
     private fun captureCurrentSessionWindow(sessionId: String) {
-        val current = state.value
+        val current = slices.chat.value
         sessionWindowCache[sessionId] = CachedSessionWindow(
             messages = current.messages,
             partsByMessage = current.partsByMessage,
@@ -178,7 +118,7 @@ internal class SessionSwitcher(
 
     /**
      * The full session-switch flow — 8 steps transcribed line-for-line from
-     * the original `MainViewModel.selectSession`.
+     * the original `selectSession`.
      *
      * **Steps:**
      *  1. Capture outgoing session state (unread re-mark decision + LRU write-back).
@@ -217,7 +157,7 @@ internal class SessionSwitcher(
             // write into the newly-selected session's state. Done here
             // (alongside the LRU write-back) because this branch only fires on
             // a real session change — a same-session reselect keeps its deltas.
-            callbacks.onClearDeltaBuffers()
+            effects.effects.tryEmit(ControllerEffect.ClearDeltaBuffers)
         }
 
         // ── Step 2: selectSessionState (inlined) ────────────────────────────
@@ -225,11 +165,11 @@ internal class SessionSwitcher(
         val oldSessionId = slices.chat.value.currentSessionId
         val currentInputText = composerFlow.value.inputText
         if (oldSessionId != null) {
-            callbacks.saveDraft(oldSessionId, currentInputText)
+            settingsManager.setDraftText(oldSessionId, currentInputText)
         }
-        callbacks.setCurrentSessionId(sessionId)
-        val restoredDraft = callbacks.getDraft(sessionId)
-        state.updateAndSync(slices) {
+        settingsManager.currentSessionId = sessionId
+        val restoredDraft = settingsManager.getDraftText(sessionId)
+        slices.chat.update {
             it.copy(
                 currentSessionId = sessionId,
                 messages = emptyList(),
@@ -250,7 +190,7 @@ internal class SessionSwitcher(
             )
         }
         // Restore the selected session's draft into the composer slice.
-        applyComposerSlice(state, composerFlow) { it.copy(inputText = restoredDraft) }
+        composerFlow.update { it.copy(inputText = restoredDraft) }
 
         // ── Step 3: Restore cached window from LRU ──────────────────────────
         // If the new session has a cached window, seed messages/parts/cursor/
@@ -259,7 +199,7 @@ internal class SessionSwitcher(
         // §preserveUnfetched merge keeps older pages and merges the tail.
         val cachedWindow = sessionWindowCache[sessionId]
         if (cachedWindow != null) {
-            state.updateAndSync(slices) {
+            slices.chat.update {
                 it.copy(
                     messages = cachedWindow.messages,
                     partsByMessage = cachedWindow.partsByMessage,
@@ -277,7 +217,7 @@ internal class SessionSwitcher(
         // #10: if the session is currently only in directorySessions, upsert
         // it now so currentSession lookup + workdir sync work.
         if (targetSession != null && slices.sessionList.value.sessions.none { it.id == sessionId }) {
-            state.updateAndSync(slices) { it.copy(sessions = upsertSession(it.sessions, targetSession)) }
+            slices.sessionList.update { s -> s.copy(sessions = upsertSession(s.sessions, targetSession)) }
         }
 
         // ── Step 5: Reset collapsible-card expansion state ──────────────────
@@ -287,13 +227,13 @@ internal class SessionSwitcher(
 
         // ── Step 6: Sync repository's workdir context ───────────────────────
         val directory = slices.sessionList.value.sessions.firstOrNull { it.id == sessionId }?.directory
-        callbacks.syncCurrentDirectory(directory)
+        repository.setCurrentDirectory(directory)
 
         // ── Step 6.5: Refresh pending questions (§stale-question) ───────────
         // Re-fetch the server's pending-questions list so the new session's
         // live question surfaces immediately and the stale-question calc in
         // ChatMessageList uses fresh data. We deliberately do NOT clear the
-        // list first: loadPendingQuestions()'s onSuccess atomically replaces
+        // list first: the effect handler's onSuccess atomically replaces
         // it, and onFailure leaves state unchanged — so a transient network
         // failure cannot wipe a LIVE question that was delivered via SSE
         // `question.asked` earlier (which would make its QuestionCardView
@@ -301,18 +241,18 @@ internal class SessionSwitcher(
         // leakage is a non-issue: partsByMessage is already cleared in Step 2
         // so the outgoing session's parts don't participate in the stale calc,
         // and stale matching is by messageId+callId, not sessionId.
-        callbacks.loadPendingQuestions()
+        effects.effects.tryEmit(ControllerEffect.LoadPendingQuestions)
 
         // ── Step 7: Load messages + session status + child sessions ─────────
         // resetLimit=false on cache hit (don't wipe restored messages); true
         // on cache miss (cold-load latest 5 + seed cursor).
-        callbacks.loadMessages(sessionId, resetLimit = cachedWindow == null)
-        callbacks.loadSessionStatus()
-        callbacks.loadChildSessions(sessionId)
+        effects.effects.tryEmit(ControllerEffect.LoadMessages(sessionId, resetLimit = cachedWindow == null))
+        effects.effects.tryEmit(ControllerEffect.LoadSessionStatus)
+        effects.effects.tryEmit(ControllerEffect.LoadChildSessions(sessionId))
 
         // ── Step 8: Unread state machine + draft discard + openSessionIds ───
         val now = clock()
-        state.updateAndSync(slices) {
+        slices.unread.update {
             // Re-mark the previous session as unread if it was busy when the
             // user navigated away.
             val withReMark = if (previousWasBusyAndCleared) {
@@ -329,20 +269,25 @@ internal class SessionSwitcher(
             )
         }
         // Selecting a real session discards any in-progress draft.
-        applyComposerSlice(state, composerFlow) { it.copy(draftWorkdir = null) }
+        composerFlow.update { it.copy(draftWorkdir = null) }
 
         // Browser-tab semantics: prepend only when NOT already in the list.
         // Skip sub-agents (parentId != null) — transient navigations.
         if (targetSession?.parentId == null && sessionId !in slices.sessionList.value.openSessionIds) {
             val updated = (listOf(sessionId) + slices.sessionList.value.openSessionIds).take(8)
-            callbacks.setOpenSessionIds(updated)
-            state.updateAndSync(slices) { it.copy(openSessionIds = updated) }
+            settingsManager.openSessionIds = updated
+            slices.sessionList.update { it.copy(openSessionIds = updated) }
             // Fix #5: persist the newly-opened session's metadata into
             // sessionCache so its tab survives a restart.
-            val postState = state.value
-            val sourceSessions = (postState.sessions + postState.directorySessions.values.flatten())
+            val sourceSessions = (slices.sessionList.value.sessions + slices.sessionList.value.directorySessions.values.flatten())
                 .distinctBy { it.id }
-            callbacks.persistSessionCache(sourceSessions, updated, postState.currentSessionId)
+            persistSessionCache(
+                settingsManager = settingsManager,
+                sessions = sourceSessions,
+                openIds = updated,
+                currentId = slices.chat.value.currentSessionId,
+                currentWorkdir = settingsManager.currentWorkdir,
+            )
         }
     }
 

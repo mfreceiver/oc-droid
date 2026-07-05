@@ -33,8 +33,12 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import cn.vectory.ocdroid.R
 import cn.vectory.ocdroid.data.model.Session
 import cn.vectory.ocdroid.data.model.SessionStatus
-import cn.vectory.ocdroid.ui.MainViewModel
+import cn.vectory.ocdroid.data.repository.OpenCodeRepository
+import cn.vectory.ocdroid.ui.ComposerViewModel
+import cn.vectory.ocdroid.ui.OrchestratorViewModel
+import cn.vectory.ocdroid.ui.SessionViewModel
 import cn.vectory.ocdroid.ui.chat.workdirTone
+import cn.vectory.ocdroid.util.DebugLog
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.map
 import java.text.SimpleDateFormat
@@ -44,7 +48,14 @@ import java.util.Locale
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
 @Composable
 fun SessionsScreen(
-    viewModel: MainViewModel,
+    viewModel: SessionViewModel,
+    composerVM: ComposerViewModel,
+    orchestratorVM: OrchestratorViewModel,
+    /** §R-17 batch3e: repository for the DirectoryPickerSheet (was
+     *  `viewModel.core.repository`). Injected via the activity-scoped
+     *  [FilesViewModel] at the call site; passed in directly here so this
+     *  composable does not reach into `.core`. */
+    repository: OpenCodeRepository,
     onSwitchToChat: () -> Unit = {},
     /**
      * Phase 7：横屏左 1/3 面板内渲染时设 false，隐藏 TopAppBar 的 navigationIcon
@@ -70,13 +81,9 @@ fun SessionsScreen(
     // kept hot during chat typing — but the field-level subscription is still
     // the cleaner, more precise model.)
     val sessionListState by viewModel.sessionListFlow.collectAsStateWithLifecycle()
-    val draftWorkdir by viewModel.composerFlow
-        .map { it.draftWorkdir }
-        .distinctUntilChanged()
+    val draftWorkdir by remember { composerVM.composerFlow.map { it.draftWorkdir }.distinctUntilChanged() }
         .collectAsStateWithLifecycle(initialValue = null)
-    val unreadSessions by viewModel.unreadFlow
-        .map { it.unreadSessions }
-        .distinctUntilChanged()
+    val unreadSessions by remember { viewModel.unreadFlow.map { it.unreadSessions }.distinctUntilChanged() }
         .collectAsStateWithLifecycle(initialValue = emptySet())
     var showNewWorkdirDialog by remember { mutableStateOf(false) }
     var expandedWorkdirs by remember { mutableStateOf(setOf<String>()) }
@@ -356,7 +363,7 @@ fun SessionsScreen(
                                     // target (the former 32dp was below the minimum).
                                     IconButton(
                                         onClick = {
-                                            viewModel.browseFilesInWorkdir(workdir)
+                                            orchestratorVM.browseFilesInWorkdir(workdir)
                                         }
                                     ) {
                                         Icon(
@@ -449,7 +456,7 @@ fun SessionsScreen(
 
     // --- M7: Archive session confirmation dialog ---
     // Long-pressing a session card sets pendingArchiveSession; confirming calls
-    // viewModel.archiveSession(id), which PATCHes session/{id} with the current
+    // viewModel.core.archiveSession(id), which PATCHes session/{id} with the current
     // timestamp. The server-returned Session (time.archived > 0 ⇒ isArchived)
     // replaces the local copy, so the derivedStateOf filters (!it.isArchived)
     // in recentSessions / workdirGroups drop it from the list automatically.
@@ -481,7 +488,7 @@ fun SessionsScreen(
     // --- Directory picker (modal bottom sheet) for connecting a new project ---
     if (showNewWorkdirDialog) {
         DirectoryPickerSheet(
-            repository = viewModel.repository,
+            repository = repository,
             onDismiss = { showNewWorkdirDialog = false },
             onSelect = { path ->
                 showNewWorkdirDialog = false
@@ -675,7 +682,8 @@ private fun formatTime(epochMs: Long): String {
     return try {
         val sdf = SimpleDateFormat("yyyy-MM-dd HH:mm", Locale.getDefault())
         sdf.format(Date(epochMs))
-    } catch (_: Exception) {
+    } catch (e: Exception) {
+        DebugLog.w("SessionsScreen", "formatTime failed: ${e.message}")
         ""
     }
 }

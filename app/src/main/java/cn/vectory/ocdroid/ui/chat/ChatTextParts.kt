@@ -353,7 +353,14 @@ internal fun ResolvedMarkdownText(
         resolvedText = MarkdownImageResolver.resolveImages(
             text = normalizedText,
             workspaceDirectory = workspaceDirectory,
-            fetchContent = { path -> repository.getFileContent(path).getOrThrow() }
+            // §R-17 batch4: explicit directory parameter — see
+            // FilePreviewPane.PreviewMarkdown for the null-directory throw
+            // rationale (MarkdownImageResolver collapses failed matches).
+            fetchContent = { path ->
+                val dir = workspaceDirectory
+                    ?: throw IllegalStateException("No session directory bound for preview")
+                repository.getFileContent(dir, path).getOrThrow()
+            }
         )
         val finalText = resolvedText ?: normalizedText
         val httpsUrls = """!\[[^\]]*\]\((https?://[^)]+)\)""".toRegex().findAll(finalText).map { it.groupValues[1] }.toList().distinct()

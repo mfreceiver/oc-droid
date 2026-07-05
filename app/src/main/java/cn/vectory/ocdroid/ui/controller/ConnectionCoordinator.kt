@@ -1,128 +1,81 @@
 package cn.vectory.ocdroid.ui.controller
 
-import android.os.Looper
 import android.util.Log
 import cn.vectory.ocdroid.data.api.CommandInfo
 import cn.vectory.ocdroid.data.model.SSEEvent
 import cn.vectory.ocdroid.data.model.Session
 import cn.vectory.ocdroid.data.repository.OpenCodeRepository
 import cn.vectory.ocdroid.data.repository.ServerCompatProfile
-import cn.vectory.ocdroid.ui.AppState
 import cn.vectory.ocdroid.ui.ConnectionState
+import cn.vectory.ocdroid.ui.SharedEffectBus
 import cn.vectory.ocdroid.ui.SliceFlows
-import cn.vectory.ocdroid.ui.SettingsState
-import cn.vectory.ocdroid.ui.applySettingsSlice
+import cn.vectory.ocdroid.ui.UiEvent
 import cn.vectory.ocdroid.ui.errorMessageOrFallback
+import cn.vectory.ocdroid.ui.launchLoadProviders
 import cn.vectory.ocdroid.ui.reportNonFatalIssue
-import cn.vectory.ocdroid.ui.updateAndSync
 import cn.vectory.ocdroid.util.DebugLog
 import cn.vectory.ocdroid.util.SettingsManager
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
-import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.catch
-import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.flow.collect
+import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import java.util.Locale
 
 /**
- * R-16 M4: callbacks the [ConnectionCoordinator] invokes back into MainViewModel
- * (or sibling controllers) to drive the side effects of the connection lifecycle.
+ * R-16 M4 → R-17 batch3b: owns the server connection lifecycle — health-check
+ * probe with exponential-backoff retry, the 30s health-check throttle,
+ * initial-data load orchestration on a healthy connect, and the SSE feed's
+ * start/stop.
  *
- * Defined as an interface rather than direct injection so the coordinator never
- * holds a reference to MainViewModel — avoiding the circular dependency flagged
- * in R-16 §7.3 (Coordinator ← MainViewModel that owns it). Each method maps 1:1
- * to the private helper the pre-extraction `testConnection` / `loadInitialData`
- * / `startSSE` / `cancelSseForReconfigure` invoked inline.
+ * **Migration (batch 3b)**: the [ConnectionCoordinatorCallbacks] interface
+ * was eliminated. Most of its methods either (a) had all dependencies already
+ * available on this coordinator (scope/repository/settingsManager/slices) and
+ * were inlined (loadAgents / loadProviders / loadPendingQuestions /
+ * loadPendingPermissions — rule A), or (b) reached sibling controllers and
+ * now emit [ControllerEffect]s on [effects]: loadSessions →
+ * [ControllerEffect.LoadSessions], onSseEvent →
+ * [ControllerEffect.OnSseEvent] (the SessionSyncCoordinator is constructed
+ * AFTER this coordinator in AppCore so it cannot be a constructor param),
+ * onHostReconfigured → [ControllerEffect.HostReconfigured]. configureRepositoryForCurrentProfile
+ * was vestigial (no callers in this coordinator) — dropped entirely. The
+ * previously-injected [cn.vectory.ocdroid.ui.EventEmitter] is replaced by
+ * [effects] — UiEvents now ride [SharedEffectBus.uiEvents].
  *
- * The initial-data loaders (loadSessions / loadAgents / loadProviders /
- * loadPendingQuestions) and the repository reconfigure + catch-up reset stay
- * owned by MainViewModel / their respective controllers — the coordinator only
- * requests them at the right points in the connect / reconfigure lifecycle.
- */
-interface ConnectionCoordinatorCallbacks {
-    /**
-     * Reconfigures the repository for the CURRENT host profile (cancels SSE,
-     * applies URL/creds + allowInsecure, restores persisted workdir). Routed to
-     * HostProfileController.configureRepositoryForProfile(currentProfile).
-     */
-    fun configureRepositoryForCurrentProfile()
-
-    /** Initial-data loaders, owned by MainViewModel / sibling controllers. */
-    fun loadSessions()
-    fun loadAgents()
-    fun loadProviders()
-    fun loadPendingQuestions()
-    fun loadPendingPermissions()
-
-    /**
-     * Routes a single SSE event to [SessionSyncCoordinator.handleEvent]. The
-     * SSE collection coroutine (owned by this coordinator) unpacks the
-     * repository's `Result<SSEEvent>` flow and forwards each success to here.
-     */
-    fun onSseEvent(event: SSEEvent)
-
-    /**
-     * A host/profile switch is a fresh server — reset the foreground catch-up
-     * state machine so the next `server.connected` is treated as a cold start
-     * (skip catch-up; the reconfigure path loads sessions/messages itself).
-     * Routed to ForegroundCatchUpController.onHostReconfigured.
-     */
-    fun onHostReconfigured()
-}
-
-/**
- * R-16 M4: owns the server connection lifecycle — health-check probe with
- * exponential-backoff retry, the 30s health-check throttle, initial-data load
- * orchestration on a healthy connect, and the SSE feed's start/stop.
- *
- * **Moved from MainViewModel:**
+ * **Moved from the orchestrator:**
  *  - `sseJob` + `lastHealthCheckTime` fields — the SSE feed Job and the
- *    throttle anchor now live here; MainViewModel no longer touches them.
- *  - `testConnection(force, retries)` — the full connect state machine (throttle
- *    → reconfigure → health probe → retry loop → on-success loadInitialData +
- *    startSSE → on-failure error surface). Cold-start entry is `coldStartReconnect`.
+ *    throttle anchor now live here.
+ *  - `testConnection(force, retries)` — the full connect state machine.
  *  - `coldStartReconnect()` — `testConnection(force=true, retries=3)`.
  *  - `loadInitialData()` — sessions/agents/providers/questions/commands + the
  *    directory-sessions re-fetch for the restored workdir.
  *  - `loadCommands()` + `localCommands()` + `mergeCommands()` — slash-command
  *    merge (server list + client-side /clear /compact /undo /redo).
- *  - `startSSE()` — starts the SSE collection coroutine (the `launchSseCollection`
- *    free function is inlined here; SSE lifecycle belongs to connection mgmt).
- *  - `cancelSse()` / `cancelSseForReconfigure()` — tear down the in-flight feed
- *    (reconfigure also resets the catch-up state machine via callback).
- *
- * **Constructor params:** holds `scope` (viewModelScope), the shared `AppState`
- * flow, the connection + settings slice flows (for the slice+mirror writes), the
- * `SliceFlows` bundle, `repository`, `hostProfileStore`, `settingsManager`, and
- * the [ConnectionCoordinatorCallbacks]. Side effects that need MainViewModel
- * orchestration (repository reconfigure, initial-data loaders, SSE event
- * dispatch → SessionSyncCoordinator, catch-up reset) flow through callbacks.
+ *  - `startSSE()` — starts the SSE collection coroutine.
+ *  - `cancelSse()` / `cancelSseForReconfigure()` — tear down the in-flight
+ *    feed (reconfigure also resets the catch-up state machine via effect).
  *
  * The 30s throttle clock is injectable ([clock]) so the cooldown is
- * deterministically testable without wall-clock latency — defaults to
- * `System::currentTimeMillis` in production (preserving the exact pre-extraction
- * behaviour).
+ * deterministically testable without wall-clock latency.
  *
- * All AppState writes go through `updateState` (= `state.updateAndSync(slices)`,
- * equivalent to MainViewModel.updateState) or `writeConnection` (the connection
- * slice + mirror, byte-for-byte MainViewModel.writeConnection).
+ * §R-17 batch2 step e final: all state writes go through the per-slice
+ * `MutableStateFlow.update` helpers (`writeConnection` here, plus the other
+ * slices from the [SliceFlows] bundle as needed).
  *
  * RFC reference: R-16 §A / §M4. Zero behaviour change.
  */
 @Suppress("DEPRECATION")
 internal class ConnectionCoordinator(
     private val scope: CoroutineScope,
-    private val state: MutableStateFlow<AppState>,
-    private val connectionFlow: MutableStateFlow<ConnectionState>,
-    private val settingsFlow: MutableStateFlow<SettingsState>,
+    private val connectionFlow: kotlinx.coroutines.flow.MutableStateFlow<ConnectionState>,
+    private val settingsFlow: kotlinx.coroutines.flow.MutableStateFlow<cn.vectory.ocdroid.ui.SettingsState>,
     private val slices: SliceFlows,
     private val repository: OpenCodeRepository,
     private val settingsManager: SettingsManager,
-    private val callbacks: ConnectionCoordinatorCallbacks,
+    private val effects: SharedEffectBus,
     // ③ ServerCompat: populated from the health probe so future shim migrations
     // can read version-derived capability flags instead of guessing a version.
     private val serverCompatProfile: ServerCompatProfile,
@@ -147,41 +100,18 @@ internal class ConnectionCoordinator(
      */
     @Volatile private var directoryFetchGeneration = 0L
 
-    // ── State sync helpers (mirror MainViewModel.updateState / writeConnection) ──
+    // ── State sync helpers (mirror orchestrator.writeConnection) ──
 
     /**
-     * Writes AppState + syncs every slice (equivalent to MainViewModel.updateState).
-     * Each MutableStateFlow suppresses equal-value emissions, so only the slice
-     * whose fields actually changed notifies its subscribers.
-     */
-    private fun updateState(transform: (AppState) -> AppState) {
-        state.updateAndSync(slices, transform)
-    }
-
-    /**
-     * Writes the connection slice atomically AND mirrors it onto the deprecated
-     * AppState fields, so `state.value` stays consistent synchronously (RFC §4
-     * strategy A — single-threaded, Main.immediate call sites; no dispatcher
-     * batch reliance). Byte-for-byte copy of MainViewModel.writeConnection — the
-     * connection-flow object is the SAME instance passed in by MainViewModel.
-     *
-     * §R-17 M5.1 (kimo 🟠#2) THREAD-SAFETY: the slice-write + AppState-mirror-write
-     * is only consistent because every call site runs on `Dispatchers.Main.immediate`.
-     * MUST be invoked on `Dispatchers.Main.immediate`; a background-thread call
-     * would break slice↔mirror consistency. (Same constraint as
-     * [MainViewModel.writeConnection] / [updateState] above.)
+     * §R-17 M5.1→batch2: writes the connection slice only (slice is the
+     * authoritative read path). The deprecated AppState mirror write +
+     * `Dispatchers.Main.immediate` Looper check were removed in R-17 batch2
+     * sub-step d (Fixer C) — call sites already run on the main dispatcher
+     * (viewModelScope default), and `MutableStateFlow.update` is main-thread-
+     * safe by VM contract.
      */
     private fun writeConnection(transform: (ConnectionState) -> ConnectionState) {
-        check(Looper.myLooper() === Looper.getMainLooper()) { "writeConnection must be called on the main thread" }
-        val next = transform(connectionFlow.value)
-        connectionFlow.value = next
-        state.value = state.value.copy(
-            isConnected = next.isConnected,
-            isConnecting = next.isConnecting,
-            serverVersion = next.serverVersion,
-            connectionPhase = next.connectionPhase,
-            tunnelActivationState = next.tunnelActivationState
-        )
+        slices.connection.update(transform)
     }
 
     // ── Public API ──────────────────────────────────────────────────────────
@@ -200,10 +130,8 @@ internal class ConnectionCoordinator(
      * [onSettled] is invoked EXACTLY ONCE when the probe reaches a terminal
      * state — `true` on a healthy connect, `false` on failure / retry
      * exhaustion / ViewModel cancellation mid-backoff. Used by callers that
-     * need a success/failure follow-up (e.g. [MainViewModel.refreshCurrentSession]
-     * surfaces a "已刷新" toast when the user-initiated refresh confirms the
-     * server is reachable). Default is null (no callback) so existing call
-     * sites keep compiling unchanged.
+     * need a success/failure follow-up. Default is null (no callback) so
+     * existing call sites keep compiling unchanged.
      *
      * `isActive` is checked so ViewModel cancellation aborts cleanly mid-backoff.
      */
@@ -227,12 +155,10 @@ internal class ConnectionCoordinator(
             // preserving structured-concurrency teardown.
             var settled = false
             try {
-                // §R-17 M2: error stays on _state (consumed app-wide);
-                // connectionPhase/isConnecting moved to connectionFlow. Atomicity
-                // (RFC §4 strategy A): the two updates run back-to-back on the same
-                // dispatcher; the intermediate state (error cleared, phase not yet
-                // "connecting") is legal and transient.
-                updateState { it.copy(error = null) }
+                // §R-17 batch2: error is now a one-shot UiEvent. There's no
+                // persistent `error` field to clear at the start of a probe —
+                // any prior failure was already consumed app-wide. Connection
+                // phase/isConnecting live on connectionFlow.
                 writeConnection { it.copy(isConnecting = true, connectionPhase = "connecting") }
                 // NOTE: configureRepositoryForCurrentProfile() was intentionally
                 // removed here. Every caller already configures the repository
@@ -288,16 +214,13 @@ internal class ConnectionCoordinator(
                         }
                     }
                     if (attempt >= maxAttempts || !isActive) {
-                        // §R-17 M2: error on _state; connection fields on
-                        // connectionFlow. Intermediate state legal (error set
-                        // before phase flips to "disconnected" — both still
-                        // describe the same failure).
-                        updateState {
-                            it.copy(
-                                error = healthResult.exceptionOrNull()?.let { e ->
-                                    errorMessageOrFallback(e, "Connection failed")
-                                }
-                            )
+                        // §R-17 batch2: error is now a one-shot UiEvent on
+                        // _uiEvents (consumed app-wide). Connection fields stay
+                        // on connectionFlow. Intermediate state legal (error
+                        // emitted before phase flips to "disconnected" — both
+                        // still describe the same failure).
+                        healthResult.exceptionOrNull()?.let { e ->
+                            effects.uiEvents.tryEmit(UiEvent.Error(errorMessageOrFallback(e, "Connection failed")))
                         }
                         writeConnection {
                             it.copy(
@@ -348,13 +271,26 @@ internal class ConnectionCoordinator(
      * re-connects each project. Restoring only currentWorkdir lost every other
      * project whose sessions fell outside the global getSessions(limit) first
      * page.
+     *
+     * §batch 3b: the loaders that crossed into sibling controllers
+     * (loadSessions / onSseEvent-style) used to be callbacks on
+     * [ConnectionCoordinatorCallbacks]; they now emit [ControllerEffect]s on
+     * [effects]. The agents/providers/questions/permissions loaders also reach
+     * cross-domain state (settings / sessionList slices) plus the in-process
+     * SettingsManager, and the orchestrator already owns their full
+     * implementations — emit them as effects so we don't duplicate the bodies
+     * here. Only `loadCommands` (pure connection-domain: server-published
+     * slash commands merged with client-side /clear /compact /undo /redo,
+     * written to the settings slice) is inlined.
      */
     fun loadInitialData() {
-        callbacks.loadSessions()
-        callbacks.loadAgents()
-        callbacks.loadProviders()
-        callbacks.loadPendingQuestions()
-        callbacks.loadPendingPermissions()
+        // Cross-domain fan-out: orchestrator owns these implementations.
+        effects.effects.tryEmit(ControllerEffect.LoadSessions)
+        effects.effects.tryEmit(ControllerEffect.LoadAgents)
+        effects.effects.tryEmit(ControllerEffect.LoadProviders)
+        effects.effects.tryEmit(ControllerEffect.LoadPendingQuestions)
+        effects.effects.tryEmit(ControllerEffect.LoadPendingPermissions)
+        // Same-domain inline: slash commands merged with client-side commands.
         loadCommands()
         // §generation-guard: capture the current generation so directory fetches
         // that return AFTER a host reconfigure (cancelSseForReconfigure bumps
@@ -400,19 +336,19 @@ internal class ConnectionCoordinator(
      * ([MutableStateFlow.update]) on the sessionList slice, so the concurrent
      * fan-out in [loadInitialData] cannot lose entries. This deliberately does
      * NOT rely on the `Dispatchers.Main.immediate` single-thread serialization
-     * that [updateState]/[updateAndSync] depend on (§R-17 M5.1: that path is a
-     * non-atomic read-modify-write safe only because call sites are main-
-     * threaded and suspension-free). The fan-out here makes the CAS explicit.
-     * Mirrors the result onto the deprecated [AppState].directorySessions field
-     * so legacy free helpers reading `state.value.directorySessions` stay
-     * consistent.
+     * that the legacy `updateState`/`updateAndSync` path depended on
+     * (§R-17 M5.1: that path was a non-atomic read-modify-write safe only
+     * because call sites were main-threaded and suspension-free). The fan-out
+     * here makes the CAS explicit.
+     *
+     * §R-17 batch2 (Fixer C): the deprecated AppState mirror write was removed;
+     * the sessionList slice is the authoritative read path.
      */
     @Suppress("DEPRECATION")
     private fun appendDirectorySessions(workdir: String, sessions: List<Session>) {
         slices.sessionList.update { slice ->
             slice.copy(directorySessions = slice.directorySessions + (workdir to sessions))
         }
-        state.update { it.copy(directorySessions = slices.sessionList.value.directorySessions) }
     }
 
     /**
@@ -426,13 +362,13 @@ internal class ConnectionCoordinator(
         scope.launch {
             repository.getCommands()
                 .onSuccess { serverCommands ->
-                    applySettingsSlice(state, settingsFlow) {
+                    slices.settings.update {
                         it.copy(availableCommands = mergeCommands(localCommands(), serverCommands))
                     }
                 }
                 .onFailure { error ->
                     reportNonFatalIssue(TAG, "Failed to load commands", error)
-                    applySettingsSlice(state, settingsFlow) {
+                    slices.settings.update {
                         it.copy(availableCommands = localCommands())
                     }
                 }
@@ -463,9 +399,10 @@ internal class ConnectionCoordinator(
     /**
      * Starts the SSE event collection feed. Cancels any in-flight feed first so
      * reconnects / reconfigures never leave two collectors racing. Each
-     * `Result<SSEEvent>` is unpacked and forwarded to [SessionSyncCoordinator]
-     * via [ConnectionCoordinatorCallbacks.onSseEvent]; collection failures land
-     * in `AppState.error` so the UI can surface a "messages may be stale" banner.
+     * `Result<SSEEvent>` is unpacked and forwarded to the SessionSyncCoordinator
+     * via [ControllerEffect.OnSseEvent]; collection failures emit a UiEvent.Error
+     * via [effects.uiEvents] so the UI can surface a "messages may be stale"
+     * banner.
      *
      * Verbatim move of the `startSSE` body + the inlined `launchSseCollection`
      * free function.
@@ -478,10 +415,10 @@ internal class ConnectionCoordinator(
 
     /**
      * §15.1: SSE collection coroutine. Wraps [OpenCodeRepository.connectSSE] so
-     * the resulting Flow's [Result]s are unpacked and forwarded to
-     * [ConnectionCoordinatorCallbacks.onSseEvent]. Failures (including the
-     * SSEConnectionExhausted raised after the §15.3 retry budget is spent) land
-     * in `AppState.error` via the `catch` block so the UI can surface a
+     * the resulting Flow's [Result]s are unpacked and forwarded as
+     * [ControllerEffect.OnSseEvent]. Failures (including the
+     * SSEConnectionExhausted raised after the §15.3 retry budget is spent) emit
+     * a UiEvent.Error via [effects.uiEvents] so the UI can surface a
      * "messages may be stale" banner.
      *
      * Verbatim move of the `launchSseCollection` free function.
@@ -491,7 +428,7 @@ internal class ConnectionCoordinator(
             repository.connectSSE()
                 .catch { error ->
                     Log.e("OC_ERROR", "SSE collection failed", error)
-                    state.updateAndSync(slices) { it.copy(error = "SSE Error: ${error.message}") }
+                    effects.uiEvents.tryEmit(UiEvent.Error("SSE Error: ${error.message}"))
                 }
                 .collect { result ->
                     result.onSuccess { event ->
@@ -509,11 +446,11 @@ internal class ConnectionCoordinator(
                                 connectionPhase = "connected"
                             )
                         }
-                        callbacks.onSseEvent(event)
+                        effects.effects.tryEmit(ControllerEffect.OnSseEvent(event))
                     }
                         .onFailure { error ->
                             Log.e("OC_ERROR", "SSE event failed", error)
-                            state.updateAndSync(slices) { it.copy(error = "SSE Error: ${error.message}") }
+                            effects.uiEvents.tryEmit(UiEvent.Error("SSE Error: ${error.message}"))
                         }
                 }
         }
@@ -537,7 +474,7 @@ internal class ConnectionCoordinator(
      * stale events (session/status/message/permission/question) would pollute
      * the freshly-cleared state for the new profile.
      *
-     * Also resets the foreground catch-up state machine via [callbacks] so the
+     * Also resets the foreground catch-up state machine via [effects] so the
      * next connect is treated as a cold start.
      */
     fun cancelSseForReconfigure() {
@@ -551,10 +488,10 @@ internal class ConnectionCoordinator(
         // §Phase1E: a host/profile switch is a fresh server — treat the next
         // connect as a cold start (skip catch-up, the reconfigure path loads
         // sessions/messages itself). Routed to the catch-up controller.
-        callbacks.onHostReconfigured()
+        effects.effects.tryEmit(ControllerEffect.HostReconfigured)
     }
 
     companion object {
-        private const val TAG = "MainViewModel"
+        private const val TAG = "ConnectionCoordinator"
     }
 }

@@ -1,82 +1,48 @@
 package cn.vectory.ocdroid.ui.controller
 
-import android.os.Looper
 import android.util.Log
 import cn.vectory.ocdroid.data.model.HostProfile
 import cn.vectory.ocdroid.data.repository.HostProfileStore
 import cn.vectory.ocdroid.data.repository.OpenCodeRepository
-import cn.vectory.ocdroid.ui.AppState
+import cn.vectory.ocdroid.ui.ComposerState
 import cn.vectory.ocdroid.ui.ConnectionFormSettings
+import cn.vectory.ocdroid.ui.ConnectionState
+import cn.vectory.ocdroid.ui.FileState
+import cn.vectory.ocdroid.ui.SessionListState
+import cn.vectory.ocdroid.ui.SettingsState
+import cn.vectory.ocdroid.ui.SharedEffectBus
 import cn.vectory.ocdroid.ui.SliceFlows
+import cn.vectory.ocdroid.ui.TrafficState
 import cn.vectory.ocdroid.ui.TunnelActivationState
 import cn.vectory.ocdroid.ui.TUNNEL_SUCCESS_TOAST
+import cn.vectory.ocdroid.ui.UiEvent
+import cn.vectory.ocdroid.ui.UnreadState
 import cn.vectory.ocdroid.ui.errorMessageOrFallback
-import cn.vectory.ocdroid.ui.updateAndSync
 import cn.vectory.ocdroid.ui.util.HttpImageHolder
 import cn.vectory.ocdroid.util.DebugLog
 import cn.vectory.ocdroid.util.SettingsManager
+import cn.vectory.ocdroid.util.TrafficTracker
 import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.flow.MutableStateFlow
-import kotlinx.coroutines.isActive
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 
 /**
- * R-16 M3: callbacks the [HostProfileController] invokes back into MainViewModel
- * for SSE lifecycle, connection testing, and cross-controller coordination.
+ * R-16 M3 → R-17 batch3b: owns Host Profile CRUD + repository reconfiguration
+ * + tunnel activation + full local-data reset.
  *
- * Defined as an interface rather than direct injection so the controller never
- * holds a reference to MainViewModel — avoiding the circular dependency flagged
- * in R-16 §7.3 (Controller ← MainViewModel that owns it).
+ * **Migration (batch 3b)**: the [HostProfileCallbacks] interface was
+ * eliminated. The 4 cross-domain signals (cancelSseForReconfigure /
+ * forceReconnect / onHostProfileSwitched / coldStartReconnect) emit
+ * [ControllerEffect]s on [effects] (rule B). The same-domain operations
+ * (resetTrafficTracker, clearSessionWindowCache) reach their owners directly:
+ * resetTrafficTracker inlines against the injected [trafficTracker];
+ * clearSessionWindowCache routes via [ControllerEffect.ClearSessionWindowCache]
+ * because SessionSwitcher is a sibling controller. The previously-injected
+ * [cn.vectory.ocdroid.ui.EventEmitter] is replaced by [effects] — UiEvents
+ * now ride [SharedEffectBus.uiEvents] (`effects.uiEvents.tryEmit(...)`).
  *
- * These methods are the orchestration points that belong to ConnectionCoordinator
- * (M4) or SessionSwitcher (M2b) and cannot yet be held directly by this controller.
- * The `testConnection` flow itself stays in MainViewModel until M4 extracts it
- * into ConnectionCoordinator.
- */
-interface HostProfileCallbacks {
-    /**
-     * Cancels the in-flight SSE feed + resets the foreground catch-up state
-     * machine. Called BEFORE repository.configure so stale events from the
-     * previous host don't pollute AppState during the new probe.
-     */
-    fun cancelSseForReconfigure()
-
-    /** Starts the SSE event collection feed. */
-    fun startSSE()
-
-    /**
-     * Forces a health-check reconnect (bypasses the 30s throttle).
-     * Already satisfied by [ForegroundCatchUpCallbacks.forceReconnect] —
-     * both interfaces declare the same method, so a single override works.
-     */
-    fun forceReconnect()
-
-    /**
-     * Force reconnect with up to 3 retries (cold start). Called from
-     * resetLocalDataAndResync.
-     */
-    fun coldStartReconnect()
-
-    /**
-     * Loads initial data (sessions/agents/providers/commands/questions/directory
-     * sessions). Called from testConnection's success path (via the callback
-     * chain in MainViewModel).
-     */
-    fun loadInitialData()
-
-    /** Drops the per-session message-window cache (owned by SessionSwitcher). */
-    fun clearSessionWindowCache()
-
-    /** Zeros the in-memory traffic tracker. */
-    fun resetTrafficTracker()
-}
-
-/**
- * R-16 M3: owns Host Profile CRUD + repository reconfiguration + tunnel
- * activation + full local-data reset.
- *
- * **Moved from MainViewModel:**
  *  - `selectHostProfile` / `deleteHostProfile` — profile switching with full
  *    per-host state purge (sessions/messages/unread/draft/cache/commands).
  *  - `saveHostProfile` / `duplicateHostProfile` / `importHostProfile` /
@@ -88,28 +54,20 @@ interface HostProfileCallbacks {
  *  - `getHostProfiles` / `currentHostProfile` / `getSavedConnectionSettings` /
  *    `refreshHostProfileState` — accessors.
  *
- * **Constructor params:** holds `HostProfileStore`, `OpenCodeRepository`, and
- * `SettingsManager` directly (per RFC §D — these are plain data/service classes,
- * not MainViewModel). Side effects that need MainViewModel orchestration (SSE
- * lifecycle, testConnection, sessionWindowCache, trafficTracker) flow through
- * [HostProfileCallbacks].
- *
- * All state writes go through `state.updateAndSync(slices)` which is
- * functionally equivalent to MainViewModel's `updateState` (writes AppState +
- * syncs all nine slices — MutableStateFlow suppresses equal-value emissions so
- * only changed slices notify subscribers).
+ * §R-17 batch2 step e final: all state writes go through the per-slice
+ * `MutableStateFlow.update` helpers (slices are the sole authoritative store).
  *
  * RFC reference: R-16 §D / §M3. Zero behaviour change.
  */
 @Suppress("DEPRECATION")
 internal class HostProfileController(
     private val scope: CoroutineScope,
-    private val state: MutableStateFlow<AppState>,
     private val slices: SliceFlows,
     private val hostProfileStore: HostProfileStore,
     private val repository: OpenCodeRepository,
     private val settingsManager: SettingsManager,
-    private val callbacks: HostProfileCallbacks
+    private val trafficTracker: TrafficTracker,
+    private val effects: SharedEffectBus,
 ) {
     // ── Public accessors ───────────────────────────────────────────────────
 
@@ -125,15 +83,9 @@ internal class HostProfileController(
 
     // ── State sync helper ──────────────────────────────────────────────────
 
-    /** Writes AppState + syncs all slices (equivalent to MainViewModel.updateState). */
-    private fun updateState(transform: (AppState) -> AppState) {
-        check(Looper.myLooper() === Looper.getMainLooper()) { "updateState must be called on the main thread" }
-        state.updateAndSync(slices, transform)
-    }
-
-    /** Updates host-profile list + current id on AppState + syncs slices. */
+    /** Updates host-profile list + current id on the host slice. */
     internal fun refreshHostProfileState() {
-        updateState {
+        slices.host.update {
             it.copy(
                 hostProfiles = hostProfileStore.profiles(),
                 currentHostProfileId = hostProfileStore.currentProfile().id
@@ -207,7 +159,11 @@ internal class HostProfileController(
         val urlChanged = previous?.serverUrl != normalized.serverUrl
         if (isActiveHost && (toggleChanged || urlChanged)) {
             configureRepositoryForProfile(normalized)
-            callbacks.forceReconnect()
+            effects.effects.tryEmit(ControllerEffect.ForceReconnect)
+            // §disabled-models-consistency: disabled-models 等按 baseUrl 存储的 per-host
+            // 状态在新 URL 生效后必须重新装载（与 selectHostProfile 路径对齐）。否则
+            // 改 URL 后旧 baseUrl 的禁用集仍然显示，状态不一致。
+            effects.effects.tryEmit(ControllerEffect.HostProfileSwitched)
         }
     }
 
@@ -229,7 +185,11 @@ internal class HostProfileController(
         refreshHostProfileState()
         if (wasCurrent) {
             purgePerHostState()
-            callbacks.forceReconnect()
+            effects.effects.tryEmit(ControllerEffect.ForceReconnect)
+            // §disabled-models-consistency: deleting the active host switches to
+            // a different baseUrl — reload per-host state (same as selectHostProfile
+            // and saveHostProfile urlChanged paths).
+            effects.effects.tryEmit(ControllerEffect.HostProfileSwitched)
         }
     }
 
@@ -255,7 +215,12 @@ internal class HostProfileController(
             purgePerHostState()
             configureRepositoryForProfile(profile)
             refreshHostProfileState()
-            callbacks.forceReconnect()
+            effects.effects.tryEmit(ControllerEffect.ForceReconnect)
+            // §host-switch-order: only AFTER select + reconnect have settled do
+            // we hand control back for host-scoped post-processing. Doing this
+            // synchronously in the caller raced the launch above and read the
+            // PREVIOUS host's baseUrl.
+            effects.effects.tryEmit(ControllerEffect.HostProfileSwitched)
         }
     }
 
@@ -267,30 +232,42 @@ internal class HostProfileController(
      * windows, and server version must not leak across hosts.
      */
     private fun purgePerHostState() {
-        // Single atomic updateState: avoids multiple aggregate→sync cycles.
-        updateState {
+        // §slice-only-preserve (glm-1 / gpt-1): ChatState carries three fields
+        // that are NOT mirrored to AppState (isCompacting, compactStartedAt,
+        // refreshNonce). Use .copy() on the existing slice value so those are
+        // preserved (a fresh ChatState() would clobber them); only the AppState-
+        // represented chat fields are reset here.
+        slices.chat.update {
             it.copy(
                 currentSessionId = null,
                 messages = emptyList(),
                 partsByMessage = emptyMap(),
-                sessionStatuses = emptyMap(),
                 streamingPartTexts = emptyMap(),
-                streamingReasoningPart = null,
-                sessionTodos = emptyMap(),
-                openSessionIds = emptyList(),
-                unreadSessions = emptySet(),
-                tempClearedUnread = emptySet(),
-                lastViewedTime = emptyMap(),
-                sessions = emptyList(),
-                directorySessions = emptyMap(),
-                // Reset the composer + settings slices that belong to the previous host.
-                draftWorkdir = null,
-                availableCommands = emptyList(),
-                serverVersion = null
+                streamingReasoningPart = null
             )
         }
+        slices.sessionList.update {
+            it.copy(
+                sessions = emptyList(),
+                directorySessions = emptyMap(),
+                openSessionIds = emptyList(),
+                sessionStatuses = emptyMap(),
+                sessionTodos = emptyMap()
+            )
+        }
+        slices.unread.update {
+            it.copy(
+                unreadSessions = emptySet(),
+                tempClearedUnread = emptySet(),
+                lastViewedTime = emptyMap()
+            )
+        }
+        // Reset the composer + settings slices that belong to the previous host.
+        slices.composer.update { it.copy(draftWorkdir = null) }
+        slices.settings.update { it.copy(availableCommands = emptyList()) }
+        slices.connection.update { it.copy(serverVersion = null) }
         // Drop per-session message cache (belongs to previous host's sessions).
-        callbacks.clearSessionWindowCache()
+        effects.effects.tryEmit(ControllerEffect.ClearSessionWindowCache)
         settingsManager.currentSessionId = null
         settingsManager.openSessionIds = emptyList()
         settingsManager.sessionCache = emptyList()
@@ -315,7 +292,7 @@ internal class HostProfileController(
      * probe. R-01: passes `allowInsecureConnections` from the current profile.
      */
     fun configureServer(url: String, username: String? = null, password: String? = null) {
-        callbacks.cancelSseForReconfigure()
+        effects.effects.tryEmit(ControllerEffect.CancelSseForReconfigure)
         settingsManager.serverUrl = url
         settingsManager.username = username
         settingsManager.password = password
@@ -341,7 +318,7 @@ internal class HostProfileController(
      * persisted workdir is restored afterwards.
      */
     internal fun configureRepositoryForProfile(profile: HostProfile) {
-        callbacks.cancelSseForReconfigure()
+        effects.effects.tryEmit(ControllerEffect.CancelSseForReconfigure)
         val password = profile.basicAuth?.passwordId?.let { settingsManager.basicAuthPassword(it) }
         repository.configure(
             profile.serverUrl, profile.basicAuth?.username, password,
@@ -360,65 +337,65 @@ internal class HostProfileController(
     /**
      * Activates the tunnel for the current host profile. Surfaces
      * loading/error/success state through `tunnelActivationState` on the
-     * connection slice + error on AppState. R-01: passes
-     * `allowInsecureConnections` from the profile.
+     * connection slice + UiEvent.Error/Success via [effects.uiEvents].
+     * R-01: passes `allowInsecureConnections` from the profile.
      */
     fun activateTunnelForCurrentHost() {
         val profile = hostProfileStore.currentProfile()
         val passwordId = profile.tunnelPasswordId
         if (passwordId == null) {
-            updateState {
+            slices.connection.update {
                 it.copy(
-                    error = "隧道激活失败：未设置隧道认证密码。请在「服务器」设置中填写隧道密码并保存后再试。",
                     tunnelActivationState = TunnelActivationState.Error("未设置隧道密码")
                 )
             }
+            effects.uiEvents.tryEmit(UiEvent.Error("隧道激活失败：未设置隧道认证密码。请在「服务器」设置中填写隧道密码并保存后再试。"))
             return
         }
         val password = settingsManager.getTunnelPassword(passwordId)
         if (password.isNullOrBlank()) {
-            updateState {
+            slices.connection.update {
                 it.copy(
-                    error = "隧道激活失败：已配置密码标识但存储为空（可能保存时未输入）。请重新输入隧道密码并保存。",
                     tunnelActivationState = TunnelActivationState.Error("隧道密码为空")
                 )
             }
+            effects.uiEvents.tryEmit(UiEvent.Error("隧道激活失败：已配置密码标识但存储为空（可能保存时未输入）。请重新输入隧道密码并保存。"))
             return
         }
 
-        updateState { it.copy(tunnelActivationState = TunnelActivationState.Loading) }
+        slices.connection.update { it.copy(tunnelActivationState = TunnelActivationState.Loading) }
         scope.launch {
             repository.activateTunnel(
                 profile.serverUrl, password,
                 allowInsecure = profile.allowInsecureConnections
             )
                 .onSuccess {
-                    updateState {
+                    slices.connection.update {
                         it.copy(
-                            // §success-channel: ride the dedicated successMessage
-                            // field (NOT error) so ChatScreen renders a success
-                            // snackbar instead of "发生错误" + "查看". The sticky
-                            // tunnelActivationState=Success still drives the
+                            // §success-channel / §R-17 batch2: success now rides a
+                            // UiEvent.Success (NOT error) so ChatScreen renders a
+                            // success snackbar instead of "发生错误" + "查看". The
+                            // sticky tunnelActivationState=Success still drives the
                             // ServerManagementDialog's success indicator.
-                            successMessage = TUNNEL_SUCCESS_TOAST,
                             tunnelActivationState = TunnelActivationState.Success
                         )
                     }
+                    effects.uiEvents.tryEmit(UiEvent.Success(TUNNEL_SUCCESS_TOAST))
                     Log.d(TAG, "Tunnel activated successfully for ${profile.serverUrl}")
                     // §user-req: tunnel 激活后自动冷启动级刷新。1.5s 经验值——cloudflared
                     // 类守护进程在 activate API 返回后需要短暂时间建立路由。coldStartReconnect
                     // 自带 3 次退避重试（1/2/4s）兜底，即使首次探测失败也会在 ~7s 内成功。
                     delay(1500)
-                    callbacks.coldStartReconnect()
+                    effects.effects.tryEmit(ControllerEffect.ColdStartReconnect)
                 }
                 .onFailure { error ->
                     val msg = errorMessageOrFallback(error, "未知错误（无异常信息）")
-                    updateState {
+                    slices.connection.update {
                         it.copy(
-                            error = "隧道激活失败：$msg",
                             tunnelActivationState = TunnelActivationState.Error(msg)
                         )
                     }
+                    effects.uiEvents.tryEmit(UiEvent.Error("隧道激活失败：$msg"))
                     Log.e(TAG, "Tunnel activation failed", error)
                 }
         }
@@ -438,54 +415,51 @@ internal class HostProfileController(
     fun resetLocalDataAndResync() {
         // 1. Wipe persisted local data (preserves connection + tunnel creds).
         settingsManager.clearAllLocalData()
-        // 2. Zero the in-memory traffic tracker.
-        callbacks.resetTrafficTracker()
-        // 3. Drop the per-session message-window cache.
-        callbacks.clearSessionWindowCache()
+        // 2. Zero the in-memory traffic tracker (direct — same domain).
+        trafficTracker.reset()
+        // 3. Drop the per-session message-window cache (sibling controller).
+        effects.effects.tryEmit(ControllerEffect.ClearSessionWindowCache)
         // 4. Tear down SSE + reset catch-up flags.
-        callbacks.cancelSseForReconfigure()
-        // 5. Reset AppState to defaults, preserving host profile list + current id.
-        val keptHostProfiles = slices.host.value.hostProfiles
-        val keptHostProfileId = slices.host.value.currentHostProfileId
-        updateState {
-            AppState(
-                hostProfiles = keptHostProfiles,
-                currentHostProfileId = keptHostProfileId
+        effects.effects.tryEmit(ControllerEffect.CancelSseForReconfigure)
+        // 5. Reset slices to defaults, preserving the host slice (kept above)
+        //    and the chat slice's slice-only fields (isCompacting /
+        //    compactStartedAt / refreshNonce — use .copy() so they survive).
+        //    Equivalent to the pre-migration `AppState(hostProfiles,
+        //    currentHostProfileId)` full-reset: every AppState-represented
+        //    field returns to its default.
+        slices.chat.update { c ->
+            c.copy(
+                currentSessionId = null,
+                messages = emptyList(),
+                partsByMessage = emptyMap(),
+                streamingPartTexts = emptyMap(),
+                streamingReasoningPart = null,
+                olderMessagesCursor = null,
+                hasMoreMessages = true,
+                isLoadingMessages = false,
+                gapInfo = null,
+                staleNotice = false,
+                currentModel = null
             )
         }
+        slices.sessionList.update { SessionListState() }
+        slices.unread.update { UnreadState() }
         // 6. Reset the connection + traffic slices to "reconnecting / zeroed".
-        updateState {
-            it.copy(
-                isConnected = false,
+        //    Defaults already cover tunnelActivationState=Idle; we override
+        //    isConnecting + connectionPhase to signal the in-flight reconnect.
+        slices.connection.update {
+            ConnectionState(
                 isConnecting = true,
-                serverVersion = null,
-                connectionPhase = "reconnecting",
-                tunnelActivationState = TunnelActivationState.Idle,
-                trafficSent = 0L,
-                trafficReceived = 0L
+                connectionPhase = "reconnecting"
             )
         }
+        slices.traffic.update { TrafficState() }
         // 7. Reset the composer/file/settings slices to defaults.
-        updateState {
-            it.copy(
-                inputText = "",
-                imageAttachments = emptyList(),
-                sendingSessionIds = emptySet(),
-                draftWorkdir = null,
-                filePathToShowInFiles = null,
-                filePreviewOriginRoute = null,
-                fileBrowserOpen = false,
-                fileBrowserWorkdir = null,
-                themeMode = cn.vectory.ocdroid.util.ThemeMode.SYSTEM,
-                markdownFontSizes = cn.vectory.ocdroid.util.MarkdownFontSizes(),
-                selectedAgentName = "build",
-                agents = emptyList(),
-                providers = null,
-                availableCommands = emptyList()
-            )
-        }
+        slices.composer.update { ComposerState() }
+        slices.file.update { FileState() }
+        slices.settings.update { SettingsState() }
         // 8. Reconnect to the (preserved) current host profile and re-fetch.
-        callbacks.coldStartReconnect()
+        effects.effects.tryEmit(ControllerEffect.ColdStartReconnect)
     }
 
     companion object {

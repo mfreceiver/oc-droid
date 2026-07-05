@@ -14,6 +14,7 @@ import cn.vectory.ocdroid.data.model.SessionStatus
 import cn.vectory.ocdroid.data.model.TodoItem
 import cn.vectory.ocdroid.util.MarkdownFontSizes
 import cn.vectory.ocdroid.util.ThemeMode
+import kotlinx.coroutines.flow.MutableStateFlow
 
 sealed class TunnelActivationState {
     data object Idle : TunnelActivationState()
@@ -23,11 +24,8 @@ sealed class TunnelActivationState {
 }
 
 /**
- * §R-17 M2: connection-domain state slice. Authoritative storage lives in
- * [MainViewModel._connectionFlow] (a dedicated `MutableStateFlow`); the
- * overlapping fields on [AppState] are deprecated mirrors kept only for
- * source/test compatibility until M4 retires them. Field set strictly
- * follows RFC R-17 §2.1.
+ * §R-17 batch2: connection-domain state slice. Authoritative storage; no
+ * AppState mirror. Field set strictly follows RFC R-17 §2.1.
  *
  * Write atomicity (RFC §4, strategy A): every mutation goes through a single
  * `writeConnection { ... }` (or a sequence of them where each
@@ -60,18 +58,16 @@ data class TrafficState(
 }
 
 /**
- * §R-17 M3: composer-domain state slice. Authoritative storage lives in
- * [MainViewModel._composerFlow]. Field set strictly follows RFC R-17 §2.5.
+ * §R-17 batch2: composer-domain state slice. Authoritative storage; writes
+ * via _composerFlow.update. Field set strictly follows RFC R-17 §2.5.
  *
  * This is the highest-frequency slice (`inputText` mutates on every keystroke)
- * and the primary reason M3 exists: once M4 consumers subscribe to
- * `composerFlow` directly instead of reading `state.inputText`, keystrokes no
- * longer recompose ChatTopBar.
+ * and the primary reason the slice exists: consumers subscribe to
+ * `composerFlow` directly, so keystrokes no longer recompose ChatTopBar.
  *
  * Write atomicity (RFC §4 strategy A): same model as [ConnectionState] —
- * every mutation goes through [MainViewModel.writeComposer], which writes the
- * slice AND the `_state` mirror in one synchronous call. No dispatcher batch
- * reliance (RFC §9.2).
+ * every mutation goes through a single `writeComposer { ... }`. No dispatcher
+ * batch reliance (RFC §9.2).
  */
 data class ComposerState(
     val inputText: String = "",
@@ -94,10 +90,9 @@ data class FileState(
 )
 
 /**
- * §R-17 M3: settings/global-preference state slice. Authoritative storage
- * lives in [MainViewModel._settingsFlow]. Field set strictly follows RFC
- * R-17 §2.4 EXCEPT `error`, which is cross-domain and stays on `_state` (see
- * RFC §3.3 — same call as M2 keeping `error` on `_state`).
+ * §R-17 batch2: settings/global-preference state slice. Authoritative storage
+ * via _settingsFlow.update. Field set strictly follows RFC R-17 §2.4 (error
+ * is NOT here — it is a one-shot UiEvent on _uiEvents).
  *
  * `availableCommands` is a connect-time / host-switch config (not live state)
  * but RFC §2.4 groups it here rather than under composer.
@@ -130,11 +125,10 @@ data class SettingsState(
 )
 
 /**
- * §R-17 M4: chat-domain state slice (RFC §2.2). Authoritative storage lives in
- * [MainViewModel._chatFlow]. The highest-frequency domain (SSE streaming deltas
- * mutate streamingPartTexts/messages many times per second). `error` is
- * intentionally NOT here — it is cross-domain and stays on `_state` (RFC §3.3,
- * same call as M2/M3).
+ * §R-17 batch2: chat-domain state slice (RFC §2.2). Authoritative storage via
+ * _chatFlow.update. The highest-frequency domain (SSE streaming deltas mutate
+ * streamingPartTexts/messages many times per second). §R-17 batch2: error/success
+ * events migrated to SharedFlow<UiEvent>.
  */
 data class ChatState(
     val currentSessionId: String? = null,
@@ -171,14 +165,34 @@ data class ChatState(
       * capsule timer and the idle-clear guard floor. */
      val compactStartedAt: Long = 0L,
      /**
-      * §3-scroll-memory: monotonically incremented by
-      * [MainViewModel.performGlobalColdStartRefresh] so the ChatScreen layer
-      * observes a change and clears its hoisted per-session scroll-position
-      * cache. Not mirrored to AppState (only consumed by ChatScreen via
-      * [MainViewModel.chatFlow]); follows the same write-only-to-slice
-      * pattern as [isCompacting] / [compactStartedAt].
+     * §3-scroll-memory: monotonically incremented by
+     * [MainViewModel.performGlobalColdStartRefresh] so the ChatScreen layer
+     * observes a change and clears its hoisted per-session scroll-position
+     * cache. Only consumed by ChatScreen via
+     * [MainViewModel.chatFlow]; follows the same write-only-to-slice
+     * pattern as [isCompacting] / [compactStartedAt].
+     */
+     val refreshNonce: Long = 0L,
+     /**
+      * §R-17 batch5: SSE delta coalescing buffers. Moved out of
+      * [cn.vectory.ocdroid.ui.controller.SessionSyncCoordinator]'s private
+      * mutableMapOf hidden state so the coalesce-window state is observable
+      * (e.g. an idle reload can detect "deltas still buffered" before deciding
+      * the overlay is empty).
+      *
+      * - [deltaBuffer]: accumulated delta text per partId (APPEND semantics;
+      *   the previous StringBuilder → String conversion makes each entry
+      *   immutable so CAS `update { }` is safe).
+      * - [fullTextBuffer]: latest authoritative full text per partId (REPLACE
+      *   semantics; fullText supersedes any concurrent delta accumulation).
+      * - [pendingFlushPartIds]: partIds whose DELTA_COALESCE_MS flush window
+      *   is still open. The actual `Job` references stay on the coordinator
+      *   (a Job is neither serializable nor a value type — it is tied to the
+      *   coordinator's CoroutineScope); this set is the observable mirror.
       */
-     val refreshNonce: Long = 0L
+     val deltaBuffer: Map<String, String> = emptyMap(),
+     val fullTextBuffer: Map<String, String> = emptyMap(),
+     val pendingFlushPartIds: Set<String> = emptySet()
  )
 
 /**
@@ -267,4 +281,40 @@ data class ConnectionFormSettings(
     val serverUrl: String,
     val username: String,
     val password: String
+)
+
+/**
+ * §R-17 batch2: navigation-domain state slice. Replaces the former
+ * AppState.lastNavPage. Source of truth is SettingsManager (persisted); this
+ * slice is the in-memory view. Not part of the 9 SliceFlows bundle.
+ */
+data class NavState(val lastNavPage: Int = 0)
+
+/**
+ * §R-17 Stage 1 (consumer-migration enabler): container holding all nine slice
+ * `MutableStateFlow`s so that free helpers (`launch*` / `handle*`) can write
+ * EVERY slice directly — without each helper taking nine separate flow params.
+ * Built once in MainViewModel and passed (as `slices`) to every free helper.
+ *
+ * §R-17 batch2 step e final: the slice↔AppState sync helpers
+ * (`aggregateFromSlices` / `syncSlicesFromAppState` / `updateAndSync` /
+ * `applyComposerSlice` / `applySettingsSlice`) that used to live alongside
+ * this data class were removed — the slices are now the sole authoritative
+ * store.
+ *
+ * §R-17 batch2: container holding all nine slice MutableStateFlows. Passed to
+ * Actions free functions and controllers. All writes via .update { } (CAS)
+ * MUST run on Dispatchers.Main.immediate (caller convention) to preserve
+ * cross-slice consistency within a single frame.
+ */
+data class SliceFlows(
+    val connection: MutableStateFlow<ConnectionState>,
+    val traffic: MutableStateFlow<TrafficState>,
+    val composer: MutableStateFlow<ComposerState>,
+    val file: MutableStateFlow<FileState>,
+    val settings: MutableStateFlow<SettingsState>,
+    val chat: MutableStateFlow<ChatState>,
+    val sessionList: MutableStateFlow<SessionListState>,
+    val unread: MutableStateFlow<UnreadState>,
+    val host: MutableStateFlow<HostState>
 )

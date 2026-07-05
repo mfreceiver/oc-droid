@@ -241,10 +241,25 @@ data class Part(
             return result
         }
 
-    /** Paths that look like files (have extension), not directories. API often returns dirs in patch. */
+    /**
+     * §file-detect: paths that look like files (vs. directories). The previous
+     * `lastSegment.contains(".")` heuristic misclassified a directory named
+     * `a.b` as a file (it has a dot) and was correct only by coincidence for
+     * most cases. The improved rule treats a path as a file when:
+     *  - the last segment (after the final "/", trailing "/" trimmed) is
+     *    non-empty,
+     *  - the path does NOT end with "/" (excludes explicit directory entries
+     *    like "src/" or "a.b/"),
+     *  - the last segment contains a "." (an extension separator).
+     * Tradeoff: extensionless files (e.g. "README", "Makefile", "Dockerfile")
+     * are dropped. This is acceptable in the patch scenario where the
+     * overwhelming majority of files carry extensions; the navigation list is a
+     * convenience affordance, not an authoritative file index.
+     */
     val filePathsForNavigationFiltered: List<String>
         get() = filePathsForNavigation.filter { path ->
-            path.substringAfterLast("/").contains(".")
+            val lastSegment = path.substringAfterLast("/").trimEnd('/')
+            lastSegment.isNotEmpty() && !path.endsWith("/") && lastSegment.contains(".")
         }
 
     @Serializable

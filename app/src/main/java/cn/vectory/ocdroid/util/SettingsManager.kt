@@ -237,7 +237,8 @@ class SettingsManager @Inject constructor(
 
     /**
      * Persisted projection of [cn.vectory.ocdroid.data.model.Session]
-     * metadata, used to seed [cn.vectory.ocdroid.ui.AppState.sessions]
+     * metadata, used to seed the session-list slice
+     * ([cn.vectory.ocdroid.ui.SessionListState.sessions])
      * on cold start so tabs/title/workdir groups render instantly before the
      * server list is fetched. Written only from `launchLoadSessions`
      * onSuccess (bounded to open/current/workdir-relevant entries). A server

@@ -169,10 +169,21 @@ interface OpenCodeApi {
     @GET("session/{id}/todo")
     suspend fun getSessionTodos(@Path("id") sessionId: String): List<TodoItem>
 
-    // file* endpoints deliberately omit Skip-Dir: they require the directory
-    // context to resolve the correct workdir.
+    // §R-17 batch4: file* endpoints now carry an EXPLICIT `@Query("directory")`
+    // + the `X-Opencode-Skip-Dir` marker. The directory is no longer resolved
+    // from the global HostConfig._currentDirectory (which is deprecated for
+    // file routes); the caller passes the workdir it wants to scope to. The
+    // Skip-Dir marker makes [DirectoryHeaderInterceptor] skip its workdir
+    // injection (it would otherwise overwrite the explicit value), and the
+    // interceptor still mirrors `?directory` into the query for proxy-safe
+    // routing when the caller supplies it via `@Header` (see
+    // [getFileTreeForDirectory] for the @Header variant used by the picker).
+    @Headers("X-Opencode-Skip-Dir: 1")
     @GET("file")
-    suspend fun getFileTree(@Query("path") path: String? = ""): List<FileNode>
+    suspend fun getFileTree(
+        @Query("path") path: String? = "",
+        @Query("directory") directory: String? = null
+    ): List<FileNode>
 
     /**
      * Variant of [getFileTree] for browsing an arbitrary directory that is
@@ -188,16 +199,23 @@ interface OpenCodeApi {
         @Query("path") path: String? = ""
     ): List<FileNode>
 
+    @Headers("X-Opencode-Skip-Dir: 1")
     @GET("file/content")
-    suspend fun getFileContent(@Query("path") path: String): FileContent
+    suspend fun getFileContent(
+        @Query("path") path: String,
+        @Query("directory") directory: String? = null
+    ): FileContent
 
+    @Headers("X-Opencode-Skip-Dir: 1")
     @GET("file/status")
-    suspend fun getFileStatus(): List<FileStatusEntry>
+    suspend fun getFileStatus(@Query("directory") directory: String? = null): List<FileStatusEntry>
 
+    @Headers("X-Opencode-Skip-Dir: 1")
     @GET("find/file")
     suspend fun findFile(
         @Query("query") query: String,
-        @Query("limit") limit: Int = 50
+        @Query("limit") limit: Int = 50,
+        @Query("directory") directory: String? = null
     ): List<String>
 }
 

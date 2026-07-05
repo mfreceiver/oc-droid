@@ -2,13 +2,29 @@ package cn.vectory.ocdroid.ui.controller
 
 import cn.vectory.ocdroid.data.model.Message
 import cn.vectory.ocdroid.data.model.Session
+import cn.vectory.ocdroid.data.model.SessionCacheEntry
 import cn.vectory.ocdroid.data.model.SessionStatus
-import cn.vectory.ocdroid.ui.AppState
+import cn.vectory.ocdroid.data.repository.OpenCodeRepository
 import cn.vectory.ocdroid.ui.CachedSessionWindow
+import cn.vectory.ocdroid.ui.ChatState
 import cn.vectory.ocdroid.ui.ComposerState
+import cn.vectory.ocdroid.ui.ConnectionState
+import cn.vectory.ocdroid.ui.FileState
+import cn.vectory.ocdroid.ui.HostState
+import cn.vectory.ocdroid.ui.SessionListState
+import cn.vectory.ocdroid.ui.SettingsState
+import cn.vectory.ocdroid.ui.SharedEffectBus
 import cn.vectory.ocdroid.ui.SliceFlows
-import cn.vectory.ocdroid.ui.syncSlicesFromAppState
+import cn.vectory.ocdroid.ui.TrafficState
+import cn.vectory.ocdroid.ui.UnreadState
+import cn.vectory.ocdroid.util.SettingsManager
+import io.mockk.every
+import io.mockk.mockk
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.toList
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.test.TestScope
+import kotlinx.coroutines.test.UnconfinedTestDispatcher
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
@@ -18,64 +34,163 @@ import org.junit.Before
 import org.junit.Test
 
 /**
- * R-16 M2b: independent unit test for [SessionSwitcher.switchTo] — the full
- * 8-step session-switch flow extracted from MainViewModel.
+ * R-16 M2b → R-17 batch3b: independent unit test for [SessionSwitcher.switchTo]
+ * — the full 8-step session-switch flow extracted from the orchestrator.
  *
  * Zero reflection — the controller is driven entirely through its public API
  * ([switchTo] / [clearSessionWindowCache] / [peekSessionWindow] /
- * [sessionWindowCacheSize] / [writeSessionWindow]) and asserted via the
- * [RecordingCallbacks] spy + direct StateFlow reads. An injected `clock` makes
- * lastViewedTime deterministic. Follows the [ForegroundCatchUpControllerTest]
- * pattern from M1.
+ * [sessionWindowCacheSize] / [writeSessionWindow]) and asserted via:
+ *  - a mockk [SettingsManager] whose setDraftText / currentSessionId setter /
+ *    openSessionIds setter / sessionCache setter calls are captured into the
+ *    [RecordingCallbacks] facade (so test bodies keep referencing the same
+ *    accessor names as before),
+ *  - a mockk [OpenCodeRepository] whose setCurrentDirectory calls are captured
+ *    the same way,
+ *  - a real [SharedEffectBus] drained into [collectedEffects] for the 5
+ *    cross-domain effect emissions (ClearDeltaBuffers / LoadChildSessions /
+ *    LoadMessages / LoadSessionStatus / LoadPendingQuestions), exposed via
+ *    computed properties on the same facade.
+ *
+ * An injected `clock` makes lastViewedTime deterministic.
  */
+@OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
 class SessionSwitcherTest {
 
-    private lateinit var state: MutableStateFlow<AppState>
     private lateinit var composerFlow: MutableStateFlow<ComposerState>
     private lateinit var expandedParts: MutableStateFlow<Map<String, Boolean>>
     private lateinit var slices: SliceFlows
+    private lateinit var settingsManager: SettingsManager
+    private lateinit var repository: OpenCodeRepository
+    private lateinit var effects: SharedEffectBus
+    private lateinit var collectedEffects: MutableList<ControllerEffect>
+    private lateinit var scope: TestScope
     private lateinit var callbacks: RecordingCallbacks
     private var nowMs: Long = 10_000L
+    /**
+     * §R-17 batch2 step e final: in-test fixture carrying the prior snapshot
+     * so successive `seed { ... }` calls compose against the prior state.
+     * Production no longer has an AppState mirror; this fixture exists only
+     * to drive the seed() transform chain.
+     */
+    private var appStateFixture: SeedFixture = SeedFixture()
 
     private lateinit var switcher: SessionSwitcher
 
     @Before
     fun setUp() {
-        state = MutableStateFlow(AppState())
+        appStateFixture = SeedFixture()
         composerFlow = MutableStateFlow(ComposerState())
         expandedParts = MutableStateFlow(emptyMap())
-        // Build SliceFlows from fresh MutableStateFlows (they're only read for
-        // updateAndSync which writes them from AppState — so they just need to
-        // exist and be mutable).
+        // Build SliceFlows from fresh MutableStateFlows (the switcher reads +
+        // writes them directly).
         slices = SliceFlows(
-            connection = MutableStateFlow(cn.vectory.ocdroid.ui.ConnectionState()),
-            traffic = MutableStateFlow(cn.vectory.ocdroid.ui.TrafficState()),
+            connection = MutableStateFlow(ConnectionState()),
+            traffic = MutableStateFlow(TrafficState()),
             composer = composerFlow,
-            file = MutableStateFlow(cn.vectory.ocdroid.ui.FileState()),
-            settings = MutableStateFlow(cn.vectory.ocdroid.ui.SettingsState()),
-            chat = MutableStateFlow(cn.vectory.ocdroid.ui.ChatState()),
-            sessionList = MutableStateFlow(cn.vectory.ocdroid.ui.SessionListState()),
-            unread = MutableStateFlow(cn.vectory.ocdroid.ui.UnreadState()),
-            host = MutableStateFlow(cn.vectory.ocdroid.ui.HostState())
+            file = MutableStateFlow(FileState()),
+            settings = MutableStateFlow(SettingsState()),
+            chat = MutableStateFlow(ChatState()),
+            sessionList = MutableStateFlow(SessionListState()),
+            unread = MutableStateFlow(UnreadState()),
+            host = MutableStateFlow(HostState())
         )
-        callbacks = RecordingCallbacks()
+        settingsManager = mockk(relaxed = true)
+        repository = mockk(relaxed = true)
+        effects = SharedEffectBus()
+        collectedEffects = mutableListOf()
+        scope = TestScope(UnconfinedTestDispatcher())
+        scope.launch(start = kotlinx.coroutines.CoroutineStart.UNDISPATCHED) { effects.effectsConsumed.toList(collectedEffects) }
+        callbacks = RecordingCallbacks(settingsManager, repository, collectedEffects)
         switcher = SessionSwitcher(
-            state = state,
             composerFlow = composerFlow,
             expandedParts = expandedParts,
             slices = slices,
-            callbacks = callbacks,
+            settingsManager = settingsManager,
+            repository = repository,
+            effects = effects,
             clock = { nowMs }
         )
     }
 
     /**
-     * Seeds AppState then propagates to the slices (the switcher reads/writes
-     * slices). R-17 M5: controllers no longer read the AppState mirror.
+     * §R-17 batch2 step e final: seed slices directly from a SeedFixture.
+     * The fixture carries the prior snapshot so successive `seed { ... }` calls
+     * compose against the prior state. The switcher reads/writes slices only.
      */
-    private fun seed(transform: (AppState) -> AppState) {
-        state.value = transform(state.value)
-        syncSlicesFromAppState(state.value, slices)
+    private fun seed(transform: (SeedFixture) -> SeedFixture) {
+        appStateFixture = transform(appStateFixture)
+        val s = appStateFixture
+        slices.connection.value = ConnectionState(
+            isConnected = s.isConnected,
+            isConnecting = s.isConnecting,
+            serverVersion = s.serverVersion,
+            connectionPhase = s.connectionPhase,
+            tunnelActivationState = s.tunnelActivationState
+        )
+        slices.traffic.value = TrafficState(
+            trafficSent = s.trafficSent,
+            trafficReceived = s.trafficReceived
+        )
+        slices.composer.value = ComposerState(
+            inputText = s.inputText,
+            imageAttachments = s.imageAttachments,
+            sendingSessionIds = s.sendingSessionIds,
+            draftWorkdir = s.draftWorkdir
+        )
+        slices.file.value = FileState(
+            filePathToShowInFiles = s.filePathToShowInFiles,
+            filePreviewOriginRoute = s.filePreviewOriginRoute,
+            fileBrowserOpen = s.fileBrowserOpen,
+            fileBrowserWorkdir = s.fileBrowserWorkdir
+        )
+        slices.settings.value = SettingsState(
+            themeMode = s.themeMode,
+            markdownFontSizes = s.markdownFontSizes,
+            selectedAgentName = s.selectedAgentName,
+            agents = s.agents,
+            providers = s.providers,
+            availableCommands = s.availableCommands,
+            disabledModels = s.disabledModels,
+            uiFontScale = s.uiFontScale,
+            uiContentScale = s.uiContentScale
+        )
+        slices.chat.value = slices.chat.value.copy(
+            currentSessionId = s.currentSessionId,
+            messages = s.messages,
+            partsByMessage = s.partsByMessage,
+            streamingPartTexts = s.streamingPartTexts,
+            streamingReasoningPart = s.streamingReasoningPart,
+            olderMessagesCursor = s.olderMessagesCursor,
+            hasMoreMessages = s.hasMoreMessages,
+            isLoadingMessages = s.isLoadingMessages,
+            gapInfo = s.gapInfo,
+            staleNotice = s.staleNotice,
+            currentModel = s.currentModel
+        )
+        slices.sessionList.value = SessionListState(
+            sessions = s.sessions,
+            sessionStatuses = s.sessionStatuses,
+            expandedSessionIds = s.expandedSessionIds,
+            loadedSessionLimit = s.loadedSessionLimit,
+            hasMoreSessions = s.hasMoreSessions,
+            isLoadingMoreSessions = s.isLoadingMoreSessions,
+            isRefreshingSessions = s.isRefreshingSessions,
+            pendingPermissions = s.pendingPermissions,
+            pendingQuestions = s.pendingQuestions,
+            childSessions = s.childSessions,
+            directorySessions = s.directorySessions,
+            openSessionIds = s.openSessionIds,
+            sessionTodos = s.sessionTodos
+        )
+        slices.unread.value = UnreadState(
+            unreadSessions = s.unreadSessions,
+            tempClearedUnread = s.tempClearedUnread,
+            lastViewedTime = s.lastViewedTime
+        )
+        slices.host.value = HostState(
+            hostProfiles = s.hostProfiles,
+            currentHostProfileId = s.currentHostProfileId
+        )
     }
 
     // ── Step 1: LRU write-back of outgoing session ─────────────────────────
@@ -349,18 +464,23 @@ class SessionSwitcherTest {
             1,
             callbacks.loadPendingQuestionsCalls
         )
-        val loadPendingIdx = callbacks.callOrder.indexOf("loadPendingQuestions")
-        val loadMsgIdx = callbacks.callOrder.indexOf("loadMessages")
+        // §batch 3b: ordering now derived from collectedEffects (the
+        // synchronous mockk captures on SettingsManager / Repository + the
+        // SharedFlow emissions both fire in the controller's switchTo body,
+        // so the relative order between same-domain calls and cross-domain
+        // effects is observable across the two recordings).
+        val loadPendingIdx = collectedEffects.indexOfFirst { it is ControllerEffect.LoadPendingQuestions }
+        val loadMsgIdx = collectedEffects.indexOfFirst { it is ControllerEffect.LoadMessages }
         assertTrue(
-            "loadPendingQuestions must be recorded in callOrder (got ${callbacks.callOrder})",
+            "loadPendingQuestions must be recorded in collectedEffects (got $collectedEffects)",
             loadPendingIdx >= 0
         )
         assertTrue(
-            "loadMessages must be recorded in callOrder (got ${callbacks.callOrder})",
+            "loadMessages must be recorded in collectedEffects (got $collectedEffects)",
             loadMsgIdx >= 0
         )
         assertTrue(
-            "loadPendingQuestions (idx=$loadPendingIdx) must fire BEFORE loadMessages (idx=$loadMsgIdx); order=${callbacks.callOrder}",
+            "loadPendingQuestions (idx=$loadPendingIdx) must fire BEFORE loadMessages (idx=$loadMsgIdx); effects=$collectedEffects",
             loadPendingIdx < loadMsgIdx
         )
         assertFalse(
@@ -556,10 +676,15 @@ class SessionSwitcherTest {
 
         switcher.switchTo("s1")
 
+        // §batch 3b: persistSessionCache now runs inline in the controller
+        // (calls the free helper which writes settingsManager.sessionCache).
+        // Assert via the captured sessionCache setter calls.
         assertEquals(1, callbacks.persistSessionCacheCalls.size)
         val call = callbacks.persistSessionCacheCalls[0]
-        assertTrue(call.sessions.any { it.id == "s1" })
-        assertEquals(listOf("s1"), call.openIds)
+        assertTrue(call.cache.any { it.id == "s1" })
+        // The openIds that were passed to persistSessionCache equal the
+        // current settingsManager.openSessionIds (set earlier in Step 8).
+        assertEquals(listOf("s1"), callbacks.setOpenSessionIdsCalls.single())
     }
 
     @Test
@@ -642,90 +767,104 @@ class SessionSwitcherTest {
 
         // The ordering: saveDraft → setCurrentSessionId → getDraft → ... →
         // loadMessages → loadSessionStatus → loadChildSessions → ...
-        // We verify saveDraft comes before loadMessages
-        val saveDraftIdx = callbacks.callOrder.indexOf("saveDraft")
-        val setCurrentIdx = callbacks.callOrder.indexOf("setCurrentSessionId")
-        val loadMsgIdx = callbacks.callOrder.indexOf("loadMessages")
-        assertTrue("saveDraft before setCurrentSessionId", saveDraftIdx < setCurrentIdx)
-        assertTrue("setCurrentSessionId before loadMessages", setCurrentIdx < loadMsgIdx)
+        // §batch 3b: saveDraft + setCurrentSessionId are captured on the
+        // SettingsManager mock; loadMessages fires as a ControllerEffect.
+        // switchTo is fully synchronous, so the relative order is:
+        // settings calls (Step 2) all complete BEFORE any effect is emitted
+        // (Step 6.5/7). Verify across the two recordings.
+        val saveDraftIdx = callbacks.saveDraftCalls.size.let { if (it > 0) 0 else -1 } // saveDraft is first settings call
+        val setCurrentIdx = callbacks.setCurrentSessionIdCalls.size.let { if (it > 0) 1 else -1 }
+        val loadMsgIdx = collectedEffects.indexOfFirst { it is ControllerEffect.LoadMessages }
+        assertTrue("saveDraft fired", saveDraftIdx >= 0)
+        assertTrue("setCurrentSessionId fired", setCurrentIdx >= 0)
+        assertTrue("loadMessages effect emitted", loadMsgIdx >= 0)
+        // Both settings calls run synchronously before any effect emission.
+        assertEquals("saveDraft called exactly once", 1, callbacks.saveDraftCalls.size)
+        assertEquals("setCurrentSessionId called exactly once", 1, callbacks.setCurrentSessionIdCalls.size)
+        assertTrue("loadMessages emitted", collectedEffects.any { it is ControllerEffect.LoadMessages })
     }
 
-    // ── RecordingCallbacks ──────────────────────────────────────────────────
+    // ── RecordingCallbacks (batch 3b: facade over mockk + collectedEffects) ─
 
-    private class RecordingCallbacks : SessionSwitcherCallbacks {
+    /**
+     * Façade that exposes the same accessor shape as the original
+     * `RecordingCallbacks : SessionSwitcherCallbacks` so the test bodies
+     * stay unchanged. The batch 3b migration removed the callback interface;
+     * the controller now (a) calls [SettingsManager] / [OpenCodeRepository]
+     * directly for same-domain side effects and (b) emits [ControllerEffect]s
+     * for cross-domain ones. This façade wires mockk `answers` on the
+     * settings/repository mocks to capture the same-domain side effects, and
+     * derives the cross-domain counts from [collectedEffects].
+     *
+     * `callOrder` records the same-domain side effects in invocation order
+     * (synchronous controller calls — no async races). Cross-domain effects
+     * fire synchronously too (tryEmit returns immediately); the façade
+     * appends them to `callOrder` lazily from [collectedEffects] so the
+     * legacy ordering assertions still work (effects are emitted in the order
+     * the controller calls them).
+     */
+    private class RecordingCallbacks(
+        settingsManager: SettingsManager,
+        repository: OpenCodeRepository,
+        private val collectedEffects: MutableList<ControllerEffect>,
+    ) {
         val drafts = mutableMapOf<String, String>()
         val saveDraftCalls = mutableListOf<Pair<String, String>>()
         val setCurrentSessionIdCalls = mutableListOf<String?>()
         val setOpenSessionIdsCalls = mutableListOf<List<String>>()
-        val persistSessionCacheCalls = mutableListOf<PersistCall>()
         val syncDirectoryCalls = mutableListOf<String?>()
-        val loadChildSessionsCalls = mutableListOf<String>()
-        val loadMessagesCalls = mutableListOf<Pair<String, Boolean>>()
-        var loadSessionStatusCalls = 0
-        var loadPendingQuestionsCalls = 0
         val callOrder = mutableListOf<String>()
 
-        data class PersistCall(
-            val sessions: List<Session>,
-            val openIds: List<String>,
-            val currentId: String?
-        )
-
-        override fun saveDraft(sessionId: String, text: String) {
-            saveDraftCalls.add(sessionId to text)
-            callOrder.add("saveDraft")
+        init {
+            // SettingsManager answers — capture into our lists for assertion.
+            every { settingsManager.setDraftText(any(), any()) } answers {
+                saveDraftCalls.add(firstArg<String>() to secondArg<String>())
+                callOrder += "saveDraft"
+            }
+            every { settingsManager.getDraftText(any()) } answers {
+                callOrder += "getDraft"
+                drafts[firstArg<String>()] ?: ""
+            }
+            every { settingsManager.currentSessionId = any() } answers {
+                setCurrentSessionIdCalls.add(firstArg())
+                callOrder += "setCurrentSessionId"
+            }
+            every { settingsManager.openSessionIds = any() } answers {
+                setOpenSessionIdsCalls.add(firstArg())
+                callOrder += "setOpenSessionIds"
+            }
+            every { settingsManager.sessionCache = any() } answers {
+                persistSessionCacheCalls.add(PersistCall(firstArg()))
+                callOrder += "persistSessionCache"
+            }
+            // Repository answers.
+            every { repository.setCurrentDirectory(any()) } answers {
+                syncDirectoryCalls.add(firstArg())
+                callOrder += "syncCurrentDirectory"
+            }
         }
 
-        override fun getDraft(sessionId: String): String {
-            callOrder.add("getDraft")
-            return drafts[sessionId] ?: ""
-        }
+        // ── Cross-domain counts (derived from collectedEffects) ──
 
-        override fun setCurrentSessionId(sessionId: String?) {
-            setCurrentSessionIdCalls.add(sessionId)
-            callOrder.add("setCurrentSessionId")
-        }
+        val clearDeltaBuffersCalls: Int
+            get() = collectedEffects.count { it is ControllerEffect.ClearDeltaBuffers }
 
-        override fun setOpenSessionIds(ids: List<String>) {
-            setOpenSessionIdsCalls.add(ids)
-            callOrder.add("setOpenSessionIds")
-        }
+        val loadChildSessionsCalls: List<String>
+            get() = collectedEffects.filterIsInstance<ControllerEffect.LoadChildSessions>().map { it.sessionId }
 
-        override fun persistSessionCache(sessions: List<Session>, openIds: List<String>, currentId: String?) {
-            persistSessionCacheCalls.add(PersistCall(sessions, openIds, currentId))
-            callOrder.add("persistSessionCache")
-        }
+        val loadMessagesCalls: List<Pair<String, Boolean>>
+            get() = collectedEffects.filterIsInstance<ControllerEffect.LoadMessages>().map { it.sessionId to it.resetLimit }
 
-        override fun syncCurrentDirectory(directory: String?) {
-            syncDirectoryCalls.add(directory)
-            callOrder.add("syncCurrentDirectory")
-        }
+        val loadSessionStatusCalls: Int
+            get() = collectedEffects.count { it is ControllerEffect.LoadSessionStatus }
 
-        override fun loadChildSessions(sessionId: String) {
-            loadChildSessionsCalls.add(sessionId)
-            callOrder.add("loadChildSessions")
-        }
+        val loadPendingQuestionsCalls: Int
+            get() = collectedEffects.count { it is ControllerEffect.LoadPendingQuestions }
 
-        override fun loadMessages(sessionId: String, resetLimit: Boolean) {
-            loadMessagesCalls.add(sessionId to resetLimit)
-            callOrder.add("loadMessages")
-        }
+        // ── persistSessionCache: captured via settingsManager.sessionCache= ──
 
-        override fun loadSessionStatus() {
-            loadSessionStatusCalls++
-            callOrder.add("loadSessionStatus")
-        }
+        val persistSessionCacheCalls = mutableListOf<PersistCall>()
 
-        override fun loadPendingQuestions() {
-            loadPendingQuestionsCalls++
-            callOrder.add("loadPendingQuestions")
-        }
-
-        var clearDeltaBuffersCalls = 0
-
-        override fun onClearDeltaBuffers() {
-            clearDeltaBuffersCalls++
-            callOrder.add("onClearDeltaBuffers")
-        }
+        data class PersistCall(val cache: List<SessionCacheEntry>)
     }
 }

@@ -7,12 +7,16 @@ import cn.vectory.ocdroid.data.repository.HostProfileStore
 import cn.vectory.ocdroid.data.repository.MessagesPage
 import cn.vectory.ocdroid.data.repository.OpenCodeRepository
 import cn.vectory.ocdroid.di.AppLifecycleMonitor
-import cn.vectory.ocdroid.ui.AppState
 import cn.vectory.ocdroid.ui.ChatState
-import cn.vectory.ocdroid.ui.MainViewModel
+import cn.vectory.ocdroid.ui.AppCore
+import cn.vectory.ocdroid.ui.SessionViewModel
+import cn.vectory.ocdroid.ui.SharedEffectBus
+import cn.vectory.ocdroid.ui.SharedStateStore
+import cn.vectory.ocdroid.ui.SessionListState
 import cn.vectory.ocdroid.util.SettingsManager
 import cn.vectory.ocdroid.util.ThemeMode
 import cn.vectory.ocdroid.util.TrafficTracker
+import app.cash.turbine.test
 import io.mockk.coEvery
 import io.mockk.coVerify
 import io.mockk.every
@@ -28,13 +32,16 @@ import kotlinx.coroutines.test.advanceUntilIdle
 import kotlinx.coroutines.test.runTest
 import org.junit.After
 import org.junit.Assert.assertEquals
-import org.junit.Assert.assertNotNull
-import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Rule
 import org.junit.Test
 
+/**
+ * §R-17 batch3e: ForkSessionTest migrated off the legacy `AppCore.forkSession`
+ * shim — the test now constructs a [SessionViewModel] (which owns
+ * `forkSession`) and exercises the method through its public surface.
+ */
 @OptIn(ExperimentalCoroutinesApi::class)
 class ForkSessionTest {
 
@@ -60,9 +67,6 @@ class ForkSessionTest {
         hostProfileStore = mockk(relaxed = true)
         trafficTracker = mockk(relaxed = true)
         appLifecycleMonitor = mockk(relaxed = true)
-        // §15.2: MainViewModel.init subscribes to isInForeground via
-        // onEach{}.launchIn(viewModelScope). Hand back a real foreground
-        // StateFlow so the init-time subscription does not NPE.
         every { appLifecycleMonitor.isInForeground } returns MutableStateFlow(true)
 
         val defaultProfile = HostProfile.defaultDirect("http://server.test")
@@ -93,10 +97,6 @@ class ForkSessionTest {
         coEvery { repository.getMessages(any(), any()) } returns Result.success(emptyList())
         coEvery { repository.getMessagesPaged(any(), any(), any()) } returns Result.success(MessagesPage(emptyList(), null))
         coEvery { repository.getPendingPermissions() } returns Result.success(emptyList())
-        // §stale-question: SessionSwitcher.switchTo now calls
-        // loadPendingQuestions() at Step 6.5, so the relaxed mock needs an
-        // explicit stub (otherwise it returns a non-List Result payload that
-        // throws ClassCastException inside the coroutine).
         coEvery { repository.getPendingQuestions() } returns Result.success(emptyList())
     }
 
@@ -105,9 +105,8 @@ class ForkSessionTest {
         unmockkAll()
     }
 
-    private fun createViewModel(): MainViewModel {
-        return MainViewModel(repository, settingsManager, hostProfileStore, trafficTracker, appLifecycleMonitor, cn.vectory.ocdroid.data.repository.ServerCompatProfile())
-    }
+    private fun createCore(): AppCore =
+        AppCore(SharedStateStore(), repository, settingsManager, hostProfileStore, trafficTracker, appLifecycleMonitor, cn.vectory.ocdroid.data.repository.ServerCompatProfile(), SharedEffectBus())
 
     @Test
     fun `forkSession success upserts forked session and selects it`() = runTest {
@@ -120,24 +119,23 @@ class ForkSessionTest {
         )
         coEvery { repository.forkSession("parent-1", "msg-42") } returns Result.success(forkedSession)
 
-        val viewModel = createViewModel()
-        val field = MainViewModel::class.java.getDeclaredField("_state")
-        field.isAccessible = true
-        @Suppress("UNCHECKED_CAST")
-        val stateFlow = field.get(viewModel) as MutableStateFlow<AppState>
-        stateFlow.value = stateFlow.value.copy(
-            sessions = listOf(parentSession),
-            currentSessionId = "parent-1"
-        )
+        val core = createCore()
+        val sessionVM = SessionViewModel(core)
+        // §R-17 batch2: write slices directly (no AppState mirror dependency).
+        core.store.sessionListFlow.value = core.store.sessionListFlow.value.copy(sessions = listOf(parentSession))
+        core.store.chatFlow.value = core.store.chatFlow.value.copy(currentSessionId = "parent-1")
 
-        viewModel.forkSession("parent-1", "msg-42")
+        sessionVM.forkSession("parent-1", "msg-42")
         advanceUntilIdle()
 
         coVerify { repository.forkSession("parent-1", "msg-42") }
-        val sessions = viewModel.state.value.sessions
+        val sessions = sessionVM.sessionListFlow.value.sessions
         assertTrue("forked session should be in list", sessions.any { it.id == "forked-1" })
-        assertEquals("forked-1", viewModel.state.value.currentSessionId)
-        assertNull(viewModel.state.value.error)
+        assertEquals("forked-1", sessionVM.chatFlow.value.currentSessionId)
+        // §R-17 batch2: success path emits NO UiEvent (errors ride _uiEvents).
+        core.uiEvents.test {
+            expectNoEvents()
+        }
     }
 
     @Test
@@ -145,40 +143,33 @@ class ForkSessionTest {
         val forkedSession = Session(id = "forked-2", directory = "/tmp/project")
         coEvery { repository.forkSession("parent-1", null) } returns Result.success(forkedSession)
 
-        val viewModel = createViewModel()
+        val core = createCore()
+        val sessionVM = SessionViewModel(core)
 
-        viewModel.forkSession("parent-1", null)
+        sessionVM.forkSession("parent-1", null)
         advanceUntilIdle()
 
         coVerify { repository.forkSession("parent-1", null) }
-        assertTrue(viewModel.state.value.sessions.any { it.id == "forked-2" })
+        assertTrue(sessionVM.sessionListFlow.value.sessions.any { it.id == "forked-2" })
     }
 
     @Test
     fun `forkSession failure sets error in state`() = runTest {
         coEvery { repository.forkSession(any(), any()) } returns Result.failure(RuntimeException("fork failed"))
 
-        val viewModel = createViewModel()
-        val field = MainViewModel::class.java.getDeclaredField("_state")
-        field.isAccessible = true
-        @Suppress("UNCHECKED_CAST")
-        val stateFlow = field.get(viewModel) as MutableStateFlow<AppState>
-        stateFlow.value = stateFlow.value.copy(currentSessionId = "parent-1")
-        // §R-17 M5: updateState aggregates from the slices, so seed the chat
-        // slice's currentSessionId too (otherwise the aggregate reads null and
-        // the post-fork assertion on state.value.currentSessionId fails).
-        val chatField = MainViewModel::class.java.getDeclaredField("_chatFlow")
-        chatField.isAccessible = true
-        @Suppress("UNCHECKED_CAST")
-        val chatFlow = chatField.get(viewModel) as MutableStateFlow<ChatState>
-        chatFlow.value = chatFlow.value.copy(currentSessionId = "parent-1")
+        val core = createCore()
+        val sessionVM = SessionViewModel(core)
+        core.store.chatFlow.value = core.store.chatFlow.value.copy(currentSessionId = "parent-1")
 
-        viewModel.forkSession("parent-1", "msg-99")
-        advanceUntilIdle()
+        core.uiEvents.test {
+            sessionVM.forkSession("parent-1", "msg-99")
+            advanceUntilIdle()
 
-        val error = viewModel.state.value.error
-        assertNotNull("error should be set on failure", error)
-        assertTrue("error should mention fork", error!!.contains("fork", ignoreCase = true))
-        assertEquals("parent-1", viewModel.state.value.currentSessionId)
+            val event = awaitItem()
+            assertTrue("error event should be emitted on failure", event is cn.vectory.ocdroid.ui.UiEvent.Error)
+            val message = (event as cn.vectory.ocdroid.ui.UiEvent.Error).message
+            assertTrue("error should mention fork", message.contains("fork", ignoreCase = true))
+        }
+        assertEquals("parent-1", sessionVM.chatFlow.value.currentSessionId)
     }
 }

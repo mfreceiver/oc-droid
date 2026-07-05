@@ -52,6 +52,18 @@ class HostProfileStore @Inject constructor(
     @Synchronized
     fun currentProfile(): HostProfile {
         val all = profiles()
+        if (all.isEmpty()) {
+            // §crash-fix: profiles() returns empty on corrupt/unrecoverable
+            // JSON (ParseFailure) or genuinely empty storage. Seed a fresh
+            // default direct profile so this method never throws
+            // NoSuchElementException. Persist it so subsequent calls are
+            // stable (mirrors migrateLegacySettings). Trade-off: a corrupt
+            // payload is overwritten — acceptable vs. an unusable app.
+            Log.w("HostProfileStore", "profiles() returned empty (corrupt JSON or fresh install); seeding default direct profile")
+            val fallback = HostProfile.defaultDirect()
+            saveProfiles(listOf(fallback), fallback.id)
+            return fallback
+        }
         val currentId = settingsManager.currentHostProfileId
         return all.firstOrNull { it.id == currentId } ?: all.first().also {
             settingsManager.currentHostProfileId = it.id

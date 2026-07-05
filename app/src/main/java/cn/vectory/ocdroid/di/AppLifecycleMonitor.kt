@@ -242,6 +242,11 @@ class AppLifecycleMonitor @Inject constructor(
      * suppressed by a missing/denied permission. Callers use the result to
      * decide whether to record the item in [notificationSnapshot].
      */
+    // §lint: MissingPermission is satisfied by the hasNotificationPermission()
+    // guard above (NotificationManagerCompat.areNotificationsEnabled), which
+    // lint's dataflow can't track through the helper. The runtime check is
+    // stricter than POST_NOTIFICATIONS (also honors per-channel settings).
+    @Suppress("MissingPermission")
     private fun notifyDecision(sessionId: String, title: String, body: String, notificationId: Int): Boolean {
         if (!hasNotificationPermission()) return false
         val notification = NotificationCompat.Builder(application, CHANNEL_DECISIONS)
@@ -253,10 +258,17 @@ class AppLifecycleMonitor @Inject constructor(
             .setAutoCancel(true)
             .setContentIntent(buildContentIntent(sessionId, notificationId))
             .build()
-        runCatching { notificationManagerCompat.notify(notificationId, notification) }
-        return true
+        // §notify-fix: a thrown notify() (channel missing / transient
+        // SecurityException) must report failure so the caller does NOT
+        // record the item in notificationSnapshot — otherwise it would be
+        // permanently suppressed and never re-notified once the condition
+        // recovers. isSuccess is false on any thrown exception.
+        val posted = runCatching { notificationManagerCompat.notify(notificationId, notification) }.isSuccess
+        return posted
     }
 
+    // §lint: see notifyDecision — hasNotificationPermission() above is the guard.
+    @Suppress("MissingPermission")
     private fun notifyError(error: String) {
         if (!hasNotificationPermission()) return
         val notification = NotificationCompat.Builder(application, CHANNEL_ERRORS)
