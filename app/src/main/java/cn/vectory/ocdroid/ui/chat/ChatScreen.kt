@@ -629,7 +629,14 @@ fun ChatScreen(
                     if (chat.currentSessionId != null && parent == null && rootSessions.size >= 2) {
                         HorizontalPager(
                             state = pagerState,
-                            modifier = Modifier.fillMaxSize()
+                            modifier = Modifier.fillMaxSize(),
+                            // §flicker-fix (Issue 1): key each page composable by
+                            // session id so the pager does NOT reuse a page slot
+                            // for a different session on reorder. Without this,
+                            // SessionSwitcher.switchTo prepends to openSessionIds
+                            // and the page slot keeps the previous session's
+                            // LazyListState scroll offset for one frame → flicker.
+                            key = { page -> rootSessions.getOrNull(page)?.id ?: "page-$page" }
                         ) { page ->
                             // §review (momo 🟠-4): defensive bounds guard. When a
                             // root session is archived/deleted from another client,

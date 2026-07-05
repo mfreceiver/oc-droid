@@ -1,0 +1,53 @@
+{
+  "agent": "dser",
+  "scope": "release",
+  "date": "2026-07-06",
+  "reviewed_commit": "3d94c31 (0.4.0) + 5-bugfix working tree",
+  "version_target": "0.4.1",
+  "verdict": "pass-with-fixes",
+  "score": 8.3,
+  "blocking_issues": [],
+  "non_blocking_issues": [
+    "Issue 3: dser disagrees with gpter/maxer — argues agent path HAS a real clobber via launchLoadMessages overwriting selectedAgentName from history when per-session agent is null. Defensive fix applied (only sync when per-session exists). Symptom may differ from user's 'second message' report but root cause is same cross-file state inconsistency.",
+    "Issue 1: changing rememberLazyListState to remember(sessionId){LazyListState()} interacts with savedPositions restore timing — verify restore LaunchedEffect runs before first visible frame after session switch.",
+    "Issue 4: exact SSE event type for rate-limit not confirmed against local server source; session.error hypothesis based on Message.kt schema + maxer web search."
+  ],
+  "issues_reviewed": [
+    {
+      "id": 1,
+      "title": "Tab horizontal-swipe flicker",
+      "verdict": "partially-correct",
+      "root_cause": "Two mechanisms: (a) tap-reorder slot reuse with unkeyed LazyListState; (b) pure-swipe switchTo sets messages=emptyList then restores from cache — blank flash between slice updates.",
+      "fix": "key= on HorizontalPager + remember(sessionId){LazyListState()}."
+    },
+    {
+      "id": 2,
+      "title": "First slash-command in draft errors",
+      "verdict": "confirmed",
+      "root_cause": "executeCommand currentSessionId ?: error; no materialization. /clear local-only correct.",
+      "fix": "materializeDraftSession shared helper."
+    },
+    {
+      "id": 3,
+      "title": "agent/model switch one-message lag",
+      "verdict": "refute-explorer-agent-path-clobber",
+      "root_cause": "Model path correct (per-session wins). Agent path: launchLoadMessages:233 overwrites selectedAgentName from inferred history when per-session agent null. Repro: global=plan, open old session (no per-session agent, last assistant=build) → selectedAgentName clobbered to build.",
+      "fix": "Defensive: persist agent in materializeDraftSession; only sync selectedAgentName when perSessionAgent != null. SSE message.updated does NOT touch currentModel (verified applyMessageUpdated)."
+    },
+    {
+      "id": 4,
+      "title": "Rate-limit/quota errors invisible",
+      "verdict": "confirmed",
+      "root_cause": "SSE when no error/else; isEffectivelyRenderableEmpty filters error-only messages (doesn't check message.error).",
+      "fix": "session.error branch + else; filter checks msg.error?.message non-blank. New lightweight ChatErrorCard preferred over CompletedTaskCard reuse (semantic mismatch)."
+    },
+    {
+      "id": 5,
+      "title": "Server switch loses model-disable config",
+      "verdict": "approve-with-changes",
+      "root_cause": "by-URL key but URL edit orphans; configureServer no HostProfileSwitched. Key normalization collision (host case, scheme strip).",
+      "fix": "by-URL (user intent); clear on edit/delete/configureServer; manual refresh inherit ∩; lowercase host in normalizeBaseUrl; include path in identity."
+    }
+  ],
+  "notes": "dser's cross-file state-consistency analysis found the agent clobber that gpter/maxer considered inert. The defensive fix (guard selectedAgentName write) addresses it. Disagreement on Issue 3 root cause is documented but does not block release — the fix is sound regardless of which reviewer's mechanism the user actually hit."
+}

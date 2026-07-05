@@ -373,6 +373,37 @@ class SettingsManager @Inject constructor(
     }
 
     /**
+     * §bug5: bulk replace the disabled set for a URL (used by manual refresh
+     * inherit so we don't issue N incremental writes). Entries are
+     * `"$providerId/$modelId"`.
+     */
+    fun setDisabledModels(baseUrl: String, disabledKeys: Set<String>) {
+        encryptedPrefs.edit().putStringSet(disabledModelsKey(baseUrl), disabledKeys).apply()
+    }
+
+    // §bug5: per-URL model availability catalog (server-fetched full set) so that
+    // manual refresh can inherit disable status only for models still present.
+    fun getModelAvailability(baseUrl: String): Set<String> {
+        return encryptedPrefs.getStringSet(modelAvailabilityKey(baseUrl), emptySet()) ?: emptySet()
+    }
+
+    fun setModelAvailability(baseUrl: String, availableKeys: Set<String>) {
+        encryptedPrefs.edit().putStringSet(modelAvailabilityKey(baseUrl), availableKeys).apply()
+    }
+
+    /**
+     * §bug5: clear ALL per-URL model data (availability + disabled) — used on URL
+     * change or server-profile deletion so stale data does not leak across
+     * identities.
+     */
+    fun clearModelDataForUrl(baseUrl: String) {
+        encryptedPrefs.edit()
+            .remove(modelAvailabilityKey(baseUrl))
+            .remove(disabledModelsKey(baseUrl))
+            .apply()
+    }
+
+    /**
      * Hard reset: wipes EVERY persisted key EXCEPT the connection-credential
      * keys and the per-host password secrets (basic-auth + tunnel), then leaves
      * the encrypted prefs otherwise intact for those preserved entries.
@@ -453,15 +484,29 @@ class SettingsManager @Inject constructor(
         private fun tunnelPasswordKey(id: String): String = "tunnel_password_$id"
 
         /**
+         * §bug5: shared URL normalizer for the per-URL model keys. Strips
+         * scheme + trailing slash, lowercases the host (collision defense —
+         * `http://Host:4096` vs `http://host:4096`), and keeps any path so the
+         * identity matches the URL the user actually configured.
+         */
+        private fun normalizeBaseUrl(baseUrl: String): String {
+            val withoutScheme = baseUrl.substringAfter("://").trimEnd('/')
+            val host = withoutScheme.substringBefore('/').lowercase()
+            val path = withoutScheme.substringAfter('/', "")
+            return if (path.isEmpty()) host else "$host/$path"
+        }
+
+        private fun modelAvailabilityKey(baseUrl: String): String {
+            return "model_availability_${normalizeBaseUrl(baseUrl)}"
+        }
+
+        /**
          * §model-selection: storage key for the per-baseUrl disabled-model
          * set. Strips scheme + trailing slash so `http://h:1/` and `https://h:1`
          * share storage (same server, alternate transport).
          */
         private fun disabledModelsKey(baseUrl: String): String {
-            val normalized = baseUrl
-                .substringAfter("://")
-                .trimEnd('/')
-            return "disabled_models_$normalized"
+            return "disabled_models_${normalizeBaseUrl(baseUrl)}"
         }
     }
 }

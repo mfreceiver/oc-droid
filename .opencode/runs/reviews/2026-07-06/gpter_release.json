@@ -1,0 +1,51 @@
+{
+  "agent": "gpter",
+  "scope": "release",
+  "date": "2026-07-06",
+  "reviewed_commit": "3d94c31 (0.4.0) + 5-bugfix working tree",
+  "version_target": "0.4.1",
+  "verdict": "pass",
+  "score": 8.5,
+  "blocking_issues": [],
+  "non_blocking_issues": [
+    "Issue 3 (agent/model lag): existing-session code path looks correct after 0efe5b6; the defensive fix (draft-agent persist + protect selectedAgentName) is sound but if user still sees lag on existing sessions, suspect server-side session-config precedence over per-prompt fields — clone sst/opencode to opencode-src/ to verify."
+  ],
+  "issues_reviewed": [
+    {
+      "id": 1,
+      "title": "Tab horizontal-swipe flicker",
+      "verdict": "partially-correct",
+      "root_cause": "HorizontalPager page content has no key=; rememberLazyListState() not keyed by sessionId. Prepend-reorder only triggers for not-yet-open sessions (explorer overstated).",
+      "fix": "Add key={ page -> rootSessions[page]?.id } to HorizontalPager; optionally key LazyListState by sessionId."
+    },
+    {
+      "id": 2,
+      "title": "First slash-command in draft errors",
+      "verdict": "confirmed",
+      "root_cause": "executeCommand has no draft-materialization branch (only sendMessage does).",
+      "fix": "Extract materializeDraftSession() shared helper; /clear stays local."
+    },
+    {
+      "id": 3,
+      "title": "agent/model switch one-message lag",
+      "verdict": "code-correct-draft-asymmetry",
+      "root_cause": "Existing-session path correct after 0efe5b6. Draft mode persists model but not agent on materialization.",
+      "fix": "Defensive: persist agent in materializeDraftSession; only sync selectedAgentName when per-session agent exists."
+    },
+    {
+      "id": 4,
+      "title": "Rate-limit/quota errors invisible",
+      "verdict": "confirmed",
+      "root_cause": "SSE dispatch has no session.error/else branch; error-only assistant messages filtered out before ErrorCard.",
+      "fix": "Add session.error branch + else; unfilter error-bearing messages."
+    },
+    {
+      "id": 5,
+      "title": "Server switch loses model-disable config",
+      "verdict": "approve-user-proposal-with-changes",
+      "root_cause": "URL edit doesn't clear old key (orphan); configureServer doesn't emit HostProfileSwitched.",
+      "fix": "by-URL storage of availability+disabled; clear on URL change/delete; manual refresh inherits disabled ∩ available."
+    }
+  ],
+  "notes": "Five bugs reviewed in parallel. Issue 3 is the only one where current code (0efe5b6, in 0.4.0) appears correct on the main path; defensive fixes applied regardless. User's Issue 5 proposal approved with collision-defense (lowercase host) and clear-on-URL-edit semantics."
+}

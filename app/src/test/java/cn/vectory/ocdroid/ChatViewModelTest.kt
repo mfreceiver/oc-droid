@@ -654,14 +654,16 @@ class ChatViewModelTest : MainViewModelTestBase() {
     }
 
     @Test
-    fun `loadMessages updates selected agent from last assistant`() = runTest {
+    fun `loadMessages syncs selected agent from per-session override`() = runTest {
+        // §bug3-defensive: the global selectedAgentName must be synced from the
+        // per-session agent override (when one exists), NOT from history-inference.
         val messages = listOf(
             MessageWithParts(info = Message(id = "u1", role = "user")),
             MessageWithParts(
                 info = Message(
                     id = "a1",
                     role = "assistant",
-                    agent = "plan"
+                    agent = "build"
                 )
             )
         )
@@ -676,11 +678,43 @@ class ChatViewModelTest : MainViewModelTestBase() {
         val orchestratorVM = cn.vectory.ocdroid.ui.OrchestratorViewModel(core)
         val viewModel = ChatViewModel(core)  // primary VM under test
         core.updateState { it.copy(currentSessionId = "session-1") }
+        // Explicit per-session override — must win over the history-inferred "build".
+        every { settingsManager.getAgentForSession("session-1") } returns "plan"
 
         chatVM.loadMessages("session-1")
         advanceUntilIdle()
 
         assertEquals(messages.map { it.info }, chatVM.chatFlow.value.messages)
+        assertEquals("plan", orchestratorVM.settingsFlow.value.selectedAgentName)
+    }
+
+    @Test
+    fun `loadMessages preserves global selected agent when no per-session override`() = runTest {
+        // §bug3-defensive: when a session has NO explicit per-session agent override,
+        // loadMessages must NOT clobber the user's global selectedAgentName with a
+        // value inferred from the last assistant message in history.
+        val messages = listOf(
+            MessageWithParts(info = Message(id = "u1", role = "user")),
+            MessageWithParts(
+                info = Message(
+                    id = "a1",
+                    role = "assistant",
+                    agent = "build"
+                )
+            )
+        )
+        coEvery { repository.getMessagesPaged("session-2", any(), any()) } returns Result.success(MessagesPage(messages, null))
+        // No per-session override (default mock returns null).
+
+        val core = createCore()
+        val chatVM = cn.vectory.ocdroid.ui.ChatViewModel(core)
+        val orchestratorVM = cn.vectory.ocdroid.ui.OrchestratorViewModel(core)
+        core.updateState { it.copy(currentSessionId = "session-2", selectedAgentName = "plan") }
+
+        chatVM.loadMessages("session-2")
+        advanceUntilIdle()
+
+        // Global choice preserved — NOT overwritten with the inferred "build".
         assertEquals("plan", orchestratorVM.settingsFlow.value.selectedAgentName)
     }
 

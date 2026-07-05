@@ -66,17 +66,29 @@ internal fun AppCore.executeCommand(command: String, arguments: String) {
             if (workdir != null) createSessionInWorkdirForEffect(workdir) else createSessionForEffect()
         }
         else -> {
-            val sessionId = store.chatFlow.value.currentSessionId ?: run {
-                effectBus.uiEvents.tryEmit(UiEvent.Error("Open or create a session before running /$cmd"))
-                return
-            }
+            val existing = store.chatFlow.value.currentSessionId
             composerController.setInputText("")
-            appScope.launch {
-                repository.executeCommand(sessionId, cmd, arguments)
-                    .onFailure { error ->
-                        effectBus.uiEvents.tryEmit(UiEvent.Error(errorMessageOrFallback(error, "Command /$cmd failed")))
+            if (existing != null) {
+                appScope.launch {
+                    repository.executeCommand(existing, cmd, arguments)
+                        .onFailure { error ->
+                            effectBus.uiEvents.tryEmit(UiEvent.Error(errorMessageOrFallback(error, "Command /$cmd failed")))
+                        }
+                }
+            } else if (store.composerFlow.value.draftWorkdir != null) {
+                // §bug2: materialize draft session, then execute the command on the new session
+                materializeDraftSession { sessionId ->
+                    appScope.launch {
+                        repository.executeCommand(sessionId, cmd, arguments)
+                            .onFailure { error ->
+                                effectBus.uiEvents.tryEmit(UiEvent.Error(errorMessageOrFallback(error, "Command /$cmd failed")))
+                            }
                     }
+                }
+            } else {
+                effectBus.uiEvents.tryEmit(UiEvent.Error("Open or create a session before running /$cmd"))
             }
+            return
         }
     }
 }
@@ -90,44 +102,67 @@ internal fun AppCore.sendMessage() {
     if (text.isEmpty() && attachments.isEmpty()) return
 
     if (draftWorkdir != null && existingSessionId == null) {
-        writeComposer { it.copy(draftWorkdir = null) }
-        appScope.launch {
-            repository.createSession(title = null)
-                .onSuccess { session ->
-                    val openIds = (listOf(session.id) + settingsManager.openSessionIds).distinct().take(8)
-                    settingsManager.openSessionIds = openIds
-                    val now = System.currentTimeMillis()
-                    writeSessionList { state ->
-                        state.copy(sessions = upsertSession(state.sessions, session), openSessionIds = openIds)
-                    }
-                    writeChat { it.copy(currentSessionId = session.id) }
-                    writeUnread { it.copy(unreadSessions = it.unreadSessions - session.id, lastViewedTime = it.lastViewedTime + (session.id to now)) }
-                    writeComposer { it.copy(draftWorkdir = null) }
-                    settingsManager.currentSessionId = session.id
-                    store.chatFlow.value.currentModel?.let { model ->
-                        settingsManager.setModelForSession(session.id, model.providerId, model.modelId)
-                    }
-                    persistSessionCache(
-                        settingsManager = settingsManager,
-                        sessions = store.sessionListFlow.value.sessions,
-                        openIds = store.sessionListFlow.value.openSessionIds,
-                        currentId = session.id,
-                        currentWorkdir = settingsManager.currentWorkdir,
-                    )
-                    dispatchSendMessage(session.id)
-                    scheduleTitleRefreshAfterFirstMessage(session.id)
-                }
-                .onFailure { error ->
-                    writeComposer { it.copy(draftWorkdir = draftWorkdir) }
-                    effectBus.uiEvents.tryEmit(UiEvent.Error("Failed to create session in $draftWorkdir: ${error.message ?: "unknown error"}"))
-                }
-        }
+        materializeDraftSession { sessionId -> dispatchSendMessage(sessionId) }
         return
     }
 
     val sessionId = existingSessionId ?: return
     if (store.composerFlow.value.sendingSessionIds.contains(sessionId)) return
     dispatchSendMessage(sessionId)
+}
+
+/**
+ * §bug2: Shared draft-session materialization. Detects draft mode (composer
+ * has a draftWorkdir but no current session yet), clears the draft, creates a
+ * new session, wires it into the session-list / chat / unread slices, copies
+ * the current model + agent selections to per-session storage, schedules a
+ * title refresh, then invokes [onSessionReady] with the new session id. On
+ * failure: emits UiEvent.Error and restores the composer draftWorkdir —
+ * callers do not need their own failure path. Used by both [sendMessage] and
+ * [executeCommand] so the first /cmd in a draft session no longer errors with
+ * "Open or create a session before running /cmd".
+ */
+internal fun AppCore.materializeDraftSession(onSessionReady: (String) -> Unit) {
+    val draftWorkdir = store.composerFlow.value.draftWorkdir ?: return
+    writeComposer { it.copy(draftWorkdir = null) }
+    appScope.launch {
+        repository.createSession(title = null)
+            .onSuccess { session ->
+                val openIds = (listOf(session.id) + settingsManager.openSessionIds).distinct().take(8)
+                settingsManager.openSessionIds = openIds
+                val now = System.currentTimeMillis()
+                writeSessionList { state ->
+                    state.copy(sessions = upsertSession(state.sessions, session), openSessionIds = openIds)
+                }
+                writeChat { it.copy(currentSessionId = session.id) }
+                writeUnread { it.copy(unreadSessions = it.unreadSessions - session.id, lastViewedTime = it.lastViewedTime + (session.id to now)) }
+                writeComposer { it.copy(draftWorkdir = null) }
+                settingsManager.currentSessionId = session.id
+                store.chatFlow.value.currentModel?.let { model ->
+                    settingsManager.setModelForSession(session.id, model.providerId, model.modelId)
+                }
+                // §bug3-defensive: persist the agent too so the next dispatchSendMessage
+                // picks up the per-session agent (mirrors the model copy above; previously
+                // the agent was not copied here, causing a one-message lag when switching
+                // agents in draft mode).
+                store.settingsFlow.value.selectedAgentName?.let { agent ->
+                    settingsManager.setAgentForSession(session.id, agent)
+                }
+                persistSessionCache(
+                    settingsManager = settingsManager,
+                    sessions = store.sessionListFlow.value.sessions,
+                    openIds = store.sessionListFlow.value.openSessionIds,
+                    currentId = session.id,
+                    currentWorkdir = settingsManager.currentWorkdir,
+                )
+                scheduleTitleRefreshAfterFirstMessage(session.id)
+                onSessionReady(session.id)
+            }
+            .onFailure { error ->
+                writeComposer { it.copy(draftWorkdir = draftWorkdir) }
+                effectBus.uiEvents.tryEmit(UiEvent.Error("Failed to create session in $draftWorkdir: ${error.message ?: "unknown error"}"))
+            }
+    }
 }
 
 /** Full-stack local reset (host → connection → session purge → chat clear). */

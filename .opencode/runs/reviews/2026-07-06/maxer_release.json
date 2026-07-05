@@ -1,0 +1,53 @@
+{
+  "agent": "maxer",
+  "scope": "release",
+  "date": "2026-07-06",
+  "reviewed_commit": "3d94c31 (0.4.0) + 5-bugfix working tree",
+  "version_target": "0.4.1",
+  "verdict": "pass",
+  "score": 8.7,
+  "blocking_issues": [],
+  "non_blocking_issues": [
+    "Issue 3: definitive test recommended before declaring the lag fixed — add DebugLog to capture first-send PromptRequest.agent/model values in draft mode.",
+    "opencode-src/ not present locally; server SSE session.error schema confirmed via web search but not verified against local source. Recommend git clone sst/opencode for future server-behavior audits.",
+    "MainViewModelMessageActions.kt: after defensive change, lastAssistant/inferredAgentName/newAgent locals become unused (benign warnings). [CLEANED UP before release.]"
+  ],
+  "issues_reviewed": [
+    {
+      "id": 1,
+      "title": "Tab horizontal-swipe flicker",
+      "verdict": "confirmed",
+      "root_cause": "HorizontalPager no key=; rememberLazyListState unkeyed. Flicker on BOTH swipe directions whenever selectSession prepends (slot reuse).",
+      "fix": "Single-line: key={ page -> rootSessions[page]?.id }. Sufficient alone; LazyListState keying optional."
+    },
+    {
+      "id": 2,
+      "title": "First slash-command in draft errors",
+      "verdict": "confirmed",
+      "root_cause": "executeCommand else-branch does currentSessionId ?: error; no materialization.",
+      "fix": "Shared materializeDraftSession helper; lazy materialization preserved; /clear stays local."
+    },
+    {
+      "id": 3,
+      "title": "agent/model switch one-message lag",
+      "verdict": "refuted-h1-h2-asymmetry-only",
+      "root_cause": "Current code (0efe5b6) should NOT lag for existing sessions on either path. Draft agent-not-persisted is asymmetric but doesn't cause second-message pattern.",
+      "fix": "Do NOT modify as hotfix without definitive test. Defensive symmetry (draft agent persist) applied as low-risk hardening."
+    },
+    {
+      "id": 4,
+      "title": "Rate-limit/quota errors invisible",
+      "verdict": "confirmed",
+      "root_cause": "Two silent-drop paths: SSE no session.error/else; ChatMessageContent filters error-only messages. Server confirmed to emit session.error (sst/opencode EventSessionError).",
+      "fix": "Add session.error SSE branch (UiEvent.Error + attach to last assistant msg) + else-log; unfilter error-bearing messages. Reuse ErrorCard, NOT CompletedTaskCard/marker."
+    },
+    {
+      "id": 5,
+      "title": "Server switch loses model-disable config",
+      "verdict": "approve-with-changes",
+      "root_cause": "Bug is NOT key type (already by-URL); bug is URL-edit doesn't clear old key + configureServer skips HostProfileSwitched.",
+      "fix": "Keep by-URL (NOT HostProfile.id); clear on URL edit/delete/configureServer; manual refresh inherit = oldDisabled ∩ newAvailable. Storage: model_availability_<url> + disabled_models_<url>."
+    }
+  ],
+  "notes": "Web search confirmed opencode server emits SSE 'session.error' (type, sessionID, error.name, error.data.message/statusCode). Recommended Fix A+B for Issue 4 over metadata-marker/CompletedTaskCard reuse. Strongly oppose switching Issue 5 key to HostProfile.id."
+}

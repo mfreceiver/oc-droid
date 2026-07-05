@@ -12,6 +12,7 @@ import cn.vectory.ocdroid.ui.ChatState
 import cn.vectory.ocdroid.ui.SessionListState
 import cn.vectory.ocdroid.ui.SharedEffectBus
 import cn.vectory.ocdroid.ui.SliceFlows
+import cn.vectory.ocdroid.ui.UiEvent
 import cn.vectory.ocdroid.ui.UnreadState
 import cn.vectory.ocdroid.ui.lenientJson
 import cn.vectory.ocdroid.ui.parseMessagePartDeltaEvent
@@ -580,6 +581,44 @@ internal class SessionSyncCoordinator(
                     return
                 }
                 slices.sessionList.update { s -> s.applyTodoUpdated(sessionId, todos) }
+            }
+            "session.error" -> {
+                // §error-feedback (Issue 4): the server emits session.error with
+                // payload { sessionID, error: { name, data: { message, statusCode } } }
+                // for rate-limit / quota / provider failures. Two surfaces:
+                //   (1) a UiEvent.Error toast (always — the user must know)
+                //   (2) attach the error to the current session's last assistant
+                //       message (if any non-error one exists) so ErrorCard can
+                //       render inline. Error-only turns (error set, no renderable
+                //       parts) are otherwise filtered out before render.
+                val errObj = event.payload.getJsonObject("error")
+                val name = (errObj?.get("name") as? kotlinx.serialization.json.JsonPrimitive)?.content
+                val data = errObj?.get("data") as? JsonObject
+                val rawMsg = (data?.get("message") as? kotlinx.serialization.json.JsonPrimitive)?.content
+                    ?: (data?.get("error") as? kotlinx.serialization.json.JsonPrimitive)?.content
+                    ?: "Server session error"
+                val composed = if (!name.isNullOrBlank()) "$name: $rawMsg" else rawMsg
+                effects.uiEvents.tryEmit(UiEvent.Error(composed))
+                val sid = event.payload.getString("sessionID")
+                if (sid != null && sid == slices.chat.value.currentSessionId) {
+                    slices.chat.update { c ->
+                        val lastAssistant = c.messages.lastOrNull { it.isAssistant }
+                        if (lastAssistant == null || lastAssistant.error != null) c
+                        else c.copy(messages = c.messages.map { m ->
+                            if (m.id == lastAssistant.id) m.copy(error = Message.MessageError(name = name, data = data)) else m
+                        })
+                    }
+                }
+            }
+            else -> {
+                // §error-feedback (Issue 4): only warn about genuinely unknown event
+                // types. Types in NOISY_SSE_LOG_EVENTS (server.connected, plugin.added,
+                // catalog.updated, integration.updated, server.heartbeat) are known-
+                // intentional non-dispatched events, not surprises — skip the warning
+                // to avoid log noise on every reconnect.
+                if (!noisy) {
+                    DebugLog.w(tag, "Unhandled SSE event type: ${event.payload.type}")
+                }
             }
         }
     }

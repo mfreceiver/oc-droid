@@ -56,9 +56,6 @@ internal fun launchLoadMessages(
                 // writes between here and the slice update near the bottom of
                 // this block.
                 if (sessionId == slices.chat.value.currentSessionId) {
-                    val lastAssistant = page.items.lastOrNull { it.info.isAssistant }
-                    val inferredAgentName = lastAssistant?.info?.agent
-                    val agentName = settingsManager?.getAgentForSession(sessionId) ?: inferredAgentName
                     // §preserveUnfetched (mirrors opencode-web reconcileFetched):
                     // a periodic reload (resetLimit=false) fetches the latest
                     // window but must NOT erase already-loaded older history
@@ -104,7 +101,6 @@ internal fun launchLoadMessages(
                     val srcHasMore = slices.chat.value.hasMoreMessages
                     val srcGap = slices.chat.value.gapInfo
                     val srcSessionStatuses = slices.sessionList.value.sessionStatuses
-                    val srcSelectedAgent = slices.settings.value.selectedAgentName
 
                     val fetchedIds = page.items.map { m -> m.info.id }.toHashSet()
                     val oldestFetchedCreated = page.items
@@ -213,7 +209,6 @@ internal fun launchLoadMessages(
                     // another client (no local stored choice yet).
                     val newModel = settingsManager?.getModelForSession(sessionId)
                         ?: inferCurrentModel(mergedMessages)
-                    val newAgent = agentName ?: srcSelectedAgent
 
                     val beforeMergeSize = srcMessages.size
                     slices.chat.update { c ->
@@ -230,7 +225,13 @@ internal fun launchLoadMessages(
                         )
                     }
                     // selectedAgentName lives in the settings slice (cross-slice write).
-                    slices.settings.update { it.copy(selectedAgentName = newAgent) }
+                    // §bug3-defensive: only sync global selectedAgentName from history when the session
+                    // has an explicit per-session agent override; otherwise preserve the user's global
+                    // choice so opening an old session does not clobber their picker selection.
+                    val perSessionAgent = settingsManager?.getAgentForSession(sessionId)
+                    if (perSessionAgent != null) {
+                        slices.settings.update { it.copy(selectedAgentName = perSessionAgent) }
+                    }
                     DebugLog.d("Sync", "merged: before=$beforeMergeSize after=${mergedMessages.size}")
                     // §Per-session message cache (write): snapshot the freshly-
                     // merged window so a return trip restores it instantly.

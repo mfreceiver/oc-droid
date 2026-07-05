@@ -19,8 +19,8 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
@@ -143,7 +143,10 @@ internal fun ChatMessageList(
     // sessionId 在 remember key 里需要——提前取（下面 savedPositions 等也用）。
     val sessionId = chatState.currentSessionId
 
-    val listState = rememberLazyListState()
+    // §flicker-fix (Issue 1): key the LazyListState by sessionId so a fresh
+    // state is created on session change. Without the key, the pager reusing
+    // a slot for a different session kept the old scroll offset for one frame.
+    val listState = remember(sessionId) { LazyListState() }
     var followBottom by remember { mutableStateOf(true) }
     // §navfab-redesign: 单键"跳到最新"按钮的可见性。仅在用户"向新滑动"（从历史
     // 往最新方向滚）时浮现；按一次、到底部、或静置 3s 后隐藏（见下方各 effect）。
@@ -481,7 +484,13 @@ internal fun ChatMessageList(
             // with text=null returned by the server after a reload). The
             // streaming guard above robustly protects live turns whose
             // streamingPartTexts/reasoning are still filling in.
-            !msg.isUser && !isStreamingMsg && isEffectivelyRenderableEmpty(msgParts)
+            // §error-feedback (Issue 4): keep assistant messages carrying a
+            // non-blank error message so ErrorCard can render — without this
+            // an error-only turn (error set, no renderable parts) is filtered
+            // out and the user gets no in-app feedback for rate-limit/quota.
+            !msg.isUser && !isStreamingMsg &&
+                msg.error?.message.isNullOrBlank() &&
+                isEffectivelyRenderableEmpty(msgParts)
         }
     }
     val showGap = gapInfo != null && gapInfo.open

@@ -241,7 +241,7 @@ class AppCore @Inject constructor(
             is ControllerEffect.HostReconfigured -> foregroundCatchUpController.onHostReconfigured()
             is ControllerEffect.LoadSessions -> loadSessionsForEffect()
             is ControllerEffect.LoadAgents -> launchLoadAgents(appScope, repository, sliceFlows, settingsManager, TAG)
-            is ControllerEffect.LoadProviders -> launchLoadProviders(appScope, repository, _settingsFlow) { message, error ->
+            is ControllerEffect.LoadProviders -> launchLoadProviders(appScope, repository, _settingsFlow, settingsManager, hostProfileStore) { message, error ->
                 reportNonFatalIssue(TAG, message, error)
             }
             is ControllerEffect.LoadPendingPermissions -> launchLoadPendingPermissions(appScope, repository, sliceFlows, TAG)

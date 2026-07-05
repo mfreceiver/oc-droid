@@ -157,6 +157,12 @@ internal class HostProfileController(
         val isActiveHost = normalized.id == slices.host.value.currentHostProfileId
         val toggleChanged = previous?.allowInsecureConnections != normalized.allowInsecureConnections
         val urlChanged = previous?.serverUrl != normalized.serverUrl
+        if (isActiveHost && urlChanged) {
+            // §bug5: URL changed → deliberately drop old-URL model data so stale
+            // disable config does not leak / orphan. The HostProfileSwitched
+            // emission below reloads the (now-empty) set for the new URL.
+            previous?.serverUrl?.let { settingsManager.clearModelDataForUrl(it) }
+        }
         if (isActiveHost && (toggleChanged || urlChanged)) {
             configureRepositoryForProfile(normalized)
             effects.effects.tryEmit(ControllerEffect.ForceReconnect)
@@ -179,11 +185,19 @@ internal class HostProfileController(
      */
     fun deleteHostProfile(profileId: String) {
         val wasCurrent = profileId == slices.host.value.currentHostProfileId
+        // §bug5: capture the deleted profile's URL before the store mutation so
+        // we can purge its per-URL model data if it was the active host.
+        val deletedServerUrl = hostProfileStore.profiles()
+            .firstOrNull { it.id == profileId }?.serverUrl
         hostProfileStore.delete(profileId)
         val current = hostProfileStore.currentProfile()
         configureRepositoryForProfile(current)
         refreshHostProfileState()
         if (wasCurrent) {
+            // §bug5: drop the deleted active host's model data so it does not
+            // leak into the new active host's identity (same-URL collision or
+            // later re-add of an identical URL).
+            deletedServerUrl?.let { settingsManager.clearModelDataForUrl(it) }
             purgePerHostState()
             effects.effects.tryEmit(ControllerEffect.ForceReconnect)
             // §disabled-models-consistency: deleting the active host switches to
@@ -292,6 +306,16 @@ internal class HostProfileController(
      * probe. R-01: passes `allowInsecureConnections` from the current profile.
      */
     fun configureServer(url: String, username: String? = null, password: String? = null) {
+        val oldUrl = settingsManager.serverUrl
+        val urlChanging = oldUrl != url
+        if (urlChanging) {
+            // §bug5: manual URL change also clears old model data so the disable
+            // set does not orphan against an identity the user abandoned.
+            // HostProfileSwitched below reloads the (now-empty) set for the new
+            // URL — previously this path skipped the reload entirely, leaving
+            // the in-memory slice stale.
+            settingsManager.clearModelDataForUrl(oldUrl)
+        }
         effects.effects.tryEmit(ControllerEffect.CancelSseForReconfigure)
         settingsManager.serverUrl = url
         settingsManager.username = username
@@ -304,6 +328,9 @@ internal class HostProfileController(
         // #12: mirror the host's TLS trust policy into the markdown image
         // client (same as configureRepositoryForProfile).
         HttpImageHolder.updateSsl(allowInsecure)
+        if (urlChanging) {
+            effects.effects.tryEmit(ControllerEffect.HostProfileSwitched)
+        }
     }
 
     /**
