@@ -1,0 +1,31 @@
+{
+  "epic": "R-19",
+  "gate": "release (4-way final)",
+  "scope": "R-19 全程 3 sprint 累计 (新增评委: 实现批判/边界条件/配置一致性/性能/语义 bug)",
+  "date": "2026-07-06",
+  "reviewer": "kimo",
+  "session": "ses_0c88d47aaffe6KgcMPKweEFT6B",
+  "final_score": 9.5,
+  "verdict": "PASS",
+  "scores": { "实现批判/边界条件": 9.5, "配置一致性": 9.0, "性能/安全": 9.5, "语义正确性": 9.5 },
+  "open_questions_judged": [
+    "P2-4 .first 丢弃 .second: 不阻塞 (当前全 emptyList 行为等价, 无 effects 被吞); 是与计划 CAS 模式的偏差, 发版后跟踪",
+    "AppCore collector 依赖 OrchestratorVM: 代码中无显式体现, 可能 P2-5 重构中已消解, 建议执行者确认"
+  ],
+  "verified": [
+    "P1-10 reconcileGap 4 场景 + Blocker 2/3 回归覆盖充分",
+    "#9 isActive 守卫位置正确 (entry + resolve 后)",
+    "P2-4 边界无并发风险 (Main.immediate 单线程)",
+    "ControllerModule wiring 与旧 AppCore 等价",
+    "emptyList 单例 + Pair 分配无实质开销",
+    "applyMessageUpdated Pair<State,Boolean> 例外合理 (日志诊断)"
+  ],
+  "r20_recommendations": [
+    "P2-4 .first 模式: 补齐 CAS 收集 或 评估简化签名 (去 Pair)",
+    "ControllerModule KDoc 修正 (controllers 已 public class 非 internal)",
+    "SessionViewModel.loadSessions 与 AppCore.loadSessionsForEffect 统一 (避免双维护 drift)",
+    "Hilt primary 注入路径补 smoke test (当前仅 secondary ctor 测)",
+    "#9 补 VM clear 后回调回归测试"
+  ],
+  "release_approval": "PASS (9.5), 无阻塞发版缺陷"
+}

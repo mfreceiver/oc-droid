@@ -222,6 +222,9 @@
     <string name="debug_log_level_all">All</string>
     <string name="debug_log_empty">(no logs yet)</string>
     <string name="debug_log_empty_filtered">(no logs under current filter)</string>
+    <string name="debug_effect_bus_dropped_title">Effect Bus Dropped</string>
+    <string name="debug_sse_unknown_events_title">SSE Unknown Events</string>
+    <string name="debug_diagnostics_none">None</string>
     <string name="chat_load_more_history">Load more history</string>
     <string name="chat_loading">Loading…</string>
     <string name="chat_no_messages">No messages yet</string>

@@ -52,9 +52,6 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.hilt.navigation.compose.hiltViewModel
 import cn.vectory.ocdroid.R
-import cn.vectory.ocdroid.data.model.Message
-import cn.vectory.ocdroid.data.model.Part
-import cn.vectory.ocdroid.data.model.SessionStatus
 import cn.vectory.ocdroid.ui.resolveMessage
 import cn.vectory.ocdroid.ui.files.FilesScreen
 import cn.vectory.ocdroid.ui.files.FilesViewModel
@@ -933,83 +930,9 @@ private fun BoxScope.ThinkingCapsuleOverlay(
     }
 }
 
-private data class CurrentSessionActivity(
-    val text: String,
-    val startedAtMillis: Long?,
-)
-
-private fun currentSessionActivity(
-    sessionId: String?,
-    status: SessionStatus?,
-    messages: List<Message>,
-    partsByMessage: Map<String, List<Part>>,
-    streamingReasoningPart: Part?,
-    streamingPartTexts: Map<String, String>,
-): CurrentSessionActivity? {
-    val sid = sessionId ?: return null
-    val startedAt = messages.lastOrNull { it.sessionId == sid && it.isUser }?.time?.created
-    val text = bestSessionActivityText(sid, status, messages, partsByMessage, streamingReasoningPart, streamingPartTexts)
-    return CurrentSessionActivity(text = text, startedAtMillis = startedAt)
-}
-
-private fun bestSessionActivityText(
-    sessionId: String,
-    status: SessionStatus?,
-    messages: List<Message>,
-    partsByMessage: Map<String, List<Part>>,
-    streamingReasoningPart: Part?,
-    streamingPartTexts: Map<String, String>,
-): String {
-    status?.message?.trim()?.takeIf { it.isNotEmpty() }?.let { return it }
-
-    messages.asReversed().forEach { message ->
-        if (message.sessionId != sessionId) return@forEach
-        (partsByMessage[message.id] ?: emptyList()).asReversed()
-            .firstOrNull { it.isTool && it.stateDisplay == "running" }
-            ?.let { part -> formatStatusFromPart(part)?.let { return it } }
-    }
-
-    if (streamingReasoningPart?.sessionId == sessionId) {
-        val key = streamingReasoningPart.id
-        return formatThinkingFromReasoningText(streamingPartTexts[key].orEmpty())
-    }
-
-    messages.asReversed().forEach { message ->
-        if (message.sessionId != sessionId) return@forEach
-        (partsByMessage[message.id] ?: emptyList()).asReversed().firstOrNull()?.let { part ->
-            formatStatusFromPart(part)?.let { return it }
-        }
-    }
-
-    return status?.takeIf { it.isRetry }?.let { "Retrying" } ?: "Thinking"
-}
-
-private fun formatStatusFromPart(part: Part): String? {
-    if (part.isTool) {
-        val base = when (part.tool) {
-            "task" -> "Delegating"
-            "todowrite", "todoread" -> "Planning"
-            "read" -> "Gathering context"
-            "list", "grep", "glob" -> "Searching codebase"
-            "webfetch" -> "Searching web"
-            "edit", "write" -> "Making edits"
-            "bash" -> "Running commands"
-            else -> null
-        }
-        val topic = (part.toolReason ?: part.toolInputSummary)?.trim()?.takeIf { it.isNotEmpty() }
-        return when {
-            base != null && topic != null -> "$base - $topic"
-            base != null -> base
-            else -> null
-        }
-    }
-
-    if (part.isReasoning) return formatThinkingFromReasoningText(part.text.orEmpty())
-    if (part.isText) return "Gathering thoughts"
-    return null
-}
-
-private fun formatThinkingFromReasoningText(text: String): String {
-    val topic = Regex("^\\*\\*([^*]+)\\*\\*").find(text.trim())?.groupValues?.getOrNull(1)?.trim()
-    return if (!topic.isNullOrEmpty()) "Thinking - $topic" else "Thinking"
-}
+// §R-19 Sprint 2 #7(b): the four session-activity helpers + the
+// CurrentSessionActivity data class were lifted verbatim into the top-level
+// pure-functions file ChatActivityHelpers.kt (same package) so they can be
+// covered by JVM unit tests (this file is excluded from kover coverage as a
+// @Composable-heavy screen — see PickerProviderFilter.kt for the same
+// extraction pattern).

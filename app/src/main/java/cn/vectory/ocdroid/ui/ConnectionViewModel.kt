@@ -2,6 +2,10 @@ package cn.vectory.ocdroid.ui
 
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import cn.vectory.ocdroid.data.repository.OpenCodeRepository
+import cn.vectory.ocdroid.ui.controller.ConnectionCoordinator
+import cn.vectory.ocdroid.util.SettingsManager
+import cn.vectory.ocdroid.util.TrafficTracker
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.launch
 import javax.inject.Inject
@@ -11,8 +15,8 @@ import javax.inject.Inject
  * slice + the health-probe / SSE / cold-start-reconnect lifecycle.
  *
  * **batch3d**: method bodies physically moved here from [AppCore]. The VM
- * calls its domain controller ([AppCore.connectionCoordinator]) directly —
- * no `core.<method>()` self-bypass. The `testConnectionForm` body (which
+ * calls its domain controller ([ConnectionCoordinator]) directly — no
+ * `core.<method>()` self-bypass. The `testConnectionForm` body (which
  * resolves the password + runs the repository health check) lives here now.
  *
  * §R18 Phase 3 Wave 3 (P2-6): the traffic role (refresh / reset counters)
@@ -21,24 +25,49 @@ import javax.inject.Inject
  * the connection slice; consolidating it here drops one more responsibility
  * from the overloaded [OrchestratorViewModel]. Pure relocation — zero
  * behaviour change.
+ *
+ * §R-19 Sprint 3 P2-5: this VM no longer injects [AppCore]. Its precise
+ * dependency surface is the connection / settings / host / traffic slices
+ * ([SharedStateStore]) + [ConnectionCoordinator] + [SettingsManager] (the
+ * basicAuthPassword helper used by testConnectionForm) +
+ * [OpenCodeRepository] (the health probe) + [TrafficTracker] (the running
+ * byte counter snapshotted into [trafficFlow]). The VM cannot reach any
+ * other slice/controller.
  */
 @HiltViewModel
 class ConnectionViewModel @Inject constructor(
-    internal val core: AppCore,
+    private val store: SharedStateStore,
+    private val connectionCoordinator: ConnectionCoordinator,
+    private val settingsManager: SettingsManager,
+    private val repository: OpenCodeRepository,
+    private val trafficTracker: TrafficTracker,
 ) : ViewModel() {
 
-    val connectionFlow get() = core.connectionFlow
-    val settingsFlow get() = core.settingsFlow
-    val hostFlow get() = core.hostFlow
+    /**
+     * §R-19 P2-5 test-only convenience constructor — see
+     * [SettingsViewModel.secondary constructor] rationale. Forwards the same
+     * deps the production Hilt binding uses.
+     */
+    internal constructor(core: AppCore) : this(
+        core.store,
+        core.connectionCoordinator,
+        core.settingsManager,
+        core.repository,
+        core.trafficTracker,
+    )
+
+    val connectionFlow get() = store.connectionFlow
+    val settingsFlow get() = store.settingsFlow
+    val hostFlow get() = store.hostFlow
 
     /** §P2-6: traffic slice read accessor (moved from [OrchestratorViewModel]).
      *  Same authoritative slice every other VM exposes (all delegate to
      *  [SharedStateStore]); kept here so SettingsScreen + ChatScreen read
      *  traffic off the connection VM. */
-    val trafficFlow get() = core.trafficFlow
+    val trafficFlow get() = store.trafficFlow
 
     fun testConnection(force: Boolean = false, retries: Int = 0, onSettled: ((Boolean) -> Unit)? = null) {
-        core.connectionCoordinator.testConnection(force = force, retries = retries, onSettled = onSettled)
+        connectionCoordinator.testConnection(force = force, retries = retries, onSettled = onSettled)
     }
 
     fun testConnectionForm(
@@ -59,8 +88,8 @@ class ConnectionViewModel @Inject constructor(
         viewModelScope.launch {
             val effectivePassword = resolveTestConnectionPassword(
                 password, passwordEdited, profileId,
-            ) { core.settingsManager.basicAuthPassword(it) }
-            val result = core.repository.checkHealthFor(baseUrl, username, effectivePassword, allowInsecure)
+            ) { settingsManager.basicAuthPassword(it) }
+            val result = repository.checkHealthFor(baseUrl, username, effectivePassword, allowInsecure)
             result
                 .onSuccess { health ->
                     if (health.healthy) {
@@ -74,7 +103,7 @@ class ConnectionViewModel @Inject constructor(
         }
     }
 
-    fun coldStartReconnect() = core.connectionCoordinator.coldStartReconnect()
+    fun coldStartReconnect() = connectionCoordinator.coldStartReconnect()
 
     // ── Traffic (§P2-6: moved from OrchestratorViewModel) ───────────────────
 
@@ -82,10 +111,10 @@ class ConnectionViewModel @Inject constructor(
      *  displays the current cumulative byte counts. The tracker keeps
      *  accumulating regardless; this just syncs the snapshot for display. */
     fun refreshTrafficStats() {
-        core.writeTraffic {
+        store.mutateTraffic {
             it.copy(
-                trafficSent = core.trafficTracker.totalBytesSent,
-                trafficReceived = core.trafficTracker.totalBytesReceived,
+                trafficSent = trafficTracker.totalBytesSent,
+                trafficReceived = trafficTracker.totalBytesReceived,
             )
         }
     }
@@ -93,17 +122,17 @@ class ConnectionViewModel @Inject constructor(
     /** Zeroes the tracker's running totals then snapshots them into
      *  [trafficFlow] so the displayed counters reset to 0. */
     fun resetTrafficStats() {
-        core.trafficTracker.reset()
+        trafficTracker.reset()
         refreshTrafficStats()
     }
 
-    fun startSSE() = core.connectionCoordinator.startSSE()
+    fun startSSE() = connectionCoordinator.startSSE()
 
-    fun cancelSse() { core.connectionCoordinator.cancelSse() }
+    fun cancelSse() { connectionCoordinator.cancelSse() }
 
-    fun cancelSseForReconfigure() { core.connectionCoordinator.cancelSseForReconfigure() }
+    fun cancelSseForReconfigure() { connectionCoordinator.cancelSseForReconfigure() }
 
     /** Connection-driven initial data fetch (sessions/agents/providers/...).
      *  Routes through the connection coordinator which owns the fan-out. */
-    fun loadInitialData() = core.connectionCoordinator.loadInitialData()
+    fun loadInitialData() = connectionCoordinator.loadInitialData()
 }

@@ -46,7 +46,7 @@ import cn.vectory.ocdroid.util.SettingsManager
  * RFC reference: R-16 §E / §M2.
  */
 @Suppress("DEPRECATION")
-internal class SessionSwitcher(
+class SessionSwitcher(
     private val store: SharedStateStore,
     private val settingsManager: SettingsManager,
     private val repository: OpenCodeRepository,

@@ -1,0 +1,145 @@
+package cn.vectory.ocdroid.di
+
+import cn.vectory.ocdroid.data.repository.HostProfileStore
+import cn.vectory.ocdroid.data.repository.OpenCodeRepository
+import cn.vectory.ocdroid.data.repository.ServerCompatProfile
+import cn.vectory.ocdroid.ui.SharedEffectBus
+import cn.vectory.ocdroid.ui.SharedStateStore
+import cn.vectory.ocdroid.ui.controller.ComposerController
+import cn.vectory.ocdroid.ui.controller.ConnectionCoordinator
+import cn.vectory.ocdroid.ui.controller.ForegroundCatchUpController
+import cn.vectory.ocdroid.ui.controller.HostProfileController
+import cn.vectory.ocdroid.ui.controller.SessionSwitcher
+import cn.vectory.ocdroid.ui.controller.SessionSyncCoordinator
+import cn.vectory.ocdroid.util.SettingsManager
+import cn.vectory.ocdroid.util.TrafficTracker
+import dagger.Module
+import dagger.Provides
+import dagger.hilt.InstallIn
+import dagger.hilt.components.SingletonComponent
+import kotlinx.coroutines.CoroutineScope
+import javax.inject.Singleton
+
+/**
+ * R-19 Sprint 3 P2-5: Hilt bindings for the 5 application-scoped controllers.
+ *
+ * **Why @Provides (not `@Inject constructor` on each controller)**: the
+ * controllers are declared `internal class` to keep them module-private
+ * (they are implementation details of the `ui` package, not part of the
+ * app's public API surface). Kotlin `internal` classes compile to
+ * `public` bytecode but Dagger/Hilt's `@Inject constructor` is documented
+ * to require a genuinely `public` Kotlin class — using `@Provides` here
+ * keeps the `internal` visibility while still giving Hilt a binding to
+ * hand out.
+ *
+ * **Why @Singleton (not VM-scoped)**: the 5 controllers own app-lifetime
+ * state (SSE feeds, delta buffers, the foreground catch-up state machine,
+ * the host profile + tunnel credential cache). They MUST outlive any
+ * individual ViewModel (which is cleared on configuration changes /
+ * navigation). AppCore itself remains a @Singleton and continues to inject
+ * these — it just no longer constructs them internally, so the 5
+ * controllers can ALSO be injected directly into the per-domain VMs
+ * (R-19 P2-5 precise injection) without creating duplicates.
+ *
+ * Each provider is a thin pass-through that wires the same deps the
+ * previous inline `XxxController(...)` construction inside
+ * [cn.vectory.ocdroid.ui.AppCore] used — pure DI relocation, zero behaviour
+ * change. The [UiApplicationScope] (Main.immediate) is shared with AppCore
+ * so the controllers' launches stay on the same dispatcher they always did.
+ */
+@Module
+@InstallIn(SingletonComponent::class)
+object ControllerModule {
+
+    @Provides
+    @Singleton
+    fun provideForegroundCatchUpController(
+        appLifecycleMonitor: AppLifecycleMonitor,
+        @UiApplicationScope appScope: CoroutineScope,
+        store: SharedStateStore,
+        settingsManager: SettingsManager,
+        effectBus: SharedEffectBus,
+    ): ForegroundCatchUpController = ForegroundCatchUpController(
+        appLifecycleMonitor = appLifecycleMonitor,
+        scope = appScope,
+        store = store,
+        settingsManager = settingsManager,
+        effects = effectBus,
+    )
+
+    @Provides
+    @Singleton
+    fun provideComposerController(
+        store: SharedStateStore,
+        settingsManager: SettingsManager,
+    ): ComposerController = ComposerController(
+        store = store,
+        settingsManager = settingsManager,
+    )
+
+    @Provides
+    @Singleton
+    fun provideSessionSwitcher(
+        store: SharedStateStore,
+        settingsManager: SettingsManager,
+        repository: OpenCodeRepository,
+        effectBus: SharedEffectBus,
+    ): SessionSwitcher = SessionSwitcher(
+        store = store,
+        settingsManager = settingsManager,
+        repository = repository,
+        effects = effectBus,
+    )
+
+    @Provides
+    @Singleton
+    fun provideHostProfileController(
+        @UiApplicationScope appScope: CoroutineScope,
+        store: SharedStateStore,
+        hostProfileStore: HostProfileStore,
+        repository: OpenCodeRepository,
+        settingsManager: SettingsManager,
+        trafficTracker: TrafficTracker,
+        effectBus: SharedEffectBus,
+    ): HostProfileController = HostProfileController(
+        scope = appScope,
+        slices = store.slices,
+        hostProfileStore = hostProfileStore,
+        repository = repository,
+        settingsManager = settingsManager,
+        trafficTracker = trafficTracker,
+        effects = effectBus,
+    )
+
+    @Provides
+    @Singleton
+    fun provideSessionSyncCoordinator(
+        @UiApplicationScope appScope: CoroutineScope,
+        store: SharedStateStore,
+        settingsManager: SettingsManager,
+        effectBus: SharedEffectBus,
+    ): SessionSyncCoordinator = SessionSyncCoordinator(
+        scope = appScope,
+        slices = store.slices,
+        settingsManager = settingsManager,
+        effects = effectBus,
+    )
+
+    @Provides
+    @Singleton
+    fun provideConnectionCoordinator(
+        @UiApplicationScope appScope: CoroutineScope,
+        store: SharedStateStore,
+        repository: OpenCodeRepository,
+        settingsManager: SettingsManager,
+        effectBus: SharedEffectBus,
+        serverCompatProfile: ServerCompatProfile,
+    ): ConnectionCoordinator = ConnectionCoordinator(
+        scope = appScope,
+        slices = store.slices,
+        repository = repository,
+        settingsManager = settingsManager,
+        effects = effectBus,
+        serverCompatProfile = serverCompatProfile,
+    )
+}

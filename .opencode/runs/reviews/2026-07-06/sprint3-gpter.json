@@ -1,0 +1,21 @@
+{
+  "epic": "R-19",
+  "sprint": 3,
+  "scope": "深度架构 (P2-4 SSE reducer Pair / P2-5 VM 精确注入 + DI 图 / #9 闭包 isActive 守卫)",
+  "date": "2026-07-06",
+  "reviewer": "gpter",
+  "session": "ses_0ca18a403ffe3d56qfyl0Us4Fz",
+  "final_score": 9.5,
+  "verdict": "PASS",
+  "scores": { "P2-4 Pair 设计": 9.2, "P2-4 CAS/副作用正确性": 9.4, "P2-5 DI 完整性": 9.6, "#9 守卫充分性": 9.4, "架构一致性": 9.5, "风险控制": 9.5 },
+  "non_blocking_notes": [
+    "🟠 P2-4 dispatcher 目前忽略 Pair.second (.first 丢弃 effects)，未来易踩坑；建议统一收集 effects 或约束 applyXxx 永远 emptyList",
+    "🟠 AppCore effect collector 依赖 OrchestratorViewModel 被根 Composable 创建（当前 OK，未来若移除根 Orchestrator 需 eager init）",
+    "🟡 ControllerModule 注释仍说 internal 但实际已 public class",
+    "🟡 #9 onFailure 分支可对称加 isActive 守卫",
+    "🟡 P2-4 可加测试 pin 所有 applyXxx().second 为空或 dispatcher 应用 returned effects"
+  ],
+  "test_count": 1848,
+  "coverage_floor": { "line": 60, "branch": 56, "instruction": 52 },
+  "hilt_ksp": "rerun-tasks 验证 DI 图完整"
+}

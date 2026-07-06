@@ -1,0 +1,17 @@
+{
+  "epic": "R-19",
+  "gate": "release (4-way final)",
+  "scope": "R-19 全程 3 sprint 累计 (45 文件 +5146/-816, 基线 R-18 b119517)",
+  "date": "2026-07-06",
+  "reviewer": "gpter",
+  "session": "ses_0ca18a403ffe3d56qfyl0Us4Fz",
+  "final_score": 9.6,
+  "verdict": "PASS (可发版)",
+  "scores": { "跨 sprint 集成一致性": 9.6, "SSE gap + reducer 共存": 9.5, "dispatcher + DI 迁移一致性": 9.6, "测试与覆盖率可信度": 9.7, "发版风险控制": 9.5 },
+  "open_questions_judged": [
+    "P2-4 .first 丢弃 .second: 不阻塞 (当前全 emptyList, 未来维护风险非当前 bug)",
+    "AppCore collector 依赖 OrchestratorVM 创建: 不阻塞 (当前 MainActivity 路径成立)"
+  ],
+  "release_approval": "可执行 ./scripts/release.sh patch (0.4.1→0.4.2)",
+  "sprint_scores": { "S1": 9.5, "S2": 9.6, "S3": 9.5 }
+}

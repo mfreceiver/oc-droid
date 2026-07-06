@@ -35,14 +35,12 @@ import javax.inject.Singleton
  *    dropping the oldest is preferable to suspending the producer (which
  *    could stall SSE collection on a toast storm).
  *
- * §back-compat deviation: `uiEvents` is kept typed as [MutableSharedFlow]
- * (not downgraded to a read-only [SharedFlow] as the literal spec proposed)
- * because many out-of-scope callers (`SessionViewModel` /
- * `OrchestratorViewModel` / `AppCoreOrchestration` / `ChatViewModel`) still
- * write through `effectBus.uiEvents.tryEmit(...)`. The new
- * [tryEmitUiEvent] / [emitUiEvent] wrappers are the preferred API for
- * in-scope controllers; existing out-of-scope callsites keep compiling
- * unchanged.
+ * §R-19 Sprint 1 Lane B: `uiEvents` is now exposed as a read-only
+ * [SharedFlow] (backed by `_uiEvents.asSharedFlow()`). All producers write
+ * through the [tryEmitUiEvent] / [emitUiEvent] wrappers — never through the
+ * mutable backing field. The legacy `uiEventsConsumed` alias is kept (it
+ * predates the downgrade and is still read by [cn.vectory.ocdroid.ui.AppCore]
+ * + several controller tests); it now points at the same read-only view.
  */
 @Singleton
 class SharedEffectBus @Inject constructor() {
@@ -56,14 +54,15 @@ class SharedEffectBus @Inject constructor() {
     val effectsConsumed: SharedFlow<ControllerEffect> get() = effects
 
     // UI 事件：可丢 (DROP_OLDEST 显式声明，UI feedback 是 ephemeral)。
-    // §back-compat: kept as MutableSharedFlow so out-of-scope
-    // `effectBus.uiEvents.tryEmit(...)` callsites still compile.
+    // §R-19 Sprint 1 Lane B: 只读暴露 — producers 必须走 tryEmitUiEvent /
+    // emitUiEvent wrapper，不再直接持有 MutableSharedFlow。
     private val _uiEvents = MutableSharedFlow<UiEvent>(
         extraBufferCapacity = 64,
         onBufferOverflow = BufferOverflow.DROP_OLDEST
     )
-    val uiEvents: MutableSharedFlow<UiEvent> = _uiEvents
-    val uiEventsConsumed: SharedFlow<UiEvent> = _uiEvents.asSharedFlow()
+    val uiEvents: SharedFlow<UiEvent> = _uiEvents.asSharedFlow()
+    /** §back-compat alias: existing tests + [cn.vectory.ocdroid.ui.AppCore] read this name; keep it. */
+    val uiEventsConsumed: SharedFlow<UiEvent> get() = uiEvents
 
     private val droppedEffects = java.util.concurrent.atomic.AtomicLong(0)
 

@@ -235,8 +235,10 @@ kover {
                 // 注：MainActivity/OpenCodeApp/Hilt 注入器已在本 filters.excludes 排除，
                 // 不在此清单内。继续纯 unit-test 估计可达 ~62-68%；80% 需 androidTest +
                 // Compose UI test（R19 epic）。
-                minBound(55, kotlinx.kover.gradle.plugin.dsl.CoverageUnit.LINE, kotlinx.kover.gradle.plugin.dsl.AggregationType.COVERED_PERCENTAGE)
-                minBound(52, kotlinx.kover.gradle.plugin.dsl.CoverageUnit.BRANCH, kotlinx.kover.gradle.plugin.dsl.AggregationType.COVERED_PERCENTAGE)
+                // R-19 Sprint 2: floor raised 55/52/52 -> 60/56/52 after P2-2 dispatcher
+                // routing tests + #7(b) helper extraction pushed unit-testable to 61.4/57.8.
+                minBound(60, kotlinx.kover.gradle.plugin.dsl.CoverageUnit.LINE, kotlinx.kover.gradle.plugin.dsl.AggregationType.COVERED_PERCENTAGE)
+                minBound(56, kotlinx.kover.gradle.plugin.dsl.CoverageUnit.BRANCH, kotlinx.kover.gradle.plugin.dsl.AggregationType.COVERED_PERCENTAGE)
                 minBound(52, kotlinx.kover.gradle.plugin.dsl.CoverageUnit.INSTRUCTION, kotlinx.kover.gradle.plugin.dsl.AggregationType.COVERED_PERCENTAGE)
             }
         }

@@ -39,7 +39,7 @@ import kotlinx.coroutines.launch
  *
  * RFC R-16 §C / §M1. Zero behaviour change vs the pre-extraction logic.
  */
-internal class ForegroundCatchUpController(
+class ForegroundCatchUpController(
     private val appLifecycleMonitor: AppLifecycleMonitor,
     private val scope: CoroutineScope,
     private val store: SharedStateStore,

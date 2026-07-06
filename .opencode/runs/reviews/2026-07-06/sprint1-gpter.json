@@ -1,0 +1,23 @@
+{
+  "epic": "R-19",
+  "sprint": 1,
+  "scope": "可靠性 + 收敛 (P1-10 SSE gap 状态机 / #2 currentWorkdir 语义 / #3 uiEvents 收敛 / #8 counter UI / #10 isConnecting)",
+  "date": "2026-07-06",
+  "reviewer": "gpter",
+  "session": "ses_0ca18a403ffe3d56qfyl0Us4Fz",
+  "rounds": 3,
+  "final_score": 9.5,
+  "verdict": "PASS",
+  "scores": { "正确性": 9.5, "并发安全": 9.4, "架构一致性": 9.5, "测试充分性": 9.6, "风险控制": 9.4 },
+  "blockers_resolved": [
+    "Blocker 1: hostGeneration stale-guard 生产路径无效 → RESOLVED (CC forwarding 层 directoryFetchGeneration drop stale-host events)",
+    "Blocker 2: sessionsDirty 单调累积误吞未来 idle reload → RESOLVED (移除 idle-dedup，依赖调度层 isLoadingMessages + 400ms debounce coalescing)",
+    "Blocker 3: 网络断线 retry 未进 Disconnected 状态机 → RESOLVED (reconcileGap ServerConnected 冷启动后始终重调)"
+  ],
+  "non_blocking_notes": [
+    "🟠 sessionsDirty 作为 RefreshSessions 标记仍只增不减，可能导致重复 LoadSessions (性能/冗余 I/O，非正确性阻塞) — 建议首次使用后清空已处理 dirty sessions",
+    "🟠 注释中 '400ms debounce' 对 ControllerEffect.LoadMessages 直接路径描述略不准 (实际主要靠同步 isLoadingMessages check-and-set)"
+  ],
+  "test_count": 1723,
+  "coverage": { "line": "60.4%", "branch": "56.6%", "instruction": "55.2%" }
+}

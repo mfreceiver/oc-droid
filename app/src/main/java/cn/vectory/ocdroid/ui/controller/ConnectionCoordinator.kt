@@ -69,7 +69,7 @@ import java.util.Locale
  * RFC reference: R-16 §A / §M4. Zero behaviour change.
  */
 @Suppress("DEPRECATION")
-internal class ConnectionCoordinator(
+class ConnectionCoordinator(
     private val scope: CoroutineScope,
     private val slices: SliceFlows,
     private val repository: OpenCodeRepository,
@@ -89,13 +89,27 @@ internal class ConnectionCoordinator(
 
     /**
      * §generation-guard: bumped on every [cancelSseForReconfigure] (host/profile
-     * switch or manual reconfigure). [loadInitialData] captures this value and
-     * discards directory-fetch results that return AFTER a reconfigure — their
-     * sessions belong to the previous host and would otherwise pollute the new
-     * host's directorySessions. The fan-out in [loadInitialData] (up to one
-     * launch per recent workdir) amplifies this in-flight window, hence the
-     * explicit guard. Reads/writes are on the main thread (reconfigure +
-     * loadInitialData both run there); AtomicLong is belt-and-suspenders.
+     * switch or manual reconfigure). Two consumers:
+     *
+     *  1. [loadInitialData] captures this value and discards directory-fetch
+     *     results that return AFTER a reconfigure — their sessions belong to
+     *     the previous host and would otherwise pollute the new host's
+     *     directorySessions. The fan-out in [loadInitialData] (up to one
+     *     launch per recent workdir) amplifies this in-flight window, hence
+     *     the explicit guard.
+     *
+     *  2. §R-19 Sprint 1 Lane A (P1-10 fix Blocker 1): [launchSseCollection]
+     *     captures this value at coroutine start ([sseGenAtStart]) and
+     *     re-checks per collected event. A mismatch means the host was
+     *     reconfigured away mid-collection; further events from THIS job
+     *     belong to the previous host and are dropped at the forwarding layer
+     *     (never become [ControllerEffect.OnSseEvent]s). This is the
+     *     production-grade stale-host guard that closes the race the
+     *     SessionSyncCoordinator's own trigger-stamped generation could not.
+     *
+     * Reads/writes are on the main thread (reconfigure + loadInitialData +
+     * launchSseCollection's collect lambda all run there); AtomicLong is
+     * belt-and-suspenders.
      */
     private val directoryFetchGeneration = java.util.concurrent.atomic.AtomicLong(0L)
 
@@ -219,7 +233,7 @@ internal class ConnectionCoordinator(
                         // emitted before phase flips to "disconnected" — both
                         // still describe the same failure).
                         healthResult.exceptionOrNull()?.let { e ->
-                            effects.uiEvents.tryEmit(UiEvent.Error(R.string.error_connection_failed, listOf(errorMessageOrFallback(e, "unknown error"))))
+                            effects.tryEmitUiEvent(UiEvent.Error(R.string.error_connection_failed, listOf(errorMessageOrFallback(e, "unknown error"))))
                         }
                         writeConnection {
                             it.copy(
@@ -303,6 +317,14 @@ internal class ConnectionCoordinator(
         // restoring only currentWorkdir lost every other project whose
         // sessions fell outside the global getSessions(limit) first page (the
         // "one of my frequent projects randomly disappeared" bug).
+        //
+        // §R-19 #2 catch-up contract: this fan-out is what makes the single-SSE
+        // model safe for multi-workdir — it populates directorySessions.keys
+        // for every recent workdir, which
+        // SessionSyncCoordinator.loadPendingQuestionsAllWorkdirs then reads to
+        // poll pending questions/permissions for BACKGROUND workdirs (the SSE
+        // only feeds currentWorkdir). Skipping this fan-out would silently
+        // drop pending questions for any workdir that isn't currently active.
         val restoreWorkdirs = (
             settingsManager.recentWorkdirs + listOfNotNull(settingsManager.currentWorkdir)
         ).distinct().filter { it.isNotBlank() }
@@ -406,6 +428,43 @@ internal class ConnectionCoordinator(
      *
      * Verbatim move of the `startSSE` body + the inlined `launchSseCollection`
      * free function.
+     *
+     * §R-19 #2 — single-SSE product decision (documented):
+     * OC Droid runs **exactly one** SSE connection at a time, bound to
+     * [SettingsManager.currentWorkdir] (see [launchSseCollection]). There is
+     * **no per-workdir SSE multiplex**. Multi-workdir correctness is recovered
+     * by catch-up instead of by parallel feeds:
+     *
+     *   (a) [SessionSyncCoordinator.loadPendingQuestionsAllWorkdirs] polls
+     *       pending questions/permissions across EVERY workdir in
+     *       `slices.sessionList.directorySessions.keys` + `currentWorkdir`,
+     *       so a `question.asked` SSE event for a non-current (background)
+     *       workdir is still surfaced (R-18 P1-9). The directory map those
+     *       keys come from is populated by THIS coordinator's [loadInitialData]
+     *       fan-out — the catch-up contract therefore depends on that fan-out
+     *       running on every healthy connect.
+     *   (b) [ForegroundCatchUpController] re-syncs the 15s/5min foreground
+     *       gap on app return (no SSE is collected while backgrounded).
+     *   (c) The session-switch path emits `LoadMessages(resetLimit=true)` to
+     *       rehydrate the freshly-selected session's history, so a workdir
+     *       that has never held the SSE feed still catches up on first view.
+     *
+     * Rationale: a multi-feed SSE redesign (one collector per
+     * [SettingsManager.recentWorkdirs]) is a large change — server-side
+     * routing, backpressure on N collectors, per-feed cancel/reconfigure
+     * fan-out, and a per-feed generation guard — for marginal benefit because
+     * the catch-up path above is already production-verified. The single-feed
+     * model keeps the connection lifecycle in one place ([sseJob] +
+     * [cancelSseForReconfigure]'s [directoryFetchGeneration] guard).
+     *
+     * **Invariant for tests**: [launchSseCollection] reads
+     * `settingsManager.currentWorkdir` **fresh** at collection start; it is
+     * NOT captured at construction or at first connect. A workdir switch must
+     * call [startSSE] again to retarget the feed — the session-switch /
+     * host-switch paths already do this. Boundary cases covered in
+     * [ConnectionCoordinatorTest]: workdir retarget on switch, background-
+     * workdir directory fan-out (the catch-up precondition), and reconnect
+     * consistency (no currentWorkdir drift across cancel → restart).
      */
     fun startSSE() {
         DebugLog.i("SSE", "startSSE")
@@ -421,7 +480,21 @@ internal class ConnectionCoordinator(
      * a UiEvent.Error via [effects.uiEvents] so the UI can surface a
      * "messages may be stale" banner.
      *
-     * Verbatim move of the `launchSseCollection` free function.
+     * §R-19 Sprint 1 Lane A fix (gpter Blocker 1): the per-event
+     * [directoryFetchGeneration] check is the production-grade stale-host
+     * guard. The generation is captured at coroutine start ([sseGenAtStart])
+     * and re-checked per collected event; a mismatch means a host reconfigure
+     * ([cancelSseForReconfigure] bumped [directoryFetchGeneration]) landed
+     * while this job was still collecting — any further events from THIS job
+     * belong to the PREVIOUS host and are silently dropped (return@collect)
+     * rather than forwarded as [ControllerEffect.OnSseEvent]. This closes the
+     * race that the SessionSyncCoordinator's own generation guard could NOT
+     * close (it stamped triggers with the CURRENT generation at consume time,
+     * so a late event from the previous host arrived carrying the new
+     * generation and was treated as a cold-start of the new host).
+     *
+     * Verbatim move of the `launchSseCollection` free function, plus the
+     * per-event generation check.
      */
     private fun launchSseCollection(): Job {
         return scope.launch {
@@ -429,12 +502,39 @@ internal class ConnectionCoordinator(
             // SSE routes to the right InstanceState. Was the global
             // currentDirectory before; behavior preserved (switchTo still
             // seeds settingsManager.currentWorkdir on session select).
+            //
+            // §R-19 #2: this is the ONLY SSE connection in the app — bound to
+            // settingsManager.currentWorkdir (single-feed product decision;
+            // see [startSSE] KDoc for the multi-workdir catch-up rationale).
+            // currentWorkdir is read FRESH here on every collection start so a
+            // workdir switch + new startSSE() retargets the feed (no cached
+            // value to drift across reconnect).
+            //
+            // §R-19 P1-10 Blocker 1 fix: capture the generation at coroutine
+            // start so per-event re-check can detect a host reconfigure that
+            // happened mid-collection.
+            val sseGenAtStart = directoryFetchGeneration.get()
             repository.connectSSE(settingsManager.currentWorkdir)
                 .catch { error ->
                     Log.e("OC_ERROR", "SSE collection failed", error)
-                    effects.uiEvents.tryEmit(UiEvent.Error(R.string.error_sse_failed, listOf(error.message ?: "unknown error")))
+                    effects.tryEmitUiEvent(UiEvent.Error(R.string.error_sse_failed, listOf(error.message ?: "unknown error")))
                 }
                 .collect { result ->
+                    // §R-19 P1-10 Blocker 1 fix: drop stale-host events BEFORE
+                    // they're forwarded. The cancellation triggered by
+                    // cancelSseForReconfigure is async; a frame already in the
+                    // Flow's buffer (or mid-flight in the collector) could be
+                    // delivered to this lambda before cancellation propagates.
+                    // Without this check that frame would be forwarded as an
+                    // OnSseEvent and pollute the new host's state (a late
+                    // `server.connected` from the previous host would land in
+                    // SessionSyncCoordinator.handleEvent and flip
+                    // connectedOnce=true for the new host's cold-start, or
+                    // worse, fire a ReloadSession of the wrong session).
+                    if (sseGenAtStart != directoryFetchGeneration.get()) {
+                        DebugLog.i("SSE", "drop stale-host SSE event (gen $sseGenAtStart → ${directoryFetchGeneration.get()})")
+                        return@collect
+                    }
                     result.onSuccess { event ->
                         // SSE liveness: a successful event (initial connect OR
                         // retryWhen recovery after a network outage) proves the
@@ -455,7 +555,7 @@ internal class ConnectionCoordinator(
                     }
                         .onFailure { error ->
                             Log.e("OC_ERROR", "SSE event failed", error)
-                            effects.uiEvents.tryEmit(UiEvent.Error(R.string.error_sse_failed, listOf(error.message ?: "unknown error")))
+                            effects.tryEmitUiEvent(UiEvent.Error(R.string.error_sse_failed, listOf(error.message ?: "unknown error")))
                         }
                 }
         }

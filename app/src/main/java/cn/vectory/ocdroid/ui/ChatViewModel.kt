@@ -5,6 +5,7 @@ import androidx.lifecycle.viewModelScope
 import cn.vectory.ocdroid.R
 import cn.vectory.ocdroid.data.repository.OpenCodeRepository
 import dagger.hilt.android.lifecycle.HiltViewModel
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import javax.inject.Inject
 
@@ -67,7 +68,7 @@ class ChatViewModel @Inject constructor(
             resetLimit = resetLimit,
             settingsManager = core.settingsManager,
             onCacheWindow = core.sessionSwitcher::writeSessionWindow,
-            emit = EventEmitter { event -> core.effectBus.uiEvents.tryEmit(event) },
+            emit = EventEmitter { event -> core.effectBus.tryEmitUiEvent(event) },
         )
     }
 
@@ -103,11 +104,11 @@ class ChatViewModel @Inject constructor(
         val chatFlow = core.store.chatFlow
         if (chatFlow.value.isCompacting) return
         val sessionId = chatFlow.value.currentSessionId ?: run {
-            core.effectBus.uiEvents.tryEmit(UiEvent.Error(R.string.error_compact_no_session))
+            core.effectBus.tryEmitUiEvent(UiEvent.Error(R.string.error_compact_no_session))
             return
         }
         val model = chatFlow.value.currentModel ?: run {
-            core.effectBus.uiEvents.tryEmit(UiEvent.Error(R.string.error_compact_no_model))
+            core.effectBus.tryEmitUiEvent(UiEvent.Error(R.string.error_compact_no_model))
             return
         }
         core.writeChat { it.copy(isCompacting = true, compactStartedAt = System.currentTimeMillis()) }
@@ -119,7 +120,7 @@ class ChatViewModel @Inject constructor(
             core.repository.summarizeSession(sessionId, model)
                 .onFailure { error ->
                     core.writeChat { it.copy(isCompacting = false, compactStartedAt = 0L) }
-                    core.effectBus.uiEvents.tryEmit(UiEvent.Error(R.string.error_compact_failed, listOf(errorMessageOrFallback(error, "unknown error"))))
+                    core.effectBus.tryEmitUiEvent(UiEvent.Error(R.string.error_compact_failed, listOf(errorMessageOrFallback(error, "unknown error"))))
                 }
         }
     }
@@ -141,9 +142,19 @@ class ChatViewModel @Inject constructor(
         // → viewModelScope. The closure captures `this@ChatViewModel` (via the
         // loadMessages call below), so binding to viewModelScope keeps the
         // captured method ref alive exactly as long as the VM.
+        // §R-19 #9: P1-7 closure-self-ref guard added — bail out before the
+        // captured loadMessages / slice writes if the VM was cleared while
+        // repository.revertSession was in flight. Without the guard, the
+        // closure would still hold a strong ref to the cleared VM until GC
+        // (viewModelScope cancellation throws CancellationException out of the
+        // launch body, which is correct, but the explicit guard documents the
+        // no-op intent and is defensive against any future restructuring that
+        // moves the body off viewModelScope).
         viewModelScope.launch {
+            if (!isActive) return@launch
             core.repository.revertSession(sessionId, messageId)
                 .onSuccess { updatedSession ->
+                    if (!isActive) return@launch
                     core.writeSessionList { state ->
                         state.copy(sessions = state.sessions.map { session -> if (session.id == sessionId) updatedSession else session })
                     }
@@ -153,7 +164,7 @@ class ChatViewModel @Inject constructor(
                     core.loadSessionsForEffect()
                 }
                 .onFailure { error ->
-                    core.effectBus.uiEvents.tryEmit(UiEvent.Error(R.string.error_edit_message_failed, listOf(errorMessageOrFallback(error, "unknown error"))))
+                    core.effectBus.tryEmitUiEvent(UiEvent.Error(R.string.error_edit_message_failed, listOf(errorMessageOrFallback(error, "unknown error"))))
                 }
         }
     }
@@ -171,7 +182,7 @@ class ChatViewModel @Inject constructor(
         core.appScope.launch {
             core.repository.abortSession(sessionId)
                 .onFailure { error ->
-                    core.effectBus.uiEvents.tryEmit(UiEvent.Error(R.string.error_abort_session_failed, listOf(errorMessageOrFallback(error, "unknown error"))))
+                    core.effectBus.tryEmitUiEvent(UiEvent.Error(R.string.error_abort_session_failed, listOf(errorMessageOrFallback(error, "unknown error"))))
                 }
         }
     }
@@ -182,7 +193,7 @@ class ChatViewModel @Inject constructor(
         core.performGlobalColdStartRefresh(currentId = sessionId)
         core.connectionCoordinator.testConnection(force = true, onSettled = { ok ->
             if (ok && !core.store.chatFlow.value.isLoadingMessages) {
-                core.effectBus.uiEvents.tryEmit(UiEvent.Success(R.string.success_refreshed))
+                core.effectBus.tryEmitUiEvent(UiEvent.Success(R.string.success_refreshed))
             }
         })
     }

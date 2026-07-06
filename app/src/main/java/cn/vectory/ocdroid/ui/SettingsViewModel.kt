@@ -14,41 +14,57 @@ import javax.inject.Inject
  * carries the settings role (it was overloaded with settings + traffic +
  * permission + nav + file + cross-domain orchestration).
  *
- * Reads stay delegated through [core] (the same [SharedStateStore] flows
- * every other VM exposes); writes flow through [core.writeSettings] +
- * [SettingsManager] exactly as they did when the methods lived on
+ * §R-19 Sprint 3 P2-5: this VM no longer injects [AppCore]. Its precise
+ * dependency surface is the settings slice ([SharedStateStore]'s
+ * [SharedStateStore.settingsFlow] / [SharedStateStore.mutateSettings]) +
+ * [SettingsManager] (the persistence side-effect). The VM cannot reach any
+ * other slice/controller — it has no compile-time handle to them. Reads
+ * delegate to the same authoritative [SharedStateStore] singleton every
+ * other VM exposes; writes funnel through [SharedStateStore.mutateSettings]
+ * + [SettingsManager] exactly as they did when the methods lived on
  * [OrchestratorViewModel] — pure relocation, zero behaviour change.
  */
 @HiltViewModel
 class SettingsViewModel @Inject constructor(
-    internal val core: AppCore,
+    private val store: SharedStateStore,
+    private val settingsManager: SettingsManager,
 ) : ViewModel() {
+
+    /**
+     * §R-19 P2-5 test-only convenience constructor: lets existing tests that
+     * build a full [AppCore] (via [cn.vectory.ocdroid.MainViewModelTestBase])
+     * keep instantiating this VM with `SettingsViewModel(core)` while the
+     * production Hilt graph uses the primary [@Inject constructor] above
+     * (precise-injected). The secondary forwards the same deps the
+     * production binding would; Hilt ignores it (not @Inject-annotated).
+     */
+    internal constructor(core: AppCore) : this(core.store, core.settingsManager)
 
     /** Read accessor — same authoritative slice [OrchestratorViewModel] and
      *  the other domain VMs expose (all delegate to [SharedStateStore]). Kept
      *  here so SettingsScreen can read settings off its own VM without
      *  reaching into another domain. */
-    val settingsFlow get() = core.settingsFlow
+    val settingsFlow get() = store.settingsFlow
 
     fun setThemeMode(mode: ThemeMode) {
-        core.settingsManager.themeMode = mode
-        core.writeSettings { it.copy(themeMode = mode) }
+        settingsManager.themeMode = mode
+        store.mutateSettings { it.copy(themeMode = mode) }
     }
 
     fun setMarkdownFontSizes(sizes: MarkdownFontSizes) {
-        core.settingsManager.markdownFontSizes = sizes
-        core.writeSettings { it.copy(markdownFontSizes = sizes) }
+        settingsManager.markdownFontSizes = sizes
+        store.mutateSettings { it.copy(markdownFontSizes = sizes) }
     }
 
     fun setUiFontScale(scale: Float) {
         val clamped = scale.coerceIn(SettingsManager.UI_SCALE_MIN, SettingsManager.UI_SCALE_MAX)
-        core.settingsManager.uiFontScale = clamped
-        core.writeSettings { it.copy(uiFontScale = clamped) }
+        settingsManager.uiFontScale = clamped
+        store.mutateSettings { it.copy(uiFontScale = clamped) }
     }
 
     fun setUiContentScale(scale: Float) {
         val clamped = scale.coerceIn(SettingsManager.UI_SCALE_MIN, SettingsManager.UI_SCALE_MAX)
-        core.settingsManager.uiContentScale = clamped
-        core.writeSettings { it.copy(uiContentScale = clamped) }
+        settingsManager.uiContentScale = clamped
+        store.mutateSettings { it.copy(uiContentScale = clamped) }
     }
 }

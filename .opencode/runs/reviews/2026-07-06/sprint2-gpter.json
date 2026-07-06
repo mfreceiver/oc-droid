@@ -1,0 +1,20 @@
+{
+  "epic": "R-19",
+  "sprint": 2,
+  "scope": "覆盖率快赢 + 架构启动 (P2-2 AppCore dispatcher 拆 / #7(b) helper 提取 / #7(c) 被 P2-2 覆盖 / kover 阈值上调)",
+  "date": "2026-07-06",
+  "reviewer": "gpter",
+  "session": "ses_0ca18a403ffe3d56qfyl0Us4Fz",
+  "final_score": 9.6,
+  "verdict": "PASS",
+  "scores": { "partition 正确性": 9.6, "行为等价": 9.5, "架构一致性": 9.5, "测试充分性": 9.7, "风险控制": 9.5 },
+  "non_blocking_notes": [
+    "🟠 assertExactlyOneHandled 只能发现零处理，不能在 runtime 发现多处理（|| 短路遮蔽）；当前 partition test 锁定 23 effect 唯一归属，建议后续集中化 effect representative 列表",
+    "🟠 build.gradle.kts coverage 注释轻微过时（仍列已提取的 Chat helpers）",
+    "🟡 OnSseEvent 归 Connection 域可接受（CC 拥有 feed，SSC 拥有 fold）",
+    "🟡 kover floor 60/56 余量 1.4/1.8pp，略紧但可接受"
+  ],
+  "test_count": 1837,
+  "coverage": { "line": "61.4%", "branch": "57.8%", "instruction": "55.9%" },
+  "kover_floor": { "line": 60, "branch": 56, "instruction": 52 }
+}

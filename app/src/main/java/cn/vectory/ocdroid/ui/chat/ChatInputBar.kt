@@ -300,38 +300,11 @@ internal fun ChatInputBar(
     }
 }
 
-/**
- * Routes the send-tap: a `/`-prefixed text matching a known command is
- * dispatched via [onExecuteCommand] (and the typed text is parsed into
- * command name + argument string); anything else falls through to a normal
- * [onSendMessage].
- *
- * [allowCommand] gates command execution: while the agent is running we only
- * ever append the (possibly `/`-prefixed) text as a normal prompt, never
- * executing server commands mid-run (an untested path that could e.g. switch
- * sessions under a live run). Mirrors the official client, which sends
- * unconditionally and lets the server absorb the prompt.
- */
-private fun handleComposerSend(
-    text: String,
-    availableCommands: List<CommandInfo>,
-    allowCommand: Boolean,
-    onSendMessage: () -> Unit,
-    onExecuteCommand: (command: String, arguments: String) -> Unit
-) {
-    val trimmed = text.trim()
-    if (allowCommand && trimmed.startsWith("/")) {
-        val withoutSlash = trimmed.removePrefix("/")
-        val cmdName = withoutSlash.substringBefore(' ').lowercase()
-        val args = withoutSlash.substringAfter(' ', "").trim()
-        val known = availableCommands.any { it.name.equals(cmdName, ignoreCase = true) }
-        if (known) {
-            onExecuteCommand(cmdName, args)
-            return
-        }
-    }
-    onSendMessage()
-}
+// §R-19 Sprint 2 #7(b): handleComposerSend was lifted verbatim into the
+// top-level pure-functions file ChatFormatHelpers.kt (same package) so it can
+// be covered by JVM unit tests (this file is excluded from kover coverage as
+// a @Composable-heavy UI file — see PickerProviderFilter.kt for the same
+// extraction pattern).
 
 @Composable
 private fun CommandSuggestionsPanel(

@@ -42,7 +42,7 @@ import kotlinx.coroutines.launch
  * clearSessionWindowCache routes via [ControllerEffect.ClearSessionWindowCache]
  * because SessionSwitcher is a sibling controller. The previously-injected
  * [cn.vectory.ocdroid.ui.EventEmitter] is replaced by [effects] — UiEvents
- * now ride [SharedEffectBus.uiEvents] (`effects.uiEvents.tryEmit(...)`).
+ * now ride [SharedEffectBus.uiEvents] (`effects.tryEmitUiEvent(...)`).
  *
  *  - `selectHostProfile` / `deleteHostProfile` — profile switching with full
  *    per-host state purge (sessions/messages/unread/draft/cache/commands).
@@ -61,7 +61,7 @@ import kotlinx.coroutines.launch
  * RFC reference: R-16 §D / §M3. Zero behaviour change.
  */
 @Suppress("DEPRECATION")
-internal class HostProfileController(
+class HostProfileController(
     private val scope: CoroutineScope,
     private val slices: SliceFlows,
     private val hostProfileStore: HostProfileStore,
@@ -390,7 +390,7 @@ internal class HostProfileController(
                     tunnelActivationState = TunnelActivationState.Error("未设置隧道密码")
                 )
             }
-            effects.uiEvents.tryEmit(UiEvent.Error(R.string.error_tunnel_password_unset))
+            effects.tryEmitUiEvent(UiEvent.Error(R.string.error_tunnel_password_unset))
             return
         }
         val password = settingsManager.getTunnelPassword(passwordId)
@@ -400,7 +400,7 @@ internal class HostProfileController(
                     tunnelActivationState = TunnelActivationState.Error("隧道密码为空")
                 )
             }
-            effects.uiEvents.tryEmit(UiEvent.Error(R.string.error_tunnel_password_empty))
+            effects.tryEmitUiEvent(UiEvent.Error(R.string.error_tunnel_password_empty))
             return
         }
 
@@ -421,7 +421,7 @@ internal class HostProfileController(
                             tunnelActivationState = TunnelActivationState.Success
                         )
                     }
-                    effects.uiEvents.tryEmit(UiEvent.Success(R.string.success_tunnel_activated))
+                    effects.tryEmitUiEvent(UiEvent.Success(R.string.success_tunnel_activated))
                     Log.d(TAG, "Tunnel activated successfully for ${profile.serverUrl}")
                     // §user-req: tunnel 激活后自动冷启动级刷新。1.5s 经验值——cloudflared
                     // 类守护进程在 activate API 返回后需要短暂时间建立路由。coldStartReconnect
@@ -437,7 +437,7 @@ internal class HostProfileController(
                             tunnelActivationState = TunnelActivationState.Error(msg)
                         )
                     }
-                    effects.uiEvents.tryEmit(UiEvent.Error(R.string.error_tunnel_activation_failed, listOf(msg)))
+                    effects.tryEmitUiEvent(UiEvent.Error(R.string.error_tunnel_activation_failed, listOf(msg)))
                     Log.e(TAG, "Tunnel activation failed", error)
                 }
         }

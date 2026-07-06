@@ -3,6 +3,9 @@ package cn.vectory.ocdroid.ui
 import androidx.lifecycle.ViewModel
 import cn.vectory.ocdroid.data.model.ComposerImageAttachment
 import cn.vectory.ocdroid.data.model.Message
+import cn.vectory.ocdroid.data.repository.HostProfileStore
+import cn.vectory.ocdroid.ui.controller.ComposerController
+import cn.vectory.ocdroid.util.SettingsManager
 import dagger.hilt.android.lifecycle.HiltViewModel
 import javax.inject.Inject
 
@@ -15,69 +18,92 @@ import javax.inject.Inject
  * per-session model/agent persistence + the disabled-model set live here now
  * (they read/write the settings + composer slices directly through the shared
  * store). No `core.<method>()` self-bypass.
+ *
+ * §R-19 Sprint 3 P2-5: this VM no longer injects [AppCore]. Its precise
+ * dependency surface is the composer / settings / chat slices
+ * ([SharedStateStore]) + [ComposerController] (the composer-domain controller
+ * that owns expandedParts + the draftWorkdir guard) + [SettingsManager]
+ * (per-session model/agent persistence) + [HostProfileStore] (the per-host
+ * baseUrl the disabled-model set is keyed by). The VM cannot reach any
+ * other slice/controller.
  */
 @HiltViewModel
 class ComposerViewModel @Inject constructor(
-    internal val core: AppCore,
+    private val store: SharedStateStore,
+    private val composerController: ComposerController,
+    private val settingsManager: SettingsManager,
+    private val hostProfileStore: HostProfileStore,
 ) : ViewModel() {
 
-    val composerFlow get() = core.composerFlow
-    val settingsFlow get() = core.settingsFlow
-    val chatFlow get() = core.chatFlow
+    /**
+     * §R-19 P2-5 test-only convenience constructor — see
+     * [SettingsViewModel.secondary constructor] rationale. Forwards the same
+     * deps the production Hilt binding uses.
+     */
+    internal constructor(core: AppCore) : this(
+        core.store,
+        core.composerController,
+        core.settingsManager,
+        core.hostProfileStore,
+    )
+
+    val composerFlow get() = store.composerFlow
+    val settingsFlow get() = store.settingsFlow
+    val chatFlow get() = store.chatFlow
 
     fun setInputText(text: String) {
-        core.composerController.setInputText(text)
+        composerController.setInputText(text)
     }
 
     fun addImageAttachments(attachments: List<ComposerImageAttachment>) {
-        core.composerController.addImageAttachments(attachments)
+        composerController.addImageAttachments(attachments)
     }
 
     fun removeImageAttachment(id: String) {
-        core.composerController.removeImageAttachment(id)
+        composerController.removeImageAttachment(id)
     }
 
     fun clearDraftIfActive() {
-        core.composerController.clearDraftIfActive()
+        composerController.clearDraftIfActive()
     }
 
     fun selectAgent(agentName: String) {
         // §R-17 batch3d: body moved verbatim from AppCore.
-        core.settingsManager.selectedAgentName = agentName
-        core.writeSettings { it.copy(selectedAgentName = agentName) }
-        core.store.chatFlow.value.currentSessionId?.let { core.settingsManager.setAgentForSession(it, agentName) }
+        settingsManager.selectedAgentName = agentName
+        store.mutateSettings { it.copy(selectedAgentName = agentName) }
+        store.chatFlow.value.currentSessionId?.let { settingsManager.setAgentForSession(it, agentName) }
     }
 
     fun toggleModelDisabled(providerId: String, modelId: String) {
         // §R-17 batch3d: body moved verbatim from AppCore.
-        val baseUrl = core.hostProfileStore.currentProfile().serverUrl
+        val baseUrl = hostProfileStore.currentProfile().serverUrl
         val key = "$providerId/$modelId"
-        val currentlyDisabled = key in core.store.settingsFlow.value.disabledModels
-        core.settingsManager.setModelDisabled(baseUrl, providerId, modelId, disabled = !currentlyDisabled)
-        core.writeSettings {
+        val currentlyDisabled = key in store.settingsFlow.value.disabledModels
+        settingsManager.setModelDisabled(baseUrl, providerId, modelId, disabled = !currentlyDisabled)
+        store.mutateSettings {
             it.copy(disabledModels = if (currentlyDisabled) it.disabledModels - key else it.disabledModels + key)
         }
     }
 
     fun switchSessionModel(providerId: String, modelId: String) {
         // §R-17 batch3d: body moved verbatim from AppCore.
-        val sessionId = core.store.chatFlow.value.currentSessionId
+        val sessionId = store.chatFlow.value.currentSessionId
         val model = Message.ModelInfo(providerId = providerId, modelId = modelId)
-        sessionId?.let { core.settingsManager.setModelForSession(it, providerId, modelId) }
-        core.writeChat { it.copy(currentModel = model) }
+        sessionId?.let { settingsManager.setModelForSession(it, providerId, modelId) }
+        store.mutateChat { it.copy(currentModel = model) }
     }
 
     fun reloadDisabledModelsForCurrentHost() {
         // §R-17 batch3d: body extracted as applyReloadDisabledModelsForCurrentHost
         // so both this VM and AppCore's effect-dispatch handler share the impl.
         applyReloadDisabledModelsForCurrentHost(
-            settingsManager = core.settingsManager,
-            hostProfileStore = core.hostProfileStore,
-            slices = core.store.slices,
+            settingsManager = settingsManager,
+            hostProfileStore = hostProfileStore,
+            slices = store.slices,
         )
     }
 
     fun togglePartExpand(key: String, currentValue: Boolean) {
-        core.composerController.togglePartExpand(key, currentValue)
+        composerController.togglePartExpand(key, currentValue)
     }
 }

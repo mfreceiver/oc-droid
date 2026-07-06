@@ -800,23 +800,8 @@ private fun GapDivider(
  */
 private const val MAX_SAVED_SESSIONS = 30
 
-/**
- * §s3-markers: derives the human-readable label text for a synthetic
- * metadata-marker [Message] (role ∈ [cn.vectory.ocdroid.ui.METADATA_MARKER_ROLES]).
- *
- * - agent-switched → the new agent name (message.agent). Falls back to the
- *   empty string if `agent` was not set on the marker (defensive — injector
- *   always populates it).
- * - model-switched → the model's id (message.modelId or message.model?.modelId).
- *   The chat list passes this raw; the [MetadataMarkerRow] chip will format
- *   it for display (and could resolve a friendly name via providers in the
- *   future).
- * - compaction       → the marker's pre-formatted body summary, or a generic
- *   localized fallback.
- */
-private fun markerLabelFor(message: Message): String = when (message.role) {
-    "agent-switched" -> message.agent.orEmpty()
-    "model-switched" -> message.modelId ?: message.model?.modelId.orEmpty()
-    "compaction" -> message.modelId.orEmpty()
-    else -> ""
-}
+// §R-19 Sprint 2 #7(b): markerLabelFor was lifted verbatim into the top-level
+// pure-functions file ChatFormatHelpers.kt (same package) so it can be covered
+// by JVM unit tests (this file is excluded from kover coverage as a
+// @Composable-heavy UI file — see PickerProviderFilter.kt for the same
+// extraction pattern).

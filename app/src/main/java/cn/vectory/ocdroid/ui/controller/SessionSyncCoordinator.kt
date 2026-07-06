@@ -86,7 +86,7 @@ import kotlinx.serialization.json.decodeFromJsonElement
  * extracted as pure functions (R-17 batch5).
  */
 @Suppress("DEPRECATION")
-internal class SessionSyncCoordinator(
+class SessionSyncCoordinator(
     private val scope: CoroutineScope,
     private val slices: SliceFlows,
     private val settingsManager: SettingsManager,
@@ -127,8 +127,94 @@ internal class SessionSyncCoordinator(
     /** Test/diagnostic read: snapshot of unknown-event counts by type. */
     internal fun unknownEventCountsSnapshot(): Map<String, Int> =
         unknownEventCounters.mapValues { it.value.get() }
+
+    // ── §R-19 Sprint 1 Lane A (P1-10): SSE gap reconciliation overlay ────────
+
     /**
-     * Entry point for every SSE event. Mirrors the pre-extraction
+     * §P1-10: the SSE gap reconciliation overlay state. Drives the explicit
+     * invariant ([SseSyncState] + [reconcileGap]) on top of
+     * [ForegroundCatchUpController]'s 3-tier. See [SseSyncState] for the
+     * overlay-vs-replacement rationale.
+     *
+     * `@Volatile` for forward-safety only — all reads/writes are confined to
+     * the coordinator's single-threaded [scope] (Dispatchers.Main.immediate).
+     */
+    @Volatile
+    private var sseSyncState: SseSyncState = SseSyncState()
+
+    /**
+     * §P1-10 generation counter, bumped on every observed
+     * [ControllerEffect.HostReconfigured]. §R-19 fix Blocker 1: this is the
+     * **defensive second line** — the production-grade stale-host guard is
+     * [ConnectionCoordinator]'s per-event generation check in
+     * `launchSseCollection` (which drops stale events BEFORE they are
+     * forwarded as [ControllerEffect.OnSseEvent]s, so this coordinator never
+     * sees them). This local counter is kept in lock-step with CC's
+     * `directoryFetchGeneration` via the HostReconfigured effect (CC bumps
+     * its counter synchronously in `cancelSseForReconfigure` BEFORE emitting
+     * the effect; this init collector bumps this counter when the effect
+     * arrives). It exists so the pure [reconcileGap] function can encode the
+     * generation guard as an explicit invariant (testable in isolation) and
+     * as forward-safety if a future code path routes SSE events to this
+     * coordinator bypassing CC's check. Reads/writes are main-thread
+     * confined; AtomicLong is belt-and-suspenders.
+     */
+    private val hostGeneration = java.util.concurrent.atomic.AtomicLong(0L)
+
+    /**
+     * §P1-10: diagnostic + test hook — snapshot of the current overlay state.
+     * Production callers should NOT branch on this (the decision logic lives
+     * in [reconcileGap]); exposed for [SessionSyncGapReconcileTest] integration
+     * cases and future debug surfaces.
+     */
+    internal fun sseSyncStateSnapshot(): SseSyncState = sseSyncState
+
+    init {
+        // §P1-10: observe the disconnect / host-reconfigure signals that the
+        // SSE collector (ConnectionCoordinator) emits on the effects bus, so
+        // the overlay state stays in lock-step without coupling the two
+        // controllers. ServerConnected is NOT consumed here — it arrives via
+        // [handleEvent] (the OnSseEvent path), which keeps the trigger's
+        // `currentSessionId` snapshot co-temporal with the SSE frame.
+        //
+        // §start-UNDISPATCHED: the collector must be subscribed BEFORE the
+        // first effect emission lands, otherwise the overlay misses the
+        // initial CancelSse / HostReconfigured signals. UNDISPATCHED runs the
+        // coroutine body inline until the first suspension (the SharedFlow
+        // collect), guaranteeing the subscription is open by the time the init
+        // block returns. Mirrors the test-harness pattern in
+        // [SessionSyncCoordinatorTest.setUp].
+        scope.launch(start = kotlinx.coroutines.CoroutineStart.UNDISPATCHED) {
+            effects.effects.collect { effect ->
+                when (effect) {
+                    is ControllerEffect.CancelSse -> {
+                        // §P1-10: foreground backgrounding / explicit SSE
+                        // cancellation. The current session's slice is now
+                        // potentially stale (the user was watching it). Mark
+                        // dirty + stamp the disconnect time so the next
+                        // `server.connected` reconciles.
+                        val gen = hostGeneration.get()
+                        val now = System.currentTimeMillis()
+                        val dirty = listOfNotNull(slices.chat.value.currentSessionId).toSet()
+                        val trigger = SseReconnectTrigger.Disconnected(now, dirty, gen)
+                        sseSyncState = reconcileGap(sseSyncState, trigger).first
+                    }
+                    is ControllerEffect.HostReconfigured -> {
+                        // §P1-10 scenario 4: bump generation so any in-flight
+                        // ServerConnected from the PREVIOUS host's cancelled
+                        // SSE job becomes a stale-trigger no-op.
+                        val newGen = hostGeneration.incrementAndGet()
+                        val trigger = SseReconnectTrigger.HostReconfigured(newGen)
+                        sseSyncState = reconcileGap(sseSyncState, trigger).first
+                    }
+                    else -> {}
+                }
+            }
+        }
+    }
+
+    /**
+     * §P1-10 entry point for every SSE event. Mirrors the pre-extraction
      * `MainViewModel.handleSSEEvent`: first the `server.connected` catch-up
      * trigger, then the [dispatchSseEvent] fold.
      *
@@ -143,8 +229,109 @@ internal class SessionSyncCoordinator(
         if (event.payload.type == "server.connected") {
             // §R18 Phase 3 Wave 1 (P1-3 B 类): 单发非 suspend → tryEmitEffect。
             effects.tryEmitEffect(ControllerEffect.ServerConnected)
+            // §R-19 Sprint 1 Lane A (P1-10): consult the SSE gap reconciliation
+            // overlay BEFORE ForegroundCatchUpController's catch-up runs (the
+            // ServerConnected effect above is collected asynchronously by
+            // AppCore's dispatch loop). The reconciler is a pure decision
+            // function: it returns the new overlay state + a list of decisions
+            // that we translate into effects here.
+            //
+            // currentSessionId is captured at event-arrival time so scenario 3
+            // (user switched sessions mid-disconnect) targets the NEW session.
+            val currentSessionId = slices.chat.value.currentSessionId
+            val gen = hostGeneration.get()
+            val trigger = SseReconnectTrigger.ServerConnected(currentSessionId, gen)
+            val (nextState, decisions) = reconcileGap(sseSyncState, trigger)
+            sseSyncState = nextState
+            applySseSyncDecisions(decisions)
         }
         dispatchSseEvent(event)
+    }
+
+    /**
+     * §R-19 Sprint 1 Lane A (P1-10): translates [SseSyncDecision]s returned by
+     * [reconcileGap] into concrete side effects. Kept tiny + inline so the
+     * pure decision function stays the single unit-testable surface.
+     *
+     *  - [SseSyncDecision.ReloadSession]    → `LoadMessages` effect
+     *    (single-shot, non-suspend → tryEmitEffect to preserve FIFO order
+     *    relative to the ServerConnected emit above).
+     *  - [SseSyncDecision.RefreshSessions]  → `LoadSessions` effect (the
+     *    non-current dirty session's list-level state is refreshed).
+     *  - [SseSyncDecision.ClearDeltaBuffers] → local [clearDeltaBuffers] call.
+     */
+    private fun applySseSyncDecisions(decisions: List<SseSyncDecision>) {
+        if (decisions.isEmpty()) return
+        for (decision in decisions) {
+            when (decision) {
+                is SseSyncDecision.ReloadSession -> {
+                    // §R18 Phase 3 Wave 1 (P1-3 B 类): 单发非 suspend → tryEmitEffect。
+                    effects.tryEmitEffect(
+                        ControllerEffect.LoadMessages(decision.sessionId, decision.resetLimit)
+                    )
+                }
+                SseSyncDecision.RefreshSessions -> {
+                    // §R-19 P1-10: RefreshSessions decision maps to the
+                    // existing LoadSessions effect (refreshes the session
+                    // list — used when a non-current session is dirty and we
+                    // don't want a per-session windowed reload).
+                    effects.tryEmitEffect(ControllerEffect.LoadSessions)
+                }
+                SseSyncDecision.ClearDeltaBuffers -> {
+                    clearDeltaBuffers()
+                }
+            }
+        }
+    }
+
+    /**
+     * §R-19 Sprint 3 P2-4: the single side-effect routing point. Translates
+     * each [SseSideEffect] into its matching [ControllerEffect] emit /
+     * [UiEvent] emit / log call. Called by every `dispatchSseEvent` branch
+     * with the combined effects list (applyXxx-returned + dispatcher-computed
+     * cross-slice effects).
+     *
+     * **Why centralized**: P2-4's goal is to kill the scattered
+     * `effects.tryEmitEffect(...)` / `effects.tryEmitUiEvent(...)` calls that
+     * were sprinkled inline in the 11 `when` branches. Every bus-level side
+     * effect now flows through this single helper, making the dispatcher's
+     * effect sequencing auditable and the pure applyXxx functions testable
+     * in isolation (they return the effects list; the dispatcher commits it).
+     */
+    private fun applySseSideEffects(sideEffects: List<SseSideEffect>) {
+        if (sideEffects.isEmpty()) return
+        for (effect in sideEffects) {
+            when (effect) {
+                is SseSideEffect.ReloadMessages -> {
+                    // §R18 Phase 3 Wave 1 (P1-3 B 类): 单发非 suspend → tryEmitEffect。
+                    effects.tryEmitEffect(
+                        ControllerEffect.LoadMessages(effect.sessionId, effect.resetLimit)
+                    )
+                }
+                SseSideEffect.LoadPendingPermissions -> {
+                    // §R18 Phase 3 Wave 1 (P1-3 B 类): 单发非 suspend → tryEmitEffect。
+                    effects.tryEmitEffect(ControllerEffect.LoadPendingPermissions)
+                }
+                is SseSideEffect.SessionError -> {
+                    // §R18 Phase 2-G: pick the format by whether `name` is present
+                    // so the rendered text matches the prior "$name: $rawMsg" /
+                    // "$rawMsg" shape exactly (only the prefix label is i18n'd;
+                    // name + rawMsg come from the server payload).
+                    if (!effect.name.isNullOrBlank()) {
+                        effects.tryEmitUiEvent(
+                            UiEvent.Error(R.string.error_session_sse_named, listOf(effect.name, effect.rawMsg))
+                        )
+                    } else {
+                        effects.tryEmitUiEvent(
+                            UiEvent.Error(R.string.error_session_sse_unnamed, listOf(effect.rawMsg))
+                        )
+                    }
+                }
+                is SseSideEffect.ReportNonFatal -> {
+                    reportNonFatalIssue(tag, effect.message)
+                }
+            }
+        }
     }
 
     /**
@@ -192,9 +379,9 @@ internal class SessionSyncCoordinator(
             "session.created" -> {
                 val created = parseSessionCreatedEvent(event)
                 if (created != null) {
-                    slices.mutateSessionList { s -> s.applySessionCreated(created.session) }
+                    slices.mutateSessionList { s -> s.applySessionCreated(created.session).first }
                 } else {
-                    reportNonFatalIssue(tag, "Ignoring invalid session.created payload")
+                    applySseSideEffects(listOf(SseSideEffect.ReportNonFatal("Ignoring invalid session.created payload")))
                 }
             }
             "session.updated" -> {
@@ -220,23 +407,23 @@ internal class SessionSyncCoordinator(
                             // changes (null is intentionally not persisted —
                             // applySavedSettings re-filters archived ids on the
                             // next cold start).
-                            slices.mutateSessionList { s -> s.applyArchiveEviction(updated, newOpenIds) }
-                            slices.mutateChat { it.applyArchivedChatClear() }
+                            slices.mutateSessionList { s -> s.applyArchiveEviction(updated, newOpenIds).first }
+                            slices.mutateChat { it.applyArchivedChatClear().first }
                         } else {
-                            slices.mutateSessionList { s -> s.applyArchiveEviction(updated, newOpenIds) }
+                            slices.mutateSessionList { s -> s.applyArchiveEviction(updated, newOpenIds).first }
                         }
                     } else {
-                        slices.mutateSessionList { s -> s.applySessionUpsert(updated) }
+                        slices.mutateSessionList { s -> s.applySessionUpsert(updated).first }
                     }
                 } else {
-                    reportNonFatalIssue(tag, "Ignoring invalid session.updated payload")
+                    applySseSideEffects(listOf(SseSideEffect.ReportNonFatal("Ignoring invalid session.updated payload")))
                 }
             }
             "session.status" -> {
                 val statusEvent = parseSessionStatusEvent(event)
                 if (statusEvent != null) {
                     slices.mutateSessionList {
-                        it.applySessionStatus(statusEvent.sessionId, statusEvent.status)
+                        it.applySessionStatus(statusEvent.sessionId, statusEvent.status).first
                     }
                     // §cross-client-sync: when the CURRENT session goes busy, a run
                     // just started — i.e. a message was sent, possibly from ANOTHER
@@ -249,12 +436,18 @@ internal class SessionSyncCoordinator(
                     // coalescing; the user message is persisted server-side before
                     // the run starts. The overlay-clear in launchLoadMessages is
                     // gated on !busy, so this does NOT disrupt the streaming overlay.
-                    if (statusEvent.status.isBusy &&
-                        statusEvent.sessionId == slices.chat.value.currentSessionId
-                    ) {
+                    //
+                    // §R-19 Sprint 3 P2-4: cross-slice effects (depend on chat /
+                    // unread state, not just SessionListState) are computed here
+                    // and routed through applySseSideEffects — the single side-
+                    // effect routing point. applySessionStatus itself returns
+                    // emptyList() (its state transform is pure same-slice).
+                    val statusEffects = mutableListOf<SseSideEffect>()
+                    val chatSnap = slices.chat.value
+                    val isCurrent = statusEvent.sessionId == chatSnap.currentSessionId
+                    if (statusEvent.status.isBusy && isCurrent) {
                         DebugLog.i("Sync", "session.status busy (current) → reload (cross-client message sync)")
-                        // §R18 Phase 3 Wave 1 (P1-3 B 类): 单发非 suspend → tryEmitEffect。
-                        effects.tryEmitEffect(ControllerEffect.LoadMessages(statusEvent.sessionId, true))
+                        statusEffects.add(SseSideEffect.ReloadMessages(statusEvent.sessionId, resetLimit = true))
                     }
                     // When a temp-cleared session finishes its in-flight work
                     // (busy -> idle) and is NOT the currently-open one, drop it
@@ -264,17 +457,17 @@ internal class SessionSyncCoordinator(
                     // was busy), keep the badge so the user still knows there was
                     // activity — the user opening the session will clear it.
                     if (!statusEvent.status.isBusy &&
-                        statusEvent.sessionId != slices.chat.value.currentSessionId &&
+                        statusEvent.sessionId != chatSnap.currentSessionId &&
                         slices.unread.value.tempClearedUnread.contains(statusEvent.sessionId)
                     ) {
-                        slices.mutateUnread { u -> u.dropTempCleared(statusEvent.sessionId) }
+                        slices.mutateUnread { u -> u.dropTempCleared(statusEvent.sessionId).first }
                     }
                     // SSE-trust model: session.status (busy/idle) only updates the
                     // status badge. It does NOT reload or clear streaming buffers
-                    // (except the busy-current and idle-current finalization paths
-                    // above). The finalized turn text is carried by
-                    // streamingPartTexts until a foreground catch-up reconciles the
-                    // persisted message list — mirroring opencode-web.
+                    // (except the busy-current and idle-current finalization paths).
+                    // The finalized turn text is carried by streamingPartTexts
+                    // until a foreground catch-up reconciles the persisted message
+                    // list — mirroring opencode-web.
                     //
                     // §append-safe finalization (gpter MAJOR): the overlay-clear in
                     // launchLoadMessages is gated on !busy, so if the last reload
@@ -284,19 +477,21 @@ internal class SessionSyncCoordinator(
                     // persisted authoritative window (loadMessagesWithRetry delays
                     // internally so the server has time to persist the finalized
                     // part text; status is now idle so the gated clear will run).
-                    if (statusEvent.status.isIdle &&
-                        statusEvent.sessionId == slices.chat.value.currentSessionId
-                    ) {
-                        val s = slices.chat.value
-                        val shouldReload = s.streamingPartTexts.isNotEmpty() || s.streamingReasoningPart != null
-                        DebugLog.d("Sync", "session.status idle → ${if (shouldReload) "reload" else "no-op"}")
-                        if (shouldReload) {
-                            // §R18 Phase 3 Wave 1 (P1-3 B 类): 单发非 suspend → tryEmitEffect。
-                            effects.tryEmitEffect(ControllerEffect.LoadMessages(statusEvent.sessionId, true))
+                    //
+                    // §R-19 fix Blocker 2 v2: no sessionsDirty dedup — idle-driven
+                    // reloads ALWAYS fire based on overlay state; overlapping
+                    // reloads coalesce at the scheduling layer (isLoadingMessages
+                    // check-and-set + 400ms debounce).
+                    if (statusEvent.status.isIdle && isCurrent) {
+                        val overlayNonEmpty = chatSnap.streamingPartTexts.isNotEmpty() || chatSnap.streamingReasoningPart != null
+                        DebugLog.d("Sync", "session.status idle → ${if (overlayNonEmpty) "reload" else "no-op"}")
+                        if (overlayNonEmpty) {
+                            statusEffects.add(SseSideEffect.ReloadMessages(statusEvent.sessionId, resetLimit = true))
                         }
                     }
+                    applySseSideEffects(statusEffects)
                 } else {
-                    reportNonFatalIssue(tag, "Ignoring invalid session.status payload")
+                    applySseSideEffects(listOf(SseSideEffect.ReportNonFatal("Ignoring invalid session.status payload")))
                 }
             }
             "message.created" -> {
@@ -309,14 +504,17 @@ internal class SessionSyncCoordinator(
                 val sessionId = event.payload.getString("sessionID")
                 val isCurrent = sessionId != null && sessionId == slices.chat.value.currentSessionId
                 DebugLog.i("Sync", "message.created: ${if (isCurrent) "reload current" else "mark unread"}")
+                // §R-19 Sprint 3 P2-4: side effects formalized as SseSideEffect list.
+                val msgEffects = mutableListOf<SseSideEffect>()
                 if (sessionId != null && sessionId == slices.chat.value.currentSessionId) {
-                    // §R18 Phase 3 Wave 1 (P1-3 B 类): 单发非 suspend → tryEmitEffect。
-                    effects.tryEmitEffect(ControllerEffect.LoadMessages(sessionId, true))
+                    msgEffects.add(SseSideEffect.ReloadMessages(sessionId, resetLimit = true))
                 } else if (sessionId != null) {
                     // Mark unread: an out-of-band message arrived for a session
-                    // the user is not currently viewing.
+                    // the user is not currently viewing. (Coordinator-internal
+                    // cross-slice mutation — stays inline, not a bus effect.)
                     markSessionUnread(sessionId)
                 }
+                applySseSideEffects(msgEffects)
             }
             "message.updated" -> {
                 // SSE-trust: patch the message metadata in-place from the server's
@@ -414,7 +612,7 @@ internal class SessionSyncCoordinator(
                             val hasCorrectType = existingParts?.any { it.id == pId && it.type == pType } == true
                             if (!hasCorrectType) {
                                 slices.mutateChat { c ->
-                                    c.applyPartCreatedPlaceholder(pType, pId, msgId, deltaEvent.sessionId)
+                                    c.applyPartCreatedPlaceholder(pType, pId, msgId, deltaEvent.sessionId).first
                                 }
                             }
                         }
@@ -441,7 +639,7 @@ internal class SessionSyncCoordinator(
                                         pId = pId,
                                         msgId = msgId,
                                         sessionId = deltaEvent.sessionId
-                                    ).markFlushPending(key)
+                                    ).first.markFlushPending(key).first
                                 }
                                 scheduleDeltaFlush(key)
                             } else {
@@ -450,7 +648,7 @@ internal class SessionSyncCoordinator(
                                 // writes the buffered fullText in one state write.
                                 // streamingReasoningPart was already set on this
                                 // part's leading edge.
-                                slices.mutateChat { c -> c.replaceFullTextBuffer(key, fullText) }
+                                slices.mutateChat { c -> c.replaceFullTextBuffer(key, fullText).first }
                             }
                         } else if (!delta.isNullOrBlank()) {
                             // §flicker-fix: apply the same leading-edge +
@@ -473,7 +671,7 @@ internal class SessionSyncCoordinator(
                                         pId = pId,
                                         msgId = msgId,
                                         sessionId = deltaEvent.sessionId
-                                    ).markFlushPending(key)
+                                    ).first.markFlushPending(key).first
                                 }
                                 scheduleDeltaFlush(key)
                             } else {
@@ -481,7 +679,7 @@ internal class SessionSyncCoordinator(
                                 // DELTA_COALESCE_MS flush appends the batch in
                                 // one state write. streamingReasoningPart was
                                 // already set on this part's leading edge.
-                                slices.mutateChat { c -> c.appendDeltaBuffer(key, delta) }
+                                slices.mutateChat { c -> c.appendDeltaBuffer(key, delta).first }
                             }
                         }
                         // Else: ids present + both text & delta null/blank =
@@ -504,9 +702,12 @@ internal class SessionSyncCoordinator(
                         // delta 缓冲（新 part 随后用权威 fullText 恢复，不丢数据）。下一
                         // 个带 ID 的 message.part.updated 正确更新流式状态；回合结束 idle
                         // finalization（resetLimit=true + streamingFinalized）正常清空 overlay。
+                        //
+                        // §R-19 Sprint 3 P2-4: side effects routed through applySseSideEffects.
                         clearDeltaBuffers()
-                        // §R18 Phase 3 Wave 1 (P1-3 B 类): 单发非 suspend → tryEmitEffect。
-                        effects.tryEmitEffect(ControllerEffect.LoadMessages(deltaEvent.sessionId, false))
+                        applySseSideEffects(listOf(
+                            SseSideEffect.ReloadMessages(deltaEvent.sessionId, resetLimit = false)
+                        ))
                     }
                 }
             }
@@ -565,33 +766,33 @@ internal class SessionSyncCoordinator(
                                 knownType = knownType,
                                 msgId = msgId,
                                 sessionId = sessionId
-                            ).markFlushPending(key)
+                            ).first.markFlushPending(key).first
                         }
                         scheduleDeltaFlush(key)
                     } else {
                         // Trailing coalesce: buffer; the pending DELTA_COALESCE_MS
                         // flush will append the batch in one state write.
-                        slices.mutateChat { c -> c.appendDeltaBuffer(key, delta) }
+                        slices.mutateChat { c -> c.appendDeltaBuffer(key, delta).first }
                     }
                 }
             }
             "permission.asked" -> {
-                // §R18 Phase 3 Wave 1 (P1-3 B 类): 单发非 suspend → tryEmitEffect。
-                effects.tryEmitEffect(ControllerEffect.LoadPendingPermissions)
+                // §R-19 Sprint 3 P2-4: routed through applySseSideEffects.
+                applySseSideEffects(listOf(SseSideEffect.LoadPendingPermissions))
             }
             "question.asked" -> {
                 val question = parseQuestionAskedEvent(event)
                 if (question != null) {
-                    slices.mutateSessionList { currentState -> currentState.applyQuestionAsked(question) }
+                    slices.mutateSessionList { currentState -> currentState.applyQuestionAsked(question).first }
                 } else {
-                    reportNonFatalIssue(tag, "Ignoring invalid question.asked payload")
+                    applySseSideEffects(listOf(SseSideEffect.ReportNonFatal("Ignoring invalid question.asked payload")))
                 }
             }
             "question.replied", "question.rejected" -> {
                 val requestId = event.payload.getString("requestID")
                     ?: event.payload.getString("id")
                 if (requestId != null) {
-                    slices.mutateSessionList { currentState -> currentState.applyQuestionResolved(requestId) }
+                    slices.mutateSessionList { currentState -> currentState.applyQuestionResolved(requestId).first }
                 }
             }
             "todo.updated" -> {
@@ -602,10 +803,10 @@ internal class SessionSyncCoordinator(
                 } catch (e: kotlinx.coroutines.CancellationException) {
                     throw e
                 } catch (e: Exception) {
-                    reportNonFatalIssue(tag, "Ignoring invalid todo.updated payload: ${e.message}")
+                    applySseSideEffects(listOf(SseSideEffect.ReportNonFatal("Ignoring invalid todo.updated payload: ${e.message}")))
                     return
                 }
-                slices.mutateSessionList { s -> s.applyTodoUpdated(sessionId, todos) }
+                slices.mutateSessionList { s -> s.applyTodoUpdated(sessionId, todos).first }
             }
             "session.error" -> {
                 // §error-feedback (Issue 4): the server emits session.error with
@@ -616,21 +817,18 @@ internal class SessionSyncCoordinator(
                 //       message (if any non-error one exists) so ErrorCard can
                 //       render inline. Error-only turns (error set, no renderable
                 //       parts) are otherwise filtered out before render.
+                //
+                // §R-19 Sprint 3 P2-4: the UiEvent.Error emission is formalized
+                // as SseSideEffect.SessionError. The chat-slice mutation (attach
+                // error to last assistant message) stays inline — it's a same-
+                // domain state transform, not a bus signal.
                 val errObj = event.payload.getJsonObject("error")
                 val name = (errObj?.get("name") as? kotlinx.serialization.json.JsonPrimitive)?.content
                 val data = errObj?.get("data") as? JsonObject
                 val rawMsg = (data?.get("message") as? kotlinx.serialization.json.JsonPrimitive)?.content
                     ?: (data?.get("error") as? kotlinx.serialization.json.JsonPrimitive)?.content
                     ?: "Server session error"
-                // §R18 Phase 2-G: pick the format by whether `name` is present
-                // so the rendered text matches the prior "$name: $rawMsg" /
-                // "$rawMsg" shape exactly (only the prefix label is i18n'd;
-                // name + rawMsg come from the server payload).
-                if (!name.isNullOrBlank()) {
-                    effects.uiEvents.tryEmit(UiEvent.Error(R.string.error_session_sse_named, listOf(name, rawMsg)))
-                } else {
-                    effects.uiEvents.tryEmit(UiEvent.Error(R.string.error_session_sse_unnamed, listOf(rawMsg)))
-                }
+                applySseSideEffects(listOf(SseSideEffect.SessionError(name = name, rawMsg = rawMsg)))
                 val sid = event.payload.getString("sessionID")
                 if (sid != null && sid == slices.chat.value.currentSessionId) {
                     slices.mutateChat { c ->
@@ -680,7 +878,7 @@ internal class SessionSyncCoordinator(
      */
     private fun markSessionUnread(sessionId: String) {
         val currentSessionId = slices.chat.value.currentSessionId
-        slices.mutateUnread { u -> u.applyMarkSessionUnread(sessionId, currentSessionId) }
+        slices.mutateUnread { u -> u.applyMarkSessionUnread(sessionId, currentSessionId).first }
     }
 
     // ── §M5 delta coalescing helpers ────────────────
@@ -728,7 +926,7 @@ internal class SessionSyncCoordinator(
      */
     private fun flushDeltaBuffer(partId: String) {
         flushJobs.remove(partId)
-        slices.mutateChat { c -> c.flushCoalesceBufferForPart(partId) }
+        slices.mutateChat { c -> c.flushCoalesceBufferForPart(partId).first }
     }
 
     /**
@@ -742,7 +940,7 @@ internal class SessionSyncCoordinator(
     @Suppress("unused")
     private fun cancelDeltaFlush(partId: String) {
         flushJobs.remove(partId)?.cancel()
-        slices.mutateChat { c -> c.clearCoalesceBufferForPart(partId) }
+        slices.mutateChat { c -> c.clearCoalesceBufferForPart(partId).first }
     }
 
     /**
@@ -755,7 +953,7 @@ internal class SessionSyncCoordinator(
     fun clearDeltaBuffers() {
         flushJobs.values.forEach { it.cancel() }
         flushJobs.clear()
-        slices.mutateChat { c -> c.clearAllCoalesceBuffers() }
+        slices.mutateChat { c -> c.clearAllCoalesceBuffers().first }
     }
 
     // ── §R18 Phase 3 Wave 1 (P1-9): multi-workdir pending questions fan-out ──
@@ -815,64 +1013,71 @@ internal class SessionSyncCoordinator(
     }
 }
 
-// ── §R-17 batch5: pure state transforms for each SSE event branch ────────
+// ── §R-17 batch5 → §R-19 Sprint 3 P2-4: pure state transforms for each SSE event branch ──
 //
 // Each function takes the prior slice value + the event payload and returns
-// the new slice value with NO side effects (no effect emits, no coroutine
-// launches, no settings writes, no DebugLog). Side effects stay inline in
-// SessionSyncCoordinator.dispatchSseEvent's `when` branches. This is the
-// semi-formalization boundary: the state math is now unit-testable in
-// isolation, while the effect-channel migration (full reducer + effect
-// bus) is tracked as a followup.
+// `Pair<State, List<SseSideEffect>>` — the new state AND a list of side
+// effects the dispatcher should commit via `applySseSideEffects`. Pure: no
+// effect emits, no coroutine launches, no settings writes, no DebugLog INSIDE
+// the function. Most return `emptyList()` (the transform is pure state-only);
+// the dispatcher adds cross-slice effects (which need context the single-slice
+// function doesn't have) and routes the combined list.
+//
+// §R-19 Sprint 3 P2-4: the signature unification (all return Pair) is the
+// formalization step — the dispatcher's CAS pattern is now uniform across all
+// 11 branches, and the effect sequencing is auditable in one place.
 
 /**
  * session.created → upsert the parsed [Session] into [SessionListState.sessions].
- * Pure.
+ * Pure; effects empty (the dispatcher handles parse-failure via ReportNonFatal).
  */
-internal fun SessionListState.applySessionCreated(session: Session): SessionListState =
-    copy(sessions = upsertSession(sessions, session))
+internal fun SessionListState.applySessionCreated(session: Session): Pair<SessionListState, List<SseSideEffect>> =
+    copy(sessions = upsertSession(sessions, session)) to emptyList()
 
 /**
  * session.updated (non-archived) → upsert the parsed [Session] into
- * [SessionListState.sessions]. Pure.
+ * [SessionListState.sessions]. Pure; effects empty.
  */
-internal fun SessionListState.applySessionUpsert(updated: Session): SessionListState =
-    copy(sessions = upsertSession(sessions, updated))
+internal fun SessionListState.applySessionUpsert(updated: Session): Pair<SessionListState, List<SseSideEffect>> =
+    copy(sessions = upsertSession(sessions, updated)) to emptyList()
 
 /**
  * session.updated (archived) → upsert the session AND rewrite [openSessionIds]
  * to the caller-supplied [newOpenIds] (with the archived id evicted). The
  * caller computes [newOpenIds] + persists it via SettingsManager (a side
- * effect that stays inline). Pure.
+ * effect that stays inline). Pure; effects empty.
  */
 internal fun SessionListState.applyArchiveEviction(
     updated: Session,
     newOpenIds: List<String>
-): SessionListState = copy(
+): Pair<SessionListState, List<SseSideEffect>> = copy(
     sessions = upsertSession(sessions, updated),
     openSessionIds = newOpenIds
-)
+) to emptyList()
 
 /**
  * The chat-side archive clear when the archived session IS the currently-open
  * one: drop currentSessionId + messages + partsByMessage so the chat view
- * falls back to the empty state. Pure.
+ * falls back to the empty state. Pure; effects empty.
  */
-internal fun ChatState.applyArchivedChatClear(): ChatState = copy(
+internal fun ChatState.applyArchivedChatClear(): Pair<ChatState, List<SseSideEffect>> = copy(
     currentSessionId = null,
     messages = emptyList(),
     partsByMessage = emptyMap()
-)
+) to emptyList()
 
 /**
  * session.status → upsert the [sessionId] → [status] pair into
- * [SessionListState.sessionStatuses]. Pure; the busy-current / idle-current
- * / temp-cleared finalization side effects stay inline in the dispatcher.
+ * [SessionListState.sessionStatuses]. Pure; effects empty — the busy-current /
+ * idle-current / temp-cleared finalization side effects are computed by the
+ * dispatcher (they depend on cross-slice state: chat.currentSessionId,
+ * chat.streamingPartTexts, unread.tempClearedUnread).
  */
 internal fun SessionListState.applySessionStatus(
     sessionId: String,
     status: SessionStatus
-): SessionListState = copy(sessionStatuses = sessionStatuses + (sessionId to status))
+): Pair<SessionListState, List<SseSideEffect>> =
+    copy(sessionStatuses = sessionStatuses + (sessionId to status)) to emptyList()
 
 /**
  * message.updated → patch-if-found / insert-if-absent [updated] into
@@ -903,7 +1108,7 @@ internal fun ChatState.applyPartCreatedPlaceholder(
     partId: String,
     msgId: String,
     sessionId: String
-): ChatState {
+): Pair<ChatState, List<SseSideEffect>> {
     val base = partsByMessage[msgId]?.filterNot { it.id == partId } ?: emptyList()
     return copy(
         streamingReasoningPart = reasoningPartOrNull(partType, partId, msgId, sessionId)
@@ -911,7 +1116,7 @@ internal fun ChatState.applyPartCreatedPlaceholder(
         partsByMessage = partsByMessage + (msgId to base + Part(
             id = partId, messageId = msgId, sessionId = sessionId, type = partType
         ))
-    )
+    ) to emptyList()
 }
 
 /**
@@ -930,7 +1135,7 @@ internal fun ChatState.applyPartFullTextLeadingEdge(
     pId: String,
     msgId: String,
     sessionId: String
-): ChatState = copy(
+): Pair<ChatState, List<SseSideEffect>> = copy(
     streamingPartTexts = streamingPartTexts + (partId to fullText),
     streamingReasoningPart = reasoningPartOrNull(
         partType = partType,
@@ -939,7 +1144,7 @@ internal fun ChatState.applyPartFullTextLeadingEdge(
         sessionId = sessionId
     ) ?: streamingReasoningPart,
     partsByMessage = ensurePlaceholderPart(partsByMessage, msgId, pId, sessionId, partType)
-)
+) to emptyList()
 
 /**
  * Leading-edge delta write: APPEND [delta] to the prior
@@ -956,14 +1161,14 @@ internal fun ChatState.applyPartDeltaLeadingEdge(
     knownType: String,
     msgId: String,
     sessionId: String
-): ChatState {
+): Pair<ChatState, List<SseSideEffect>> {
     val previous = streamingPartTexts[partId].orEmpty()
     return copy(
         streamingPartTexts = streamingPartTexts + (partId to (previous + delta)),
         streamingReasoningPart = reasoningPartOrNull(knownType, partId, msgId, sessionId)
             ?: streamingReasoningPart,
         partsByMessage = ensurePlaceholderPart(partsByMessage, msgId, partId, sessionId, knownType)
-    )
+    ) to emptyList()
 }
 
 /** Variant of [applyPartDeltaLeadingEdge] taking the part.updated partType +
@@ -976,7 +1181,7 @@ internal fun ChatState.applyPartDeltaLeadingEdge(
     pId: String,
     msgId: String,
     sessionId: String
-): ChatState {
+): Pair<ChatState, List<SseSideEffect>> {
     val previous = streamingPartTexts[partId].orEmpty()
     return copy(
         streamingPartTexts = streamingPartTexts + (partId to (previous + delta)),
@@ -987,7 +1192,7 @@ internal fun ChatState.applyPartDeltaLeadingEdge(
             sessionId = sessionId
         ) ?: streamingReasoningPart,
         partsByMessage = ensurePlaceholderPart(partsByMessage, msgId, pId, sessionId, partType)
-    )
+    ) to emptyList()
 }
 
 /**
@@ -995,9 +1200,9 @@ internal fun ChatState.applyPartDeltaLeadingEdge(
  * [ChatState.deltaBuffer][partId] (the buffer is now a `Map<String, String>`,
  * so the append is a read-modify-write under the slice's CAS `update`).
  * Pure. */
-internal fun ChatState.appendDeltaBuffer(partId: String, delta: String): ChatState {
+internal fun ChatState.appendDeltaBuffer(partId: String, delta: String): Pair<ChatState, List<SseSideEffect>> {
     val current = deltaBuffer[partId].orEmpty()
-    return copy(deltaBuffer = deltaBuffer + (partId to (current + delta)))
+    return copy(deltaBuffer = deltaBuffer + (partId to (current + delta))) to emptyList()
 }
 
 /**
@@ -1005,8 +1210,8 @@ internal fun ChatState.appendDeltaBuffer(partId: String, delta: String): ChatSta
  * with [text] (REPLACE — fullText is the server-authoritative accumulated
  * text; only the latest value per partId matters). Pure.
  */
-internal fun ChatState.replaceFullTextBuffer(partId: String, text: String): ChatState =
-    copy(fullTextBuffer = fullTextBuffer + (partId to text))
+internal fun ChatState.replaceFullTextBuffer(partId: String, text: String): Pair<ChatState, List<SseSideEffect>> =
+    copy(fullTextBuffer = fullTextBuffer + (partId to text)) to emptyList()
 
 /**
  * Marks [partId] as having a pending flush (the slice-side mirror of the
@@ -1014,9 +1219,9 @@ internal fun ChatState.replaceFullTextBuffer(partId: String, text: String): Chat
  * leading-edge write so an observer of the slice can detect "deltas still
  * buffered" without needing access to the Job. Pure.
  */
-internal fun ChatState.markFlushPending(partId: String): ChatState =
-    if (partId in pendingFlushPartIds) this
-    else copy(pendingFlushPartIds = pendingFlushPartIds + partId)
+internal fun ChatState.markFlushPending(partId: String): Pair<ChatState, List<SseSideEffect>> =
+    if (partId in pendingFlushPartIds) this to emptyList()
+    else copy(pendingFlushPartIds = pendingFlushPartIds + partId) to emptyList()
 
 /**
  * Flushes [partId]'s buffered delta/fullText into [ChatState.streamingPartTexts]
@@ -1031,7 +1236,7 @@ internal fun ChatState.markFlushPending(partId: String): ChatState =
  * Mirrors the verbatim semantics of the pre-batch5 imperative
  * `flushDeltaBuffer` (the only change is storage location). Pure.
  */
-internal fun ChatState.flushCoalesceBufferForPart(partId: String): ChatState {
+internal fun ChatState.flushCoalesceBufferForPart(partId: String): Pair<ChatState, List<SseSideEffect>> {
     val overlayPresent = streamingPartTexts[partId] != null
     // REPLACE path: fullText wins outright when the overlay still exists.
     val bufferedFullText = fullTextBuffer[partId]
@@ -1044,7 +1249,7 @@ internal fun ChatState.flushCoalesceBufferForPart(partId: String): ChatState {
             deltaBuffer = deltaBuffer - partId,
             fullTextBuffer = fullTextBuffer - partId,
             pendingFlushPartIds = pendingFlushPartIds - partId
-        )
+        ) to emptyList()
     }
     // If the overlay was wiped mid-window, drop the buffered fullText (stale).
     // Otherwise keep fullTextBuffer intact (no fullText buffered for this
@@ -1056,7 +1261,7 @@ internal fun ChatState.flushCoalesceBufferForPart(partId: String): ChatState {
             fullTextBuffer = fullTextBufferAfter - partId,
             deltaBuffer = deltaBuffer - partId,
             pendingFlushPartIds = pendingFlushPartIds - partId
-        )
+        ) to emptyList()
     }
     // Overlay wiped mid-window → drop stale buffered delta (re-injecting
     // would render ghost text from the previous session).
@@ -1065,7 +1270,7 @@ internal fun ChatState.flushCoalesceBufferForPart(partId: String): ChatState {
             fullTextBuffer = fullTextBufferAfter - partId,
             deltaBuffer = deltaBuffer - partId,
             pendingFlushPartIds = pendingFlushPartIds - partId
-        )
+        ) to emptyList()
     }
     // APPEND path: append the buffered delta to the overlay.
     val previous = streamingPartTexts[partId].orEmpty()
@@ -1074,7 +1279,7 @@ internal fun ChatState.flushCoalesceBufferForPart(partId: String): ChatState {
         fullTextBuffer = fullTextBufferAfter - partId,
         deltaBuffer = deltaBuffer - partId,
         pendingFlushPartIds = pendingFlushPartIds - partId
-    )
+    ) to emptyList()
 }
 
 /**
@@ -1082,11 +1287,11 @@ internal fun ChatState.flushCoalesceBufferForPart(partId: String): ChatState {
  * discarded, NOT applied to streamingPartTexts). The slice-side companion of
  * [SessionSyncCoordinator.cancelDeltaFlush]. Pure.
  */
-internal fun ChatState.clearCoalesceBufferForPart(partId: String): ChatState = copy(
+internal fun ChatState.clearCoalesceBufferForPart(partId: String): Pair<ChatState, List<SseSideEffect>> = copy(
     deltaBuffer = deltaBuffer - partId,
     fullTextBuffer = fullTextBuffer - partId,
     pendingFlushPartIds = pendingFlushPartIds - partId
-)
+) to emptyList()
 
 /**
  * Drops ALL coalesce entries (deltaBuffer / fullTextBuffer /
@@ -1096,27 +1301,27 @@ internal fun ChatState.clearCoalesceBufferForPart(partId: String): ChatState = c
  * dropped). The slice-side companion of
  * [SessionSyncCoordinator.clearDeltaBuffers]. Pure.
  */
-internal fun ChatState.clearAllCoalesceBuffers(): ChatState = copy(
+internal fun ChatState.clearAllCoalesceBuffers(): Pair<ChatState, List<SseSideEffect>> = copy(
     deltaBuffer = emptyMap(),
     fullTextBuffer = emptyMap(),
     pendingFlushPartIds = emptySet()
-)
+) to emptyList()
 
 /**
  * question.asked → append [question] to [SessionListState.pendingQuestions]
  * iff its id is not already present (idempotent). Pure.
  */
-internal fun SessionListState.applyQuestionAsked(question: QuestionRequest): SessionListState {
+internal fun SessionListState.applyQuestionAsked(question: QuestionRequest): Pair<SessionListState, List<SseSideEffect>> {
     val existing = pendingQuestions.any { it.id == question.id }
-    return if (existing) this else copy(pendingQuestions = pendingQuestions + question)
+    return (if (existing) this else copy(pendingQuestions = pendingQuestions + question)) to emptyList()
 }
 
 /**
  * question.replied / question.rejected → drop the pending question whose id
  * matches [requestId]. Pure.
  */
-internal fun SessionListState.applyQuestionResolved(requestId: String): SessionListState =
-    copy(pendingQuestions = pendingQuestions.filter { it.id != requestId })
+internal fun SessionListState.applyQuestionResolved(requestId: String): Pair<SessionListState, List<SseSideEffect>> =
+    copy(pendingQuestions = pendingQuestions.filter { it.id != requestId }) to emptyList()
 
 /**
  * todo.updated → upsert [todos] under [sessionId] in
@@ -1125,7 +1330,8 @@ internal fun SessionListState.applyQuestionResolved(requestId: String): SessionL
 internal fun SessionListState.applyTodoUpdated(
     sessionId: String,
     todos: List<TodoItem>
-): SessionListState = copy(sessionTodos = sessionTodos + (sessionId to todos))
+): Pair<SessionListState, List<SseSideEffect>> =
+    copy(sessionTodos = sessionTodos + (sessionId to todos)) to emptyList()
 
 /**
  * message.created (out-of-band) → mark [sessionId] unread IF it is not the
@@ -1135,15 +1341,16 @@ internal fun SessionListState.applyTodoUpdated(
 internal fun UnreadState.applyMarkSessionUnread(
     sessionId: String,
     currentSessionId: String?
-): UnreadState = if (sessionId == currentSessionId) this
-else copy(unreadSessions = unreadSessions + sessionId)
+): Pair<UnreadState, List<SseSideEffect>> =
+    (if (sessionId == currentSessionId) this
+    else copy(unreadSessions = unreadSessions + sessionId)) to emptyList()
 
 /**
  * session.status idle finalization (non-current temp-cleared session) → drop
  * [sessionId] from [UnreadState.tempClearedUnread]. Pure.
  */
-internal fun UnreadState.dropTempCleared(sessionId: String): UnreadState =
-    copy(tempClearedUnread = tempClearedUnread - sessionId)
+internal fun UnreadState.dropTempCleared(sessionId: String): Pair<UnreadState, List<SseSideEffect>> =
+    copy(tempClearedUnread = tempClearedUnread - sessionId) to emptyList()
 
 // ── §streaming-render placeholder injection ────────────────
 

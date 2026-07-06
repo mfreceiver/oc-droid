@@ -222,6 +222,9 @@
     <string name="debug_log_level_all">全部</string>
     <string name="debug_log_empty">（暂无日志）</string>
     <string name="debug_log_empty_filtered">（当前过滤下无日志）</string>
+    <string name="debug_effect_bus_dropped_title">Effect Bus 丢弃</string>
+    <string name="debug_sse_unknown_events_title">SSE 未知事件</string>
+    <string name="debug_diagnostics_none">无</string>
     <string name="chat_load_more_history">加载更多历史</string>
     <string name="chat_loading">加载中…</string>
     <string name="chat_no_messages">暂无消息</string>

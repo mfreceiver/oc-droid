@@ -201,6 +201,8 @@ private fun ContextUsageRow(label: String, value: String) {
     }
 }
 
-private fun formatCount(value: Int): String = String.format(Locale.US, "%,d", value)
-
-private fun formatOptionalCount(value: Int?): String = value?.let(::formatCount) ?: "-"
+// §R-19 Sprint 2 #7(b): formatCount / formatOptionalCount were lifted
+// verbatim into the top-level pure-functions file ChatFormatHelpers.kt
+// (same package) so they can be covered by JVM unit tests (this file is
+// excluded from kover coverage as a @Composable-heavy UI file — see
+// PickerProviderFilter.kt for the same extraction pattern).

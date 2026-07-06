@@ -457,6 +457,78 @@ class ConnectionCoordinatorTest {
         assertEquals(sessions, slices.sessionList.value.directorySessions["/proj"])
     }
 
+    // ── §R-19 fix Blocker 1: SSE stale-host event drop at forwarding layer ──
+
+    @Test
+    fun `launchSseCollection drops events from a stale-host job after reconfigure`() {
+        // §R-19 Sprint 1 Lane A (P1-10) fix Blocker 1: the production-grade
+        // stale-host guard lives HERE (in ConnectionCoordinator.launchSseCollection),
+        // not in SessionSyncCoordinator. The generation is captured at SSE job
+        // start and re-checked per collected event; a host reconfigure that
+        // lands mid-collection causes every subsequent event from THIS job to
+        // be dropped at the forwarding layer (never becomes an OnSseEvent).
+        //
+        // Without this check a late server.connected from the previous host's
+        // cancelled SSE job would arrive at SessionSyncCoordinator.handleEvent,
+        // be stamped with the CURRENT generation (mismatch undetectable at
+        // consume time), and pollute the new host's cold-start semantics.
+        val feed = MutableSharedFlow<Result<SSEEvent>>(extraBufferCapacity = 8)
+        every { repository.connectSSE(any()) } returns feed.asSharedFlow()
+
+        coordinator.startSSE()
+        runPending()
+
+        // Event #1: forwarded normally (gen 0 == captured sseGenAtStart 0).
+        val evt1 = SSEEvent(payload = cn.vectory.ocdroid.data.model.SSEPayload(type = "evt1"))
+        feed.tryEmit(Result.success(evt1))
+        runPending()
+        assertEquals("evt1 forwarded pre-reconfigure", listOf(evt1), forwardedSseEvents())
+
+        // Host reconfigure: bumps directoryFetchGeneration to 1.
+        coordinator.cancelSseForReconfigure()
+        // NOTE: cancelSseForReconfigure also calls sseJob?.cancel(), so the
+        // collector is being torn down. But the race window we cover is the
+        // frame already buffered in `feed` (or mid-flight in the collector)
+        // before cancellation propagates — the generation check at collect time
+        // is the safety net.
+
+        // Stale event #2 from the OLD job: must NOT be forwarded.
+        val staleEvt = SSEEvent(payload = cn.vectory.ocdroid.data.model.SSEPayload(type = "stale"))
+        feed.tryEmit(Result.success(staleEvt))
+        runPending()
+
+        // Only evt1 was forwarded; staleEvt was dropped by the per-event
+        // generation check.
+        assertEquals(
+            "stale-host event dropped at CC forwarding layer",
+            listOf(evt1),
+            forwardedSseEvents()
+        )
+    }
+
+    @Test
+    fun `launchSseCollection forwards events normally when no reconfigure intervenes`() {
+        // Positive control for the Blocker 1 generation guard: identical setup
+        // but NO reconfigure interleaved → every event forwards.
+        val feed = MutableSharedFlow<Result<SSEEvent>>(extraBufferCapacity = 8)
+        every { repository.connectSSE(any()) } returns feed.asSharedFlow()
+
+        coordinator.startSSE()
+        runPending()
+
+        val evt1 = SSEEvent(payload = cn.vectory.ocdroid.data.model.SSEPayload(type = "a"))
+        val evt2 = SSEEvent(payload = cn.vectory.ocdroid.data.model.SSEPayload(type = "b"))
+        feed.tryEmit(Result.success(evt1))
+        feed.tryEmit(Result.success(evt2))
+        runPending()
+
+        assertEquals(
+            "both events forwarded when no reconfigure intervened",
+            listOf(evt1, evt2),
+            forwardedSseEvents()
+        )
+    }
+
     // ── SSE lifecycle ──────────────────────────────────────────────────────
 
     /** §batch 3b helper: extracts every SSE event the coordinator forwarded as
@@ -639,6 +711,124 @@ class ConnectionCoordinatorTest {
         coordinator.startSSE()
         runPending()
         verify(exactly = 1) { repository.connectSSE(any()) }
+    }
+
+    // ── §R-19 #2: single-SSE + catch-up boundary cases ─────────────────────
+    //
+    // The app runs exactly ONE SSE connection (bound to currentWorkdir). These
+    // cases pin the contract that multi-workdir correctness is recovered by
+    // catch-up (loadPendingQuestionsAllWorkdirs reads directorySessions.keys,
+    // which loadInitialData's fan-out populates for every recent workdir). See
+    // ConnectionCoordinator.startSSE KDoc for the full rationale.
+
+    @Test
+    fun `startSSE retargets to the new currentWorkdir after a workdir switch A to B`() {
+        // §single-sse retarget: when the user switches project A → B, the next
+        // startSSE must connect B's SSE. The prior A-bound collector is
+        // cancelled by the sseJob?.cancel() in startSSE; currentWorkdir is
+        // read fresh inside launchSseCollection (no cached value drifts).
+        every { settingsManager.currentWorkdir } returns "/A"
+        val flowA = MutableSharedFlow<Result<SSEEvent>>(extraBufferCapacity = 8)
+        every { repository.connectSSE("/A") } returns flowA.asSharedFlow()
+
+        coordinator.startSSE()
+        runPending()
+
+        // A's feed is now collecting; emit one event to prove liveness.
+        val evtA = SSEEvent(payload = cn.vectory.ocdroid.data.model.SSEPayload(type = "a"))
+        flowA.tryEmit(Result.success(evtA))
+        runPending()
+        assertEquals("A's feed forwarded before switch", listOf(evtA), forwardedSseEvents())
+
+        // User switches project A → B (SessionSwitcher updates currentWorkdir;
+        // the host-switch / session-switch path then calls startSSE again).
+        every { settingsManager.currentWorkdir } returns "/B"
+        val flowB = MutableSharedFlow<Result<SSEEvent>>(extraBufferCapacity = 8)
+        every { repository.connectSSE("/B") } returns flowB.asSharedFlow()
+
+        coordinator.startSSE()
+        runPending()
+
+        // A's collector is cancelled: events on flowA no longer forward.
+        flowA.tryEmit(Result.success(evtA))
+        // B's collector is live: evtB forwards.
+        val evtB = SSEEvent(payload = cn.vectory.ocdroid.data.model.SSEPayload(type = "b"))
+        flowB.tryEmit(Result.success(evtB))
+        runPending()
+
+        // Exactly one connect per workdir; the A feed did not double-connect.
+        verify(exactly = 1) { repository.connectSSE("/A") }
+        verify(exactly = 1) { repository.connectSSE("/B") }
+        assertEquals(
+            "no extra evtA re-forwarded after retarget; evtB forwarded once",
+            listOf(evtA, evtB),
+            forwardedSseEvents()
+        )
+    }
+
+    @Test
+    fun `single SSE on currentWorkdir B still restores background workdir A directory for catch-up fan-out`() {
+        // §catch-up precondition: SSE is bound to currentWorkdir B, but A is a
+        // BACKGROUND workdir (in recentWorkdirs but not currentWorkdir). The
+        // single-SSE model relies on loadInitialData's fan-out restoring
+        // directorySessions[/A] so SessionSyncCoordinator.
+        // loadPendingQuestionsAllWorkdirs (which reads directorySessions.keys)
+        // can still poll A's pending questions. This test pins the precondition
+        // — the SessionSyncCoordinator side is exercised in its own test file.
+        every { settingsManager.currentWorkdir } returns "/B"
+        every { settingsManager.recentWorkdirs } returns listOf("/A", "/B")
+        coEvery { repository.getCommands() } returns Result.success(emptyList())
+        val aSessions = listOf(Session(id = "s-a", directory = "/A"))
+        val bSessions = listOf(Session(id = "s-b", directory = "/B"))
+        coEvery { repository.getSessionsForDirectory("/A") } returns Result.success(aSessions)
+        coEvery { repository.getSessionsForDirectory("/B") } returns Result.success(bSessions)
+
+        // SSE only ever binds currentWorkdir (B) — never the background A.
+        every { repository.connectSSE(any()) } returns flowOf()
+        coordinator.startSSE()
+        runPending()
+        verify(exactly = 1) { repository.connectSSE("/B") }
+        verify(exactly = 0) { repository.connectSSE("/A") }
+
+        // loadInitialData fans out across recentWorkdirs + currentWorkdir →
+        // BOTH directories are restored. directorySessions[/A] being populated
+        // is the catch-up precondition for the background workdir's questions.
+        coordinator.loadInitialData()
+        runPending()
+
+        assertEquals(aSessions, slices.sessionList.value.directorySessions["/A"])
+        assertEquals(bSessions, slices.sessionList.value.directorySessions["/B"])
+    }
+
+    @Test
+    fun `startSSE after cancelSse reads currentWorkdir fresh and does not drift to the prior value`() {
+        // §reconnect consistency: the foreground ON_STOP → ON_START path calls
+        // cancelSse then startSSE on app return. If the user switched workdir
+        // while backgrounded (currentWorkdir flipped /A → /B between cancel
+        // and restart), the reconnect must bind B — never a stale /A captured
+        // at the prior connect. launchSseCollection reads settingsManager.
+        // currentWorkdir at collection start, so the property holds by
+        // construction; this test pins it as a regression guard.
+        every { settingsManager.currentWorkdir } returns "/A"
+        every { repository.connectSSE("/A") } returns flowOf()
+        coordinator.startSSE()
+        runPending()
+        verify(exactly = 1) { repository.connectSSE("/A") }
+
+        // App backgrounded (cancelSse), user switches workdir while bg,
+        // app foregrounded (startSSE again).
+        coordinator.cancelSse()
+        every { settingsManager.currentWorkdir } returns "/B"
+        every { repository.connectSSE("/B") } returns flowOf()
+        coordinator.startSSE()
+        runPending()
+
+        // Reconnect bound the latest currentWorkdir (B); no drift back to /A.
+        verify(exactly = 1) { repository.connectSSE("/A") }
+        verify(exactly = 1) { repository.connectSSE("/B") }
+        // Total connectSSE calls: 2 (one per connect cycle). No phantom third
+        // collector from a stale captured workdir.
+        verify(exactly = 2) { repository.connectSSE(any()) }
     }
 
     // ── RecordingConnectionCoordinatorCallbacks (removed in batch 3b) ──────

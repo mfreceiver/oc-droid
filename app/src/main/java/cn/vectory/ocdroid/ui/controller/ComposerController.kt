@@ -35,7 +35,7 @@ import cn.vectory.ocdroid.util.SettingsManager
  * slice via `composerFlow.update` so subscribers see a consistent value (RFC
  * R-17 §4 strategy A, §9.2 — no dispatcher batch reliance).
  */
-internal class ComposerController(
+class ComposerController(
     private val store: SharedStateStore,
     private val settingsManager: SettingsManager,
 ) {

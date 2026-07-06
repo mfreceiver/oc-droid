@@ -1,0 +1,30 @@
+{
+  "epic": "R-19",
+  "gate": "release (4-way final)",
+  "scope": "R-19 全程 3 sprint 累计 (新增评委: 架构决策/跨文件状态/数据完整性/并发生命周期/安全)",
+  "date": "2026-07-06",
+  "reviewer": "dser",
+  "session": "ses_0c88d8a63ffePMvBATqBRaSl02",
+  "final_score": 9.5,
+  "verdict": "PASS",
+  "scores": { "架构决策": 9.0, "跨文件状态一致性": 9.5, "数据完整性": 9.5, "并发/生命周期": 9.5, "安全": 10.0 },
+  "open_questions_judged": [
+    "P2-4 .first 丢弃 .second: 不应阻塞发版 (当前无数据丢失, 三重保险 KDoc+逻辑+测试; 机械防御改动回退风险>防御价值). R-20 选项 B: PureTransform<State> 类型别名编译器强制区分",
+    "secondary internal ctor(core) 假精确注入通道: 低风险, 建议 @VisibleForTesting + KDoc"
+  ],
+  "verified": [
+    "P1-10 stale 事件 guard 双层 (CC drop + SS trigger-stamped) race window 闭合",
+    "hostGeneration 同步时序 (CC incrementAndGet 后 emit HostReconfigured) 正确",
+    "SSE reducer CAS TOCTOU 安全 (MutableStateFlow.update 原子)",
+    "ControllerModule 6 @Provides wiring 与原 AppCore 内联 new 等价",
+    "@UiApplicationScope (Main.immediate) vs @ApplicationScope (Default) 语义区分正确",
+    "#9 isActive 双守卫 (entry + resolve 后) 覆盖 VM clear 窗口"
+  ],
+  "r20_recommendations": [
+    "PureTransform<State> 类型别名区分纯变换 vs effect-producing (消除 .first 陷阱)",
+    "secondary ctor 加 @VisibleForTesting",
+    "sessionsDirty 加 growth guard (多轮 disconnect 累积上限)",
+    "ChatVM 引入 CrossDomainOrchestrator 接口替代整 AppCore"
+  ],
+  "release_approval": "PASS (9.5), 可发版"
+}

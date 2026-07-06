@@ -114,7 +114,7 @@ internal fun AppCore.executeCommand(command: String, arguments: String) {
                 appScope.launch {
                     repository.executeCommand(existing, cmd, arguments, directory = commandDirectory)
                         .onFailure { error ->
-                            effectBus.uiEvents.tryEmit(UiEvent.Error(R.string.error_command_failed, listOf(cmd, errorMessageOrFallback(error, "unknown error"))))
+                            effectBus.tryEmitUiEvent(UiEvent.Error(R.string.error_command_failed, listOf(cmd, errorMessageOrFallback(error, "unknown error"))))
                         }
                 }
             } else if (store.composerFlow.value.draftWorkdir != null) {
@@ -123,12 +123,12 @@ internal fun AppCore.executeCommand(command: String, arguments: String) {
                     appScope.launch {
                         repository.executeCommand(sessionId, cmd, arguments, directory = commandDirectory)
                             .onFailure { error ->
-                                effectBus.uiEvents.tryEmit(UiEvent.Error(R.string.error_command_failed, listOf(cmd, errorMessageOrFallback(error, "unknown error"))))
+                                effectBus.tryEmitUiEvent(UiEvent.Error(R.string.error_command_failed, listOf(cmd, errorMessageOrFallback(error, "unknown error"))))
                             }
                     }
                 }
             } else {
-                effectBus.uiEvents.tryEmit(UiEvent.Error(R.string.chat_command_no_session, listOf(cmd)))
+                effectBus.tryEmitUiEvent(UiEvent.Error(R.string.chat_command_no_session, listOf(cmd)))
             }
             return
         }
@@ -204,7 +204,7 @@ internal fun AppCore.materializeDraftSession(onSessionReady: (String) -> Unit) {
             }
             .onFailure { error ->
                 writeComposer { it.copy(draftWorkdir = draftWorkdir) }
-                effectBus.uiEvents.tryEmit(UiEvent.Error(R.string.error_create_session_in_workdir_failed, listOf(draftWorkdir, error.message ?: "unknown error")))
+                effectBus.tryEmitUiEvent(UiEvent.Error(R.string.error_create_session_in_workdir_failed, listOf(draftWorkdir, error.message ?: "unknown error")))
             }
     }
 }
@@ -266,7 +266,7 @@ private fun AppCore.dispatchSendMessage(sessionId: String) {
             onComplete = {
                 writeComposer { state -> state.copy(sendingSessionIds = state.sendingSessionIds - sessionId) }
             },
-            emit = EventEmitter { event -> effectBus.uiEvents.tryEmit(event) },
+            emit = EventEmitter { event -> effectBus.tryEmitUiEvent(event) },
         )
     }
 
@@ -283,7 +283,7 @@ private fun AppCore.dispatchSendMessage(sessionId: String) {
                     val currentInput = store.composerFlow.value.inputText
                     val restored = if (currentInput.isBlank()) text else currentInput
                     if (restored != currentInput) settingsManager.setDraftText(sessionId, restored)
-                    effectBus.uiEvents.tryEmit(UiEvent.Error(R.string.error_restore_session_failed, listOf(errorMessageOrFallback(error, "unknown error"))))
+                    effectBus.tryEmitUiEvent(UiEvent.Error(R.string.error_restore_session_failed, listOf(errorMessageOrFallback(error, "unknown error"))))
                     writeComposer { c ->
                         c.copy(sendingSessionIds = c.sendingSessionIds - sessionId, inputText = restored)
                     }
@@ -370,7 +370,7 @@ internal fun AppCore.loadMessagesForEffect(sessionId: String, resetLimit: Boolea
         resetLimit = resetLimit,
         settingsManager = settingsManager,
         onCacheWindow = ::writeSessionWindow,
-        emit = EventEmitter { event -> effectBus.uiEvents.tryEmit(event) },
+        emit = EventEmitter { event -> effectBus.tryEmitUiEvent(event) },
     )
 }
 
@@ -384,7 +384,7 @@ internal fun AppCore.loadSessionsForEffect() {
         onSelectSession = { selectSessionForEffect(it) },
         onLoadSessionStatus = { launchLoadSessionStatus(appScope, repository, store.slices) },
         onLoadMessages = { sessionId -> loadMessagesForEffect(sessionId, resetLimit = true) },
-        emit = EventEmitter { event -> effectBus.uiEvents.tryEmit(event) },
+        emit = EventEmitter { event -> effectBus.tryEmitUiEvent(event) },
     )
 }
 
@@ -393,7 +393,7 @@ private fun AppCore.selectSessionForEffect(sessionId: String) {
 }
 
 private fun AppCore.createSessionForEffect(title: String? = null) {
-    launchCreateSession(appScope, repository, store.slices, title, { selectSessionForEffect(it) }, EventEmitter { effectBus.uiEvents.tryEmit(it) }, directory = settingsManager.currentWorkdir)   // §R18 Final 终审 fix (gpter)
+    launchCreateSession(appScope, repository, store.slices, title, { selectSessionForEffect(it) }, EventEmitter { effectBus.tryEmitUiEvent(it) }, directory = settingsManager.currentWorkdir)   // §R18 Final 终审 fix (gpter)
 }
 
 private fun AppCore.createSessionInWorkdirForEffect(workdir: String) {

@@ -5,6 +5,8 @@ import cn.vectory.ocdroid.data.model.*
 import cn.vectory.ocdroid.data.repository.HostProfileStore
 import cn.vectory.ocdroid.data.repository.OpenCodeRepository
 import cn.vectory.ocdroid.di.AppLifecycleMonitor
+import cn.vectory.ocdroid.di.UiApplicationScope
+import cn.vectory.ocdroid.util.DebugLog
 import cn.vectory.ocdroid.util.SettingsManager
 import cn.vectory.ocdroid.util.TrafficTracker
 import cn.vectory.ocdroid.ui.controller.ComposerController
@@ -17,9 +19,7 @@ import cn.vectory.ocdroid.ui.controller.SessionSwitcher
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CoroutineStart
-import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.FlowPreview
-import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.launch
@@ -92,10 +92,28 @@ class AppCore @Inject constructor(
      *  resolve via [LocalContext] instead; this Context serves only the
      *  app-lifetime notification path that has no Composition available. */
     @ApplicationContext private val appContext: Context,
+    /** R-19 Sprint 3 P2-5: the 5 application-scoped controllers are now
+     *  Hilt-injected (@Singleton via [cn.vectory.ocdroid.di.ControllerModule])
+     *  instead of being constructed inline here. This lets the per-domain
+     *  ViewModels inject the SAME singleton instances directly (precise
+     *  injection — see R-19 P2-5) without `core.<controller>` reach-through
+     *  and without duplicating controller instances. AppCore retains the
+     *  effect-bus collector → [dispatchEffect] routing + the cross-domain
+     *  orchestration methods; it does not construct the controllers. */
+    internal val foregroundCatchUpController: ForegroundCatchUpController,
+    internal val composerController: ComposerController,
+    internal val sessionSwitcher: SessionSwitcher,
+    internal val hostProfileController: HostProfileController,
+    internal val sessionSyncCoordinator: SessionSyncCoordinator,
+    internal val connectionCoordinator: ConnectionCoordinator,
+    /** R-19 P2-5: the app-lifetime scope is now Hilt-provided
+     *  ([cn.vectory.ocdroid.di.UiApplicationScopeModule], Main.immediate) so
+     *  the migrated ViewModels inject the SAME singleton scope AppCore and
+     *  the controllers use. AppCore keeps the field `internal` because the
+     *  R-19-P2-2 dispatch helpers (in this file) and the AppCoreOrchestration
+     *  extensions reach `appScope` directly. */
+    @UiApplicationScope internal val appScope: CoroutineScope,
 ) {
-
-    /** App-process-lifetime scope (replaces the former viewModelScope). */
-    internal val appScope: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
 
     // ── Slice accessors (delegate to SharedStateStore) ──────────────────────
     // §R18 Phase 4 (P0-9): SharedStateStore now owns private MutableStateFlows
@@ -116,59 +134,6 @@ class AppCore @Inject constructor(
     val navFlow: StateFlow<NavState> get() = store.navFlow
 
     val uiEvents: SharedFlow<UiEvent> get() = effectBus.uiEventsConsumed
-
-    // ── Controllers (constructed once; `internal` so the 6 VMs reach them) ──
-    internal val foregroundCatchUpController: ForegroundCatchUpController =
-        ForegroundCatchUpController(
-            appLifecycleMonitor = appLifecycleMonitor,
-            scope = appScope,
-            store = store,
-            settingsManager = settingsManager,
-            effects = effectBus,
-        )
-
-    internal val composerController: ComposerController =
-        ComposerController(
-            store = store,
-            settingsManager = settingsManager,
-        )
-
-    internal val sessionSwitcher: SessionSwitcher =
-        SessionSwitcher(
-            store = store,
-            settingsManager = settingsManager,
-            repository = repository,
-            effects = effectBus,
-        )
-
-    internal val hostProfileController: HostProfileController =
-        HostProfileController(
-            scope = appScope,
-            slices = store.slices,
-            hostProfileStore = hostProfileStore,
-            repository = repository,
-            settingsManager = settingsManager,
-            trafficTracker = trafficTracker,
-            effects = effectBus,
-        )
-
-    internal val sessionSyncCoordinator: SessionSyncCoordinator =
-        SessionSyncCoordinator(
-            scope = appScope,
-            slices = store.slices,
-            settingsManager = settingsManager,
-            effects = effectBus,
-        )
-
-    internal val connectionCoordinator: ConnectionCoordinator =
-        ConnectionCoordinator(
-            scope = appScope,
-            slices = store.slices,
-            repository = repository,
-            settingsManager = settingsManager,
-            effects = effectBus,
-            serverCompatProfile = serverCompatProfile,
-        )
 
     // ── Slice write helpers (delegate to SharedStateStore.mutateXxx). ───────
     // Kept `internal` so the 6 VMs / orchestration extensions keep resolving
@@ -243,63 +208,190 @@ class AppCore @Inject constructor(
     }
 
     /**
-     * R-17 batch3b → batch3d: routes a single [ControllerEffect] emitted by any
-     * of the 6 controllers to the matching helper here. Each branch is a thin
-     * call to the same controller / free function the corresponding VM method
-     * uses (AppCore cannot call the VMs directly because Hilt ViewModels are
-     * not @Inject-able).
+     * R-17 batch3b → batch3d → R-19 Sprint 2 P2-2: routes a single
+     * [ControllerEffect] emitted by any of the 6 controllers to the matching
+     * helper here.
+     *
+     * **R-19 P2-2 split**: the former 23-branch monolithic `when` (which had
+     * reached its cognitive ceiling — sealed `ControllerEffect` guarantees
+     * compile-time exhaustiveness but a single function with 23 branches
+     * makes adding a new effect silently no-op if a branch is missed) is now
+     * split into 5 per-domain dispatchers that each return `Boolean` (handled).
+     * The top-level router cascades them via short-circuit `||` so the first
+     * domain that handles the effect wins; if none does,
+     * [assertExactlyOneHandled] logs a warning (visible in the in-app debug
+     * log viewer) so a missed branch is never silently swallowed.
+     *
+     * Each branch is a thin call to the same controller / free function the
+     * corresponding VM method uses (AppCore cannot call the VMs directly
+     * because Hilt ViewModels are not @Inject-able).
      */
     private fun dispatchEffect(effect: ControllerEffect) {
-        when (effect) {
-            // ── ForegroundCatchUpController ──
-            is ControllerEffect.ForceReconnect -> connectionCoordinator.testConnection(force = true)
-            is ControllerEffect.GlobalColdStartRefresh -> performGlobalColdStartRefresh(currentId = effect.sessionId)
-            is ControllerEffect.CancelSse -> {
-                connectionCoordinator.cancelSse()
-                sessionSyncCoordinator.clearDeltaBuffers()
-            }
-            is ControllerEffect.CatchUpAfterDisconnect ->
-                catchUpAfterDisconnectOrForeground(effect.sessionId)
+        val handled = dispatchForegroundCatchUpEffect(effect)
+            || dispatchSessionEffect(effect)
+            || dispatchHostEffect(effect)
+            || dispatchConnectionEffect(effect)
+            || dispatchSessionSyncEffect(effect)
+        assertExactlyOneHandled(effect, handled)
+    }
 
-            // ── SessionSwitcher ──
-            is ControllerEffect.LoadMessages -> loadMessagesForEffect(effect.sessionId, effect.resetLimit)
-            is ControllerEffect.LoadChildSessions -> launchLoadChildSessions(appScope, repository, store.slices, effect.sessionId, TAG)
-            is ControllerEffect.LoadSessionStatus -> launchLoadSessionStatus(appScope, repository, store.slices)
-            is ControllerEffect.LoadPendingQuestions ->
-                // §R18 Phase 3 Wave 3 (P1-9 wire-up): production now uses the
-                // multi-workdir fan-out added in Wave 1. The single-workdir
-                // `launchLoadPendingQuestions(..., settingsManager.currentWorkdir, ...)`
-                // path was dropping pending questions for any background workdir
-                // (a `question.asked` SSE event for a non-current workdir was
-                // fetched-then-overwritten by the next currentWorkdir poll).
-                // The coordinator owns `slices` (directorySessions keys) +
-                // `settingsManager` (currentWorkdir), so it computes the
-                // workdir set internally — only the repository is passed in.
-                sessionSyncCoordinator.loadPendingQuestionsAllWorkdirs(repository)
-            is ControllerEffect.ClearDeltaBuffers -> sessionSyncCoordinator.clearDeltaBuffers()
+    /**
+     * R-19 P2-2: invariant guard. Each [ControllerEffect] subtype belongs to
+     * exactly ONE domain dispatcher; the `||` cascade in [dispatchEffect]
+     * stops at the first `handled = true`. If none of the 5 dispatchers
+     * claims the effect (e.g. a new branch was added to the sealed hierarchy
+     * but no dispatcher was updated), this logs a warning so the miss is
+     * observable in the in-app debug log viewer instead of silently
+     * no-op'ing. We do not throw: production must not crash on an
+     * unrecognized effect (a missed branch is a correctness bug, but the
+     * effect itself is otherwise harmless to drop).
+     *
+     * Visibility is `internal` (not `private`) so unit tests can drive the
+     * warning path directly without constructing a fake `ControllerEffect`
+     * subtype (sealed classes cannot be subclassed from the test source set
+     * — different Kotlin module). The cascade itself is exercised by
+     * `dispatchEffect`, which is the only production caller.
+     */
+    internal fun assertExactlyOneHandled(effect: ControllerEffect, handled: Boolean) {
+        if (!handled) {
+            DebugLog.w(TAG, "unhandled effect=$effect")
+        }
+    }
 
-            // ── HostProfileController ──
-            is ControllerEffect.CancelSseForReconfigure -> connectionCoordinator.cancelSseForReconfigure()
-            is ControllerEffect.StartSse -> connectionCoordinator.startSSE()
-            is ControllerEffect.HostProfileSwitched -> applyReloadDisabledModelsForCurrentHost(settingsManager, hostProfileStore, store.slices)
-            is ControllerEffect.ColdStartReconnect -> connectionCoordinator.coldStartReconnect()
-            is ControllerEffect.ResetLocalDataAndResync -> resetLocalDataAndResync()
-            is ControllerEffect.ClearSessionWindowCache -> sessionSwitcher.clearSessionWindowCache()
+    // ── Per-domain effect dispatchers (R-19 P2-2 split). ─────────────────────
+    // Each dispatcher owns the branches for ONE controller family; returns
+    // `true` iff it matched + dispatched the effect, `false` otherwise so the
+    // next domain dispatcher in [dispatchEffect]'s `||` cascade gets a chance.
+    // Branch bodies are preserved verbatim from the former monolithic `when`
+    // (pure relocation — no behavior change).
 
-            // ── ConnectionCoordinator ──
-            is ControllerEffect.HostReconfigured -> foregroundCatchUpController.onHostReconfigured()
-            is ControllerEffect.LoadSessions -> loadSessionsForEffect()
-            is ControllerEffect.LoadAgents -> launchLoadAgents(appScope, repository, store.slices, settingsManager, TAG)
-            is ControllerEffect.LoadProviders -> launchLoadProviders(appScope, repository, store.slices, settingsManager, hostProfileStore) { message, error ->
+    /** ForegroundCatchUpController-owned effects. */
+    internal fun dispatchForegroundCatchUpEffect(effect: ControllerEffect): Boolean = when (effect) {
+        is ControllerEffect.ForceReconnect -> {
+            connectionCoordinator.testConnection(force = true)
+            true
+        }
+        is ControllerEffect.GlobalColdStartRefresh -> {
+            performGlobalColdStartRefresh(currentId = effect.sessionId)
+            true
+        }
+        is ControllerEffect.CancelSse -> {
+            connectionCoordinator.cancelSse()
+            sessionSyncCoordinator.clearDeltaBuffers()
+            true
+        }
+        is ControllerEffect.CatchUpAfterDisconnect -> {
+            catchUpAfterDisconnectOrForeground(effect.sessionId)
+            true
+        }
+        else -> false
+    }
+
+    /** SessionSwitcher-owned effects. */
+    internal fun dispatchSessionEffect(effect: ControllerEffect): Boolean = when (effect) {
+        is ControllerEffect.LoadMessages -> {
+            loadMessagesForEffect(effect.sessionId, effect.resetLimit)
+            true
+        }
+        is ControllerEffect.LoadChildSessions -> {
+            launchLoadChildSessions(appScope, repository, store.slices, effect.sessionId, TAG)
+            true
+        }
+        is ControllerEffect.LoadSessionStatus -> {
+            launchLoadSessionStatus(appScope, repository, store.slices)
+            true
+        }
+        is ControllerEffect.LoadPendingQuestions -> {
+            // §R18 Phase 3 Wave 3 (P1-9 wire-up): production now uses the
+            // multi-workdir fan-out added in Wave 1. The single-workdir
+            // `launchLoadPendingQuestions(..., settingsManager.currentWorkdir, ...)`
+            // path was dropping pending questions for any background workdir
+            // (a `question.asked` SSE event for a non-current workdir was
+            // fetched-then-overwritten by the next currentWorkdir poll).
+            // The coordinator owns `slices` (directorySessions keys) +
+            // `settingsManager` (currentWorkdir), so it computes the
+            // workdir set internally — only the repository is passed in.
+            sessionSyncCoordinator.loadPendingQuestionsAllWorkdirs(repository)
+            true
+        }
+        is ControllerEffect.ClearDeltaBuffers -> {
+            sessionSyncCoordinator.clearDeltaBuffers()
+            true
+        }
+        else -> false
+    }
+
+    /** HostProfileController-owned effects. */
+    internal fun dispatchHostEffect(effect: ControllerEffect): Boolean = when (effect) {
+        is ControllerEffect.CancelSseForReconfigure -> {
+            connectionCoordinator.cancelSseForReconfigure()
+            true
+        }
+        is ControllerEffect.StartSse -> {
+            connectionCoordinator.startSSE()
+            true
+        }
+        is ControllerEffect.HostProfileSwitched -> {
+            applyReloadDisabledModelsForCurrentHost(settingsManager, hostProfileStore, store.slices)
+            true
+        }
+        is ControllerEffect.ColdStartReconnect -> {
+            connectionCoordinator.coldStartReconnect()
+            true
+        }
+        is ControllerEffect.ResetLocalDataAndResync -> {
+            resetLocalDataAndResync()
+            true
+        }
+        is ControllerEffect.ClearSessionWindowCache -> {
+            sessionSwitcher.clearSessionWindowCache()
+            true
+        }
+        else -> false
+    }
+
+    /** ConnectionCoordinator-owned effects. */
+    internal fun dispatchConnectionEffect(effect: ControllerEffect): Boolean = when (effect) {
+        is ControllerEffect.HostReconfigured -> {
+            foregroundCatchUpController.onHostReconfigured()
+            true
+        }
+        is ControllerEffect.LoadSessions -> {
+            loadSessionsForEffect()
+            true
+        }
+        is ControllerEffect.LoadAgents -> {
+            launchLoadAgents(appScope, repository, store.slices, settingsManager, TAG)
+            true
+        }
+        is ControllerEffect.LoadProviders -> {
+            launchLoadProviders(appScope, repository, store.slices, settingsManager, hostProfileStore) { message, error ->
                 reportNonFatalIssue(TAG, message, error)
             }
-            is ControllerEffect.LoadPendingPermissions -> launchLoadPendingPermissions(appScope, repository, store.slices, TAG)
-            is ControllerEffect.OnSseEvent -> sessionSyncCoordinator.handleEvent(effect.event)
-
-            // ── SessionSyncCoordinator ──
-            is ControllerEffect.ServerConnected -> foregroundCatchUpController.onServerConnected()
-            is ControllerEffect.RefreshSessions -> loadSessionsForEffect()
+            true
         }
+        is ControllerEffect.LoadPendingPermissions -> {
+            launchLoadPendingPermissions(appScope, repository, store.slices, TAG)
+            true
+        }
+        is ControllerEffect.OnSseEvent -> {
+            sessionSyncCoordinator.handleEvent(effect.event)
+            true
+        }
+        else -> false
+    }
+
+    /** SessionSyncCoordinator-owned effects. */
+    internal fun dispatchSessionSyncEffect(effect: ControllerEffect): Boolean = when (effect) {
+        is ControllerEffect.ServerConnected -> {
+            foregroundCatchUpController.onServerConnected()
+            true
+        }
+        is ControllerEffect.RefreshSessions -> {
+            loadSessionsForEffect()
+            true
+        }
+        else -> false
     }
 
 

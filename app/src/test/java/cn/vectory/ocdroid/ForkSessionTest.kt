@@ -106,8 +106,76 @@ class ForkSessionTest {
         unmockkAll()
     }
 
-    private fun createCore(): AppCore =
-        AppCore(SharedStateStore(), repository, settingsManager, hostProfileStore, trafficTracker, appLifecycleMonitor, cn.vectory.ocdroid.data.repository.ServerCompatProfile(), SharedEffectBus(), mockk<Context>(relaxed = true))
+    private fun createCore(): AppCore {
+        // §R-19 Sprint 3 P2-5: AppCore now takes the 5 controllers + scope as
+        // constructor params (Hilt-injected in production). Tests construct
+        // them inline with the same wiring [cn.vectory.ocdroid.di.ControllerModule]
+        // uses — see MainViewModelTestBase.createCore for the same pattern.
+        val store = SharedStateStore()
+        val effectBus = SharedEffectBus()
+        val appScope = kotlinx.coroutines.CoroutineScope(
+            kotlinx.coroutines.SupervisorJob() +
+                kotlinx.coroutines.Dispatchers.Main.immediate
+        )
+        val foregroundCatchUpController = cn.vectory.ocdroid.ui.controller.ForegroundCatchUpController(
+            appLifecycleMonitor = appLifecycleMonitor,
+            scope = appScope,
+            store = store,
+            settingsManager = settingsManager,
+            effects = effectBus,
+        )
+        val composerController = cn.vectory.ocdroid.ui.controller.ComposerController(
+            store = store,
+            settingsManager = settingsManager,
+        )
+        val sessionSwitcher = cn.vectory.ocdroid.ui.controller.SessionSwitcher(
+            store = store,
+            settingsManager = settingsManager,
+            repository = repository,
+            effects = effectBus,
+        )
+        val hostProfileController = cn.vectory.ocdroid.ui.controller.HostProfileController(
+            scope = appScope,
+            slices = store.slices,
+            hostProfileStore = hostProfileStore,
+            repository = repository,
+            settingsManager = settingsManager,
+            trafficTracker = trafficTracker,
+            effects = effectBus,
+        )
+        val sessionSyncCoordinator = cn.vectory.ocdroid.ui.controller.SessionSyncCoordinator(
+            scope = appScope,
+            slices = store.slices,
+            settingsManager = settingsManager,
+            effects = effectBus,
+        )
+        val connectionCoordinator = cn.vectory.ocdroid.ui.controller.ConnectionCoordinator(
+            scope = appScope,
+            slices = store.slices,
+            repository = repository,
+            settingsManager = settingsManager,
+            effects = effectBus,
+            serverCompatProfile = cn.vectory.ocdroid.data.repository.ServerCompatProfile(),
+        )
+        return AppCore(
+            store,
+            repository,
+            settingsManager,
+            hostProfileStore,
+            trafficTracker,
+            appLifecycleMonitor,
+            cn.vectory.ocdroid.data.repository.ServerCompatProfile(),
+            effectBus,
+            mockk<Context>(relaxed = true),
+            foregroundCatchUpController,
+            composerController,
+            sessionSwitcher,
+            hostProfileController,
+            sessionSyncCoordinator,
+            connectionCoordinator,
+            appScope,
+        )
+    }
 
     @Test
     fun `forkSession success upserts forked session and selects it`() = runTest {

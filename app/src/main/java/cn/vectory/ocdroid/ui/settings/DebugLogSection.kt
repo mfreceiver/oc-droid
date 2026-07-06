@@ -50,7 +50,14 @@ import cn.vectory.ocdroid.R
 import cn.vectory.ocdroid.ui.theme.BundledMonoFamily
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import cn.vectory.ocdroid.ui.AppCore
+import cn.vectory.ocdroid.ui.SharedEffectBus
+import cn.vectory.ocdroid.ui.controller.SessionSyncCoordinator
 import cn.vectory.ocdroid.util.DebugLog
+import dagger.hilt.EntryPoint
+import dagger.hilt.InstallIn
+import dagger.hilt.android.EntryPointAccessors
+import dagger.hilt.components.SingletonComponent
 import kotlinx.coroutines.delay
 import java.text.SimpleDateFormat
 import java.util.Locale
@@ -83,9 +90,39 @@ internal fun DebugLogSection(hideHeader: Boolean = false) {
         }
     }
 
+    // ── Diagnostic panels (R-19 Sprint 1 Lane D): observability for the
+    // Effect Bus drop counter + SSE unknown-event counters. Read-only.
+    //
+    // §dependency-injection: this Composable lives outside any
+    // @HiltViewModel scope (DebugLogSection takes no VM). Rather than
+    // threading new params through SettingsScreen + every caller, we resolve
+    // the app singletons via a Hilt @EntryPoint — the same pattern Theme.kt
+    // uses for SettingsManager. SharedEffectBus + AppCore are both
+    // @Singleton @Inject, so Hilt auto-provides them.
+    val diagnostics = rememberDebugDiagnostics()
+
+    // §polling: the underlying classes expose imperative snapshot getters
+    // (AtomicLong / ConcurrentHashMap), not Flows. A 1 s poll keeps the UI
+    // fresh without per-event recompositions (these counters move slowly —
+    // a drop or unknown event is an anomaly, not per-token noise).
+    var droppedEffectCount by remember { mutableStateOf(0L) }
+    var unknownEventCounts by remember { mutableStateOf(emptyMap<String, Int>()) }
+    LaunchedEffect(diagnostics) {
+        while (true) {
+            droppedEffectCount = diagnostics.effectBus.droppedEffectCount()
+            unknownEventCounts = diagnostics.coordinator.unknownEventCountsSnapshot()
+            delay(1000)
+        }
+    }
+
     if (!hideHeader) {
         SectionHeader(title = stringResource(R.string.debug_log_title))
     }
+
+    EffectBusDroppedPanel(droppedEffectCount)
+    Spacer(modifier = Modifier.height(12.dp))
+    SseUnknownEventsPanel(unknownEventCounts)
+    Spacer(modifier = Modifier.height(12.dp))
 
     Card(
         modifier = Modifier.fillMaxWidth(),
@@ -261,4 +298,145 @@ private fun LevelChip(
             selectedTrailingIconColor = MaterialTheme.colorScheme.primary
         )
     )
+}
+
+// ── R-19 Sprint 1 Lane D: diagnostic panels (read-only observability) ────
+
+/**
+ * Holds the two diagnostic sources the panels read. Resolved once per Activity
+ * via [rememberDebugDiagnostics] (the underlying singletons outlive any single
+ * Composition).
+ */
+private data class DebugDiagnostics(
+    val effectBus: SharedEffectBus,
+    val coordinator: SessionSyncCoordinator
+)
+
+/**
+ * R-19: Hilt EntryPoint that exposes the app singletons needed by the
+ * diagnostic panels. [SharedEffectBus] is `@Singleton @Inject constructor()`,
+ * and [AppCore] (which owns the [SessionSyncCoordinator] as an `internal val`)
+ * is also `@Singleton @Inject`. This mirrors the [SettingsManagerEntryPoint]
+ * pattern in Theme.kt for Composables that live outside any @HiltViewModel
+ * scope.
+ */
+@EntryPoint
+@InstallIn(SingletonComponent::class)
+interface DebugDiagnosticsEntryPoint {
+    fun effectBus(): SharedEffectBus
+    fun appCore(): AppCore
+}
+
+/**
+ * Resolves the diagnostic singletons from the Hilt-attached Application.
+ * Cached with `remember(context)` so the entry-point lookup runs once per
+ * Activity (the Application context is stable across recompositions).
+ */
+@Composable
+private fun rememberDebugDiagnostics(): DebugDiagnostics {
+    val context = LocalContext.current
+    return remember(context) {
+        val ep = EntryPointAccessors.fromApplication(
+            context.applicationContext,
+            DebugDiagnosticsEntryPoint::class.java
+        )
+        DebugDiagnostics(
+            effectBus = ep.effectBus(),
+            // sessionSyncCoordinator is internal on AppCore; accessible here
+            // because DebugLogSection lives in the same Gradle module.
+            coordinator = ep.appCore().sessionSyncCoordinator
+        )
+    }
+}
+
+/**
+ * R-19 Lane D: shows the total count of [ControllerEffect]s dropped by
+ * [SharedEffectBus.tryEmitEffect] since process start. A non-zero value means
+ * the SUSPEND buffer (256) filled under burst — should never happen in normal
+ * operation, so any non-zero count is rendered in [error] colour.
+ */
+@Composable
+private fun EffectBusDroppedPanel(droppedCount: Long) {
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(16.dp),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text(
+                stringResource(R.string.debug_effect_bus_dropped_title),
+                style = MaterialTheme.typography.titleMedium
+            )
+            Text(
+                droppedCount.toString(),
+                style = MaterialTheme.typography.titleMedium,
+                color = if (droppedCount > 0L) MaterialTheme.colorScheme.error
+                        else MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        }
+    }
+}
+
+/**
+ * R-19 Lane D: shows the per-type counts of SSE events that fell through
+ * [SessionSyncCoordinator.dispatchSseEvent]'s else branch (unrecognized types,
+ * excluding the known-intentional NOISY_SSE_LOG_EVENTS skips). The header row
+ * shows the running total; the body lists each type → count (sorted by count
+ * descending) in monospace so the columns align. Empty → "无" / "None" in a
+ * muted style. A non-zero total is rendered in [error] colour.
+ */
+@Composable
+private fun SseUnknownEventsPanel(counts: Map<String, Int>) {
+    val total = counts.values.sum()
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
+    ) {
+        Column(modifier = Modifier.padding(16.dp)) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    stringResource(R.string.debug_sse_unknown_events_title),
+                    style = MaterialTheme.typography.titleMedium
+                )
+                Text(
+                    total.toString(),
+                    style = MaterialTheme.typography.labelSmall,
+                    color = if (total > 0) MaterialTheme.colorScheme.error
+                            else MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+
+            if (counts.isEmpty()) {
+                Spacer(modifier = Modifier.height(4.dp))
+                Text(
+                    stringResource(R.string.debug_diagnostics_none),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            } else {
+                Spacer(modifier = Modifier.height(8.dp))
+                // Sort by count desc so the most frequent unknown type surfaces
+                // first (a recurring unknown type is a higher-priority signal
+                // than a one-off).
+                val sorted = counts.entries.sortedByDescending { it.value }
+                sorted.forEach { (type, count) ->
+                    Text(
+                        text = "$type  ·  $count",
+                        style = MaterialTheme.typography.labelSmall,
+                        fontFamily = BundledMonoFamily,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            }
+        }
+    }
 }

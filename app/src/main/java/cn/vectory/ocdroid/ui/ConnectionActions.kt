@@ -111,8 +111,15 @@ internal fun applySavedSettings(
     // empty-state UX can show a spinner instead of the bare connect button
     // while coldStartReconnect() is in flight. §R18 Phase 2-I: phase is now a
     // sealed ConnectionPhase; Idle replaces the legacy null sentinel.
+    // §R-19 Sprint 1 Lane A (#10): keep isConnecting in sync with the phase —
+    // a cold-start Reconnecting signal means a connect probe is in flight, so
+    // isConnecting MUST be true (it was being left at the default false,
+    // causing the empty-state spinner / "connecting" badge to flip off for the
+    // duration of coldStartReconnect). The Idle branch (no profiles configured)
+    // leaves isConnecting at the ConnectionState default of false.
     val connectionPhase = if (profiles.isNotEmpty()) ConnectionPhase.Reconnecting else ConnectionPhase.Idle
-    slices.mutateConnection { it.copy(connectionPhase = connectionPhase) }
+    val isConnecting = connectionPhase is ConnectionPhase.Reconnecting
+    slices.mutateConnection { it.copy(connectionPhase = connectionPhase, isConnecting = isConnecting) }
 }
 
 /**

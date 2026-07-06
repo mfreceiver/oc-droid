@@ -150,66 +150,13 @@ internal sealed class StreamSegment {
     data class Code(val code: String, val language: String) : StreamSegment()
 }
 
-/** Returns `" ``` "` / `"~~~"` if the line opens/closes a fence, else null. */
-private fun fenceMarkerOf(line: String): String? {
-    val t = line.trimStart()
-    return when {
-        t.startsWith("```") -> "```"
-        t.startsWith("~~~") -> "~~~"
-        else -> null
-    }
-}
-
-private fun splitCodeAndProse(text: String): List<StreamSegment> {
-    if (text.isEmpty()) return emptyList()
-    val segments = mutableListOf<StreamSegment>()
-    val lines = text.split("\n")
-    val proseBuf = StringBuilder()
-    // fenceMarker != null ⇒ currently inside a code fence of that marker char.
-    var fenceMarker: String? = null
-    var lang = ""
-    val codeBuf = StringBuilder()
-    fun flushProse() {
-        if (proseBuf.isNotEmpty()) {
-            segments.add(StreamSegment.Prose(proseBuf.toString()))
-            proseBuf.clear()
-        }
-    }
-    for (line in lines) {
-        val marker = fenceMarkerOf(line)
-        if (fenceMarker == null) {
-            if (marker != null) {
-                // A fence opens: freeze the prose accumulated so far, enter code.
-                flushProse()
-                fenceMarker = marker
-                lang = line.substring(marker.length).trim()
-                    .substringBefore(' ').removePrefix("{.").removeSuffix("}")
-                codeBuf.clear()
-            } else {
-                proseBuf.append(line).append('\n')
-            }
-        } else {
-            // Inside a fence. A line whose marker matches the opening marker's
-            // char closes the fence; anything else is code content.
-            if (marker != null && marker[0] == fenceMarker!![0]) {
-                segments.add(StreamSegment.Code(codeBuf.toString().trimEnd('\n'), lang))
-                fenceMarker = null
-                lang = ""
-                codeBuf.clear()
-            } else {
-                codeBuf.append(line).append('\n')
-            }
-        }
-    }
-    // End of text: an OPEN fence (not yet closed) is still emitted as a Code
-    // segment — a growing code block is height-monotonic, so rendering it
-    // formatted mid-stream is stable (no prose↔code seam reflow).
-    flushProse()
-    if (fenceMarker != null && codeBuf.isNotEmpty()) {
-        segments.add(StreamSegment.Code(codeBuf.toString().trimEnd('\n'), lang))
-    }
-    return segments
-}
+// §R-19 Sprint 2 #7(b): fenceMarkerOf / splitCodeAndProse and the two code-
+// block helpers (formerly `MarkdownComponentModel.codeText()` /
+// `.codeFenceLanguage()` extensions) were lifted into the top-level pure-
+// functions file ChatTextPartHelpers.kt (same package) so they can be
+// covered by JVM unit tests (this file is excluded from kover coverage as a
+// @Composable-heavy UI file — see PickerProviderFilter.kt for the same
+// extraction pattern).
 
 @Composable
 internal fun TextPart(
@@ -389,55 +336,6 @@ internal fun ResolvedMarkdownText(
 }
 
 /**
- * Extracts the raw code text from a markdown code-block / code-fence
- * [MarkdownComponentModel], stripping the surrounding ``` / ~~~ fence lines
- * (with their optional language tag) when present. For indented code blocks
- * (no fence) the span text is returned as-is. Used by [WrappedCodeBlock] (#9)
- * which renders code with wrapping instead of the library's horizontal scroll.
- */
-private fun MarkdownComponentModel.codeText(): String {
-    val raw = content.subSequence(node.startOffset, node.endOffset).toString()
-    val lines = raw.split("\n")
-    if (lines.size >= 2) {
-        val first = lines.first().trimStart()
-        val last = lines.last().trimStart()
-        val isFenceStart = first.startsWith("```") || first.startsWith("~~~")
-        val isFenceEnd = last.startsWith("```") || last.startsWith("~~~")
-        if (isFenceStart && isFenceEnd) {
-            return lines.subList(1, lines.size - 1).joinToString("\n")
-        }
-    }
-    return raw
-}
-
-/**
- * Extracts the optional language tag from a fenced code block
- * [MarkdownComponentModel] (e.g. `kotlin` from ``` ```kotlin ```). Returns the
- * empty string for indented code blocks (no fence) or fences that omit the
- * language. Used by [WrappedCodeBlock] (#9 option 2) to render a language
- * badge in the top-right corner of the card — recovering a hint of the
- * metadata that mikepenz's `MarkdownHighlightedCodeFence` would have surfaced
- * via syntax highlighting.
- */
-private fun MarkdownComponentModel.codeFenceLanguage(): String {
-    val raw = content.subSequence(node.startOffset, node.endOffset).toString()
-    val first = raw.substringBefore('\n', "").trimStart()
-    val isFenceStart = first.startsWith("```") || first.startsWith("~~~")
-    if (!isFenceStart) return ""
-    // Strip the fence marker (3+ chars of ` or ~), then trim whitespace/quotes.
-    val markerEnd = first.takeWhile { it == '`' || it == '~' }.length
-    // 🟡 Pandoc/attribute-style fence beautify (glmer 🟡-2): pandoc emits
-    // ` ```{.kotlin} ` instead of ` ```kotlin `. Strip the `{.` prefix and `}`
-    // suffix so the badge renders `kotlin` rather than the raw `{.kotlin}`.
-    return first.substring(markerEnd)
-        .trim()
-        .substringBefore(' ')
-        .removePrefix("{.")
-        .removeSuffix("}")
-        .ifBlank { "" }
-}
-
-/**
  * #9 — code block / code fence renderer that wraps long lines instead of
  * scrolling horizontally. Replaces mikepenz's [highlightedCodeBlock] /
  * [highlightedCodeFence], whose inner [Text] is wrapped in a
@@ -463,8 +361,8 @@ private fun MarkdownComponentModel.codeFenceLanguage(): String {
  */
 @Composable
 internal fun WrappedCodeBlock(model: MarkdownComponentModel) {
-    val code = remember(model) { model.codeText() }
-    val language = remember(model) { model.codeFenceLanguage() }
+    val code = remember(model) { codeText(model.content, model.node.startOffset, model.node.endOffset) }
+    val language = remember(model) { codeFenceLanguage(model.content, model.node.startOffset, model.node.endOffset) }
     CodeBlockSurface(code = code, language = language)
 }
 

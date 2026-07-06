@@ -1,0 +1,22 @@
+{
+  "epic": "R-19",
+  "gate": "release (4-way final)",
+  "scope": "R-19 全程 3 sprint 累计",
+  "date": "2026-07-06",
+  "reviewer": "glmer",
+  "session": "ses_0c88cdc59ffegg2toYmXKMHPv5",
+  "final_score": 9.7,
+  "verdict": "PASS (可发版)",
+  "scores": { "可行性": 9.7, "配置一致性": 9.7, "语义正确性": 9.7, "性能": 9.9, "安全": 10.0 },
+  "config_drift": "无 (唯一漂移是注释 Y1/Y2/Y3, 非配置实质)",
+  "open_questions_judged": [
+    "P2-4 .first 丢弃 .second: 不阻塞 (0 当前数据丢失, 1848 单测全绿); 建议 R-20 选项 A 防御性解构",
+    "release.sh 要求 clean tree (line 34 git diff --quiet HEAD || git diff --cached --quiet): 需先 commit R-19 工作"
+  ],
+  "release_checklist": {
+    "check_sh_full": "全绿", "1848_unit_tests": "通过", "koverVerify_60_56_52": "通过",
+    "hilt_ksp_rerun": "DI 图完整", "config_no_drift": true, "versionName_未手改": "0.4.1 待 release.sh bump"
+  },
+  "release_approval": "可执行 ./scripts/release.sh patch",
+  "sprint_scores": { "S1": 9.8, "S2": 9.8, "S3": 9.7 }
+}

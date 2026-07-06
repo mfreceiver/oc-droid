@@ -110,7 +110,7 @@ class SessionSyncPureFunctionsTest {
         ))
         val created = Session(id = "new", directory = "/tmp/new")
 
-        val next = state.applySessionCreated(created)
+        val (next, _) = state.applySessionCreated(created)
 
         assertEquals(listOf("new", "old"), next.sessions.map { it.id })
     }
@@ -120,7 +120,7 @@ class SessionSyncPureFunctionsTest {
         val state = SessionListState()
         val created = Session(id = "solo", directory = "/x")
 
-        val next = state.applySessionCreated(created)
+        val (next, _) = state.applySessionCreated(created)
 
         assertEquals(listOf("solo"), next.sessions.map { it.id })
     }
@@ -132,7 +132,7 @@ class SessionSyncPureFunctionsTest {
         ))
         val updated = Session(id = "s1", directory = "/tmp", title = "new title")
 
-        val next = state.applySessionUpsert(updated)
+        val (next, _) = state.applySessionUpsert(updated)
 
         assertEquals(1, next.sessions.size)
         assertEquals("new title", next.sessions[0].title)
@@ -150,7 +150,7 @@ class SessionSyncPureFunctionsTest {
             time = Session.TimeInfo(archived = 1_700_000_000_000)
         )
 
-        val next = state.applyArchiveEviction(archived, listOf("s1", "s3"))
+        val (next, _) = state.applyArchiveEviction(archived, listOf("s1", "s3"))
 
         assertTrue(next.sessions.any { it.id == "s2" && it.isArchived })
         assertEquals(listOf("s1", "s3"), next.openSessionIds)
@@ -165,7 +165,7 @@ class SessionSyncPureFunctionsTest {
             streamingPartTexts = mapOf("p1" to "leftover")
         )
 
-        val next = state.applyArchivedChatClear()
+        val (next, _) = state.applyArchivedChatClear()
 
         assertNull(next.currentSessionId)
         assertTrue(next.messages.isEmpty())
@@ -184,7 +184,7 @@ class SessionSyncPureFunctionsTest {
             sessionStatuses = mapOf("s1" to SessionStatus(type = "idle"))
         )
 
-        val next = state.applySessionStatus("s1", SessionStatus(type = "busy"))
+        val (next, _) = state.applySessionStatus("s1", SessionStatus(type = "busy"))
 
         assertEquals(SessionStatus(type = "busy"), next.sessionStatuses["s1"])
         assertEquals(1, next.sessionStatuses.size)
@@ -196,7 +196,7 @@ class SessionSyncPureFunctionsTest {
             sessionStatuses = mapOf("s1" to SessionStatus(type = "idle"))
         )
 
-        val next = state.applySessionStatus("s2", SessionStatus(type = "busy"))
+        val (next, _) = state.applySessionStatus("s2", SessionStatus(type = "busy"))
 
         assertEquals(2, next.sessionStatuses.size)
         assertEquals(SessionStatus(type = "idle"), next.sessionStatuses["s1"])
@@ -207,7 +207,7 @@ class SessionSyncPureFunctionsTest {
     fun `dropTempCleared removes the id`() {
         val state = UnreadState(tempClearedUnread = setOf("s1", "s2", "s3"))
 
-        val next = state.dropTempCleared("s2")
+        val (next, _) = state.dropTempCleared("s2")
 
         assertEquals(setOf("s1", "s3"), next.tempClearedUnread)
     }
@@ -216,7 +216,7 @@ class SessionSyncPureFunctionsTest {
     fun `dropTempCleared is a no-op when the id is absent`() {
         val state = UnreadState(tempClearedUnread = setOf("s1"))
 
-        val next = state.dropTempCleared("missing")
+        val (next, _) = state.dropTempCleared("missing")
 
         assertEquals(setOf("s1"), next.tempClearedUnread)
     }
@@ -238,7 +238,7 @@ class SessionSyncPureFunctionsTest {
             )
         )
 
-        val next = state.applyQuestionAsked(question)
+        val (next, _) = state.applyQuestionAsked(question)
 
         assertEquals(listOf("q1"), next.pendingQuestions.map { it.id })
     }
@@ -254,7 +254,7 @@ class SessionSyncPureFunctionsTest {
             questions = listOf(QuestionInfo("other", "h", emptyList()))
         )
 
-        val next = state.applyQuestionAsked(dup)
+        val (next, _) = state.applyQuestionAsked(dup)
 
         assertEquals(1, next.pendingQuestions.size)
         // Original is preserved (insert-if-absent semantics).
@@ -268,7 +268,7 @@ class SessionSyncPureFunctionsTest {
             QuestionRequest(id = "q2", sessionId = "s2", questions = emptyList())
         ))
 
-        val next = state.applyQuestionResolved("q1")
+        val (next, _) = state.applyQuestionResolved("q1")
 
         assertEquals(listOf("q2"), next.pendingQuestions.map { it.id })
     }
@@ -279,7 +279,7 @@ class SessionSyncPureFunctionsTest {
             QuestionRequest(id = "q1", sessionId = "s1", questions = emptyList())
         ))
 
-        val next = state.applyQuestionResolved("missing")
+        val (next, _) = state.applyQuestionResolved("missing")
 
         assertEquals(listOf("q1"), next.pendingQuestions.map { it.id })
     }
@@ -294,7 +294,7 @@ class SessionSyncPureFunctionsTest {
             TodoItem("second", "pending", "medium", "t2")
         )
 
-        val next = state.applyTodoUpdated("s1", todos)
+        val (next, _) = state.applyTodoUpdated("s1", todos)
 
         assertEquals(2, next.sessionTodos["s1"]?.size)
         assertEquals("new", next.sessionTodos["s1"]!![0].content)
@@ -306,7 +306,7 @@ class SessionSyncPureFunctionsTest {
             sessionTodos = mapOf("s1" to listOf(TodoItem("a", "pending", "low", "t0")))
         )
 
-        val next = state.applyTodoUpdated("s2", listOf(TodoItem("b", "pending", "low", "t1")))
+        val (next, _) = state.applyTodoUpdated("s2", listOf(TodoItem("b", "pending", "low", "t1")))
 
         assertNotNull(next.sessionTodos["s1"])
         assertNotNull(next.sessionTodos["s2"])
@@ -318,7 +318,7 @@ class SessionSyncPureFunctionsTest {
     fun `applyPartCreatedPlaceholder injects a reasoning part and sets streamingReasoningPart`() {
         val state = ChatState()
 
-        val next = state.applyPartCreatedPlaceholder(
+        val (next, _) = state.applyPartCreatedPlaceholder(
             partType = "reasoning",
             partId = "p1",
             msgId = "m1",
@@ -335,7 +335,7 @@ class SessionSyncPureFunctionsTest {
     fun `applyPartCreatedPlaceholder for text type does not set streamingReasoningPart`() {
         val state = ChatState()
 
-        val next = state.applyPartCreatedPlaceholder(
+        val (next, _) = state.applyPartCreatedPlaceholder(
             partType = "text",
             partId = "p1",
             msgId = "m1",
@@ -350,8 +350,8 @@ class SessionSyncPureFunctionsTest {
     fun `applyPartCreatedPlaceholder is idempotent`() {
         val state = ChatState()
 
-        val first = state.applyPartCreatedPlaceholder("reasoning", "p1", "m1", "s1")
-        val second = first.applyPartCreatedPlaceholder("reasoning", "p1", "m1", "s1")
+        val (first, _) = state.applyPartCreatedPlaceholder("reasoning", "p1", "m1", "s1")
+        val (second, _) = first.applyPartCreatedPlaceholder("reasoning", "p1", "m1", "s1")
 
         assertEquals(1, second.partsByMessage["m1"]?.count { it.id == "p1" })
     }
@@ -363,7 +363,7 @@ class SessionSyncPureFunctionsTest {
         // placeholder AND writes the streaming text in one pass.
         val state = ChatState(streamingPartTexts = mapOf("p1" to "Hello"))
 
-        val next = state.applyPartDeltaLeadingEdge(
+        val (next, _) = state.applyPartDeltaLeadingEdge(
             partId = "p1",
             delta = ", world",
             knownType = "text",
@@ -380,7 +380,7 @@ class SessionSyncPureFunctionsTest {
     fun `applyPartDeltaLeadingEdge on missing overlay seeds an empty-string base`() {
         val state = ChatState()
 
-        val next = state.applyPartDeltaLeadingEdge(
+        val (next, _) = state.applyPartDeltaLeadingEdge(
             partId = "p1",
             delta = "first token",
             knownType = "text",
@@ -397,7 +397,7 @@ class SessionSyncPureFunctionsTest {
         // fullText still wins outright (the server is the source of truth).
         val state = ChatState(streamingPartTexts = mapOf("p1" to "longer trailing delta accumulation"))
 
-        val next = state.applyPartFullTextLeadingEdge(
+        val (next, _) = state.applyPartFullTextLeadingEdge(
             partId = "p1",
             fullText = "short",  // shorter than the current overlay
             partType = "text",
@@ -413,7 +413,7 @@ class SessionSyncPureFunctionsTest {
     fun `applyPartFullTextLeadingEdge sets streamingReasoningPart for reasoning`() {
         val state = ChatState()
 
-        val next = state.applyPartFullTextLeadingEdge(
+        val (next, _) = state.applyPartFullTextLeadingEdge(
             partId = "p1",
             fullText = "thinking",
             partType = "reasoning",
@@ -433,9 +433,9 @@ class SessionSyncPureFunctionsTest {
         val state = ChatState()
 
         val next = state
-            .appendDeltaBuffer("p1", "Hello")
-            .appendDeltaBuffer("p1", ", ")
-            .appendDeltaBuffer("p1", "world!")
+            .appendDeltaBuffer("p1", "Hello").first
+            .appendDeltaBuffer("p1", ", ").first
+            .appendDeltaBuffer("p1", "world!").first
 
         assertEquals("Hello, world!", next.deltaBuffer["p1"])
     }
@@ -445,9 +445,9 @@ class SessionSyncPureFunctionsTest {
         val state = ChatState()
 
         val next = state
-            .appendDeltaBuffer("p1", "A")
-            .appendDeltaBuffer("p2", "B")
-            .appendDeltaBuffer("p1", "A2")
+            .appendDeltaBuffer("p1", "A").first
+            .appendDeltaBuffer("p2", "B").first
+            .appendDeltaBuffer("p1", "A2").first
 
         assertEquals("AA2", next.deltaBuffer["p1"])
         assertEquals("B", next.deltaBuffer["p2"])
@@ -458,9 +458,9 @@ class SessionSyncPureFunctionsTest {
         val state = ChatState()
 
         val next = state
-            .replaceFullTextBuffer("p1", "first")
-            .replaceFullTextBuffer("p1", "second")
-            .replaceFullTextBuffer("p1", "third")
+            .replaceFullTextBuffer("p1", "first").first
+            .replaceFullTextBuffer("p1", "second").first
+            .replaceFullTextBuffer("p1", "third").first
 
         assertEquals("third", next.fullTextBuffer["p1"])
     }
@@ -470,8 +470,8 @@ class SessionSyncPureFunctionsTest {
         val state = ChatState()
 
         val next = state
-            .markFlushPending("p1")
-            .markFlushPending("p2")
+            .markFlushPending("p1").first
+            .markFlushPending("p2").first
 
         assertEquals(setOf("p1", "p2"), next.pendingFlushPartIds)
     }
@@ -480,14 +480,14 @@ class SessionSyncPureFunctionsTest {
     fun `markFlushPending is idempotent`() {
         val state = ChatState()
 
-        val next = state.markFlushPending("p1").markFlushPending("p1")
+        val (next, _) = state.markFlushPending("p1").first.markFlushPending("p1")
 
         assertEquals(setOf("p1"), next.pendingFlushPartIds)
     }
 
     @Test
     fun `isFlushPending reflects pendingFlushPartIds membership`() {
-        val state = ChatState().markFlushPending("p1")
+        val state = ChatState().markFlushPending("p1").first
 
         assertTrue(state.isFlushPending("p1"))
         assertFalse(state.isFlushPending("p2"))
@@ -504,7 +504,7 @@ class SessionSyncPureFunctionsTest {
             pendingFlushPartIds = setOf("p1")
         )
 
-        val next = state.flushCoalesceBufferForPart("p1")
+        val (next, _) = state.flushCoalesceBufferForPart("p1")
 
         // fullText wins (REPLACE), stale delta is dropped.
         assertEquals("AUTHORITATIVE", next.streamingPartTexts["p1"])
@@ -521,7 +521,7 @@ class SessionSyncPureFunctionsTest {
             pendingFlushPartIds = setOf("p1")
         )
 
-        val next = state.flushCoalesceBufferForPart("p1")
+        val (next, _) = state.flushCoalesceBufferForPart("p1")
 
         assertEquals("partial MORE", next.streamingPartTexts["p1"])
         assertNull(next.deltaBuffer["p1"])
@@ -541,7 +541,7 @@ class SessionSyncPureFunctionsTest {
             pendingFlushPartIds = setOf("p1")
         )
 
-        val next = state.flushCoalesceBufferForPart("p1")
+        val (next, _) = state.flushCoalesceBufferForPart("p1")
 
         assertNull(next.streamingPartTexts["p1"])
         assertNull(next.deltaBuffer["p1"])
@@ -556,7 +556,7 @@ class SessionSyncPureFunctionsTest {
             pendingFlushPartIds = setOf("p1")
         )
 
-        val next = state.flushCoalesceBufferForPart("p1")
+        val (next, _) = state.flushCoalesceBufferForPart("p1")
 
         // Overlay is untouched; only the pending bookkeeping is cleared.
         assertEquals("hello", next.streamingPartTexts["p1"])
@@ -571,7 +571,7 @@ class SessionSyncPureFunctionsTest {
             pendingFlushPartIds = setOf("p1", "p2")
         )
 
-        val next = state.flushCoalesceBufferForPart("p1")
+        val (next, _) = state.flushCoalesceBufferForPart("p1")
 
         // p1 flushed (delta appended), p2 untouched.
         assertEquals("a1", next.streamingPartTexts["p1"])
@@ -592,7 +592,7 @@ class SessionSyncPureFunctionsTest {
             pendingFlushPartIds = setOf("p1")
         )
 
-        val next = state.flushCoalesceBufferForPart("p1")
+        val (next, _) = state.flushCoalesceBufferForPart("p1")
 
         assertEquals("short", next.streamingPartTexts["p1"])
     }
@@ -605,7 +605,7 @@ class SessionSyncPureFunctionsTest {
             pendingFlushPartIds = setOf("p1")
         )
 
-        val next = state.flushCoalesceBufferForPart("p1")
+        val (next, _) = state.flushCoalesceBufferForPart("p1")
 
         assertEquals("preserved", next.streamingPartTexts["p1"])
         assertNull(next.deltaBuffer["p1"])
@@ -622,7 +622,7 @@ class SessionSyncPureFunctionsTest {
             pendingFlushPartIds = setOf("p1", "p2")
         )
 
-        val next = state.clearCoalesceBufferForPart("p1")
+        val (next, _) = state.clearCoalesceBufferForPart("p1")
 
         assertNull(next.deltaBuffer["p1"])
         assertEquals("b", next.deltaBuffer["p2"])
@@ -644,7 +644,7 @@ class SessionSyncPureFunctionsTest {
             pendingFlushPartIds = setOf("p1")
         )
 
-        val next = state.clearAllCoalesceBuffers()
+        val (next, _) = state.clearAllCoalesceBuffers()
 
         assertEquals("preserved", next.streamingPartTexts["p1"])
         assertNotNull(next.streamingReasoningPart)
@@ -659,7 +659,7 @@ class SessionSyncPureFunctionsTest {
     fun `applyMarkSessionUnread adds the id when not current`() {
         val state = UnreadState(unreadSessions = emptySet())
 
-        val next = state.applyMarkSessionUnread("s1", currentSessionId = "s2")
+        val (next, _) = state.applyMarkSessionUnread("s1", currentSessionId = "s2")
 
         assertEquals(setOf("s1"), next.unreadSessions)
     }
@@ -668,7 +668,7 @@ class SessionSyncPureFunctionsTest {
     fun `applyMarkSessionUnread is a no-op when the session is current`() {
         val state = UnreadState(unreadSessions = setOf("other"))
 
-        val next = state.applyMarkSessionUnread("s1", currentSessionId = "s1")
+        val (next, _) = state.applyMarkSessionUnread("s1", currentSessionId = "s1")
 
         assertFalse(next.unreadSessions.contains("s1"))
         assertEquals(setOf("other"), next.unreadSessions)
@@ -678,7 +678,7 @@ class SessionSyncPureFunctionsTest {
     fun `applyMarkSessionUnread with null currentSessionId always marks unread`() {
         val state = UnreadState()
 
-        val next = state.applyMarkSessionUnread("s1", currentSessionId = null)
+        val (next, _) = state.applyMarkSessionUnread("s1", currentSessionId = null)
 
         assertEquals(setOf("s1"), next.unreadSessions)
     }
@@ -695,7 +695,7 @@ class SessionSyncPureFunctionsTest {
         // the leading-edge value).
         var chat = ChatState(currentSessionId = "s1")
         // busy status: badge updated
-        val sessionListBusy = SessionListState()
+        val (sessionListBusy, _) = SessionListState()
             .applySessionStatus("s1", SessionStatus(type = "busy"))
         assertEquals(SessionStatus(type = "busy"), sessionListBusy.sessionStatuses["s1"])
 
@@ -703,13 +703,13 @@ class SessionSyncPureFunctionsTest {
         chat = chat.applyPartDeltaLeadingEdge(
             partId = "p1", delta = "streaming", knownType = "text",
             msgId = "m1", sessionId = "s1"
-        ).markFlushPending("p1")
+        ).first.markFlushPending("p1").first
         assertTrue(chat.streamingPartTexts.isNotEmpty())
         assertTrue(chat.streamingReasoningPart == null)
 
         // idle status: badge updated; reload decision is based on
         // streamingPartTexts being non-empty (still true here).
-        val sessionListIdle = sessionListBusy.applySessionStatus("s1", SessionStatus(type = "idle"))
+        val (sessionListIdle, _) = sessionListBusy.applySessionStatus("s1", SessionStatus(type = "idle"))
         assertEquals(SessionStatus(type = "idle"), sessionListIdle.sessionStatuses["s1"])
         assertTrue(chat.streamingPartTexts.isNotEmpty())
     }
@@ -739,7 +739,7 @@ class SessionSyncPureFunctionsTest {
             .applyPartDeltaLeadingEdge(
                 partId = "p1", delta = "first", knownType = "text",
                 msgId = "m1", sessionId = "s1"
-            )
+            ).first
 
         assertEquals("first", chat.streamingPartTexts["p1"])
         assertEquals("text", chat.partsByMessage["m1"]?.firstOrNull { it.id == "p1" }?.type)
@@ -760,7 +760,7 @@ class SessionSyncPureFunctionsTest {
         // SessionSwitcher wipes streamingPartTexts (simulated here):
         val chatAfterSwitch = chatBeforeSwitch.copy(streamingPartTexts = emptyMap())
 
-        val flushed = chatAfterSwitch.flushCoalesceBufferForPart("p1")
+        val (flushed, _) = chatAfterSwitch.flushCoalesceBufferForPart("p1")
 
         assertNull(flushed.streamingPartTexts["p1"])
         assertNull(flushed.deltaBuffer["p1"])
@@ -780,7 +780,7 @@ class SessionSyncPureFunctionsTest {
             pendingFlushPartIds = setOf("p1")
         )
 
-        val next = chat.flushCoalesceBufferForPart("p1")
+        val (next, _) = chat.flushCoalesceBufferForPart("p1")
 
         assertNull(next.streamingPartTexts["p1"])
         assertNull(next.deltaBuffer["p1"])
@@ -912,7 +912,7 @@ class SessionSyncPureFunctionsTest {
         ))
         val reCreated = Session(id = "s1", directory = "/first", title = "refreshed")
 
-        val next = state.applySessionCreated(reCreated)
+        val (next, _) = state.applySessionCreated(reCreated)
 
         assertEquals(listOf("s1", "old", "other"), next.sessions.map { it.id })
         assertEquals("refreshed", next.sessions[0].title)
@@ -925,7 +925,7 @@ class SessionSyncPureFunctionsTest {
         ))
         val created = Session(id = "b", directory = "/dir-b", title = "Title B")
 
-        val next = state.applySessionCreated(created)
+        val (next, _) = state.applySessionCreated(created)
 
         assertEquals(2, next.sessions.size)
         val original = next.sessions.first { it.id == "a" }
@@ -944,7 +944,7 @@ class SessionSyncPureFunctionsTest {
             time = Session.TimeInfo(archived = 1_700_000_000_000)
         )
 
-        val next = state.applySessionCreated(created)
+        val (next, _) = state.applySessionCreated(created)
 
         assertEquals(listOf("arch", "a"), next.sessions.map { it.id })
         assertTrue(next.sessions[0].isArchived)
@@ -955,7 +955,7 @@ class SessionSyncPureFunctionsTest {
         val created = Session(id = "solo", directory = "/x", title = "T")
         val state = SessionListState()
 
-        val next = state.applySessionCreated(created).applySessionCreated(created)
+        val (next, _) = state.applySessionCreated(created).first.applySessionCreated(created)
 
         assertEquals(1, next.sessions.size)
         assertEquals("solo", next.sessions[0].id)
@@ -970,7 +970,7 @@ class SessionSyncPureFunctionsTest {
         ))
         val created = Session(id = "new", directory = "/new")
 
-        val next = state.applySessionCreated(created)
+        val (next, _) = state.applySessionCreated(created)
 
         assertEquals(listOf("new", "a", "b", "c"), next.sessions.map { it.id })
     }
@@ -984,7 +984,7 @@ class SessionSyncPureFunctionsTest {
         ))
         val updated = Session(id = "new", directory = "/new")
 
-        val next = state.applySessionUpsert(updated)
+        val (next, _) = state.applySessionUpsert(updated)
 
         assertEquals(listOf("new", "old"), next.sessions.map { it.id })
     }
@@ -994,7 +994,7 @@ class SessionSyncPureFunctionsTest {
         val state = SessionListState()
         val updated = Session(id = "solo", directory = "/x")
 
-        val next = state.applySessionUpsert(updated)
+        val (next, _) = state.applySessionUpsert(updated)
 
         assertEquals(listOf("solo"), next.sessions.map { it.id })
     }
@@ -1010,7 +1010,7 @@ class SessionSyncPureFunctionsTest {
         ))
         val updated = Session(id = "b", directory = "/b", title = "updated")
 
-        val next = state.applySessionUpsert(updated)
+        val (next, _) = state.applySessionUpsert(updated)
 
         assertEquals(listOf("b", "a", "c"), next.sessions.map { it.id })
         assertEquals("updated", next.sessions[0].title)
@@ -1026,7 +1026,7 @@ class SessionSyncPureFunctionsTest {
             version = "2.0"
         )
 
-        val next = state.applySessionUpsert(updated)
+        val (next, _) = state.applySessionUpsert(updated)
 
         assertEquals(1, next.sessions.size)
         assertEquals("/new-dir", next.sessions[0].directory)
@@ -1041,7 +1041,7 @@ class SessionSyncPureFunctionsTest {
             Session(id = "y", directory = "/y")
         ))
 
-        val next = state.applySessionUpsert(updated).applySessionUpsert(updated)
+        val (next, _) = state.applySessionUpsert(updated).first.applySessionUpsert(updated)
 
         assertEquals(listOf("x", "y"), next.sessions.map { it.id })
     }
@@ -1059,7 +1059,7 @@ class SessionSyncPureFunctionsTest {
             time = Session.TimeInfo(archived = 1L)
         )
 
-        val next = state.applyArchiveEviction(archived, listOf("s1", "s3"))
+        val (next, _) = state.applyArchiveEviction(archived, listOf("s1", "s3"))
 
         // openSessionIds unchanged (sX was never open); session upserted.
         assertEquals(listOf("s1", "s3"), next.openSessionIds)
@@ -1077,7 +1077,7 @@ class SessionSyncPureFunctionsTest {
             time = Session.TimeInfo(archived = 1L)
         )
 
-        val next = state.applyArchiveEviction(archived, emptyList())
+        val (next, _) = state.applyArchiveEviction(archived, emptyList())
 
         assertTrue(next.openSessionIds.isEmpty())
     }
@@ -1090,7 +1090,7 @@ class SessionSyncPureFunctionsTest {
             time = Session.TimeInfo(archived = 1_700_000_000_000L)
         )
 
-        val next = state.applyArchiveEviction(archived, emptyList())
+        val (next, _) = state.applyArchiveEviction(archived, emptyList())
 
         val upserted = next.sessions.first { it.id == "s2" }
         assertEquals("Got archived", upserted.title)
@@ -1107,7 +1107,7 @@ class SessionSyncPureFunctionsTest {
             time = Session.TimeInfo(archived = 1L)
         )
 
-        val next = state.applyArchiveEviction(archived, listOf("keep"))
+        val (next, _) = state.applyArchiveEviction(archived, listOf("keep"))
 
         assertEquals(listOf("arc", "keep"), next.sessions.map { it.id })
     }
@@ -1121,7 +1121,7 @@ class SessionSyncPureFunctionsTest {
             messages = listOf(Message(id = "m1", role = "user"))
         )
 
-        val next = state.applyArchivedChatClear()
+        val (next, _) = state.applyArchivedChatClear()
 
         assertNull(next.currentSessionId)
         assertTrue(next.messages.isEmpty())
@@ -1131,7 +1131,7 @@ class SessionSyncPureFunctionsTest {
     fun `applyArchivedChatClear on already-empty state is a no-op for the wiped fields`() {
         val state = ChatState()
 
-        val next = state.applyArchivedChatClear()
+        val (next, _) = state.applyArchivedChatClear()
 
         assertNull(next.currentSessionId)
         assertTrue(next.messages.isEmpty())
@@ -1148,7 +1148,7 @@ class SessionSyncPureFunctionsTest {
             pendingFlushPartIds = setOf("p1")
         )
 
-        val next = state.applyArchivedChatClear()
+        val (next, _) = state.applyArchivedChatClear()
 
         // Only currentSessionId / messages / partsByMessage are wiped.
         assertNotNull(next.streamingReasoningPart)
@@ -1160,20 +1160,20 @@ class SessionSyncPureFunctionsTest {
 
     @Test
     fun `applySessionStatus with idle type`() {
-        val next = SessionListState().applySessionStatus("s1", SessionStatus(type = "idle"))
+        val (next, _) = SessionListState().applySessionStatus("s1", SessionStatus(type = "idle"))
         assertEquals("idle", next.sessionStatuses["s1"]?.type)
         assertTrue(next.sessionStatuses["s1"]?.isIdle == true)
     }
 
     @Test
     fun `applySessionStatus with busy type`() {
-        val next = SessionListState().applySessionStatus("s1", SessionStatus(type = "busy"))
+        val (next, _) = SessionListState().applySessionStatus("s1", SessionStatus(type = "busy"))
         assertTrue(next.sessionStatuses["s1"]?.isBusy == true)
     }
 
     @Test
     fun `applySessionStatus with retry type`() {
-        val next = SessionListState().applySessionStatus("s1", SessionStatus(type = "retry"))
+        val (next, _) = SessionListState().applySessionStatus("s1", SessionStatus(type = "retry"))
         assertTrue(next.sessionStatuses["s1"]?.isRetry == true)
     }
 
@@ -1181,14 +1181,14 @@ class SessionSyncPureFunctionsTest {
     fun `applySessionStatus with custom type is stored verbatim`() {
         // Types beyond idle/busy/retry are stored as-is (no isXxx helper but
         // the entry is preserved for any future UI consumer).
-        val next = SessionListState().applySessionStatus("s1", SessionStatus(type = "error"))
+        val (next, _) = SessionListState().applySessionStatus("s1", SessionStatus(type = "error"))
         assertEquals("error", next.sessionStatuses["s1"]?.type)
     }
 
     @Test
     fun `applySessionStatus preserves attempt message and next fields`() {
         val status = SessionStatus(type = "retry", attempt = 3, message = "backoff", next = 1_700L)
-        val next = SessionListState().applySessionStatus("s1", status)
+        val (next, _) = SessionListState().applySessionStatus("s1", status)
 
         assertEquals(status, next.sessionStatuses["s1"])
         assertEquals(3, next.sessionStatuses["s1"]?.attempt)
@@ -1201,9 +1201,9 @@ class SessionSyncPureFunctionsTest {
         val state = SessionListState()
 
         val next = state
-            .applySessionStatus("s1", SessionStatus(type = "idle"))
-            .applySessionStatus("s1", SessionStatus(type = "busy"))
-            .applySessionStatus("s1", SessionStatus(type = "idle"))
+            .applySessionStatus("s1", SessionStatus(type = "idle")).first
+            .applySessionStatus("s1", SessionStatus(type = "busy")).first
+            .applySessionStatus("s1", SessionStatus(type = "idle")).first
 
         assertEquals(1, next.sessionStatuses.size)
         assertEquals("idle", next.sessionStatuses["s1"]?.type)
@@ -1215,7 +1215,7 @@ class SessionSyncPureFunctionsTest {
     fun `dropTempCleared on the last entry yields an empty set`() {
         val state = UnreadState(tempClearedUnread = setOf("only"))
 
-        val next = state.dropTempCleared("only")
+        val (next, _) = state.dropTempCleared("only")
 
         assertTrue(next.tempClearedUnread.isEmpty())
     }
@@ -1224,7 +1224,7 @@ class SessionSyncPureFunctionsTest {
     fun `dropTempCleared on an empty set is a no-op`() {
         val state = UnreadState(tempClearedUnread = emptySet())
 
-        val next = state.dropTempCleared("anything")
+        val (next, _) = state.dropTempCleared("anything")
 
         assertTrue(next.tempClearedUnread.isEmpty())
     }
@@ -1233,7 +1233,7 @@ class SessionSyncPureFunctionsTest {
     fun `dropTempCleared is case-sensitive`() {
         val state = UnreadState(tempClearedUnread = setOf("S1"))
 
-        val next = state.dropTempCleared("s1")
+        val (next, _) = state.dropTempCleared("s1")
 
         assertEquals(setOf("S1"), next.tempClearedUnread)
     }
@@ -1244,7 +1244,7 @@ class SessionSyncPureFunctionsTest {
     fun `applyPartCreatedPlaceholder for tool type injects a tool part and skips streamingReasoningPart`() {
         val state = ChatState()
 
-        val next = state.applyPartCreatedPlaceholder(
+        val (next, _) = state.applyPartCreatedPlaceholder(
             partType = "tool", partId = "p1", msgId = "m1", sessionId = "s1"
         )
 
@@ -1254,7 +1254,7 @@ class SessionSyncPureFunctionsTest {
 
     @Test
     fun `applyPartCreatedPlaceholder for patch type injects a patch part`() {
-        val next = ChatState().applyPartCreatedPlaceholder(
+        val (next, _) = ChatState().applyPartCreatedPlaceholder(
             partType = "patch", partId = "p1", msgId = "m1", sessionId = "s1"
         )
         assertEquals("patch", next.partsByMessage["m1"]?.firstOrNull { it.id == "p1" }?.type)
@@ -1263,7 +1263,7 @@ class SessionSyncPureFunctionsTest {
 
     @Test
     fun `applyPartCreatedPlaceholder for file type injects a file part`() {
-        val next = ChatState().applyPartCreatedPlaceholder(
+        val (next, _) = ChatState().applyPartCreatedPlaceholder(
             partType = "file", partId = "p1", msgId = "m1", sessionId = "s1"
         )
         assertEquals("file", next.partsByMessage["m1"]?.firstOrNull { it.id == "p1" }?.type)
@@ -1275,7 +1275,7 @@ class SessionSyncPureFunctionsTest {
             "m1" to listOf(Part(id = "other", messageId = "m1", sessionId = "s1", type = "text"))
         ))
 
-        val next = state.applyPartCreatedPlaceholder(
+        val (next, _) = state.applyPartCreatedPlaceholder(
             partType = "reasoning", partId = "p1", msgId = "m1", sessionId = "s1"
         )
 
@@ -1293,7 +1293,7 @@ class SessionSyncPureFunctionsTest {
             "m1" to listOf(Part(id = "p1", messageId = "m1", sessionId = "s1", type = "text"))
         ))
 
-        val next = state.applyPartCreatedPlaceholder(
+        val (next, _) = state.applyPartCreatedPlaceholder(
             partType = "reasoning", partId = "p1", msgId = "m1", sessionId = "s1"
         )
 
@@ -1312,7 +1312,7 @@ class SessionSyncPureFunctionsTest {
             streamingReasoningPart = Part(id = "prior", messageId = "m0", sessionId = "s1", type = "reasoning")
         )
 
-        val next = state.applyPartCreatedPlaceholder(
+        val (next, _) = state.applyPartCreatedPlaceholder(
             partType = "reasoning", partId = "p1", msgId = "m1", sessionId = "s1"
         )
 
@@ -1327,7 +1327,7 @@ class SessionSyncPureFunctionsTest {
             streamingReasoningPart = Part(id = "prior", messageId = "m0", sessionId = "s1", type = "reasoning")
         )
 
-        val next = state.applyPartCreatedPlaceholder(
+        val (next, _) = state.applyPartCreatedPlaceholder(
             partType = "text", partId = "p1", msgId = "m1", sessionId = "s1"
         )
 
@@ -1340,7 +1340,7 @@ class SessionSyncPureFunctionsTest {
     fun `applyPartFullTextLeadingEdge for tool type updates overlay but skips placeholder injection`() {
         val state = ChatState()
 
-        val next = state.applyPartFullTextLeadingEdge(
+        val (next, _) = state.applyPartFullTextLeadingEdge(
             partId = "p1", fullText = "hello", partType = "tool",
             pId = "p1", msgId = "m1", sessionId = "s1"
         )
@@ -1355,7 +1355,7 @@ class SessionSyncPureFunctionsTest {
 
     @Test
     fun `applyPartFullTextLeadingEdge for patch type does not inject placeholder`() {
-        val next = ChatState().applyPartFullTextLeadingEdge(
+        val (next, _) = ChatState().applyPartFullTextLeadingEdge(
             partId = "p1", fullText = "x", partType = "patch",
             pId = "p1", msgId = "m1", sessionId = "s1"
         )
@@ -1365,7 +1365,7 @@ class SessionSyncPureFunctionsTest {
 
     @Test
     fun `applyPartFullTextLeadingEdge with empty fullText stores empty string`() {
-        val next = ChatState().applyPartFullTextLeadingEdge(
+        val (next, _) = ChatState().applyPartFullTextLeadingEdge(
             partId = "p1", fullText = "", partType = "text",
             pId = "p1", msgId = "m1", sessionId = "s1"
         )
@@ -1377,7 +1377,7 @@ class SessionSyncPureFunctionsTest {
         // partId is the streamingPartTexts key; pId is the Part id. They
         // usually match but the API permits divergence — verify both are
         // wired to the correct slots.
-        val next = ChatState().applyPartFullTextLeadingEdge(
+        val (next, _) = ChatState().applyPartFullTextLeadingEdge(
             partId = "overlay-key", fullText = "v", partType = "reasoning",
             pId = "part-uuid", msgId = "m1", sessionId = "s1"
         )
@@ -1392,7 +1392,7 @@ class SessionSyncPureFunctionsTest {
             "m1" to listOf(Part(id = "other", messageId = "m1", sessionId = "s1", type = "text"))
         ))
 
-        val next = state.applyPartFullTextLeadingEdge(
+        val (next, _) = state.applyPartFullTextLeadingEdge(
             partId = "p1", fullText = "v", partType = "text",
             pId = "p1", msgId = "m1", sessionId = "s1"
         )
@@ -1409,7 +1409,7 @@ class SessionSyncPureFunctionsTest {
             streamingReasoningPart = Part(id = "prior", messageId = "m0", sessionId = "s1", type = "reasoning")
         )
 
-        val next = state.applyPartFullTextLeadingEdge(
+        val (next, _) = state.applyPartFullTextLeadingEdge(
             partId = "p1", fullText = "v", partType = "text",
             pId = "p1", msgId = "m1", sessionId = "s1"
         )
@@ -1421,7 +1421,7 @@ class SessionSyncPureFunctionsTest {
     fun `applyPartFullTextLeadingEdge overwrites a prior overlay value with the new fullText`() {
         val state = ChatState(streamingPartTexts = mapOf("p1" to "first"))
 
-        val next = state.applyPartFullTextLeadingEdge(
+        val (next, _) = state.applyPartFullTextLeadingEdge(
             partId = "p1", fullText = "second", partType = "text",
             pId = "p1", msgId = "m1", sessionId = "s1"
         )
@@ -1435,7 +1435,7 @@ class SessionSyncPureFunctionsTest {
             "m1" to listOf(Part(id = "p1", messageId = "m1", sessionId = "s1", type = "text"))
         ))
 
-        val next = state.applyPartFullTextLeadingEdge(
+        val (next, _) = state.applyPartFullTextLeadingEdge(
             partId = "p1", fullText = "v", partType = "text",
             pId = "p1", msgId = "m1", sessionId = "s1"
         )
@@ -1448,7 +1448,7 @@ class SessionSyncPureFunctionsTest {
 
     @Test
     fun `applyPartDeltaLeadingEdge with reasoning knownType sets streamingReasoningPart`() {
-        val next = ChatState().applyPartDeltaLeadingEdge(
+        val (next, _) = ChatState().applyPartDeltaLeadingEdge(
             partId = "p1", delta = "thought", knownType = "reasoning",
             msgId = "m1", sessionId = "s1"
         )
@@ -1458,7 +1458,7 @@ class SessionSyncPureFunctionsTest {
 
     @Test
     fun `applyPartDeltaLeadingEdge with tool knownType skips streamingReasoningPart and placeholder`() {
-        val next = ChatState().applyPartDeltaLeadingEdge(
+        val (next, _) = ChatState().applyPartDeltaLeadingEdge(
             partId = "p1", delta = "x", knownType = "tool",
             msgId = "m1", sessionId = "s1"
         )
@@ -1474,7 +1474,7 @@ class SessionSyncPureFunctionsTest {
     fun `applyPartDeltaLeadingEdge accumulates onto an existing overlay`() {
         val state = ChatState(streamingPartTexts = mapOf("p1" to "abc"))
 
-        val next = state.applyPartDeltaLeadingEdge(
+        val (next, _) = state.applyPartDeltaLeadingEdge(
             partId = "p1", delta = "def", knownType = "text",
             msgId = "m1", sessionId = "s1"
         )
@@ -1485,16 +1485,16 @@ class SessionSyncPureFunctionsTest {
     @Test
     fun `applyPartDeltaLeadingEdge chained calls accumulate in order`() {
         val next = ChatState()
-            .applyPartDeltaLeadingEdge("p1", "Hello", "text", "m1", "s1")
-            .applyPartDeltaLeadingEdge("p1", ", ", "text", "m1", "s1")
-            .applyPartDeltaLeadingEdge("p1", "world", "text", "m1", "s1")
+            .applyPartDeltaLeadingEdge("p1", "Hello", "text", "m1", "s1").first
+            .applyPartDeltaLeadingEdge("p1", ", ", "text", "m1", "s1").first
+            .applyPartDeltaLeadingEdge("p1", "world", "text", "m1", "s1").first
 
         assertEquals("Hello, world", next.streamingPartTexts["p1"])
     }
 
     @Test
     fun `applyPartDeltaLeadingEdge with empty delta still creates an overlay entry`() {
-        val next = ChatState().applyPartDeltaLeadingEdge(
+        val (next, _) = ChatState().applyPartDeltaLeadingEdge(
             partId = "p1", delta = "", knownType = "text",
             msgId = "m1", sessionId = "s1"
         )
@@ -1508,7 +1508,7 @@ class SessionSyncPureFunctionsTest {
             streamingReasoningPart = Part(id = "prior", messageId = "m0", sessionId = "s1", type = "reasoning")
         )
 
-        val next = state.applyPartDeltaLeadingEdge(
+        val (next, _) = state.applyPartDeltaLeadingEdge(
             partId = "p1", delta = "x", knownType = "text",
             msgId = "m1", sessionId = "s1"
         )
@@ -1520,7 +1520,7 @@ class SessionSyncPureFunctionsTest {
 
     @Test
     fun `applyPartDeltaLeadingEdge partType variant with text appends and injects placeholder`() {
-        val next = ChatState().applyPartDeltaLeadingEdge(
+        val (next, _) = ChatState().applyPartDeltaLeadingEdge(
             partId = "p1", delta = "hi", partType = "text",
             pId = "p1", msgId = "m1", sessionId = "s1"
         )
@@ -1531,7 +1531,7 @@ class SessionSyncPureFunctionsTest {
 
     @Test
     fun `applyPartDeltaLeadingEdge partType variant with reasoning sets streamingReasoningPart using pId`() {
-        val next = ChatState().applyPartDeltaLeadingEdge(
+        val (next, _) = ChatState().applyPartDeltaLeadingEdge(
             partId = "overlay-key", delta = "thought", partType = "reasoning",
             pId = "uuid-1", msgId = "m1", sessionId = "s1"
         )
@@ -1541,7 +1541,7 @@ class SessionSyncPureFunctionsTest {
 
     @Test
     fun `applyPartDeltaLeadingEdge partType variant with distinct pId wires placeholder to pId`() {
-        val next = ChatState().applyPartDeltaLeadingEdge(
+        val (next, _) = ChatState().applyPartDeltaLeadingEdge(
             partId = "overlay-key", delta = "v", partType = "text",
             pId = "uuid-2", msgId = "m1", sessionId = "s1"
         )
@@ -1553,7 +1553,7 @@ class SessionSyncPureFunctionsTest {
     fun `applyPartDeltaLeadingEdge partType variant accumulates onto prior overlay`() {
         val state = ChatState(streamingPartTexts = mapOf("p1" to "A"))
 
-        val next = state.applyPartDeltaLeadingEdge(
+        val (next, _) = state.applyPartDeltaLeadingEdge(
             partId = "p1", delta = "B", partType = "text",
             pId = "p1", msgId = "m1", sessionId = "s1"
         )
@@ -1563,7 +1563,7 @@ class SessionSyncPureFunctionsTest {
 
     @Test
     fun `applyPartDeltaLeadingEdge partType variant with tool skips placeholder and streamingReasoningPart`() {
-        val next = ChatState().applyPartDeltaLeadingEdge(
+        val (next, _) = ChatState().applyPartDeltaLeadingEdge(
             partId = "p1", delta = "x", partType = "tool",
             pId = "p1", msgId = "m1", sessionId = "s1"
         )
@@ -1576,7 +1576,7 @@ class SessionSyncPureFunctionsTest {
 
     @Test
     fun `appendDeltaBuffer with empty delta string creates an empty-string entry`() {
-        val next = ChatState().appendDeltaBuffer("p1", "")
+        val (next, _) = ChatState().appendDeltaBuffer("p1", "")
         // The entry is created (current.orEmpty() + "" = ""); it is NOT a
         // no-op. Verified explicitly because flushCoalesceBufferForPart then
         // treats empty string as "nothing buffered".
@@ -1585,7 +1585,7 @@ class SessionSyncPureFunctionsTest {
 
     @Test
     fun `appendDeltaBuffer on a brand-new partId creates the entry`() {
-        val next = ChatState().appendDeltaBuffer("p1", "first")
+        val (next, _) = ChatState().appendDeltaBuffer("p1", "first")
         assertEquals("first", next.deltaBuffer["p1"])
     }
 
@@ -1593,7 +1593,7 @@ class SessionSyncPureFunctionsTest {
     fun `appendDeltaBuffer preserves unrelated partId entries`() {
         val state = ChatState(deltaBuffer = mapOf("p2" to "kept"))
 
-        val next = state.appendDeltaBuffer("p1", "x")
+        val (next, _) = state.appendDeltaBuffer("p1", "x")
 
         assertEquals("kept", next.deltaBuffer["p2"])
         assertEquals("x", next.deltaBuffer["p1"])
@@ -1603,7 +1603,7 @@ class SessionSyncPureFunctionsTest {
 
     @Test
     fun `replaceFullTextBuffer on a brand-new partId creates the entry`() {
-        val next = ChatState().replaceFullTextBuffer("p1", "v")
+        val (next, _) = ChatState().replaceFullTextBuffer("p1", "v")
         assertEquals("v", next.fullTextBuffer["p1"])
     }
 
@@ -1611,7 +1611,7 @@ class SessionSyncPureFunctionsTest {
     fun `replaceFullTextBuffer overwrites a prior value for the same partId`() {
         val state = ChatState(fullTextBuffer = mapOf("p1" to "old"))
 
-        val next = state.replaceFullTextBuffer("p1", "new")
+        val (next, _) = state.replaceFullTextBuffer("p1", "new")
 
         assertEquals("new", next.fullTextBuffer["p1"])
         assertEquals(1, next.fullTextBuffer.size)
@@ -1621,7 +1621,7 @@ class SessionSyncPureFunctionsTest {
     fun `replaceFullTextBuffer does not touch deltaBuffer`() {
         val state = ChatState(deltaBuffer = mapOf("p1" to "delta"))
 
-        val next = state.replaceFullTextBuffer("p1", "full")
+        val (next, _) = state.replaceFullTextBuffer("p1", "full")
 
         assertEquals("delta", next.deltaBuffer["p1"])
         assertEquals("full", next.fullTextBuffer["p1"])
@@ -1633,7 +1633,7 @@ class SessionSyncPureFunctionsTest {
     fun `markFlushPending preserves existing entries when adding a new partId`() {
         val state = ChatState(pendingFlushPartIds = setOf("p1"))
 
-        val next = state.markFlushPending("p2")
+        val (next, _) = state.markFlushPending("p2")
 
         assertEquals(setOf("p1", "p2"), next.pendingFlushPartIds)
     }
@@ -1645,7 +1645,7 @@ class SessionSyncPureFunctionsTest {
             streamingReasoningPart = Part(id = "p1", messageId = "m1", sessionId = "s1", type = "reasoning")
         )
 
-        val next = state.markFlushPending("p2")
+        val (next, _) = state.markFlushPending("p2")
 
         assertEquals("v", next.streamingPartTexts["p1"])
         assertNotNull(next.streamingReasoningPart)
@@ -1653,7 +1653,7 @@ class SessionSyncPureFunctionsTest {
 
     @Test
     fun `markFlushPending on an empty set adds the sole entry`() {
-        val next = ChatState().markFlushPending("solo")
+        val (next, _) = ChatState().markFlushPending("solo")
         assertEquals(setOf("solo"), next.pendingFlushPartIds)
     }
 
@@ -1683,7 +1683,7 @@ class SessionSyncPureFunctionsTest {
             pendingFlushPartIds = setOf("p1")
         )
 
-        val next = state.flushCoalesceBufferForPart("p1")
+        val (next, _) = state.flushCoalesceBufferForPart("p1")
 
         assertEquals("AUTHORITATIVE", next.streamingPartTexts["p1"])
         assertNull(next.deltaBuffer["p1"])
@@ -1698,7 +1698,7 @@ class SessionSyncPureFunctionsTest {
             pendingFlushPartIds = setOf("p1")
         )
 
-        val next = state.flushCoalesceBufferForPart("p1")
+        val (next, _) = state.flushCoalesceBufferForPart("p1")
 
         assertEquals("FULL", next.streamingPartTexts["p1"])
         assertNull(next.fullTextBuffer["p1"])
@@ -1713,7 +1713,7 @@ class SessionSyncPureFunctionsTest {
             pendingFlushPartIds = setOf("p1")
         )
 
-        val next = state.flushCoalesceBufferForPart("p1")
+        val (next, _) = state.flushCoalesceBufferForPart("p1")
 
         assertEquals("head tail", next.streamingPartTexts["p1"])
         assertNull(next.deltaBuffer["p1"])
@@ -1728,7 +1728,7 @@ class SessionSyncPureFunctionsTest {
             pendingFlushPartIds = setOf("p1")
         )
 
-        val next = state.flushCoalesceBufferForPart("p1")
+        val (next, _) = state.flushCoalesceBufferForPart("p1")
 
         assertNull(next.streamingPartTexts["p1"])
         assertNull(next.fullTextBuffer["p1"])
@@ -1744,7 +1744,7 @@ class SessionSyncPureFunctionsTest {
             pendingFlushPartIds = setOf("p1")
         )
 
-        val next = state.flushCoalesceBufferForPart("p1")
+        val (next, _) = state.flushCoalesceBufferForPart("p1")
 
         assertNull(next.streamingPartTexts["p1"])
         assertNull(next.fullTextBuffer["p1"])
@@ -1758,7 +1758,7 @@ class SessionSyncPureFunctionsTest {
             pendingFlushPartIds = setOf("p1")
         )
 
-        val next = state.flushCoalesceBufferForPart("p1")
+        val (next, _) = state.flushCoalesceBufferForPart("p1")
 
         assertNull(next.streamingPartTexts["p1"])
         assertNull(next.deltaBuffer["p1"])
@@ -1771,7 +1771,7 @@ class SessionSyncPureFunctionsTest {
             pendingFlushPartIds = setOf("p1")
         )
 
-        val next = state.flushCoalesceBufferForPart("p1")
+        val (next, _) = state.flushCoalesceBufferForPart("p1")
 
         assertEquals("preserved", next.streamingPartTexts["p1"])
         assertFalse(next.pendingFlushPartIds.contains("p1"))
@@ -1788,7 +1788,7 @@ class SessionSyncPureFunctionsTest {
             pendingFlushPartIds = emptySet()
         )
 
-        val next = state.flushCoalesceBufferForPart("p1")
+        val (next, _) = state.flushCoalesceBufferForPart("p1")
 
         assertEquals("x y", next.streamingPartTexts["p1"])
         assertNull(next.deltaBuffer["p1"])
@@ -1801,7 +1801,7 @@ class SessionSyncPureFunctionsTest {
             pendingFlushPartIds = setOf("p1")
         )
 
-        val next = state.flushCoalesceBufferForPart("p1")
+        val (next, _) = state.flushCoalesceBufferForPart("p1")
 
         // Overlay absent + no buffers → no overlay entry created; pending cleared.
         assertNull(next.streamingPartTexts["p1"])
@@ -1817,7 +1817,7 @@ class SessionSyncPureFunctionsTest {
             pendingFlushPartIds = setOf("p1", "p2", "p3")
         )
 
-        val next = state.flushCoalesceBufferForPart("p2")
+        val (next, _) = state.flushCoalesceBufferForPart("p2")
 
         // p1 untouched, p2 flushed (REPLACE), p3 untouched.
         assertEquals("a", next.streamingPartTexts["p1"])
@@ -1840,7 +1840,7 @@ class SessionSyncPureFunctionsTest {
             pendingFlushPartIds = setOf("p1")
         )
 
-        val next = state.clearCoalesceBufferForPart("pX")
+        val (next, _) = state.clearCoalesceBufferForPart("pX")
 
         assertEquals("a", next.deltaBuffer["p1"])
         assertEquals("x", next.fullTextBuffer["p1"])
@@ -1851,7 +1851,7 @@ class SessionSyncPureFunctionsTest {
     fun `clearCoalesceBufferForPart preserves streamingPartTexts`() {
         val state = ChatState(streamingPartTexts = mapOf("p1" to "kept"))
 
-        val next = state.clearCoalesceBufferForPart("p1")
+        val (next, _) = state.clearCoalesceBufferForPart("p1")
 
         assertEquals("kept", next.streamingPartTexts["p1"])
     }
@@ -1864,7 +1864,7 @@ class SessionSyncPureFunctionsTest {
             pendingFlushPartIds = setOf("p1")
         )
 
-        val next = state.clearCoalesceBufferForPart("p1")
+        val (next, _) = state.clearCoalesceBufferForPart("p1")
 
         assertTrue(next.deltaBuffer.isEmpty())
         assertTrue(next.fullTextBuffer.isEmpty())
@@ -1877,7 +1877,7 @@ class SessionSyncPureFunctionsTest {
     fun `clearAllCoalesceBuffers on already-empty state is a no-op`() {
         val state = ChatState()
 
-        val next = state.clearAllCoalesceBuffers()
+        val (next, _) = state.clearAllCoalesceBuffers()
 
         assertTrue(next.deltaBuffer.isEmpty())
         assertTrue(next.fullTextBuffer.isEmpty())
@@ -1892,7 +1892,7 @@ class SessionSyncPureFunctionsTest {
             pendingFlushPartIds = setOf("p1", "p2", "p3")
         )
 
-        val next = state.clearAllCoalesceBuffers()
+        val (next, _) = state.clearAllCoalesceBuffers()
 
         assertTrue(next.deltaBuffer.isEmpty())
         assertTrue(next.fullTextBuffer.isEmpty())
@@ -1906,7 +1906,7 @@ class SessionSyncPureFunctionsTest {
             deltaBuffer = mapOf("p1" to "buf")
         )
 
-        val next = state.clearAllCoalesceBuffers()
+        val (next, _) = state.clearAllCoalesceBuffers()
 
         assertEquals("v1", next.streamingPartTexts["p1"])
         assertEquals("v2", next.streamingPartTexts["p2"])
@@ -1919,8 +1919,8 @@ class SessionSyncPureFunctionsTest {
         val state = SessionListState()
 
         val next = state
-            .applyQuestionAsked(QuestionRequest(id = "q1", sessionId = "s1", questions = emptyList()))
-            .applyQuestionAsked(QuestionRequest(id = "q2", sessionId = "s1", questions = emptyList()))
+            .applyQuestionAsked(QuestionRequest(id = "q1", sessionId = "s1", questions = emptyList())).first
+            .applyQuestionAsked(QuestionRequest(id = "q2", sessionId = "s1", questions = emptyList())).first
 
         assertEquals(listOf("q1", "q2"), next.pendingQuestions.map { it.id })
     }
@@ -1934,7 +1934,7 @@ class SessionSyncPureFunctionsTest {
         ))
         val dup = QuestionRequest(id = "q1", sessionId = "s2", questions = emptyList())
 
-        val next = state.applyQuestionAsked(dup)
+        val (next, _) = state.applyQuestionAsked(dup)
 
         assertEquals(1, next.pendingQuestions.size)
         assertEquals("s1", next.pendingQuestions[0].sessionId)
@@ -1950,7 +1950,7 @@ class SessionSyncPureFunctionsTest {
             )
         )
 
-        val next = state.applyQuestionAsked(q)
+        val (next, _) = state.applyQuestionAsked(q)
 
         assertEquals(1, next.pendingQuestions[0].questions.size)
         assertEquals("q", next.pendingQuestions[0].questions[0].question)
@@ -1960,7 +1960,7 @@ class SessionSyncPureFunctionsTest {
     fun `applyQuestionResolved on an empty pending list is a no-op`() {
         val state = SessionListState()
 
-        val next = state.applyQuestionResolved("anything")
+        val (next, _) = state.applyQuestionResolved("anything")
 
         assertTrue(next.pendingQuestions.isEmpty())
     }
@@ -1971,7 +1971,7 @@ class SessionSyncPureFunctionsTest {
             QuestionRequest(id = "q1", sessionId = "s1", questions = emptyList())
         ))
 
-        val next = state.applyQuestionResolved("q1")
+        val (next, _) = state.applyQuestionResolved("q1")
 
         assertTrue(next.pendingQuestions.isEmpty())
     }
@@ -1987,7 +1987,7 @@ class SessionSyncPureFunctionsTest {
             QuestionRequest(id = "q2", sessionId = "s1", questions = emptyList())
         ))
 
-        val next = state.applyQuestionResolved("q1")
+        val (next, _) = state.applyQuestionResolved("q1")
 
         assertEquals(listOf("q2"), next.pendingQuestions.map { it.id })
     }
@@ -1998,7 +1998,7 @@ class SessionSyncPureFunctionsTest {
     fun `applyTodoUpdated with an empty todos list stores an empty list for the session`() {
         val state = SessionListState()
 
-        val next = state.applyTodoUpdated("s1", emptyList())
+        val (next, _) = state.applyTodoUpdated("s1", emptyList())
 
         assertEquals(0, next.sessionTodos["s1"]?.size)
     }
@@ -2009,7 +2009,7 @@ class SessionSyncPureFunctionsTest {
             sessionTodos = mapOf("s1" to listOf(TodoItem("a", "pending", "low", "t0")))
         )
 
-        val next = state.applyTodoUpdated("s1", emptyList())
+        val (next, _) = state.applyTodoUpdated("s1", emptyList())
 
         assertEquals(0, next.sessionTodos["s1"]?.size)
     }
@@ -2023,7 +2023,7 @@ class SessionSyncPureFunctionsTest {
             )
         )
 
-        val next = state.applyTodoUpdated("s1", listOf(TodoItem("c", "pending", "medium", "t2")))
+        val (next, _) = state.applyTodoUpdated("s1", listOf(TodoItem("c", "pending", "medium", "t2")))
 
         assertEquals(1, next.sessionTodos["s1"]?.size)
         assertEquals("c", next.sessionTodos["s1"]!![0].content)
@@ -2037,7 +2037,7 @@ class SessionSyncPureFunctionsTest {
     fun `applyMarkSessionUnread is idempotent when the id is already unread`() {
         val state = UnreadState(unreadSessions = setOf("s1"))
 
-        val next = state.applyMarkSessionUnread("s1", currentSessionId = "other")
+        val (next, _) = state.applyMarkSessionUnread("s1", currentSessionId = "other")
 
         assertEquals(setOf("s1"), next.unreadSessions)
     }
@@ -2046,7 +2046,7 @@ class SessionSyncPureFunctionsTest {
     fun `applyMarkSessionUnread is case-sensitive for s1 versus S1`() {
         val state = UnreadState()
 
-        val next = state.applyMarkSessionUnread("s1", currentSessionId = null)
+        val (next, _) = state.applyMarkSessionUnread("s1", currentSessionId = null).first
             .applyMarkSessionUnread("S1", currentSessionId = null)
 
         assertEquals(setOf("s1", "S1"), next.unreadSessions)
@@ -2056,7 +2056,7 @@ class SessionSyncPureFunctionsTest {
     fun `applyMarkSessionUnread preserves unrelated unread entries`() {
         val state = UnreadState(unreadSessions = setOf("a", "b"))
 
-        val next = state.applyMarkSessionUnread("c", currentSessionId = null)
+        val (next, _) = state.applyMarkSessionUnread("c", currentSessionId = null)
 
         assertEquals(setOf("a", "b", "c"), next.unreadSessions)
     }
@@ -2203,5 +2203,146 @@ class SessionSyncPureFunctionsTest {
     @Test
     fun `isStreamablePartType returns false for an unknown custom type`() {
         assertFalse(isStreamablePartType("custom-future-type"))
+    }
+
+    // P2-4: SseSideEffect return verification
+    //
+    // Every applyXxx now returns Pair of State and effects List. Most
+    // return emptyList for effects (the transform is pure state-only;
+    // cross-slice effects are computed by the dispatcher). These tests pin
+    // that contract: the effects list is structurally empty for pure-slice
+    // transforms, and the state is unchanged from the pre-P2-4 behavior.
+
+    @Test
+    fun `p24 applySessionCreated returns empty effects list`() {
+        val state = SessionListState()
+        val created = Session(id = "s1", directory = "/x")
+
+        val (next, effects) = state.applySessionCreated(created)
+
+        assertEquals(1, next.sessions.size)
+        assertTrue("effects must be empty for pure-slice transform", effects.isEmpty())
+    }
+
+    @Test
+    fun `p24 applySessionStatus returns empty effects list`() {
+        val state = SessionListState()
+
+        val (next, effects) = state.applySessionStatus("s1", SessionStatus(type = "busy"))
+
+        assertEquals(SessionStatus(type = "busy"), next.sessionStatuses["s1"])
+        assertTrue(
+            "applySessionStatus effects must be empty — busy/idle reload effects " +
+                "depend on chat.currentSessionId (cross-slice) and are computed by the dispatcher",
+            effects.isEmpty()
+        )
+    }
+
+    @Test
+    fun `p24 applyMessageUpdated preserves found flag`() {
+        // applyMessageUpdated is the ONE function that kept its pre-P2-4
+        // Pair<ChatState, Boolean> signature (the Boolean is a diagnostic
+        // found/not-found flag for logging, NOT a bus-level side effect).
+        val state = ChatState(messages = listOf(Message(id = "m1", role = "user")))
+        val updated = Message(id = "m1", role = "user", cost = 1.0)
+
+        val (next, found) = state.applyMessageUpdated(updated)
+
+        assertTrue(found)
+        assertEquals(1.0, next.messages[0].cost!!, 1e-9)
+    }
+
+    @Test
+    fun `p24 applyPartDeltaLeadingEdge returns empty effects list`() {
+        val state = ChatState()
+
+        val (next, effects) = state.applyPartDeltaLeadingEdge(
+            partId = "p1", delta = "hello", knownType = "text",
+            msgId = "m1", sessionId = "s1"
+        )
+
+        assertEquals("hello", next.streamingPartTexts["p1"])
+        assertTrue(effects.isEmpty())
+    }
+
+    @Test
+    fun `p24 applyPartFullTextLeadingEdge returns empty effects list`() {
+        val state = ChatState()
+
+        val (next, effects) = state.applyPartFullTextLeadingEdge(
+            partId = "p1", fullText = "authoritative", partType = "text",
+            pId = "p1", msgId = "m1", sessionId = "s1"
+        )
+
+        assertEquals("authoritative", next.streamingPartTexts["p1"])
+        assertTrue(effects.isEmpty())
+    }
+
+    @Test
+    fun `p24 flushCoalesceBufferForPart returns empty effects list`() {
+        val state = ChatState(
+            streamingPartTexts = mapOf("p1" to "base"),
+            deltaBuffer = mapOf("p1" to " MORE"),
+            pendingFlushPartIds = setOf("p1")
+        )
+
+        val (next, effects) = state.flushCoalesceBufferForPart("p1")
+
+        assertEquals("base MORE", next.streamingPartTexts["p1"])
+        assertTrue(effects.isEmpty())
+    }
+
+    @Test
+    fun `p24 clearAllCoalesceBuffers returns empty effects list`() {
+        val state = ChatState(
+            deltaBuffer = mapOf("p1" to "x"),
+            pendingFlushPartIds = setOf("p1")
+        )
+
+        val (next, effects) = state.clearAllCoalesceBuffers()
+
+        assertTrue(next.deltaBuffer.isEmpty())
+        assertTrue(effects.isEmpty())
+    }
+
+    @Test
+    fun `p24 applyQuestionAsked returns empty effects list`() {
+        val state = SessionListState()
+        val question = QuestionRequest(id = "q1", sessionId = "s1", questions = emptyList())
+
+        val (next, effects) = state.applyQuestionAsked(question)
+
+        assertEquals(1, next.pendingQuestions.size)
+        assertTrue(effects.isEmpty())
+    }
+
+    @Test
+    fun `p24 applyMarkSessionUnread returns empty effects list`() {
+        val state = UnreadState()
+
+        val (next, effects) = state.applyMarkSessionUnread("s1", currentSessionId = null)
+
+        assertEquals(setOf("s1"), next.unreadSessions)
+        assertTrue(effects.isEmpty())
+    }
+
+    @Test
+    fun `p24 dropTempCleared returns empty effects list`() {
+        val state = UnreadState(tempClearedUnread = setOf("s1", "s2"))
+
+        val (next, effects) = state.dropTempCleared("s1")
+
+        assertEquals(setOf("s2"), next.tempClearedUnread)
+        assertTrue(effects.isEmpty())
+    }
+
+    @Test
+    fun `p24 markFlushPending returns empty effects list`() {
+        val state = ChatState()
+
+        val (next, effects) = state.markFlushPending("p1")
+
+        assertTrue(next.pendingFlushPartIds.contains("p1"))
+        assertTrue(effects.isEmpty())
     }
 }

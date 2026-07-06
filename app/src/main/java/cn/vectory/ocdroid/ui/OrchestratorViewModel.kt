@@ -76,7 +76,7 @@ class OrchestratorViewModel @Inject constructor(
                     core.writeSessionList { it.copy(pendingPermissions = it.pendingPermissions.filter { p -> p.id != permissionId }) }
                 }
                 .onFailure { error ->
-                    core.effectBus.uiEvents.tryEmit(UiEvent.Error(R.string.error_respond_permission_failed, listOf(errorMessageOrFallback(error, "unknown error"))))
+                    core.effectBus.tryEmitUiEvent(UiEvent.Error(R.string.error_respond_permission_failed, listOf(errorMessageOrFallback(error, "unknown error"))))
                 }
         }
     }
