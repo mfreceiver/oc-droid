@@ -451,7 +451,12 @@ class SettingsManager @Inject constructor(
             KEY_HOST_PROFILES,
             KEY_CURRENT_HOST_PROFILE_ID
         )
-        val preservedKeys = connectionKeys
+        // R-20 Phase 0: cache DB key MUST survive a "reset local data" — if it
+        // is wiped, the SQLCipher DB becomes permanently unreadable (the key
+        // never rotates; losing it = losing the cache, which then has to be
+        // destructive-reset in CacheModule on the next open). Same category as
+        // the per-host password secrets — preserved across reset.
+        val preservedKeys = connectionKeys + CACHE_DB_KEY
         val e = encryptedPrefs.edit()
         for (k in encryptedPrefs.all.keys) {
             val preserved = k in preservedKeys ||
@@ -466,6 +471,16 @@ class SettingsManager @Inject constructor(
         private const val TAG = "SettingsManager"
         const val DEFAULT_SERVER = "http://localhost:4096"
         const val LEGACY_BASIC_AUTH_PASSWORD_ID = "legacy_basic_auth_password"
+        /**
+         * R-20 Phase 0: EncryptedSharedPreferences key holding the SQLCipher DB
+         * passphrase (32 random bytes, Base64-encoded). Public so
+         * [cn.vectory.ocdroid.data.cache.CacheKeyStore] and the
+         * `clearAllLocalData` preserved-keys whitelist reference the SAME
+         * constant — drift between the two would either silently wipe the key
+         * on reset (cache unreadable) or leave it after a full wipe (cache
+         * leaks across identities).
+         */
+        const val CACHE_DB_KEY = "cache_db_key"
         private const val KEY_SERVER_URL = "server_url"
         private const val KEY_USERNAME = "username"
         private const val KEY_PASSWORD = "password"

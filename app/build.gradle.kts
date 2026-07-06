@@ -124,6 +124,12 @@ android {
     }
 }
 
+// R-20 Phase 0：Room schema 导出目录（exportSchema=true 要求 KSP arg）。
+// schemas/ 入 git（后续稳定后正式 Migration 用）。
+ksp {
+    arg("room.schemaLocation", "$projectDir/schemas")
+}
+
 // R-22 / R18 Phase 5++ kover 覆盖率门槛（防回归 floor）。
 // §R18 Phase 5++ 实测基线（2026-07-06，排除纯 @Composable/主题/Activity 后的
 // unit-testable 集合，~995 新单测累计覆盖纯函数/util/拦截器/controllers/
@@ -286,7 +292,15 @@ dependencies {
     // v2 §3.1: code-block syntax highlight (highlightedCodeBlock / highlightedCodeFence).
     implementation(libs.markdown.renderer.code)
     implementation(libs.androidx.compose.material3.windowsizeclass)
-    
+
+    // R-20 Phase 0：加密持久化缓存（SQLCipher via Room SupportFactory）。
+    // Room 用 KSP 处理器；SQLCipher 4.16.0 AAR 自带 consumer-rules（见 proguard-rules.pro）。
+    implementation(libs.androidx.room.runtime)
+    implementation(libs.androidx.room.ktx)
+    ksp(libs.androidx.room.compiler)
+    implementation(libs.androidx.sqlite.framework)
+    implementation(libs.sqlcipher.android)
+
     testImplementation(libs.junit)
     testImplementation(libs.mockk)
     testImplementation(libs.kotlinx.coroutines.test)
@@ -300,6 +314,9 @@ dependencies {
     testImplementation(libs.robolectric)
     // R-21: ApplicationProvider.getApplicationContext（Robolectric 测试取 Context）
     testImplementation(libs.androidx.test.core)
+    // R-20 Phase 0：CacheDatabaseTest 用 Room in-memory（不挂 SupportFactory，
+    // Robolectric 跑不了真 SQLCipher native lib）。
+    testImplementation(libs.androidx.room.testing)
     
     androidTestImplementation(libs.androidx.junit)
     androidTestImplementation(libs.androidx.espresso.core)

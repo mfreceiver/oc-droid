@@ -1,0 +1,46 @@
+{
+  "doc": "持久化聊天记录计划 — 7 模型 round-2 复审（复用 round-1 会话，逐字相同提示词）",
+  "date": "2026-07-06",
+  "plan_version": "v2（按 round-1 并集修订 ~25 项后）",
+  "verdict": "5 live 评委全部解决 round-1 阻塞；分数 7.6–8.5（r1 为 6.4–7.5）；3/5 PASS/COND-PASS。gpter+kimo 引擎 round-2 不可用（4 次空返回），r1 分数存档。",
+  "scores_r1_to_r2": {
+    "dser":    { "r1": 7.5, "r2": 8.5, "delta": "+1.0", "r2_verdict": "PASS", "new_blockers": 0 },
+    "maxer":   { "r1": 7.5, "r2": 8.4, "delta": "+0.9", "r2_verdict": "PASS-WITH-FIXES", "new_blockers": 0, "detail_items": 3 },
+    "momo":    { "r1": 7.5, "r2": 8.2, "delta": "+0.7", "r2_verdict": "COND-PASS", "new_blockers": 2 },
+    "glmer":   { "r1": 6.5, "r2": 8.0, "delta": "+1.5", "r2_verdict": "NEEDS-FIX narrow", "new_blockers": 2 },
+    "freegpt": { "r1": 6.4, "r2": 7.6, "delta": "+1.2", "r2_verdict": "NEEDS-FIX", "new_blockers": 4 },
+    "gpter":   { "r1": 7.1, "r2": "unavailable", "delta": "—", "note": "round-2 引擎 3 次空返回（gpt-1 reused + gpt-2 retry 均空），r1 7.1 存档" },
+    "kimo":    { "r1": 5.8, "r2": "unavailable", "delta": "—", "note": "round-2 引擎 2 次空返回（kim-1 + kim-2 retry 均空），r1 5.8 存档" }
+  },
+  "round1_blocker_resolution": "5 live 评委 round-1 阻塞项全部 RESOLVED（dser 6/6, maxer 4/4, momo 4/4, glmer 5/5, freegpt 8/8 RESOLVED+PARTIAL）。v2 修订有效。",
+  "round2_new_findings_convergence": {
+    "switchTo_applySavedSettings_非suspend_vs_suspend_verify": {
+      "命中": "momo(N-B2) + glmer(I1) + maxer(坑1) + freegpt隐含 = 4/5 live",
+      "裁决": "最强收敛。switchTo 8步流靠同步FIFO effect发射(代码5处注释警告launch包裹会race)，禁改suspend。fix: applySavedSettings改suspend(在appScope.launch上下文) + switchTo新增VerifyAndHydrate effect(appScope.launch内verify+hydrate)，switchTo签名不动"
+    },
+    "EvictSession_group_provider_来源": {
+      "命中": "glmer(I3) + freegpt(#3) + maxer(细节) = 3/5 live",
+      "裁决": "SessionMutationActions/SessionSyncCoordinator 构造无 hostProfileStore→复合PK取不到group。fix: current group provider 注入(currentServerGroupFp: ()->String 或 HostState slice)"
+    },
+    "createdAt_null_三态": {
+      "命中": "freegpt(#1) 独有，但尖锐(v2 内部矛盾)",
+      "裁决": "v2 §0 写null→冷启动但§2接口写null→verify true→loadVerified返回正文=展示未验证。fix: FingerprintResult 3态(Verified/UnknownColdStart/MismatchEvicted), null→UnknownColdStart不hydrate"
+    },
+    "HostProfile_serverGroupFp_blank_normalize": {
+      "命中": "freegpt(#2) + maxer(细节-3)",
+      "裁决": "data class 默认值不能引用self.id→旧profile全落blank group。fix: decode后normalize blank→id + nonblank invariant"
+    },
+    "draft_agent_model_group_scoped": {
+      "命中": "freegpt(#4) 独有",
+      "裁决": "v2 Phase5留歧义'或改cacheSessionKey'。sessionId非UUID→必须group-scoped, 定稿( serverGroupFp, sessionId)"
+    },
+    "同组切换字段分类": { "命中": "glmer(I2)", "裁决": "purgePerHostState清8类状态, 同组保留须区分同服务器数据(sessions/unread/cache/recentWorkdirs) vs per-profile UX(openSessionIds/draft/currentWorkdir)" },
+    "select前snapshot_4step": { "命中": "momo(N-B1)", "裁决": "hostProfileStore.select()有副作用, 须select前快照previous serverGroupFp" },
+    "onCacheWindow漏SessionViewModel309": { "命中": "maxer(细节-1)", "裁决": "实际6个调用点, v2列5个漏SessionViewModel:309" },
+    "命名evictGroup_vs_ClearGroup": { "命中": "maxer(细节-2)", "裁决": "统一为EvictGroup(与EvictSession一致)" },
+    "addRecentWorkdir显式serverGroupFp参数": { "命中": "maxer(坑2)", "裁决": "签名改addRecentWorkdir(serverGroupFp,workdir)" },
+    "GapFillCoordinator_Mutex实现位置": { "命中": "maxer(坑3)", "裁决": "per-session ConcurrentHashMap<String,Mutex>, 非全局单Mutex" },
+    "alive不硬编码Int_MAX_VALUE": { "命中": "freegpt(建议1)+dser(S2)", "裁决": "完整枚举策略非magic number, 不完整mark-only" }
+  },
+  "conclusion": "v2 是有效修订(round-1 阻塞全清, 平均+1.06)。round-2 新发现集中在 switchTo async 边界(4模型收敛, 必修) + 一组 detail 级机械项。建议出 v3 修 ~8 项(以 switchTo async 边界为头号)即可定稿。"
+}

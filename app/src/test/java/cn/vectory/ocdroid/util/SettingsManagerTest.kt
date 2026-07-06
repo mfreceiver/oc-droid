@@ -405,4 +405,35 @@ class SettingsManagerTest {
         assertNotNull(SettingsManager.LEGACY_BASIC_AUTH_PASSWORD_ID)
         assertFalse(SettingsManager.LEGACY_BASIC_AUTH_PASSWORD_ID.isBlank())
     }
+
+    /**
+     * R-20 Phase 0: `cache_db_key`（SQLCipher DB 密钥，存 EncryptedSharedPreferences）
+     * 必须在 clearAllLocalData() 中保留 —— 否则一次"reset local data"会让缓存 DB
+     * 永久不可读（密钥永不轮换），下次打开触发 CacheModule 的 destructive reset。
+     * 该 key 与 basic_auth_password_* 同属"基础设施"白名单。
+     */
+    @Test
+    fun `clearAllLocalData preserves the cache DB key`() {
+        // 直接通过 encryptedPrefs API 写入（CacheKeyStore 也走同一个 encrypted
+        // prefs 文件）；这里只验证白名单机制，不重新构造 CacheKeyStore。
+        val espField = SettingsManager::class.java.getDeclaredField("encryptedPrefs")
+        espField.isAccessible = true
+        val esp = espField.get(settings) as android.content.SharedPreferences
+        esp.edit().putString(SettingsManager.CACHE_DB_KEY, "phase0-cache-key").apply()
+
+        // 顺带写一个应被擦除的普通键，验证擦除仍生效（不是"全保留"）。
+        settings.currentSessionId = "wipe-me"
+        settings.clearAllLocalData()
+
+        assertEquals("phase0-cache-key", esp.getString(SettingsManager.CACHE_DB_KEY, null))
+        assertNull(settings.currentSessionId)
+    }
+
+    @Test
+    fun `CACHE_DB_KEY constant is stable and nonblank`() {
+        // 防回归：CacheKeyStore 与 clearAllLocalData 共享此常量，改名或变 blank
+        // 会让两处失配（一处 wipe 一处保留）—— 缓存要么泄漏跨身份，要么不可读。
+        assertNotNull(SettingsManager.CACHE_DB_KEY)
+        assertFalse(SettingsManager.CACHE_DB_KEY.isBlank())
+    }
 }

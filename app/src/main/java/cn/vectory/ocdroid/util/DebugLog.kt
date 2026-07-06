@@ -77,6 +77,18 @@ object DebugLog {
     fun w(tag: String, message: String) = log(tag, message, Level.WARN)
     fun e(tag: String, message: String) = log(tag, message, Level.ERROR)
 
+    /**
+     * R-20 Phase 0: 3-arg ERROR convenience — Logcat parity preserves the
+     * throwable stack (more useful for triaging a destructive cache reset
+     * than a string-only message). The in-memory ring buffer does NOT carry
+     * the throwable (the live viewer is a flat list of strings) — the user
+     * sees the message, devs see the stack via Logcat.
+     */
+    fun e(tag: String, message: String, throwable: Throwable?) {
+        log(tag, if (throwable != null) "$message: ${throwable.javaClass.simpleName}: ${throwable.message}" else message, Level.ERROR)
+        runCatching { if (throwable != null) Log.e(tag, message, throwable) }
+    }
+
     /** Clear all entries (in-memory only). */
     fun clear() {
         _entries.value = emptyList()

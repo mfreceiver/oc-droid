@@ -4,6 +4,7 @@ import android.util.Log
 import cn.vectory.ocdroid.data.model.HostProfile
 import cn.vectory.ocdroid.data.model.HostProfileExportPayload
 import cn.vectory.ocdroid.data.model.HostProfileImportPayload
+import cn.vectory.ocdroid.data.model.normalizeGroupFp
 import cn.vectory.ocdroid.util.SettingsManager
 import kotlinx.serialization.SerializationException
 import kotlinx.serialization.builtins.ListSerializer
@@ -72,10 +73,15 @@ class HostProfileStore @Inject constructor(
 
     @Synchronized
     fun save(profile: HostProfile) {
+        // R-20 Phase 0: enforce the nonblank serverGroupFp invariant at the
+        // write boundary — defensive; new profiles and decode normalize this
+        // upstream, but save() is the choke point where a blank value would
+        // land on disk and silently corrupt group keying.
+        val safe = profile.normalizeGroupFp()
         val all = profiles().toMutableList()
-        val index = all.indexOfFirst { it.id == profile.id }
-        if (index >= 0) all[index] = profile else all.add(profile)
-        val currentId = settingsManager.currentHostProfileId ?: profile.id
+        val index = all.indexOfFirst { it.id == safe.id }
+        if (index >= 0) all[index] = safe else all.add(safe)
+        val currentId = settingsManager.currentHostProfileId ?: safe.id
         saveProfiles(all, currentId)
     }
 
@@ -92,10 +98,19 @@ class HostProfileStore @Inject constructor(
     @Synchronized
     fun duplicate(profileId: String): HostProfile {
         val source = profiles().firstOrNull { it.id == profileId } ?: error("Host profile not found")
+        // R-20 Phase 0: duplicate is "clone configuration into an independent
+        // connection point" — by plan §1's "import 默认新建独立组" logic, a
+        // duplicate starts as its own single-member group rather than
+        // inheriting the source's group. Two entry points that legitimately
+        // reach the same server can later be merged via [mergeServerGroup];
+        // defaulting to a fresh group avoids accidental cross-contamination
+        // of the cache when the duplicate points at a different server.
+        val newId = java.util.UUID.randomUUID().toString()
         val copy = source.copy(
-            id = java.util.UUID.randomUUID().toString(),
+            id = newId,
             name = "${source.displayName} Copy",
-            lastUsedAt = null
+            lastUsedAt = null,
+            serverGroupFp = newId
         )
         save(copy)
         return copy
@@ -131,6 +146,17 @@ class HostProfileStore @Inject constructor(
      * with SSH entries removed, the cleaned list is persisted in place. On parse
      * failure, returns [DecodeOutcome.ParseFailure] so callers can preserve the
      * original payload instead of overwriting it.
+     *
+     * R-20 Phase 0 — `serverGroupFp` nonblank invariant: after a successful
+     * decode (with or without SSH filtering), each profile whose
+     * `serverGroupFp` is blank is normalized to `serverGroupFp = id`. This
+     * upgrades legacy JSON that predates Phase 0 (where the field is absent →
+     * defaults to `""`) into the Phase 0 form: each legacy profile becomes its
+     * own single-member group, preventing a "blank group" collapse that would
+     * merge unrelated legacy profiles into the same cache key (plan §0 复合
+     * 键控 + freegpt #2). If normalization changed any row, the cleaned list is
+     * persisted alongside the SSH cleanup (or in its own save if SSH cleanup
+     * did not fire).
      */
     private fun decodeProfiles(raw: String?): DecodeOutcome {
         if (raw.isNullOrBlank()) return DecodeOutcome.Decoded(emptyList())
@@ -145,6 +171,13 @@ class HostProfileStore @Inject constructor(
                 ListSerializer(HostProfile.serializer()),
                 JsonArray(filtered)
             )
+            // R-20 Phase 0: normalize blank serverGroupFp → id (independent of
+            // whether SSH filtering removed any rows). `changed` is true iff
+            // any row actually had a blank group — drives the persist decision.
+            val normalizedProfiles = profiles.map { p ->
+                if (p.serverGroupFp.isBlank()) p.copy(serverGroupFp = p.id) else p
+            }
+            val changed = normalizedProfiles.zip(profiles).any { (a, b) -> a.serverGroupFp != b.serverGroupFp }
             if (filtered.size != elements.size) {
                 Log.w(
                     TAG,
@@ -153,11 +186,26 @@ class HostProfileStore @Inject constructor(
                 // Persist the cleanup. Safe: we successfully decoded every
                 // remaining entry, so this is a deliberate migration rather
                 // than a destructive overwrite.
+                // R-20 Phase 0: persist the normalized (blank→id) form together
+                // with the SSH cleanup so we don't leave blank serverGroupFp
+                // rows on disk to be re-normalized on every read.
                 val remainingCurrentId = settingsManager.currentHostProfileId
-                    ?.takeIf { id -> profiles.any { it.id == id } }
-                saveProfiles(profiles, remainingCurrentId)
+                    ?.takeIf { id -> normalizedProfiles.any { it.id == id } }
+                saveProfiles(normalizedProfiles, remainingCurrentId)
+            } else if (changed) {
+                // No SSH cleanup, but blank→id normalization upgraded some rows.
+                // Persist the upgraded form (independent of SSH path so legacy
+                // pre-Phase-0 JSON converges on the nonblank invariant).
+                Log.w(
+                    TAG,
+                    "Normalized ${normalizedProfiles.zip(profiles).count { (a, b) -> a.serverGroupFp != b.serverGroupFp }} " +
+                        "profile(s) with blank serverGroupFp (Phase 0 migration)"
+                )
+                val remainingCurrentId = settingsManager.currentHostProfileId
+                    ?.takeIf { id -> normalizedProfiles.any { it.id == id } }
+                saveProfiles(normalizedProfiles, remainingCurrentId)
             }
-            profiles
+            normalizedProfiles
         }.fold(
             onSuccess = { DecodeOutcome.Decoded(it) },
             onFailure = {
@@ -180,8 +228,69 @@ class HostProfileStore @Inject constructor(
     }
 
     private fun saveProfiles(profiles: List<HostProfile>, currentId: String?) {
-        settingsManager.hostProfilesJson = json.encodeToString(profiles)
-        settingsManager.currentHostProfileId = currentId ?: profiles.firstOrNull()?.id
+        // R-20 Phase 0: belt-and-braces nonblank guard at the lowest write
+        // boundary. Every other entry path (save / decodeProfiles) normalizes
+        // upstream, but this catches any future caller that bypasses them.
+        val safe = profiles.map { it.normalizeGroupFp() }
+        settingsManager.hostProfilesJson = json.encodeToString(safe)
+        settingsManager.currentHostProfileId = currentId ?: safe.firstOrNull()?.id
+    }
+
+    /**
+     * R-20 Phase 0: merge all profiles in group [from] into group [into]
+     * (one-directional). After the call, no profile has `serverGroupFp == from`;
+     * every previously-`from` profile now carries `into`. Persists the change.
+     *
+     * Use case: the user has two profiles pointing at the same server (e.g. a
+     * LAN entry and a tunnel entry) and wants them to share cached chat
+     * content. Idempotent: if [from] is already empty / does not exist, this
+     * is a no-op.
+     */
+    @Synchronized
+    fun mergeServerGroup(from: String, into: String) {
+        if (from.isBlank() || from == into) return
+        val all = profiles()
+        val changed = all.any { it.serverGroupFp == from }
+        if (!changed) return
+        val updated = all.map { p ->
+            if (p.serverGroupFp == from) p.copy(serverGroupFp = into) else p
+        }
+        val currentId = settingsManager.currentHostProfileId
+        saveProfiles(updated, currentId)
+    }
+
+    /**
+     * R-20 Phase 0: split [profileId] into its own independent single-member
+     * group (sets its `serverGroupFp = profileId`). Persists the change.
+     *
+     * Use case (plan §4 G1 "copy-on-split" escape hatch, surfaced in Phase 4
+     * management UI): the user accidentally merged two unrelated profiles and
+     * wants to undo the cache sharing without losing either side's config.
+     * Idempotent: if the profile is already its own group, this is a no-op.
+     */
+    @Synchronized
+    fun splitProfileToOwnGroup(profileId: String) {
+        if (profileId.isBlank()) return
+        val all = profiles()
+        val target = all.firstOrNull { it.id == profileId } ?: return
+        if (target.serverGroupFp == profileId) return
+        val updated = all.map { p ->
+            if (p.id == profileId) p.copy(serverGroupFp = profileId) else p
+        }
+        val currentId = settingsManager.currentHostProfileId
+        saveProfiles(updated, currentId)
+    }
+
+    /**
+     * R-20 Phase 0: returns all profiles whose `serverGroupFp` equals [fp].
+     * Empty list if [fp] matches no profile (including when [fp] is blank —
+     * callers must never query for a blank group; the nonblank invariant
+     * guarantees no profile carries one anyway).
+     */
+    @Synchronized
+    fun profilesInGroup(serverGroupFp: String): List<HostProfile> {
+        if (serverGroupFp.isBlank()) return emptyList()
+        return profiles().filter { it.serverGroupFp == serverGroupFp }
     }
 
     private sealed interface DecodeOutcome {

@@ -33,6 +33,35 @@ data class HostProfile(
     val basicAuth: BasicAuthConfig? = null,
     val tunnelPasswordId: String? = null,
     /**
+     * R-20 Phase 0: fingerprint of the "server group" this profile is part of.
+     *
+     * A group = the set of接入点 (entry-point profiles) that point at the
+     * **same logical server** and therefore should share cached chat content /
+     * workdir config / model-disabled set. Two profiles with the same
+     * serverGroupFp are treated as one server for cache keying; switching
+     * between them does NOT clear the cache (plan §0 "缓存复合键控", §1).
+     *
+     * **Nonblank invariant**: this field is `""` ONLY as a deserialization
+     * fallback for legacy JSON that predates Phase 0.
+     * [cn.vectory.ocdroid.data.repository.HostProfileStore.decodeProfiles]
+     * normalizes any blank value to `id` immediately after decode (so each
+     * legacy profile becomes its own single-member group), and `save()` /
+     * `saveProfiles()` guarantee nonblank before persistence — a blank value
+     * never reaches EncryptedSharedPreferences.
+     *
+     * New profiles ([defaultDirect] / [HostProfileImportPayload.makeProfile] /
+     * [cn.vectory.ocdroid.data.repository.HostProfileStore.duplicate]) set
+     * `serverGroupFp = <new UUID>` at construction time, so they form a fresh
+     * independent group rather than collapsing into a shared-blank group.
+     *
+     * Manual grouping: [cn.vectory.ocdroid.data.repository.HostProfileStore.mergeServerGroup]
+     * (merge two profiles' groups into one) /
+     * [cn.vectory.ocdroid.data.repository.HostProfileStore.splitProfileToOwnGroup]
+     * (split a profile into its own group).
+     */
+    @SerialName("serverGroupFp")
+    val serverGroupFp: String = "",
+    /**
      * R-01: per-host "接受不安全连接"开关。默认 false（仅信任系统证书），
      * 设为 true 时该 host 的 REST/SSE/health/tunnel client 全部降级为 trust-all。
      * 这是把原先全局硬编码的 trustAll 收紧为按 host 的显式、可审计的开关。
@@ -58,10 +87,17 @@ data class HostProfile(
             } else {
                 null
             }
+            // R-20 Phase 0: new profiles start as their own single-member group
+            // (serverGroupFp == id). The user can later merge via
+            // HostProfileStore.mergeServerGroup if multiple entry points reach
+            // the same server.
+            val id = UUID.randomUUID().toString()
             return HostProfile(
+                id = id,
                 name = "Localhost",
                 serverUrl = serverUrl,
                 basicAuth = basicAuth,
+                serverGroupFp = id,
                 lastUsedAt = System.currentTimeMillis()
             )
         }
@@ -82,10 +118,17 @@ data class HostProfileImportPayload(
         require(url.isNotEmpty()) {
             "Host profile requires serverURL (legacy SSH-only profiles are no longer supported)"
         }
+        // R-20 Phase 0: imported profiles start as their own independent group
+        // (plan §1: "import/export 默认不导出内部 group，导入新建独立组"). If the
+        // user wants the imported profile to share a cache with an existing
+        // one, they merge via HostProfileStore.mergeServerGroup afterwards.
+        val id = UUID.randomUUID().toString()
         return HostProfile(
+            id = id,
             name = name,
             serverUrl = url,
-            allowInsecureConnections = allowInsecureConnections
+            allowInsecureConnections = allowInsecureConnections,
+            serverGroupFp = id
         )
     }
 }
@@ -101,6 +144,9 @@ data class HostProfileExportPayload(
 ) {
     companion object {
         fun from(profile: HostProfile): HostProfileExportPayload {
+            // R-20 Phase 0: export does NOT include serverGroupFp (plan §1:
+            // "import/export 默认不导出内部 group，导入新建独立组"). Importing the
+            // same payload twice creates two independent groups.
             return HostProfileExportPayload(
                 name = profile.displayName,
                 serverUrl = profile.serverUrl,
@@ -109,3 +155,15 @@ data class HostProfileExportPayload(
         }
     }
 }
+
+/**
+ * R-20 Phase 0: defensive nonblank guard. Returns a copy with
+ * `serverGroupFp` set to [id] if it was blank, otherwise `this`. Used at the
+ * HostProfileStore write boundary (save / saveProfiles) so a blank value can
+ * never reach EncryptedSharedPreferences. Internal to the data layer — not
+ * for external callers (new profiles should set serverGroupFp at construction
+ * time via [HostProfile.defaultDirect] / [HostProfileImportPayload.makeProfile]
+ * / [HostProfileStore.duplicate]).
+ */
+internal fun HostProfile.normalizeGroupFp(): HostProfile =
+    if (serverGroupFp.isBlank()) copy(serverGroupFp = id) else this

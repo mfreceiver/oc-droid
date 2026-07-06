@@ -1,0 +1,23 @@
+{
+  "doc": "持久化聊天记录计划 — round-3 复审（复用 round-2 会话，4 路只 gpter/glmer/freegpt/momo，硬要求修复代码）",
+  "date": "2026-07-06",
+  "plan_version": "v3",
+  "verdict": "3/3 live 收敛到 PASS 区（glmer 8.5 PASS / momo 8.7 COND-PASS / freegpt 8.1 N-F）。gpter 引擎 round-3 第 4 次空返回，不可用。设计层无新阻塞；唯一阻塞是 v3 自身引入的 VerifyAndHydrate 描述歧义（3/3 命中，修复代码一致）。",
+  "scores_r2_to_r3": {
+    "momo":    { "r2": 8.2, "r3": 8.7, "delta": "+0.5", "r3_verdict": "COND-PASS", "new_blockers": 1, "with_code": true },
+    "glmer":   { "r2": 8.0, "r3": 8.5, "delta": "+0.5", "r3_verdict": "PASS", "new_design_blockers": 0, "with_code": true },
+    "freegpt": { "r2": 7.6, "r3": 8.1, "delta": "+0.5", "r3_verdict": "NEEDS-FIX", "new_blockers": 1, "with_code": true },
+    "gpter":   { "r2": "unavailable", "r3": "unavailable", "note": "round-3 第4次空返回（gpt-1 reused），r1 7.1 存档" }
+  },
+  "headline_convergence": "VerifyAndHydrate vs Step 7 LoadMessages 双重加载歧义：momo(V3-B1) + glmer(I-1) + freegpt(阻塞1) 三模型独立命中，修复代码一致（Step 7 移除 LoadMessages，VerifyAndHydrate handler 独占 + currentSessionId mismatch guard）。",
+  "round2_blocker_resolution": "3 live 评委 round-2 阻塞全 RESOLVED（momo N-B1/N-B2, glmer I1/I2, freegpt 4 阻塞）。",
+  "v4_fix_set_from_reviewer_code": [
+    "VerifyAndHydrate ordering + ControllerEffect 表补 + dispatch handler（momo+glmer+freegpt 一致代码）",
+    "verifyAndLoad 单 @Transaction 消除 TOCTOU + HydrateResult sealed（glmer I-2 独有并发尖锐）",
+    "EvictGroup 命名统一（freegpt+maxer-r2）",
+    "onCacheWindow createdAt/workdir 源：slice 查询 + makeCacheHook(fp) 复用（glmer+freegpt）",
+    "dailySweepIfNeeded(fp): DailySweepReport，alive 完整性归内部 CacheMaintenanceCoordinator（freegpt+dser-r2）",
+    "currentServerGroupFp DI provider @Provides ControllerModule（freegpt 建议3）"
+  ],
+  "conclusion": "v3→v4 折入评委代码后，计划实施就绪（设计层无阻塞，Kotlin 骨架齐全）。进入 handoff：方案+阶段计划+每 Phase 完整提示词供派给其他 agent 实施。"
+}
