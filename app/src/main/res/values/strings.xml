@@ -234,6 +234,45 @@
     <string name="chat_stale_notice">You haven\'t viewed this for a while. Only the latest content is shown.</string>
     <string name="chat_reconnecting">Reconnecting to %1$s…</string>
     <string name="chat_reconnecting_with_phase">Reconnecting to %1$s… / %2$s</string>
+    <!-- §R18 Phase 2-G follow-up: localized phase-text fragments interpolated into
+         chat_reconnecting_with_phase's %2$s. Replaces the legacy hardcoded English
+         phase strings emitted by ConnectionPhase.displayTextForEmptyState. -->
+    <string name="chat_phase_reconnecting">reconnecting</string>
+    <string name="chat_phase_reconnecting_attempt">reconnecting (attempt %1$d/%2$d)</string>
+    <string name="chat_phase_disconnected">disconnected</string>
     <string name="chat_jump_to_latest">Jump to latest</string>
     <string name="chat_gap_divider_hint">Some messages may be unloaded · tap to load</string>
+
+    <!-- §R18 Phase 2-G: UiEvent.Error / UiEvent.Success resource strings.
+         Format args (%1$s etc.) are filled at resolution time by
+         LocalContext.getString / appContext.getString. The English values
+         double as the test-oracle text (TestAppStateShim resolves events
+         against the default locale). -->
+    <string name="error_load_messages_failed">Failed to load messages: %1$s</string>
+    <string name="error_load_sessions_failed">Failed to load sessions: %1$s</string>
+    <string name="error_load_more_sessions_failed">Failed to load more sessions: %1$s</string>
+    <string name="error_command_failed">Command /%1$s failed: %2$s</string>
+    <string name="error_create_session_in_workdir_failed">Failed to create session in %1$s: %2$s</string>
+    <string name="error_restore_session_failed">Failed to restore session: %1$s</string>
+    <string name="error_compact_no_session">Open or create a session before compacting</string>
+    <string name="error_compact_no_model">No model info available for compaction</string>
+    <string name="error_compact_failed">Compact failed: %1$s</string>
+    <string name="error_edit_message_failed">Failed to edit message: %1$s</string>
+    <string name="error_abort_session_failed">Failed to abort session: %1$s</string>
+    <string name="success_refreshed">Refreshed</string>
+    <string name="error_session_sse_named">%1$s: %2$s</string>
+    <string name="error_session_sse_unnamed">%1$s</string>
+    <string name="error_create_session_failed">Failed to create session: %1$s</string>
+    <string name="error_fork_session_failed">Failed to fork session: %1$s</string>
+    <string name="error_archive_session_failed">Failed to archive session: %1$s</string>
+    <string name="error_delete_session_failed">Failed to delete session: %1$s</string>
+    <string name="error_send_message_failed">Failed to send message: %1$s</string>
+    <string name="error_child_session_unavailable">Sub-agent session unavailable</string>
+    <string name="error_tunnel_password_unset">Tunnel activation failed: tunnel auth password not set. Please fill in the tunnel password in Server settings and save before retrying.</string>
+    <string name="error_tunnel_password_empty">Tunnel activation failed: password id is configured but the stored value is empty (possibly not entered when saving). Please re-enter the tunnel password and save.</string>
+    <string name="success_tunnel_activated">Tunnel activated successfully</string>
+    <string name="error_tunnel_activation_failed">Tunnel activation failed: %1$s</string>
+    <string name="error_connection_failed">Connection failed: %1$s</string>
+    <string name="error_sse_failed">SSE Error: %1$s</string>
+    <string name="error_respond_permission_failed">Failed to respond to permission: %1$s</string>
 </resources>

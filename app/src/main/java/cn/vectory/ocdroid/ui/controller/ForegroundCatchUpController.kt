@@ -1,16 +1,17 @@
 package cn.vectory.ocdroid.ui.controller
 
+import cn.vectory.ocdroid.data.model.QuestionRequest
+import cn.vectory.ocdroid.data.repository.OpenCodeRepository
 import cn.vectory.ocdroid.di.AppLifecycleMonitor
-import cn.vectory.ocdroid.ui.ChatState
-import cn.vectory.ocdroid.ui.ComposerState
+import cn.vectory.ocdroid.ui.SessionListState
 import cn.vectory.ocdroid.ui.SharedEffectBus
+import cn.vectory.ocdroid.ui.SharedStateStore
 import cn.vectory.ocdroid.util.DebugLog
 import cn.vectory.ocdroid.util.SettingsManager
 import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.launchIn
 import kotlinx.coroutines.flow.onEach
-import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.launch
 
 /**
  * R-16 M1 → R-17 batch3b: owns the foreground/background three-tier catch-up
@@ -41,8 +42,7 @@ import kotlinx.coroutines.flow.update
 internal class ForegroundCatchUpController(
     private val appLifecycleMonitor: AppLifecycleMonitor,
     private val scope: CoroutineScope,
-    private val chatFlow: MutableStateFlow<ChatState>,
-    private val composerFlow: MutableStateFlow<ComposerState>,
+    private val store: SharedStateStore,
     private val settingsManager: SettingsManager,
     private val effects: SharedEffectBus,
     // Injected clock so the three-tier thresholds (<15s / 15s–5min / >5min) are
@@ -116,7 +116,8 @@ internal class ForegroundCatchUpController(
             // server.connected never arrived, the flag would linger and
             // suppress the NEXT cycle's catch-up — permanently hiding messages.
             suppressNextConnectCatchUp = false
-            effects.effects.tryEmit(ControllerEffect.ForceReconnect)
+            // §R18 Phase 3 Wave 1 (P1-3 B 类): 单发非 suspend → tryEmitEffect。
+            effects.tryEmitEffect(ControllerEffect.ForceReconnect)
             val now = clock()
             val bgGapMs = if (backgroundedAtMs > 0L) now - backgroundedAtMs else Long.MAX_VALUE
             when {
@@ -135,7 +136,8 @@ internal class ForegroundCatchUpController(
                     lastLoadAtMs = now
                     suppressNextConnectCatchUp = true
                     currentSessionId()?.let {
-                        effects.effects.tryEmit(ControllerEffect.GlobalColdStartRefresh(it))
+                        // §R18 Phase 3 Wave 1 (P1-3 B 类): 单发非 suspend → tryEmitEffect。
+                        effects.tryEmitEffect(ControllerEffect.GlobalColdStartRefresh(it))
                     }
                     setStaleNotice()
                 }
@@ -146,7 +148,8 @@ internal class ForegroundCatchUpController(
             clearDraft()
             backgroundedAtMs = clock()
             DebugLog.i("SSE", "cancelSse (background)")
-            effects.effects.tryEmit(ControllerEffect.CancelSse)
+            // §R18 Phase 3 Wave 1 (P1-3 B 类): 单发非 suspend → tryEmitEffect。
+            effects.tryEmitEffect(ControllerEffect.CancelSse)
         }
     }
 
@@ -165,7 +168,8 @@ internal class ForegroundCatchUpController(
         DebugLog.i("SSE", "server.connected: sseHasConnectedOnce=$sseHasConnectedOnce suppress=$suppress → ${if (doCatchUp) "catch-up" else "skip"}")
         if (doCatchUp) {
             currentSessionId()?.let {
-                effects.effects.tryEmit(ControllerEffect.CatchUpAfterDisconnect(it))
+                // §R18 Phase 3 Wave 1 (P1-3 B 类): 单发非 suspend → tryEmitEffect。
+                effects.tryEmitEffect(ControllerEffect.CatchUpAfterDisconnect(it))
             }
         }
         sseHasConnectedOnce = true
@@ -186,7 +190,7 @@ internal class ForegroundCatchUpController(
      * Was a [ForegroundCatchUpCallbacks] method; eliminated in batch 3b.
      */
     private fun setStaleNotice() {
-        chatFlow.update { it.copy(staleNotice = true) }
+        store.mutateChat { it.copy(staleNotice = true) }
     }
 
     /**
@@ -195,18 +199,62 @@ internal class ForegroundCatchUpController(
      * Mirrors [ComposerController.clearDraftIfActive]. Eliminated in batch 3b.
      */
     private fun clearDraft() {
-        if (composerFlow.value.draftWorkdir == null || chatFlow.value.currentSessionId != null) return
+        if (store.composerFlow.value.draftWorkdir == null || store.chatFlow.value.currentSessionId != null) return
         settingsManager.currentWorkdir = null
-        composerFlow.update {
+        store.mutateComposer {
             it.copy(draftWorkdir = null, inputText = "", imageAttachments = emptyList())
         }
     }
 
     /**
-     * Inline (rule A) — reads currentSessionId directly from [chatFlow].
+     * Inline (rule A) — reads currentSessionId directly from [SharedStateStore.chatFlow].
      * Eliminated in batch 3b.
      */
-    private fun currentSessionId(): String? = chatFlow.value.currentSessionId
+    private fun currentSessionId(): String? = store.chatFlow.value.currentSessionId
+
+    // ── §R18 Phase 3 Wave 1 (P1-9): multi-workdir pending questions fan-out ──
+
+    /**
+     * §P1-9: catch-up pending questions across EVERY known workdir (the in-
+     * memory `directorySessions` keys + `currentWorkdir`), not just the single
+     * [SettingsManager.currentWorkdir]. Without this, questions arriving for
+     * a background workdir (one the user previously connected to but isn't
+     * viewing right now) are lost: the AppCore dispatch handler for
+     * `LoadPendingQuestions` reads only `currentWorkdir`, so a `question.asked`
+     * SSE event for any other workdir is fetched-then-immediately-overwritten
+     * by the next currentWorkdir poll.
+     *
+     * This controller does NOT own [cn.vectory.ocdroid.ui.SliceFlows] (the
+     * batch 3b migration gave it only the [SharedStateStore.chatFlow] +
+     * [SharedStateStore.composerFlow] it writes), so the workdir set is
+     * supplied by the caller (typically AppCore, which has both). Each
+     * workdir's `getPendingQuestions(dir)` is launched in [scope]; results
+     * are merged by id into the sessionList slice via
+     * [SharedStateStore.mutateSessionList] (`byGet` wins, pre-existing fills
+     * gaps — same merge semantics as `launchLoadPendingQuestions`).
+     *
+     * §scope-note: AppCore (out of this wave's write scope) needs to call
+     * this from its catch-up paths to wire production. The method is
+     * exercised directly by [ForegroundCatchUpControllerTest].
+     */
+    fun catchUpPendingQuestionsAllWorkdirs(
+        repository: OpenCodeRepository,
+        workdirs: List<String>,
+        tag: String = "ForegroundCatchUp",
+    ) {
+        if (workdirs.isEmpty()) return
+        workdirs.forEach { dir ->
+            scope.launch {
+                repository.getPendingQuestions(dir)
+                    .onSuccess { questions ->
+                        mergePendingQuestionsById(store::mutateSessionList, questions)
+                    }
+                    .onFailure { error ->
+                        DebugLog.w(tag, "catchUp getPendingQuestions failed for $dir: ${error.message}")
+                    }
+            }
+        }
+    }
 
     companion object {
         /** Foreground reload throttle window: at most one reload per 15s. */
@@ -214,5 +262,32 @@ internal class ForegroundCatchUpController(
 
         /** Beyond this absence the foreground return becomes a global cold-start. */
         const val LONG_ABSENCE_THRESHOLD_MS = 5 * 60 * 1000L
+    }
+}
+
+// ── §R18 Phase 3 Wave 1 (P1-9): multi-workdir pending-questions merge helper ──
+
+/**
+ * Merges [incoming] into the sessionList slice's `pendingQuestions` by id,
+ * with the freshly-fetched [incoming] winning (byGet semantics — mirrors the
+ * pre-fan-out `launchLoadPendingQuestions` merge so the catch-up fan-out's
+ * per-directory results compose without dropping prior SSE-delivered
+ * questions that the server's get endpoint doesn't echo back).
+ *
+ * §R18 Phase 4 (P0-9): the write funnels through [mutateSessionList] (a
+ * per-slice mutate-function reference from [SharedStateStore] /
+ * [cn.vectory.ocdroid.ui.SliceFlows]). Pure CAS — safe for the concurrent
+ * per-workdir fan-out (each launch's onSuccess may land in any order).
+ */
+internal fun mergePendingQuestionsById(
+    mutateSessionList: ((SessionListState) -> SessionListState) -> Unit,
+    incoming: List<QuestionRequest>,
+) {
+    if (incoming.isEmpty()) return
+    mutateSessionList { currentState ->
+        val byGet = incoming.associateBy { it.id }
+        val existing = currentState.pendingQuestions.associateBy { it.id }
+        val merged = (byGet + existing.filterKeys { it !in byGet }).values.toList()
+        currentState.copy(pendingQuestions = merged)
     }
 }

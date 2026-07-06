@@ -1,5 +1,6 @@
 package cn.vectory.ocdroid
 
+import android.content.Context
 import android.util.Log
 import cn.vectory.ocdroid.data.model.Session
 import cn.vectory.ocdroid.data.model.HostProfile
@@ -92,12 +93,12 @@ class ForkSessionTest {
         every { settingsManager.getAgentForSession(any()) } returns null
         every { settingsManager.setAgentForSession(any(), any()) } just runs
 
-        every { repository.connectSSE() } returns emptyFlow()
+        every { repository.connectSSE(any()) } returns emptyFlow()
         coEvery { repository.getSessionStatus() } returns Result.success(emptyMap())
         coEvery { repository.getMessages(any(), any()) } returns Result.success(emptyList())
         coEvery { repository.getMessagesPaged(any(), any(), any()) } returns Result.success(MessagesPage(emptyList(), null))
         coEvery { repository.getPendingPermissions() } returns Result.success(emptyList())
-        coEvery { repository.getPendingQuestions() } returns Result.success(emptyList())
+        coEvery { repository.getPendingQuestions(any()) } returns Result.success(emptyList())
     }
 
     @After
@@ -106,7 +107,7 @@ class ForkSessionTest {
     }
 
     private fun createCore(): AppCore =
-        AppCore(SharedStateStore(), repository, settingsManager, hostProfileStore, trafficTracker, appLifecycleMonitor, cn.vectory.ocdroid.data.repository.ServerCompatProfile(), SharedEffectBus())
+        AppCore(SharedStateStore(), repository, settingsManager, hostProfileStore, trafficTracker, appLifecycleMonitor, cn.vectory.ocdroid.data.repository.ServerCompatProfile(), SharedEffectBus(), mockk<Context>(relaxed = true))
 
     @Test
     fun `forkSession success upserts forked session and selects it`() = runTest {
@@ -122,8 +123,10 @@ class ForkSessionTest {
         val core = createCore()
         val sessionVM = SessionViewModel(core)
         // §R-17 batch2: write slices directly (no AppState mirror dependency).
-        core.store.sessionListFlow.value = core.store.sessionListFlow.value.copy(sessions = listOf(parentSession))
-        core.store.chatFlow.value = core.store.chatFlow.value.copy(currentSessionId = "parent-1")
+        // §R18 Phase 4 (P0-9): SharedStateStore's per-slice StateFlow is read-only;
+        // funnel writes through mutateXxx.
+        core.store.mutateSessionList { it.copy(sessions = listOf(parentSession)) }
+        core.store.mutateChat { it.copy(currentSessionId = "parent-1") }
 
         sessionVM.forkSession("parent-1", "msg-42")
         advanceUntilIdle()
@@ -159,7 +162,8 @@ class ForkSessionTest {
 
         val core = createCore()
         val sessionVM = SessionViewModel(core)
-        core.store.chatFlow.value = core.store.chatFlow.value.copy(currentSessionId = "parent-1")
+        // §R18 Phase 4 (P0-9): chatFlow is a read-only StateFlow; write via mutateChat.
+        core.store.mutateChat { it.copy(currentSessionId = "parent-1") }
 
         core.uiEvents.test {
             sessionVM.forkSession("parent-1", "msg-99")
@@ -167,8 +171,13 @@ class ForkSessionTest {
 
             val event = awaitItem()
             assertTrue("error event should be emitted on failure", event is cn.vectory.ocdroid.ui.UiEvent.Error)
-            val message = (event as cn.vectory.ocdroid.ui.UiEvent.Error).message
-            assertTrue("error should mention fork", message.contains("fork", ignoreCase = true))
+            // §R18 Phase 2-G: UiEvent.Error now carries @StringRes resId + args.
+            // The fork-failure path emits R.string.error_fork_session_failed with
+            // the resolved exception message as the single arg.
+            val errEvent = event as cn.vectory.ocdroid.ui.UiEvent.Error
+            assertEquals(cn.vectory.ocdroid.R.string.error_fork_session_failed, errEvent.resId)
+            val arg = errEvent.args.single().toString()
+            assertTrue("error should mention fork", arg.contains("fork", ignoreCase = true))
         }
         assertEquals("parent-1", sessionVM.chatFlow.value.currentSessionId)
     }

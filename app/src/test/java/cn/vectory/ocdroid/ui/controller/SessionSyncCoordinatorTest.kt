@@ -19,11 +19,13 @@ import cn.vectory.ocdroid.ui.SliceFlows
 import cn.vectory.ocdroid.ui.TrafficState
 import cn.vectory.ocdroid.ui.UnreadState
 import cn.vectory.ocdroid.util.SettingsManager
+import io.mockk.coEvery
+import io.mockk.coVerify
+import io.mockk.every
 import io.mockk.mockk
 import io.mockk.mockkStatic
 import io.mockk.unmockkAll
 import io.mockk.verify
-import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.toList
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.TestScope
@@ -91,17 +93,10 @@ class SessionSyncCoordinatorTest {
         io.mockk.every { Log.w(any<String>(), any<String>()) } returns 0
         io.mockk.every { Log.w(any<String>(), any<String>(), any<Throwable>()) } returns 0
         appStateFixture = SeedFixture()
-        slices = SliceFlows(
-            connection = MutableStateFlow(ConnectionState()),
-            traffic = MutableStateFlow(TrafficState()),
-            composer = MutableStateFlow(ComposerState()),
-            file = MutableStateFlow(FileState()),
-            settings = MutableStateFlow(SettingsState()),
-            chat = MutableStateFlow(ChatState()),
-            sessionList = MutableStateFlow(SessionListState()),
-            unread = MutableStateFlow(UnreadState()),
-            host = MutableStateFlow(HostState())
-        )
+        // §R18 Phase 4 (P0-9): SliceFlows is built via a SharedStateStore; the
+        // bundle exposes read-only StateFlow views + per-slice mutateXxx.
+        val store = cn.vectory.ocdroid.ui.SharedStateStore()
+        slices = store.slices
         settingsManager = mockk(relaxed = true)
         effects = SharedEffectBus()
         collectedEffects = mutableListOf()
@@ -121,81 +116,102 @@ class SessionSyncCoordinatorTest {
      * §R-17 batch2 step e final: seed slices directly from a SeedFixture.
      * The fixture carries the prior snapshot so successive `seed { ... }` calls
      * compose against the prior state. The coordinator reads slices only.
+     *
+     * §R18 Phase 4 (P0-9): per-slice StateFlow views are read-only; funnel
+     * every seed write through the matching mutateXxx helper.
      */
     private fun seed(transform: (SeedFixture) -> SeedFixture) {
         appStateFixture = transform(appStateFixture)
         val s = appStateFixture
-        slices.connection.value = ConnectionState(
-            isConnected = s.isConnected,
-            isConnecting = s.isConnecting,
-            serverVersion = s.serverVersion,
-            connectionPhase = s.connectionPhase,
-            tunnelActivationState = s.tunnelActivationState
-        )
-        slices.traffic.value = TrafficState(
-            trafficSent = s.trafficSent,
-            trafficReceived = s.trafficReceived
-        )
-        slices.composer.value = ComposerState(
-            inputText = s.inputText,
-            imageAttachments = s.imageAttachments,
-            sendingSessionIds = s.sendingSessionIds,
-            draftWorkdir = s.draftWorkdir
-        )
-        slices.file.value = FileState(
-            filePathToShowInFiles = s.filePathToShowInFiles,
-            filePreviewOriginRoute = s.filePreviewOriginRoute,
-            fileBrowserOpen = s.fileBrowserOpen,
-            fileBrowserWorkdir = s.fileBrowserWorkdir
-        )
-        slices.settings.value = SettingsState(
-            themeMode = s.themeMode,
-            markdownFontSizes = s.markdownFontSizes,
-            selectedAgentName = s.selectedAgentName,
-            agents = s.agents,
-            providers = s.providers,
-            availableCommands = s.availableCommands,
-            disabledModels = s.disabledModels,
-            uiFontScale = s.uiFontScale,
-            uiContentScale = s.uiContentScale
-        )
-        slices.chat.value = slices.chat.value.copy(
-            currentSessionId = s.currentSessionId,
-            messages = s.messages,
-            partsByMessage = s.partsByMessage,
-            streamingPartTexts = s.streamingPartTexts,
-            streamingReasoningPart = s.streamingReasoningPart,
-            olderMessagesCursor = s.olderMessagesCursor,
-            hasMoreMessages = s.hasMoreMessages,
-            isLoadingMessages = s.isLoadingMessages,
-            gapInfo = s.gapInfo,
-            staleNotice = s.staleNotice,
-            currentModel = s.currentModel
-        )
-        slices.sessionList.value = SessionListState(
-            sessions = s.sessions,
-            sessionStatuses = s.sessionStatuses,
-            expandedSessionIds = s.expandedSessionIds,
-            loadedSessionLimit = s.loadedSessionLimit,
-            hasMoreSessions = s.hasMoreSessions,
-            isLoadingMoreSessions = s.isLoadingMoreSessions,
-            isRefreshingSessions = s.isRefreshingSessions,
-            pendingPermissions = s.pendingPermissions,
-            pendingQuestions = s.pendingQuestions,
-            childSessions = s.childSessions,
-            directorySessions = s.directorySessions,
-            openSessionIds = s.openSessionIds,
-            sessionTodos = s.sessionTodos
-        )
-        slices.unread.value = UnreadState(
-            unreadSessions = s.unreadSessions,
-            tempClearedUnread = s.tempClearedUnread,
-            lastViewedTime = s.lastViewedTime
-        )
-        slices.host.value = HostState(
-            hostProfiles = s.hostProfiles,
-            currentHostProfileId = s.currentHostProfileId
-        )
+        slices.mutateConnection {
+            ConnectionState(
+                isConnected = s.isConnected,
+                isConnecting = s.isConnecting,
+                serverVersion = s.serverVersion,
+                connectionPhase = s.connectionPhase,
+                tunnelActivationState = s.tunnelActivationState
+            )
+        }
+        slices.mutateTraffic {
+            TrafficState(
+                trafficSent = s.trafficSent,
+                trafficReceived = s.trafficReceived
+            )
+        }
+        slices.mutateComposer {
+            ComposerState(
+                inputText = s.inputText,
+                imageAttachments = s.imageAttachments,
+                sendingSessionIds = s.sendingSessionIds,
+                draftWorkdir = s.draftWorkdir
+            )
+        }
+        slices.mutateFile {
+            FileState(
+                filePathToShowInFiles = s.filePathToShowInFiles,
+                filePreviewOriginRoute = s.filePreviewOriginRoute,
+                fileBrowserOpen = s.fileBrowserOpen,
+                fileBrowserWorkdir = s.fileBrowserWorkdir
+            )
+        }
+        slices.mutateSettings {
+            SettingsState(
+                themeMode = s.themeMode,
+                markdownFontSizes = s.markdownFontSizes,
+                selectedAgentName = s.selectedAgentName,
+                agents = s.agents,
+                providers = s.providers,
+                availableCommands = s.availableCommands,
+                disabledModels = s.disabledModels,
+                uiFontScale = s.uiFontScale,
+                uiContentScale = s.uiContentScale
+            )
+        }
+        slices.mutateChat {
+            it.copy(
+                currentSessionId = s.currentSessionId,
+                messages = s.messages,
+                partsByMessage = s.partsByMessage,
+                streamingPartTexts = s.streamingPartTexts,
+                streamingReasoningPart = s.streamingReasoningPart,
+                olderMessagesCursor = s.olderMessagesCursor,
+                hasMoreMessages = s.hasMoreMessages,
+                isLoadingMessages = s.isLoadingMessages,
+                gapInfo = s.gapInfo,
+                staleNotice = s.staleNotice,
+                currentModel = s.currentModel
+            )
+        }
+        slices.mutateSessionList {
+            SessionListState(
+                sessions = s.sessions,
+                sessionStatuses = s.sessionStatuses,
+                expandedSessionIds = s.expandedSessionIds,
+                loadedSessionLimit = s.loadedSessionLimit,
+                hasMoreSessions = s.hasMoreSessions,
+                isLoadingMoreSessions = s.isLoadingMoreSessions,
+                isRefreshingSessions = s.isRefreshingSessions,
+                pendingPermissions = s.pendingPermissions,
+                pendingQuestions = s.pendingQuestions,
+                childSessions = s.childSessions,
+                directorySessions = s.directorySessions,
+                openSessionIds = s.openSessionIds,
+                sessionTodos = s.sessionTodos
+            )
+        }
+        slices.mutateUnread {
+            UnreadState(
+                unreadSessions = s.unreadSessions,
+                tempClearedUnread = s.tempClearedUnread,
+                lastViewedTime = s.lastViewedTime
+            )
+        }
+        slices.mutateHost {
+            HostState(
+                hostProfiles = s.hostProfiles,
+                currentHostProfileId = s.currentHostProfileId
+            )
+        }
     }
 
     /** Current-session guard: many folds only touch the current session's view. */
@@ -345,7 +361,9 @@ class SessionSyncCoordinatorTest {
         assertTrue(slices.chat.value.messages.isEmpty())
         assertTrue(slices.chat.value.partsByMessage.isEmpty())
         assertEquals(emptyList<String>(), slices.sessionList.value.openSessionIds)
-        verify { settingsManager.currentSessionId = null }
+        // §R18 Phase 2-F: SettingsManager is no longer written directly here —
+        // chatFlow.currentSessionId (asserted null above) is the runtime source;
+        // the AppCore collector persists non-null changes only.
     }
 
     @Test
@@ -1003,5 +1021,130 @@ class SessionSyncCoordinatorTest {
         coordinator.handleEvent(event("plugin.added") { put("sessionID", JsonPrimitive("session-1")) })
         verify(exactly = 0) { Log.w(any<String>(), any<String>()) }
         assertTrue(collectedEffects.filterIsInstance<ControllerEffect.LoadMessages>().isEmpty())
+    }
+
+    // ── §R18 Phase 3 Wave 1 (P0-7): unknown SSE event warning + counter ────
+
+    @Test
+    fun `a noisy unknown event type skips the log warning but still bumps the counter`() {
+        // plugin.added is in NOISY_SSE_LOG_EVENTS → no DebugLog.w (preserves
+        // the original test contract: no Log.w on noisy types).
+        coordinator.handleEvent(event("plugin.added") { put("sessionID", JsonPrimitive("s1")) })
+
+        verify(exactly = 0) { Log.w(any<String>(), any<String>()) }
+        // P0-7: the counter still increments so diagnostics can spot recurring
+        // unknown types even when they happen to be on the noisy-skip list.
+        assertEquals(mapOf("plugin.added" to 1), coordinator.unknownEventCountsSnapshot())
+    }
+
+    @Test
+    fun `a genuinely unknown event type logs a warning and bumps the counter`() {
+        // §P0-7: a non-noisy type that fell through the dispatch table must
+        // (a) be logged via DebugLog.w (= Log.w under the mockkStatic stub),
+        // (b) bump the unknownEventCounters entry, (c) in DEBUG builds, emit
+        // a UiEvent.Debug so the in-app snackbar surfaces the surprise.
+        coordinator.handleEvent(event("totally.unknown") {
+            put("sessionID", JsonPrimitive("s1"))
+            put("weird", JsonPrimitive("field"))
+        })
+
+        verify(atLeast = 1) { Log.w(any<String>(), match<String> { it.contains("totally.unknown") }) }
+        assertEquals(mapOf("totally.unknown" to 1), coordinator.unknownEventCountsSnapshot())
+    }
+
+    @Test
+    fun `unknownEventCounters accumulates per type across events`() {
+        coordinator.handleEvent(event("unknown.a") {})
+        coordinator.handleEvent(event("unknown.a") {})
+        coordinator.handleEvent(event("unknown.b") {})
+
+        val snapshot = coordinator.unknownEventCountsSnapshot()
+        assertEquals(2, snapshot["unknown.a"])
+        assertEquals(1, snapshot["unknown.b"])
+    }
+
+    // ── §R18 Phase 3 Wave 1 (P1-9): multi-workdir pending questions fan-out ──
+
+    @Test
+    fun `loadPendingQuestionsAllWorkdirs fans out across directorySessions keys plus currentWorkdir and merges by id`() {
+        // §P1-9: the single-workdir AppCore dispatch path polls only
+        // currentWorkdir; background workdirs' questions vanish. The fan-out
+        // here queries EVERY known directory + currentWorkdir and merges by id.
+        seed {
+            it.copy(
+                directorySessions = mapOf(
+                    "/proj-a" to listOf(Session(id = "sa", directory = "/proj-a")),
+                    "/proj-b" to listOf(Session(id = "sb", directory = "/proj-b"))
+                ),
+                pendingQuestions = listOf(
+                    QuestionRequest(id = "existing-not-on-server", sessionId = "s0", questions = emptyList())
+                )
+            )
+        }
+        every { settingsManager.currentWorkdir } returns "/current"
+        val repository = mockk<cn.vectory.ocdroid.data.repository.OpenCodeRepository>(relaxed = true)
+        coEvery { repository.getPendingQuestions("/proj-a") } returns Result.success(
+            listOf(QuestionRequest(id = "qa", sessionId = "sa", questions = emptyList()))
+        )
+        coEvery { repository.getPendingQuestions("/proj-b") } returns Result.success(
+            listOf(QuestionRequest(id = "qb", sessionId = "sb", questions = emptyList()))
+        )
+        coEvery { repository.getPendingQuestions("/current") } returns Result.success(
+            listOf(QuestionRequest(id = "qc", sessionId = "sc", questions = emptyList()))
+        )
+
+        coordinator.loadPendingQuestionsAllWorkdirs(repository)
+        scope.testScheduler.advanceUntilIdle()
+
+        val ids = slices.sessionList.value.pendingQuestions.map { it.id }.toSet()
+        // byGet wins, existing fills gaps — merge keeps all 4 ids.
+        assertTrue("qa from /proj-a", "qa" in ids)
+        assertTrue("qb from /proj-b", "qb" in ids)
+        assertTrue("qc from /current", "qc" in ids)
+        assertTrue("existing-not-on-server preserved (gap-fill)", "existing-not-on-server" in ids)
+        // No double-fetch of currentWorkdir even when it's also in directorySessions.
+        coVerify(exactly = 1) { repository.getPendingQuestions("/current") }
+    }
+
+    @Test
+    fun `loadPendingQuestionsAllWorkdirs dedupes workdirs that appear in both directorySessions and currentWorkdir`() {
+        seed {
+            it.copy(directorySessions = mapOf("/dup" to listOf(Session(id = "sx", directory = "/dup"))))
+        }
+        every { settingsManager.currentWorkdir } returns "/dup"
+        val repository = mockk<cn.vectory.ocdroid.data.repository.OpenCodeRepository>(relaxed = true)
+        coEvery { repository.getPendingQuestions("/dup") } returns Result.success(emptyList())
+
+        coordinator.loadPendingQuestionsAllWorkdirs(repository)
+        scope.testScheduler.advanceUntilIdle()
+
+        coVerify(exactly = 1) { repository.getPendingQuestions("/dup") }
+    }
+
+    @Test
+    fun `loadPendingQuestionsAllWorkdirs is a no-op when no workdirs are known`() {
+        seed { it.copy(directorySessions = emptyMap()) }
+        every { settingsManager.currentWorkdir } returns null
+        val repository = mockk<cn.vectory.ocdroid.data.repository.OpenCodeRepository>(relaxed = true)
+
+        coordinator.loadPendingQuestionsAllWorkdirs(repository)
+        scope.testScheduler.advanceUntilIdle()
+
+        coVerify(exactly = 0) { repository.getPendingQuestions(any()) }
+    }
+
+    @Test
+    fun `loadPendingQuestionsAllWorkdirs swallows per-directory failures and keeps the slice unchanged for that dir`() {
+        seed { it.copy(directorySessions = mapOf("/bad" to listOf(Session(id = "s", directory = "/bad")))) }
+        every { settingsManager.currentWorkdir } returns null
+        val repository = mockk<cn.vectory.ocdroid.data.repository.OpenCodeRepository>(relaxed = true)
+        coEvery { repository.getPendingQuestions("/bad") } returns Result.failure(java.io.IOException("network down"))
+
+        coordinator.loadPendingQuestionsAllWorkdirs(repository)
+        scope.testScheduler.advanceUntilIdle()
+
+        // Failure path doesn't wipe the slice — pendingQuestions stays empty
+        // (its initial state) rather than being mutated by the failed fetch.
+        assertTrue(slices.sessionList.value.pendingQuestions.isEmpty())
     }
 }

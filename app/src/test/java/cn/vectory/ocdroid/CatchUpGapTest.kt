@@ -5,15 +5,8 @@ import cn.vectory.ocdroid.data.model.MessageWithParts
 import cn.vectory.ocdroid.data.repository.MessagesPage
 import cn.vectory.ocdroid.data.repository.OpenCodeRepository
 import cn.vectory.ocdroid.ui.ChatState
-import cn.vectory.ocdroid.ui.ComposerState
-import cn.vectory.ocdroid.ui.ConnectionState
-import cn.vectory.ocdroid.ui.FileState
-import cn.vectory.ocdroid.ui.HostState
-import cn.vectory.ocdroid.ui.SessionListState
-import cn.vectory.ocdroid.ui.SettingsState
+import cn.vectory.ocdroid.ui.SharedStateStore
 import cn.vectory.ocdroid.ui.SliceFlows
-import cn.vectory.ocdroid.ui.TrafficState
-import cn.vectory.ocdroid.ui.UnreadState
 import cn.vectory.ocdroid.ui.launchCatchUp
 import cn.vectory.ocdroid.ui.launchCloseGap
 import cn.vectory.ocdroid.ui.launchLoadMessages
@@ -21,7 +14,6 @@ import io.mockk.coEvery
 import io.mockk.coVerify
 import io.mockk.mockk
 import kotlinx.coroutines.ExperimentalCoroutinesApi
-import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.test.advanceUntilIdle
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
@@ -55,18 +47,16 @@ class CatchUpGapTest {
      * §R-17 batch2 step e final: builds SliceFlows from a ChatState fixture so
      * the catch-up / load helpers can run against realistic slice values.
      * Tests then assert via `slices.chat.value.X` etc.
+     *
+     * §R18 Phase 4 (P0-9): SliceFlows is now `internal constructor` on a
+     * [SharedStateStore]; obtain the bundle via `store.slices` and seed the
+     * chat slice through the per-slice mutateXxx funnel.
      */
-    private fun makeSlices(chat: ChatState = ChatState()): SliceFlows = SliceFlows(
-        connection = MutableStateFlow(ConnectionState()),
-        traffic = MutableStateFlow(TrafficState()),
-        composer = MutableStateFlow(ComposerState()),
-        file = MutableStateFlow(FileState()),
-        settings = MutableStateFlow(SettingsState()),
-        chat = MutableStateFlow(chat),
-        sessionList = MutableStateFlow(SessionListState()),
-        unread = MutableStateFlow(UnreadState()),
-        host = MutableStateFlow(HostState())
-    )
+    private fun makeSlices(chat: ChatState = ChatState()): SliceFlows {
+        val store = SharedStateStore()
+        store.mutateChat { chat }
+        return store.slices
+    }
 
     @Test
     fun `catchUp skips reload when probe matches local newest`() = runTest {

@@ -1,6 +1,5 @@
 package cn.vectory.ocdroid.data.repository.http
 
-import cn.vectory.ocdroid.data.repository.HostConfig
 import okhttp3.Interceptor
 import okhttp3.Response
 import javax.inject.Inject
@@ -13,14 +12,19 @@ import javax.inject.Singleton
  * leaves the client. Split out of the pre-R-18 combined
  * header/auth/cache interceptor so it can be unit-tested in isolation.
  *
- * Behavior preserved byte-for-byte from the original inline lambda:
+ * Behavior (R-18 §Phase 2-E step 2):
  *
- * - Skip-dir marker present → strip it (caller may have set an explicit
+ * - Caller-supplied `X-Opencode-Directory` header is the ONLY source of the
+ *   directory. The global HostConfig workdir fallback was removed; every
+ *   directory-scoped endpoint now passes its directory explicitly via
+ *   `@Header(HttpHeaders.DIRECTORY_HEADER)` (or `?directory` on file routes,
+ *   which also carry Skip-Dir).
+ * - Skip-dir marker present → strip it (caller may also have set an explicit
  *   `X-Opencode-Directory` via `@Header`; that value is left untouched),
- *   and do NOT add a directory header from the current workdir.
- * - No marker + a workdir context is set → add
- *   `X-Opencode-Directory: <dir>` (overwriting any pre-existing value).
- * - No marker + no workdir context → pass through unchanged.
+ *   and do NOT add a directory header.
+ * - No caller-supplied header → pass through unchanged (no injection). The
+ *   server then falls back to its own process.cwd() — callers that need
+ *   workdir-scoped routing MUST pass an explicit `directory` parameter.
  *
  * Note (R-14): this interceptor is on the shared base chain, so SSE
  * requests also flow through it. That matches the pre-R-18 behavior — SSE
@@ -45,38 +49,23 @@ import javax.inject.Singleton
  *   resolution, and the server does not read it for mutations.
  */
 @Singleton
-class DirectoryHeaderInterceptor @Inject constructor(
-    private val hostConfig: HostConfig
-) : Interceptor {
+class DirectoryHeaderInterceptor @Inject constructor() : Interceptor {
 
     override fun intercept(chain: Interceptor.Chain): Response {
         val original = chain.request()
         val skipDir = original.header(HttpHeaders.SKIP_DIR_HEADER) != null
 
-        // Effective directory: when skip-dir is set, only an explicit caller
-        // header is honored (never injected from the workdir). Otherwise the
-        // current workdir drives injection (overwriting any stale value).
-        // §R-17 batch4: hostConfig.currentDirectory is deprecated; it remains
-        // the fallback for non-file routes (SSE / /question / /command) that
-        // have not opted out via X-Opencode-Skip-Dir. File routes now carry
-        // their own explicit `?directory` and a Skip-Dir marker, so they take
-        // the `if (skipDir)` branch above and never read this field.
-        @Suppress("DEPRECATION")
-        val effectiveDir = if (skipDir) {
-            original.header(HttpHeaders.DIRECTORY_HEADER)
-        } else {
-            hostConfig.currentDirectory
-        }
+        // §R18 Phase 2-E step 2: the directory is sourced ONLY from the
+        // caller-supplied X-Opencode-Directory header. The global HostConfig
+        // workdir fallback was removed; every directory-scoped endpoint now
+        // passes its directory explicitly. No header → no injection (callers
+        // that need workdir routing MUST pass it).
+        val effectiveDir = original.header(HttpHeaders.DIRECTORY_HEADER)
 
         val builder = original.newBuilder()
         if (skipDir) builder.removeHeader(HttpHeaders.SKIP_DIR_HEADER)
 
         if (effectiveDir != null) {
-            // Inject from workdir unless the caller opted out (skip-dir keeps
-            // whatever explicit value the @Header supplied, untouched).
-            if (!skipDir) {
-                builder.header(HttpHeaders.DIRECTORY_HEADER, effectiveDir)
-            }
             // ② mirror directory into the query for safe-for-cache GET/HEAD.
             val method = original.method
             if (method == "GET" || method == "HEAD") {

@@ -31,12 +31,10 @@ class HostConfig @Inject constructor() {
     @Volatile private var _username: String? = null
     @Volatile private var _password: String? = null
 
-    // §R-17 batch4: still mutable for the SSE / non-file routes that did NOT
-    // opt out via X-Opencode-Skip-Dir (DirectoryHeaderInterceptor falls back
-    // to this). File routes now take an explicit `directory` parameter on the
-    // API method, so this should NOT be mutated on their behalf.
-    @Deprecated("R-17 batch4: use explicit directory parameter on API calls")
-    @Volatile private var _currentDirectory: String? = null
+    // §R18 Phase 2-E step 2: the deprecated mutable workdir field was removed.
+    // Non-file routes (SSE / /question / /command) now receive their directory
+    // EXPLICITLY via `@Header(HttpHeaders.DIRECTORY_HEADER)` on the API method,
+    // and DirectoryHeaderInterceptor no longer reads from HostConfig.
 
     @Volatile private var _allowInsecure: Boolean = false
 
@@ -44,18 +42,13 @@ class HostConfig @Inject constructor() {
     val username: String? get() = _username
     val password: String? get() = _password
 
-    @Deprecated("R-17 batch4: use explicit directory parameter on API calls")
-    val currentDirectory: String? get() = _currentDirectory
-
     val allowInsecure: Boolean get() = _allowInsecure
 
     /** True iff a complete Basic Auth credential pair is configured. */
     val hasBasicAuth: Boolean get() = _username != null && _password != null
 
     /**
-     * Atomic host switch. Clears any workdir context — a new host
-     * invalidates the prior directory. See class kdoc for the
-     * synchronization rationale.
+     * Atomic host switch. See class kdoc for the synchronization rationale.
      */
     @Synchronized
     fun configure(
@@ -68,20 +61,6 @@ class HostConfig @Inject constructor() {
         _username = username
         _password = password
         _allowInsecure = allowInsecure
-        @Suppress("DEPRECATION")
-        _currentDirectory = null
-    }
-
-    /**
-     * Updates the workdir directory injected into scoped requests.
-     *
-     * §R-17 batch4: deprecated — file routes now use an explicit `directory`
-     * parameter. This setter remains for SSE / non-file routes that have not
-     * opted out of [DirectoryHeaderInterceptor]'s workdir injection.
-     */
-    @Deprecated("R-17 batch4: use explicit directory parameter on API calls")
-    fun setCurrentDirectory(directory: String?) {
-        _currentDirectory = directory
     }
 
     companion object {

@@ -1,6 +1,7 @@
 package cn.vectory.ocdroid.ui.controller
 
 import android.util.Log
+import cn.vectory.ocdroid.R
 import cn.vectory.ocdroid.data.api.CommandInfo
 import cn.vectory.ocdroid.data.model.HealthResponse
 import cn.vectory.ocdroid.data.model.SSEEvent
@@ -8,6 +9,7 @@ import cn.vectory.ocdroid.data.model.Session
 import cn.vectory.ocdroid.data.repository.OpenCodeRepository
 import cn.vectory.ocdroid.ui.ChatState
 import cn.vectory.ocdroid.ui.ComposerState
+import cn.vectory.ocdroid.ui.ConnectionPhase
 import cn.vectory.ocdroid.ui.ConnectionState
 import cn.vectory.ocdroid.ui.SharedEffectBus
 import cn.vectory.ocdroid.ui.FileState
@@ -28,7 +30,6 @@ import io.mockk.unmockkAll
 import io.mockk.verify
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.flow.MutableSharedFlow
-import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.flowOf
@@ -68,8 +69,12 @@ import java.io.IOException
 @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
 class ConnectionCoordinatorTest {
 
-    private lateinit var connectionFlow: MutableStateFlow<ConnectionState>
-    private lateinit var settingsFlow: MutableStateFlow<SettingsState>
+    // §R18 Phase 4 (P0-9): the controller takes the [SliceFlows] bundle only
+    // (no separate connectionFlow / settingsFlow). Keep read-only StateFlow
+    // views of those two slices so the existing assertions keep their
+    // `.value.X` shape.
+    private lateinit var connectionFlow: kotlinx.coroutines.flow.StateFlow<ConnectionState>
+    private lateinit var settingsFlow: kotlinx.coroutines.flow.StateFlow<SettingsState>
     private lateinit var slices: SliceFlows
     private lateinit var repository: OpenCodeRepository
     private lateinit var settingsManager: SettingsManager
@@ -87,19 +92,10 @@ class ConnectionCoordinatorTest {
         // loadPendingPermissions inline paths now call Log.w on failure.
         mockkStatic(Log::class)
         io.mockk.every { Log.w(any<String>(), any<String>()) } returns 0
-        connectionFlow = MutableStateFlow(ConnectionState())
-        settingsFlow = MutableStateFlow(SettingsState())
-        slices = SliceFlows(
-            connection = connectionFlow,
-            traffic = MutableStateFlow(TrafficState()),
-            composer = MutableStateFlow(ComposerState()),
-            file = MutableStateFlow(FileState()),
-            settings = settingsFlow,
-            chat = MutableStateFlow(ChatState()),
-            sessionList = MutableStateFlow(SessionListState()),
-            unread = MutableStateFlow(UnreadState()),
-            host = MutableStateFlow(HostState())
-        )
+        val stateStore = cn.vectory.ocdroid.ui.SharedStateStore()
+        slices = stateStore.slices
+        connectionFlow = stateStore.connectionFlow
+        settingsFlow = stateStore.settingsFlow
         repository = mockk(relaxed = true)
         settingsManager = mockk(relaxed = true)
         effects = SharedEffectBus()
@@ -113,8 +109,6 @@ class ConnectionCoordinatorTest {
         now = 100_000L
         coordinator = ConnectionCoordinator(
             scope = scope,
-            connectionFlow = connectionFlow,
-            settingsFlow = settingsFlow,
             slices = slices,
             repository = repository,
             settingsManager = settingsManager,
@@ -197,7 +191,7 @@ class ConnectionCoordinatorTest {
     @Test
     fun `testConnection on healthy sets connected phase and fans out initial data plus SSE`() {
         coEvery { repository.checkHealth() } returns Result.success(HealthResponse(healthy = true, version = "9.9"))
-        every { repository.connectSSE() } returns flowOf()
+        every { repository.connectSSE(any()) } returns flowOf()
         coEvery { repository.getCommands() } returns Result.success(emptyList())
 
         coordinator.testConnection()
@@ -205,7 +199,7 @@ class ConnectionCoordinatorTest {
 
         assertTrue(connectionFlow.value.isConnected)
         assertFalse(connectionFlow.value.isConnecting)
-        assertEquals("connected", connectionFlow.value.connectionPhase)
+        assertEquals(ConnectionPhase.Connected, connectionFlow.value.connectionPhase)
         assertEquals("9.9", connectionFlow.value.serverVersion)
         // Mirrors on AppState too.
         assertTrue(slices.connection.value.isConnected)
@@ -218,7 +212,7 @@ class ConnectionCoordinatorTest {
         assertEquals(1, collectedEffects.filterIsInstance<ControllerEffect.LoadPendingPermissions>().size)
         coVerify { repository.getCommands() }
         // SSE feed started.
-        verify { repository.connectSSE() }
+        verify { repository.connectSSE(any()) }
     }
 
     @Test
@@ -233,7 +227,7 @@ class ConnectionCoordinatorTest {
         assertEquals("1.2.3", connectionFlow.value.serverVersion)
         assertFalse(connectionFlow.value.isConnected)
         assertFalse(connectionFlow.value.isConnecting)
-        assertEquals("disconnected", connectionFlow.value.connectionPhase)
+        assertEquals(ConnectionPhase.Disconnected, connectionFlow.value.connectionPhase)
     }
 
     @Test
@@ -244,9 +238,13 @@ class ConnectionCoordinatorTest {
         runPending()
 
         assertFalse(connectionFlow.value.isConnected)
-        assertEquals("disconnected", connectionFlow.value.connectionPhase)
+        assertEquals(ConnectionPhase.Disconnected, connectionFlow.value.connectionPhase)
         val errorEvent = recordedEvents.filterIsInstance<UiEvent.Error>().single()
-        assertTrue(errorEvent.message.contains("network down"))
+        // §R18 Phase 2-G: UiEvent.Error now carries @StringRes resId + args.
+        // Connection failure → R.string.error_connection_failed with the
+        // resolved exception message as the single arg.
+        assertEquals(R.string.error_connection_failed, errorEvent.resId)
+        assertTrue(errorEvent.args.single().toString().contains("network down"))
     }
 
     @Test
@@ -257,7 +255,7 @@ class ConnectionCoordinatorTest {
         runPending()
 
         coVerify(exactly = 4) { repository.checkHealth() }
-        assertEquals("disconnected", connectionFlow.value.connectionPhase)
+        assertEquals(ConnectionPhase.Disconnected, connectionFlow.value.connectionPhase)
         assertFalse(connectionFlow.value.isConnected)
     }
 
@@ -268,7 +266,7 @@ class ConnectionCoordinatorTest {
         // connect must NOT emit a fresh UiEvent.Error (it used to clear the
         // legacy `state.error` field here).
         coEvery { repository.checkHealth() } returns Result.success(HealthResponse(healthy = true, version = "1.0"))
-        every { repository.connectSSE() } returns flowOf()
+        every { repository.connectSSE(any()) } returns flowOf()
         coEvery { repository.getCommands() } returns Result.success(emptyList())
 
         coordinator.testConnection()
@@ -294,7 +292,7 @@ class ConnectionCoordinatorTest {
 
     @Test
     fun `loadInitialData fans out to every loader and fetches slash commands`() {
-        every { repository.connectSSE() } returns flowOf()
+        every { repository.connectSSE(any()) } returns flowOf()
         coEvery { repository.getCommands() } returns Result.success(emptyList())
         every { settingsManager.currentWorkdir } returns null
 
@@ -469,7 +467,7 @@ class ConnectionCoordinatorTest {
     @Test
     fun `startSSE forwards each successful SSE event to the onSseEvent callback`() {
         val event = SSEEvent(payload = cn.vectory.ocdroid.data.model.SSEPayload(type = "session.created"))
-        every { repository.connectSSE() } returns flowOf(Result.success(event))
+        every { repository.connectSSE(any()) } returns flowOf(Result.success(event))
 
         coordinator.startSSE()
         runPending()
@@ -479,24 +477,24 @@ class ConnectionCoordinatorTest {
 
     @Test
     fun `startSSE collection-level failure writes an SSE Error onto AppState`() {
-        every { repository.connectSSE() } returns flow { throw IOException("feed exhausted") }
+        every { repository.connectSSE(any()) } returns flow { throw IOException("feed exhausted") }
 
         coordinator.startSSE()
         runPending()
 
         val errorEvent = recordedEvents.filterIsInstance<UiEvent.Error>().single()
-        assertTrue(errorEvent.message.contains("SSE Error"))
+        assertEquals(R.string.error_sse_failed, errorEvent.resId)
     }
 
     @Test
     fun `startSSE event-level failure writes an SSE Error onto AppState`() {
-        every { repository.connectSSE() } returns flowOf(Result.failure(IOException("bad frame")))
+        every { repository.connectSSE(any()) } returns flowOf(Result.failure(IOException("bad frame")))
 
         coordinator.startSSE()
         runPending()
 
         val errorEvent = recordedEvents.filterIsInstance<UiEvent.Error>().single()
-        assertTrue(errorEvent.message.contains("SSE Error"))
+        assertEquals(R.string.error_sse_failed, errorEvent.resId)
     }
 
     @Test
@@ -506,7 +504,7 @@ class ConnectionCoordinatorTest {
         // events emitted on flow #1 AFTER the second start no longer forward.
         val flow1 = MutableSharedFlow<Result<SSEEvent>>(extraBufferCapacity = 8)
         val flow2 = MutableSharedFlow<Result<SSEEvent>>(extraBufferCapacity = 8)
-        every { repository.connectSSE() } returnsMany listOf(flow1.asSharedFlow(), flow2.asSharedFlow())
+        every { repository.connectSSE(any()) } returnsMany listOf(flow1.asSharedFlow(), flow2.asSharedFlow())
         val evt1 = SSEEvent(payload = cn.vectory.ocdroid.data.model.SSEPayload(type = "a"))
         val evt2 = SSEEvent(payload = cn.vectory.ocdroid.data.model.SSEPayload(type = "b"))
 
@@ -527,13 +525,13 @@ class ConnectionCoordinatorTest {
             listOf(evt1, evt2),
             forwardedSseEvents()
         )
-        verify(atLeast = 2) { repository.connectSSE() }
+        verify(atLeast = 2) { repository.connectSSE(any()) }
     }
 
     @Test
     fun `cancelSse stops forwarding events from the live feed`() {
         val feed = MutableSharedFlow<Result<SSEEvent>>(extraBufferCapacity = 8)
-        every { repository.connectSSE() } returns feed.asSharedFlow()
+        every { repository.connectSSE(any()) } returns feed.asSharedFlow()
         val evt = SSEEvent(payload = cn.vectory.ocdroid.data.model.SSEPayload(type = "a"))
 
         coordinator.startSSE()
@@ -549,7 +547,7 @@ class ConnectionCoordinatorTest {
     @Test
     fun `cancelSseForReconfigure cancels the feed and fires onHostReconfigured`() {
         val feed = MutableSharedFlow<Result<SSEEvent>>(extraBufferCapacity = 8)
-        every { repository.connectSSE() } returns feed.asSharedFlow()
+        every { repository.connectSSE(any()) } returns feed.asSharedFlow()
         val evt = SSEEvent(payload = cn.vectory.ocdroid.data.model.SSEPayload(type = "a"))
 
         coordinator.startSSE()
@@ -566,6 +564,81 @@ class ConnectionCoordinatorTest {
     fun `cancelSseForReconfigure fires onHostReconfigured even with no active feed`() {
         coordinator.cancelSseForReconfigure()
         assertEquals(1, collectedEffects.filterIsInstance<ControllerEffect.HostReconfigured>().size)
+    }
+
+    // ── loadInitialData (§best-effort: directory onFailure is non-fatal) ───
+
+    @Test
+    fun `loadInitialData directory fetch failure logs non-fatal issue without surfacing error or writing stale data`() {
+        // §best-effort restore: a failed workdir simply stays absent from
+        // directorySessions — the global getSessions list + user-initiated
+        // refreshDirectorySessions are the fallbacks. reportNonFatalIssue
+        // (Log.w) fires for diagnosability WITHOUT a user-facing error toast.
+        // This covers the previously-uncovered onFailure branch (lines 661-664).
+        every { settingsManager.currentWorkdir } returns "/proj"
+        every { settingsManager.recentWorkdirs } returns listOf("/proj")
+        coEvery { repository.getCommands() } returns Result.success(emptyList())
+        coEvery { repository.getSessionsForDirectory("/proj") } returns
+            Result.failure(IOException("dir fetch boom"))
+
+        coordinator.loadInitialData()
+        runPending()
+
+        // Failed workdir stays absent from directorySessions.
+        assertFalse(
+            "failed directory must not appear in directorySessions",
+            slices.sessionList.value.directorySessions.containsKey("/proj")
+        )
+        // Non-fatal: no user-facing error toast for a directory fetch failure.
+        assertTrue(
+            "no UiEvent.Error for directory fetch failure",
+            recordedEvents.filterIsInstance<UiEvent.Error>().isEmpty()
+        )
+        // Other initial-data loaders still fanned out.
+        assertEquals(1, collectedEffects.filterIsInstance<ControllerEffect.LoadSessions>().size)
+    }
+
+    @Test
+    fun `loadInitialData directory fetch failure after reconfigure is silently dropped`() {
+        // §generation-guard × onFailure: a directory fetch that fails AFTER a
+        // host switch must not even log — the error belongs to the stale host.
+        every { settingsManager.currentWorkdir } returns "/proj"
+        every { settingsManager.recentWorkdirs } returns listOf("/proj")
+        coEvery { repository.getCommands() } returns Result.success(emptyList())
+        val pending = CompletableDeferred<Result<List<Session>>>()
+        coEvery { repository.getSessionsForDirectory("/proj") } coAnswers { pending.await() }
+
+        coordinator.loadInitialData()
+        runPending() // launch suspended on pending.await()
+
+        // Host switch bumps generation.
+        coordinator.cancelSseForReconfigure()
+
+        // Stale-host failure arrives AFTER the reconfigure.
+        pending.complete(Result.failure(IOException("stale-host dir boom")))
+        runPending()
+
+        // Silently dropped: no directorySessions entry, no error toast.
+        assertFalse(slices.sessionList.value.directorySessions.containsKey("/proj"))
+        assertTrue(recordedEvents.filterIsInstance<UiEvent.Error>().isEmpty())
+    }
+
+    // ── cancelSse (null-branch coverage) ───────────────────────────────────
+
+    @Test
+    fun `cancelSse without an active SSE feed is a safe no-op`() {
+        // No prior startSSE → sseJob is null. cancelSse must not throw (the
+        // null-conditional `sseJob?.cancel()` skip is the coverage target for
+        // the previously partially-covered line 805).
+        coordinator.cancelSse()
+
+        // No SSE feed was ever started.
+        verify(exactly = 0) { repository.connectSSE(any()) }
+        // A subsequent startSSE still works after the no-op cancel.
+        every { repository.connectSSE(any()) } returns flowOf()
+        coordinator.startSSE()
+        runPending()
+        verify(exactly = 1) { repository.connectSSE(any()) }
     }
 
     // ── RecordingConnectionCoordinatorCallbacks (removed in batch 3b) ──────

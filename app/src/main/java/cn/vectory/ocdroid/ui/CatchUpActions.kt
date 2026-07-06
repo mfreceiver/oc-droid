@@ -58,7 +58,7 @@ internal fun launchCatchUp(
     // probes / tail reloads. Reset on every exit path (skip / success / fail).
     // §R-17 batch2 step e final: slice-only read.
     if (slices.chat.value.isLoadingMessages) return
-    slices.chat.update { c -> c.copy(isLoadingMessages = true) }
+    slices.mutateChat { c -> c.copy(isLoadingMessages = true) }
     scope.launch {
         // §R-17 batch2 step e final: slice-only read.
         // Order-independent newest id (messages is oldest-first per ora-2).
@@ -69,7 +69,7 @@ internal fun launchCatchUp(
         // No newer message on the server → skip the 5-message reload entirely.
         // Preserve any already-open gap (it is still unresolved).
         if (anchorNewestId != null && serverNewestId != null && anchorNewestId == serverNewestId) {
-            slices.chat.update { c -> c.copy(isLoadingMessages = false) }
+            slices.mutateChat { c -> c.copy(isLoadingMessages = false) }
             return@launch
         }
 
@@ -79,7 +79,7 @@ internal fun launchCatchUp(
                 // synchronous onSuccess block (no writes between here and the
                 // slice update below).
                 if (sessionId != slices.chat.value.currentSessionId) {
-                    slices.chat.update { c -> c.copy(isLoadingMessages = false) }
+                    slices.mutateChat { c -> c.copy(isLoadingMessages = false) }
                     return@onSuccess
                 }
                 // §preserveUnfetched merge (resetLimit=false): keep older loaded
@@ -130,7 +130,7 @@ internal fun launchCatchUp(
                 val currentCursor = slices.chat.value.olderMessagesCursor
                 val currentHasMore = slices.chat.value.hasMoreMessages
 
-                slices.chat.update { c ->
+                slices.mutateChat { c ->
                     c.copy(
                         messages = mergedMessages,
                         partsByMessage = mergedParts,
@@ -142,7 +142,7 @@ internal fun launchCatchUp(
                     )
                 }
                 // selectedAgentName lives in the settings slice (cross-slice write).
-                slices.settings.update { it.copy(selectedAgentName = agentName ?: it.selectedAgentName) }
+                slices.mutateSettings { it.copy(selectedAgentName = agentName ?: it.selectedAgentName) }
                 onCacheWindow(
                     sessionId,
                     CachedSessionWindow(
@@ -172,7 +172,7 @@ internal fun launchCatchUp(
                 if (sessionId == slices.chat.value.currentSessionId) {
                     reportNonFatalIssue("MainViewModel", "Catch-up tail reload failed")
                 }
-                slices.chat.update { c -> c.copy(isLoadingMessages = false) }
+                slices.mutateChat { c -> c.copy(isLoadingMessages = false) }
             }
     }
 }
@@ -231,10 +231,10 @@ internal fun launchCloseGap(
     if (step <= 0 || maxSteps <= 0) return // nothing to do; leave gap for manual
     if (gap0.tailOldestCursor == null) {
         // No more history to page — can't bridge; stop showing the divider.
-        slices.chat.update { c -> c.copy(gapInfo = gap0.copy(open = false)) }
+        slices.mutateChat { c -> c.copy(gapInfo = gap0.copy(open = false)) }
         return
     }
-    slices.chat.update { c -> c.copy(isLoadingMessages = true) }
+    slices.mutateChat { c -> c.copy(isLoadingMessages = true) }
     scope.launch {
         var stepsTaken = 0
         var gap = gap0
@@ -248,7 +248,7 @@ internal fun launchCloseGap(
             if (c == null) {
                 // History exhausted mid-walk without reaching the anchor →
                 // can't bridge; stop showing the divider.
-                slices.chat.update { ch -> ch.copy(gapInfo = ch.gapInfo?.copy(open = false)) }
+                slices.mutateChat { ch -> ch.copy(gapInfo = ch.gapInfo?.copy(open = false)) }
                 break
             }
             val page = repository.getMessagesPaged(sessionId, limit = step, before = c)
@@ -256,7 +256,7 @@ internal fun launchCloseGap(
                     if (sessionId == currentSessionId) {
                         reportNonFatalIssue("MainViewModel", "Gap closure fetch failed")
                     }
-                    slices.chat.update { ch -> ch.copy(isLoadingMessages = false) }
+                    slices.mutateChat { ch -> ch.copy(isLoadingMessages = false) }
                     return@launch
                 }
             stepsTaken += 1
@@ -287,7 +287,7 @@ internal fun launchCloseGap(
                 tailOldestId = newTailOldestId ?: gap.tailOldestId,
                 tailOldestCursor = page.nextCursor
             )
-            slices.chat.update { ch ->
+            slices.mutateChat { ch ->
                 ch.copy(
                     messages = mergedMessages,
                     partsByMessage = bridgedParts + currentParts,
@@ -303,7 +303,7 @@ internal fun launchCloseGap(
             // the gap hint open for a manual tap (fresh budget on re-entry).
             if (stepsTaken >= maxSteps) break
         }
-        slices.chat.update { c -> c.copy(isLoadingMessages = false) }
+        slices.mutateChat { c -> c.copy(isLoadingMessages = false) }
         // §R-17 batch2 step e final: slice-only reads for the cache snapshot.
         val postMessages = slices.chat.value.messages
         val postParts = slices.chat.value.partsByMessage

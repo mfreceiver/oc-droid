@@ -8,6 +8,7 @@ package cn.vectory.ocdroid.ui
  * Future cleanup (batch3e+): may be inlined into individual VM private methods.
  */
 
+import cn.vectory.ocdroid.R
 import cn.vectory.ocdroid.data.model.Message
 import cn.vectory.ocdroid.data.model.Part
 import cn.vectory.ocdroid.data.repository.OpenCodeRepository
@@ -15,8 +16,6 @@ import cn.vectory.ocdroid.util.DebugLog
 import cn.vectory.ocdroid.util.SettingsManager
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.delay
-import kotlinx.coroutines.flow.MutableStateFlow
-import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 
 internal fun launchLoadMessages(
@@ -27,7 +26,6 @@ internal fun launchLoadMessages(
     resetLimit: Boolean = true,
     settingsManager: SettingsManager? = null,
     onCacheWindow: (sessionId: String, window: CachedSessionWindow) -> Unit = { _, _ -> },
-    settingsFlow: MutableStateFlow<SettingsState>? = null,
     emit: EventEmitter = EventEmitter { }
 ) {
 
@@ -42,7 +40,7 @@ internal fun launchLoadMessages(
         DebugLog.d("Sync", "launchLoadMessages skipped: isLoadingMessages already true")
         return
     }
-    slices.chat.update { c -> c.copy(isLoadingMessages = true) }
+    slices.mutateChat { c -> c.copy(isLoadingMessages = true) }
     scope.launch {
         // §on-demand: cursor pagination. The first load (resetLimit) captures the
         // X-Next-Cursor for future loadMore; subsequent periodic reloads fetch the
@@ -211,7 +209,7 @@ internal fun launchLoadMessages(
                         ?: inferCurrentModel(mergedMessages)
 
                     val beforeMergeSize = srcMessages.size
-                    slices.chat.update { c ->
+                    slices.mutateChat { c ->
                         c.copy(
                             messages = mergedMessages,
                             partsByMessage = mergedParts,
@@ -230,7 +228,7 @@ internal fun launchLoadMessages(
                     // choice so opening an old session does not clobber their picker selection.
                     val perSessionAgent = settingsManager?.getAgentForSession(sessionId)
                     if (perSessionAgent != null) {
-                        slices.settings.update { it.copy(selectedAgentName = perSessionAgent) }
+                        slices.mutateSettings { it.copy(selectedAgentName = perSessionAgent) }
                     }
                     DebugLog.d("Sync", "merged: before=$beforeMergeSize after=${mergedMessages.size}")
                     // §Per-session message cache (write): snapshot the freshly-
@@ -247,17 +245,17 @@ internal fun launchLoadMessages(
                         )
                     )
                 } else {
-                    slices.chat.update { c -> c.copy(isLoadingMessages = false) }
+                    slices.mutateChat { c -> c.copy(isLoadingMessages = false) }
                 }
             }
             .onFailure { error ->
                 DebugLog.w("Sync", "loadMessages failed: ${errorMessageOrFallback(error, "unknown error")}")
                 // §R-17 batch2 step e final: slice-only read.
                 if (sessionId == slices.chat.value.currentSessionId) {
-                    slices.chat.update { c -> c.copy(isLoadingMessages = false) }
-                    emit.emit(UiEvent.Error("Failed to load messages: ${errorMessageOrFallback(error, "unknown error")}"))
+                    slices.mutateChat { c -> c.copy(isLoadingMessages = false) }
+                    emit.emit(UiEvent.Error(R.string.error_load_messages_failed, listOf(errorMessageOrFallback(error, "unknown error"))))
                 } else {
-                    slices.chat.update { c -> c.copy(isLoadingMessages = false) }
+                    slices.mutateChat { c -> c.copy(isLoadingMessages = false) }
                 }
             }
 
@@ -266,7 +264,7 @@ internal fun launchLoadMessages(
         try {
             repository.getSessionTodos(sessionId)
                 .onSuccess { todos ->
-                    slices.sessionList.update { sl -> sl.copy(sessionTodos = sl.sessionTodos + (sessionId to todos)) }
+                    slices.mutateSessionList { sl -> sl.copy(sessionTodos = sl.sessionTodos + (sessionId to todos)) }
                 }
         } catch (e: Exception) {
             // R-14: never swallow structured concurrency cancellation — re-throw
@@ -320,7 +318,7 @@ internal fun launchLoadMoreMessages(
     // synchronously BEFORE launch so a rapid second loadMore (fast scroll /
     // recomposition) can't pass the guard and fire a duplicate concurrent
     // fetch of the same cursor page.
-    slices.chat.update { c -> c.copy(isLoadingMessages = true) }
+    slices.mutateChat { c -> c.copy(isLoadingMessages = true) }
     scope.launch {
         repository.getMessagesPaged(sessionId, limit = MainViewModelTimings.historyMessagePageSize, before = cursor)
             .onSuccess { page ->
@@ -359,7 +357,7 @@ internal fun launchLoadMoreMessages(
                     }
                     val newMessagesFinal = newMessages
                     val newPartsFinal = newParts
-                    slices.chat.update { c ->
+                    slices.mutateChat { c ->
                         c.copy(
                             messages = newMessagesFinal,
                             partsByMessage = newPartsFinal,
@@ -384,7 +382,7 @@ internal fun launchLoadMoreMessages(
                         )
                     )
                 } else {
-                    slices.chat.update { c -> c.copy(isLoadingMessages = false) }
+                    slices.mutateChat { c -> c.copy(isLoadingMessages = false) }
                 }
             }
             .onFailure {
@@ -396,7 +394,7 @@ internal fun launchLoadMoreMessages(
                 // user can tap "load more" again (transient failures shouldn't
                 // permanently disable history). With limit=5 a page is tiny, so
                 // hitting the 16 MB response cap is essentially impossible.
-                slices.chat.update { c -> c.copy(isLoadingMessages = false) }
+                slices.mutateChat { c -> c.copy(isLoadingMessages = false) }
             }
     }
 }

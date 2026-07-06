@@ -1,12 +1,14 @@
 package cn.vectory.ocdroid.ui.controller
 
 import android.util.Log
+import cn.vectory.ocdroid.R
 import cn.vectory.ocdroid.data.model.BasicAuthConfig
 import cn.vectory.ocdroid.data.model.HostProfile
 import cn.vectory.ocdroid.data.repository.HostProfileStore
 import cn.vectory.ocdroid.data.repository.OpenCodeRepository
 import cn.vectory.ocdroid.ui.ChatState
 import cn.vectory.ocdroid.ui.ComposerState
+import cn.vectory.ocdroid.ui.ConnectionPhase
 import cn.vectory.ocdroid.ui.ConnectionState
 import cn.vectory.ocdroid.ui.FileState
 import cn.vectory.ocdroid.ui.HostState
@@ -14,7 +16,6 @@ import cn.vectory.ocdroid.ui.SessionListState
 import cn.vectory.ocdroid.ui.SettingsState
 import cn.vectory.ocdroid.ui.SharedEffectBus
 import cn.vectory.ocdroid.ui.SliceFlows
-import cn.vectory.ocdroid.ui.TUNNEL_SUCCESS_TOAST
 import cn.vectory.ocdroid.ui.TrafficState
 import cn.vectory.ocdroid.ui.TunnelActivationState
 import cn.vectory.ocdroid.ui.UiEvent
@@ -29,7 +30,6 @@ import io.mockk.mockk
 import io.mockk.mockkStatic
 import io.mockk.unmockkAll
 import io.mockk.verify
-import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.toList
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.TestScope
@@ -103,17 +103,10 @@ class HostProfileControllerTest {
         // HostProfileController.activateTunnelForCurrentHost calls Log.d/Log.e.
         mockkStatic(Log::class)
         appStateFixture = SeedFixture()
-        slices = SliceFlows(
-            connection = MutableStateFlow(ConnectionState()),
-            traffic = MutableStateFlow(TrafficState()),
-            composer = MutableStateFlow(ComposerState()),
-            file = MutableStateFlow(FileState()),
-            settings = MutableStateFlow(SettingsState()),
-            chat = MutableStateFlow(ChatState()),
-            sessionList = MutableStateFlow(SessionListState()),
-            unread = MutableStateFlow(UnreadState()),
-            host = MutableStateFlow(HostState())
-        )
+        // §R18 Phase 4 (P0-9): SliceFlows is built via a SharedStateStore; the
+        // bundle exposes read-only StateFlow views + per-slice mutateXxx.
+        val stateStore = cn.vectory.ocdroid.ui.SharedStateStore()
+        slices = stateStore.slices
         store = mockk(relaxed = true)
         repository = mockk(relaxed = true)
         settingsManager = mockk(relaxed = true)
@@ -174,80 +167,101 @@ class HostProfileControllerTest {
     // compose against the prior state (tests routinely call seed multiple
     // times). Production no longer has an AppState mirror; this exists only to
     // drive the test transform chain.
+    //
+    // §R18 Phase 4 (P0-9): per-slice StateFlow views are read-only; funnel
+    // every seed write through the matching mutateXxx helper.
     private fun seed(transform: (SeedFixture) -> SeedFixture) {
         appStateFixture = transform(appStateFixture)
         val s = appStateFixture
-        slices.connection.value = ConnectionState(
-            isConnected = s.isConnected,
-            isConnecting = s.isConnecting,
-            serverVersion = s.serverVersion,
-            connectionPhase = s.connectionPhase,
-            tunnelActivationState = s.tunnelActivationState
-        )
-        slices.traffic.value = TrafficState(
-            trafficSent = s.trafficSent,
-            trafficReceived = s.trafficReceived
-        )
-        slices.composer.value = ComposerState(
-            inputText = s.inputText,
-            imageAttachments = s.imageAttachments,
-            sendingSessionIds = s.sendingSessionIds,
-            draftWorkdir = s.draftWorkdir
-        )
-        slices.file.value = FileState(
-            filePathToShowInFiles = s.filePathToShowInFiles,
-            filePreviewOriginRoute = s.filePreviewOriginRoute,
-            fileBrowserOpen = s.fileBrowserOpen,
-            fileBrowserWorkdir = s.fileBrowserWorkdir
-        )
-        slices.settings.value = SettingsState(
-            themeMode = s.themeMode,
-            markdownFontSizes = s.markdownFontSizes,
-            selectedAgentName = s.selectedAgentName,
-            agents = s.agents,
-            providers = s.providers,
-            availableCommands = s.availableCommands,
-            disabledModels = s.disabledModels,
-            uiFontScale = s.uiFontScale,
-            uiContentScale = s.uiContentScale
-        )
-        slices.chat.value = slices.chat.value.copy(
-            currentSessionId = s.currentSessionId,
-            messages = s.messages,
-            partsByMessage = s.partsByMessage,
-            streamingPartTexts = s.streamingPartTexts,
-            streamingReasoningPart = s.streamingReasoningPart,
-            olderMessagesCursor = s.olderMessagesCursor,
-            hasMoreMessages = s.hasMoreMessages,
-            isLoadingMessages = s.isLoadingMessages,
-            gapInfo = s.gapInfo,
-            staleNotice = s.staleNotice,
-            currentModel = s.currentModel
-        )
-        slices.sessionList.value = SessionListState(
-            sessions = s.sessions,
-            sessionStatuses = s.sessionStatuses,
-            expandedSessionIds = s.expandedSessionIds,
-            loadedSessionLimit = s.loadedSessionLimit,
-            hasMoreSessions = s.hasMoreSessions,
-            isLoadingMoreSessions = s.isLoadingMoreSessions,
-            isRefreshingSessions = s.isRefreshingSessions,
-            pendingPermissions = s.pendingPermissions,
-            pendingQuestions = s.pendingQuestions,
-            childSessions = s.childSessions,
-            directorySessions = s.directorySessions,
-            openSessionIds = s.openSessionIds,
-            sessionTodos = s.sessionTodos
-        )
-        slices.unread.value = UnreadState(
-            unreadSessions = s.unreadSessions,
-            tempClearedUnread = s.tempClearedUnread,
-            lastViewedTime = s.lastViewedTime
-        )
-        slices.host.value = HostState(
-            hostProfiles = s.hostProfiles,
-            currentHostProfileId = s.currentHostProfileId
-        )
+        slices.mutateConnection {
+            ConnectionState(
+                isConnected = s.isConnected,
+                isConnecting = s.isConnecting,
+                serverVersion = s.serverVersion,
+                connectionPhase = s.connectionPhase,
+                tunnelActivationState = s.tunnelActivationState
+            )
+        }
+        slices.mutateTraffic {
+            TrafficState(
+                trafficSent = s.trafficSent,
+                trafficReceived = s.trafficReceived
+            )
+        }
+        slices.mutateComposer {
+            ComposerState(
+                inputText = s.inputText,
+                imageAttachments = s.imageAttachments,
+                sendingSessionIds = s.sendingSessionIds,
+                draftWorkdir = s.draftWorkdir
+            )
+        }
+        slices.mutateFile {
+            FileState(
+                filePathToShowInFiles = s.filePathToShowInFiles,
+                filePreviewOriginRoute = s.filePreviewOriginRoute,
+                fileBrowserOpen = s.fileBrowserOpen,
+                fileBrowserWorkdir = s.fileBrowserWorkdir
+            )
+        }
+        slices.mutateSettings {
+            SettingsState(
+                themeMode = s.themeMode,
+                markdownFontSizes = s.markdownFontSizes,
+                selectedAgentName = s.selectedAgentName,
+                agents = s.agents,
+                providers = s.providers,
+                availableCommands = s.availableCommands,
+                disabledModels = s.disabledModels,
+                uiFontScale = s.uiFontScale,
+                uiContentScale = s.uiContentScale
+            )
+        }
+        slices.mutateChat {
+            it.copy(
+                currentSessionId = s.currentSessionId,
+                messages = s.messages,
+                partsByMessage = s.partsByMessage,
+                streamingPartTexts = s.streamingPartTexts,
+                streamingReasoningPart = s.streamingReasoningPart,
+                olderMessagesCursor = s.olderMessagesCursor,
+                hasMoreMessages = s.hasMoreMessages,
+                isLoadingMessages = s.isLoadingMessages,
+                gapInfo = s.gapInfo,
+                staleNotice = s.staleNotice,
+                currentModel = s.currentModel
+            )
+        }
+        slices.mutateSessionList {
+            SessionListState(
+                sessions = s.sessions,
+                sessionStatuses = s.sessionStatuses,
+                expandedSessionIds = s.expandedSessionIds,
+                loadedSessionLimit = s.loadedSessionLimit,
+                hasMoreSessions = s.hasMoreSessions,
+                isLoadingMoreSessions = s.isLoadingMoreSessions,
+                isRefreshingSessions = s.isRefreshingSessions,
+                pendingPermissions = s.pendingPermissions,
+                pendingQuestions = s.pendingQuestions,
+                childSessions = s.childSessions,
+                directorySessions = s.directorySessions,
+                openSessionIds = s.openSessionIds,
+                sessionTodos = s.sessionTodos
+            )
+        }
+        slices.mutateUnread {
+            UnreadState(
+                unreadSessions = s.unreadSessions,
+                tempClearedUnread = s.tempClearedUnread,
+                lastViewedTime = s.lastViewedTime
+            )
+        }
+        slices.mutateHost {
+            HostState(
+                hostProfiles = s.hostProfiles,
+                currentHostProfileId = s.currentHostProfileId
+            )
+        }
     }
 
     // ── Accessors ──────────────────────────────────────────────────────────
@@ -606,7 +620,10 @@ class HostProfileControllerTest {
         runPending()
 
         assertEquals(1, collectedEffects.filterIsInstance<ControllerEffect.ClearSessionWindowCache>().size)
-        verify { settingsManager.currentSessionId = null }
+        // §R18 Phase 2-F: currentSessionId is no longer written to
+        // SettingsManager here (purgePerHostState clears it on the chat slice,
+        // asserted below); the AppCore collector persists non-null changes only.
+        assertNull("currentSessionId purged on chat slice", slices.chat.value.currentSessionId)
         verify { settingsManager.openSessionIds = emptyList() }
         verify { settingsManager.sessionCache = emptyList() }
         verify { settingsManager.currentWorkdir = null }
@@ -663,7 +680,7 @@ class HostProfileControllerTest {
     // ── configureRepositoryForProfile ──────────────────────────────────────
 
     @Test
-    fun `configureRepositoryForProfile cancels SSE, configures with profile creds + allowInsecure, and restores workdir`() {
+    fun `configureRepositoryForProfile cancels SSE and configures with profile creds + allowInsecure`() {
         every { settingsManager.basicAuthPassword("p-B") } returns "secret-b"
         every { settingsManager.currentWorkdir } returns "/persisted/proj"
 
@@ -678,16 +695,29 @@ class HostProfileControllerTest {
                 profileB.allowInsecureConnections
             )
         }
-        verify { repository.setCurrentDirectory("/persisted/proj") }
+        // §R18 Phase 2-E step 2: the repository.setCurrentDirectory call was
+        // removed; directory routing now uses explicit `directory` parameters
+        // sourced from settingsManager.currentWorkdir at each callsite.
     }
 
     @Test
-    fun `configureRepositoryForProfile skips setCurrentDirectory when no workdir persisted`() {
+    fun `configureRepositoryForProfile does not require a persisted workdir`() {
+        // §R18 Phase 2-E step 2: with the global workdir fallback removed,
+        // configureRepositoryForProfile no longer reads settingsManager.
+        // currentWorkdir at all — it only reconfigures the repository and TLS.
         every { settingsManager.currentWorkdir } returns null
 
         controller.configureRepositoryForProfile(profileA)
 
-        verify(exactly = 0) { repository.setCurrentDirectory(any()) }
+        // Repository is still configured; no exception, no effect.
+        verify {
+            repository.configure(
+                profileA.serverUrl,
+                profileA.basicAuth?.username,
+                any(),
+                profileA.allowInsecureConnections
+            )
+        }
     }
 
     // ── activateTunnelForCurrentHost (state machine) ───────────────────────
@@ -700,7 +730,8 @@ class HostProfileControllerTest {
 
         assertEquals(TunnelActivationState.Error("未设置隧道密码"), slices.connection.value.tunnelActivationState)
         val errorEvent = recordedEvents.filterIsInstance<UiEvent.Error>().single()
-        assertTrue("error surfaced", errorEvent.message.contains("隧道激活失败"))
+        // §R18 Phase 2-G: tunnel-password-unset path emits the dedicated resId.
+        assertEquals(R.string.error_tunnel_password_unset, errorEvent.resId)
         // No network call scheduled.
         coVerify(exactly = 0) { repository.activateTunnel(any(), any(), any()) }
     }
@@ -738,8 +769,9 @@ class HostProfileControllerTest {
         assertEquals(TunnelActivationState.Success, slices.connection.value.tunnelActivationState)
         // §success-channel / §R-17 batch2: success now rides a UiEvent.Success
         // (NOT Error) so ChatScreen renders a positive toast.
+        // §R18 Phase 2-G: success-toast text is now R.string.success_tunnel_activated.
         val successEvent = recordedEvents.filterIsInstance<UiEvent.Success>().single()
-        assertEquals(TUNNEL_SUCCESS_TOAST, successEvent.message)
+        assertEquals(R.string.success_tunnel_activated, successEvent.resId)
         coVerify { repository.activateTunnel(profile.serverUrl, "real-pw", profile.allowInsecureConnections) }
     }
 
@@ -758,8 +790,10 @@ class HostProfileControllerTest {
         assertTrue("failure yields TunnelActivationState.Error", tunnelState is TunnelActivationState.Error)
         assertEquals("boom-network", (tunnelState as TunnelActivationState.Error).message)
         val errorEvent = recordedEvents.filterIsInstance<UiEvent.Error>().single()
-        assertTrue("error toast includes exception message", errorEvent.message.contains("boom-network"))
-        assertTrue("error toast includes failure prefix", errorEvent.message.contains("隧道激活失败"))
+        // §R18 Phase 2-G: tunnel-activation failure emits the dedicated resId
+        // with the resolved exception message as the single arg.
+        assertEquals(R.string.error_tunnel_activation_failed, errorEvent.resId)
+        assertTrue("error toast includes exception message", errorEvent.args.single().toString().contains("boom-network"))
     }
 
     // ── resetLocalDataAndResync ────────────────────────────────────────────
@@ -791,7 +825,7 @@ class HostProfileControllerTest {
         // Reconnecting slice values:
         assertFalse("isConnected false", slices.connection.value.isConnected)
         assertTrue("isConnecting true", slices.connection.value.isConnecting)
-        assertEquals("reconnecting", slices.connection.value.connectionPhase)
+        assertEquals(ConnectionPhase.Reconnecting, slices.connection.value.connectionPhase)
         assertEquals(0L, slices.traffic.value.trafficSent)
         assertEquals(0L, slices.traffic.value.trafficReceived)
         assertEquals(TunnelActivationState.Idle, slices.connection.value.tunnelActivationState)
@@ -832,6 +866,110 @@ class HostProfileControllerTest {
         controller.resetLocalDataAndResync()
 
         assertTrue(collectedEffects.filterIsInstance<ControllerEffect.ForceReconnect>().isEmpty())
+    }
+
+    // ── saveHostProfile (S-1: live reconfigure when active host serverUrl changes) ─
+
+    @Test
+    fun `saveHostProfile of active host reconfigures and reconnects when serverUrl changes`() {
+        // S-1: editing the current host's URL persisted the new value but left
+        // the existing REST/SSE/image clients pointed at the OLD endpoint. The
+        // fix mirrors the allowInsecure-toggle path: when the ACTIVE host's
+        // serverUrl changes, clear old-URL model data + reconfigure + reconnect
+        // so the new endpoint takes effect immediately. This also covers the
+        // previously-uncovered clearModelDataForUrl call (line 356).
+        seed { it.copy(currentHostProfileId = "p-A") }
+        val moved = profileA.copy(serverUrl = "http://new-host:4096")
+
+        controller.saveHostProfile(moved, basicAuthEdited = false)
+        scope.testScheduler.advanceUntilIdle()
+
+        // §bug5: old-URL model data dropped so the disable set does not orphan.
+        verify { settingsManager.clearModelDataForUrl("http://a:4096") }
+        // Reconfigured for the updated profileA at the new URL.
+        verify { repository.configure(moved.serverUrl, any(), any(), moved.allowInsecureConnections) }
+        // forceReconnect fired so clients rebuild against the new endpoint.
+        assertEquals(1, collectedEffects.filterIsInstance<ControllerEffect.ForceReconnect>().size)
+        // §disabled-models-consistency: per-host state reloaded for the new baseUrl.
+        assertEquals(1, collectedEffects.filterIsInstance<ControllerEffect.HostProfileSwitched>().size)
+        // configureRepositoryForProfile cancels SSE once.
+        assertEquals(1, collectedEffects.filterIsInstance<ControllerEffect.CancelSseForReconfigure>().size)
+    }
+
+    @Test
+    fun `saveHostProfile of active host with both URL and allowInsecure changed clears old-URL data once`() {
+        // Composite: URL + toggle both change on the active host. The URL-clear
+        // fires exactly once (guard is urlChanged-only), the reconfigure uses
+        // the new URL + new allowInsecure, and both effects emit.
+        seed { it.copy(currentHostProfileId = "p-A") }
+        val moved = profileA.copy(serverUrl = "http://new:4096", allowInsecureConnections = true)
+
+        controller.saveHostProfile(moved, basicAuthEdited = false)
+        scope.testScheduler.advanceUntilIdle()
+
+        verify(exactly = 1) { settingsManager.clearModelDataForUrl("http://a:4096") }
+        verify { repository.configure("http://new:4096", any(), any(), true) }
+        assertEquals(1, collectedEffects.filterIsInstance<ControllerEffect.ForceReconnect>().size)
+        assertEquals(1, collectedEffects.filterIsInstance<ControllerEffect.HostProfileSwitched>().size)
+    }
+
+    // ── deleteHostProfile (§bug5: clearModelDataForUrl on the deleted active host) ─
+
+    @Test
+    fun `deleteHostProfile of current profile clears model data for the deleted host serverUrl`() {
+        // §bug5: when the ACTIVE host is deleted, its per-URL model data must be
+        // purged so it does not leak into the replacement host's identity (same-
+        // URL collision or later re-add). The existing wasCurrent test re-stubs
+        // profiles() to drop the deleted entry before deleteHostProfile reads
+        // it, leaving deletedServerUrl=null and skipping clearModelDataForUrl.
+        // Here we keep profileA in profiles() so its serverUrl is captured.
+        seed { it.copy(currentHostProfileId = "p-A") }
+        // Keep the default setUp seed ([profileA, profileB], current p-A) so
+        // profiles().firstOrNull { id == "p-A" } resolves. Re-stub currentProfile
+        // only — the replacement host picked by the store after deletion.
+        every { store.currentProfile() } returns profileB
+
+        controller.deleteHostProfile("p-A")
+        scope.testScheduler.advanceUntilIdle()
+
+        // Deleted active host's old URL model data purged.
+        verify { settingsManager.clearModelDataForUrl("http://a:4096") }
+        // Reconfigured for the replacement profileB.
+        verify { repository.configure(profileB.serverUrl, any(), any(), profileB.allowInsecureConnections) }
+        // wasCurrent → purge + forceReconnect + hostProfileSwitched.
+        assertEquals(1, collectedEffects.filterIsInstance<ControllerEffect.ForceReconnect>().size)
+        assertEquals(1, collectedEffects.filterIsInstance<ControllerEffect.HostProfileSwitched>().size)
+        assertEquals(1, collectedEffects.filterIsInstance<ControllerEffect.ClearSessionWindowCache>().size)
+    }
+
+    // ── configureServer (URL-unchanged branch) ─────────────────────────────
+
+    @Test
+    fun `configureServer with unchanged URL skips clearModelData and HostProfileSwitched but still cancels SSE`() {
+        // The urlChanging=false branch: when the user re-submits the SAME URL
+        // (e.g. just changing credentials), there is no host switch — old-URL
+        // model data must NOT be cleared and HostProfileSwitched must NOT fire.
+        // SSE is still cancelled before the reconfigure so events from the
+        // previous credential don't land during the new probe.
+        every { settingsManager.serverUrl } returns "http://same:4096"
+        every { store.currentProfile() } returns profileA // allowInsecure=false
+
+        controller.configureServer("http://same:4096", "u", "p")
+
+        // Old-URL model data NOT cleared (URL did not change).
+        verify(exactly = 0) { settingsManager.clearModelDataForUrl(any()) }
+        // SSE still cancelled before reconfigure (Stage D — always fires).
+        assertEquals(1, collectedEffects.filterIsInstance<ControllerEffect.CancelSseForReconfigure>().size)
+        // Settings + repository reconfigured with the (unchanged) URL + new creds.
+        verify { settingsManager.serverUrl = "http://same:4096" }
+        verify { settingsManager.username = "u" }
+        verify { settingsManager.password = "p" }
+        verify { repository.configure("http://same:4096", "u", "p", profileA.allowInsecureConnections) }
+        // No host switch → no HostProfileSwitched effect.
+        assertTrue("HostProfileSwitched must NOT fire on unchanged URL",
+            collectedEffects.filterIsInstance<ControllerEffect.HostProfileSwitched>().isEmpty())
+        // #12: image client trust policy still synced (mirrors REST/SSE).
+        assertEquals(false, HttpImageHolder.lastUpdateSslAllowInsecure)
     }
 
     // ── RecordingHostProfileCallbacks (removed in batch 3b) ───────────────

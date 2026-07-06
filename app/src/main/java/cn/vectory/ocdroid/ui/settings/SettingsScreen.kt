@@ -24,7 +24,7 @@ import cn.vectory.ocdroid.R
 import cn.vectory.ocdroid.ui.ComposerViewModel
 import cn.vectory.ocdroid.ui.ConnectionViewModel
 import cn.vectory.ocdroid.ui.HostViewModel
-import cn.vectory.ocdroid.ui.OrchestratorViewModel
+import cn.vectory.ocdroid.ui.SettingsViewModel
 import cn.vectory.ocdroid.util.ThemeMode
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.map
@@ -41,7 +41,7 @@ fun SettingsScreen(
     viewModel: HostViewModel,
     composerVM: ComposerViewModel,
     connectionVM: ConnectionViewModel,
-    orchestratorVM: OrchestratorViewModel,
+    settingsVM: SettingsViewModel,
     onBack: (() -> Unit)? = null
 ) {
     // §R-17 Stage 3 (+ follow-up debt cleanup): subscribe to the relevant
@@ -61,22 +61,29 @@ fun SettingsScreen(
     // §flow-remember: each settingsFlow projection is wrapped in remember{}
     // so map/distinctUntilChanged aren't re-applied on every recomposition
     // (FlowOperatorInvokedInComposition).
-    val themeMode by remember { orchestratorVM.settingsFlow.map { it.themeMode }.distinctUntilChanged() }
+    //
+    // §R18 Phase 3 Wave 3 (P2-6): the settingsFlow reads + writes (theme /
+    // providers / scales) now route through [settingsVM] (the new
+    // Settings-domain VM); the trafficFlow read + refresh / reset route
+    // through [connectionVM] (traffic moved into the Connection domain). The
+    // flows themselves are the same SharedStateStore slices — the VM split
+    // is a write-side / role-overload fix, not a state move.
+    val themeMode by remember { settingsVM.settingsFlow.map { it.themeMode }.distinctUntilChanged() }
         .collectAsStateWithLifecycle(initialValue = ThemeMode.SYSTEM)
     // §model-selection: providers + disabledModels are read by the Model
     // management section. Subscribed here (not in the parent) so SSE /
     // composer deltas do not recompose SettingsScreen.
-    val providers by remember { orchestratorVM.settingsFlow.map { it.providers }.distinctUntilChanged() }
+    val providers by remember { settingsVM.settingsFlow.map { it.providers }.distinctUntilChanged() }
         .collectAsStateWithLifecycle(initialValue = null)
-    val disabledModels by remember { orchestratorVM.settingsFlow.map { it.disabledModels }.distinctUntilChanged() }
+    val disabledModels by remember { settingsVM.settingsFlow.map { it.disabledModels }.distinctUntilChanged() }
         .collectAsStateWithLifecycle(initialValue = emptySet())
     // §ui-scale: subscribe to the two scale factors so the Appearance sliders
     // render the live value + dispatch changes through the ViewModel setters.
-    val uiFontScale by remember { orchestratorVM.settingsFlow.map { it.uiFontScale }.distinctUntilChanged() }
+    val uiFontScale by remember { settingsVM.settingsFlow.map { it.uiFontScale }.distinctUntilChanged() }
         .collectAsStateWithLifecycle(initialValue = 1f)
-    val uiContentScale by remember { orchestratorVM.settingsFlow.map { it.uiContentScale }.distinctUntilChanged() }
+    val uiContentScale by remember { settingsVM.settingsFlow.map { it.uiContentScale }.distinctUntilChanged() }
         .collectAsStateWithLifecycle(initialValue = 1f)
-    val traffic by orchestratorVM.trafficFlow.collectAsStateWithLifecycle()
+    val traffic by connectionVM.trafficFlow.collectAsStateWithLifecycle()
     val connection by connectionVM.connectionFlow.collectAsStateWithLifecycle()
 
     // Refresh traffic counters once when the Settings screen enters
@@ -84,7 +91,7 @@ fun SettingsScreen(
     // accumulation. The tracker keeps counting regardless; this just syncs
     // the snapshot for display.
     LaunchedEffect(Unit) {
-        orchestratorVM.refreshTrafficStats()
+        connectionVM.refreshTrafficStats()
     }
 
     var showHostProfiles by remember { mutableStateOf(false) }
@@ -136,7 +143,7 @@ fun SettingsScreen(
             TrafficSection(
                 sent = traffic.trafficSent,
                 received = traffic.trafficReceived,
-                onReset = orchestratorVM::resetTrafficStats,
+                onReset = connectionVM::resetTrafficStats,
                 hideHeader = true
             )
             Spacer(modifier = Modifier.height(12.dp))
@@ -145,11 +152,11 @@ fun SettingsScreen(
 
             AppearanceSection(
                 themeMode = themeMode,
-                onThemeSelected = orchestratorVM::setThemeMode,
+                onThemeSelected = settingsVM::setThemeMode,
                 uiFontScale = uiFontScale,
                 uiContentScale = uiContentScale,
-                onFontScaleChange = orchestratorVM::setUiFontScale,
-                onContentScaleChange = orchestratorVM::setUiContentScale
+                onFontScaleChange = settingsVM::setUiFontScale,
+                onContentScaleChange = settingsVM::setUiContentScale
             )
 
             Spacer(modifier = Modifier.height(12.dp))

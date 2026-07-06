@@ -108,9 +108,17 @@ class SettingsManager @Inject constructor(
      * [MAX_RECENT_WORKDIRS].
      */
     var recentWorkdirs: List<String>
-        get() {
-            val json = encryptedPrefs.getString(KEY_RECENT_WORKDIRS, null) ?: return emptyList()
-            return try {
+        get() = synchronized(this) {
+            // §R18 Phase 4 (P2-9) Gate-4 fix (maxer): lock the read too so it
+            // cannot observe a value mid-flight from a concurrent
+            // addRecentWorkdir write (the getter is otherwise a separate
+            // critical section from the write-side RMW). SharedPreferences
+            // getString is itself atomic, but without this lock a reader
+            // (e.g. loadInitialData computing the fan-out workdir set) could
+            // base its decision on a list that addRecentWorkdir is about to
+            // change. Synchronized(this) pairs with addRecentWorkdir's lock.
+            val json = encryptedPrefs.getString(KEY_RECENT_WORKDIRS, null) ?: return@synchronized emptyList()
+            try {
                 Json.decodeFromString<List<String>>(json)
             } catch (e: Exception) {
                 Log.w(TAG, "Failed to parse recent workdirs, using empty", e)
@@ -128,13 +136,22 @@ class SettingsManager @Inject constructor(
      * `createSessionInWorkdir` so the workdir survives restart even after it
      * is later superseded as [currentWorkdir]. Blank/whitespace-only entries
      * are ignored.
+     *
+     * §R18 Phase 4 (P2-9): the read-filter-write across [recentWorkdirs] is
+     * wrapped in `synchronized(this)` to make the sequence atomic. Without
+     * this, two concurrent callers can both read the old list, both prepend,
+     * and the second write clobbers the first — losing the first caller's
+     * workdir (read-modify-write race). SharedPreferences itself is process-
+     * thread-safe but the read→filter→write compound is not.
      */
     fun addRecentWorkdir(workdir: String) {
         val normalized = workdir.trim()
         if (normalized.isEmpty()) return
-        val updated = (listOf(normalized) + recentWorkdirs.filter { it != normalized })
-            .take(MAX_RECENT_WORKDIRS)
-        recentWorkdirs = updated
+        synchronized(this) {
+            val updated = (listOf(normalized) + recentWorkdirs.filter { it != normalized })
+                .take(MAX_RECENT_WORKDIRS)
+            recentWorkdirs = updated
+        }
     }
 
     var selectedAgentName: String?

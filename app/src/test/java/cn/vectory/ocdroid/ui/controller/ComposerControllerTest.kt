@@ -3,11 +3,12 @@ package cn.vectory.ocdroid.ui.controller
 import cn.vectory.ocdroid.data.model.ComposerImageAttachment
 import cn.vectory.ocdroid.ui.ChatState
 import cn.vectory.ocdroid.ui.ComposerState
+import cn.vectory.ocdroid.ui.SharedStateStore
 import cn.vectory.ocdroid.util.SettingsManager
 import io.mockk.every
 import io.mockk.mockk
 import io.mockk.verify
-import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -26,22 +27,25 @@ import org.junit.Test
  */
 class ComposerControllerTest {
 
-    private lateinit var chatFlow: MutableStateFlow<ChatState>
-    private lateinit var composerFlow: MutableStateFlow<ComposerState>
-    private lateinit var expandedParts: MutableStateFlow<Map<String, Boolean>>
+    // §R18 Phase 4 (P0-9): the controller takes a SharedStateStore; the test
+    // holds read-only StateFlow views of the three slices it cares about so
+    // assertions keep the same `.value.X` shape. Writes go through mutateXxx.
+    private lateinit var store: SharedStateStore
+    private lateinit var chatFlow: StateFlow<ChatState>
+    private lateinit var composerFlow: StateFlow<ComposerState>
+    private lateinit var expandedParts: StateFlow<Map<String, Boolean>>
     private lateinit var settingsManager: SettingsManager
     private lateinit var controller: ComposerController
 
     @Before
     fun setUp() {
-        chatFlow = MutableStateFlow(ChatState())
-        composerFlow = MutableStateFlow(ComposerState())
-        expandedParts = MutableStateFlow(emptyMap())
+        store = SharedStateStore()
+        chatFlow = store.chatFlow
+        composerFlow = store.composerFlow
+        expandedParts = store.expandedParts
         settingsManager = mockk(relaxed = true)
         controller = ComposerController(
-            composerFlow = composerFlow,
-            chatFlow = chatFlow,
-            expandedParts = expandedParts,
+            store = store,
             settingsManager = settingsManager,
         )
     }
@@ -57,7 +61,7 @@ class ComposerControllerTest {
 
     @Test
     fun `setInputText saves draft for active session`() {
-        chatFlow.value = chatFlow.value.copy(currentSessionId = "s1")
+        store.mutateChat { it.copy(currentSessionId = "s1") }
 
         controller.setInputText("draft text")
 
@@ -66,7 +70,7 @@ class ComposerControllerTest {
 
     @Test
     fun `setInputText does not save draft when no session is active`() {
-        chatFlow.value = chatFlow.value.copy(currentSessionId = null)
+        store.mutateChat { it.copy(currentSessionId = null) }
 
         controller.setInputText("no session")
 
@@ -151,8 +155,8 @@ class ComposerControllerTest {
 
     @Test
     fun `clearDraftIfActive clears composer when draftWorkdir is set and no session`() {
-        composerFlow.value = composerFlow.value.copy(draftWorkdir = "/tmp/proj")
-        chatFlow.value = chatFlow.value.copy(currentSessionId = null)
+        store.mutateComposer { it.copy(draftWorkdir = "/tmp/proj") }
+        store.mutateChat { it.copy(currentSessionId = null) }
         controller.setInputText("draft content")
 
         controller.clearDraftIfActive()
@@ -167,8 +171,8 @@ class ComposerControllerTest {
 
     @Test
     fun `clearDraftIfActive is no-op when draftWorkdir is null`() {
-        composerFlow.value = composerFlow.value.copy(draftWorkdir = null)
-        chatFlow.value = chatFlow.value.copy(currentSessionId = null)
+        store.mutateComposer { it.copy(draftWorkdir = null) }
+        store.mutateChat { it.copy(currentSessionId = null) }
         controller.setInputText("not a draft")
 
         controller.clearDraftIfActive()
@@ -180,8 +184,8 @@ class ComposerControllerTest {
 
     @Test
     fun `clearDraftIfActive is no-op when session is active (real session)`() {
-        composerFlow.value = composerFlow.value.copy(draftWorkdir = "/tmp/proj")
-        chatFlow.value = chatFlow.value.copy(currentSessionId = "s1")
+        store.mutateComposer { it.copy(draftWorkdir = "/tmp/proj") }
+        store.mutateChat { it.copy(currentSessionId = "s1") }
 
         controller.clearDraftIfActive()
 
@@ -229,7 +233,7 @@ class ComposerControllerTest {
 
     @Test
     fun `setInputText does not affect sendingSessionIds`() {
-        composerFlow.value = composerFlow.value.copy(sendingSessionIds = setOf("s1"))
+        store.mutateComposer { it.copy(sendingSessionIds = setOf("s1")) }
 
         controller.setInputText("new text")
 

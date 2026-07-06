@@ -1,5 +1,6 @@
 package cn.vectory.ocdroid.ui
 
+import android.content.Context
 import cn.vectory.ocdroid.data.model.*
 import cn.vectory.ocdroid.data.repository.HostProfileStore
 import cn.vectory.ocdroid.data.repository.OpenCodeRepository
@@ -13,6 +14,7 @@ import cn.vectory.ocdroid.ui.controller.ForegroundCatchUpController
 import cn.vectory.ocdroid.ui.controller.HostProfileController
 import cn.vectory.ocdroid.ui.controller.SessionSyncCoordinator
 import cn.vectory.ocdroid.ui.controller.SessionSwitcher
+import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
@@ -24,13 +26,15 @@ import kotlinx.coroutines.launch
 import javax.inject.Inject
 import javax.inject.Singleton
 
-/** Success message shown on successful tunnel activation. HostProfileController
- *  emits this as a [UiEvent.Success] (NOT an Error) so ChatScreen's
- *  success-snackbar branch renders it as a positive toast. The sticky
- *  `tunnelActivationState` (Success) separately drives the ServerManagementDialog
- *  indicator. Kept as a named constant so the success-toast text and the
- *  dialog state stay decoupled. */
-const val TUNNEL_SUCCESS_TOAST = "隧道激活成功"
+/**
+ * §R18 Phase 2-G: this constant was the hardcoded success-toast text for
+ * tunnel activation. The toast now rides `UiEvent.Success(R.string
+ * .success_tunnel_activated)` (i18n'd). The constant is retained only as
+ * a documentation anchor — production code MUST NOT reference it (it has
+ * no runtime value post-i18n). Tests assert on the resId directly.
+ */
+@Deprecated("Use R.string.success_tunnel_activated via UiEvent.Success(resId).")
+const val TUNNEL_SUCCESS_TOAST: String = "隧道激活成功"
 
 /**
  * R-17 batch3 → batch3d: application-scoped engine that owns the 6 controllers
@@ -81,36 +85,35 @@ class AppCore @Inject constructor(
      *  them in its [init] block and dispatches. UiEvents ride
      *  [SharedEffectBus.uiEvents]. */
     internal val effectBus: SharedEffectBus,
+    /** §R18 Phase 2-G (P0-6): application Context used to resolve
+     *  [UiEvent.Error]'s `@StringRes resId` + args to a localized String
+     *  before forwarding to [AppLifecycleMonitor.onAppError] (whose
+     *  notification body needs a real String). Composable collectors
+     *  resolve via [LocalContext] instead; this Context serves only the
+     *  app-lifetime notification path that has no Composition available. */
+    @ApplicationContext private val appContext: Context,
 ) {
 
     /** App-process-lifetime scope (replaces the former viewModelScope). */
     internal val appScope: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
 
     // ── Slice accessors (delegate to SharedStateStore) ──────────────────────
-    private val _connectionFlow get() = store.connectionFlow
-    private val _trafficFlow get() = store.trafficFlow
-    private val _composerFlow get() = store.composerFlow
-    private val _fileFlow get() = store.fileFlow
-    private val _settingsFlow get() = store.settingsFlow
-    private val _chatFlow get() = store.chatFlow
-    private val _sessionListFlow get() = store.sessionListFlow
-    private val _unreadFlow get() = store.unreadFlow
-    private val _hostFlow get() = store.hostFlow
-    private val _expandedParts get() = store.expandedParts
-    private val _navFlow get() = store.navFlow
-    private val sliceFlows get() = store.slices
-
-    val connectionFlow: StateFlow<ConnectionState> get() = _connectionFlow.asStateFlow()
-    val trafficFlow: StateFlow<TrafficState> get() = _trafficFlow.asStateFlow()
-    val composerFlow: StateFlow<ComposerState> get() = _composerFlow.asStateFlow()
-    val fileFlow: StateFlow<FileState> get() = _fileFlow.asStateFlow()
-    val settingsFlow: StateFlow<SettingsState> get() = _settingsFlow.asStateFlow()
-    val chatFlow: StateFlow<ChatState> get() = _chatFlow.asStateFlow()
-    val sessionListFlow: StateFlow<SessionListState> get() = _sessionListFlow.asStateFlow()
-    val unreadFlow: StateFlow<UnreadState> get() = _unreadFlow.asStateFlow()
-    val hostFlow: StateFlow<HostState> get() = _hostFlow.asStateFlow()
-    val expandedParts: StateFlow<Map<String, Boolean>> get() = _expandedParts.asStateFlow()
-    val navFlow: StateFlow<NavState> get() = _navFlow.asStateFlow()
+    // §R18 Phase 4 (P0-9): SharedStateStore now owns private MutableStateFlows
+    // + public read-only StateFlow views + public mutateXxx write funnels.
+    // These accessors re-expose the read views (StateFlow) and the write
+    // helpers (delegating to store.mutateXxx) so the 6 VMs / orchestration
+    // extensions keep resolving unchanged.
+    val connectionFlow: StateFlow<ConnectionState> get() = store.connectionFlow
+    val trafficFlow: StateFlow<TrafficState> get() = store.trafficFlow
+    val composerFlow: StateFlow<ComposerState> get() = store.composerFlow
+    val fileFlow: StateFlow<FileState> get() = store.fileFlow
+    val settingsFlow: StateFlow<SettingsState> get() = store.settingsFlow
+    val chatFlow: StateFlow<ChatState> get() = store.chatFlow
+    val sessionListFlow: StateFlow<SessionListState> get() = store.sessionListFlow
+    val unreadFlow: StateFlow<UnreadState> get() = store.unreadFlow
+    val hostFlow: StateFlow<HostState> get() = store.hostFlow
+    val expandedParts: StateFlow<Map<String, Boolean>> get() = store.expandedParts
+    val navFlow: StateFlow<NavState> get() = store.navFlow
 
     val uiEvents: SharedFlow<UiEvent> get() = effectBus.uiEventsConsumed
 
@@ -119,25 +122,20 @@ class AppCore @Inject constructor(
         ForegroundCatchUpController(
             appLifecycleMonitor = appLifecycleMonitor,
             scope = appScope,
-            chatFlow = _chatFlow,
-            composerFlow = _composerFlow,
+            store = store,
             settingsManager = settingsManager,
             effects = effectBus,
         )
 
     internal val composerController: ComposerController =
         ComposerController(
-            composerFlow = _composerFlow,
-            chatFlow = _chatFlow,
-            expandedParts = _expandedParts,
+            store = store,
             settingsManager = settingsManager,
         )
 
     internal val sessionSwitcher: SessionSwitcher =
         SessionSwitcher(
-            composerFlow = _composerFlow,
-            expandedParts = _expandedParts,
-            slices = sliceFlows,
+            store = store,
             settingsManager = settingsManager,
             repository = repository,
             effects = effectBus,
@@ -146,7 +144,7 @@ class AppCore @Inject constructor(
     internal val hostProfileController: HostProfileController =
         HostProfileController(
             scope = appScope,
-            slices = sliceFlows,
+            slices = store.slices,
             hostProfileStore = hostProfileStore,
             repository = repository,
             settingsManager = settingsManager,
@@ -157,7 +155,7 @@ class AppCore @Inject constructor(
     internal val sessionSyncCoordinator: SessionSyncCoordinator =
         SessionSyncCoordinator(
             scope = appScope,
-            slices = sliceFlows,
+            slices = store.slices,
             settingsManager = settingsManager,
             effects = effectBus,
         )
@@ -165,34 +163,43 @@ class AppCore @Inject constructor(
     internal val connectionCoordinator: ConnectionCoordinator =
         ConnectionCoordinator(
             scope = appScope,
-            connectionFlow = _connectionFlow,
-            settingsFlow = _settingsFlow,
-            slices = sliceFlows,
+            slices = store.slices,
             repository = repository,
             settingsManager = settingsManager,
             effects = effectBus,
             serverCompatProfile = serverCompatProfile,
         )
 
-    // ── Slice write helpers (`internal` so the 6 VMs share the same store) ──
-    internal fun writeConnection(transform: (ConnectionState) -> ConnectionState) = _connectionFlow.update(transform)
-    internal fun writeTraffic(transform: (TrafficState) -> TrafficState) = _trafficFlow.update(transform)
-    internal fun writeComposer(transform: (ComposerState) -> ComposerState) = _composerFlow.update(transform)
-    internal fun writeFile(transform: (FileState) -> FileState) = _fileFlow.update(transform)
-    internal fun writeSettings(transform: (SettingsState) -> SettingsState) = _settingsFlow.update(transform)
-    internal fun writeChat(transform: (ChatState) -> ChatState) = _chatFlow.update(transform)
-    internal fun writeSessionList(transform: (SessionListState) -> SessionListState) = _sessionListFlow.update(transform)
-    internal fun writeUnread(transform: (UnreadState) -> UnreadState) = _unreadFlow.update(transform)
-    internal fun writeHost(transform: (HostState) -> HostState) = _hostFlow.update(transform)
+    // ── Slice write helpers (delegate to SharedStateStore.mutateXxx). ───────
+    // Kept `internal` so the 6 VMs / orchestration extensions keep resolving
+    // unchanged. The single authoritative writer per slice is now
+    // SharedStateStore.mutateXxx; these are thin pass-throughs.
+    internal fun writeConnection(transform: (ConnectionState) -> ConnectionState) = store.mutateConnection(transform)
+    internal fun writeTraffic(transform: (TrafficState) -> TrafficState) = store.mutateTraffic(transform)
+    internal fun writeComposer(transform: (ComposerState) -> ComposerState) = store.mutateComposer(transform)
+    internal fun writeFile(transform: (FileState) -> FileState) = store.mutateFile(transform)
+    internal fun writeSettings(transform: (SettingsState) -> SettingsState) = store.mutateSettings(transform)
+    internal fun writeChat(transform: (ChatState) -> ChatState) = store.mutateChat(transform)
+    internal fun writeSessionList(transform: (SessionListState) -> SessionListState) = store.mutateSessionList(transform)
+    internal fun writeUnread(transform: (UnreadState) -> UnreadState) = store.mutateUnread(transform)
+    internal fun writeHost(transform: (HostState) -> HostState) = store.mutateHost(transform)
     internal fun writeSessionWindow(sessionId: String, window: CachedSessionWindow) {
         sessionSwitcher.writeSessionWindow(sessionId, window)
     }
 
     init {
-        applySavedSettings(repository, settingsManager, hostProfileStore, _connectionFlow, _settingsFlow, sliceFlows)
+        applySavedSettings(repository, settingsManager, hostProfileStore, store.slices)
         appScope.launch(start = CoroutineStart.UNDISPATCHED) {
+            // §R18 Phase 2-G (P0-6): UiEvent.Error now carries a `@StringRes`
+            // resId + format args instead of a hardcoded String. Resolve to
+            // a localized String here (the only app-lifetime UiEvent consumer
+            // without a Composition); the in-app snackbar is rendered by
+            // ChatScreen, which resolves via its own LocalContext.
             uiEvents.collect { event ->
-                if (event is UiEvent.Error) appLifecycleMonitor.onAppError(event.message)
+                if (event is UiEvent.Error) {
+                    val message = appContext.getString(event.resId, *event.args.toTypedArray())
+                    appLifecycleMonitor.onAppError(message)
+                }
             }
         }
         // R-17 batch3b: subscribe to controller effects BEFORE any external
@@ -200,6 +207,38 @@ class AppCore @Inject constructor(
         // registered synchronously here, before the constructor returns.
         appScope.launch(start = CoroutineStart.UNDISPATCHED) {
             effectBus.effects.collect { effect -> dispatchEffect(effect) }
+        }
+
+        // §R18 Phase 2-F: currentSessionId convergence. ChatState
+        // (chatFlow.currentSessionId) is the sole runtime source; the
+        // SettingsManager is a cold-start seed + a persistence side-effect.
+        //
+        // Cold-start seed: applySavedSettings already seeded chatFlow above;
+        // this is a fallback for when applySavedSettings did not run or left
+        // currentSessionId null while a persisted id exists. Runs synchronously
+        // (inline) BEFORE the collector below is registered, so the collector
+        // sees the seeded value as the starting point (not the pre-seed null).
+        val persistedSid = settingsManager.currentSessionId
+        if (persistedSid != null && store.chatFlow.value.currentSessionId == null) {
+            store.mutateChat { it.copy(currentSessionId = persistedSid) }
+        }
+
+        // Persistence side-effect: every non-null change of chatFlow's
+        // currentSessionId is written back to SettingsManager so the next cold
+        // start can re-seed. `filterNotNull()` prevents the collector from
+        // reading the initial null (before the seed lands) and overwriting the
+        // seed; it also means null-clearing transitions (host switch / close /
+        // delete / archive of the current session) are NOT persisted here —
+        // those are handled by the explicit chatFlow.clear + applySavedSettings
+        // archived-id filter on the next cold start. `distinctUntilChanged`
+        // avoids redundant writes. UNDISPATCHED so the collector is registered
+        // before the constructor returns (same rationale as the two collectors
+        // above).
+        appScope.launch(start = CoroutineStart.UNDISPATCHED) {
+            store.chatFlow.map { it.currentSessionId }
+                .filterNotNull()
+                .distinctUntilChanged()
+                .collect { id -> settingsManager.currentSessionId = id }
         }
     }
 
@@ -224,15 +263,25 @@ class AppCore @Inject constructor(
 
             // ── SessionSwitcher ──
             is ControllerEffect.LoadMessages -> loadMessagesForEffect(effect.sessionId, effect.resetLimit)
-            is ControllerEffect.LoadChildSessions -> launchLoadChildSessions(appScope, repository, sliceFlows, effect.sessionId, TAG)
-            is ControllerEffect.LoadSessionStatus -> launchLoadSessionStatus(appScope, repository, sliceFlows)
-            is ControllerEffect.LoadPendingQuestions -> launchLoadPendingQuestions(appScope, repository, sliceFlows, TAG)
+            is ControllerEffect.LoadChildSessions -> launchLoadChildSessions(appScope, repository, store.slices, effect.sessionId, TAG)
+            is ControllerEffect.LoadSessionStatus -> launchLoadSessionStatus(appScope, repository, store.slices)
+            is ControllerEffect.LoadPendingQuestions ->
+                // §R18 Phase 3 Wave 3 (P1-9 wire-up): production now uses the
+                // multi-workdir fan-out added in Wave 1. The single-workdir
+                // `launchLoadPendingQuestions(..., settingsManager.currentWorkdir, ...)`
+                // path was dropping pending questions for any background workdir
+                // (a `question.asked` SSE event for a non-current workdir was
+                // fetched-then-overwritten by the next currentWorkdir poll).
+                // The coordinator owns `slices` (directorySessions keys) +
+                // `settingsManager` (currentWorkdir), so it computes the
+                // workdir set internally — only the repository is passed in.
+                sessionSyncCoordinator.loadPendingQuestionsAllWorkdirs(repository)
             is ControllerEffect.ClearDeltaBuffers -> sessionSyncCoordinator.clearDeltaBuffers()
 
             // ── HostProfileController ──
             is ControllerEffect.CancelSseForReconfigure -> connectionCoordinator.cancelSseForReconfigure()
             is ControllerEffect.StartSse -> connectionCoordinator.startSSE()
-            is ControllerEffect.HostProfileSwitched -> applyReloadDisabledModelsForCurrentHost(settingsManager, hostProfileStore, sliceFlows)
+            is ControllerEffect.HostProfileSwitched -> applyReloadDisabledModelsForCurrentHost(settingsManager, hostProfileStore, store.slices)
             is ControllerEffect.ColdStartReconnect -> connectionCoordinator.coldStartReconnect()
             is ControllerEffect.ResetLocalDataAndResync -> resetLocalDataAndResync()
             is ControllerEffect.ClearSessionWindowCache -> sessionSwitcher.clearSessionWindowCache()
@@ -240,11 +289,11 @@ class AppCore @Inject constructor(
             // ── ConnectionCoordinator ──
             is ControllerEffect.HostReconfigured -> foregroundCatchUpController.onHostReconfigured()
             is ControllerEffect.LoadSessions -> loadSessionsForEffect()
-            is ControllerEffect.LoadAgents -> launchLoadAgents(appScope, repository, sliceFlows, settingsManager, TAG)
-            is ControllerEffect.LoadProviders -> launchLoadProviders(appScope, repository, _settingsFlow, settingsManager, hostProfileStore) { message, error ->
+            is ControllerEffect.LoadAgents -> launchLoadAgents(appScope, repository, store.slices, settingsManager, TAG)
+            is ControllerEffect.LoadProviders -> launchLoadProviders(appScope, repository, store.slices, settingsManager, hostProfileStore) { message, error ->
                 reportNonFatalIssue(TAG, message, error)
             }
-            is ControllerEffect.LoadPendingPermissions -> launchLoadPendingPermissions(appScope, repository, sliceFlows, TAG)
+            is ControllerEffect.LoadPendingPermissions -> launchLoadPendingPermissions(appScope, repository, store.slices, TAG)
             is ControllerEffect.OnSseEvent -> sessionSyncCoordinator.handleEvent(effect.event)
 
             // ── SessionSyncCoordinator ──

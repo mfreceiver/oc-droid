@@ -1,6 +1,7 @@
 package cn.vectory.ocdroid.data.api
 
 import cn.vectory.ocdroid.data.model.*
+import cn.vectory.ocdroid.data.repository.http.HttpHeaders
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonElement
 import retrofit2.Response
@@ -19,8 +20,17 @@ interface OpenCodeApi {
         @Query("roots") roots: Boolean? = null
     ): List<Session>
 
+    // §R18 Final 终审 fix (gpter): createSession is NON-Skip-Dir (it must route
+    // to the target workdir's server instance). After Phase 2-E removed the
+    // global currentDirectory fallback from DirectoryHeaderInterceptor, this
+    // endpoint had NO directory source → POST /session routed to the server's
+    // process cwd, creating sessions in the wrong workdir. Add an explicit
+    // @Header so callers thread the directory (currentWorkdir / draftWorkdir).
     @POST("session")
-    suspend fun createSession(@Body body: CreateSessionRequest = CreateSessionRequest()): Session
+    suspend fun createSession(
+        @Body body: CreateSessionRequest = CreateSessionRequest(),
+        @Header(HttpHeaders.DIRECTORY_HEADER) directory: String?
+    ): Session
 
     @Headers("X-Opencode-Skip-Dir: 1")
     @GET("session/{id}")
@@ -112,19 +122,28 @@ interface OpenCodeApi {
     // pending question. /question/{id}/reply has no sessionID in the URL, so
     // the server cannot reverse-lookup session.directory (unlike /session/{id}
     // routes) and falls back to process.cwd() — which is wrong in tunnel /
-    // multi-directory topologies. DirectoryHeaderInterceptor now injects
-    // X-Opencode-Directory for these (currentDirectory = the open session's dir).
+    // multi-directory topologies. §R18 Phase 2-E step 1: callers now pass the
+    // directory EXPLICITLY via @Header; the OkHttp interceptor preserves a
+    // caller-supplied X-Opencode-Directory (it does NOT overwrite it with the
+    // global workdir fallback), so the marker is intentionally absent (we
+    // want the interceptor's query-mirror path to run too).
     @GET("question")
-    suspend fun getPendingQuestions(): List<QuestionRequest>
+    suspend fun getPendingQuestions(
+        @Header(HttpHeaders.DIRECTORY_HEADER) directory: String?
+    ): List<QuestionRequest>
 
     @POST("question/{requestId}/reply")
     suspend fun replyQuestion(
         @Path("requestId") requestId: String,
-        @Body body: QuestionReplyRequest
+        @Body body: QuestionReplyRequest,
+        @Header(HttpHeaders.DIRECTORY_HEADER) directory: String?
     ): Response<Unit>
 
     @POST("question/{requestId}/reject")
-    suspend fun rejectQuestion(@Path("requestId") requestId: String): Response<Unit>
+    suspend fun rejectQuestion(
+        @Path("requestId") requestId: String,
+        @Header(HttpHeaders.DIRECTORY_HEADER) directory: String?
+    ): Response<Unit>
 
     @Headers("X-Opencode-Skip-Dir: 1")
     @GET("config/providers")
@@ -148,9 +167,11 @@ interface OpenCodeApi {
     suspend fun getCommands(): List<CommandInfo>
 
     /**
-     * Executes a slash command against [sessionId]. The directory context is
-     * inherited from the OkHttp interceptor (i.e. the session's workdir), so
-     * this endpoint deliberately does NOT carry Skip-Dir.
+     * Executes a slash command against [sessionId]. §R18 Phase 2-E step 1:
+     * the directory context is now supplied EXPLICITLY by the caller via
+     * @Header(directory) (the session's workdir). The interceptor preserves
+     * the caller-supplied header (it does NOT overwrite with the global
+     * workdir fallback), so this method deliberately does NOT carry Skip-Dir.
      *
      * Returns Unit on success; failures surface through the Result wrapper in
      * the repository.
@@ -158,7 +179,8 @@ interface OpenCodeApi {
     @POST("session/{id}/command")
     suspend fun executeCommand(
         @Path("id") sessionId: String,
-        @Body body: CommandRequest
+        @Body body: CommandRequest,
+        @Header(HttpHeaders.DIRECTORY_HEADER) directory: String?
     ): Response<Unit>
 
     @Headers("X-Opencode-Skip-Dir: 1")
@@ -169,14 +191,12 @@ interface OpenCodeApi {
     @GET("session/{id}/todo")
     suspend fun getSessionTodos(@Path("id") sessionId: String): List<TodoItem>
 
-    // §R-17 batch4: file* endpoints now carry an EXPLICIT `@Query("directory")`
-    // + the `X-Opencode-Skip-Dir` marker. The directory is no longer resolved
-    // from the global HostConfig._currentDirectory (which is deprecated for
-    // file routes); the caller passes the workdir it wants to scope to. The
-    // Skip-Dir marker makes [DirectoryHeaderInterceptor] skip its workdir
-    // injection (it would otherwise overwrite the explicit value), and the
-    // interceptor still mirrors `?directory` into the query for proxy-safe
-    // routing when the caller supplies it via `@Header` (see
+    // §R-17 batch4 / §R18 Phase 2-E step 2: file* endpoints carry an EXPLICIT
+    // `@Query("directory")` + the `X-Opencode-Skip-Dir` marker. The directory
+    // is supplied by the caller (no global state involved). The Skip-Dir
+    // marker makes [DirectoryHeaderInterceptor] skip its workdir injection,
+    // and the interceptor still mirrors `?directory` into the query for
+    // proxy-safe routing when the caller supplies it via `@Header` (see
     // [getFileTreeForDirectory] for the @Header variant used by the picker).
     @Headers("X-Opencode-Skip-Dir: 1")
     @GET("file")

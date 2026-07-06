@@ -81,7 +81,7 @@ class OpenCodeRepository @Inject constructor(
     // `@Inject constructor @Singleton` for reuse / future DI migration.
     private val hostConfig = HostConfig()
     private val cachePathSanitizer = CachePathSanitizer(hostConfig)
-    private val directoryHeaderInterceptor = DirectoryHeaderInterceptor(hostConfig)
+    private val directoryHeaderInterceptor = DirectoryHeaderInterceptor()
     private val authInterceptor = AuthInterceptor(hostConfig)
     private val cacheControlInterceptor = CacheControlInterceptor(hostConfig, cachePathSanitizer)
     private val trafficCountingInterceptor = TrafficCountingInterceptor(trafficTracker, trafficLogger)
@@ -168,28 +168,11 @@ class OpenCodeRepository @Inject constructor(
         rebuildClients()
     }
 
-    /**
-     * Set the current workdir directory context injected into directory-scoped
-     * requests via the `X-Opencode-Directory` header. Pass null to clear it.
-     *
-     * §R-17 batch4: kept (deprecated) because [DirectoryHeaderInterceptor] still
-     * uses it as the fallback for non-file routes that did NOT opt out via
-     * `X-Opencode-Skip-Dir` (e.g. SSE, /question, /command). File routes
-     * (/file, /file/content, /file/status, /find/file) now take an EXPLICIT
-     * `directory` parameter — do NOT rely on this setter for them.
-     */
-    @Deprecated("R-17 batch4: use explicit directory parameter on file API calls")
-    fun setCurrentDirectory(dir: String?) = hostConfig.setCurrentDirectory(dir)
-
-    /**
-     * Returns the currently configured workdir directory, or null when unset.
-     *
-     * §R-17 batch4: deprecated for the same reason as [setCurrentDirectory] —
-     * file callers should track the directory themselves; this remains for the
-     * interceptor + SSE routing + the host-profile restore path.
-     */
-    @Deprecated("R-17 batch4: use explicit directory parameter on file API calls")
-    fun getCurrentDirectory(): String? = hostConfig.currentDirectory
+    // §R18 Phase 2-E step 2: the deprecated setCurrentDirectory /
+    // getCurrentDirectory forwarding helpers were removed. Non-file routes
+    // (SSE / /question / /command) now take an explicit `directory` parameter
+    // on the API method; DirectoryHeaderInterceptor no longer reads from
+    // HostConfig. File routes already took explicit parameters (R-17 batch4).
 
     suspend fun checkHealth(): Result<HealthResponse> = runSuspendCatching { api.getHealth() }
 
@@ -250,8 +233,11 @@ class OpenCodeRepository @Inject constructor(
      */
     suspend fun getSession(sessionId: String): Result<Session> = runSuspendCatching { api.getSession(sessionId) }
 
-    suspend fun createSession(title: String? = null): Result<Session> = runSuspendCatching {
-        api.createSession(CreateSessionRequest(title = title))
+    // §R18 Final 终审 fix (gpter): directory now explicit (was relying on the
+    // removed global currentDirectory fallback). Callers pass currentWorkdir /
+    // draftWorkdir so POST /session routes to the correct workdir instance.
+    suspend fun createSession(title: String? = null, directory: String? = null): Result<Session> = runSuspendCatching {
+        api.createSession(CreateSessionRequest(title = title), directory)
     }
 
     suspend fun updateSession(sessionId: String, title: String): Result<Session> = runSuspendCatching {
@@ -391,20 +377,24 @@ class OpenCodeRepository @Inject constructor(
         api.respondPermission(sessionId, permissionId, PermissionResponseRequest(response.value))
     }
 
-    suspend fun getPendingQuestions(): Result<List<QuestionRequest>> = runSuspendCatching {
-        api.getPendingQuestions()
+    suspend fun getPendingQuestions(directory: String?): Result<List<QuestionRequest>> = runSuspendCatching {
+        api.getPendingQuestions(directory)
     }
 
-    suspend fun replyQuestion(requestId: String, answers: List<List<String>>): Result<Unit> = runSuspendCatching {
-        val response = api.replyQuestion(requestId, QuestionReplyRequest(answers))
+    suspend fun replyQuestion(
+        requestId: String,
+        answers: List<List<String>>,
+        directory: String?
+    ): Result<Unit> = runSuspendCatching {
+        val response = api.replyQuestion(requestId, QuestionReplyRequest(answers), directory)
         if (!response.isSuccessful) {
             val errorBody = response.errorBody()?.string() ?: response.message()
             throw Exception("Reply failed ${response.code()}: $errorBody")
         }
     }
 
-    suspend fun rejectQuestion(requestId: String): Result<Unit> = runSuspendCatching {
-        val response = api.rejectQuestion(requestId)
+    suspend fun rejectQuestion(requestId: String, directory: String?): Result<Unit> = runSuspendCatching {
+        val response = api.rejectQuestion(requestId, directory)
         if (!response.isSuccessful) {
             val errorBody = response.errorBody()?.string() ?: response.message()
             throw Exception("Reject failed ${response.code()}: $errorBody")
@@ -430,18 +420,22 @@ class OpenCodeRepository @Inject constructor(
     suspend fun getCommands(): Result<List<CommandInfo>> = runSuspendCatching { api.getCommands() }
 
     /**
-     * Executes a slash command against [sessionId]. The current workdir context
-     * is injected automatically by the OkHttp interceptor.
+     * Executes a slash command against [sessionId]. §R18 Phase 2-E step 1:
+     * the directory context is supplied EXPLICITLY by the caller (the
+     * session's workdir); the OkHttp interceptor no longer injects the
+     * global workdir fallback over it.
      */
     suspend fun executeCommand(
         sessionId: String,
         command: String,
         arguments: String = "",
-        agent: String? = null
+        agent: String? = null,
+        directory: String?
     ): Result<Unit> = runSuspendCatching {
         val response = api.executeCommand(
             sessionId,
-            CommandRequest(command = command, arguments = arguments, agent = agent)
+            CommandRequest(command = command, arguments = arguments, agent = agent),
+            directory
         )
         if (!response.isSuccessful) {
             val errorBody = response.errorBody()?.string() ?: response.message()
@@ -458,10 +452,10 @@ class OpenCodeRepository @Inject constructor(
     }
 
     /**
-     * §R-17 batch4: lists files under [directory] (absolute workdir) at the
-     * relative [path]. The directory is passed EXPLICITLY to the server via
-     * `?directory` + the `X-Opencode-Skip-Dir` marker on the API method, so
-     * this no longer depends on the global [setCurrentDirectory] state.
+     * §R-17 batch4 / §R18 Phase 2-E step 2: lists files under [directory]
+     * (absolute workdir) at the relative [path]. The directory is passed
+     * EXPLICITLY to the server via `?directory` + the `X-Opencode-Skip-Dir`
+     * marker on the API method (no global state involved).
      */
     suspend fun getFileTree(directory: String, path: String? = null): Result<List<FileNode>> = runSuspendCatching {
         api.getFileTree(path ?: "", directory)
@@ -493,8 +487,14 @@ class OpenCodeRepository @Inject constructor(
         api.findFile(query, limit, directory)
     }
 
-    fun connectSSE(): Flow<Result<SSEEvent>> =
-        sseClient.connect(hostConfig.baseUrl, hostConfig.username, hostConfig.password)
+    /**
+     * §R18 Phase 2-E step 1: SSE feed now takes an explicit [directory] so
+     * the server routes events to the right InstanceState without relying on
+     * the global workdir. Null defers to the interceptor's fallback (still
+     * present in step 1; removed in step 2).
+     */
+    fun connectSSE(directory: String?): Flow<Result<SSEEvent>> =
+        sseClient.connect(hostConfig.baseUrl, hostConfig.username, hostConfig.password, directory)
 
     /**
      * Activates a tunnel by POSTing the password to the tunnel endpoint.

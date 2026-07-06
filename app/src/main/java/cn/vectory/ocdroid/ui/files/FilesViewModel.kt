@@ -18,11 +18,11 @@ import kotlinx.coroutines.launch
 data class FilesUiState(
     val currentPath: String = "",
     /**
-     * §R-17 batch4: absolute workdir this browser is scoped to. Threaded
-     * explicitly into every file API call (replacing the prior reliance on
-     * [OpenCodeRepository.setCurrentDirectory]'s global state). null while
-     * no session/project has been bound yet — loads are skipped in that case
-     * because there is no directory to scope them to.
+     * §R-17 batch4 / §R18 Phase 2-E step 2: absolute workdir this browser is
+     * scoped to. Threaded explicitly into every file API call (the global
+     * currentDirectory state was removed). null while no session/project has
+     * been bound yet — loads are skipped in that case because there is no
+     * directory to scope them to.
      */
     val workdir: String? = null,
     val files: List<FileNode> = emptyList(),
@@ -80,8 +80,20 @@ class FilesViewModel @Inject constructor(
 
     fun navigateUp() {
         val dir = _state.value.workdir ?: return
+        val current = _state.value.currentPath
+        // §R18 P1-6 fix (maxer+glmer): only an EMPTY currentPath is the true
+        // root — no-op there without bumping gen. A '/'-less path like "src"
+        // is a FIRST-LEVEL CHILD whose parent is "" (the workdir root); that
+        // is a legitimate navigation, not a no-op. The prior guard
+        // `normalized.substringBeforeLast('/', "").isEmpty()` returned "" for
+        // any '/'-less path (substringBeforeLast returns the default when the
+        // delimiter is absent), so it misclassified every top-level child as
+        // root and blocked the child → root transition.
+        if (current.isEmpty()) return  // true root: no-op, don't bump gen
+        val normalized = current.trimEnd('/')
+        // parentPath == "" is legitimate (back to workdir root) — do NOT return.
+        val parentPath = if (normalized.isEmpty()) "" else normalized.substringBeforeLast('/', "")
         val gen = requestGeneration.incrementAndGet()
-        val parentPath = _state.value.currentPath.substringBeforeLast("/", "")
         _state.update { it.copy(currentPath = parentPath) }
         loadFiles(parentPath, dir, gen)
     }
@@ -127,7 +139,10 @@ class FilesViewModel @Inject constructor(
             return
         }
 
-        loadPreview(pathToShow, sessionDirectory, isRefresh = false)
+        // §R18 P1-5: deep-link entry only has a path string (no FileNode), so
+        // isDirectory is unknown — loadPreview will probe via getFileContent
+        // and fall back to a tree lookup on failure / non-file type response.
+        loadPreview(pathToShow, sessionDirectory, isRefresh = false, isDirectory = null)
     }
 
     fun refreshPreview(sessionDirectory: String?) {
@@ -135,10 +150,38 @@ class FilesViewModel @Inject constructor(
             _state.update { it.copy(workdir = sessionDirectory) }
         }
         val pathToShow = _state.value.selectedFilePath ?: return
-        loadPreview(pathToShow, sessionDirectory, isRefresh = true)
+        // §R18 P1-5: state tracks only the path, not whether it was a dir/file,
+        // so the reload also probes. (A future commit could persist the kind
+        // alongside selectedFilePath and pass it through.)
+        loadPreview(pathToShow, sessionDirectory, isRefresh = true, isDirectory = null)
     }
 
-    private fun loadPreview(pathToShow: String, sessionDirectory: String?, isRefresh: Boolean) {
+    /**
+     * §R18 P1-5: [isDirectory] is a caller-provided hint that selects between
+     * the file-content path and the directory-tree path WITHOUT relying on
+     * content emptiness:
+     *  - `true`  → skip [OpenCodeRepository.getFileContent] entirely and go
+     *              straight to [loadDirectoryPreview]. Used when the caller
+     *              already has a [FileNode] (or equivalent signal) and wants
+     *              to avoid both the empty-file-vs-directory ambiguity and a
+     *              wasted round-trip.
+     *  - `false` → trust the file response unconditionally (an empty file is
+     *              still a file).
+     *  - `null`  → probe mode for deep-link entries that only have a path
+     *              string. We issue a single [OpenCodeRepository.getFileContent]
+     *              call; success with `type != "directory"` resolves as a file
+     *              (covers text, binary, image, video, and any future file
+     *              type — even when content is empty/blank), otherwise we fall
+     *              back to [loadDirectoryPreview]. This is single-shot: we
+     *              never issue both calls in parallel, so a directory path
+     *              costs at most one extra round-trip.
+     */
+    private fun loadPreview(
+        pathToShow: String,
+        sessionDirectory: String?,
+        isRefresh: Boolean,
+        isDirectory: Boolean?
+    ) {
         val relPath = resolveRelativePreviewPath(pathToShow, sessionDirectory)
         // §R-17 batch4 fix (maxer): only bump gen after confirming workdir is valid,
         // to avoid invalidating other in-flight loads when there's nothing to load.
@@ -147,6 +190,17 @@ class FilesViewModel @Inject constructor(
             return
         }
         val gen = requestGeneration.incrementAndGet()
+
+        if (isDirectory == true) {
+            viewModelScope.launch {
+                if (isRefresh) {
+                    _state.update { it.copy(isPreviewRefreshing = true, error = null) }
+                }
+                loadDirectoryPreview(pathToShow, relPath, sessionDirectory, isRefresh, gen)
+            }
+            return
+        }
+
         viewModelScope.launch {
             if (isRefresh) {
                 _state.update { it.copy(isPreviewRefreshing = true, error = null) }
@@ -166,7 +220,21 @@ class FilesViewModel @Inject constructor(
             repository.getFileContent(dir, relPath)
                 .onSuccess { content ->
                     if (gen != requestGeneration.get()) return@launch
-                    if (!content.content.isNullOrBlank()) {
+                    // §R18 P1-5 fix (glmer): discriminate by
+                    // `content.type != "directory"`, NOT by `isText || isBinary`.
+                    // An empty text/binary file legitimately returns
+                    // content == null/""; the prior `!content.content.isNullOrBlank()`
+                    // check misdetected such files as directories and silently
+                    // swapped in a tree preview. Using `type != "directory"`
+                    // (instead of the narrower `isText || isBinary`) also
+                    // future-proofs against upcoming file kinds — image/video/
+                    // etc. all carry a non-"directory" type and must read as
+                    // files, which the prior check would have misclassified
+                    // as a directory. isDirectory==false (caller-asserted
+                    // file) trusts the response unconditionally; null falls
+                    // back to a tree lookup only when the server explicitly
+                    // reports type == "directory".
+                    if (isDirectory == false || content.type != "directory") {
                         _state.update {
                             it.copy(
                                 selectedFileContent = content,

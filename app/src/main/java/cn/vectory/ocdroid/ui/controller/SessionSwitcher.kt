@@ -3,14 +3,12 @@ package cn.vectory.ocdroid.ui.controller
 import cn.vectory.ocdroid.data.model.Session
 import cn.vectory.ocdroid.data.repository.OpenCodeRepository
 import cn.vectory.ocdroid.ui.CachedSessionWindow
-import cn.vectory.ocdroid.ui.ComposerState
 import cn.vectory.ocdroid.ui.SharedEffectBus
+import cn.vectory.ocdroid.ui.SharedStateStore
 import cn.vectory.ocdroid.ui.SliceFlows
 import cn.vectory.ocdroid.ui.persistSessionCache
 import cn.vectory.ocdroid.ui.upsertSession
 import cn.vectory.ocdroid.util.SettingsManager
-import kotlinx.coroutines.flow.MutableStateFlow
-import kotlinx.coroutines.flow.update
 
 /**
  * R-16 M2b → R-17 batch3b: owns the session-switching state machine — the
@@ -49,15 +47,15 @@ import kotlinx.coroutines.flow.update
  */
 @Suppress("DEPRECATION")
 internal class SessionSwitcher(
-    private val composerFlow: MutableStateFlow<ComposerState>,
-    private val expandedParts: MutableStateFlow<Map<String, Boolean>>,
-    private val slices: SliceFlows,
+    private val store: SharedStateStore,
     private val settingsManager: SettingsManager,
     private val repository: OpenCodeRepository,
     private val effects: SharedEffectBus,
     // Injectable clock so lastViewedTime is deterministically testable.
     private val clock: () -> Long = { System.currentTimeMillis() }
 ) {
+    /** §R18 Phase 4 (P0-9): the 9-slice bundle is derived from [store]. */
+    private val slices: SliceFlows get() = store.slices
     /**
      * §Per-session message cache (LRU): maps sessionId → the loaded message
      * window ([CachedSessionWindow]) so switching A→B→A restores A's already-
@@ -157,19 +155,22 @@ internal class SessionSwitcher(
             // write into the newly-selected session's state. Done here
             // (alongside the LRU write-back) because this branch only fires on
             // a real session change — a same-session reselect keeps its deltas.
-            effects.effects.tryEmit(ControllerEffect.ClearDeltaBuffers)
+            // §R18 Phase 3 Wave 1 (P1-3 C 类): switchTo 多发顺序敏感 → 同步 tryEmitEffect。
+            effects.tryEmitEffect(ControllerEffect.ClearDeltaBuffers)
         }
 
         // ── Step 2: selectSessionState (inlined) ────────────────────────────
         // Save old draft, set currentSessionId, restore new draft, clear chat.
         val oldSessionId = slices.chat.value.currentSessionId
-        val currentInputText = composerFlow.value.inputText
+        val currentInputText = slices.composer.value.inputText
         if (oldSessionId != null) {
             settingsManager.setDraftText(oldSessionId, currentInputText)
         }
-        settingsManager.currentSessionId = sessionId
+        // §R18 Phase 2-F: chatFlow.currentSessionId (set in the chat.update
+        // below) is the sole runtime source; the AppCore collector persists
+        // the new non-null id back to SettingsManager. No manual write here.
         val restoredDraft = settingsManager.getDraftText(sessionId)
-        slices.chat.update {
+        slices.mutateChat {
             it.copy(
                 currentSessionId = sessionId,
                 messages = emptyList(),
@@ -190,7 +191,7 @@ internal class SessionSwitcher(
             )
         }
         // Restore the selected session's draft into the composer slice.
-        composerFlow.update { it.copy(inputText = restoredDraft) }
+        slices.mutateComposer { it.copy(inputText = restoredDraft) }
 
         // ── Step 3: Restore cached window from LRU ──────────────────────────
         // If the new session has a cached window, seed messages/parts/cursor/
@@ -199,7 +200,7 @@ internal class SessionSwitcher(
         // §preserveUnfetched merge keeps older pages and merges the tail.
         val cachedWindow = sessionWindowCache[sessionId]
         if (cachedWindow != null) {
-            slices.chat.update {
+            slices.mutateChat {
                 it.copy(
                     messages = cachedWindow.messages,
                     partsByMessage = cachedWindow.partsByMessage,
@@ -217,17 +218,24 @@ internal class SessionSwitcher(
         // #10: if the session is currently only in directorySessions, upsert
         // it now so currentSession lookup + workdir sync work.
         if (targetSession != null && slices.sessionList.value.sessions.none { it.id == sessionId }) {
-            slices.sessionList.update { s -> s.copy(sessions = upsertSession(s.sessions, targetSession)) }
+            slices.mutateSessionList { s -> s.copy(sessions = upsertSession(s.sessions, targetSession)) }
         }
 
         // ── Step 5: Reset collapsible-card expansion state ──────────────────
         // Switching sessions collapses all cards (#13). Done here so history
         // pagination (loadMore) preserves the user's in-progress expand state.
-        expandedParts.value = emptyMap()
+        // §R18 Phase 3 Wave 1 (C-2): .value = → .update { } (CAS, atomic).
+        // §R18 Phase 4 (P0-9): write via SharedStateStore.mutateExpandedParts.
+        store.mutateExpandedParts { emptyMap() }
 
-        // ── Step 6: Sync repository's workdir context ───────────────────────
-        val directory = slices.sessionList.value.sessions.firstOrNull { it.id == sessionId }?.directory
-        repository.setCurrentDirectory(directory)
+        // ── Step 6: Workdir tracking ───────────────────────────────────────
+        // §R18 Phase 2-E step 2: the repository.setCurrentDirectory call was
+        // removed; downstream directory-scoped calls now take an explicit
+        // `directory` parameter. settingsManager.currentWorkdir is updated
+        // below (Step 8 / persistSessionCache path) when the user opens a
+        // new root session — the per-session directory is read directly from
+        // the Session object at each callsite.
+        // (No global mutation needed; intentionally blank.)
 
         // ── Step 6.5: Refresh pending questions (§stale-question) ───────────
         // Re-fetch the server's pending-questions list so the new session's
@@ -241,18 +249,19 @@ internal class SessionSwitcher(
         // leakage is a non-issue: partsByMessage is already cleared in Step 2
         // so the outgoing session's parts don't participate in the stale calc,
         // and stale matching is by messageId+callId, not sessionId.
-        effects.effects.tryEmit(ControllerEffect.LoadPendingQuestions)
+        effects.tryEmitEffect(ControllerEffect.LoadPendingQuestions)
 
         // ── Step 7: Load messages + session status + child sessions ─────────
         // resetLimit=false on cache hit (don't wipe restored messages); true
         // on cache miss (cold-load latest 5 + seed cursor).
-        effects.effects.tryEmit(ControllerEffect.LoadMessages(sessionId, resetLimit = cachedWindow == null))
-        effects.effects.tryEmit(ControllerEffect.LoadSessionStatus)
-        effects.effects.tryEmit(ControllerEffect.LoadChildSessions(sessionId))
+        // §R18 Phase 3 Wave 1 (P1-3 C 类): switchTo 多发顺序敏感 (LoadPendingQuestions → LoadMessages → LoadSessionStatus → LoadChildSessions) → 同步 tryEmitEffect。
+        effects.tryEmitEffect(ControllerEffect.LoadMessages(sessionId, resetLimit = cachedWindow == null))
+        effects.tryEmitEffect(ControllerEffect.LoadSessionStatus)
+        effects.tryEmitEffect(ControllerEffect.LoadChildSessions(sessionId))
 
         // ── Step 8: Unread state machine + draft discard + openSessionIds ───
         val now = clock()
-        slices.unread.update {
+        slices.mutateUnread {
             // Re-mark the previous session as unread if it was busy when the
             // user navigated away.
             val withReMark = if (previousWasBusyAndCleared) {
@@ -269,14 +278,14 @@ internal class SessionSwitcher(
             )
         }
         // Selecting a real session discards any in-progress draft.
-        composerFlow.update { it.copy(draftWorkdir = null) }
+        slices.mutateComposer { it.copy(draftWorkdir = null) }
 
         // Browser-tab semantics: prepend only when NOT already in the list.
         // Skip sub-agents (parentId != null) — transient navigations.
         if (targetSession?.parentId == null && sessionId !in slices.sessionList.value.openSessionIds) {
             val updated = (listOf(sessionId) + slices.sessionList.value.openSessionIds).take(8)
             settingsManager.openSessionIds = updated
-            slices.sessionList.update { it.copy(openSessionIds = updated) }
+            slices.mutateSessionList { it.copy(openSessionIds = updated) }
             // Fix #5: persist the newly-opened session's metadata into
             // sessionCache so its tab survives a restart.
             val sourceSessions = (slices.sessionList.value.sessions + slices.sessionList.value.directorySessions.values.flatten())

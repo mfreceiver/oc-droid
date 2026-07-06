@@ -1,18 +1,26 @@
 package cn.vectory.ocdroid.ui.controller
 
+import cn.vectory.ocdroid.data.model.QuestionRequest
+import cn.vectory.ocdroid.data.repository.OpenCodeRepository
 import cn.vectory.ocdroid.ui.ChatState
 import cn.vectory.ocdroid.ui.ComposerState
+import cn.vectory.ocdroid.ui.SessionListState
 import cn.vectory.ocdroid.ui.SharedEffectBus
+import cn.vectory.ocdroid.ui.SharedStateStore
 import cn.vectory.ocdroid.di.AppLifecycleMonitor
 import cn.vectory.ocdroid.util.SettingsManager
+import io.mockk.coEvery
+import io.mockk.coVerify
 import io.mockk.mockk
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.toList
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.StandardTestDispatcher
+import kotlinx.coroutines.test.TestScope
 import kotlinx.coroutines.test.UnconfinedTestDispatcher
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
@@ -43,18 +51,24 @@ import org.junit.Test
 @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
 class ForegroundCatchUpControllerTest {
 
+    // §R18 Phase 4 (P0-9): the controller takes a SharedStateStore; the test
+    // holds read-only StateFlow views of the slices it asserts against. Writes
+    // (the controller's own inline writes + the test seeding) go through the
+    // per-slice mutateXxx funnels on [store].
+    private lateinit var store: SharedStateStore
     private lateinit var foregroundFlow: MutableStateFlow<Boolean>
-    private lateinit var chatFlow: MutableStateFlow<ChatState>
-    private lateinit var composerFlow: MutableStateFlow<ComposerState>
+    private lateinit var chatFlow: StateFlow<ChatState>
+    private lateinit var composerFlow: StateFlow<ComposerState>
     private lateinit var settingsManager: SettingsManager
     private lateinit var effects: SharedEffectBus
     private var nowMs: Long = 0L
 
     @Before
     fun setUp() {
+        store = SharedStateStore()
         foregroundFlow = MutableStateFlow(true)
-        chatFlow = MutableStateFlow(ChatState())
-        composerFlow = MutableStateFlow(ComposerState())
+        chatFlow = store.chatFlow
+        composerFlow = store.composerFlow
         settingsManager = mockk(relaxed = true)
         effects = SharedEffectBus()
         nowMs = 0L
@@ -94,8 +108,7 @@ class ForegroundCatchUpControllerTest {
         ForegroundCatchUpController(
             appLifecycleMonitor = stubMonitor(),
             scope = scope,
-            chatFlow = chatFlow,
-            composerFlow = composerFlow,
+            store = store,
             settingsManager = settingsManager,
             effects = effects,
             clock = { nowMs }
@@ -121,8 +134,8 @@ class ForegroundCatchUpControllerTest {
         controller.onForegroundChanged(true) // consume the baseline emission
         nowMs = 1_000
         // Set up an in-progress draft so clearDraft actually does work.
-        composerFlow.value = composerFlow.value.copy(draftWorkdir = "/tmp/proj")
-        chatFlow.value = chatFlow.value.copy(currentSessionId = null)
+        store.mutateComposer { it.copy(draftWorkdir = "/tmp/proj") }
+        store.mutateChat { it.copy(currentSessionId = null) }
 
         controller.onForegroundChanged(false)
 
@@ -176,7 +189,7 @@ class ForegroundCatchUpControllerTest {
         // drives the catch-up (single entry point). Need a prior connect so
         // sseHasConnectedOnce is true, and a current session for the catch-up
         // to target.
-        chatFlow.value = chatFlow.value.copy(currentSessionId = "session-M")
+        store.mutateChat { it.copy(currentSessionId = "session-M") }
         controller.onServerConnected() // first connect: sets sseHasConnectedOnce
         controller.onServerConnected() // reconnect: should catch up
         assertEquals(1, collected.filterIsInstance<ControllerEffect.CatchUpAfterDisconnect>().size)
@@ -191,7 +204,7 @@ class ForegroundCatchUpControllerTest {
         nowMs = 1_000
         controller.onForegroundChanged(false) // background @1000
         nowMs = 1_000 + (6 * 60 * 1000L) // 6min absence — long tier
-        chatFlow.value = chatFlow.value.copy(currentSessionId = "session-X")
+        store.mutateChat { it.copy(currentSessionId = "session-X") }
 
         controller.onForegroundChanged(true)
 
@@ -224,7 +237,7 @@ class ForegroundCatchUpControllerTest {
     @Test
     fun `second server connected with current session catches up`() = withCollectedEffects { controllerScope, collected ->
         val controller = makeController(controllerScope)
-        chatFlow.value = chatFlow.value.copy(currentSessionId = "session-Y")
+        store.mutateChat { it.copy(currentSessionId = "session-Y") }
         controller.onServerConnected() // first → sets sseHasConnectedOnce
         controller.onServerConnected() // reconnect → catch up
         val catchUps = collected.filterIsInstance<ControllerEffect.CatchUpAfterDisconnect>()
@@ -246,7 +259,7 @@ class ForegroundCatchUpControllerTest {
     @Test
     fun `onHostReconfigured resets so next connect is treated as cold start`() = withCollectedEffects { controllerScope, collected ->
         val controller = makeController(controllerScope)
-        chatFlow.value = chatFlow.value.copy(currentSessionId = "session-Z")
+        store.mutateChat { it.copy(currentSessionId = "session-Z") }
         controller.onServerConnected() // first → sseHasConnectedOnce=true
         controller.onServerConnected() // reconnect → would catch up
         assertEquals(1, collected.filterIsInstance<ControllerEffect.CatchUpAfterDisconnect>().size)
@@ -275,7 +288,7 @@ class ForegroundCatchUpControllerTest {
         nowMs = 3_000
         controller.onForegroundChanged(false) // background
         nowMs = 3_000 + 20_000 // 20s — medium tier (would NOT suppress)
-        chatFlow.value = chatFlow.value.copy(currentSessionId = "session-W")
+        store.mutateChat { it.copy(currentSessionId = "session-W") }
 
         controller.onForegroundChanged(true)
         controller.onServerConnected() // first connect after this cycle
@@ -292,5 +305,75 @@ class ForegroundCatchUpControllerTest {
     /** Returns a no-op AppLifecycleMonitor stub backed by [foregroundFlow]. */
     private fun stubMonitor(): AppLifecycleMonitor = mockk(relaxed = true) {
         io.mockk.every { isInForeground } returns foregroundFlow
+    }
+
+    // ── §R18 Phase 3 Wave 1 (P1-9): multi-workdir pending questions fan-out ──
+
+    @Test
+    fun `catchUpPendingQuestionsAllWorkdirs fans out per workdir and merges results by id`() {
+        // §P1-9: catch-up across all known workdirs so a question that arrived
+        // for a non-current workdir during background doesn't disappear. The
+        // controller owns its [SharedStateStore] and merges per-workdir results
+        // into the sessionList slice via mutateSessionList.
+        store.mutateSessionList {
+            SessionListState(pendingQuestions = listOf(
+                QuestionRequest(id = "existing", sessionId = "s0", questions = emptyList())
+            ))
+        }
+        val repository = mockk<OpenCodeRepository>(relaxed = true)
+        coEvery { repository.getPendingQuestions("/a") } returns Result.success(
+            listOf(QuestionRequest(id = "qa", sessionId = "sa", questions = emptyList()))
+        )
+        coEvery { repository.getPendingQuestions("/b") } returns Result.success(
+            listOf(QuestionRequest(id = "qb", sessionId = "sb", questions = emptyList()))
+        )
+
+        // Use an unconfined scope so per-workdir launches are drained eagerly.
+        val testScope = TestScope(UnconfinedTestDispatcher())
+        val controller = ForegroundCatchUpController(
+            appLifecycleMonitor = stubMonitor(),
+            scope = testScope,
+            store = store,
+            settingsManager = settingsManager,
+            effects = effects,
+            clock = { nowMs },
+        )
+
+        controller.catchUpPendingQuestionsAllWorkdirs(
+            repository = repository,
+            workdirs = listOf("/a", "/b"),
+        )
+        testScope.testScheduler.advanceUntilIdle()
+
+        val ids = store.sessionListFlow.value.pendingQuestions.map { it.id }.toSet()
+        assertTrue("qa from /a", "qa" in ids)
+        assertTrue("qb from /b", "qb" in ids)
+        assertTrue("existing preserved (gap-fill merge)", "existing" in ids)
+        coVerify(exactly = 1) { repository.getPendingQuestions("/a") }
+        coVerify(exactly = 1) { repository.getPendingQuestions("/b") }
+        testScope.cancel()
+    }
+
+    @Test
+    fun `catchUpPendingQuestionsAllWorkdirs is a no-op for an empty workdir list`() {
+        val repository = mockk<OpenCodeRepository>(relaxed = true)
+        val testScope = TestScope(UnconfinedTestDispatcher())
+        val controller = ForegroundCatchUpController(
+            appLifecycleMonitor = stubMonitor(),
+            scope = testScope,
+            store = store,
+            settingsManager = settingsManager,
+            effects = effects,
+            clock = { nowMs },
+        )
+
+        controller.catchUpPendingQuestionsAllWorkdirs(
+            repository = repository,
+            workdirs = emptyList(),
+        )
+        testScope.testScheduler.advanceUntilIdle()
+
+        coVerify(exactly = 0) { repository.getPendingQuestions(any()) }
+        testScope.cancel()
     }
 }

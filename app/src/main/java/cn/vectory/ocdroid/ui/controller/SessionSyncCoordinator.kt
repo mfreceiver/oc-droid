@@ -1,5 +1,7 @@
 package cn.vectory.ocdroid.ui.controller
 
+import cn.vectory.ocdroid.BuildConfig
+import cn.vectory.ocdroid.R
 import cn.vectory.ocdroid.data.api.NOISY_SSE_LOG_EVENTS
 import cn.vectory.ocdroid.data.model.Message
 import cn.vectory.ocdroid.data.model.Part
@@ -8,6 +10,7 @@ import cn.vectory.ocdroid.data.model.Session
 import cn.vectory.ocdroid.data.model.SessionStatus
 import cn.vectory.ocdroid.data.model.QuestionRequest
 import cn.vectory.ocdroid.data.model.TodoItem
+import cn.vectory.ocdroid.data.repository.OpenCodeRepository
 import cn.vectory.ocdroid.ui.ChatState
 import cn.vectory.ocdroid.ui.SessionListState
 import cn.vectory.ocdroid.ui.SharedEffectBus
@@ -29,8 +32,6 @@ import cn.vectory.ocdroid.util.SettingsManager
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
-import kotlinx.coroutines.flow.MutableStateFlow
-import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
@@ -50,7 +51,7 @@ import kotlinx.serialization.json.decodeFromJsonElement
  * `handleIncomingSseEvent` / `markSessionUnread` free functions): every
  * server-pushed message / session / status / part / permission / question /
  * todo event is folded in-place into the slice flows via
- * `slices.chat.update { ... }` (patch-if-found + insert-if-absent for messages;
+ * `slices.mutateChat { ... }` (patch-if-found + insert-if-absent for messages;
  * upsert for sessions; in-place map updates for statuses/todos/questions;
  * streaming overlay for parts). The side effects a fold can trigger
  * (authoritative reload, permission refresh, catch-up) flow through
@@ -113,6 +114,19 @@ internal class SessionSyncCoordinator(
      * or use @Synchronized.
      */
     private val flushJobs = mutableMapOf<String, Job>()
+
+    /**
+     * §R18 Phase 3 Wave 1 (P0-7): per-event-type counters for SSE events that
+     * fell through the dispatch `when`'s else branch. Lets diagnostics (and
+     * future tests) see which unknown types are recurring vs one-off. Only
+     * incremented for NON-noisy types (noisy ones in [NOISY_SSE_LOG_EVENTS]
+     * are known-intentional skips).
+     */
+    private val unknownEventCounters = java.util.concurrent.ConcurrentHashMap<String, java.util.concurrent.atomic.AtomicInteger>()
+
+    /** Test/diagnostic read: snapshot of unknown-event counts by type. */
+    internal fun unknownEventCountsSnapshot(): Map<String, Int> =
+        unknownEventCounters.mapValues { it.value.get() }
     /**
      * Entry point for every SSE event. Mirrors the pre-extraction
      * `MainViewModel.handleSSEEvent`: first the `server.connected` catch-up
@@ -127,7 +141,8 @@ internal class SessionSyncCoordinator(
      */
     fun handleEvent(event: SSEEvent) {
         if (event.payload.type == "server.connected") {
-            effects.effects.tryEmit(ControllerEffect.ServerConnected)
+            // §R18 Phase 3 Wave 1 (P1-3 B 类): 单发非 suspend → tryEmitEffect。
+            effects.tryEmitEffect(ControllerEffect.ServerConnected)
         }
         dispatchSseEvent(event)
     }
@@ -177,7 +192,7 @@ internal class SessionSyncCoordinator(
             "session.created" -> {
                 val created = parseSessionCreatedEvent(event)
                 if (created != null) {
-                    slices.sessionList.update { s -> s.applySessionCreated(created.session) }
+                    slices.mutateSessionList { s -> s.applySessionCreated(created.session) }
                 } else {
                     reportNonFatalIssue(tag, "Ignoring invalid session.created payload")
                 }
@@ -199,14 +214,19 @@ internal class SessionSyncCoordinator(
                             settingsManager.openSessionIds = newOpenIds
                         }
                         if (chatBefore.currentSessionId == updated.id) {
-                            settingsManager.currentSessionId = null
-                            slices.sessionList.update { s -> s.applyArchiveEviction(updated, newOpenIds) }
-                            slices.chat.update { it.applyArchivedChatClear() }
+                            // §R18 Phase 2-F: chatFlow.currentSessionId is the
+                            // sole runtime source; the chat.update below clears
+                            // it and the AppCore collector persists non-null
+                            // changes (null is intentionally not persisted —
+                            // applySavedSettings re-filters archived ids on the
+                            // next cold start).
+                            slices.mutateSessionList { s -> s.applyArchiveEviction(updated, newOpenIds) }
+                            slices.mutateChat { it.applyArchivedChatClear() }
                         } else {
-                            slices.sessionList.update { s -> s.applyArchiveEviction(updated, newOpenIds) }
+                            slices.mutateSessionList { s -> s.applyArchiveEviction(updated, newOpenIds) }
                         }
                     } else {
-                        slices.sessionList.update { s -> s.applySessionUpsert(updated) }
+                        slices.mutateSessionList { s -> s.applySessionUpsert(updated) }
                     }
                 } else {
                     reportNonFatalIssue(tag, "Ignoring invalid session.updated payload")
@@ -215,7 +235,7 @@ internal class SessionSyncCoordinator(
             "session.status" -> {
                 val statusEvent = parseSessionStatusEvent(event)
                 if (statusEvent != null) {
-                    slices.sessionList.update {
+                    slices.mutateSessionList {
                         it.applySessionStatus(statusEvent.sessionId, statusEvent.status)
                     }
                     // §cross-client-sync: when the CURRENT session goes busy, a run
@@ -233,7 +253,8 @@ internal class SessionSyncCoordinator(
                         statusEvent.sessionId == slices.chat.value.currentSessionId
                     ) {
                         DebugLog.i("Sync", "session.status busy (current) → reload (cross-client message sync)")
-                        effects.effects.tryEmit(ControllerEffect.LoadMessages(statusEvent.sessionId, true))
+                        // §R18 Phase 3 Wave 1 (P1-3 B 类): 单发非 suspend → tryEmitEffect。
+                        effects.tryEmitEffect(ControllerEffect.LoadMessages(statusEvent.sessionId, true))
                     }
                     // When a temp-cleared session finishes its in-flight work
                     // (busy -> idle) and is NOT the currently-open one, drop it
@@ -246,7 +267,7 @@ internal class SessionSyncCoordinator(
                         statusEvent.sessionId != slices.chat.value.currentSessionId &&
                         slices.unread.value.tempClearedUnread.contains(statusEvent.sessionId)
                     ) {
-                        slices.unread.update { u -> u.dropTempCleared(statusEvent.sessionId) }
+                        slices.mutateUnread { u -> u.dropTempCleared(statusEvent.sessionId) }
                     }
                     // SSE-trust model: session.status (busy/idle) only updates the
                     // status badge. It does NOT reload or clear streaming buffers
@@ -270,7 +291,8 @@ internal class SessionSyncCoordinator(
                         val shouldReload = s.streamingPartTexts.isNotEmpty() || s.streamingReasoningPart != null
                         DebugLog.d("Sync", "session.status idle → ${if (shouldReload) "reload" else "no-op"}")
                         if (shouldReload) {
-                            effects.effects.tryEmit(ControllerEffect.LoadMessages(statusEvent.sessionId, true))
+                            // §R18 Phase 3 Wave 1 (P1-3 B 类): 单发非 suspend → tryEmitEffect。
+                            effects.tryEmitEffect(ControllerEffect.LoadMessages(statusEvent.sessionId, true))
                         }
                     }
                 } else {
@@ -288,7 +310,8 @@ internal class SessionSyncCoordinator(
                 val isCurrent = sessionId != null && sessionId == slices.chat.value.currentSessionId
                 DebugLog.i("Sync", "message.created: ${if (isCurrent) "reload current" else "mark unread"}")
                 if (sessionId != null && sessionId == slices.chat.value.currentSessionId) {
-                    effects.effects.tryEmit(ControllerEffect.LoadMessages(sessionId, true))
+                    // §R18 Phase 3 Wave 1 (P1-3 B 类): 单发非 suspend → tryEmitEffect。
+                    effects.tryEmitEffect(ControllerEffect.LoadMessages(sessionId, true))
                 } else if (sessionId != null) {
                     // Mark unread: an out-of-band message arrived for a session
                     // the user is not currently viewing.
@@ -332,7 +355,7 @@ internal class SessionSyncCoordinator(
                         // when NOT found, append (insert) the new message at the
                         // tail (oldest-first list).
                         var found = false
-                        slices.chat.update { c ->
+                        slices.mutateChat { c ->
                             val (next, wasFound) = c.applyMessageUpdated(updated)
                             found = wasFound
                             next
@@ -390,7 +413,7 @@ internal class SessionSyncCoordinator(
                             val existingParts = slices.chat.value.partsByMessage[msgId]
                             val hasCorrectType = existingParts?.any { it.id == pId && it.type == pType } == true
                             if (!hasCorrectType) {
-                                slices.chat.update { c ->
+                                slices.mutateChat { c ->
                                     c.applyPartCreatedPlaceholder(pType, pId, msgId, deltaEvent.sessionId)
                                 }
                             }
@@ -410,7 +433,7 @@ internal class SessionSyncCoordinator(
                             // authoritative accumulated text, only the latest value
                             // matters) and flush in one state write.
                             if (flushJobs[key]?.isActive != true) {
-                                slices.chat.update { c ->
+                                slices.mutateChat { c ->
                                     c.applyPartFullTextLeadingEdge(
                                         partId = key,
                                         fullText = fullText,
@@ -427,7 +450,7 @@ internal class SessionSyncCoordinator(
                                 // writes the buffered fullText in one state write.
                                 // streamingReasoningPart was already set on this
                                 // part's leading edge.
-                                slices.chat.update { c -> c.replaceFullTextBuffer(key, fullText) }
+                                slices.mutateChat { c -> c.replaceFullTextBuffer(key, fullText) }
                             }
                         } else if (!delta.isNullOrBlank()) {
                             // §flicker-fix: apply the same leading-edge +
@@ -442,7 +465,7 @@ internal class SessionSyncCoordinator(
                             // once; subsequent deltas within the window buffer
                             // into deltaBuffer and flush in one batch.
                             if (flushJobs[key]?.isActive != true) {
-                                slices.chat.update { c ->
+                                slices.mutateChat { c ->
                                     c.applyPartDeltaLeadingEdge(
                                         partId = key,
                                         delta = delta,
@@ -458,7 +481,7 @@ internal class SessionSyncCoordinator(
                                 // DELTA_COALESCE_MS flush appends the batch in
                                 // one state write. streamingReasoningPart was
                                 // already set on this part's leading edge.
-                                slices.chat.update { c -> c.appendDeltaBuffer(key, delta) }
+                                slices.mutateChat { c -> c.appendDeltaBuffer(key, delta) }
                             }
                         }
                         // Else: ids present + both text & delta null/blank =
@@ -476,13 +499,14 @@ internal class SessionSyncCoordinator(
                         //
                         // 修复：不再手动清空 overlay。reload(resetLimit=false) 本身保留
                         // streamingPartTexts/streamingReasoningPart（见 launchLoadMessages
-                        // §append-safe MainViewModelMessageActions.kt:108-109），当前流式
+                        // §append-safe MessageActions.kt:175），当前流式
                         // 气泡继续显示不坍缩。仅 clearDeltaBuffers() 丢弃旧 part 的 pending
                         // delta 缓冲（新 part 随后用权威 fullText 恢复，不丢数据）。下一
                         // 个带 ID 的 message.part.updated 正确更新流式状态；回合结束 idle
                         // finalization（resetLimit=true + streamingFinalized）正常清空 overlay。
                         clearDeltaBuffers()
-                        effects.effects.tryEmit(ControllerEffect.LoadMessages(deltaEvent.sessionId, false))
+                        // §R18 Phase 3 Wave 1 (P1-3 B 类): 单发非 suspend → tryEmitEffect。
+                        effects.tryEmitEffect(ControllerEffect.LoadMessages(deltaEvent.sessionId, false))
                     }
                 }
             }
@@ -534,7 +558,7 @@ internal class SessionSyncCoordinator(
                     // from "msgId:partId" to partId, matching UI consumers).
                     if (flushJobs[key]?.isActive != true) {
                         // Leading edge: write now, then open the coalesce window.
-                        slices.chat.update { c ->
+                        slices.mutateChat { c ->
                             c.applyPartDeltaLeadingEdge(
                                 partId = key,
                                 delta = delta,
@@ -547,17 +571,18 @@ internal class SessionSyncCoordinator(
                     } else {
                         // Trailing coalesce: buffer; the pending DELTA_COALESCE_MS
                         // flush will append the batch in one state write.
-                        slices.chat.update { c -> c.appendDeltaBuffer(key, delta) }
+                        slices.mutateChat { c -> c.appendDeltaBuffer(key, delta) }
                     }
                 }
             }
             "permission.asked" -> {
-                effects.effects.tryEmit(ControllerEffect.LoadPendingPermissions)
+                // §R18 Phase 3 Wave 1 (P1-3 B 类): 单发非 suspend → tryEmitEffect。
+                effects.tryEmitEffect(ControllerEffect.LoadPendingPermissions)
             }
             "question.asked" -> {
                 val question = parseQuestionAskedEvent(event)
                 if (question != null) {
-                    slices.sessionList.update { currentState -> currentState.applyQuestionAsked(question) }
+                    slices.mutateSessionList { currentState -> currentState.applyQuestionAsked(question) }
                 } else {
                     reportNonFatalIssue(tag, "Ignoring invalid question.asked payload")
                 }
@@ -566,7 +591,7 @@ internal class SessionSyncCoordinator(
                 val requestId = event.payload.getString("requestID")
                     ?: event.payload.getString("id")
                 if (requestId != null) {
-                    slices.sessionList.update { currentState -> currentState.applyQuestionResolved(requestId) }
+                    slices.mutateSessionList { currentState -> currentState.applyQuestionResolved(requestId) }
                 }
             }
             "todo.updated" -> {
@@ -580,7 +605,7 @@ internal class SessionSyncCoordinator(
                     reportNonFatalIssue(tag, "Ignoring invalid todo.updated payload: ${e.message}")
                     return
                 }
-                slices.sessionList.update { s -> s.applyTodoUpdated(sessionId, todos) }
+                slices.mutateSessionList { s -> s.applyTodoUpdated(sessionId, todos) }
             }
             "session.error" -> {
                 // §error-feedback (Issue 4): the server emits session.error with
@@ -597,11 +622,18 @@ internal class SessionSyncCoordinator(
                 val rawMsg = (data?.get("message") as? kotlinx.serialization.json.JsonPrimitive)?.content
                     ?: (data?.get("error") as? kotlinx.serialization.json.JsonPrimitive)?.content
                     ?: "Server session error"
-                val composed = if (!name.isNullOrBlank()) "$name: $rawMsg" else rawMsg
-                effects.uiEvents.tryEmit(UiEvent.Error(composed))
+                // §R18 Phase 2-G: pick the format by whether `name` is present
+                // so the rendered text matches the prior "$name: $rawMsg" /
+                // "$rawMsg" shape exactly (only the prefix label is i18n'd;
+                // name + rawMsg come from the server payload).
+                if (!name.isNullOrBlank()) {
+                    effects.uiEvents.tryEmit(UiEvent.Error(R.string.error_session_sse_named, listOf(name, rawMsg)))
+                } else {
+                    effects.uiEvents.tryEmit(UiEvent.Error(R.string.error_session_sse_unnamed, listOf(rawMsg)))
+                }
                 val sid = event.payload.getString("sessionID")
                 if (sid != null && sid == slices.chat.value.currentSessionId) {
-                    slices.chat.update { c ->
+                    slices.mutateChat { c ->
                         val lastAssistant = c.messages.lastOrNull { it.isAssistant }
                         if (lastAssistant == null || lastAssistant.error != null) c
                         else c.copy(messages = c.messages.map { m ->
@@ -611,14 +643,27 @@ internal class SessionSyncCoordinator(
                 }
             }
             else -> {
-                // §error-feedback (Issue 4): only warn about genuinely unknown event
-                // types. Types in NOISY_SSE_LOG_EVENTS (server.connected, plugin.added,
-                // catalog.updated, integration.updated, server.heartbeat) are known-
-                // intentional non-dispatched events, not surprises — skip the warning
-                // to avoid log noise on every reconnect.
+                // §R18 Phase 3 Wave 1 (P0-7): surface unrecognized SSE event
+                // types instead of silently dropping them. NOISY_SSE_LOG_EVENTS
+                // (server.connected / plugin.added / catalog.updated /
+                // integration.updated / server.heartbeat / message.part.*)
+                // are known-intentional non-dispatched types — skip the warning
+                // to avoid log noise on every reconnect / per-token streaming
+                // event, but still bump the counter for diagnostics.
+                //
+                // §test-guard: the existing `plugin.added` test asserts
+                // `verify(exactly = 0) { Log.w(...) }`; the `!noisy` gate
+                // preserves that contract (DebugLog.w forwards to Log.w).
                 if (!noisy) {
-                    DebugLog.w(tag, "Unhandled SSE event type: ${event.payload.type}")
+                    val keys = event.payload.properties?.keys?.take(5) ?: emptyList()
+                    DebugLog.w("SSE", "unrecognized event type=$type session=$evtSession payload-keys=$keys")
+                    if (BuildConfig.DEBUG) {
+                        effects.tryEmitUiEvent(UiEvent.Debug("unknown SSE: $type"))
+                    }
                 }
+                unknownEventCounters
+                    .computeIfAbsent(type) { java.util.concurrent.atomic.AtomicInteger(0) }
+                    .incrementAndGet()
             }
         }
     }
@@ -635,7 +680,7 @@ internal class SessionSyncCoordinator(
      */
     private fun markSessionUnread(sessionId: String) {
         val currentSessionId = slices.chat.value.currentSessionId
-        slices.unread.update { u -> u.applyMarkSessionUnread(sessionId, currentSessionId) }
+        slices.mutateUnread { u -> u.applyMarkSessionUnread(sessionId, currentSessionId) }
     }
 
     // ── §M5 delta coalescing helpers ────────────────
@@ -683,7 +728,7 @@ internal class SessionSyncCoordinator(
      */
     private fun flushDeltaBuffer(partId: String) {
         flushJobs.remove(partId)
-        slices.chat.update { c -> c.flushCoalesceBufferForPart(partId) }
+        slices.mutateChat { c -> c.flushCoalesceBufferForPart(partId) }
     }
 
     /**
@@ -697,7 +742,7 @@ internal class SessionSyncCoordinator(
     @Suppress("unused")
     private fun cancelDeltaFlush(partId: String) {
         flushJobs.remove(partId)?.cancel()
-        slices.chat.update { c -> c.clearCoalesceBufferForPart(partId) }
+        slices.mutateChat { c -> c.clearCoalesceBufferForPart(partId) }
     }
 
     /**
@@ -710,7 +755,53 @@ internal class SessionSyncCoordinator(
     fun clearDeltaBuffers() {
         flushJobs.values.forEach { it.cancel() }
         flushJobs.clear()
-        slices.chat.update { c -> c.clearAllCoalesceBuffers() }
+        slices.mutateChat { c -> c.clearAllCoalesceBuffers() }
+    }
+
+    // ── §R18 Phase 3 Wave 1 (P1-9): multi-workdir pending questions fan-out ──
+
+    /**
+     * §P1-9: refreshes pending questions across EVERY known workdir (the in-
+     * memory `directorySessions` keys + `settingsManager.currentWorkdir`),
+     * not just `currentWorkdir`. The single-workdir AppCore dispatch handler
+     * for `LoadPendingQuestions` reads only `currentWorkdir`, so a
+     * `question.asked` SSE event for any OTHER workdir is fetched-then-
+     * immediately-overwritten by the next currentWorkdir poll — background
+     * workdirs' questions silently vanish.
+     *
+     * The coordinator already owns [slices] (so it can read `directorySessions`)
+     * + [settingsManager] (currentWorkdir) + [scope]. The repository is passed
+     * in because the batch 3b migration left this controller without it
+     * (callers fan out via [ControllerEffect]s); AppCore (out of this wave's
+     * write scope) will need a one-line wiring update to call this method.
+     *
+     * Merge semantics: byGet wins, pre-existing fills gaps (mirrors
+     * `launchLoadPendingQuestions` so the per-workdir fan-out composes without
+     * dropping prior SSE-delivered questions).
+     *
+     * §scope-note: AppCore needs to call this from its catch-up / switch paths
+     * to wire production. The method is exercised directly by
+     * [SessionSyncCoordinatorTest].
+     */
+    fun loadPendingQuestionsAllWorkdirs(repository: OpenCodeRepository) {
+        val workdirs = (
+            slices.sessionList.value.directorySessions.keys +
+                listOfNotNull(settingsManager.currentWorkdir)
+            )
+            .filter { it.isNotBlank() }
+            .distinct()
+        if (workdirs.isEmpty()) return
+        workdirs.forEach { dir ->
+            scope.launch {
+                repository.getPendingQuestions(dir)
+                    .onSuccess { questions ->
+                        mergePendingQuestionsById(slices::mutateSessionList, questions)
+                    }
+                    .onFailure { error ->
+                        DebugLog.w(tag, "fan-out getPendingQuestions failed for $dir: ${error.message}")
+                    }
+            }
+        }
     }
 
     companion object {

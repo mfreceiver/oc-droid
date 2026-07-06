@@ -1,6 +1,8 @@
 package cn.vectory.ocdroid.ui
 
 import androidx.lifecycle.ViewModel
+import androidx.lifecycle.viewModelScope
+import cn.vectory.ocdroid.R
 import cn.vectory.ocdroid.util.runSuspendCatching
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.launch
@@ -13,7 +15,7 @@ import javax.inject.Inject
  *
  * **batch3d**: method bodies physically moved here from [AppCore]. The VM
  * calls its domain controller ([AppCore.sessionSwitcher]) and the
- * [MainViewModelSessionListActions] / [MainViewModelSessionMutationActions]
+ * [SessionListActions] / [SessionMutationActions]
  * free functions directly — no `core.<method>()` self-bypass.
  *
  * State reads/writes flow through the shared [SharedStateStore] slices.
@@ -36,7 +38,11 @@ class SessionViewModel @Inject constructor(
 
     fun openSubAgent(childSessionId: String) {
         val parentId = core.store.chatFlow.value.currentSessionId
-        core.appScope.launch {
+        // §R18 Phase 3 Wave 2 (drift #6 / P1-7): user-triggered open-sub-agent
+        // → viewModelScope. Closure captures `this@SessionViewModel` (via the
+        // selectSession call below) — viewModelScope keeps it alive exactly as
+        // long as the VM.
+        viewModelScope.launch {
             val child = core.store.sessionListFlow.value.sessions.firstOrNull { it.id == childSessionId }
                 ?: parentId?.let { pid -> core.store.sessionListFlow.value.childSessions[pid]?.find { it.id == childSessionId } }
                 ?: core.store.sessionListFlow.value.childSessions.values.flatten().firstOrNull { it.id == childSessionId }
@@ -45,7 +51,7 @@ class SessionViewModel @Inject constructor(
                 core.writeSessionList { state -> state.copy(sessions = upsertSession(state.sessions, child)) }
                 selectSession(childSessionId)
             } else {
-                core.effectBus.uiEvents.tryEmit(UiEvent.Error("子任务会话不可用"))
+                core.effectBus.uiEvents.tryEmit(UiEvent.Error(R.string.error_child_session_unavailable))
             }
         }
     }
@@ -61,7 +67,9 @@ class SessionViewModel @Inject constructor(
         core.writeSessionList { it.copy(openSessionIds = updated) }
         core.writeUnread { it.copy(unreadSessions = it.unreadSessions - sessionId) }
         if (isCurrent && nextId == null) {
-            core.settingsManager.currentSessionId = null
+            // §R18 Phase 2-F: chatFlow is the sole runtime source; the
+            // chat.update below clears currentSessionId. The AppCore collector
+            // drops null, so no manual SettingsManager write.
             core.writeChat { it.copy(currentSessionId = null, messages = emptyList(), partsByMessage = emptyMap()) }
         }
         if (isCurrent && nextId == null) {
@@ -85,14 +93,21 @@ class SessionViewModel @Inject constructor(
     fun createSession(title: String? = null) {
         launchCreateSession(
             core.appScope, core.repository, core.store.slices, title, ::selectSession,
-            EventEmitter { event -> core.effectBus.uiEvents.tryEmit(event) }
+            EventEmitter { event -> core.effectBus.uiEvents.tryEmit(event) },
+            directory = core.settingsManager.currentWorkdir   // §R18 Final 终审 fix (gpter)
         )
     }
 
     fun createSessionInWorkdir(workdir: String) {
         val workdir = workdir.trim()
-        core.repository.setCurrentDirectory(workdir)
-        core.settingsManager.currentSessionId = null
+        // §R18 Phase 2-E step 2: the repository.setCurrentDirectory call was
+        // removed; downstream directory-scoped calls (SSE / /question /
+        // /command) now take an explicit `directory` parameter, and the
+        // composer / settingsManager state below carries the workdir forward
+        // (draftWorkdir + settingsManager.currentWorkdir).
+        // §R18 Phase 2-F: chatFlow.currentSessionId (cleared in the writeChat
+        // below) is the sole runtime source; the AppCore collector drops null,
+        // so no manual SettingsManager write.
         core.writeChat {
             it.copy(
                 currentSessionId = null,
@@ -109,7 +124,11 @@ class SessionViewModel @Inject constructor(
         }
         core.settingsManager.currentWorkdir = workdir
         core.settingsManager.addRecentWorkdir(workdir)
-        core.appScope.launch {
+        // §R18 Phase 3 Wave 2 (drift #6): ephemeral directory-session prefetch
+        // → viewModelScope. If the user navigates away mid-fetch the partial
+        // directorySessions write is acceptable (refreshDirectorySessions
+        // re-fetches on next open); cancellation on VM clear is safe.
+        viewModelScope.launch {
             core.repository.getSessionsForDirectory(workdir)
                 .onSuccess { sessions ->
                     core.writeSessionList { it.copy(directorySessions = it.directorySessions + (workdir to sessions)) }
@@ -148,7 +167,9 @@ class SessionViewModel @Inject constructor(
     fun refreshDirectorySessions(workdir: String) {
         val workdir = workdir.trim()
         if (workdir.isBlank()) return
-        core.appScope.launch {
+        // §R18 Phase 3 Wave 2 (drift #6): user-triggered refresh →
+        // viewModelScope (ephemeral; cancel on VM clear, re-fetchable on return).
+        viewModelScope.launch {
             core.repository.getSessionsForDirectory(workdir)
                 .onSuccess { sessions ->
                     core.writeSessionList { it.copy(directorySessions = it.directorySessions + (workdir to sessions)) }
@@ -181,6 +202,10 @@ class SessionViewModel @Inject constructor(
             scope = core.appScope,
             repository = core.repository,
             slices = core.store.slices,
+            // §R18 Phase 2-E step 1: explicit workdir now required (was the
+            // global currentDirectory before; behavior preserved via the
+            // settingsManager fallback the global was seeded from).
+            directory = core.settingsManager.currentWorkdir,
             tag = TAG,
         )
     }

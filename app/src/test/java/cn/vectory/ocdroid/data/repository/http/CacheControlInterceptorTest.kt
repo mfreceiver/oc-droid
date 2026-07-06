@@ -128,4 +128,126 @@ class CacheControlInterceptorTest {
             )
         }
     }
+
+    // ---- Phase 5: branch-coverage edge cases ----
+
+    @Test
+    fun `HEAD method forces no-store even on whitelisted path`() {
+        // The cacheable check requires method == "GET" explicitly; HEAD
+        // is treated like any other non-cacheable method.
+        server.enqueue(MockResponse().setBody("ok"))
+
+        client.newCall(
+            Request.Builder().url(server.url("/global/health")).method("HEAD", null).build()
+        ).execute().use { /* drain */ }
+
+        val request = server.takeRequest()
+        assertEquals("no-store", request.getHeader("Cache-Control"))
+    }
+
+    @Test
+    fun `DELETE method forces no-store even on whitelisted path`() {
+        server.enqueue(MockResponse().setBody("ok"))
+
+        client.newCall(
+            Request.Builder().url(server.url("/agent")).delete().build()
+        ).execute().use { /* drain */ }
+
+        val request = server.takeRequest()
+        assertEquals("no-store", request.getHeader("Cache-Control"))
+    }
+
+    @Test
+    fun `sub-path baseUrl strips prefix before whitelist match`() {
+        // A whitelisted endpoint deployed under a sub-path (e.g. behind a
+        // reverse proxy mount) must still match the whitelist AFTER the
+        // sanitizer strips the prefix. This is the §Stage D (gpter 阻塞 #2)
+        // contract end-to-end through the interceptor.
+        hostConfig.configure(
+            baseUrl = server.url("/opencode").toString().trimEnd('/'),
+            username = null,
+            password = null,
+            allowInsecure = false
+        )
+        server.enqueue(MockResponse().setBody("ok"))
+
+        client.newCall(Request.Builder().url(server.url("/opencode/global/health")).build())
+            .execute().use { /* drain */ }
+
+        val request = server.takeRequest()
+        assertNull(
+            "cacheable endpoint behind sub-path must NOT carry no-store",
+            request.getHeader("Cache-Control")
+        )
+    }
+
+    @Test
+    fun `sub-path baseUrl still forces no-store for non-whitelisted endpoint`() {
+        hostConfig.configure(
+            baseUrl = server.url("/opencode").toString().trimEnd('/'),
+            username = null,
+            password = null,
+            allowInsecure = false
+        )
+        server.enqueue(MockResponse().setBody("ok"))
+
+        client.newCall(Request.Builder().url(server.url("/opencode/session")).build())
+            .execute().use { /* drain */ }
+
+        val request = server.takeRequest()
+        assertEquals("no-store", request.getHeader("Cache-Control"))
+    }
+
+    @Test
+    fun `global health whitelist entry is cacheable when no auth`() {
+        // Covers the "/global/health" entry separately from the loop above
+        // (which only iterates 3 of the 4 entries).
+        server.enqueue(MockResponse().setBody("ok"))
+
+        client.newCall(Request.Builder().url(server.url("/global/health")).build())
+            .execute().use { /* drain */ }
+
+        val request = server.takeRequest()
+        assertNull(request.getHeader("Cache-Control"))
+    }
+
+    @Test
+    fun `non-whitelisted path that shares prefix with whitelist entry forces no-store`() {
+        // Exact-match contract: "/agents" is NOT "/agent" and must force
+        // no-store. Guards against a future endsWith relaxation.
+        server.enqueue(MockResponse().setBody("ok"))
+
+        client.newCall(Request.Builder().url(server.url("/agents")).build())
+            .execute().use { /* drain */ }
+
+        val request = server.takeRequest()
+        assertEquals("no-store", request.getHeader("Cache-Control"))
+    }
+
+    @Test
+    fun `configuring auth after a no-auth request flips subsequent requests to no-store`() {
+        // First request: no auth, cacheable.
+        server.enqueue(MockResponse().setBody("ok"))
+        client.newCall(Request.Builder().url(server.url("/global/health")).build())
+            .execute().use { /* drain */ }
+        val r1 = server.takeRequest()
+        assertNull(r1.getHeader("Cache-Control"))
+
+        // Now configure credentials; the SAME path must now force no-store.
+        hostConfig.configure(
+            baseUrl = server.url("/").toString().trimEnd('/'),
+            username = "alice",
+            password = "secret",
+            allowInsecure = false
+        )
+        server.enqueue(MockResponse().setBody("ok"))
+        client.newCall(Request.Builder().url(server.url("/global/health")).build())
+            .execute().use { /* drain */ }
+        val r2 = server.takeRequest()
+        assertEquals(
+            "auth config flip must force no-store on the same path",
+            "no-store",
+            r2.getHeader("Cache-Control")
+        )
+    }
 }

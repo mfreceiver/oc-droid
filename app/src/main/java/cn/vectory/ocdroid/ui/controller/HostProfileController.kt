@@ -1,11 +1,13 @@
 package cn.vectory.ocdroid.ui.controller
 
 import android.util.Log
+import cn.vectory.ocdroid.R
 import cn.vectory.ocdroid.data.model.HostProfile
 import cn.vectory.ocdroid.data.repository.HostProfileStore
 import cn.vectory.ocdroid.data.repository.OpenCodeRepository
 import cn.vectory.ocdroid.ui.ComposerState
 import cn.vectory.ocdroid.ui.ConnectionFormSettings
+import cn.vectory.ocdroid.ui.ConnectionPhase
 import cn.vectory.ocdroid.ui.ConnectionState
 import cn.vectory.ocdroid.ui.FileState
 import cn.vectory.ocdroid.ui.SessionListState
@@ -14,7 +16,6 @@ import cn.vectory.ocdroid.ui.SharedEffectBus
 import cn.vectory.ocdroid.ui.SliceFlows
 import cn.vectory.ocdroid.ui.TrafficState
 import cn.vectory.ocdroid.ui.TunnelActivationState
-import cn.vectory.ocdroid.ui.TUNNEL_SUCCESS_TOAST
 import cn.vectory.ocdroid.ui.UiEvent
 import cn.vectory.ocdroid.ui.UnreadState
 import cn.vectory.ocdroid.ui.errorMessageOrFallback
@@ -85,7 +86,7 @@ internal class HostProfileController(
 
     /** Updates host-profile list + current id on the host slice. */
     internal fun refreshHostProfileState() {
-        slices.host.update {
+        slices.mutateHost {
             it.copy(
                 hostProfiles = hostProfileStore.profiles(),
                 currentHostProfileId = hostProfileStore.currentProfile().id
@@ -165,11 +166,14 @@ internal class HostProfileController(
         }
         if (isActiveHost && (toggleChanged || urlChanged)) {
             configureRepositoryForProfile(normalized)
-            effects.effects.tryEmit(ControllerEffect.ForceReconnect)
+            // §R18 Phase 3 Wave 1 (P1-3 C 类): saveHostProfile 多发顺序敏感 → 保持同步 tryEmitEffect。
+            // wrapping in scope.launch would race the synchronous purge above; FIFO via the
+            // SUSPEND buffer (256) makes a synchronous multi-emit reliable in practice.
+            effects.tryEmitEffect(ControllerEffect.ForceReconnect)
             // §disabled-models-consistency: disabled-models 等按 baseUrl 存储的 per-host
             // 状态在新 URL 生效后必须重新装载（与 selectHostProfile 路径对齐）。否则
             // 改 URL 后旧 baseUrl 的禁用集仍然显示，状态不一致。
-            effects.effects.tryEmit(ControllerEffect.HostProfileSwitched)
+            effects.tryEmitEffect(ControllerEffect.HostProfileSwitched)
         }
     }
 
@@ -199,11 +203,12 @@ internal class HostProfileController(
             // later re-add of an identical URL).
             deletedServerUrl?.let { settingsManager.clearModelDataForUrl(it) }
             purgePerHostState()
-            effects.effects.tryEmit(ControllerEffect.ForceReconnect)
+            // §R18 Phase 3 Wave 1 (P1-3 C 类): deleteHostProfile(wasCurrent) 多发顺序敏感 → 同步 tryEmitEffect。
+            effects.tryEmitEffect(ControllerEffect.ForceReconnect)
             // §disabled-models-consistency: deleting the active host switches to
             // a different baseUrl — reload per-host state (same as selectHostProfile
             // and saveHostProfile urlChanged paths).
-            effects.effects.tryEmit(ControllerEffect.HostProfileSwitched)
+            effects.tryEmitEffect(ControllerEffect.HostProfileSwitched)
         }
     }
 
@@ -229,12 +234,14 @@ internal class HostProfileController(
             purgePerHostState()
             configureRepositoryForProfile(profile)
             refreshHostProfileState()
-            effects.effects.tryEmit(ControllerEffect.ForceReconnect)
+            // §R18 Phase 3 Wave 1 (P1-3 A 类): scope.launch suspend 上下文 → 用 suspend emitEffect
+            // 可靠+FIFO，不会丢。
+            effects.emitEffect(ControllerEffect.ForceReconnect)
             // §host-switch-order: only AFTER select + reconnect have settled do
             // we hand control back for host-scoped post-processing. Doing this
             // synchronously in the caller raced the launch above and read the
             // PREVIOUS host's baseUrl.
-            effects.effects.tryEmit(ControllerEffect.HostProfileSwitched)
+            effects.emitEffect(ControllerEffect.HostProfileSwitched)
         }
     }
 
@@ -251,7 +258,7 @@ internal class HostProfileController(
         // refreshNonce). Use .copy() on the existing slice value so those are
         // preserved (a fresh ChatState() would clobber them); only the AppState-
         // represented chat fields are reset here.
-        slices.chat.update {
+        slices.mutateChat {
             it.copy(
                 currentSessionId = null,
                 messages = emptyList(),
@@ -260,7 +267,7 @@ internal class HostProfileController(
                 streamingReasoningPart = null
             )
         }
-        slices.sessionList.update {
+        slices.mutateSessionList {
             it.copy(
                 sessions = emptyList(),
                 directorySessions = emptyMap(),
@@ -269,7 +276,7 @@ internal class HostProfileController(
                 sessionTodos = emptyMap()
             )
         }
-        slices.unread.update {
+        slices.mutateUnread {
             it.copy(
                 unreadSessions = emptySet(),
                 tempClearedUnread = emptySet(),
@@ -277,12 +284,16 @@ internal class HostProfileController(
             )
         }
         // Reset the composer + settings slices that belong to the previous host.
-        slices.composer.update { it.copy(draftWorkdir = null) }
-        slices.settings.update { it.copy(availableCommands = emptyList()) }
-        slices.connection.update { it.copy(serverVersion = null) }
+        slices.mutateComposer { it.copy(draftWorkdir = null) }
+        slices.mutateSettings { it.copy(availableCommands = emptyList()) }
+        slices.mutateConnection { it.copy(serverVersion = null) }
         // Drop per-session message cache (belongs to previous host's sessions).
-        effects.effects.tryEmit(ControllerEffect.ClearSessionWindowCache)
-        settingsManager.currentSessionId = null
+        // §R18 Phase 3 Wave 1 (P1-3 B 类): 单发非 suspend → tryEmitEffect (log+counter)。
+        effects.tryEmitEffect(ControllerEffect.ClearSessionWindowCache)
+        // §R18 Phase 2-F: currentSessionId clear above (chat slice) is the
+        // runtime source; the AppCore collector persists non-null changes only,
+        // so no manual null write here. openSessionIds/sessionCache/currentWorkdir/
+        // recentWorkdirs are still persisted directly (no collector for them).
         settingsManager.openSessionIds = emptyList()
         settingsManager.sessionCache = emptyList()
         // §H3: clear persisted workdir — a path from host A is meaningless on
@@ -316,7 +327,7 @@ internal class HostProfileController(
             // the in-memory slice stale.
             settingsManager.clearModelDataForUrl(oldUrl)
         }
-        effects.effects.tryEmit(ControllerEffect.CancelSseForReconfigure)
+        effects.tryEmitEffect(ControllerEffect.CancelSseForReconfigure)
         settingsManager.serverUrl = url
         settingsManager.username = username
         settingsManager.password = password
@@ -329,23 +340,28 @@ internal class HostProfileController(
         // client (same as configureRepositoryForProfile).
         HttpImageHolder.updateSsl(allowInsecure)
         if (urlChanging) {
-            effects.effects.tryEmit(ControllerEffect.HostProfileSwitched)
+            // §R18 Phase 3 Wave 1 (P1-3 C 类): configureServer 多发顺序敏感 (CancelSse 在前，HostProfileSwitched 在后) → 保持同步 tryEmitEffect。
+            effects.tryEmitEffect(ControllerEffect.HostProfileSwitched)
         }
     }
 
     /**
      * Reconfigures the repository for a [profile]: cancels SSE, configures the
      * URL/credentials with the profile's allowInsecureConnections flag (R-01),
-     * and restores the persisted workdir.
+     * and (Phase 1) restored the persisted workdir.
      *
      * §Stage D (gpter 阻塞 #1): this is the single authoritative SSE
      * cancellation point for all profile-based reconfigure paths
      * (selectHostProfile / deleteHostProfile / testConnection).
-     * §H2: repository.configure() resets currentDirectory to null, so the
-     * persisted workdir is restored afterwards.
+     * §R18 Phase 2-E step 2: the repository.setCurrentDirectory call that
+     * used to restore the workdir here is removed — directory-scoped calls
+     * now take an explicit `directory` parameter sourced from
+     * settingsManager.currentWorkdir. The workdir itself is still cleared on
+     * host switch by the caller (see resetLocalDataAndResync).
      */
     internal fun configureRepositoryForProfile(profile: HostProfile) {
-        effects.effects.tryEmit(ControllerEffect.CancelSseForReconfigure)
+        // §R18 Phase 3 Wave 1 (P1-3 B 类): 单发非 suspend (configureRepositoryForProfile 可能被 C 类路径调用，但本处只是一次 emit) → tryEmitEffect。
+        effects.tryEmitEffect(ControllerEffect.CancelSseForReconfigure)
         val password = profile.basicAuth?.passwordId?.let { settingsManager.basicAuthPassword(it) }
         repository.configure(
             profile.serverUrl, profile.basicAuth?.username, password,
@@ -355,8 +371,6 @@ internal class HostProfileController(
         // with the active host so self-signed HTTPS images load under the
         // trust-all toggle (same entry point as REST / SSE).
         HttpImageHolder.updateSsl(profile.allowInsecureConnections)
-        // §H2: restore persisted workdir after repository.configure resets it.
-        settingsManager.currentWorkdir?.let { repository.setCurrentDirectory(it) }
     }
 
     // ── Tunnel activation ──────────────────────────────────────────────────
@@ -371,33 +385,33 @@ internal class HostProfileController(
         val profile = hostProfileStore.currentProfile()
         val passwordId = profile.tunnelPasswordId
         if (passwordId == null) {
-            slices.connection.update {
+            slices.mutateConnection {
                 it.copy(
                     tunnelActivationState = TunnelActivationState.Error("未设置隧道密码")
                 )
             }
-            effects.uiEvents.tryEmit(UiEvent.Error("隧道激活失败：未设置隧道认证密码。请在「服务器」设置中填写隧道密码并保存后再试。"))
+            effects.uiEvents.tryEmit(UiEvent.Error(R.string.error_tunnel_password_unset))
             return
         }
         val password = settingsManager.getTunnelPassword(passwordId)
         if (password.isNullOrBlank()) {
-            slices.connection.update {
+            slices.mutateConnection {
                 it.copy(
                     tunnelActivationState = TunnelActivationState.Error("隧道密码为空")
                 )
             }
-            effects.uiEvents.tryEmit(UiEvent.Error("隧道激活失败：已配置密码标识但存储为空（可能保存时未输入）。请重新输入隧道密码并保存。"))
+            effects.uiEvents.tryEmit(UiEvent.Error(R.string.error_tunnel_password_empty))
             return
         }
 
-        slices.connection.update { it.copy(tunnelActivationState = TunnelActivationState.Loading) }
+        slices.mutateConnection { it.copy(tunnelActivationState = TunnelActivationState.Loading) }
         scope.launch {
             repository.activateTunnel(
                 profile.serverUrl, password,
                 allowInsecure = profile.allowInsecureConnections
             )
                 .onSuccess {
-                    slices.connection.update {
+                    slices.mutateConnection {
                         it.copy(
                             // §success-channel / §R-17 batch2: success now rides a
                             // UiEvent.Success (NOT error) so ChatScreen renders a
@@ -407,22 +421,23 @@ internal class HostProfileController(
                             tunnelActivationState = TunnelActivationState.Success
                         )
                     }
-                    effects.uiEvents.tryEmit(UiEvent.Success(TUNNEL_SUCCESS_TOAST))
+                    effects.uiEvents.tryEmit(UiEvent.Success(R.string.success_tunnel_activated))
                     Log.d(TAG, "Tunnel activated successfully for ${profile.serverUrl}")
                     // §user-req: tunnel 激活后自动冷启动级刷新。1.5s 经验值——cloudflared
                     // 类守护进程在 activate API 返回后需要短暂时间建立路由。coldStartReconnect
                     // 自带 3 次退避重试（1/2/4s）兜底，即使首次探测失败也会在 ~7s 内成功。
                     delay(1500)
-                    effects.effects.tryEmit(ControllerEffect.ColdStartReconnect)
+                    // §R18 Phase 3 Wave 1 (P1-3 A 类): activateTunnel scope.launch onSuccess suspend 上下文 → suspend emitEffect。
+                    effects.emitEffect(ControllerEffect.ColdStartReconnect)
                 }
                 .onFailure { error ->
                     val msg = errorMessageOrFallback(error, "未知错误（无异常信息）")
-                    slices.connection.update {
+                    slices.mutateConnection {
                         it.copy(
                             tunnelActivationState = TunnelActivationState.Error(msg)
                         )
                     }
-                    effects.uiEvents.tryEmit(UiEvent.Error("隧道激活失败：$msg"))
+                    effects.uiEvents.tryEmit(UiEvent.Error(R.string.error_tunnel_activation_failed, listOf(msg)))
                     Log.e(TAG, "Tunnel activation failed", error)
                 }
         }
@@ -445,16 +460,17 @@ internal class HostProfileController(
         // 2. Zero the in-memory traffic tracker (direct — same domain).
         trafficTracker.reset()
         // 3. Drop the per-session message-window cache (sibling controller).
-        effects.effects.tryEmit(ControllerEffect.ClearSessionWindowCache)
+        // §R18 Phase 3 Wave 1 (P1-3 C 类): resetLocalDataAndResync 多发顺序敏感 (Clear → Cancel → ColdStart) → 保持同步 tryEmitEffect。
+        effects.tryEmitEffect(ControllerEffect.ClearSessionWindowCache)
         // 4. Tear down SSE + reset catch-up flags.
-        effects.effects.tryEmit(ControllerEffect.CancelSseForReconfigure)
+        effects.tryEmitEffect(ControllerEffect.CancelSseForReconfigure)
         // 5. Reset slices to defaults, preserving the host slice (kept above)
         //    and the chat slice's slice-only fields (isCompacting /
         //    compactStartedAt / refreshNonce — use .copy() so they survive).
         //    Equivalent to the pre-migration `AppState(hostProfiles,
         //    currentHostProfileId)` full-reset: every AppState-represented
         //    field returns to its default.
-        slices.chat.update { c ->
+        slices.mutateChat { c ->
             c.copy(
                 currentSessionId = null,
                 messages = emptyList(),
@@ -469,24 +485,24 @@ internal class HostProfileController(
                 currentModel = null
             )
         }
-        slices.sessionList.update { SessionListState() }
-        slices.unread.update { UnreadState() }
+        slices.mutateSessionList { SessionListState() }
+        slices.mutateUnread { UnreadState() }
         // 6. Reset the connection + traffic slices to "reconnecting / zeroed".
         //    Defaults already cover tunnelActivationState=Idle; we override
         //    isConnecting + connectionPhase to signal the in-flight reconnect.
-        slices.connection.update {
+        slices.mutateConnection {
             ConnectionState(
                 isConnecting = true,
-                connectionPhase = "reconnecting"
+                connectionPhase = ConnectionPhase.Reconnecting
             )
         }
-        slices.traffic.update { TrafficState() }
+        slices.mutateTraffic { TrafficState() }
         // 7. Reset the composer/file/settings slices to defaults.
-        slices.composer.update { ComposerState() }
-        slices.file.update { FileState() }
-        slices.settings.update { SettingsState() }
+        slices.mutateComposer { ComposerState() }
+        slices.mutateFile { FileState() }
+        slices.mutateSettings { SettingsState() }
         // 8. Reconnect to the (preserved) current host profile and re-fetch.
-        effects.effects.tryEmit(ControllerEffect.ColdStartReconnect)
+        effects.tryEmitEffect(ControllerEffect.ColdStartReconnect)
     }
 
     companion object {

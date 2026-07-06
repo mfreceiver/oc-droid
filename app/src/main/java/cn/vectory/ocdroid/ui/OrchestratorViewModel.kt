@@ -1,31 +1,44 @@
 package cn.vectory.ocdroid.ui
 
 import androidx.lifecycle.ViewModel
+import androidx.lifecycle.viewModelScope
+import cn.vectory.ocdroid.R
 import cn.vectory.ocdroid.data.model.PermissionResponse
-import cn.vectory.ocdroid.util.MarkdownFontSizes
-import cn.vectory.ocdroid.util.SettingsManager
-import cn.vectory.ocdroid.util.ThemeMode
 import dagger.hilt.android.lifecycle.HiltViewModel
-import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import javax.inject.Inject
 
 /**
- * R-17 batch3 → batch3d: Orchestrator-domain ViewModel. Owns the nav /
- * file / settings UI preferences / traffic slices + the permission / question
- * response surface + the project file-browser affordances.
+ * R-17 batch3 → batch3d → §R18 Phase 3 Wave 3 (P2-6): Orchestrator-domain
+ * ViewModel. After the Wave 3 split this VM owns ONLY:
  *
- * **batch3d**: method bodies physically moved here from [AppCore]. The
- * settings persistence + slice writes + permission/question repository calls
- * live here now. No `core.<method>()` self-bypass.
+ *  - **Nav** ([setLastNavPage]) — the persisted top-level destination.
+ *  - **File browser / file-to-show** ([showFileInFiles] / [clearFileToShow]
+ *    / [browseFilesInWorkdir] / [closeFileBrowser]).
+ *  - **Permission / Question responses** ([respondPermission] /
+ *    [replyQuestion] / [rejectQuestion]).
+ *  - **Genuinely cross-domain entry points** surfaced via
+ *    [openSessionFromDeepLink] / [resetLocalDataAndResync] /
+ *    [executeCommand] / [coldStartReconnect] / [configureServer] (these
+ *    orchestrate across 3+ domains and live in [AppCore]).
  *
- * Genuinely cross-domain entry points (deep-link, full local reset, /clear
- * command) stay in [AppCore] (they orchestrate across 3+ domains) and are
- * surfaced via [openSessionFromDeepLink] / [resetLocalDataAndResync] /
- * [executeCommand].
+ * Settings writes (theme / markdown font sizes / UI scale) moved to
+ * [SettingsViewModel]; traffic writes (refresh / reset counters) moved to
+ * [ConnectionViewModel] (traffic is connectivity-shaped state). The read
+ * accessors below ([settingsFlow], [trafficFlow], [hostFlow],
+ * [connectionFlow], [fileFlow], [navFlow], [uiEvents]) stay — they are
+ * zero-cost delegates to the same [SharedStateStore] flows the new owners
+ * expose, retained so existing tests + the composables that legitimately
+ * read multi-domain state off this VM (e.g. ChatScreen's settingsFlow
+ * subscription for the agent list) keep resolving.
  *
- * ForegroundCatchUpController still lives in [AppCore] (its effects span 4
- * domains and route through the shared [SharedEffectBus]).
+ * §R18 Phase 3 Wave 3 (drift #6 / P1-7): [respondPermission] /
+ * [replyQuestion] / [rejectQuestion] now launch on [viewModelScope] instead
+ * of [AppCore.appScope]. These are user-interaction-triggered ephemeral
+ * operations; binding them to the VM scope lets them cancel cleanly on
+ * navigation-away / VM clear, and the closure captures repository / slice
+ * transforms (never VM `::ref`s) so the P1-7 self-capture hazard does not
+ * apply.
  */
 @HiltViewModel
 class OrchestratorViewModel @Inject constructor(
@@ -40,55 +53,45 @@ class OrchestratorViewModel @Inject constructor(
     val hostFlow get() = core.hostFlow
     val connectionFlow get() = core.connectionFlow
 
-    // ── Nav + UI preferences ────────────────────────────────────────────────
+    // ── Nav ─────────────────────────────────────────────────────────────────
 
     fun setLastNavPage(page: Int) {
         // §R-17 batch3d: body moved verbatim from AppCore.
         val clamped = page.coerceIn(0, 2)
         if (core.store.navFlow.value.lastNavPage == clamped) return
         core.settingsManager.lastNavPage = clamped
-        core.store.navFlow.update { it.copy(lastNavPage = clamped) }
-    }
-
-    fun setThemeMode(mode: ThemeMode) {
-        core.settingsManager.themeMode = mode
-        core.writeSettings { it.copy(themeMode = mode) }
-    }
-
-    fun setMarkdownFontSizes(sizes: MarkdownFontSizes) {
-        core.settingsManager.markdownFontSizes = sizes
-        core.writeSettings { it.copy(markdownFontSizes = sizes) }
-    }
-
-    fun setUiFontScale(scale: Float) {
-        val clamped = scale.coerceIn(SettingsManager.UI_SCALE_MIN, SettingsManager.UI_SCALE_MAX)
-        core.settingsManager.uiFontScale = clamped
-        core.writeSettings { it.copy(uiFontScale = clamped) }
-    }
-
-    fun setUiContentScale(scale: Float) {
-        val clamped = scale.coerceIn(SettingsManager.UI_SCALE_MIN, SettingsManager.UI_SCALE_MAX)
-        core.settingsManager.uiContentScale = clamped
-        core.writeSettings { it.copy(uiContentScale = clamped) }
+        core.store.mutateNav { it.copy(lastNavPage = clamped) }
     }
 
     // ── Permission / Question responses (orchestrator-domain) ───────────────
 
     fun respondPermission(sessionId: String, permissionId: String, response: PermissionResponse) {
-        core.appScope.launch {
+        // §R18 Phase 3 Wave 3 (drift #6 / P1-7): user-triggered ephemeral
+        // permission response → viewModelScope. Closure captures the repo
+        // call + a slice transform (never a VM `::ref`), so viewModelScope
+        // cancels cleanly on navigation-away.
+        viewModelScope.launch {
             core.repository.respondPermission(sessionId, permissionId, response)
                 .onSuccess {
                     core.writeSessionList { it.copy(pendingPermissions = it.pendingPermissions.filter { p -> p.id != permissionId }) }
                 }
                 .onFailure { error ->
-                    core.effectBus.uiEvents.tryEmit(UiEvent.Error(errorMessageOrFallback(error, "Failed to respond to permission")))
+                    core.effectBus.uiEvents.tryEmit(UiEvent.Error(R.string.error_respond_permission_failed, listOf(errorMessageOrFallback(error, "unknown error"))))
                 }
         }
     }
 
     fun replyQuestion(requestId: String, answers: List<List<String>>, onError: () -> Unit = {}) {
-        core.appScope.launch {
-            core.repository.replyQuestion(requestId, answers)
+        // §R18 Phase 3 Wave 3 (drift #6 / P1-7): same viewModelScope rationale
+        // as respondPermission.
+        viewModelScope.launch {
+            // §R18 Phase 2-E step 1: explicit directory now required by the
+            // API. Resolve from the question's parent session if possible
+            // (handles cross-workdir routing); fall back to the persisted
+            // workdir. Was the global currentDirectory before — currentWorkdir
+            // was always its source on the main path.
+            val directory = core.resolveQuestionDirectory(requestId)
+            core.repository.replyQuestion(requestId, answers, directory)
                 .onSuccess {
                     core.writeSessionList { currentState ->
                         currentState.copy(pendingQuestions = currentState.pendingQuestions.filter { it.id != requestId })
@@ -102,8 +105,11 @@ class OrchestratorViewModel @Inject constructor(
     }
 
     fun rejectQuestion(requestId: String) {
-        core.appScope.launch {
-            core.repository.rejectQuestion(requestId)
+        // §R18 Phase 3 Wave 3 (drift #6 / P1-7): same viewModelScope rationale
+        // as respondPermission.
+        viewModelScope.launch {
+            val directory = core.resolveQuestionDirectory(requestId)
+            core.repository.rejectQuestion(requestId, directory)
                 .onSuccess {
                     core.writeSessionList { currentState ->
                         currentState.copy(pendingQuestions = currentState.pendingQuestions.filter { it.id != requestId })
@@ -111,19 +117,6 @@ class OrchestratorViewModel @Inject constructor(
                 }
                 .onFailure { error -> android.util.Log.w(TAG, "Failed to reject question: ${error.message}") }
         }
-    }
-
-    // ── Traffic ─────────────────────────────────────────────────────────────
-
-    fun refreshTrafficStats() {
-        core.writeTraffic {
-            it.copy(trafficSent = core.trafficTracker.totalBytesSent, trafficReceived = core.trafficTracker.totalBytesReceived)
-        }
-    }
-
-    fun resetTrafficStats() {
-        core.trafficTracker.reset()
-        refreshTrafficStats()
     }
 
     // ── File browser / file-to-show ─────────────────────────────────────────
@@ -137,11 +130,13 @@ class OrchestratorViewModel @Inject constructor(
     }
 
     fun browseFilesInWorkdir(workdir: String) {
-        if (!browseActive) {
-            browseSavedDirectory = core.repository.getCurrentDirectory()
-            browseActive = true
-        }
-        core.repository.setCurrentDirectory(workdir)
+        // §R18-P0-1 stop-bleed: do NOT mutate the global current directory here.
+        // File-tree routing uses Skip-Dir + explicit @Header(directory) (see
+        // OpenCodeApi.browseFileTree), so the browser does not need the global
+        // dir. Only SSE/question/command routing depends on the global dir, and
+        // those must keep pointing at the session dir — overriding it here
+        // polluted their routing for the whole browse session. Phase 2 will
+        // remove the global state entirely.
         core.writeFile {
             it.copy(
                 filePathToShowInFiles = null,
@@ -153,11 +148,8 @@ class OrchestratorViewModel @Inject constructor(
     }
 
     fun closeFileBrowser() {
-        if (browseActive) {
-            core.repository.setCurrentDirectory(browseSavedDirectory)
-            browseSavedDirectory = null
-            browseActive = false
-        }
+        // §R18-P0-1: no global-dir restore needed (browseFilesInWorkdir no
+        // longer saves/overrides it).
         core.writeFile {
             it.copy(fileBrowserOpen = false, fileBrowserWorkdir = null, filePathToShowInFiles = null, filePreviewOriginRoute = null)
         }
@@ -184,13 +176,12 @@ class OrchestratorViewModel @Inject constructor(
     }
 
     // ── browse state (private to this VM instance) ──────────────────────────
-    // §R-17 batch3d: moved from AppCore private fields. The two flags track
-    // whether the file browser is overriding the repository's working
-    // directory so closeFileBrowser() can restore it. Per-VM (not per-process)
-    // is correct: the browse session is a UI-driven transient tied to the
-    // OrchestratorVM that opened it.
-    private var browseSavedDirectory: String? = null
-    private var browseActive: Boolean = false
+    // §R-17 batch3d: moved from AppCore private fields. §R18-P0-1 stop-bleed
+    // removed the save/restore-global-directory mechanism that lived here
+    // (browseSavedDirectory + browseActive) — the file browser no longer
+    // touches the global current directory (see browseFilesInWorkdir). The
+    // browse session's transient UI state lives entirely in fileFlow
+    // (fileBrowserOpen / fileBrowserWorkdir).
 
     private companion object {
         private const val TAG = "OrchestratorViewModel"

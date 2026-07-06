@@ -68,12 +68,13 @@ import org.junit.Test
  * (`chatVM.sendMessage()`, `sessionVM.selectSession(...)`, etc.) — no legacy
  * `AppCore` shim extensions remain.
  *
- * State setup uses the test-only [AppState] shim ([updateState] /
- * [AppCore.state]) so the historical `updateState { it.copy(...) }` and
- * `viewModel.state.value.X` patterns keep working without rewriting every
- * state-seed call. AppCore internals that have no VM equivalent
- * (`handleSSEEvent`, `store`, `peekSessionWindow`) are reached through
- * `core` directly.
+ * §R18 Phase 4 (P2-3): state setup writes slices directly through the
+ * AppCore `writeXxx { it.copy(...) }` helpers (former `updateState {}`
+ * AppState shim removed). UiEvent Error/Success assertions read the
+ * test-only [AppCore.recentTestErrors] / [AppCore.recentTestSuccesses]
+ * ring buffers populated by [MainViewModelTestBase.createCore]. AppCore
+ * internals that have no VM equivalent (`handleSSEEvent`, `store`,
+ * `peekSessionWindow`) are reached through `core` directly.
  */
 @OptIn(ExperimentalCoroutinesApi::class)
 class HostViewModelTest : MainViewModelTestBase() {
@@ -243,7 +244,7 @@ class HostViewModelTest : MainViewModelTestBase() {
         // user knows why activation did nothing (previously a silent no-op).
         coVerify(exactly = 0) { repository.activateTunnel(any(), any()) }
         assertTrue(connectionVM.connectionFlow.value.tunnelActivationState is TunnelActivationState.Error)
-        assertNotNull(core.state.value.error)
+        assertNotNull(core.recentTestErrors.lastOrNull())
     }
 
     @Test
@@ -269,7 +270,7 @@ class HostViewModelTest : MainViewModelTestBase() {
 
         coVerify(exactly = 0) { repository.activateTunnel(any(), any()) }
         assertTrue(connectionVM.connectionFlow.value.tunnelActivationState is TunnelActivationState.Error)
-        assertNotNull(core.state.value.error)
+        assertNotNull(core.recentTestErrors.lastOrNull())
     }
 
     @Test
@@ -362,11 +363,9 @@ class HostViewModelTest : MainViewModelTestBase() {
         val composerVM = cn.vectory.ocdroid.ui.ComposerViewModel(core)
         val orchestratorVM = cn.vectory.ocdroid.ui.OrchestratorViewModel(core)
         val viewModel = HostViewModel(core)  // primary VM under test
-        core.updateState {
-            it.copy(
-                currentSessionId = "session-A",
-                sessions = listOf(Session(id = "session-A", directory = "/tmp/a"))
-            )
+        core.writeChat { it.copy(currentSessionId = "session-A") }
+        core.writeSessionList {
+            it.copy(sessions = listOf(Session(id = "session-A", directory = "/tmp/a")))
         }
         chatVM.loadMessages("session-A")
         advanceUntilIdle()

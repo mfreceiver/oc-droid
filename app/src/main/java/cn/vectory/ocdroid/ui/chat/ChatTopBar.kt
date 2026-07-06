@@ -52,6 +52,7 @@ import cn.vectory.ocdroid.data.model.Session
 import cn.vectory.ocdroid.data.model.SessionStatus
 import cn.vectory.ocdroid.data.model.TodoItem
 import cn.vectory.ocdroid.ui.ContextUsage
+import cn.vectory.ocdroid.ui.ConnectionPhase
 import cn.vectory.ocdroid.ui.TunnelActivationState
 import cn.vectory.ocdroid.ui.resolveModelDisplayName
 import cn.vectory.ocdroid.ui.theme.SemanticColors
@@ -72,7 +73,7 @@ internal data class ChatTopBarState(
     val hostName: String = "",
     val isConnected: Boolean = false,
     val isConnecting: Boolean = false,
-    val connectionPhase: String? = null,
+    val connectionPhase: ConnectionPhase = ConnectionPhase.Idle,
     val hostProfiles: List<HostProfile> = emptyList(),
     val currentHostProfileId: String? = null,
     val tunnelActivationState: TunnelActivationState = TunnelActivationState.Idle,
@@ -377,11 +378,15 @@ internal fun ChatTopBar(
                 // R-24: the status colours are sourced from SemanticColors
                 // state-* constants (Phase 2：固定语义常量) + M3 colorScheme.error,
                 // so the badge adapts to dark mode.
-                // none (not connected AND no connectionPhase) → no badge at all.
+                // none (not connected AND connectionPhase is Idle) → no badge
+                // at all. §R18 Phase 2-I: legacy `state.connectionPhase == null`
+                // maps to `is ConnectionPhase.Idle` now that the field is a
+                // non-null sealed type with [ConnectionPhase.Idle] as the new
+                // "absent" sentinel.
                 val badgeColor = when {
                     state.isConnected -> SemanticColors.stateSuccessFg()
                     state.isConnecting -> SemanticColors.stateInfoFg()
-                    state.connectionPhase == null -> null
+                    state.connectionPhase is ConnectionPhase.Idle -> null
                     else -> MaterialTheme.colorScheme.error
                 }
                 IconButton(onClick = { showServerDialog = true }) {
@@ -562,30 +567,14 @@ internal fun ChatTopBar(
 }
 
 /**
- * Pure filter for the model quick-switch picker's provider catalog (§problem:
- * hide providers with no enabled model). Keeps a provider only when it has at
- * least one model whose `"$providerId/$modelId"` key is NOT in [disabledModels]
- * — so a provider whose every model the user disabled no longer renders an
- * empty section header in the picker.
- *
- * The Settings `ModelManagementSection` intentionally does NOT use this: the
- * management surface must list every provider (even fully-disabled ones) so a
- * disabled model can be re-enabled. This filter is picker-only.
- *
- * `disabledModels` keys use the canonical `"$providerId/$modelId"` format also
- * produced/consumed by SettingsManager (see ModelManagementSection /
- * modelCatalogCounts). Extracted as a pure top-level fn so it has JVM unit
- * tests (VisiblePickerProvidersTest) without needing Compose.
+ * §R18 Phase 5+ Gate-5 fix: `visiblePickerProviders` was extracted into its
+ * own file (`PickerProviderFilter.kt`). It is a pure JVM-testable helper that
+ * has unit tests (VisiblePickerProvidersTest); keeping it co-located here would
+ * have hidden its coverage because ChatTopBarKt is excluded from kover (the
+ * rest of this file is @Composable UI requiring ComposeTestRule/androidTest).
+ * The Composable below calls `visiblePickerProviders(...)` directly (same
+ * package, no import needed).
  */
-internal fun visiblePickerProviders(
-    providers: ProvidersResponse?,
-    disabledModels: Set<String>
-): List<ConfigProvider> =
-    providers?.providers.orEmpty()
-        .filter { it.models.isNotEmpty() }
-        .filter { provider ->
-            provider.models.keys.any { modelId -> "${provider.id}/$modelId" !in disabledModels }
-        }
 
 /**
  * §model-selection: standalone AlertDialog that lists every enabled model in

@@ -11,6 +11,8 @@ import cn.vectory.ocdroid.data.model.TodoItem
 import cn.vectory.ocdroid.ui.ChatState
 import cn.vectory.ocdroid.ui.SessionListState
 import cn.vectory.ocdroid.ui.UnreadState
+import cn.vectory.ocdroid.ui.isStreamablePartType
+import cn.vectory.ocdroid.ui.reasoningPartOrNull
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
@@ -783,5 +785,1423 @@ class SessionSyncPureFunctionsTest {
         assertNull(next.streamingPartTexts["p1"])
         assertNull(next.deltaBuffer["p1"])
         assertNull(next.fullTextBuffer["p1"])
+    }
+
+    // ── R18 Phase 5: expanded edge-case / branch coverage ─────────────────
+    // The 49 table tests above nail the happy paths + the four reviewed
+    // composite scenarios. This block exhausts the remaining `when` branches
+    // and boundary inputs (null/empty, every partType, every status type,
+    // idempotency, type-guarded injection, …) so the pure transforms reach
+    // near-full branch coverage without dragging in Android framework or
+    // coroutine state.
+
+    // === applyMessageUpdated: position / replacement edge cases ============
+
+    @Test
+    fun `applyMessageUpdated patching the first element preserves tail order`() {
+        val state = ChatState(messages = listOf(
+            Message(id = "a", role = "user"),
+            Message(id = "b", role = "assistant"),
+            Message(id = "c", role = "user")
+        ))
+        val updated = Message(id = "a", role = "user", cost = 1.0)
+
+        val (next, found) = state.applyMessageUpdated(updated)
+
+        assertTrue(found)
+        assertEquals(listOf("a", "b", "c"), next.messages.map { it.id })
+        assertEquals(1.0, next.messages.first { it.id == "a" }.cost!!, 1e-9)
+    }
+
+    @Test
+    fun `applyMessageUpdated patching the last element preserves head order`() {
+        val state = ChatState(messages = listOf(
+            Message(id = "a", role = "user"),
+            Message(id = "b", role = "assistant"),
+            Message(id = "c", role = "user")
+        ))
+        val updated = Message(id = "c", role = "user", cost = 2.0)
+
+        val (next, found) = state.applyMessageUpdated(updated)
+
+        assertTrue(found)
+        assertEquals(listOf("a", "b", "c"), next.messages.map { it.id })
+    }
+
+    @Test
+    fun `applyMessageUpdated on single-element list replaces in place`() {
+        val state = ChatState(messages = listOf(Message(id = "only", role = "user")))
+        val updated = Message(id = "only", role = "user", cost = 9.9)
+
+        val (next, found) = state.applyMessageUpdated(updated)
+
+        assertTrue(found)
+        assertEquals(1, next.messages.size)
+        assertEquals(9.9, next.messages[0].cost!!, 1e-9)
+    }
+
+    @Test
+    fun `applyMessageUpdated swaps the entire message instance no field merge`() {
+        // The transform is patch-by-replacement, NOT field merge: any field
+        // absent on `updated` is absent on the result. Verified by cost:
+        val state = ChatState(messages = listOf(
+            Message(id = "m1", role = "user", cost = 5.0)
+        ))
+        val updated = Message(id = "m1", role = "user") // no cost
+
+        val (next, found) = state.applyMessageUpdated(updated)
+
+        assertTrue(found)
+        assertNull(next.messages[0].cost)
+    }
+
+    @Test
+    fun `applyMessageUpdated can change the role of an existing id`() {
+        val state = ChatState(messages = listOf(
+            Message(id = "m1", role = "user")
+        ))
+        val updated = Message(id = "m1", role = "assistant")
+
+        val (next, found) = state.applyMessageUpdated(updated)
+
+        assertTrue(found)
+        assertEquals("assistant", next.messages[0].role)
+        assertTrue(next.messages[0].isAssistant)
+    }
+
+    @Test
+    fun `applyMessageUpdated preserves sibling messages untouched on insert`() {
+        val state = ChatState(messages = listOf(
+            Message(id = "a", role = "user", cost = 1.0),
+            Message(id = "b", role = "assistant", cost = 2.0)
+        ))
+        val inserted = Message(id = "c", role = "user", cost = 3.0)
+
+        val (next, found) = state.applyMessageUpdated(inserted)
+
+        assertFalse(found)
+        assertEquals(3, next.messages.size)
+        assertEquals(1.0, next.messages[0].cost!!, 1e-9)
+        assertEquals(2.0, next.messages[1].cost!!, 1e-9)
+        assertEquals(3.0, next.messages[2].cost!!, 1e-9)
+    }
+
+    @Test
+    fun `applyMessageUpdated preserves message order across a larger list`() {
+        val state = ChatState(messages = (1..6).map {
+            Message(id = "m$it", role = if (it % 2 == 0) "assistant" else "user")
+        })
+        val updated = Message(id = "m4", role = "assistant", cost = 0.1)
+
+        val (next, found) = state.applyMessageUpdated(updated)
+
+        assertTrue(found)
+        assertEquals(listOf("m1", "m2", "m3", "m4", "m5", "m6"), next.messages.map { it.id })
+    }
+
+    // === applySessionCreated: upsert semantics ============================
+
+    @Test
+    fun `applySessionCreated on duplicate id demotes the prior occurrence`() {
+        // upsertSession prepends the new occurrence and filters out any prior
+        // entry with the same id — so a re-created session lifts to the head.
+        val state = SessionListState(sessions = listOf(
+            Session(id = "old", directory = "/old"),
+            Session(id = "s1", directory = "/first"),
+            Session(id = "other", directory = "/other")
+        ))
+        val reCreated = Session(id = "s1", directory = "/first", title = "refreshed")
+
+        val next = state.applySessionCreated(reCreated)
+
+        assertEquals(listOf("s1", "old", "other"), next.sessions.map { it.id })
+        assertEquals("refreshed", next.sessions[0].title)
+    }
+
+    @Test
+    fun `applySessionCreated preserves title and directory of unrelated sessions`() {
+        val state = SessionListState(sessions = listOf(
+            Session(id = "a", directory = "/dir-a", title = "Title A")
+        ))
+        val created = Session(id = "b", directory = "/dir-b", title = "Title B")
+
+        val next = state.applySessionCreated(created)
+
+        assertEquals(2, next.sessions.size)
+        val original = next.sessions.first { it.id == "a" }
+        assertEquals("/dir-a", original.directory)
+        assertEquals("Title A", original.title)
+    }
+
+    @Test
+    fun `applySessionCreated with archived-time session still prepends`() {
+        val state = SessionListState(sessions = listOf(
+            Session(id = "a", directory = "/a")
+        ))
+        val created = Session(
+            id = "arch",
+            directory = "/arch",
+            time = Session.TimeInfo(archived = 1_700_000_000_000)
+        )
+
+        val next = state.applySessionCreated(created)
+
+        assertEquals(listOf("arch", "a"), next.sessions.map { it.id })
+        assertTrue(next.sessions[0].isArchived)
+    }
+
+    @Test
+    fun `applySessionCreated is idempotent under repeated creates`() {
+        val created = Session(id = "solo", directory = "/x", title = "T")
+        val state = SessionListState()
+
+        val next = state.applySessionCreated(created).applySessionCreated(created)
+
+        assertEquals(1, next.sessions.size)
+        assertEquals("solo", next.sessions[0].id)
+    }
+
+    @Test
+    fun `applySessionCreated prepends to a multi-session list preserving order`() {
+        val state = SessionListState(sessions = listOf(
+            Session(id = "a", directory = "/a"),
+            Session(id = "b", directory = "/b"),
+            Session(id = "c", directory = "/c")
+        ))
+        val created = Session(id = "new", directory = "/new")
+
+        val next = state.applySessionCreated(created)
+
+        assertEquals(listOf("new", "a", "b", "c"), next.sessions.map { it.id })
+    }
+
+    // === applySessionUpsert: prepend / replace ===========================
+
+    @Test
+    fun `applySessionUpsert prepends a brand-new session id`() {
+        val state = SessionListState(sessions = listOf(
+            Session(id = "old", directory = "/old")
+        ))
+        val updated = Session(id = "new", directory = "/new")
+
+        val next = state.applySessionUpsert(updated)
+
+        assertEquals(listOf("new", "old"), next.sessions.map { it.id })
+    }
+
+    @Test
+    fun `applySessionUpsert on empty list yields the sole session`() {
+        val state = SessionListState()
+        val updated = Session(id = "solo", directory = "/x")
+
+        val next = state.applySessionUpsert(updated)
+
+        assertEquals(listOf("solo"), next.sessions.map { it.id })
+    }
+
+    @Test
+    fun `applySessionUpsert demotes a matching id from middle of the list`() {
+        // Upsert always prepends; a matching id in the middle is filtered out
+        // and lifted to the head. This is intentional (MRU-style ordering).
+        val state = SessionListState(sessions = listOf(
+            Session(id = "a", directory = "/a"),
+            Session(id = "b", directory = "/b"),
+            Session(id = "c", directory = "/c")
+        ))
+        val updated = Session(id = "b", directory = "/b", title = "updated")
+
+        val next = state.applySessionUpsert(updated)
+
+        assertEquals(listOf("b", "a", "c"), next.sessions.map { it.id })
+        assertEquals("updated", next.sessions[0].title)
+    }
+
+    @Test
+    fun `applySessionUpsert preserves non-id fields on the replacement`() {
+        val state = SessionListState(sessions = listOf(
+            Session(id = "s1", directory = "/old-dir", title = "old")
+        ))
+        val updated = Session(
+            id = "s1", directory = "/new-dir", title = "new",
+            version = "2.0"
+        )
+
+        val next = state.applySessionUpsert(updated)
+
+        assertEquals(1, next.sessions.size)
+        assertEquals("/new-dir", next.sessions[0].directory)
+        assertEquals("new", next.sessions[0].title)
+        assertEquals("2.0", next.sessions[0].version)
+    }
+
+    @Test
+    fun `applySessionUpsert is idempotent under repeated upserts`() {
+        val updated = Session(id = "x", directory = "/x", title = "T")
+        val state = SessionListState(sessions = listOf(
+            Session(id = "y", directory = "/y")
+        ))
+
+        val next = state.applySessionUpsert(updated).applySessionUpsert(updated)
+
+        assertEquals(listOf("x", "y"), next.sessions.map { it.id })
+    }
+
+    // === applyArchiveEviction: openSessionIds rewrite ====================
+
+    @Test
+    fun `applyArchiveEviction when archived id is absent from openSessionIds`() {
+        val state = SessionListState(
+            sessions = listOf(Session(id = "s1", directory = "/tmp")),
+            openSessionIds = listOf("s1", "s3")
+        )
+        val archived = Session(
+            id = "sX", directory = "/tmp",
+            time = Session.TimeInfo(archived = 1L)
+        )
+
+        val next = state.applyArchiveEviction(archived, listOf("s1", "s3"))
+
+        // openSessionIds unchanged (sX was never open); session upserted.
+        assertEquals(listOf("s1", "s3"), next.openSessionIds)
+        assertTrue(next.sessions.any { it.id == "sX" })
+    }
+
+    @Test
+    fun `applyArchiveEviction with empty newOpenIds yields empty list`() {
+        val state = SessionListState(
+            sessions = emptyList(),
+            openSessionIds = listOf("s1")
+        )
+        val archived = Session(
+            id = "s1", directory = "/tmp",
+            time = Session.TimeInfo(archived = 1L)
+        )
+
+        val next = state.applyArchiveEviction(archived, emptyList())
+
+        assertTrue(next.openSessionIds.isEmpty())
+    }
+
+    @Test
+    fun `applyArchiveEviction preserves the archived session metadata`() {
+        val state = SessionListState()
+        val archived = Session(
+            id = "s2", directory = "/tmp", title = "Got archived",
+            time = Session.TimeInfo(archived = 1_700_000_000_000L)
+        )
+
+        val next = state.applyArchiveEviction(archived, emptyList())
+
+        val upserted = next.sessions.first { it.id == "s2" }
+        assertEquals("Got archived", upserted.title)
+        assertTrue(upserted.isArchived)
+    }
+
+    @Test
+    fun `applyArchiveEviction prepends the archived session to the list`() {
+        val state = SessionListState(
+            sessions = listOf(Session(id = "keep", directory = "/k"))
+        )
+        val archived = Session(
+            id = "arc", directory = "/a",
+            time = Session.TimeInfo(archived = 1L)
+        )
+
+        val next = state.applyArchiveEviction(archived, listOf("keep"))
+
+        assertEquals(listOf("arc", "keep"), next.sessions.map { it.id })
+    }
+
+    // === applyArchivedChatClear: selective wipe ==========================
+
+    @Test
+    fun `applyArchivedChatClear with null currentSessionId leaves it null`() {
+        val state = ChatState(
+            currentSessionId = null,
+            messages = listOf(Message(id = "m1", role = "user"))
+        )
+
+        val next = state.applyArchivedChatClear()
+
+        assertNull(next.currentSessionId)
+        assertTrue(next.messages.isEmpty())
+    }
+
+    @Test
+    fun `applyArchivedChatClear on already-empty state is a no-op for the wiped fields`() {
+        val state = ChatState()
+
+        val next = state.applyArchivedChatClear()
+
+        assertNull(next.currentSessionId)
+        assertTrue(next.messages.isEmpty())
+        assertTrue(next.partsByMessage.isEmpty())
+    }
+
+    @Test
+    fun `applyArchivedChatClear preserves streamingReasoningPart and buffers`() {
+        val state = ChatState(
+            currentSessionId = "s1",
+            messages = listOf(Message(id = "m1", role = "user")),
+            streamingReasoningPart = Part(id = "p1", messageId = "m1", sessionId = "s1", type = "reasoning"),
+            deltaBuffer = mapOf("p1" to "buf"),
+            pendingFlushPartIds = setOf("p1")
+        )
+
+        val next = state.applyArchivedChatClear()
+
+        // Only currentSessionId / messages / partsByMessage are wiped.
+        assertNotNull(next.streamingReasoningPart)
+        assertEquals("buf", next.deltaBuffer["p1"])
+        assertTrue(next.pendingFlushPartIds.contains("p1"))
+    }
+
+    // === applySessionStatus: every status type branch ====================
+
+    @Test
+    fun `applySessionStatus with idle type`() {
+        val next = SessionListState().applySessionStatus("s1", SessionStatus(type = "idle"))
+        assertEquals("idle", next.sessionStatuses["s1"]?.type)
+        assertTrue(next.sessionStatuses["s1"]?.isIdle == true)
+    }
+
+    @Test
+    fun `applySessionStatus with busy type`() {
+        val next = SessionListState().applySessionStatus("s1", SessionStatus(type = "busy"))
+        assertTrue(next.sessionStatuses["s1"]?.isBusy == true)
+    }
+
+    @Test
+    fun `applySessionStatus with retry type`() {
+        val next = SessionListState().applySessionStatus("s1", SessionStatus(type = "retry"))
+        assertTrue(next.sessionStatuses["s1"]?.isRetry == true)
+    }
+
+    @Test
+    fun `applySessionStatus with custom type is stored verbatim`() {
+        // Types beyond idle/busy/retry are stored as-is (no isXxx helper but
+        // the entry is preserved for any future UI consumer).
+        val next = SessionListState().applySessionStatus("s1", SessionStatus(type = "error"))
+        assertEquals("error", next.sessionStatuses["s1"]?.type)
+    }
+
+    @Test
+    fun `applySessionStatus preserves attempt message and next fields`() {
+        val status = SessionStatus(type = "retry", attempt = 3, message = "backoff", next = 1_700L)
+        val next = SessionListState().applySessionStatus("s1", status)
+
+        assertEquals(status, next.sessionStatuses["s1"])
+        assertEquals(3, next.sessionStatuses["s1"]?.attempt)
+        assertEquals("backoff", next.sessionStatuses["s1"]?.message)
+        assertEquals(1_700L, next.sessionStatuses["s1"]?.next)
+    }
+
+    @Test
+    fun `applySessionStatus overwriting the same id multiple times keeps only the latest`() {
+        val state = SessionListState()
+
+        val next = state
+            .applySessionStatus("s1", SessionStatus(type = "idle"))
+            .applySessionStatus("s1", SessionStatus(type = "busy"))
+            .applySessionStatus("s1", SessionStatus(type = "idle"))
+
+        assertEquals(1, next.sessionStatuses.size)
+        assertEquals("idle", next.sessionStatuses["s1"]?.type)
+    }
+
+    // === dropTempCleared: boundary =======================================
+
+    @Test
+    fun `dropTempCleared on the last entry yields an empty set`() {
+        val state = UnreadState(tempClearedUnread = setOf("only"))
+
+        val next = state.dropTempCleared("only")
+
+        assertTrue(next.tempClearedUnread.isEmpty())
+    }
+
+    @Test
+    fun `dropTempCleared on an empty set is a no-op`() {
+        val state = UnreadState(tempClearedUnread = emptySet())
+
+        val next = state.dropTempCleared("anything")
+
+        assertTrue(next.tempClearedUnread.isEmpty())
+    }
+
+    @Test
+    fun `dropTempCleared is case-sensitive`() {
+        val state = UnreadState(tempClearedUnread = setOf("S1"))
+
+        val next = state.dropTempCleared("s1")
+
+        assertEquals(setOf("S1"), next.tempClearedUnread)
+    }
+
+    // === applyPartCreatedPlaceholder: every partType branch ==============
+
+    @Test
+    fun `applyPartCreatedPlaceholder for tool type injects a tool part and skips streamingReasoningPart`() {
+        val state = ChatState()
+
+        val next = state.applyPartCreatedPlaceholder(
+            partType = "tool", partId = "p1", msgId = "m1", sessionId = "s1"
+        )
+
+        assertEquals("tool", next.partsByMessage["m1"]?.firstOrNull { it.id == "p1" }?.type)
+        assertNull(next.streamingReasoningPart)
+    }
+
+    @Test
+    fun `applyPartCreatedPlaceholder for patch type injects a patch part`() {
+        val next = ChatState().applyPartCreatedPlaceholder(
+            partType = "patch", partId = "p1", msgId = "m1", sessionId = "s1"
+        )
+        assertEquals("patch", next.partsByMessage["m1"]?.firstOrNull { it.id == "p1" }?.type)
+        assertNull(next.streamingReasoningPart)
+    }
+
+    @Test
+    fun `applyPartCreatedPlaceholder for file type injects a file part`() {
+        val next = ChatState().applyPartCreatedPlaceholder(
+            partType = "file", partId = "p1", msgId = "m1", sessionId = "s1"
+        )
+        assertEquals("file", next.partsByMessage["m1"]?.firstOrNull { it.id == "p1" }?.type)
+    }
+
+    @Test
+    fun `applyPartCreatedPlaceholder preserves an unrelated existing part under the same msgId`() {
+        val state = ChatState(partsByMessage = mapOf(
+            "m1" to listOf(Part(id = "other", messageId = "m1", sessionId = "s1", type = "text"))
+        ))
+
+        val next = state.applyPartCreatedPlaceholder(
+            partType = "reasoning", partId = "p1", msgId = "m1", sessionId = "s1"
+        )
+
+        val parts = next.partsByMessage["m1"]!!
+        assertEquals(2, parts.size)
+        assertTrue(parts.any { it.id == "other" && it.type == "text" })
+        assertTrue(parts.any { it.id == "p1" && it.type == "reasoning" })
+    }
+
+    @Test
+    fun `applyPartCreatedPlaceholder filters out a stale same-id placeholder before re-injecting`() {
+        // Defensive: if a wrong-typed placeholder for partId already exists,
+        // it is removed and re-added with the correct type.
+        val state = ChatState(partsByMessage = mapOf(
+            "m1" to listOf(Part(id = "p1", messageId = "m1", sessionId = "s1", type = "text"))
+        ))
+
+        val next = state.applyPartCreatedPlaceholder(
+            partType = "reasoning", partId = "p1", msgId = "m1", sessionId = "s1"
+        )
+
+        val parts = next.partsByMessage["m1"]!!
+        assertEquals(1, parts.size)
+        assertEquals("reasoning", parts[0].type)
+        assertEquals("p1", next.streamingReasoningPart?.id)
+    }
+
+    @Test
+    fun `applyPartCreatedPlaceholder for reasoning does not overwrite a pre-existing streamingReasoningPart for a different partId`() {
+        // reasoningPartOrNull(...) returns a fresh Part for "reasoning", so
+        // the `?: streamingReasoningPart` fallback is NOT taken — the new
+        // value wins. Verified explicitly:
+        val state = ChatState(
+            streamingReasoningPart = Part(id = "prior", messageId = "m0", sessionId = "s1", type = "reasoning")
+        )
+
+        val next = state.applyPartCreatedPlaceholder(
+            partType = "reasoning", partId = "p1", msgId = "m1", sessionId = "s1"
+        )
+
+        assertEquals("p1", next.streamingReasoningPart?.id)
+    }
+
+    @Test
+    fun `applyPartCreatedPlaceholder for text preserves a pre-existing streamingReasoningPart`() {
+        // For "text", reasoningPartOrNull returns null → fallback keeps the
+        // prior streamingReasoningPart untouched.
+        val state = ChatState(
+            streamingReasoningPart = Part(id = "prior", messageId = "m0", sessionId = "s1", type = "reasoning")
+        )
+
+        val next = state.applyPartCreatedPlaceholder(
+            partType = "text", partId = "p1", msgId = "m1", sessionId = "s1"
+        )
+
+        assertEquals("prior", next.streamingReasoningPart?.id)
+    }
+
+    // === applyPartFullTextLeadingEdge: type / pId branches ===============
+
+    @Test
+    fun `applyPartFullTextLeadingEdge for tool type updates overlay but skips placeholder injection`() {
+        val state = ChatState()
+
+        val next = state.applyPartFullTextLeadingEdge(
+            partId = "p1", fullText = "hello", partType = "tool",
+            pId = "p1", msgId = "m1", sessionId = "s1"
+        )
+
+        // streamingPartTexts IS still updated (fullText is authoritative
+        // regardless of type); ensurePlaceholderPart returns partsByMessage
+        // unchanged because tool is not streamable.
+        assertEquals("hello", next.streamingPartTexts["p1"])
+        assertNull(next.partsByMessage["m1"])
+        assertNull(next.streamingReasoningPart)
+    }
+
+    @Test
+    fun `applyPartFullTextLeadingEdge for patch type does not inject placeholder`() {
+        val next = ChatState().applyPartFullTextLeadingEdge(
+            partId = "p1", fullText = "x", partType = "patch",
+            pId = "p1", msgId = "m1", sessionId = "s1"
+        )
+        assertEquals("x", next.streamingPartTexts["p1"])
+        assertNull(next.partsByMessage["m1"])
+    }
+
+    @Test
+    fun `applyPartFullTextLeadingEdge with empty fullText stores empty string`() {
+        val next = ChatState().applyPartFullTextLeadingEdge(
+            partId = "p1", fullText = "", partType = "text",
+            pId = "p1", msgId = "m1", sessionId = "s1"
+        )
+        assertEquals("", next.streamingPartTexts["p1"])
+    }
+
+    @Test
+    fun `applyPartFullTextLeadingEdge with distinct pId and partId keeps both keys consistent`() {
+        // partId is the streamingPartTexts key; pId is the Part id. They
+        // usually match but the API permits divergence — verify both are
+        // wired to the correct slots.
+        val next = ChatState().applyPartFullTextLeadingEdge(
+            partId = "overlay-key", fullText = "v", partType = "reasoning",
+            pId = "part-uuid", msgId = "m1", sessionId = "s1"
+        )
+        assertEquals("v", next.streamingPartTexts["overlay-key"])
+        assertEquals("part-uuid", next.streamingReasoningPart?.id)
+        assertEquals("part-uuid", next.partsByMessage["m1"]?.firstOrNull { it.id == "part-uuid" }?.id)
+    }
+
+    @Test
+    fun `applyPartFullTextLeadingEdge preserves existing parts under the same msgId`() {
+        val state = ChatState(partsByMessage = mapOf(
+            "m1" to listOf(Part(id = "other", messageId = "m1", sessionId = "s1", type = "text"))
+        ))
+
+        val next = state.applyPartFullTextLeadingEdge(
+            partId = "p1", fullText = "v", partType = "text",
+            pId = "p1", msgId = "m1", sessionId = "s1"
+        )
+
+        val parts = next.partsByMessage["m1"]!!
+        assertEquals(2, parts.size)
+        assertTrue(parts.any { it.id == "other" })
+        assertTrue(parts.any { it.id == "p1" })
+    }
+
+    @Test
+    fun `applyPartFullTextLeadingEdge for text does not overwrite a prior streamingReasoningPart`() {
+        val state = ChatState(
+            streamingReasoningPart = Part(id = "prior", messageId = "m0", sessionId = "s1", type = "reasoning")
+        )
+
+        val next = state.applyPartFullTextLeadingEdge(
+            partId = "p1", fullText = "v", partType = "text",
+            pId = "p1", msgId = "m1", sessionId = "s1"
+        )
+
+        assertEquals("prior", next.streamingReasoningPart?.id)
+    }
+
+    @Test
+    fun `applyPartFullTextLeadingEdge overwrites a prior overlay value with the new fullText`() {
+        val state = ChatState(streamingPartTexts = mapOf("p1" to "first"))
+
+        val next = state.applyPartFullTextLeadingEdge(
+            partId = "p1", fullText = "second", partType = "text",
+            pId = "p1", msgId = "m1", sessionId = "s1"
+        )
+
+        assertEquals("second", next.streamingPartTexts["p1"])
+    }
+
+    @Test
+    fun `applyPartFullTextLeadingEdge preserves an existing same-id part without double-inject`() {
+        val state = ChatState(partsByMessage = mapOf(
+            "m1" to listOf(Part(id = "p1", messageId = "m1", sessionId = "s1", type = "text"))
+        ))
+
+        val next = state.applyPartFullTextLeadingEdge(
+            partId = "p1", fullText = "v", partType = "text",
+            pId = "p1", msgId = "m1", sessionId = "s1"
+        )
+
+        // ensurePlaceholderPart is a no-op when pId already exists.
+        assertEquals(1, next.partsByMessage["m1"]?.count { it.id == "p1" })
+    }
+
+    // === applyPartDeltaLeadingEdge (knownType variant): type branches =====
+
+    @Test
+    fun `applyPartDeltaLeadingEdge with reasoning knownType sets streamingReasoningPart`() {
+        val next = ChatState().applyPartDeltaLeadingEdge(
+            partId = "p1", delta = "thought", knownType = "reasoning",
+            msgId = "m1", sessionId = "s1"
+        )
+        assertEquals("thought", next.streamingPartTexts["p1"])
+        assertEquals("p1", next.streamingReasoningPart?.id)
+    }
+
+    @Test
+    fun `applyPartDeltaLeadingEdge with tool knownType skips streamingReasoningPart and placeholder`() {
+        val next = ChatState().applyPartDeltaLeadingEdge(
+            partId = "p1", delta = "x", knownType = "tool",
+            msgId = "m1", sessionId = "s1"
+        )
+        // Delta still accumulates into the overlay; placeholder injection
+        // is gated (tool isn't streamable) and streamingReasoningPart stays
+        // null.
+        assertEquals("x", next.streamingPartTexts["p1"])
+        assertNull(next.partsByMessage["m1"])
+        assertNull(next.streamingReasoningPart)
+    }
+
+    @Test
+    fun `applyPartDeltaLeadingEdge accumulates onto an existing overlay`() {
+        val state = ChatState(streamingPartTexts = mapOf("p1" to "abc"))
+
+        val next = state.applyPartDeltaLeadingEdge(
+            partId = "p1", delta = "def", knownType = "text",
+            msgId = "m1", sessionId = "s1"
+        )
+
+        assertEquals("abcdef", next.streamingPartTexts["p1"])
+    }
+
+    @Test
+    fun `applyPartDeltaLeadingEdge chained calls accumulate in order`() {
+        val next = ChatState()
+            .applyPartDeltaLeadingEdge("p1", "Hello", "text", "m1", "s1")
+            .applyPartDeltaLeadingEdge("p1", ", ", "text", "m1", "s1")
+            .applyPartDeltaLeadingEdge("p1", "world", "text", "m1", "s1")
+
+        assertEquals("Hello, world", next.streamingPartTexts["p1"])
+    }
+
+    @Test
+    fun `applyPartDeltaLeadingEdge with empty delta still creates an overlay entry`() {
+        val next = ChatState().applyPartDeltaLeadingEdge(
+            partId = "p1", delta = "", knownType = "text",
+            msgId = "m1", sessionId = "s1"
+        )
+        // orEmpty() yields "" so the entry is created as an empty string.
+        assertEquals("", next.streamingPartTexts["p1"])
+    }
+
+    @Test
+    fun `applyPartDeltaLeadingEdge for text preserves a prior streamingReasoningPart`() {
+        val state = ChatState(
+            streamingReasoningPart = Part(id = "prior", messageId = "m0", sessionId = "s1", type = "reasoning")
+        )
+
+        val next = state.applyPartDeltaLeadingEdge(
+            partId = "p1", delta = "x", knownType = "text",
+            msgId = "m1", sessionId = "s1"
+        )
+
+        assertEquals("prior", next.streamingReasoningPart?.id)
+    }
+
+    // === applyPartDeltaLeadingEdge (partType+pId variant): branches =======
+
+    @Test
+    fun `applyPartDeltaLeadingEdge partType variant with text appends and injects placeholder`() {
+        val next = ChatState().applyPartDeltaLeadingEdge(
+            partId = "p1", delta = "hi", partType = "text",
+            pId = "p1", msgId = "m1", sessionId = "s1"
+        )
+        assertEquals("hi", next.streamingPartTexts["p1"])
+        assertEquals("text", next.partsByMessage["m1"]?.firstOrNull { it.id == "p1" }?.type)
+        assertNull(next.streamingReasoningPart)
+    }
+
+    @Test
+    fun `applyPartDeltaLeadingEdge partType variant with reasoning sets streamingReasoningPart using pId`() {
+        val next = ChatState().applyPartDeltaLeadingEdge(
+            partId = "overlay-key", delta = "thought", partType = "reasoning",
+            pId = "uuid-1", msgId = "m1", sessionId = "s1"
+        )
+        assertEquals("thought", next.streamingPartTexts["overlay-key"])
+        assertEquals("uuid-1", next.streamingReasoningPart?.id)
+    }
+
+    @Test
+    fun `applyPartDeltaLeadingEdge partType variant with distinct pId wires placeholder to pId`() {
+        val next = ChatState().applyPartDeltaLeadingEdge(
+            partId = "overlay-key", delta = "v", partType = "text",
+            pId = "uuid-2", msgId = "m1", sessionId = "s1"
+        )
+        assertEquals("v", next.streamingPartTexts["overlay-key"])
+        assertEquals("uuid-2", next.partsByMessage["m1"]?.firstOrNull { it.id == "uuid-2" }?.id)
+    }
+
+    @Test
+    fun `applyPartDeltaLeadingEdge partType variant accumulates onto prior overlay`() {
+        val state = ChatState(streamingPartTexts = mapOf("p1" to "A"))
+
+        val next = state.applyPartDeltaLeadingEdge(
+            partId = "p1", delta = "B", partType = "text",
+            pId = "p1", msgId = "m1", sessionId = "s1"
+        )
+
+        assertEquals("AB", next.streamingPartTexts["p1"])
+    }
+
+    @Test
+    fun `applyPartDeltaLeadingEdge partType variant with tool skips placeholder and streamingReasoningPart`() {
+        val next = ChatState().applyPartDeltaLeadingEdge(
+            partId = "p1", delta = "x", partType = "tool",
+            pId = "p1", msgId = "m1", sessionId = "s1"
+        )
+        assertEquals("x", next.streamingPartTexts["p1"])
+        assertNull(next.partsByMessage["m1"])
+        assertNull(next.streamingReasoningPart)
+    }
+
+    // === appendDeltaBuffer: boundary =====================================
+
+    @Test
+    fun `appendDeltaBuffer with empty delta string creates an empty-string entry`() {
+        val next = ChatState().appendDeltaBuffer("p1", "")
+        // The entry is created (current.orEmpty() + "" = ""); it is NOT a
+        // no-op. Verified explicitly because flushCoalesceBufferForPart then
+        // treats empty string as "nothing buffered".
+        assertEquals("", next.deltaBuffer["p1"])
+    }
+
+    @Test
+    fun `appendDeltaBuffer on a brand-new partId creates the entry`() {
+        val next = ChatState().appendDeltaBuffer("p1", "first")
+        assertEquals("first", next.deltaBuffer["p1"])
+    }
+
+    @Test
+    fun `appendDeltaBuffer preserves unrelated partId entries`() {
+        val state = ChatState(deltaBuffer = mapOf("p2" to "kept"))
+
+        val next = state.appendDeltaBuffer("p1", "x")
+
+        assertEquals("kept", next.deltaBuffer["p2"])
+        assertEquals("x", next.deltaBuffer["p1"])
+    }
+
+    // === replaceFullTextBuffer: boundary =================================
+
+    @Test
+    fun `replaceFullTextBuffer on a brand-new partId creates the entry`() {
+        val next = ChatState().replaceFullTextBuffer("p1", "v")
+        assertEquals("v", next.fullTextBuffer["p1"])
+    }
+
+    @Test
+    fun `replaceFullTextBuffer overwrites a prior value for the same partId`() {
+        val state = ChatState(fullTextBuffer = mapOf("p1" to "old"))
+
+        val next = state.replaceFullTextBuffer("p1", "new")
+
+        assertEquals("new", next.fullTextBuffer["p1"])
+        assertEquals(1, next.fullTextBuffer.size)
+    }
+
+    @Test
+    fun `replaceFullTextBuffer does not touch deltaBuffer`() {
+        val state = ChatState(deltaBuffer = mapOf("p1" to "delta"))
+
+        val next = state.replaceFullTextBuffer("p1", "full")
+
+        assertEquals("delta", next.deltaBuffer["p1"])
+        assertEquals("full", next.fullTextBuffer["p1"])
+    }
+
+    // === markFlushPending / isFlushPending: boundary =====================
+
+    @Test
+    fun `markFlushPending preserves existing entries when adding a new partId`() {
+        val state = ChatState(pendingFlushPartIds = setOf("p1"))
+
+        val next = state.markFlushPending("p2")
+
+        assertEquals(setOf("p1", "p2"), next.pendingFlushPartIds)
+    }
+
+    @Test
+    fun `markFlushPending does not touch unrelated slice state`() {
+        val state = ChatState(
+            streamingPartTexts = mapOf("p1" to "v"),
+            streamingReasoningPart = Part(id = "p1", messageId = "m1", sessionId = "s1", type = "reasoning")
+        )
+
+        val next = state.markFlushPending("p2")
+
+        assertEquals("v", next.streamingPartTexts["p1"])
+        assertNotNull(next.streamingReasoningPart)
+    }
+
+    @Test
+    fun `markFlushPending on an empty set adds the sole entry`() {
+        val next = ChatState().markFlushPending("solo")
+        assertEquals(setOf("solo"), next.pendingFlushPartIds)
+    }
+
+    @Test
+    fun `isFlushPending returns false for every partId when the set is empty`() {
+        val state = ChatState()
+        assertFalse(state.isFlushPending("p1"))
+        assertFalse(state.isFlushPending("anything"))
+    }
+
+    @Test
+    fun `isFlushPending reports membership independently for multiple partIds`() {
+        val state = ChatState(pendingFlushPartIds = setOf("a", "b"))
+        assertTrue(state.isFlushPending("a"))
+        assertTrue(state.isFlushPending("b"))
+        assertFalse(state.isFlushPending("c"))
+    }
+
+    // === flushCoalesceBufferForPart: extended decision matrix ============
+
+    @Test
+    fun `flushCoalesceBufferForPart REPLACE path with both buffers prefers fullText and drops delta`() {
+        val state = ChatState(
+            streamingPartTexts = mapOf("p1" to "partial"),
+            fullTextBuffer = mapOf("p1" to "AUTHORITATIVE"),
+            deltaBuffer = mapOf("p1" to " stale delta"),
+            pendingFlushPartIds = setOf("p1")
+        )
+
+        val next = state.flushCoalesceBufferForPart("p1")
+
+        assertEquals("AUTHORITATIVE", next.streamingPartTexts["p1"])
+        assertNull(next.deltaBuffer["p1"])
+        assertNull(next.fullTextBuffer["p1"])
+    }
+
+    @Test
+    fun `flushCoalesceBufferForPart with fullText only and no delta applies REPLACE`() {
+        val state = ChatState(
+            streamingPartTexts = mapOf("p1" to "partial"),
+            fullTextBuffer = mapOf("p1" to "FULL"),
+            pendingFlushPartIds = setOf("p1")
+        )
+
+        val next = state.flushCoalesceBufferForPart("p1")
+
+        assertEquals("FULL", next.streamingPartTexts["p1"])
+        assertNull(next.fullTextBuffer["p1"])
+        assertFalse(next.pendingFlushPartIds.contains("p1"))
+    }
+
+    @Test
+    fun `flushCoalesceBufferForPart with delta only and no fullText applies APPEND`() {
+        val state = ChatState(
+            streamingPartTexts = mapOf("p1" to "head"),
+            deltaBuffer = mapOf("p1" to " tail"),
+            pendingFlushPartIds = setOf("p1")
+        )
+
+        val next = state.flushCoalesceBufferForPart("p1")
+
+        assertEquals("head tail", next.streamingPartTexts["p1"])
+        assertNull(next.deltaBuffer["p1"])
+    }
+
+    @Test
+    fun `flushCoalesceBufferForPart with overlay wiped and both buffers drops both`() {
+        val state = ChatState(
+            streamingPartTexts = emptyMap(),
+            fullTextBuffer = mapOf("p1" to "ghost-full"),
+            deltaBuffer = mapOf("p1" to "ghost-delta"),
+            pendingFlushPartIds = setOf("p1")
+        )
+
+        val next = state.flushCoalesceBufferForPart("p1")
+
+        assertNull(next.streamingPartTexts["p1"])
+        assertNull(next.fullTextBuffer["p1"])
+        assertNull(next.deltaBuffer["p1"])
+        assertFalse(next.pendingFlushPartIds.contains("p1"))
+    }
+
+    @Test
+    fun `flushCoalesceBufferForPart with overlay wiped and fullText only drops the stale fullText`() {
+        val state = ChatState(
+            streamingPartTexts = emptyMap(),
+            fullTextBuffer = mapOf("p1" to "stale"),
+            pendingFlushPartIds = setOf("p1")
+        )
+
+        val next = state.flushCoalesceBufferForPart("p1")
+
+        assertNull(next.streamingPartTexts["p1"])
+        assertNull(next.fullTextBuffer["p1"])
+    }
+
+    @Test
+    fun `flushCoalesceBufferForPart with overlay wiped and delta only drops the stale delta`() {
+        val state = ChatState(
+            streamingPartTexts = emptyMap(),
+            deltaBuffer = mapOf("p1" to "ghost"),
+            pendingFlushPartIds = setOf("p1")
+        )
+
+        val next = state.flushCoalesceBufferForPart("p1")
+
+        assertNull(next.streamingPartTexts["p1"])
+        assertNull(next.deltaBuffer["p1"])
+    }
+
+    @Test
+    fun `flushCoalesceBufferForPart with overlay present and no buffers clears only the pending bookkeeping`() {
+        val state = ChatState(
+            streamingPartTexts = mapOf("p1" to "preserved"),
+            pendingFlushPartIds = setOf("p1")
+        )
+
+        val next = state.flushCoalesceBufferForPart("p1")
+
+        assertEquals("preserved", next.streamingPartTexts["p1"])
+        assertFalse(next.pendingFlushPartIds.contains("p1"))
+    }
+
+    @Test
+    fun `flushCoalesceBufferForPart flushes even when partId is not in pendingFlushPartIds`() {
+        // pendingFlushPartIds is the observable mirror; the flush itself is
+        // not gated by membership (the dispatcher may have already removed
+        // the entry). Verified explicitly:
+        val state = ChatState(
+            streamingPartTexts = mapOf("p1" to "x"),
+            deltaBuffer = mapOf("p1" to " y"),
+            pendingFlushPartIds = emptySet()
+        )
+
+        val next = state.flushCoalesceBufferForPart("p1")
+
+        assertEquals("x y", next.streamingPartTexts["p1"])
+        assertNull(next.deltaBuffer["p1"])
+    }
+
+    @Test
+    fun `flushCoalesceBufferForPart for an unknown partId with empty overlay clears bookkeeping`() {
+        val state = ChatState(
+            streamingPartTexts = emptyMap(),
+            pendingFlushPartIds = setOf("p1")
+        )
+
+        val next = state.flushCoalesceBufferForPart("p1")
+
+        // Overlay absent + no buffers → no overlay entry created; pending cleared.
+        assertNull(next.streamingPartTexts["p1"])
+        assertFalse(next.pendingFlushPartIds.contains("p1"))
+    }
+
+    @Test
+    fun `flushCoalesceBufferForPart preserves every other partId entirely`() {
+        val state = ChatState(
+            streamingPartTexts = mapOf("p1" to "a", "p2" to "b", "p3" to "c"),
+            fullTextBuffer = mapOf("p2" to "B"),
+            deltaBuffer = mapOf("p3" to "DELTA"),
+            pendingFlushPartIds = setOf("p1", "p2", "p3")
+        )
+
+        val next = state.flushCoalesceBufferForPart("p2")
+
+        // p1 untouched, p2 flushed (REPLACE), p3 untouched.
+        assertEquals("a", next.streamingPartTexts["p1"])
+        assertEquals("B", next.streamingPartTexts["p2"])
+        assertEquals("c", next.streamingPartTexts["p3"])
+        assertNull(next.fullTextBuffer["p2"])
+        assertEquals("DELTA", next.deltaBuffer["p3"])
+        assertTrue(next.pendingFlushPartIds.contains("p1"))
+        assertTrue(next.pendingFlushPartIds.contains("p3"))
+        assertFalse(next.pendingFlushPartIds.contains("p2"))
+    }
+
+    // === clearCoalesceBufferForPart: boundary ============================
+
+    @Test
+    fun `clearCoalesceBufferForPart for an absent partId is a no-op on the buffers`() {
+        val state = ChatState(
+            deltaBuffer = mapOf("p1" to "a"),
+            fullTextBuffer = mapOf("p1" to "x"),
+            pendingFlushPartIds = setOf("p1")
+        )
+
+        val next = state.clearCoalesceBufferForPart("pX")
+
+        assertEquals("a", next.deltaBuffer["p1"])
+        assertEquals("x", next.fullTextBuffer["p1"])
+        assertEquals(setOf("p1"), next.pendingFlushPartIds)
+    }
+
+    @Test
+    fun `clearCoalesceBufferForPart preserves streamingPartTexts`() {
+        val state = ChatState(streamingPartTexts = mapOf("p1" to "kept"))
+
+        val next = state.clearCoalesceBufferForPart("p1")
+
+        assertEquals("kept", next.streamingPartTexts["p1"])
+    }
+
+    @Test
+    fun `clearCoalesceBufferForPart of the last entry yields empty maps`() {
+        val state = ChatState(
+            deltaBuffer = mapOf("p1" to "a"),
+            fullTextBuffer = mapOf("p1" to "x"),
+            pendingFlushPartIds = setOf("p1")
+        )
+
+        val next = state.clearCoalesceBufferForPart("p1")
+
+        assertTrue(next.deltaBuffer.isEmpty())
+        assertTrue(next.fullTextBuffer.isEmpty())
+        assertTrue(next.pendingFlushPartIds.isEmpty())
+    }
+
+    // === clearAllCoalesceBuffers: boundary ===============================
+
+    @Test
+    fun `clearAllCoalesceBuffers on already-empty state is a no-op`() {
+        val state = ChatState()
+
+        val next = state.clearAllCoalesceBuffers()
+
+        assertTrue(next.deltaBuffer.isEmpty())
+        assertTrue(next.fullTextBuffer.isEmpty())
+        assertTrue(next.pendingFlushPartIds.isEmpty())
+    }
+
+    @Test
+    fun `clearAllCoalesceBuffers wipes multiple partIds at once`() {
+        val state = ChatState(
+            deltaBuffer = mapOf("p1" to "a", "p2" to "b", "p3" to "c"),
+            fullTextBuffer = mapOf("p1" to "x", "p2" to "y"),
+            pendingFlushPartIds = setOf("p1", "p2", "p3")
+        )
+
+        val next = state.clearAllCoalesceBuffers()
+
+        assertTrue(next.deltaBuffer.isEmpty())
+        assertTrue(next.fullTextBuffer.isEmpty())
+        assertTrue(next.pendingFlushPartIds.isEmpty())
+    }
+
+    @Test
+    fun `clearAllCoalesceBuffers preserves streamingPartTexts entries`() {
+        val state = ChatState(
+            streamingPartTexts = mapOf("p1" to "v1", "p2" to "v2"),
+            deltaBuffer = mapOf("p1" to "buf")
+        )
+
+        val next = state.clearAllCoalesceBuffers()
+
+        assertEquals("v1", next.streamingPartTexts["p1"])
+        assertEquals("v2", next.streamingPartTexts["p2"])
+    }
+
+    // === applyQuestionAsked / applyQuestionResolved: boundary ============
+
+    @Test
+    fun `applyQuestionAsked appends multiple distinct questions in order`() {
+        val state = SessionListState()
+
+        val next = state
+            .applyQuestionAsked(QuestionRequest(id = "q1", sessionId = "s1", questions = emptyList()))
+            .applyQuestionAsked(QuestionRequest(id = "q2", sessionId = "s1", questions = emptyList()))
+
+        assertEquals(listOf("q1", "q2"), next.pendingQuestions.map { it.id })
+    }
+
+    @Test
+    fun `applyQuestionAsked with the same id but a different sessionId is still idempotent`() {
+        // Idempotency is keyed on QuestionRequest.id alone — a different
+        // sessionId does NOT turn it into a new question.
+        val state = SessionListState(pendingQuestions = listOf(
+            QuestionRequest(id = "q1", sessionId = "s1", questions = emptyList())
+        ))
+        val dup = QuestionRequest(id = "q1", sessionId = "s2", questions = emptyList())
+
+        val next = state.applyQuestionAsked(dup)
+
+        assertEquals(1, next.pendingQuestions.size)
+        assertEquals("s1", next.pendingQuestions[0].sessionId)
+    }
+
+    @Test
+    fun `applyQuestionAsked preserves the questions list payload verbatim`() {
+        val state = SessionListState()
+        val q = QuestionRequest(
+            id = "q1", sessionId = "s1",
+            questions = listOf(
+                QuestionInfo("q", "h", listOf(QuestionOption("a", "b")))
+            )
+        )
+
+        val next = state.applyQuestionAsked(q)
+
+        assertEquals(1, next.pendingQuestions[0].questions.size)
+        assertEquals("q", next.pendingQuestions[0].questions[0].question)
+    }
+
+    @Test
+    fun `applyQuestionResolved on an empty pending list is a no-op`() {
+        val state = SessionListState()
+
+        val next = state.applyQuestionResolved("anything")
+
+        assertTrue(next.pendingQuestions.isEmpty())
+    }
+
+    @Test
+    fun `applyQuestionResolved resolving the only pending question yields empty list`() {
+        val state = SessionListState(pendingQuestions = listOf(
+            QuestionRequest(id = "q1", sessionId = "s1", questions = emptyList())
+        ))
+
+        val next = state.applyQuestionResolved("q1")
+
+        assertTrue(next.pendingQuestions.isEmpty())
+    }
+
+    @Test
+    fun `applyQuestionResolved filter removes every entry sharing the id`() {
+        // The implementation uses `filter { it.id != requestId }`; if the
+        // list ever contains duplicates (it should not, but defensively)
+        // all are removed.
+        val state = SessionListState(pendingQuestions = listOf(
+            QuestionRequest(id = "q1", sessionId = "s1", questions = emptyList()),
+            QuestionRequest(id = "q1", sessionId = "s2", questions = emptyList()),
+            QuestionRequest(id = "q2", sessionId = "s1", questions = emptyList())
+        ))
+
+        val next = state.applyQuestionResolved("q1")
+
+        assertEquals(listOf("q2"), next.pendingQuestions.map { it.id })
+    }
+
+    // === applyTodoUpdated: boundary ======================================
+
+    @Test
+    fun `applyTodoUpdated with an empty todos list stores an empty list for the session`() {
+        val state = SessionListState()
+
+        val next = state.applyTodoUpdated("s1", emptyList())
+
+        assertEquals(0, next.sessionTodos["s1"]?.size)
+    }
+
+    @Test
+    fun `applyTodoUpdated replacing a prior list with an empty list yields empty`() {
+        val state = SessionListState(
+            sessionTodos = mapOf("s1" to listOf(TodoItem("a", "pending", "low", "t0")))
+        )
+
+        val next = state.applyTodoUpdated("s1", emptyList())
+
+        assertEquals(0, next.sessionTodos["s1"]?.size)
+    }
+
+    @Test
+    fun `applyTodoUpdated preserves other sessions' todo lists`() {
+        val state = SessionListState(
+            sessionTodos = mapOf(
+                "s1" to listOf(TodoItem("a", "pending", "low", "t0")),
+                "s2" to listOf(TodoItem("b", "completed", "high", "t1"))
+            )
+        )
+
+        val next = state.applyTodoUpdated("s1", listOf(TodoItem("c", "pending", "medium", "t2")))
+
+        assertEquals(1, next.sessionTodos["s1"]?.size)
+        assertEquals("c", next.sessionTodos["s1"]!![0].content)
+        assertEquals(1, next.sessionTodos["s2"]?.size)
+        assertEquals("b", next.sessionTodos["s2"]!![0].content)
+    }
+
+    // === applyMarkSessionUnread: boundary ================================
+
+    @Test
+    fun `applyMarkSessionUnread is idempotent when the id is already unread`() {
+        val state = UnreadState(unreadSessions = setOf("s1"))
+
+        val next = state.applyMarkSessionUnread("s1", currentSessionId = "other")
+
+        assertEquals(setOf("s1"), next.unreadSessions)
+    }
+
+    @Test
+    fun `applyMarkSessionUnread is case-sensitive for s1 versus S1`() {
+        val state = UnreadState()
+
+        val next = state.applyMarkSessionUnread("s1", currentSessionId = null)
+            .applyMarkSessionUnread("S1", currentSessionId = null)
+
+        assertEquals(setOf("s1", "S1"), next.unreadSessions)
+    }
+
+    @Test
+    fun `applyMarkSessionUnread preserves unrelated unread entries`() {
+        val state = UnreadState(unreadSessions = setOf("a", "b"))
+
+        val next = state.applyMarkSessionUnread("c", currentSessionId = null)
+
+        assertEquals(setOf("a", "b", "c"), next.unreadSessions)
+    }
+
+    // === ensurePlaceholderPart: direct unit tests (type-guarded inject) ==
+
+    @Test
+    fun `ensurePlaceholderPart for tool type returns the map unchanged`() {
+        val input = mapOf("m1" to listOf(Part(id = "p1", messageId = "m1", sessionId = "s1", type = "text")))
+        val result = ensurePlaceholderPart(input, "m1", "p2", "s1", "tool")
+        // Non-streamable type → no injection; the existing single part is
+        // preserved and no p2 placeholder is added.
+        assertEquals(1, result["m1"]?.size)
+        assertEquals("p1", result["m1"]!![0].id)
+        assertFalse(result["m1"]!!.any { it.id == "p2" })
+    }
+
+    @Test
+    fun `ensurePlaceholderPart for patch type returns the map unchanged`() {
+        val input = emptyMap<String, List<Part>>()
+        val result = ensurePlaceholderPart(input, "m1", "p1", "s1", "patch")
+        assertTrue(result.isEmpty())
+    }
+
+    @Test
+    fun `ensurePlaceholderPart for file type returns the map unchanged`() {
+        val input = emptyMap<String, List<Part>>()
+        val result = ensurePlaceholderPart(input, "m1", "p1", "s1", "file")
+        assertTrue(result.isEmpty())
+    }
+
+    @Test
+    fun `ensurePlaceholderPart for step-start type returns the map unchanged`() {
+        val input = emptyMap<String, List<Part>>()
+        val result = ensurePlaceholderPart(input, "m1", "p1", "s1", "step-start")
+        assertTrue(result.isEmpty())
+    }
+
+    @Test
+    fun `ensurePlaceholderPart for text type on missing msgId inserts a single-element list`() {
+        val result = ensurePlaceholderPart(emptyMap(), "m1", "p1", "s1", "text")
+        assertEquals(1, result["m1"]?.size)
+        assertEquals("p1", result["m1"]!![0].id)
+        assertEquals("text", result["m1"]!![0].type)
+    }
+
+    @Test
+    fun `ensurePlaceholderPart for reasoning type on missing msgId inserts a reasoning part`() {
+        val result = ensurePlaceholderPart(emptyMap(), "m1", "p1", "s1", "reasoning")
+        assertEquals("reasoning", result["m1"]!![0].type)
+    }
+
+    @Test
+    fun `ensurePlaceholderPart appends when msgId exists but lacks pId`() {
+        val input = mapOf(
+            "m1" to listOf(Part(id = "other", messageId = "m1", sessionId = "s1", type = "text"))
+        )
+
+        val result = ensurePlaceholderPart(input, "m1", "p1", "s1", "text")
+
+        assertEquals(2, result["m1"]?.size)
+        assertTrue(result["m1"]!!.any { it.id == "other" })
+        assertTrue(result["m1"]!!.any { it.id == "p1" })
+    }
+
+    @Test
+    fun `ensurePlaceholderPart is a no-op when msgId already has pId`() {
+        val input = mapOf(
+            "m1" to listOf(Part(id = "p1", messageId = "m1", sessionId = "s1", type = "text"))
+        )
+
+        val result = ensurePlaceholderPart(input, "m1", "p1", "s1", "text")
+
+        assertEquals(1, result["m1"]?.size)
+    }
+
+    @Test
+    fun `ensurePlaceholderPart does not touch unrelated msgId entries`() {
+        val input = mapOf(
+            "m-other" to listOf(Part(id = "x", messageId = "m-other", sessionId = "s1", type = "text"))
+        )
+
+        val result = ensurePlaceholderPart(input, "m1", "p1", "s1", "text")
+
+        assertEquals(1, result["m-other"]?.size)
+        assertEquals("x", result["m-other"]!![0].id)
+        assertEquals(1, result["m1"]?.size)
+    }
+
+    // === reasoningPartOrNull: direct unit tests =========================
+
+    @Test
+    fun `reasoningPartOrNull for reasoning returns a Part typed reasoning`() {
+        val part = reasoningPartOrNull("reasoning", "p1", "m1", "s1")
+        assertNotNull(part)
+        assertEquals("reasoning", part!!.type)
+        assertEquals("p1", part.id)
+        assertEquals("m1", part.messageId)
+        assertEquals("s1", part.sessionId)
+    }
+
+    @Test
+    fun `reasoningPartOrNull for text returns null`() {
+        assertNull(reasoningPartOrNull("text", "p1", "m1", "s1"))
+    }
+
+    @Test
+    fun `reasoningPartOrNull for tool returns null`() {
+        assertNull(reasoningPartOrNull("tool", "p1", "m1", "s1"))
+    }
+
+    @Test
+    fun `reasoningPartOrNull for empty string returns null`() {
+        assertNull(reasoningPartOrNull("", "p1", "m1", "s1"))
+    }
+
+    // === isStreamablePartType: direct unit tests ========================
+
+    @Test
+    fun `isStreamablePartType returns true for text`() {
+        assertTrue(isStreamablePartType("text"))
+    }
+
+    @Test
+    fun `isStreamablePartType returns true for reasoning`() {
+        assertTrue(isStreamablePartType("reasoning"))
+    }
+
+    @Test
+    fun `isStreamablePartType returns false for tool`() {
+        assertFalse(isStreamablePartType("tool"))
+    }
+
+    @Test
+    fun `isStreamablePartType returns false for patch`() {
+        assertFalse(isStreamablePartType("patch"))
+    }
+
+    @Test
+    fun `isStreamablePartType returns false for an empty string`() {
+        assertFalse(isStreamablePartType(""))
+    }
+
+    @Test
+    fun `isStreamablePartType returns false for an unknown custom type`() {
+        assertFalse(isStreamablePartType("custom-future-type"))
     }
 }

@@ -1,11 +1,13 @@
 package cn.vectory.ocdroid.ui.controller
 
 import android.util.Log
+import cn.vectory.ocdroid.R
 import cn.vectory.ocdroid.data.api.CommandInfo
 import cn.vectory.ocdroid.data.model.SSEEvent
 import cn.vectory.ocdroid.data.model.Session
 import cn.vectory.ocdroid.data.repository.OpenCodeRepository
 import cn.vectory.ocdroid.data.repository.ServerCompatProfile
+import cn.vectory.ocdroid.ui.ConnectionPhase
 import cn.vectory.ocdroid.ui.ConnectionState
 import cn.vectory.ocdroid.ui.SharedEffectBus
 import cn.vectory.ocdroid.ui.SliceFlows
@@ -20,7 +22,6 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.catch
 import kotlinx.coroutines.flow.collect
-import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import java.util.Locale
@@ -70,8 +71,6 @@ import java.util.Locale
 @Suppress("DEPRECATION")
 internal class ConnectionCoordinator(
     private val scope: CoroutineScope,
-    private val connectionFlow: kotlinx.coroutines.flow.MutableStateFlow<ConnectionState>,
-    private val settingsFlow: kotlinx.coroutines.flow.MutableStateFlow<cn.vectory.ocdroid.ui.SettingsState>,
     private val slices: SliceFlows,
     private val repository: OpenCodeRepository,
     private val settingsManager: SettingsManager,
@@ -96,9 +95,9 @@ internal class ConnectionCoordinator(
      * host's directorySessions. The fan-out in [loadInitialData] (up to one
      * launch per recent workdir) amplifies this in-flight window, hence the
      * explicit guard. Reads/writes are on the main thread (reconfigure +
-     * loadInitialData both run there); @Volatile is belt-and-suspenders.
+     * loadInitialData both run there); AtomicLong is belt-and-suspenders.
      */
-    @Volatile private var directoryFetchGeneration = 0L
+    private val directoryFetchGeneration = java.util.concurrent.atomic.AtomicLong(0L)
 
     // ── State sync helpers (mirror orchestrator.writeConnection) ──
 
@@ -111,7 +110,7 @@ internal class ConnectionCoordinator(
      * safe by VM contract.
      */
     private fun writeConnection(transform: (ConnectionState) -> ConnectionState) {
-        slices.connection.update(transform)
+        slices.mutateConnection(transform)
     }
 
     // ── Public API ──────────────────────────────────────────────────────────
@@ -159,7 +158,7 @@ internal class ConnectionCoordinator(
                 // persistent `error` field to clear at the start of a probe —
                 // any prior failure was already consumed app-wide. Connection
                 // phase/isConnecting live on connectionFlow.
-                writeConnection { it.copy(isConnecting = true, connectionPhase = "connecting") }
+                writeConnection { it.copy(isConnecting = true, connectionPhase = ConnectionPhase.Connecting) }
                 // NOTE: configureRepositoryForCurrentProfile() was intentionally
                 // removed here. Every caller already configures the repository
                 // before invoking testConnection (cold start via applySavedSettings;
@@ -181,7 +180,7 @@ internal class ConnectionCoordinator(
                     attempt++
                     if (attempt > 1) {
                         writeConnection {
-                            it.copy(connectionPhase = "reconnecting (attempt $attempt/$maxAttempts)")
+                            it.copy(connectionPhase = ConnectionPhase.ReconnectingAttempt(attempt, maxAttempts))
                         }
                     }
                     val healthResult = repository.checkHealth()
@@ -197,7 +196,7 @@ internal class ConnectionCoordinator(
                                     isConnected = true,
                                     serverVersion = health.version,
                                     isConnecting = false,
-                                    connectionPhase = "connected"
+                                    connectionPhase = ConnectionPhase.Connected
                                 )
                             }
                             loadInitialData()
@@ -220,13 +219,13 @@ internal class ConnectionCoordinator(
                         // emitted before phase flips to "disconnected" — both
                         // still describe the same failure).
                         healthResult.exceptionOrNull()?.let { e ->
-                            effects.uiEvents.tryEmit(UiEvent.Error(errorMessageOrFallback(e, "Connection failed")))
+                            effects.uiEvents.tryEmit(UiEvent.Error(R.string.error_connection_failed, listOf(errorMessageOrFallback(e, "unknown error"))))
                         }
                         writeConnection {
                             it.copy(
                                 isConnected = false,
                                 isConnecting = false,
-                                connectionPhase = "disconnected"
+                                connectionPhase = ConnectionPhase.Disconnected
                             )
                         }
                         settled = true
@@ -285,17 +284,18 @@ internal class ConnectionCoordinator(
      */
     fun loadInitialData() {
         // Cross-domain fan-out: orchestrator owns these implementations.
-        effects.effects.tryEmit(ControllerEffect.LoadSessions)
-        effects.effects.tryEmit(ControllerEffect.LoadAgents)
-        effects.effects.tryEmit(ControllerEffect.LoadProviders)
-        effects.effects.tryEmit(ControllerEffect.LoadPendingQuestions)
-        effects.effects.tryEmit(ControllerEffect.LoadPendingPermissions)
+        // §R18 Phase 3 Wave 1 (P1-3 C 类): loadInitialData 五连发顺序敏感 → 保持同步 tryEmitEffect (scope.launch 包裹会破坏顺序)。
+        effects.tryEmitEffect(ControllerEffect.LoadSessions)
+        effects.tryEmitEffect(ControllerEffect.LoadAgents)
+        effects.tryEmitEffect(ControllerEffect.LoadProviders)
+        effects.tryEmitEffect(ControllerEffect.LoadPendingQuestions)
+        effects.tryEmitEffect(ControllerEffect.LoadPendingPermissions)
         // Same-domain inline: slash commands merged with client-side commands.
         loadCommands()
         // §generation-guard: capture the current generation so directory fetches
         // that return AFTER a host reconfigure (cancelSseForReconfigure bumps
         // this) are dropped — their sessions belong to the previous host.
-        val generation = directoryFetchGeneration
+        val generation = directoryFetchGeneration.get()
         // Re-fetch directory-scoped sessions for EVERY known workdir (the
         // persisted recentWorkdirs set + currentWorkdir) so each connected
         // project's sessions reappear after restart. directorySessions is
@@ -313,7 +313,7 @@ internal class ConnectionCoordinator(
                         // Drop stale-host results: a host/profile switch between
                         // dispatch and return would otherwise write the previous
                         // host's sessions into the new host's directorySessions.
-                        if (generation != directoryFetchGeneration) return@launch
+                        if (generation != directoryFetchGeneration.get()) return@launch
                         appendDirectorySessions(workdir, sessions)
                     }
                     .onFailure { error ->
@@ -323,7 +323,7 @@ internal class ConnectionCoordinator(
                         // user-initiated refreshDirectorySessions are the
                         // fallbacks. Log for diagnosability without surfacing
                         // a user-facing error.
-                        if (generation == directoryFetchGeneration) {
+                        if (generation == directoryFetchGeneration.get()) {
                             reportNonFatalIssue(TAG, "directory restore failed for $workdir", error)
                         }
                     }
@@ -346,7 +346,7 @@ internal class ConnectionCoordinator(
      */
     @Suppress("DEPRECATION")
     private fun appendDirectorySessions(workdir: String, sessions: List<Session>) {
-        slices.sessionList.update { slice ->
+        slices.mutateSessionList { slice ->
             slice.copy(directorySessions = slice.directorySessions + (workdir to sessions))
         }
     }
@@ -362,13 +362,13 @@ internal class ConnectionCoordinator(
         scope.launch {
             repository.getCommands()
                 .onSuccess { serverCommands ->
-                    slices.settings.update {
+                    slices.mutateSettings {
                         it.copy(availableCommands = mergeCommands(localCommands(), serverCommands))
                     }
                 }
                 .onFailure { error ->
                     reportNonFatalIssue(TAG, "Failed to load commands", error)
-                    slices.settings.update {
+                    slices.mutateSettings {
                         it.copy(availableCommands = localCommands())
                     }
                 }
@@ -425,10 +425,14 @@ internal class ConnectionCoordinator(
      */
     private fun launchSseCollection(): Job {
         return scope.launch {
-            repository.connectSSE()
+            // §R18 Phase 2-E step 1: pass the persisted workdir explicitly so
+            // SSE routes to the right InstanceState. Was the global
+            // currentDirectory before; behavior preserved (switchTo still
+            // seeds settingsManager.currentWorkdir on session select).
+            repository.connectSSE(settingsManager.currentWorkdir)
                 .catch { error ->
                     Log.e("OC_ERROR", "SSE collection failed", error)
-                    effects.uiEvents.tryEmit(UiEvent.Error("SSE Error: ${error.message}"))
+                    effects.uiEvents.tryEmit(UiEvent.Error(R.string.error_sse_failed, listOf(error.message ?: "unknown error")))
                 }
                 .collect { result ->
                     result.onSuccess { event ->
@@ -443,14 +447,15 @@ internal class ConnectionCoordinator(
                             it.copy(
                                 isConnected = true,
                                 isConnecting = false,
-                                connectionPhase = "connected"
+                                connectionPhase = ConnectionPhase.Connected
                             )
                         }
-                        effects.effects.tryEmit(ControllerEffect.OnSseEvent(event))
+                        // §R18 Phase 3 Wave 1 (P1-3 A 类): launchSseCollection 内 SSE collect 回调是 suspend 上下文 → suspend emitEffect。
+                        effects.emitEffect(ControllerEffect.OnSseEvent(event))
                     }
                         .onFailure { error ->
                             Log.e("OC_ERROR", "SSE event failed", error)
-                            effects.uiEvents.tryEmit(UiEvent.Error("SSE Error: ${error.message}"))
+                            effects.uiEvents.tryEmit(UiEvent.Error(R.string.error_sse_failed, listOf(error.message ?: "unknown error")))
                         }
                 }
         }
@@ -484,11 +489,12 @@ internal class ConnectionCoordinator(
         // §generation-guard: a host/profile switch invalidates every in-flight
         // directory fetch from the previous host. Bump so loadInitialData's
         // late-returning onSuccess blocks drop their (stale-host) results.
-        directoryFetchGeneration++
+        directoryFetchGeneration.incrementAndGet()
         // §Phase1E: a host/profile switch is a fresh server — treat the next
         // connect as a cold start (skip catch-up, the reconfigure path loads
         // sessions/messages itself). Routed to the catch-up controller.
-        effects.effects.tryEmit(ControllerEffect.HostReconfigured)
+        // §R18 Phase 3 Wave 1 (P1-3 B 类): 单发非 suspend → tryEmitEffect。
+        effects.tryEmitEffect(ControllerEffect.HostReconfigured)
     }
 
     companion object {

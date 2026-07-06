@@ -14,7 +14,7 @@ import cn.vectory.ocdroid.data.model.SessionStatus
 import cn.vectory.ocdroid.data.model.TodoItem
 import cn.vectory.ocdroid.util.MarkdownFontSizes
 import cn.vectory.ocdroid.util.ThemeMode
-import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
 
 sealed class TunnelActivationState {
     data object Idle : TunnelActivationState()
@@ -24,20 +24,54 @@ sealed class TunnelActivationState {
 }
 
 /**
+ * §R18 Phase 2-I: replacement for the legacy `connectionPhase: String?`
+ * (which used free-form strings "connecting"/"connected"/"disconnected"/
+ * "reconnecting"/"reconnecting (attempt N/M)"). The sealed hierarchy lets the
+ * compiler enforce exhaustive `when` branches at UI read sites and kills
+ * typo-class bugs at write sites.
+ *
+ * Two distinct Reconnecting shapes coexist in the codebase:
+ *  - [Reconnecting] — host-switch / cold-start immediate signal, no
+ *    attempt counter (writers: HostProfileController host-switch reset,
+ *    ConnectionActions.applySavedSettings cold-start signal).
+ *  - [ReconnectingAttempt] — ConnectionCoordinator retry-loop probe with
+ *    exponential backoff (writer: ConnectionCoordinator.testConnection on
+ *    attempt > 1).
+ *
+ * Non-null (default [Idle]) on purpose: lets UI `when (phase)` branches be
+ * exhaustive without an `else`. The previous `null` semantics (badge hidden,
+ * empty-state plain text) map to [Idle].
+ */
+sealed class ConnectionPhase {
+    /** No connection activity — initial state, or after a clean disconnect reset. */
+    data object Idle : ConnectionPhase()
+    /** First attempt of a connect probe is in flight (no retries yet). */
+    data object Connecting : ConnectionPhase()
+    /** Healthy connect established (server is reachable). */
+    data object Connected : ConnectionPhase()
+    /** Host-switch / cold-start reconnect signal, no attempt counter. */
+    data object Reconnecting : ConnectionPhase()
+    /** Retry-loop reconnect with backoff; carries the attempt counter for UI. */
+    data class ReconnectingAttempt(val attempt: Int, val maxAttempts: Int) : ConnectionPhase()
+    /** Probe failed terminally (retries exhausted or one-shot failure). */
+    data object Disconnected : ConnectionPhase()
+}
+
+/**
  * §R-17 batch2: connection-domain state slice. Authoritative storage; no
  * AppState mirror. Field set strictly follows RFC R-17 §2.1.
  *
  * Write atomicity (RFC §4, strategy A): every mutation goes through a single
  * `writeConnection { ... }` (or a sequence of them where each
  * intermediate state is a legal UI state — never a `isConnected=true` paired
- * with a null `connectionPhase`). Do NOT rely on `Dispatchers.Main.immediate`
+ * with an `Idle` `connectionPhase`). Do NOT rely on `Dispatchers.Main.immediate`
  * batching across separate `update` calls.
  */
 data class ConnectionState(
     val isConnected: Boolean = false,
     val isConnecting: Boolean = false,
     val serverVersion: String? = null,
-    val connectionPhase: String? = null,
+    val connectionPhase: ConnectionPhase = ConnectionPhase.Idle,
     val tunnelActivationState: TunnelActivationState = TunnelActivationState.Idle
 )
 
@@ -291,30 +325,42 @@ data class ConnectionFormSettings(
 data class NavState(val lastNavPage: Int = 0)
 
 /**
- * §R-17 Stage 1 (consumer-migration enabler): container holding all nine slice
- * `MutableStateFlow`s so that free helpers (`launch*` / `handle*`) can write
- * EVERY slice directly — without each helper taking nine separate flow params.
- * Built once in MainViewModel and passed (as `slices`) to every free helper.
+ * §R-17 batch2 → §R18 Phase 4 (P0-9): bundle view over the nine domain slices.
+ * Passed to Actions free functions and controllers.
  *
- * §R-17 batch2 step e final: the slice↔AppState sync helpers
- * (`aggregateFromSlices` / `syncSlicesFromAppState` / `updateAndSync` /
- * `applyComposerSlice` / `applySettingsSlice`) that used to live alongside
- * this data class were removed — the slices are now the sole authoritative
- * store.
+ * Originally a `data class` holding the nine `MutableStateFlow`s directly so
+ * free helpers could `.update { }` them. P0-9 write convergence moved every
+ * `MutableStateFlow` behind [SharedStateStore]'s private field + public
+ * [SharedStateStore.mutateXxx] helper; this bundle now exposes the matching
+ * read-only [StateFlow] views + per-slice [mutateXxx] write funnels that
+ * delegate to the store. Callers that used `slices.mutateChat { ... }` now
+ * use `slices.mutateChat { ... }`; reads (`slices.chat.value`) are unchanged.
  *
- * §R-17 batch2: container holding all nine slice MutableStateFlows. Passed to
- * Actions free functions and controllers. All writes via .update { } (CAS)
- * MUST run on Dispatchers.Main.immediate (caller convention) to preserve
- * cross-slice consistency within a single frame.
+ * `internal` constructor pins creation to [SharedStateStore] so the bundle
+ * cannot be assembled against foreign flows.
+ *
+ * §R-17 batch2 step e final: all writes via the per-slice `mutateXxx` helpers
+ * (CAS) MUST run on Dispatchers.Main.immediate (caller convention) to
+ * preserve cross-slice consistency within a single frame.
  */
-data class SliceFlows(
-    val connection: MutableStateFlow<ConnectionState>,
-    val traffic: MutableStateFlow<TrafficState>,
-    val composer: MutableStateFlow<ComposerState>,
-    val file: MutableStateFlow<FileState>,
-    val settings: MutableStateFlow<SettingsState>,
-    val chat: MutableStateFlow<ChatState>,
-    val sessionList: MutableStateFlow<SessionListState>,
-    val unread: MutableStateFlow<UnreadState>,
-    val host: MutableStateFlow<HostState>
-)
+class SliceFlows internal constructor(internal val store: SharedStateStore) {
+    val connection: StateFlow<ConnectionState> get() = store.connectionFlow
+    val traffic: StateFlow<TrafficState> get() = store.trafficFlow
+    val composer: StateFlow<ComposerState> get() = store.composerFlow
+    val file: StateFlow<FileState> get() = store.fileFlow
+    val settings: StateFlow<SettingsState> get() = store.settingsFlow
+    val chat: StateFlow<ChatState> get() = store.chatFlow
+    val sessionList: StateFlow<SessionListState> get() = store.sessionListFlow
+    val unread: StateFlow<UnreadState> get() = store.unreadFlow
+    val host: StateFlow<HostState> get() = store.hostFlow
+
+    fun mutateConnection(transform: (ConnectionState) -> ConnectionState) = store.mutateConnection(transform)
+    fun mutateTraffic(transform: (TrafficState) -> TrafficState) = store.mutateTraffic(transform)
+    fun mutateComposer(transform: (ComposerState) -> ComposerState) = store.mutateComposer(transform)
+    fun mutateFile(transform: (FileState) -> FileState) = store.mutateFile(transform)
+    fun mutateSettings(transform: (SettingsState) -> SettingsState) = store.mutateSettings(transform)
+    fun mutateChat(transform: (ChatState) -> ChatState) = store.mutateChat(transform)
+    fun mutateSessionList(transform: (SessionListState) -> SessionListState) = store.mutateSessionList(transform)
+    fun mutateUnread(transform: (UnreadState) -> UnreadState) = store.mutateUnread(transform)
+    fun mutateHost(transform: (HostState) -> HostState) = store.mutateHost(transform)
+}

@@ -20,7 +20,6 @@ import cn.vectory.ocdroid.ui.UnreadState
 import cn.vectory.ocdroid.util.SettingsManager
 import io.mockk.every
 import io.mockk.mockk
-import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.toList
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.TestScope
@@ -44,8 +43,9 @@ import org.junit.Test
  *    openSessionIds setter / sessionCache setter calls are captured into the
  *    [RecordingCallbacks] facade (so test bodies keep referencing the same
  *    accessor names as before),
- *  - a mockk [OpenCodeRepository] whose setCurrentDirectory calls are captured
- *    the same way,
+ *  - a mockk [OpenCodeRepository] (Phase 2-E step 2: setCurrentDirectory
+ *    capture was removed alongside the production call; the mock is still
+ *    wired for the remaining answers SessionSwitcher needs),
  *  - a real [SharedEffectBus] drained into [collectedEffects] for the 5
  *    cross-domain effect emissions (ClearDeltaBuffers / LoadChildSessions /
  *    LoadMessages / LoadSessionStatus / LoadPendingQuestions), exposed via
@@ -56,8 +56,13 @@ import org.junit.Test
 @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
 class SessionSwitcherTest {
 
-    private lateinit var composerFlow: MutableStateFlow<ComposerState>
-    private lateinit var expandedParts: MutableStateFlow<Map<String, Boolean>>
+    // §R18 Phase 4 (P0-9): the controller takes a [SharedStateStore]. The test
+    // holds read-only StateFlow views of composerFlow + expandedParts so the
+    // existing assertions keep their `.value.X` shape; writes go through the
+    // per-slice mutateXxx funnels on [store].
+    private lateinit var store: cn.vectory.ocdroid.ui.SharedStateStore
+    private lateinit var composerFlow: kotlinx.coroutines.flow.StateFlow<ComposerState>
+    private lateinit var expandedParts: kotlinx.coroutines.flow.StateFlow<Map<String, Boolean>>
     private lateinit var slices: SliceFlows
     private lateinit var settingsManager: SettingsManager
     private lateinit var repository: OpenCodeRepository
@@ -79,21 +84,10 @@ class SessionSwitcherTest {
     @Before
     fun setUp() {
         appStateFixture = SeedFixture()
-        composerFlow = MutableStateFlow(ComposerState())
-        expandedParts = MutableStateFlow(emptyMap())
-        // Build SliceFlows from fresh MutableStateFlows (the switcher reads +
-        // writes them directly).
-        slices = SliceFlows(
-            connection = MutableStateFlow(ConnectionState()),
-            traffic = MutableStateFlow(TrafficState()),
-            composer = composerFlow,
-            file = MutableStateFlow(FileState()),
-            settings = MutableStateFlow(SettingsState()),
-            chat = MutableStateFlow(ChatState()),
-            sessionList = MutableStateFlow(SessionListState()),
-            unread = MutableStateFlow(UnreadState()),
-            host = MutableStateFlow(HostState())
-        )
+        store = cn.vectory.ocdroid.ui.SharedStateStore()
+        slices = store.slices
+        composerFlow = store.composerFlow
+        expandedParts = store.expandedParts
         settingsManager = mockk(relaxed = true)
         repository = mockk(relaxed = true)
         effects = SharedEffectBus()
@@ -102,9 +96,7 @@ class SessionSwitcherTest {
         scope.launch(start = kotlinx.coroutines.CoroutineStart.UNDISPATCHED) { effects.effectsConsumed.toList(collectedEffects) }
         callbacks = RecordingCallbacks(settingsManager, repository, collectedEffects)
         switcher = SessionSwitcher(
-            composerFlow = composerFlow,
-            expandedParts = expandedParts,
-            slices = slices,
+            store = store,
             settingsManager = settingsManager,
             repository = repository,
             effects = effects,
@@ -116,81 +108,102 @@ class SessionSwitcherTest {
      * §R-17 batch2 step e final: seed slices directly from a SeedFixture.
      * The fixture carries the prior snapshot so successive `seed { ... }` calls
      * compose against the prior state. The switcher reads/writes slices only.
+     *
+     * §R18 Phase 4 (P0-9): per-slice StateFlow views are read-only; funnel
+     * every seed write through the matching mutateXxx helper.
      */
     private fun seed(transform: (SeedFixture) -> SeedFixture) {
         appStateFixture = transform(appStateFixture)
         val s = appStateFixture
-        slices.connection.value = ConnectionState(
-            isConnected = s.isConnected,
-            isConnecting = s.isConnecting,
-            serverVersion = s.serverVersion,
-            connectionPhase = s.connectionPhase,
-            tunnelActivationState = s.tunnelActivationState
-        )
-        slices.traffic.value = TrafficState(
-            trafficSent = s.trafficSent,
-            trafficReceived = s.trafficReceived
-        )
-        slices.composer.value = ComposerState(
-            inputText = s.inputText,
-            imageAttachments = s.imageAttachments,
-            sendingSessionIds = s.sendingSessionIds,
-            draftWorkdir = s.draftWorkdir
-        )
-        slices.file.value = FileState(
-            filePathToShowInFiles = s.filePathToShowInFiles,
-            filePreviewOriginRoute = s.filePreviewOriginRoute,
-            fileBrowserOpen = s.fileBrowserOpen,
-            fileBrowserWorkdir = s.fileBrowserWorkdir
-        )
-        slices.settings.value = SettingsState(
-            themeMode = s.themeMode,
-            markdownFontSizes = s.markdownFontSizes,
-            selectedAgentName = s.selectedAgentName,
-            agents = s.agents,
-            providers = s.providers,
-            availableCommands = s.availableCommands,
-            disabledModels = s.disabledModels,
-            uiFontScale = s.uiFontScale,
-            uiContentScale = s.uiContentScale
-        )
-        slices.chat.value = slices.chat.value.copy(
-            currentSessionId = s.currentSessionId,
-            messages = s.messages,
-            partsByMessage = s.partsByMessage,
-            streamingPartTexts = s.streamingPartTexts,
-            streamingReasoningPart = s.streamingReasoningPart,
-            olderMessagesCursor = s.olderMessagesCursor,
-            hasMoreMessages = s.hasMoreMessages,
-            isLoadingMessages = s.isLoadingMessages,
-            gapInfo = s.gapInfo,
-            staleNotice = s.staleNotice,
-            currentModel = s.currentModel
-        )
-        slices.sessionList.value = SessionListState(
-            sessions = s.sessions,
-            sessionStatuses = s.sessionStatuses,
-            expandedSessionIds = s.expandedSessionIds,
-            loadedSessionLimit = s.loadedSessionLimit,
-            hasMoreSessions = s.hasMoreSessions,
-            isLoadingMoreSessions = s.isLoadingMoreSessions,
-            isRefreshingSessions = s.isRefreshingSessions,
-            pendingPermissions = s.pendingPermissions,
-            pendingQuestions = s.pendingQuestions,
-            childSessions = s.childSessions,
-            directorySessions = s.directorySessions,
-            openSessionIds = s.openSessionIds,
-            sessionTodos = s.sessionTodos
-        )
-        slices.unread.value = UnreadState(
-            unreadSessions = s.unreadSessions,
-            tempClearedUnread = s.tempClearedUnread,
-            lastViewedTime = s.lastViewedTime
-        )
-        slices.host.value = HostState(
-            hostProfiles = s.hostProfiles,
-            currentHostProfileId = s.currentHostProfileId
-        )
+        slices.mutateConnection {
+            ConnectionState(
+                isConnected = s.isConnected,
+                isConnecting = s.isConnecting,
+                serverVersion = s.serverVersion,
+                connectionPhase = s.connectionPhase,
+                tunnelActivationState = s.tunnelActivationState
+            )
+        }
+        slices.mutateTraffic {
+            TrafficState(
+                trafficSent = s.trafficSent,
+                trafficReceived = s.trafficReceived
+            )
+        }
+        slices.mutateComposer {
+            ComposerState(
+                inputText = s.inputText,
+                imageAttachments = s.imageAttachments,
+                sendingSessionIds = s.sendingSessionIds,
+                draftWorkdir = s.draftWorkdir
+            )
+        }
+        slices.mutateFile {
+            FileState(
+                filePathToShowInFiles = s.filePathToShowInFiles,
+                filePreviewOriginRoute = s.filePreviewOriginRoute,
+                fileBrowserOpen = s.fileBrowserOpen,
+                fileBrowserWorkdir = s.fileBrowserWorkdir
+            )
+        }
+        slices.mutateSettings {
+            SettingsState(
+                themeMode = s.themeMode,
+                markdownFontSizes = s.markdownFontSizes,
+                selectedAgentName = s.selectedAgentName,
+                agents = s.agents,
+                providers = s.providers,
+                availableCommands = s.availableCommands,
+                disabledModels = s.disabledModels,
+                uiFontScale = s.uiFontScale,
+                uiContentScale = s.uiContentScale
+            )
+        }
+        slices.mutateChat {
+            it.copy(
+                currentSessionId = s.currentSessionId,
+                messages = s.messages,
+                partsByMessage = s.partsByMessage,
+                streamingPartTexts = s.streamingPartTexts,
+                streamingReasoningPart = s.streamingReasoningPart,
+                olderMessagesCursor = s.olderMessagesCursor,
+                hasMoreMessages = s.hasMoreMessages,
+                isLoadingMessages = s.isLoadingMessages,
+                gapInfo = s.gapInfo,
+                staleNotice = s.staleNotice,
+                currentModel = s.currentModel
+            )
+        }
+        slices.mutateSessionList {
+            SessionListState(
+                sessions = s.sessions,
+                sessionStatuses = s.sessionStatuses,
+                expandedSessionIds = s.expandedSessionIds,
+                loadedSessionLimit = s.loadedSessionLimit,
+                hasMoreSessions = s.hasMoreSessions,
+                isLoadingMoreSessions = s.isLoadingMoreSessions,
+                isRefreshingSessions = s.isRefreshingSessions,
+                pendingPermissions = s.pendingPermissions,
+                pendingQuestions = s.pendingQuestions,
+                childSessions = s.childSessions,
+                directorySessions = s.directorySessions,
+                openSessionIds = s.openSessionIds,
+                sessionTodos = s.sessionTodos
+            )
+        }
+        slices.mutateUnread {
+            UnreadState(
+                unreadSessions = s.unreadSessions,
+                tempClearedUnread = s.tempClearedUnread,
+                lastViewedTime = s.lastViewedTime
+            )
+        }
+        slices.mutateHost {
+            HostState(
+                hostProfiles = s.hostProfiles,
+                currentHostProfileId = s.currentHostProfileId
+            )
+        }
     }
 
     // ── Step 1: LRU write-back of outgoing session ─────────────────────────
@@ -279,7 +292,7 @@ class SessionSwitcherTest {
             sessions = listOf(Session(id = "s1", directory = "/d"), Session(id = "s2", directory = "/d"))
             )
         }
-        composerFlow.value = composerFlow.value.copy(inputText = "old draft text")
+        store.mutateComposer { it.copy(inputText = "old draft text") }
 
         switcher.switchTo("s2")
 
@@ -287,8 +300,10 @@ class SessionSwitcherTest {
         assertEquals(1, callbacks.saveDraftCalls.size)
         assertEquals("s1", callbacks.saveDraftCalls[0].first)
         assertEquals("old draft text", callbacks.saveDraftCalls[0].second)
-        // Set current session
-        assertEquals("s2", callbacks.setCurrentSessionIdCalls.single())
+        // §R18 Phase 2-F: switchTo now writes chatFlow.currentSessionId (the
+        // sole runtime source) instead of SettingsManager; the AppCore
+        // collector persists the non-null change.
+        assertEquals("s2", slices.chat.value.currentSessionId)
         // Restored new draft
         assertEquals("draft-for-s2", composerFlow.value.inputText)
     }
@@ -389,7 +404,7 @@ class SessionSwitcherTest {
 
     @Test
     fun `switchTo clears expanded parts`() {
-        expandedParts.value = mapOf("msg1|key1" to true, "msg2|key2" to false)
+        store.mutateExpandedParts { mapOf("msg1|key1" to true, "msg2|key2" to false) }
         seed {
             it.copy(
             currentSessionId = null,
@@ -402,22 +417,12 @@ class SessionSwitcherTest {
         assertTrue("expanded parts cleared on switch", expandedParts.value.isEmpty())
     }
 
-    // ── Step 6: directory sync ──────────────────────────────────────────────
-
-    @Test
-    fun `switchTo syncs directory to selected session`() {
-        seed {
-            it.copy(
-            currentSessionId = null,
-            sessions = listOf(Session(id = "s1", directory = "/home/user/proj"))
-            )
-        }
-
-        switcher.switchTo("s1")
-
-        assertEquals(1, callbacks.syncDirectoryCalls.size)
-        assertEquals("/home/user/proj", callbacks.syncDirectoryCalls[0])
-    }
+    // ── Step 6: (Phase 2-E step 2) directory sync ──────────────────────────
+    // §R18 Phase 2-E step 2: the repository.setCurrentDirectory call that
+    // lived at Step 6 of switchTo was removed; directory routing now uses
+    // the session's directory field directly at each callsite. The previous
+    // "switchTo syncs directory to selected session" test verified the
+    // removed side effect; deleted alongside the call.
 
     // ── Step 7: load callbacks ──────────────────────────────────────────────
 
@@ -585,7 +590,7 @@ class SessionSwitcherTest {
             sessions = listOf(Session(id = "s1", directory = "/d"))
             )
         }
-        composerFlow.value = composerFlow.value.copy(draftWorkdir = "/tmp/draft")
+        store.mutateComposer { it.copy(draftWorkdir = "/tmp/draft") }
 
         switcher.switchTo("s1")
 
@@ -751,7 +756,7 @@ class SessionSwitcherTest {
     // ── Callback ordering (Step 2 before Step 7 before Step 8) ──────────────
 
     @Test
-    fun `switchTo calls saveDraft before setCurrentSessionId before loadMessages`() {
+    fun `switchTo calls saveDraft before loadMessages and sets currentSessionId on chatFlow`() {
         seed {
             it.copy(
             currentSessionId = "old",
@@ -761,26 +766,23 @@ class SessionSwitcherTest {
             )
             )
         }
-        composerFlow.value = composerFlow.value.copy(inputText = "text")
+        store.mutateComposer { it.copy(inputText = "text") }
 
         switcher.switchTo("new")
 
-        // The ordering: saveDraft → setCurrentSessionId → getDraft → ... →
-        // loadMessages → loadSessionStatus → loadChildSessions → ...
-        // §batch 3b: saveDraft + setCurrentSessionId are captured on the
-        // SettingsManager mock; loadMessages fires as a ControllerEffect.
-        // switchTo is fully synchronous, so the relative order is:
-        // settings calls (Step 2) all complete BEFORE any effect is emitted
-        // (Step 6.5/7). Verify across the two recordings.
-        val saveDraftIdx = callbacks.saveDraftCalls.size.let { if (it > 0) 0 else -1 } // saveDraft is first settings call
-        val setCurrentIdx = callbacks.setCurrentSessionIdCalls.size.let { if (it > 0) 1 else -1 }
+        // §R18 Phase 2-F: switchTo no longer calls settingsManager.currentSessionId=;
+        // it writes chatFlow.currentSessionId (Step 2, selectSessionState) and the
+        // AppCore collector persists it. Ordering assertion now covers the two
+        // remaining captured side effects: saveDraft (SettingsManager, Step 2)
+        // runs synchronously BEFORE the loadMessages effect (Step 6.5/7).
+        // The chatFlow.currentSessionId write also happens in Step 2 (before
+        // any effect emission); verified post-hoc below.
+        assertTrue("saveDraft fired", callbacks.saveDraftCalls.isNotEmpty())
         val loadMsgIdx = collectedEffects.indexOfFirst { it is ControllerEffect.LoadMessages }
-        assertTrue("saveDraft fired", saveDraftIdx >= 0)
-        assertTrue("setCurrentSessionId fired", setCurrentIdx >= 0)
         assertTrue("loadMessages effect emitted", loadMsgIdx >= 0)
         // Both settings calls run synchronously before any effect emission.
         assertEquals("saveDraft called exactly once", 1, callbacks.saveDraftCalls.size)
-        assertEquals("setCurrentSessionId called exactly once", 1, callbacks.setCurrentSessionIdCalls.size)
+        assertEquals("currentSessionId set on chatFlow", "new", slices.chat.value.currentSessionId)
         assertTrue("loadMessages emitted", collectedEffects.any { it is ControllerEffect.LoadMessages })
     }
 
@@ -815,34 +817,33 @@ class SessionSwitcherTest {
         val syncDirectoryCalls = mutableListOf<String?>()
         val callOrder = mutableListOf<String>()
 
-        init {
-            // SettingsManager answers — capture into our lists for assertion.
-            every { settingsManager.setDraftText(any(), any()) } answers {
-                saveDraftCalls.add(firstArg<String>() to secondArg<String>())
-                callOrder += "saveDraft"
-            }
-            every { settingsManager.getDraftText(any()) } answers {
-                callOrder += "getDraft"
-                drafts[firstArg<String>()] ?: ""
-            }
-            every { settingsManager.currentSessionId = any() } answers {
-                setCurrentSessionIdCalls.add(firstArg())
-                callOrder += "setCurrentSessionId"
-            }
-            every { settingsManager.openSessionIds = any() } answers {
-                setOpenSessionIdsCalls.add(firstArg())
-                callOrder += "setOpenSessionIds"
-            }
-            every { settingsManager.sessionCache = any() } answers {
-                persistSessionCacheCalls.add(PersistCall(firstArg()))
-                callOrder += "persistSessionCache"
-            }
-            // Repository answers.
-            every { repository.setCurrentDirectory(any()) } answers {
-                syncDirectoryCalls.add(firstArg())
-                callOrder += "syncCurrentDirectory"
-            }
+    init {
+        // SettingsManager answers — capture into our lists for assertion.
+        every { settingsManager.setDraftText(any(), any()) } answers {
+            saveDraftCalls.add(firstArg<String>() to secondArg<String>())
+            callOrder += "saveDraft"
         }
+        every { settingsManager.getDraftText(any()) } answers {
+            callOrder += "getDraft"
+            drafts[firstArg<String>()] ?: ""
+        }
+        every { settingsManager.currentSessionId = any() } answers {
+            setCurrentSessionIdCalls.add(firstArg())
+            callOrder += "setCurrentSessionId"
+        }
+        every { settingsManager.openSessionIds = any() } answers {
+            setOpenSessionIdsCalls.add(firstArg())
+            callOrder += "setOpenSessionIds"
+        }
+        every { settingsManager.sessionCache = any() } answers {
+            persistSessionCacheCalls.add(PersistCall(firstArg()))
+            callOrder += "persistSessionCache"
+        }
+        // §R18 Phase 2-E step 2: the repository.setCurrentDirectory mock that
+        // lived here was removed alongside the production call it captured
+        // (switchTo Step 6). syncDirectoryCalls is kept (still mutable) for
+        // any future capture need but is no longer populated by switchTo.
+    }
 
         // ── Cross-domain counts (derived from collectedEffects) ──
 

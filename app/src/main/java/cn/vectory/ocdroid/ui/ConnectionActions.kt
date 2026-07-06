@@ -12,15 +12,11 @@ import cn.vectory.ocdroid.data.model.toSession
 import cn.vectory.ocdroid.data.repository.OpenCodeRepository
 import cn.vectory.ocdroid.data.repository.HostProfileStore
 import cn.vectory.ocdroid.util.SettingsManager
-import kotlinx.coroutines.flow.MutableStateFlow
-import kotlinx.coroutines.flow.update
 
 internal fun applySavedSettings(
     repository: OpenCodeRepository,
     settingsManager: SettingsManager,
     hostProfileStore: HostProfileStore,
-    connectionFlow: MutableStateFlow<ConnectionState>,
-    settingsFlow: MutableStateFlow<SettingsState>,
     slices: SliceFlows
 ) {
 
@@ -32,10 +28,11 @@ internal fun applySavedSettings(
         password = password,
         allowInsecureConnections = currentProfile.allowInsecureConnections
     )
-    // Restore the last connected workdir so the repository is re-scoped to the
-    // same project on cold start (currentDirectory is otherwise in-memory only
-    // and the connected project would "vanish" after restart).
-    settingsManager.currentWorkdir?.let { repository.setCurrentDirectory(it) }
+    // Restore the last connected workdir so the app re-scopes to the same
+    // project on cold start. §R18 Phase 2-E step 2: the repository's global
+    // currentDirectory was removed; the workdir is persisted in
+    // settingsManager (below) and consumed explicitly by the directory-scoped
+    // API methods (SSE / /question / /command / file routes).
 
     // Reuse the profile list once: it backs both the host slice and the
     // cold-start connectionPhase decision below.
@@ -61,23 +58,27 @@ internal fun applySavedSettings(
     val restoredCurrentSessionId = persistedCurrentSessionId?.let { cid ->
         if (cid in archivedIds) null else cid
     }
-    if (restoredCurrentSessionId != persistedCurrentSessionId) {
-        settingsManager.currentSessionId = restoredCurrentSessionId
-    }
+    // §R18 Phase 2-F: SettingsManager is no longer written here — the AppCore
+    // init collector persists non-null chatFlow.currentSessionId changes, and
+    // an archived-id filter (restoredCurrentSessionId == null when persisted
+    // pointed at an archived session) is re-applied on every cold start via
+    // this same read path, so leaving the stale archived id in SettingsManager
+    // is self-healing across restarts. The chat.update below is the runtime
+    // source of truth.
     // §R-17 batch2 step d → step e final: each domain written directly to its
     // own slice via thread-safe MutableStateFlow.update. The AppState mirror
     // is no longer written from here — slices are the sole authoritative
     // store.
-    slices.chat.update {
+    slices.mutateChat {
         it.copy(currentSessionId = restoredCurrentSessionId)
     }
-    slices.host.update {
+    slices.mutateHost {
         it.copy(
             hostProfiles = profiles,
             currentHostProfileId = currentProfile.id
         )
     }
-    slices.sessionList.update {
+    slices.mutateSessionList {
         it.copy(
             openSessionIds = restoredOpenSessionIds,
             sessions = restoredSessions
@@ -91,7 +92,7 @@ internal fun applySavedSettings(
     // host so the chat quick-switch picker + Settings render the right
     // entries on cold start.
     val seedDisabledModels = settingsManager.getDisabledModels(currentProfile.serverUrl)
-    settingsFlow.update {
+    slices.mutateSettings {
         it.copy(
             selectedAgentName = seedAgent,
             themeMode = settingsManager.themeMode,
@@ -108,9 +109,10 @@ internal fun applySavedSettings(
     // §R-17 M2 (RFC §4 strategy A): write the connection slice directly.
     // Signal "reconnecting" immediately when a profile is configured so the
     // empty-state UX can show a spinner instead of the bare connect button
-    // while coldStartReconnect() is in flight.
-    val connectionPhase = if (profiles.isNotEmpty()) "reconnecting" else null
-    connectionFlow.update { it.copy(connectionPhase = connectionPhase) }
+    // while coldStartReconnect() is in flight. §R18 Phase 2-I: phase is now a
+    // sealed ConnectionPhase; Idle replaces the legacy null sentinel.
+    val connectionPhase = if (profiles.isNotEmpty()) ConnectionPhase.Reconnecting else ConnectionPhase.Idle
+    slices.mutateConnection { it.copy(connectionPhase = connectionPhase) }
 }
 
 /**
@@ -127,5 +129,5 @@ internal fun applyReloadDisabledModelsForCurrentHost(
 ) {
     val baseUrl = hostProfileStore.currentProfile().serverUrl
     val set = settingsManager.getDisabledModels(baseUrl)
-    slices.settings.update { it.copy(disabledModels = set) }
+    slices.mutateSettings { it.copy(disabledModels = set) }
 }

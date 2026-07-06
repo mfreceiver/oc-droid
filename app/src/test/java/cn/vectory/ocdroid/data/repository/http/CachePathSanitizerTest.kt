@@ -124,4 +124,106 @@ class CachePathSanitizerTest {
         // The old prefix is no longer stripped.
         assertEquals("/a/agent", sanitizer.cacheRelativePath("/a/agent"))
     }
+
+    // ---- Phase 5: branch-coverage edge cases ----
+
+    @Test
+    fun `default baseUrl leaves all request paths unchanged`() {
+        // DEFAULT_SERVER has no path prefix → hostStart finds '/', pathStart
+        // returns the substring from '/', trimEnd('/') yields "". Empty
+        // basePath short-circuits to "return requestPath unchanged".
+        // Default HostConfig uses http://localhost:4096 (no configure() call).
+        assertEquals("/", sanitizer.cacheRelativePath("/"))
+        assertEquals("/global/health", sanitizer.cacheRelativePath("/global/health"))
+        assertEquals("/session/abc/message", sanitizer.cacheRelativePath("/session/abc/message"))
+    }
+
+    @Test
+    fun `empty requestPath is returned unchanged`() {
+        hostConfig.configure(
+            baseUrl = "http://host/opencode",
+            username = null,
+            password = null,
+            allowInsecure = false
+        )
+        // Empty string does NOT start with "$basePath/" so it falls through
+        // to the else branch (return as-is). Pin this so the sanitizer
+        // never produces an empty-prefix-stripped garbage value.
+        assertEquals("", sanitizer.cacheRelativePath(""))
+    }
+
+    @Test
+    fun `multi-segment basePath is stripped wholesale`() {
+        hostConfig.configure(
+            baseUrl = "http://host/api/v2",
+            username = null,
+            password = null,
+            allowInsecure = false
+        )
+        // The whole "/api/v2" prefix must come off in one shot.
+        assertEquals("/session", sanitizer.cacheRelativePath("/api/v2/session"))
+        assertEquals("/global/health", sanitizer.cacheRelativePath("/api/v2/global/health"))
+    }
+
+    @Test
+    fun `multi-segment basePath with trailing slash is stripped`() {
+        hostConfig.configure(
+            baseUrl = "http://host/api/v2/",
+            username = null,
+            password = null,
+            allowInsecure = false
+        )
+        // trimEnd('/') normalises the trailing slash so the strip behaves
+        // identically to the no-trailing-slash case.
+        assertEquals("/agent", sanitizer.cacheRelativePath("/api/v2/agent"))
+    }
+
+    @Test
+    fun `requestPath that shares prefix segment but not full basePath is unchanged`() {
+        hostConfig.configure(
+            baseUrl = "http://host/api/v2",
+            username = null,
+            password = null,
+            allowInsecure = false
+        )
+        // "/api/v3/agent" only shares "/api" prefix; the strict startsWith
+        // check requires the FULL basePath, so this is NOT stripped.
+        assertEquals("/api/v3/agent", sanitizer.cacheRelativePath("/api/v3/agent"))
+        // And a request that equals the basePath WITHOUT a trailing segment
+        // is also returned unchanged (startsWith("$basePath/") is false).
+        assertEquals("/api/v2", sanitizer.cacheRelativePath("/api/v2"))
+    }
+
+    @Test
+    fun `baseUrl consisting of only a path is handled`() {
+        // No protocol, no host — just "/opencode". The protocol-end branch
+        // (protocolEnd < 0) sets hostStart=0, then the FIRST '/' is at
+        // index 0, which makes pathStart=0 and basePath="/opencode".
+        hostConfig.configure(
+            baseUrl = "/opencode",
+            username = null,
+            password = null,
+            allowInsecure = false
+        )
+        assertEquals("/agent", sanitizer.cacheRelativePath("/opencode/agent"))
+        assertEquals("/opencode", sanitizer.cacheRelativePath("/opencode"))
+    }
+
+    @Test
+    fun `sanitizer reads the latest baseUrl snapshot after multiple reconfigures`() {
+        // Three consecutive configs; each must replace the previous basePath.
+        hostConfig.configure("http://h/x", null, null, false)
+        assertEquals("/agent", sanitizer.cacheRelativePath("/x/agent"))
+        assertEquals("/y/agent", sanitizer.cacheRelativePath("/y/agent"))
+
+        hostConfig.configure("http://h/y", null, null, false)
+        assertEquals("/agent", sanitizer.cacheRelativePath("/y/agent"))
+        assertEquals("/x/agent", sanitizer.cacheRelativePath("/x/agent"))
+
+        hostConfig.configure("http://h", null, null, false)
+        // No basePath now → both old prefixed paths returned as-is.
+        assertEquals("/x/agent", sanitizer.cacheRelativePath("/x/agent"))
+        assertEquals("/y/agent", sanitizer.cacheRelativePath("/y/agent"))
+        assertEquals("/agent", sanitizer.cacheRelativePath("/agent"))
+    }
 }

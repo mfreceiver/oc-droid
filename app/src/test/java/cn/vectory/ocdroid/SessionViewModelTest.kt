@@ -68,12 +68,13 @@ import org.junit.Test
  * (`chatVM.sendMessage()`, `sessionVM.selectSession(...)`, etc.) — no legacy
  * `AppCore` shim extensions remain.
  *
- * State setup uses the test-only [AppState] shim ([updateState] /
- * [AppCore.state]) so the historical `updateState { it.copy(...) }` and
- * `viewModel.state.value.X` patterns keep working without rewriting every
- * state-seed call. AppCore internals that have no VM equivalent
- * (`handleSSEEvent`, `store`, `peekSessionWindow`) are reached through
- * `core` directly.
+ * §R18 Phase 4 (P2-3): state setup writes slices directly through the
+ * AppCore `writeXxx { it.copy(...) }` helpers (former `updateState {}`
+ * AppState shim removed). UiEvent Error/Success assertions read the
+ * test-only [AppCore.recentTestErrors] / [AppCore.recentTestSuccesses]
+ * ring buffers populated by [MainViewModelTestBase.createCore]. AppCore
+ * internals that have no VM equivalent (`handleSSEEvent`, `store`,
+ * `peekSessionWindow`) are reached through `core` directly.
  */
 @OptIn(ExperimentalCoroutinesApi::class)
 class SessionViewModelTest : MainViewModelTestBase() {
@@ -114,7 +115,7 @@ class SessionViewModelTest : MainViewModelTestBase() {
             directory = "/tmp/project",
             title = "New Session"
         )
-        coEvery { repository.createSession(any()) } returns Result.success(created)
+        coEvery { repository.createSession(any(), any()) } returns Result.success(created)
 
         val core = createCore()
         val chatVM = cn.vectory.ocdroid.ui.ChatViewModel(core)
@@ -157,7 +158,6 @@ class SessionViewModelTest : MainViewModelTestBase() {
         // Deferred-create: createSessionInWorkdir must NOT call the server.
         // It only sets the repository cwd and enters draftWorkdir state; the
         // session is created lazily by sendMessage on first prompt.
-        every { repository.setCurrentDirectory(any()) } just runs
 
         val core = createCore()
         val chatVM = cn.vectory.ocdroid.ui.ChatViewModel(core)
@@ -171,15 +171,17 @@ class SessionViewModelTest : MainViewModelTestBase() {
         sessionVM.createSessionInWorkdir("/home/user/myproject")
         advanceUntilIdle()
 
-        coVerify(exactly = 0) { repository.createSession(any()) }
-        verify { repository.setCurrentDirectory("/home/user/myproject") }
+        coVerify(exactly = 0) { repository.createSession(any(), any()) }
+        // §R18 Phase 2-E step 2: createSessionInWorkdir no longer calls the
+        // repository's global setCurrentDirectory (the API was removed); the
+        // workdir is carried forward by composerFlow.draftWorkdir +
+        // settingsManager.currentWorkdir.
         assertEquals("/home/user/myproject", composerVM.composerFlow.value.draftWorkdir)
         assertNull(chatVM.chatFlow.value.currentSessionId)
     }
 
     @Test
     fun `selectSession discards in-progress draft`() = runTest {
-        every { repository.setCurrentDirectory(any()) } just runs
 
         val core = createCore()
         val chatVM = cn.vectory.ocdroid.ui.ChatViewModel(core)
@@ -201,8 +203,7 @@ class SessionViewModelTest : MainViewModelTestBase() {
 
     @Test
     fun `createSessionInWorkdir draft surfaces error when first send cannot create session`() = runTest {
-        coEvery { repository.createSession(title = null) } returns Result.failure(IllegalStateException("network error"))
-        every { repository.setCurrentDirectory(any()) } just runs
+        coEvery { repository.createSession(title = null, directory = any()) } returns Result.failure(IllegalStateException("network error"))
 
         val core = createCore()
         val chatVM = cn.vectory.ocdroid.ui.ChatViewModel(core)
@@ -219,8 +220,8 @@ class SessionViewModelTest : MainViewModelTestBase() {
         advanceUntilIdle()
 
         assertNull(chatVM.chatFlow.value.currentSessionId)
-        assertNotNull(core.state.value.error)
-        assertTrue(core.state.value.error!!.contains("network error"))
+        assertNotNull(core.recentTestErrors.lastOrNull())
+        assertTrue(core.recentTestErrors.lastOrNull()!!.contains("network error"))
     }
 
     @Test
@@ -327,7 +328,7 @@ class SessionViewModelTest : MainViewModelTestBase() {
         advanceUntilIdle()
 
         assertFalse(sessionVM.sessionListFlow.value.isRefreshingSessions)
-        assertEquals("Failed to load sessions: network error", core.state.value.error)
+        assertEquals("Failed to load sessions: network error", core.recentTestErrors.lastOrNull())
     }
 
     @Test
@@ -348,14 +349,14 @@ class SessionViewModelTest : MainViewModelTestBase() {
         val composerVM = cn.vectory.ocdroid.ui.ComposerViewModel(core)
         val orchestratorVM = cn.vectory.ocdroid.ui.OrchestratorViewModel(core)
         val viewModel = SessionViewModel(core)  // primary VM under test
-        core.updateState {
+        core.writeSessionList {
             it.copy(
                 sessions = initial,
                 loadedSessionLimit = 10,
-                hasMoreSessions = true,
-                currentSessionId = "session-5"
+                hasMoreSessions = true
             )
         }
+        core.writeChat { it.copy(currentSessionId = "session-5") }
 
         sessionVM.loadMoreSessions()
         advanceUntilIdle()
@@ -385,7 +386,7 @@ class SessionViewModelTest : MainViewModelTestBase() {
         val composerVM = cn.vectory.ocdroid.ui.ComposerViewModel(core)
         val orchestratorVM = cn.vectory.ocdroid.ui.OrchestratorViewModel(core)
         val viewModel = SessionViewModel(core)  // primary VM under test
-        core.updateState {
+        core.writeSessionList {
             it.copy(
                 sessions = (1..10).map { index -> cn.vectory.ocdroid.data.model.Session(id = "session-$index", directory = "/tmp/$index") },
                 loadedSessionLimit = 10,
@@ -420,9 +421,7 @@ class SessionViewModelTest : MainViewModelTestBase() {
         val composerVM = cn.vectory.ocdroid.ui.ComposerViewModel(core)
         val orchestratorVM = cn.vectory.ocdroid.ui.OrchestratorViewModel(core)
         val viewModel = SessionViewModel(core)  // primary VM under test
-        core.updateState {
-            it.copy(currentSessionId = "session-not-in-list")
-        }
+        core.writeChat { it.copy(currentSessionId = "session-not-in-list") }
 
         sessionVM.loadSessions()
         advanceUntilIdle()
@@ -455,16 +454,16 @@ class SessionViewModelTest : MainViewModelTestBase() {
         val composerVM = cn.vectory.ocdroid.ui.ComposerViewModel(core)
         val orchestratorVM = cn.vectory.ocdroid.ui.OrchestratorViewModel(core)
         val viewModel = SessionViewModel(core)  // primary VM under test
-        core.updateState {
+        core.writeSessionList {
             it.copy(
                 sessions = initial,
                 loadedSessionLimit = 10,
-                hasMoreSessions = true,
-                // currentSessionId is set but the session is NOT in the refreshed
-                // list — loadMore must keep it rather than reselecting first().
-                currentSessionId = "session-not-in-list"
+                hasMoreSessions = true
             )
         }
+        // currentSessionId is set but the session is NOT in the refreshed
+        // list — loadMore must keep it rather than reselecting first().
+        core.writeChat { it.copy(currentSessionId = "session-not-in-list") }
 
         sessionVM.loadMoreSessions()
         advanceUntilIdle()
@@ -483,7 +482,6 @@ class SessionViewModelTest : MainViewModelTestBase() {
             cn.vectory.ocdroid.data.model.Session(id = "existing-1", directory = workdir, title = "Prior chat"),
             cn.vectory.ocdroid.data.model.Session(id = "existing-2", directory = workdir, title = "Another")
         )
-        every { repository.setCurrentDirectory(any()) } just runs
         coEvery { repository.getSessionsForDirectory(workdir, any()) } returns Result.success(existing)
 
         val core = createCore()
@@ -515,7 +513,6 @@ class SessionViewModelTest : MainViewModelTestBase() {
     @Test
     fun `createSessionInWorkdir directorySessions failure is silently ignored`() = runTest {
         val workdir = "/home/user/broken"
-        every { repository.setCurrentDirectory(any()) } just runs
         coEvery { repository.getSessionsForDirectory(workdir, any()) } returns Result.failure(IllegalStateException("boom"))
 
         val core = createCore()
@@ -530,7 +527,7 @@ class SessionViewModelTest : MainViewModelTestBase() {
         advanceUntilIdle()
 
         assertEquals(workdir, composerVM.composerFlow.value.draftWorkdir)
-        assertNull(core.state.value.error)
+        assertNull(core.recentTestErrors.lastOrNull())
         assertTrue(sessionVM.sessionListFlow.value.directorySessions.isEmpty())
     }
 
@@ -543,7 +540,6 @@ class SessionViewModelTest : MainViewModelTestBase() {
         // cold-start restore path that reads recentWorkdirs).
         val raw = "  /home/user/myproject  "
         val trimmed = "/home/user/myproject"
-        every { repository.setCurrentDirectory(any()) } just runs
         coEvery { repository.getSessionsForDirectory(trimmed, any()) } returns Result.success(emptyList())
 
         val core = createCore()
@@ -560,7 +556,9 @@ class SessionViewModelTest : MainViewModelTestBase() {
         verify { settingsManager.currentWorkdir = trimmed }
         verify { settingsManager.addRecentWorkdir(trimmed) }
         coVerify { repository.getSessionsForDirectory(trimmed, any()) }
-        verify { repository.setCurrentDirectory(trimmed) }
+        // §R18 Phase 2-E step 2: the repository.setCurrentDirectory verify
+        // was removed (the API is gone); the workdir is now carried by
+        // settingsManager (verified above).
     }
 
     @Test
@@ -582,7 +580,7 @@ class SessionViewModelTest : MainViewModelTestBase() {
         val composerVM = cn.vectory.ocdroid.ui.ComposerViewModel(core)
         val orchestratorVM = cn.vectory.ocdroid.ui.OrchestratorViewModel(core)
         val viewModel = SessionViewModel(core)  // primary VM under test
-        core.updateState { it.copy(sessions = listOf(parent, child)) }
+        core.writeSessionList { it.copy(sessions = listOf(parent, child)) }
 
         sessionVM.archiveSession("parent")
         advanceUntilIdle()
@@ -622,7 +620,7 @@ class SessionViewModelTest : MainViewModelTestBase() {
         val composerVM = cn.vectory.ocdroid.ui.ComposerViewModel(core)
         val orchestratorVM = cn.vectory.ocdroid.ui.OrchestratorViewModel(core)
         val viewModel = SessionViewModel(core)  // primary VM under test
-        core.updateState { it.copy(sessions = listOf(parent, child)) }
+        core.writeSessionList { it.copy(sessions = listOf(parent, child)) }
 
         sessionVM.restoreSession("parent")
         advanceUntilIdle()
@@ -646,7 +644,8 @@ class SessionViewModelTest : MainViewModelTestBase() {
         val composerVM = cn.vectory.ocdroid.ui.ComposerViewModel(core)
         val orchestratorVM = cn.vectory.ocdroid.ui.OrchestratorViewModel(core)
         val viewModel = SessionViewModel(core)  // primary VM under test
-        core.updateState { it.copy(currentSessionId = "s1", inputText = "draft1") }
+        core.writeChat { it.copy(currentSessionId = "s1") }
+        core.writeComposer { it.copy(inputText = "draft1") }
 
         sessionVM.selectSession("s2")
         advanceUntilIdle()
@@ -668,15 +667,15 @@ class SessionViewModelTest : MainViewModelTestBase() {
         val composerVM = cn.vectory.ocdroid.ui.ComposerViewModel(core)
         val orchestratorVM = cn.vectory.ocdroid.ui.OrchestratorViewModel(core)
         val viewModel = SessionViewModel(core)  // primary VM under test
-        core.updateState {
+        core.writeSessionList {
             it.copy(
                 sessions = listOf(
                     cn.vectory.ocdroid.data.model.Session(id = "session-1", directory = "/tmp/one"),
                     cn.vectory.ocdroid.data.model.Session(id = "session-2", directory = "/tmp/two")
-                ),
-                currentSessionId = "session-2"
+                )
             )
         }
+        core.writeChat { it.copy(currentSessionId = "session-2") }
 
         sessionVM.deleteSession("session-1")
         advanceUntilIdle()
@@ -691,7 +690,6 @@ class SessionViewModelTest : MainViewModelTestBase() {
         val dirSession = cn.vectory.ocdroid.data.model.Session(
             id = "dir-only-1", directory = workdir, title = "From directory"
         )
-        every { repository.setCurrentDirectory(any()) } just runs
 
         val core = createCore()
         val chatVM = cn.vectory.ocdroid.ui.ChatViewModel(core)
@@ -701,7 +699,7 @@ class SessionViewModelTest : MainViewModelTestBase() {
         val composerVM = cn.vectory.ocdroid.ui.ComposerViewModel(core)
         val orchestratorVM = cn.vectory.ocdroid.ui.OrchestratorViewModel(core)
         val viewModel = SessionViewModel(core)  // primary VM under test
-        core.updateState {
+        core.writeSessionList {
             it.copy(directorySessions = mapOf(workdir to listOf(dirSession)))
         }
         // Precondition: the session lives only in directorySessions.
@@ -715,8 +713,9 @@ class SessionViewModelTest : MainViewModelTestBase() {
         assertEquals("dir-only-1", chatVM.chatFlow.value.currentSessionId)
         assertNotNull(currentSession(sessionVM.sessionListFlow.value.sessions, chatVM.chatFlow.value.currentSessionId))
         assertEquals("dir-only-1", currentSession(sessionVM.sessionListFlow.value.sessions, chatVM.chatFlow.value.currentSessionId)?.id)
-        // workdir sync must target the directory session's directory, not null.
-        verify { repository.setCurrentDirectory(workdir) }
+        // §R18 Phase 2-E step 2: switchTo no longer calls repository's global
+        // setCurrentDirectory; directory routing now uses the session's
+        // directory field directly at each callsite.
     }
 
     @Test
@@ -731,14 +730,14 @@ class SessionViewModelTest : MainViewModelTestBase() {
         val composerVM = cn.vectory.ocdroid.ui.ComposerViewModel(core)
         val orchestratorVM = cn.vectory.ocdroid.ui.OrchestratorViewModel(core)
         val viewModel = SessionViewModel(core)  // primary VM under test
-        core.updateState { it.copy(currentSessionId = "parent-1") }
+        core.writeChat { it.copy(currentSessionId = "parent-1") }
         val beforeId = chatVM.chatFlow.value.currentSessionId
 
         sessionVM.openSubAgent("child-missing")
         advanceUntilIdle()
 
         assertEquals(beforeId, chatVM.chatFlow.value.currentSessionId)
-        assertNotNull("error channel must be set when child session is unavailable", core.state.value.error)
+        assertNotNull("error channel must be set when child session is unavailable", core.recentTestErrors.lastOrNull())
     }
 
     @Test
@@ -746,7 +745,6 @@ class SessionViewModelTest : MainViewModelTestBase() {
         every { settingsManager.openSessionIds } returns listOf("s1", "s2")
         every { settingsManager.openSessionIds = any() } just runs
         every { settingsManager.getDraftText("s2") } returns "s2draft"
-        every { repository.setCurrentDirectory(any()) } just runs
 
         val core = createCore()
         val chatVM = cn.vectory.ocdroid.ui.ChatViewModel(core)
@@ -756,13 +754,9 @@ class SessionViewModelTest : MainViewModelTestBase() {
         val composerVM = cn.vectory.ocdroid.ui.ComposerViewModel(core)
         val orchestratorVM = cn.vectory.ocdroid.ui.OrchestratorViewModel(core)
         val viewModel = SessionViewModel(core)  // primary VM under test
-        core.updateState {
-            it.copy(
-                currentSessionId = "s1",
-                inputText = "s1-unsent-draft",
-                openSessionIds = listOf("s1", "s2")
-            )
-        }
+        core.writeChat { it.copy(currentSessionId = "s1") }
+        core.writeComposer { it.copy(inputText = "s1-unsent-draft") }
+        core.writeSessionList { it.copy(openSessionIds = listOf("s1", "s2")) }
 
         sessionVM.closeSession("s1")
         advanceUntilIdle()
@@ -788,18 +782,20 @@ class SessionViewModelTest : MainViewModelTestBase() {
         val composerVM = cn.vectory.ocdroid.ui.ComposerViewModel(core)
         val orchestratorVM = cn.vectory.ocdroid.ui.OrchestratorViewModel(core)
         val viewModel = SessionViewModel(core)  // primary VM under test
-        core.updateState {
+        core.writeSessionList {
             it.copy(
-                sessions = listOf(cn.vectory.ocdroid.data.model.Session(id = "s1", directory = "/tmp")),
-                currentSessionId = "s1"
+                sessions = listOf(cn.vectory.ocdroid.data.model.Session(id = "s1", directory = "/tmp"))
             )
         }
+        core.writeChat { it.copy(currentSessionId = "s1") }
 
         sessionVM.deleteSession("s1")
         advanceUntilIdle()
 
         assertNull(chatVM.chatFlow.value.currentSessionId)
-        verify { settingsManager.currentSessionId = null }
+        // §R18 Phase 2-F: SettingsManager is no longer written directly here —
+        // chatFlow.currentSessionId (asserted null above) is the runtime source;
+        // the AppCore collector persists non-null changes only.
     }
 
     @Test
@@ -818,7 +814,7 @@ class SessionViewModelTest : MainViewModelTestBase() {
         val composerVM = cn.vectory.ocdroid.ui.ComposerViewModel(core)
         val orchestratorVM = cn.vectory.ocdroid.ui.OrchestratorViewModel(core)
         val viewModel = SessionViewModel(core)  // primary VM under test
-        core.updateState {
+        core.writeSessionList {
             it.copy(directorySessions = mapOf(workdir to listOf(ghost)))
         }
         // Precondition: the session lives in directorySessions (not in sessions).

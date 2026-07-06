@@ -68,12 +68,13 @@ import org.junit.Test
  * (`chatVM.sendMessage()`, `sessionVM.selectSession(...)`, etc.) — no legacy
  * `AppCore` shim extensions remain.
  *
- * State setup uses the test-only [AppState] shim ([updateState] /
- * [AppCore.state]) so the historical `updateState { it.copy(...) }` and
- * `viewModel.state.value.X` patterns keep working without rewriting every
- * state-seed call. AppCore internals that have no VM equivalent
- * (`handleSSEEvent`, `store`, `peekSessionWindow`) are reached through
- * `core` directly.
+ * §R18 Phase 4 (P2-3): state setup writes slices directly through the
+ * AppCore `writeXxx { it.copy(...) }` helpers (former `updateState {}`
+ * AppState shim removed). UiEvent Error/Success assertions read the
+ * test-only [AppCore.recentTestErrors] / [AppCore.recentTestSuccesses]
+ * ring buffers populated by [MainViewModelTestBase.createCore]. AppCore
+ * internals that have no VM equivalent (`handleSSEEvent`, `store`,
+ * `peekSessionWindow`) are reached through `core` directly.
  */
 @OptIn(ExperimentalCoroutinesApi::class)
 class ComposerViewModelTest : MainViewModelTestBase() {
@@ -138,7 +139,7 @@ class ComposerViewModelTest : MainViewModelTestBase() {
 
     @Test
     fun `draft model choice is persisted when session materialises on first send`() = runTest {
-        coEvery { repository.createSession(any()) } returns Result.success(
+        coEvery { repository.createSession(any(), any()) } returns Result.success(
             Session(id = "draft-1", directory = "/tmp/project")
         )
         coEvery { repository.sendMessage(any(), any(), any(), any(), any()) } returns Result.success(Unit)
@@ -194,7 +195,7 @@ class ComposerViewModelTest : MainViewModelTestBase() {
         val composerVM = cn.vectory.ocdroid.ui.ComposerViewModel(core)
         val orchestratorVM = cn.vectory.ocdroid.ui.OrchestratorViewModel(core)
         val viewModel = ComposerViewModel(core)  // primary VM under test
-        core.updateState { it.copy(currentSessionId = "s1") }
+        core.writeChat { it.copy(currentSessionId = "s1") }
 
         composerVM.setInputText("hello")
 
@@ -211,7 +212,7 @@ class ComposerViewModelTest : MainViewModelTestBase() {
         val composerVM = cn.vectory.ocdroid.ui.ComposerViewModel(core)
         val orchestratorVM = cn.vectory.ocdroid.ui.OrchestratorViewModel(core)
         val viewModel = ComposerViewModel(core)  // primary VM under test
-        core.updateState { it.copy(currentSessionId = "s1") }
+        core.writeChat { it.copy(currentSessionId = "s1") }
 
         composerVM.selectAgent("oracle")
 

@@ -30,11 +30,23 @@
 
 ## 一、P0 必须修复
 
-### P0-1. currentDirectory 全局状态未彻底消除
+### P0-1. currentDirectory 全局状态未彻底消除（Phase 1 已完成 browse 止血子集）
 
 - **来源**：gpter 🔴 + dser 🔴 + glmer 🟠 + kimo 🔴（4/4 共识，最高优先）
 - **当前状态**：文件 API 已改显式 directory，但 OrchestratorVM/SessionVM 仍调 `repository.setCurrentDirectory()`，`HostConfig._currentDirectory` 仍被 `DirectoryHeaderInterceptor` 读取
 - **影响**：文件浏览器打开期间，SSE/question/command 路由可能导向错误目录
+
+> ✅ **Phase 1 止血边界（已完成 2026-07-06）**：Phase 1 仅修复了 **browse 期间的全局目录污染**——`OrchestratorViewModel.browseFilesInWorkdir`/`closeFileBrowser` 不再调 `setCurrentDirectory/getCurrentDirectory`，文件浏览器打开期间 SSE/question/command 路由不再被错指向浏览目录。
+>
+> **仍残留 5 处 `setCurrentDirectory` + 1 处 `getCurrentDirectory` 读取**（功能正确，与 browse 污染性质不同）：
+> - `SessionViewModel.kt:94` createSessionInWorkdir（设 workdir）
+> - `MainViewModelConnectionActions.kt:38` applySavedSettings 冷启动 restore
+> - `HostProfileController.kt:359` configureRepositoryForProfile 切换 host 后 restore
+> - `SessionSwitcher.kt:230` switchTo 切到不同 directory 的 session
+> - `AppCoreOrchestration.kt:340` createSessionInWorkdirForEffect
+> - `AppCoreOrchestration.kt:64` getCurrentDirectory 读取（executeCommand）
+>
+> 这 5 处设的全局 dir **恰好是 SSE/question/command 应路由到的目录**（workdir/session dir），功能正确。**彻底删除全局状态（含这 5 处 + Header 显式穿透）在 Phase 2 步骤 2 完成**。
 
 > ⚠️ **评审修正（3/3 共识）**：
 > 1. **调用链列举严重不全**。实际 main 代码 `setCurrentDirectory` **8 处**（不止 2 处）：OrchestratorVM ×3（141/144/157）、SessionVM ×1（92-95）、HostProfileController:359、SessionSwitcher:230、MainViewModelConnectionActions:38、AppCoreOrchestration:340。

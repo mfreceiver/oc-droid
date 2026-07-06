@@ -234,6 +234,41 @@
     <string name="chat_stale_notice">长时间未查看，仅显示最新内容。</string>
     <string name="chat_reconnecting">正在重连 %1$s…</string>
     <string name="chat_reconnecting_with_phase">正在重连 %1$s… / %2$s</string>
+    <!-- §R18 Phase 2-G follow-up: 本地化 phase 文案，插入 chat_reconnecting_with_phase 的 %2$s -->
+    <string name="chat_phase_reconnecting">重新连接中</string>
+    <string name="chat_phase_reconnecting_attempt">重新连接中（第 %1$d/%2$d 次）</string>
+    <string name="chat_phase_disconnected">已断开</string>
     <string name="chat_jump_to_latest">跳到最新</string>
     <string name="chat_gap_divider_hint">可能有未加载的消息 · 点击加载</string>
+
+    <!-- §R18 Phase 2-G: UiEvent.Error / UiEvent.Success 资源字符串。
+         格式参数（%1$s 等）由 LocalContext.getString / appContext.getString
+         在解析时填充。中文文本沿用原硬编码字符串。 -->
+    <string name="error_load_messages_failed">加载消息失败：%1$s</string>
+    <string name="error_load_sessions_failed">加载会话失败：%1$s</string>
+    <string name="error_load_more_sessions_failed">加载更多会话失败：%1$s</string>
+    <string name="error_command_failed">命令 /%1$s 失败：%2$s</string>
+    <string name="error_create_session_in_workdir_failed">在 %1$s 创建会话失败：%2$s</string>
+    <string name="error_restore_session_failed">恢复会话失败：%1$s</string>
+    <string name="error_compact_no_session">压缩前请先打开或创建会话</string>
+    <string name="error_compact_no_model">没有可用于压缩的模型信息</string>
+    <string name="error_compact_failed">压缩失败：%1$s</string>
+    <string name="error_edit_message_failed">编辑消息失败：%1$s</string>
+    <string name="error_abort_session_failed">中止会话失败：%1$s</string>
+    <string name="success_refreshed">已刷新</string>
+    <string name="error_session_sse_named">%1$s：%2$s</string>
+    <string name="error_session_sse_unnamed">%1$s</string>
+    <string name="error_create_session_failed">创建会话失败：%1$s</string>
+    <string name="error_fork_session_failed">分叉会话失败：%1$s</string>
+    <string name="error_archive_session_failed">归档会话失败：%1$s</string>
+    <string name="error_delete_session_failed">删除会话失败：%1$s</string>
+    <string name="error_send_message_failed">发送消息失败：%1$s</string>
+    <string name="error_child_session_unavailable">子任务会话不可用</string>
+    <string name="error_tunnel_password_unset">隧道激活失败：未设置隧道认证密码。请在「服务器」设置中填写隧道密码并保存后再试。</string>
+    <string name="error_tunnel_password_empty">隧道激活失败：已配置密码标识但存储为空（可能保存时未输入）。请重新输入隧道密码并保存。</string>
+    <string name="success_tunnel_activated">隧道激活成功</string>
+    <string name="error_tunnel_activation_failed">隧道激活失败：%1$s</string>
+    <string name="error_connection_failed">连接失败：%1$s</string>
+    <string name="error_sse_failed">SSE 错误：%1$s</string>
+    <string name="error_respond_permission_failed">响应权限请求失败：%1$s</string>
 </resources>

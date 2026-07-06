@@ -8,13 +8,12 @@ package cn.vectory.ocdroid.ui
  * Future cleanup (batch3e+): may be inlined into individual VM private methods.
  */
 
+import cn.vectory.ocdroid.R
 import cn.vectory.ocdroid.data.model.ComposerImageAttachment
 import cn.vectory.ocdroid.data.model.Message
 import cn.vectory.ocdroid.data.repository.OpenCodeRepository
 import cn.vectory.ocdroid.util.SettingsManager
 import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.flow.MutableStateFlow
-import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 
 internal fun launchCreateSession(
@@ -23,17 +22,18 @@ internal fun launchCreateSession(
     slices: SliceFlows,
     title: String?,
     onSelectSession: (String) -> Unit,
-    emit: EventEmitter = EventEmitter { }
+    emit: EventEmitter = EventEmitter { },
+    directory: String? = null   // §R18 Final 终审 fix (gpter): route POST /session to the right workdir
 ) {
 
     scope.launch {
-        repository.createSession(title)
+        repository.createSession(title, directory)
             .onSuccess { session ->
-                slices.sessionList.update { sl -> sl.copy(sessions = upsertSession(sl.sessions, session)) }
+                slices.mutateSessionList { sl -> sl.copy(sessions = upsertSession(sl.sessions, session)) }
                 onSelectSession(session.id)
             }
             .onFailure { error ->
-                emit.emit(UiEvent.Error("Failed to create session: ${errorMessageOrFallback(error, "unknown error")}"))
+                emit.emit(UiEvent.Error(R.string.error_create_session_failed, listOf(errorMessageOrFallback(error, "unknown error"))))
             }
     }
 }
@@ -51,11 +51,11 @@ internal fun launchForkSession(
     scope.launch {
         repository.forkSession(sessionId, messageId)
             .onSuccess { session ->
-                slices.sessionList.update { sl -> sl.copy(sessions = upsertSession(sl.sessions, session)) }
+                slices.mutateSessionList { sl -> sl.copy(sessions = upsertSession(sl.sessions, session)) }
                 onSelectSession(session.id)
             }
             .onFailure { error ->
-                emit.emit(UiEvent.Error("Failed to fork session: ${errorMessageOrFallback(error, "unknown error")}"))
+                emit.emit(UiEvent.Error(R.string.error_fork_session_failed, listOf(errorMessageOrFallback(error, "unknown error"))))
             }
     }
 }
@@ -105,11 +105,11 @@ internal fun launchSetSessionArchived(
                         settingsManager.openSessionIds = newOpenIds
                     }
                     val clearCurrent = isArchive && currentCurrentId == id
-                    if (clearCurrent) {
-                        settingsManager.currentSessionId = null
-                    }
+                    // §R18 Phase 2-F: chatFlow is the sole runtime source; the
+                    // chat.update below clears currentSessionId, and the AppCore
+                    // collector drops null (no manual SettingsManager write).
 
-                    slices.sessionList.update {
+                    slices.mutateSessionList {
                         it.copy(
                             sessions = newSessions,
                             directorySessions = newDirSessions,
@@ -119,7 +119,7 @@ internal fun launchSetSessionArchived(
                     if (clearCurrent) {
                         // Cross-slice: currentSessionId/messages/partsByMessage are
                         // chat-slice fields; the rest above are sessionList.
-                        slices.chat.update {
+                        slices.mutateChat {
                             it.copy(
                                 currentSessionId = null,
                                 messages = emptyList(),
@@ -129,7 +129,11 @@ internal fun launchSetSessionArchived(
                     }
                 }
                 .onFailure { error ->
-                    emit.emit(UiEvent.Error("Failed to ${if (archived) "archive" else "restore"} session: ${errorMessageOrFallback(error, "unknown error")}"))
+                    emit.emit(UiEvent.Error(
+                        if (archived) R.string.error_archive_session_failed
+                        else R.string.error_restore_session_failed,
+                        listOf(errorMessageOrFallback(error, "unknown error")),
+                    ))
                     return@launch
                 }
         }
@@ -171,24 +175,24 @@ internal fun launchDeleteSession(
                 val newDirSessions = currentDirSessions
                     .mapValues { (_, list) -> list.filter { s -> s.id != sessionId } }
                     .filterValues { it.isNotEmpty() }
-                slices.sessionList.update { sl -> sl.copy(sessions = newSessions, directorySessions = newDirSessions) }
+                slices.mutateSessionList { sl -> sl.copy(sessions = newSessions, directorySessions = newDirSessions) }
                 val currentId = slices.chat.value.currentSessionId
                 if (currentId == sessionId) {
                     val newCurrent = newSessions.firstOrNull()?.id
                     if (newCurrent != null) {
                         onSelectSession(newCurrent)
                     } else {
-                        // #10: no remaining session — clear the persisted
-                        // currentSessionId too, otherwise a stale id survives
-                        // in SettingsManager and would be restored on next
-                        // launch / host switch, pointing at a deleted session.
-                        settingsManager.currentSessionId = null
-                        slices.chat.update { c -> c.copy(currentSessionId = null, messages = emptyList(), partsByMessage = emptyMap()) }
+                        // #10: no remaining session — clear currentSessionId on
+                        // the chat slice too, otherwise a stale id survives in
+                        // the runtime state pointing at a deleted session.
+                        // §R18 Phase 2-F: chatFlow is the sole runtime source;
+                        // the AppCore collector drops null so no manual write.
+                        slices.mutateChat { c -> c.copy(currentSessionId = null, messages = emptyList(), partsByMessage = emptyMap()) }
                     }
                 }
             }
             .onFailure { error ->
-                emit.emit(UiEvent.Error("Failed to delete session: ${errorMessageOrFallback(error, "unknown error")}"))
+                emit.emit(UiEvent.Error(R.string.error_delete_session_failed, listOf(errorMessageOrFallback(error, "unknown error"))))
             }
     }
 }
@@ -196,7 +200,6 @@ internal fun launchDeleteSession(
 internal fun launchSendMessage(
     scope: CoroutineScope,
     repository: OpenCodeRepository,
-    composerFlow: MutableStateFlow<ComposerState>,
     slices: SliceFlows,
     sessionId: String,
     text: String,
@@ -223,7 +226,7 @@ internal fun launchSendMessage(
                 // running workflow).
                 val newSessions = bumpSessionUpdated(currentSessions, sessionId, System.currentTimeMillis())
                 val newStatuses = currentStatuses + (sessionId to cn.vectory.ocdroid.data.model.SessionStatus(type = "busy"))
-                slices.sessionList.update { sl -> sl.copy(sessions = newSessions, sessionStatuses = newStatuses) }
+                slices.mutateSessionList { sl -> sl.copy(sessions = newSessions, sessionStatuses = newStatuses) }
                 onSuccess?.invoke()
                 onRefreshSessions()
                 // §15.1 (review N6): the post-send 1200ms double-refresh is
@@ -240,10 +243,10 @@ internal fun launchSendMessage(
                 // → UiEvent, inputText → composer slice.
                 // Restore the failed prompt only if the user has not typed
                 // something new since the synchronous dispatch clear.
-                val currentInput = composerFlow.value.inputText
+                val currentInput = slices.composer.value.inputText
                 val restored = if (currentInput.isBlank()) text else currentInput
-                emit.emit(UiEvent.Error(errorMessageOrFallback(error, "Failed to send message")))
-                composerFlow.update { it.copy(inputText = restored) }
+                emit.emit(UiEvent.Error(R.string.error_send_message_failed, listOf(errorMessageOrFallback(error, "Failed to send message"))))
+                slices.mutateComposer { it.copy(inputText = restored) }
             }
         onComplete?.invoke()
     }

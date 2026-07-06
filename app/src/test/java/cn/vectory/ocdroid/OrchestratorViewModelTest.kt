@@ -68,10 +68,9 @@ import org.junit.Test
  * (`chatVM.sendMessage()`, `sessionVM.selectSession(...)`, etc.) — no legacy
  * `AppCore` shim extensions remain.
  *
- * State setup uses the test-only [AppState] shim ([updateState] /
- * [AppCore.state]) so the historical `updateState { it.copy(...) }` and
- * `viewModel.state.value.X` patterns keep working without rewriting every
- * state-seed call. AppCore internals that have no VM equivalent
+ * §R18 Phase 4 (P2-3): state setup writes slices directly through the
+ * AppCore `writeXxx { it.copy(...) }` helpers (former `updateState {}`
+ * AppState shim removed). AppCore internals that have no VM equivalent
  * (`handleSSEEvent`, `store`, `peekSessionWindow`) are reached through
  * `core` directly.
  */
@@ -88,9 +87,9 @@ class OrchestratorViewModelTest : MainViewModelTestBase() {
         val composerVM = cn.vectory.ocdroid.ui.ComposerViewModel(core)
         val orchestratorVM = cn.vectory.ocdroid.ui.OrchestratorViewModel(core)
         val viewModel = OrchestratorViewModel(core)  // primary VM under test
-        core.updateState {
+        core.writeChat { it.copy(currentSessionId = "session-1") }
+        core.writeSessionList {
             it.copy(
-                currentSessionId = "session-1",
                 sessions = listOf(cn.vectory.ocdroid.data.model.Session(id = "session-1", directory = "/tmp/project", title = "Old"))
             )
         }
@@ -132,9 +131,9 @@ class OrchestratorViewModelTest : MainViewModelTestBase() {
         val composerVM = cn.vectory.ocdroid.ui.ComposerViewModel(core)
         val orchestratorVM = cn.vectory.ocdroid.ui.OrchestratorViewModel(core)
         val viewModel = OrchestratorViewModel(core)  // primary VM under test
-        core.updateState {
+        core.writeChat { it.copy(currentSessionId = "session-1") }
+        core.writeSessionList {
             it.copy(
-                currentSessionId = "session-1",
                 sessions = listOf(
                     cn.vectory.ocdroid.data.model.Session(
                         id = "session-1",
@@ -186,7 +185,7 @@ class OrchestratorViewModelTest : MainViewModelTestBase() {
         val composerVM = cn.vectory.ocdroid.ui.ComposerViewModel(core)
         val orchestratorVM = cn.vectory.ocdroid.ui.OrchestratorViewModel(core)
         val viewModel = OrchestratorViewModel(core)  // primary VM under test
-        core.updateState { it.copy(currentSessionId = "session-1") }
+        core.writeChat { it.copy(currentSessionId = "session-1") }
 
         handleSse(core,
             SSEEvent(
@@ -226,7 +225,7 @@ class OrchestratorViewModelTest : MainViewModelTestBase() {
         val composerVM = cn.vectory.ocdroid.ui.ComposerViewModel(core)
         val orchestratorVM = cn.vectory.ocdroid.ui.OrchestratorViewModel(core)
         val viewModel = OrchestratorViewModel(core)  // primary VM under test
-        core.updateState { it.copy(currentSessionId = "session-1") }
+        core.writeChat { it.copy(currentSessionId = "session-1") }
 
         fun delta(d: String) = handleSse(core,
             SSEEvent(
@@ -272,7 +271,7 @@ class OrchestratorViewModelTest : MainViewModelTestBase() {
         val composerVM = cn.vectory.ocdroid.ui.ComposerViewModel(core)
         val orchestratorVM = cn.vectory.ocdroid.ui.OrchestratorViewModel(core)
         val viewModel = OrchestratorViewModel(core)  // primary VM under test
-        core.updateState { it.copy(currentSessionId = "session-1") }
+        core.writeChat { it.copy(currentSessionId = "session-1") }
 
         handleSse(core,
             SSEEvent(
@@ -301,7 +300,7 @@ class OrchestratorViewModelTest : MainViewModelTestBase() {
         val composerVM = cn.vectory.ocdroid.ui.ComposerViewModel(core)
         val orchestratorVM = cn.vectory.ocdroid.ui.OrchestratorViewModel(core)
         val viewModel = OrchestratorViewModel(core)  // primary VM under test
-        core.updateState {
+        core.writeSessionList {
             it.copy(sessions = listOf(cn.vectory.ocdroid.data.model.Session(id = "session-1", directory = "/tmp/old")))
         }
 
@@ -336,7 +335,7 @@ class OrchestratorViewModelTest : MainViewModelTestBase() {
         val composerVM = cn.vectory.ocdroid.ui.ComposerViewModel(core)
         val orchestratorVM = cn.vectory.ocdroid.ui.OrchestratorViewModel(core)
         val viewModel = OrchestratorViewModel(core)  // primary VM under test
-        core.updateState {
+        core.writeSessionList {
             it.copy(sessions = listOf(
                 cn.vectory.ocdroid.data.model.Session(id = "session-1", directory = "/tmp/project", title = null)
             ))
@@ -376,7 +375,7 @@ class OrchestratorViewModelTest : MainViewModelTestBase() {
         val composerVM = cn.vectory.ocdroid.ui.ComposerViewModel(core)
         val orchestratorVM = cn.vectory.ocdroid.ui.OrchestratorViewModel(core)
         val viewModel = OrchestratorViewModel(core)  // primary VM under test
-        core.updateState {
+        core.writeSessionList {
             it.copy(sessions = listOf(
                 cn.vectory.ocdroid.data.model.Session(id = "session-1", directory = "/tmp/old")
             ))
@@ -421,7 +420,7 @@ class OrchestratorViewModelTest : MainViewModelTestBase() {
         val viewModel = OrchestratorViewModel(core)  // primary VM under test
         val initialStreaming = mapOf("part-1" to "partial")
         val initialReasoning = Part(id = "part-1", messageId = "message-1", sessionId = "session-1", type = "reasoning")
-        core.updateState {
+        core.writeChat {
             it.copy(
                 currentSessionId = "session-1",
                 streamingPartTexts = initialStreaming,
@@ -500,7 +499,7 @@ class OrchestratorViewModelTest : MainViewModelTestBase() {
         val viewModel = OrchestratorViewModel(core)  // primary VM under test
         val streaming = mapOf("part-1" to "partial")
         val reasoning = Part(id = "part-1", messageId = "message-1", sessionId = "session-1", type = "reasoning")
-        core.updateState {
+        core.writeChat {
             it.copy(
                 currentSessionId = "session-1",
                 streamingPartTexts = streaming,
@@ -551,7 +550,7 @@ class OrchestratorViewModelTest : MainViewModelTestBase() {
         val composerVM = cn.vectory.ocdroid.ui.ComposerViewModel(core)
         val orchestratorVM = cn.vectory.ocdroid.ui.OrchestratorViewModel(core)
         val viewModel = OrchestratorViewModel(core)  // primary VM under test
-        core.updateState {
+        core.writeChat {
             it.copy(
                 currentSessionId = "session-1",
                 streamingPartTexts = emptyMap(),
@@ -621,7 +620,7 @@ class OrchestratorViewModelTest : MainViewModelTestBase() {
         val composerVM = cn.vectory.ocdroid.ui.ComposerViewModel(core)
         val orchestratorVM = cn.vectory.ocdroid.ui.OrchestratorViewModel(core)
         val viewModel = OrchestratorViewModel(core)  // primary VM under test
-        core.updateState {
+        core.writeSessionList {
             it.copy(
                 pendingPermissions = listOf(
                     PermissionRequest(id = "perm-1", sessionId = "session-1", permission = "file.write"),
@@ -666,7 +665,10 @@ class OrchestratorViewModelTest : MainViewModelTestBase() {
     @Test
     fun `replyQuestion calls repository and removes answered question`() = runTest {
         val answers = listOf(listOf("React"), listOf("Custom"))
-        coEvery { repository.replyQuestion("question-1", answers) } returns Result.success(Unit)
+        // §R18 Phase 2-E step 2: directory now threaded explicitly. The
+        // question's session is not in the test state, so the resolver falls
+        // back to settingsManager.currentWorkdir (mocked null here).
+        coEvery { repository.replyQuestion("question-1", answers, any()) } returns Result.success(Unit)
 
         val core = createCore()
         val chatVM = cn.vectory.ocdroid.ui.ChatViewModel(core)
@@ -676,7 +678,7 @@ class OrchestratorViewModelTest : MainViewModelTestBase() {
         val composerVM = cn.vectory.ocdroid.ui.ComposerViewModel(core)
         val orchestratorVM = cn.vectory.ocdroid.ui.OrchestratorViewModel(core)
         val viewModel = OrchestratorViewModel(core)  // primary VM under test
-        core.updateState {
+        core.writeSessionList {
             it.copy(
                 pendingQuestions = listOf(
                     QuestionRequest(
@@ -696,13 +698,13 @@ class OrchestratorViewModelTest : MainViewModelTestBase() {
         orchestratorVM.replyQuestion("question-1", answers)
         advanceUntilIdle()
 
-        coVerify(exactly = 1) { repository.replyQuestion("question-1", answers) }
+        coVerify(exactly = 1) { repository.replyQuestion("question-1", answers, any()) }
         assertEquals(listOf("question-2"), sessionVM.sessionListFlow.value.pendingQuestions.map { it.id })
     }
 
     @Test
     fun `rejectQuestion calls repository and removes rejected question`() = runTest {
-        coEvery { repository.rejectQuestion("question-1") } returns Result.success(Unit)
+        coEvery { repository.rejectQuestion("question-1", any()) } returns Result.success(Unit)
 
         val core = createCore()
         val chatVM = cn.vectory.ocdroid.ui.ChatViewModel(core)
@@ -712,7 +714,7 @@ class OrchestratorViewModelTest : MainViewModelTestBase() {
         val composerVM = cn.vectory.ocdroid.ui.ComposerViewModel(core)
         val orchestratorVM = cn.vectory.ocdroid.ui.OrchestratorViewModel(core)
         val viewModel = OrchestratorViewModel(core)  // primary VM under test
-        core.updateState {
+        core.writeSessionList {
             it.copy(
                 pendingQuestions = listOf(
                     QuestionRequest(
@@ -732,7 +734,7 @@ class OrchestratorViewModelTest : MainViewModelTestBase() {
         orchestratorVM.rejectQuestion("question-1")
         advanceUntilIdle()
 
-        coVerify(exactly = 1) { repository.rejectQuestion("question-1") }
+        coVerify(exactly = 1) { repository.rejectQuestion("question-1", any()) }
         assertEquals(listOf("question-2"), sessionVM.sessionListFlow.value.pendingQuestions.map { it.id })
     }
 
@@ -752,7 +754,7 @@ class OrchestratorViewModelTest : MainViewModelTestBase() {
         val composerVM = cn.vectory.ocdroid.ui.ComposerViewModel(core)
         val orchestratorVM = cn.vectory.ocdroid.ui.OrchestratorViewModel(core)
         val viewModel = OrchestratorViewModel(core)  // primary VM under test
-        core.updateState { it.copy(currentSessionId = "session-1") }
+        core.writeChat { it.copy(currentSessionId = "session-1") }
 
         handleSse(core,
             SSEEvent(
@@ -831,7 +833,7 @@ class OrchestratorViewModelTest : MainViewModelTestBase() {
         val composerVM = cn.vectory.ocdroid.ui.ComposerViewModel(core)
         val orchestratorVM = cn.vectory.ocdroid.ui.OrchestratorViewModel(core)
         val viewModel = OrchestratorViewModel(core)  // primary VM under test
-        core.updateState {
+        core.writeSessionList {
             it.copy(
                 pendingQuestions = listOf(
                     QuestionRequest(id = "question-1", sessionId = "session-1", questions = emptyList()),
@@ -869,7 +871,7 @@ class OrchestratorViewModelTest : MainViewModelTestBase() {
         val composerVM = cn.vectory.ocdroid.ui.ComposerViewModel(core)
         val orchestratorVM = cn.vectory.ocdroid.ui.OrchestratorViewModel(core)
         val viewModel = OrchestratorViewModel(core)  // primary VM under test
-        core.updateState { it.copy(sessions = listOf(Session(id = "s1", directory = "/tmp"))) }
+        core.writeSessionList { it.copy(sessions = listOf(Session(id = "s1", directory = "/tmp"))) }
         sessionVM.selectSession("s1")
         advanceUntilIdle()
         assertEquals("s1", chatVM.chatFlow.value.currentSessionId)

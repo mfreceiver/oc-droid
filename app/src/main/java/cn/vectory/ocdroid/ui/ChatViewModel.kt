@@ -1,13 +1,15 @@
 package cn.vectory.ocdroid.ui
 
 import androidx.lifecycle.ViewModel
+import androidx.lifecycle.viewModelScope
+import cn.vectory.ocdroid.R
 import cn.vectory.ocdroid.data.repository.OpenCodeRepository
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.launch
 import javax.inject.Inject
 
 /**
- * R-17 batch3 → batch3d: Chat-domain ViewModel. Owns the chat slice + the
+ * * R-17 batch3 → batch3d: Chat-domain ViewModel. Owns the chat slice + the
  * message-window lifecycle (load / page / gap-close / streaming overlay),
  * plus the abort / compact / edit / refresh operations.
  *
@@ -15,7 +17,7 @@ import javax.inject.Inject
  * exposed as `fun xxx() = core.xxx()` delegate shells) have been physically
  * moved HERE. The VM now calls its domain controller
  * ([AppCore.sessionSyncCoordinator], [AppCore.composerController]) and the
- * [MainViewModelMessageActions] / [MainViewModelCatchUpActions] free functions
+ * [MessageActions] / [CatchUpActions] free functions
  * directly — no more `core.<method>()` self-bypass.
  *
  * Cross-domain orchestration (`sendMessage` — composer→chat→session creation)
@@ -65,7 +67,6 @@ class ChatViewModel @Inject constructor(
             resetLimit = resetLimit,
             settingsManager = core.settingsManager,
             onCacheWindow = core.sessionSwitcher::writeSessionWindow,
-            settingsFlow = core.store.settingsFlow,
             emit = EventEmitter { event -> core.effectBus.uiEvents.tryEmit(event) },
         )
     }
@@ -102,19 +103,23 @@ class ChatViewModel @Inject constructor(
         val chatFlow = core.store.chatFlow
         if (chatFlow.value.isCompacting) return
         val sessionId = chatFlow.value.currentSessionId ?: run {
-            core.effectBus.uiEvents.tryEmit(UiEvent.Error("Open or create a session before compacting"))
+            core.effectBus.uiEvents.tryEmit(UiEvent.Error(R.string.error_compact_no_session))
             return
         }
         val model = chatFlow.value.currentModel ?: run {
-            core.effectBus.uiEvents.tryEmit(UiEvent.Error("No model info available for compaction"))
+            core.effectBus.uiEvents.tryEmit(UiEvent.Error(R.string.error_compact_no_model))
             return
         }
         core.writeChat { it.copy(isCompacting = true, compactStartedAt = System.currentTimeMillis()) }
-        core.appScope.launch {
+        // §R18 Phase 3 Wave 2 (drift #6 / P1-7): user-triggered ephemeral op
+        // (compact) → viewModelScope so it cancels cleanly on VM clear and the
+        // captured `this@ChatViewModel` closure (loadMessages / core writes)
+        // never outlives the VM.
+        viewModelScope.launch {
             core.repository.summarizeSession(sessionId, model)
                 .onFailure { error ->
                     core.writeChat { it.copy(isCompacting = false, compactStartedAt = 0L) }
-                    core.effectBus.uiEvents.tryEmit(UiEvent.Error(errorMessageOrFallback(error, "Compact failed")))
+                    core.effectBus.uiEvents.tryEmit(UiEvent.Error(R.string.error_compact_failed, listOf(errorMessageOrFallback(error, "unknown error"))))
                 }
         }
     }
@@ -132,7 +137,11 @@ class ChatViewModel @Inject constructor(
         val draft = (chatFlow.value.partsByMessage[messageId] ?: emptyList()).firstOrNull { it.isText }?.text?.trim().orEmpty()
         if (draft.isBlank()) return
 
-        core.appScope.launch {
+        // §R18 Phase 3 Wave 2 (drift #6 / P1-7): ephemeral edit-from-message
+        // → viewModelScope. The closure captures `this@ChatViewModel` (via the
+        // loadMessages call below), so binding to viewModelScope keeps the
+        // captured method ref alive exactly as long as the VM.
+        viewModelScope.launch {
             core.repository.revertSession(sessionId, messageId)
                 .onSuccess { updatedSession ->
                     core.writeSessionList { state ->
@@ -144,17 +153,25 @@ class ChatViewModel @Inject constructor(
                     core.loadSessionsForEffect()
                 }
                 .onFailure { error ->
-                    core.effectBus.uiEvents.tryEmit(UiEvent.Error("Failed to edit message: ${errorMessageOrFallback(error, "unknown error")}"))
+                    core.effectBus.uiEvents.tryEmit(UiEvent.Error(R.string.error_edit_message_failed, listOf(errorMessageOrFallback(error, "unknown error"))))
                 }
         }
     }
 
     fun abortSession() {
         val sessionId = core.store.chatFlow.value.currentSessionId ?: return
+        // §R18 Phase 3 Wave 2 + Gate-3 fix (maxer): abort is a SERVER-STATE
+        // mutation (POST /session/{id}/abort), not an ephemeral UI action. It
+        // MUST outlive the VM — if the user backgrounds the app / navigates
+        // away while the abort request is in flight, viewModelScope.cancel()
+        // would cancel the HTTP call, the server never receives the abort, and
+        // keeps streaming. Use appScope so the request completes regardless of
+        // VM lifecycle. (Closure captures only core.repository + core.effectBus,
+        // no VM self-ref → no P1-7 leak.)
         core.appScope.launch {
             core.repository.abortSession(sessionId)
                 .onFailure { error ->
-                    core.effectBus.uiEvents.tryEmit(UiEvent.Error(errorMessageOrFallback(error, "Failed to abort session")))
+                    core.effectBus.uiEvents.tryEmit(UiEvent.Error(R.string.error_abort_session_failed, listOf(errorMessageOrFallback(error, "unknown error"))))
                 }
         }
     }
@@ -165,7 +182,7 @@ class ChatViewModel @Inject constructor(
         core.performGlobalColdStartRefresh(currentId = sessionId)
         core.connectionCoordinator.testConnection(force = true, onSettled = { ok ->
             if (ok && !core.store.chatFlow.value.isLoadingMessages) {
-                core.effectBus.uiEvents.tryEmit(UiEvent.Success("已刷新"))
+                core.effectBus.uiEvents.tryEmit(UiEvent.Success(R.string.success_refreshed))
             }
         })
     }

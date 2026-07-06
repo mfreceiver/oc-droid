@@ -1,6 +1,7 @@
 package cn.vectory.ocdroid.data.api
 
 import cn.vectory.ocdroid.data.model.SSEEvent
+import cn.vectory.ocdroid.data.repository.http.HttpHeaders
 import cn.vectory.ocdroid.util.DebugLog
 import kotlinx.coroutines.channels.awaitClose
 import kotlinx.coroutines.delay
@@ -16,6 +17,7 @@ import okhttp3.sse.EventSourceListener
 import okhttp3.sse.EventSources
 import kotlin.random.Random
 import java.util.Base64
+import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicLong
 
@@ -61,8 +63,13 @@ class SSEClient(
     fun connect(
         baseUrl: String,
         username: String? = null,
-        password: String? = null
-    ): Flow<Result<SSEEvent>> = connectOnce(baseUrl, username, password)
+        password: String? = null,
+        // §R18 Phase 2-E step 1: explicit workdir for SSE routing. The SSE
+        // feed is plain OkHttp (no Retrofit), so we set the header directly
+        // here. Null leaves the request unscoped (the interceptor's workdir
+        // fallback still applies in step 1; step 2 makes null a true no-op).
+        directory: String? = null
+    ): Flow<Result<SSEEvent>> = connectOnce(baseUrl, username, password, directory)
         .retryWhen { _, attempt ->
             if (attempt >= MAX_RETRY_ATTEMPTS) {
                 // §15.3: budget exhausted — give up and let the custom
@@ -87,7 +94,8 @@ class SSEClient(
     private fun connectOnce(
         baseUrl: String,
         username: String? = null,
-        password: String? = null
+        password: String? = null,
+        directory: String? = null
     ): Flow<Result<SSEEvent>> = callbackFlow {
         val url = if (baseUrl.startsWith("http")) baseUrl else "http://$baseUrl"
         val request = Request.Builder()
@@ -100,6 +108,12 @@ class SSEClient(
                     val encoded = Base64.getEncoder().encodeToString(credential.toByteArray())
                     header("Authorization", "Basic $encoded")
                 }
+                // §R18 Phase 2-E step 1: explicit directory header for SSE.
+                // The OkHttp interceptor also mirrors it into `?directory` for
+                // proxy-safe routing (server reads query before header).
+                if (directory != null) {
+                    header(HttpHeaders.DIRECTORY_HEADER, directory)
+                }
             }
             .build()
 
@@ -110,6 +124,12 @@ class SSEClient(
         // very first check window isn't already "expired".
         val lastEventAt = AtomicLong(System.currentTimeMillis())
         val eventCount = AtomicInteger(0)
+        // §P2-8: idempotent close guard. onClosed and onFailure can both fire
+        // after the heartbeat watchdog cancels the eventSource (cancel triggers
+        // onFailure), and closing the channel twice is illegal (OkHttp /
+        // coroutines internal IllegalStateException / NoSuchElementException).
+        // CAS ensures only the first close wins; later callbacks are no-ops.
+        val closed = AtomicBoolean(false)
 
         val listener = object : EventSourceListener() {
             override fun onOpen(eventSource: EventSource, response: okhttp3.Response) {
@@ -122,6 +142,14 @@ class SSEClient(
                 type: String?,
                 data: String
             ) {
+                // §P2-8 race fix: watchdog may have already cancelled the
+                // eventSource (and the channel is closing/closed) while OkHttp
+                // still has in-flight frames queued in its pipeline. Those
+                // residual onEvent callbacks must NOT reach trySend — sending
+                // into a closed channel throws IllegalStateException, which
+                // propagates out of the callbackFlow producer and burns the
+                // retryWhen budget on every reconnect-after-backlog. Early-out.
+                if (closed.get()) return
                 // Any frame (including `server.heartbeat`) proves the link is
                 // alive — reset the watchdog clock and count it.
                 lastEventAt.set(System.currentTimeMillis())
@@ -146,6 +174,13 @@ class SSEClient(
                         if (!noisy) {
                             DebugLog.d("SSE", "event type=$type session=${event.payload.getString("sessionID") ?: "-"}")
                         }
+                        // §P2-8 race fix (double-check): decoding took real
+                        // time; the watchdog / onFailure may have closed the
+                        // channel between the entry check and here. Re-check
+                        // before trySend so a residual-in-pipeline event after
+                        // cancel can never throw IllegalStateException into the
+                        // producer scope and waste the retryWhen budget.
+                        if (closed.get()) return
                         trySend(Result.success(event))
                     } catch (e: Exception) {
                         // Skip malformed events, but record so a recurring parse
@@ -157,12 +192,18 @@ class SSEClient(
 
             override fun onClosed(eventSource: EventSource) {
                 DebugLog.w("SSE", "closed/error: connection closed by server")
-                close(Exception("SSE connection closed by server"))
+                // §P2-8: guard against double-close (watchdog cancel may also
+                // trigger onFailure -> close).
+                if (closed.compareAndSet(false, true)) {
+                    close(Exception("SSE connection closed by server"))
+                }
             }
 
             override fun onFailure(eventSource: EventSource, t: Throwable?, response: okhttp3.Response?) {
                 DebugLog.w("SSE", "closed/error: ${t?.message ?: "code=${response?.code}"}")
-                close(t ?: Exception("SSE connection failed"))
+                if (closed.compareAndSet(false, true)) {
+                    close(t ?: Exception("SSE connection failed"))
+                }
             }
         }
 

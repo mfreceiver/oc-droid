@@ -1,6 +1,7 @@
 package cn.vectory.ocdroid.ui
 
 import androidx.lifecycle.ViewModel
+import androidx.lifecycle.viewModelScope
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.launch
 import javax.inject.Inject
@@ -13,6 +14,13 @@ import javax.inject.Inject
  * calls its domain controller ([AppCore.connectionCoordinator]) directly —
  * no `core.<method>()` self-bypass. The `testConnectionForm` body (which
  * resolves the password + runs the repository health check) lives here now.
+ *
+ * §R18 Phase 3 Wave 3 (P2-6): the traffic role (refresh / reset counters)
+ * moved here from [OrchestratorViewModel]. Traffic is connectivity-shaped
+ * state (bytes sent / received over the wire) so it groups naturally with
+ * the connection slice; consolidating it here drops one more responsibility
+ * from the overloaded [OrchestratorViewModel]. Pure relocation — zero
+ * behaviour change.
  */
 @HiltViewModel
 class ConnectionViewModel @Inject constructor(
@@ -22,6 +30,12 @@ class ConnectionViewModel @Inject constructor(
     val connectionFlow get() = core.connectionFlow
     val settingsFlow get() = core.settingsFlow
     val hostFlow get() = core.hostFlow
+
+    /** §P2-6: traffic slice read accessor (moved from [OrchestratorViewModel]).
+     *  Same authoritative slice every other VM exposes (all delegate to
+     *  [SharedStateStore]); kept here so SettingsScreen + ChatScreen read
+     *  traffic off the connection VM. */
+    val trafficFlow get() = core.trafficFlow
 
     fun testConnection(force: Boolean = false, retries: Int = 0, onSettled: ((Boolean) -> Unit)? = null) {
         core.connectionCoordinator.testConnection(force = force, retries = retries, onSettled = onSettled)
@@ -37,7 +51,12 @@ class ConnectionViewModel @Inject constructor(
         onResult: (success: Boolean, message: String) -> Unit,
     ) {
         // §R-17 batch3d: body moved verbatim from AppCore.
-        core.appScope.launch {
+        // §R18 Phase 3 Wave 2 (drift #6 / P1-7): user-triggered "test
+        // connection" → viewModelScope. The closure captures the onResult
+        // callback (caller-supplied, never a VM `::ref`), so binding to
+        // viewModelScope cancels the health probe cleanly if the user
+        // navigates away mid-check.
+        viewModelScope.launch {
             val effectivePassword = resolveTestConnectionPassword(
                 password, passwordEdited, profileId,
             ) { core.settingsManager.basicAuthPassword(it) }
@@ -56,6 +75,27 @@ class ConnectionViewModel @Inject constructor(
     }
 
     fun coldStartReconnect() = core.connectionCoordinator.coldStartReconnect()
+
+    // ── Traffic (§P2-6: moved from OrchestratorViewModel) ───────────────────
+
+    /** Snapshots the latest tracker totals into [trafficFlow] so the UI
+     *  displays the current cumulative byte counts. The tracker keeps
+     *  accumulating regardless; this just syncs the snapshot for display. */
+    fun refreshTrafficStats() {
+        core.writeTraffic {
+            it.copy(
+                trafficSent = core.trafficTracker.totalBytesSent,
+                trafficReceived = core.trafficTracker.totalBytesReceived,
+            )
+        }
+    }
+
+    /** Zeroes the tracker's running totals then snapshots them into
+     *  [trafficFlow] so the displayed counters reset to 0. */
+    fun resetTrafficStats() {
+        core.trafficTracker.reset()
+        refreshTrafficStats()
+    }
 
     fun startSSE() = core.connectionCoordinator.startSSE()
 

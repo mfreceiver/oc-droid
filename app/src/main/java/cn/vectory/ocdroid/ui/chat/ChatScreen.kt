@@ -55,6 +55,7 @@ import cn.vectory.ocdroid.R
 import cn.vectory.ocdroid.data.model.Message
 import cn.vectory.ocdroid.data.model.Part
 import cn.vectory.ocdroid.data.model.SessionStatus
+import cn.vectory.ocdroid.ui.resolveMessage
 import cn.vectory.ocdroid.ui.files.FilesScreen
 import cn.vectory.ocdroid.ui.files.FilesViewModel
 import cn.vectory.ocdroid.ui.ChatViewModel
@@ -108,7 +109,10 @@ fun ChatScreen(
     // single LaunchedEffect(Unit) so each event fires the snackbar exactly
     // once. The slice-flow subscriptions below stay as-is.
     val connection by chatVM.connectionFlow.collectAsStateWithLifecycle()
-    val traffic by orchestratorVM.trafficFlow.collectAsStateWithLifecycle()
+    // §R18 Phase 3 Wave 3 (P2-6): traffic moved from OrchestratorViewModel to
+    // ConnectionViewModel (connectivity-shaped state). Same SharedStateStore
+    // slice — pure injection-site update.
+    val traffic by connectionVM.trafficFlow.collectAsStateWithLifecycle()
     val composer by composerVM.composerFlow.collectAsStateWithLifecycle()
     val file by orchestratorVM.fileFlow.collectAsStateWithLifecycle()
     val settings by orchestratorVM.settingsFlow.collectAsStateWithLifecycle()
@@ -324,7 +328,7 @@ fun ChatScreen(
     // identity re-builds the actions bundle. The VM method references and the
     // wrapping lambdas only capture viewModel (itself stable), so they do not
     // need to be keys.
-    val topBarActions = remember(sessionVM, composerVM, onNavigateToSettings, onNavigateToSessions) {
+    val topBarActions = remember(sessionVM, composerVM, connectionVM, onNavigateToSettings, onNavigateToSessions) {
         ChatTopBarActions(
             onSelectSession = sessionVM::selectSession,
             onCloseSession = sessionVM::closeSession,
@@ -332,7 +336,7 @@ fun ChatScreen(
             onNavigateToSettings = onNavigateToSettings,
             onNavigateToSessions = onNavigateToSessions,
             onRefreshMessages = { chatVM.refreshCurrentSession() },
-            onRefreshTrafficStats = orchestratorVM::refreshTrafficStats,
+            onRefreshTrafficStats = connectionVM::refreshTrafficStats,
             onSelectHost = { hostVM.selectHostProfile(it) },
             onActivateTunnel = { hostVM.activateTunnelForCurrentHost() },
             onSwitchModel = { providerId, modelId -> composerVM.switchSessionModel(providerId, modelId) },
@@ -439,16 +443,22 @@ fun ChatScreen(
         // observing pendingQuestion becoming null is the success signal.
         isSubmittingQuestion = false
     }
-    // §C1 / §R-17 batch2: surface UiEvent.Error / UiEvent.Success via a 3s/2.5s
-    // M3 Snackbar. Collection lives in ONE LaunchedEffect(Unit) so each event
-    // fires the snackbar exactly once (the SharedFlow is one-shot, consumed on
-    // emission — no clearError/clearSuccessMessage to call afterwards). The
-    // Error branch reuses the §error-detail "查看" action; Success is short
+    // §C1 / §R-17 batch2 / §R18 Phase 2-G: surface UiEvent.Error / UiEvent.Success
+    // via a 3s/2.5s M3 Snackbar. Collection lives in ONE LaunchedEffect(Unit)
+    // so each event fires the snackbar exactly once (the SharedFlow is one-shot,
+    // consumed on emission — no clearError/clearSuccessMessage to call afterwards).
+    // The Error branch reuses the §error-detail "查看" action; Success is short
     // ("隧道激活成功" / "已刷新") with no action. SnackbarHostState serializes
     // concurrent showSnackbar calls so simultaneous Error + Success still
     // display in turn.
+    //
+    // §R18 Phase 2-G: UiEvent.Error/Success now carry a `@StringRes resId` +
+    // format args; resolve to a localized String via [context] (captured at
+    // composable scope above — `LaunchedEffect`'s lambda is non-composable, so
+    // LocalContext.current cannot be read inside it).
     LaunchedEffect(Unit) {
         orchestratorVM.uiEvents.collect { event ->
+            val message = event.resolveMessage(context)
             when (event) {
                 is UiEvent.Error -> {
                     // §error-detail: all errors show a generic snackbar + "查看"
@@ -459,16 +469,17 @@ fun ChatScreen(
                         message = errorMessage,
                         durationMillis = 10_000L,
                         actionLabel = errorActionLabel,
-                        onAction = { errorDetail = event.message }
+                        onAction = { errorDetail = message }
                     )
                 }
                 is UiEvent.Success -> {
                     // §success-channel: positive snackbar, 2.5s, no action.
                     snackbarHostState.showTimed(
-                        message = event.message,
+                        message = message,
                         durationMillis = 2_500L
                     )
                 }
+                is UiEvent.Debug -> Unit
             }
         }
     }

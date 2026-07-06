@@ -1,15 +1,46 @@
 package cn.vectory.ocdroid.ui
 
+import androidx.annotation.StringRes
+
 /**
  * §R-17 batch2: one-shot UI events (error/success toasts). Replaces the
  * cross-domain error/successMessage fields on AppState. Consumed once
  * (SharedFlow), unlike state which is persistent. error/successMessage
  * writes that previously went through updateState { it.copy(error=...) }
  * now emit UiEvent.Error/Success via MainViewModel._uiEvents.
+ *
+ * §R18 Phase 2-G: Error/Success now carry a `@StringRes resId` + format
+ * args instead of a hardcoded String. Composable collectors resolve via
+ * `LocalContext.current.getString(resId, *args.toTypedArray())`; the
+ * app-lifetime AppCore collector does the same with its injected
+ * `@ApplicationContext` for the [cn.vectory.ocdroid.di.AppLifecycleMonitor]
+ * notification path. The Debug variant keeps a raw String because it is
+ * developer-facing (not user-visible) — i18n does not apply.
  */
 sealed class UiEvent {
-    data class Error(val message: String) : UiEvent()
-    data class Success(val message: String) : UiEvent()
+    data class Error(@StringRes val resId: Int, val args: List<Any> = emptyList()) : UiEvent()
+    data class Success(@StringRes val resId: Int, val args: List<Any> = emptyList()) : UiEvent()
+    /** Developer-facing debug event; message stays a raw String (not user-visible). */
+    data class Debug(val message: String) : UiEvent()
+}
+
+/**
+ * §R18 Phase 2-G: Resolve a [UiEvent]'s localized message via the given
+ * [android.content.Context]. This is a plain (non-`@Composable`) top-level
+ * function on purpose: the Compose lint rule `LocalContextGetResourceValueCall`
+ * flags `context.getString(...)` calls that lexically appear inside a
+ * `@Composable` function (because they bypass Compose recomposition on
+ * configuration change). Snackbar/event collectors run inside a
+ * `LaunchedEffect` coroutine on event arrival — the resolved String is
+ * consumed immediately by `SnackbarHostState.showSnackbar` (an ephemeral
+ * side effect), never held across recompositions, so the recomposition
+ * concern does not apply. Hoisting the resolution into this non-composable
+ * helper satisfies lint while keeping the call site readable.
+ */
+fun UiEvent.resolveMessage(context: android.content.Context): String = when (this) {
+    is UiEvent.Error -> context.getString(resId, *args.toTypedArray())
+    is UiEvent.Success -> context.getString(resId, *args.toTypedArray())
+    is UiEvent.Debug -> message
 }
 
 /** §R-17 batch2: passed to Actions free functions and controllers so they can

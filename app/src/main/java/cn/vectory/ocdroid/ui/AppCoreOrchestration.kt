@@ -1,5 +1,6 @@
 package cn.vectory.ocdroid.ui
 
+import cn.vectory.ocdroid.R
 import cn.vectory.ocdroid.data.model.Message
 import cn.vectory.ocdroid.util.runSuspendCatching
 import kotlinx.coroutines.Dispatchers
@@ -35,6 +36,33 @@ import java.util.Locale
 // Cross-domain orchestration (the ~6 methods that span 3+ domains)
 // ════════════════════════════════════════════════════════════════════════════
 
+/**
+ * §R18 Phase 2-E step 1: resolves the directory header to attach to a
+ * question reply/reject for [requestId]. Three-level fallback:
+ *  1. The pending question's parent session's directory (handles cross-workdir
+ *     routing — a question may belong to a session whose workdir differs from
+ *     the currently-selected one).
+ *  2. The persisted current workdir (matches the pre-Phase-2-E behavior,
+ *     where the interceptor injected the global currentDirectory).
+ *  3. null — server falls back to its own process.cwd() (last resort; should
+ *     not happen in normal use).
+ *
+ * Defined here (next to executeCommand) because it touches sessionList +
+ * directorySessions + settingsManager — three domains AppCore already owns.
+ */
+internal fun AppCore.resolveQuestionDirectory(requestId: String): String? {
+    val pending = store.sessionListFlow.value.pendingQuestions.firstOrNull { it.id == requestId }
+    val sessionId = pending?.sessionId
+    if (sessionId != null) {
+        val session = (
+            store.sessionListFlow.value.sessions +
+                store.sessionListFlow.value.directorySessions.values.flatten()
+            ).firstOrNull { it.id == sessionId }
+        if (session != null && !session.directory.isNullOrBlank()) return session.directory
+    }
+    return settingsManager.currentWorkdir
+}
+
 /** nav → session-list → chat. Used by the notification deep-link path. */
 internal fun AppCore.openSessionFromDeepLink(sessionId: String) {
     appScope.launch {
@@ -61,32 +89,46 @@ internal fun AppCore.executeCommand(command: String, arguments: String) {
     when (cmd) {
         "clear" -> {
             composerController.setInputText("")
-            val workdir = repository.getCurrentDirectory()
+            val workdir = settingsManager.currentWorkdir
                 ?: currentSession(store.sessionListFlow.value.sessions, store.chatFlow.value.currentSessionId)?.directory
             if (workdir != null) createSessionInWorkdirForEffect(workdir) else createSessionForEffect()
         }
         else -> {
             val existing = store.chatFlow.value.currentSessionId
             composerController.setInputText("")
+            // §R18 Phase 2-E step 1: resolve the directory for the slash
+            // command's session explicitly. Was repository.getCurrentDirectory()
+            // (the global currentDirectory); now derived from the current
+            // session's directory, then the draft workdir (when the user is in
+            // draft mode targeting a different workdir than currentWorkdir), then
+            // the persisted workdir as final fallback. (maxer Gate-2: draft-mode
+            // fallback must prefer draftWorkdir over currentWorkdir, otherwise a
+            // /compact typed while drafting in workdir B but currentWorkdir=A
+            // routes the command to A.)
+            val commandDirectory = (
+                currentSession(store.sessionListFlow.value.sessions, existing)?.directory
+                    ?: store.composerFlow.value.draftWorkdir
+                    ?: settingsManager.currentWorkdir
+                )
             if (existing != null) {
                 appScope.launch {
-                    repository.executeCommand(existing, cmd, arguments)
+                    repository.executeCommand(existing, cmd, arguments, directory = commandDirectory)
                         .onFailure { error ->
-                            effectBus.uiEvents.tryEmit(UiEvent.Error(errorMessageOrFallback(error, "Command /$cmd failed")))
+                            effectBus.uiEvents.tryEmit(UiEvent.Error(R.string.error_command_failed, listOf(cmd, errorMessageOrFallback(error, "unknown error"))))
                         }
                 }
             } else if (store.composerFlow.value.draftWorkdir != null) {
                 // §bug2: materialize draft session, then execute the command on the new session
                 materializeDraftSession { sessionId ->
                     appScope.launch {
-                        repository.executeCommand(sessionId, cmd, arguments)
+                        repository.executeCommand(sessionId, cmd, arguments, directory = commandDirectory)
                             .onFailure { error ->
-                                effectBus.uiEvents.tryEmit(UiEvent.Error(errorMessageOrFallback(error, "Command /$cmd failed")))
+                                effectBus.uiEvents.tryEmit(UiEvent.Error(R.string.error_command_failed, listOf(cmd, errorMessageOrFallback(error, "unknown error"))))
                             }
                     }
                 }
             } else {
-                effectBus.uiEvents.tryEmit(UiEvent.Error("Open or create a session before running /$cmd"))
+                effectBus.uiEvents.tryEmit(UiEvent.Error(R.string.chat_command_no_session, listOf(cmd)))
             }
             return
         }
@@ -126,7 +168,7 @@ internal fun AppCore.materializeDraftSession(onSessionReady: (String) -> Unit) {
     val draftWorkdir = store.composerFlow.value.draftWorkdir ?: return
     writeComposer { it.copy(draftWorkdir = null) }
     appScope.launch {
-        repository.createSession(title = null)
+        repository.createSession(title = null, directory = draftWorkdir)   // §R18 Final 终审 fix (gpter): route to the draft workdir
             .onSuccess { session ->
                 val openIds = (listOf(session.id) + settingsManager.openSessionIds).distinct().take(8)
                 settingsManager.openSessionIds = openIds
@@ -137,7 +179,9 @@ internal fun AppCore.materializeDraftSession(onSessionReady: (String) -> Unit) {
                 writeChat { it.copy(currentSessionId = session.id) }
                 writeUnread { it.copy(unreadSessions = it.unreadSessions - session.id, lastViewedTime = it.lastViewedTime + (session.id to now)) }
                 writeComposer { it.copy(draftWorkdir = null) }
-                settingsManager.currentSessionId = session.id
+                // §R18 Phase 2-F: chatFlow.currentSessionId (set in writeChat
+                // above) is the sole runtime source; the AppCore init collector
+                // persists session.id to SettingsManager. No manual write here.
                 store.chatFlow.value.currentModel?.let { model ->
                     settingsManager.setModelForSession(session.id, model.providerId, model.modelId)
                 }
@@ -160,7 +204,7 @@ internal fun AppCore.materializeDraftSession(onSessionReady: (String) -> Unit) {
             }
             .onFailure { error ->
                 writeComposer { it.copy(draftWorkdir = draftWorkdir) }
-                effectBus.uiEvents.tryEmit(UiEvent.Error("Failed to create session in $draftWorkdir: ${error.message ?: "unknown error"}"))
+                effectBus.uiEvents.tryEmit(UiEvent.Error(R.string.error_create_session_in_workdir_failed, listOf(draftWorkdir, error.message ?: "unknown error")))
             }
     }
 }
@@ -207,7 +251,6 @@ private fun AppCore.dispatchSendMessage(sessionId: String) {
         launchSendMessage(
             scope = appScope,
             repository = repository,
-            composerFlow = store.composerFlow,
             slices = store.slices,
             sessionId = sessionId,
             text = text,
@@ -240,7 +283,7 @@ private fun AppCore.dispatchSendMessage(sessionId: String) {
                     val currentInput = store.composerFlow.value.inputText
                     val restored = if (currentInput.isBlank()) text else currentInput
                     if (restored != currentInput) settingsManager.setDraftText(sessionId, restored)
-                    effectBus.uiEvents.tryEmit(UiEvent.Error("Failed to restore session: ${errorMessageOrFallback(error, "unknown error")}"))
+                    effectBus.uiEvents.tryEmit(UiEvent.Error(R.string.error_restore_session_failed, listOf(errorMessageOrFallback(error, "unknown error"))))
                     writeComposer { c ->
                         c.copy(sendingSessionIds = c.sendingSessionIds - sessionId, inputText = restored)
                     }
@@ -290,6 +333,25 @@ internal fun AppCore.catchUpAfterDisconnectOrForeground(sessionId: String) {
         settingsManager = settingsManager,
         onCacheWindow = ::writeSessionWindow,
     )
+    // §R18 Phase 3 Wave 3 (P1-9 wire-up): fan-out pending-questions catch-up
+    // across EVERY known workdir (in-memory directorySessions keys +
+    // currentWorkdir), not just currentWorkdir. Without this, a question
+    // arriving for a background workdir during the SSE outage window is lost:
+    // the catch-up ran only against currentWorkdir. Mirrors the workdir-set
+    // computation in SessionSyncCoordinator.loadPendingQuestionsAllWorkdirs
+    // (duplicated inline because ForegroundCatchUpController does NOT own
+    // SliceFlows — the workdir list is supplied by the caller per the Wave 1
+    // signature contract).
+    val catchUpWorkdirs = (
+        store.sessionListFlow.value.directorySessions.keys +
+            listOfNotNull(settingsManager.currentWorkdir)
+        )
+        .filter { it.isNotBlank() }
+        .distinct()
+    foregroundCatchUpController.catchUpPendingQuestionsAllWorkdirs(
+        repository = repository,
+        workdirs = catchUpWorkdirs,
+    )
 }
 
 /**
@@ -308,7 +370,6 @@ internal fun AppCore.loadMessagesForEffect(sessionId: String, resetLimit: Boolea
         resetLimit = resetLimit,
         settingsManager = settingsManager,
         onCacheWindow = ::writeSessionWindow,
-        settingsFlow = store.settingsFlow,
         emit = EventEmitter { event -> effectBus.uiEvents.tryEmit(event) },
     )
 }
@@ -332,13 +393,18 @@ private fun AppCore.selectSessionForEffect(sessionId: String) {
 }
 
 private fun AppCore.createSessionForEffect(title: String? = null) {
-    launchCreateSession(appScope, repository, store.slices, title, { selectSessionForEffect(it) }, EventEmitter { effectBus.uiEvents.tryEmit(it) })
+    launchCreateSession(appScope, repository, store.slices, title, { selectSessionForEffect(it) }, EventEmitter { effectBus.uiEvents.tryEmit(it) }, directory = settingsManager.currentWorkdir)   // §R18 Final 终审 fix (gpter)
 }
 
 private fun AppCore.createSessionInWorkdirForEffect(workdir: String) {
     val workdir = workdir.trim()
-    repository.setCurrentDirectory(workdir)
-    settingsManager.currentSessionId = null
+    // §R18 Phase 2-E step 2: the repository.setCurrentDirectory call was
+    // removed; downstream directory-scoped calls (SSE / /question / /command)
+    // now take an explicit `directory` parameter, and the workdir is carried
+    // forward by settingsManager.currentWorkdir + composer.draftWorkdir below.
+    // §R18 Phase 2-F: chatFlow.currentSessionId (cleared in writeChat below) is
+    // the sole runtime source; the AppCore collector drops null so no manual
+    // SettingsManager write here.
     writeChat {
         it.copy(
             currentSessionId = null,

@@ -12,14 +12,12 @@ import cn.vectory.ocdroid.data.repository.HostProfileStore
 import cn.vectory.ocdroid.data.repository.OpenCodeRepository
 import cn.vectory.ocdroid.util.SettingsManager
 import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.flow.MutableStateFlow
-import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 
 internal fun launchLoadProviders(
     scope: CoroutineScope,
     repository: OpenCodeRepository,
-    settingsFlow: MutableStateFlow<SettingsState>,
+    slices: SliceFlows,
     settingsManager: SettingsManager,
     hostProfileStore: HostProfileStore,
     onNonFatalError: (String, Throwable?) -> Unit
@@ -53,7 +51,7 @@ internal fun launchLoadProviders(
                 val inheritedDisabled = oldDisabled.intersect(newAvailableKeys)
                 settingsManager.setModelAvailability(baseUrl, newAvailableKeys)
                 settingsManager.setDisabledModels(baseUrl, inheritedDisabled)
-                settingsFlow.update {
+                slices.mutateSettings {
                     it.copy(providers = providers, disabledModels = inheritedDisabled)
                 }
             }

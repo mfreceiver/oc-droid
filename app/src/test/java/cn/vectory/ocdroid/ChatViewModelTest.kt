@@ -68,12 +68,13 @@ import org.junit.Test
  * (`chatVM.sendMessage()`, `sessionVM.selectSession(...)`, etc.) — no legacy
  * `AppCore` shim extensions remain.
  *
- * State setup uses the test-only [AppState] shim ([updateState] /
- * [AppCore.state]) so the historical `updateState { it.copy(...) }` and
- * `viewModel.state.value.X` patterns keep working without rewriting every
- * state-seed call. AppCore internals that have no VM equivalent
- * (`handleSSEEvent`, `store`, `peekSessionWindow`) are reached through
- * `core` directly.
+ * §R18 Phase 4 (P2-3): state setup writes slices directly through the
+ * AppCore `writeXxx { it.copy(...) }` helpers (former `updateState {}`
+ * AppState shim removed). UiEvent Error/Success assertions read the
+ * test-only [AppCore.recentTestErrors] / [AppCore.recentTestSuccesses]
+ * ring buffers populated by [MainViewModelTestBase.createCore]. AppCore
+ * internals that have no VM equivalent (`handleSSEEvent`, `store`,
+ * `peekSessionWindow`) are reached through `core` directly.
  */
 @OptIn(ExperimentalCoroutinesApi::class)
 class ChatViewModelTest : MainViewModelTestBase() {
@@ -110,7 +111,7 @@ class ChatViewModelTest : MainViewModelTestBase() {
             )
         }
         assertEquals("", composerVM.composerFlow.value.inputText)
-        assertNull(core.state.value.error)
+        assertNull(core.recentTestErrors.lastOrNull())
     }
 
     @Test
@@ -180,7 +181,7 @@ class ChatViewModelTest : MainViewModelTestBase() {
         val composerVM = cn.vectory.ocdroid.ui.ComposerViewModel(core)
         val orchestratorVM = cn.vectory.ocdroid.ui.OrchestratorViewModel(core)
         val viewModel = ChatViewModel(core)  // primary VM under test
-        core.updateState { it.copy(currentSessionId = "session-1") }
+        core.writeChat { it.copy(currentSessionId = "session-1") }
 
         chatVM.loadMessages("session-1")
         advanceUntilIdle()
@@ -270,13 +271,9 @@ class ChatViewModelTest : MainViewModelTestBase() {
         val composerVM = cn.vectory.ocdroid.ui.ComposerViewModel(core)
         val orchestratorVM = cn.vectory.ocdroid.ui.OrchestratorViewModel(core)
         val viewModel = ChatViewModel(core)  // primary VM under test
-        core.updateState {
-            it.copy(
-                currentSessionId = "session-1",
-                sessions = listOf(previousTop, current),
-                inputText = "hello"
-            )
-        }
+        core.writeChat { it.copy(currentSessionId = "session-1") }
+        core.writeSessionList { it.copy(sessions = listOf(previousTop, current)) }
+        core.writeComposer { it.copy(inputText = "hello") }
 
         chatVM.sendMessage()
         advanceUntilIdle()
@@ -304,7 +301,10 @@ class ChatViewModelTest : MainViewModelTestBase() {
         advanceUntilIdle()
 
         assertEquals("hello", composerVM.composerFlow.value.inputText)
-        assertEquals("send failed", core.state.value.error)
+        // §R18 Phase 2-G: the message format is now "Failed to send message: <err>";
+        // assert on the dynamic portion (preserves the original semantic — the
+        // exception message is surfaced to the user via the UiEvent).
+        assertTrue(core.recentTestErrors.lastOrNull()!!.contains("send failed"))
     }
 
     @Test
@@ -321,11 +321,9 @@ class ChatViewModelTest : MainViewModelTestBase() {
         val viewModel = ChatViewModel(core)  // primary VM under test
         sessionVM.selectSession("session-1")
         advanceUntilIdle()
-        core.updateState {
-            it.copy(
-                inputText = "queue this next",
-                sessionStatuses = it.sessionStatuses + ("session-1" to SessionStatus(type = "busy"))
-            )
+        core.writeComposer { it.copy(inputText = "queue this next") }
+        core.writeSessionList {
+            it.copy(sessionStatuses = it.sessionStatuses + ("session-1" to SessionStatus(type = "busy")))
         }
 
         chatVM.sendMessage()
@@ -389,13 +387,12 @@ class ChatViewModelTest : MainViewModelTestBase() {
             directory = "/home/user/myproject",
             title = null
         )
-        coEvery { repository.createSession(title = null) } returns Result.success(created)
+        coEvery { repository.createSession(title = null, directory = any()) } returns Result.success(created)
         coEvery { repository.sendMessage(any(), any(), any(), any(), any()) } returns Result.success(Unit)
         coEvery { repository.getSessions(any()) } returns Result.success(listOf(created))
         // scheduleTitleRefreshAfterFirstMessage fires 5s after the new session's
         // first message (title fallback); mock the GET so it doesn't blow up.
         coEvery { repository.getSession(any()) } returns Result.success(created)
-        every { repository.setCurrentDirectory(any()) } just runs
 
         val core = createCore()
         val chatVM = cn.vectory.ocdroid.ui.ChatViewModel(core)
@@ -413,8 +410,10 @@ class ChatViewModelTest : MainViewModelTestBase() {
         advanceUntilIdle()
 
         coVerifyOrder {
-            repository.setCurrentDirectory("/home/user/myproject")
-            repository.createSession(title = null)
+            // §R18 Phase 2-E step 2: createSessionInWorkdir no longer calls
+            // repository.setCurrentDirectory (removed); the workdir is carried
+            // by composer.draftWorkdir → sendMessage → materializeDraftSession.
+            repository.createSession(title = null, directory = any())
             repository.sendMessage("session-1", "hello", any(), any(), any())
         }
         assertEquals("session-1", chatVM.chatFlow.value.currentSessionId)
@@ -445,12 +444,8 @@ class ChatViewModelTest : MainViewModelTestBase() {
         val composerVM = cn.vectory.ocdroid.ui.ComposerViewModel(core)
         val orchestratorVM = cn.vectory.ocdroid.ui.OrchestratorViewModel(core)
         val viewModel = ChatViewModel(core)  // primary VM under test
-        core.updateState {
-            it.copy(
-                currentSessionId = "session-1",
-                sessions = listOf(session1, session2)
-            )
-        }
+        core.writeChat { it.copy(currentSessionId = "session-1") }
+        core.writeSessionList { it.copy(sessions = listOf(session1, session2)) }
 
         handleSse(core,
             SSEEvent(
@@ -480,7 +475,7 @@ class ChatViewModelTest : MainViewModelTestBase() {
         val composerVM = cn.vectory.ocdroid.ui.ComposerViewModel(core)
         val orchestratorVM = cn.vectory.ocdroid.ui.OrchestratorViewModel(core)
         val viewModel = ChatViewModel(core)  // primary VM under test
-        core.updateState { it.copy(currentSessionId = "session-1") }
+        core.writeChat { it.copy(currentSessionId = "session-1") }
 
         advanceUntilIdle()
 
@@ -520,7 +515,7 @@ class ChatViewModelTest : MainViewModelTestBase() {
         val composerVM = cn.vectory.ocdroid.ui.ComposerViewModel(core)
         val orchestratorVM = cn.vectory.ocdroid.ui.OrchestratorViewModel(core)
         val viewModel = ChatViewModel(core)  // primary VM under test
-        core.updateState {
+        core.writeChat {
             it.copy(
                 currentSessionId = "session-1",
                 messages = listOf(original),
@@ -577,7 +572,7 @@ class ChatViewModelTest : MainViewModelTestBase() {
         val composerVM = cn.vectory.ocdroid.ui.ComposerViewModel(core)
         val orchestratorVM = cn.vectory.ocdroid.ui.OrchestratorViewModel(core)
         val viewModel = ChatViewModel(core)  // primary VM under test
-        core.updateState {
+        core.writeChat {
             it.copy(
                 currentSessionId = "session-1",
                 messages = listOf(Message(id = "other", role = "assistant"))
@@ -633,13 +628,11 @@ class ChatViewModelTest : MainViewModelTestBase() {
         val composerVM = cn.vectory.ocdroid.ui.ComposerViewModel(core)
         val orchestratorVM = cn.vectory.ocdroid.ui.OrchestratorViewModel(core)
         val viewModel = ChatViewModel(core)  // primary VM under test
-        core.updateState {
-            it.copy(
-                currentSessionId = "session-1",
-                sessions = listOf(cn.vectory.ocdroid.data.model.Session(id = "session-1", directory = "/tmp")),
-                inputText = "draft1"
-            )
+        core.writeChat { it.copy(currentSessionId = "session-1") }
+        core.writeSessionList {
+            it.copy(sessions = listOf(cn.vectory.ocdroid.data.model.Session(id = "session-1", directory = "/tmp")))
         }
+        core.writeComposer { it.copy(inputText = "draft1") }
         chatVM.togglePartExpand("msg-1|part-1", false)
         chatVM.togglePartExpand("msg-2|part-2", false)
         assertEquals(2, chatVM.expandedParts.value.size)
@@ -677,7 +670,7 @@ class ChatViewModelTest : MainViewModelTestBase() {
         val composerVM = cn.vectory.ocdroid.ui.ComposerViewModel(core)
         val orchestratorVM = cn.vectory.ocdroid.ui.OrchestratorViewModel(core)
         val viewModel = ChatViewModel(core)  // primary VM under test
-        core.updateState { it.copy(currentSessionId = "session-1") }
+        core.writeChat { it.copy(currentSessionId = "session-1") }
         // Explicit per-session override — must win over the history-inferred "build".
         every { settingsManager.getAgentForSession("session-1") } returns "plan"
 
@@ -709,7 +702,8 @@ class ChatViewModelTest : MainViewModelTestBase() {
         val core = createCore()
         val chatVM = cn.vectory.ocdroid.ui.ChatViewModel(core)
         val orchestratorVM = cn.vectory.ocdroid.ui.OrchestratorViewModel(core)
-        core.updateState { it.copy(currentSessionId = "session-2", selectedAgentName = "plan") }
+        core.writeChat { it.copy(currentSessionId = "session-2") }
+        core.writeSettings { it.copy(selectedAgentName = "plan") }
 
         chatVM.loadMessages("session-2")
         advanceUntilIdle()
@@ -739,9 +733,7 @@ class ChatViewModelTest : MainViewModelTestBase() {
         val composerVM = cn.vectory.ocdroid.ui.ComposerViewModel(core)
         val orchestratorVM = cn.vectory.ocdroid.ui.OrchestratorViewModel(core)
         val viewModel = ChatViewModel(core)  // primary VM under test
-        core.updateState {
-            it.copy(currentSessionId = "session-1", messages = mixed)
-        }
+        core.writeChat { it.copy(currentSessionId = "session-1", messages = mixed) }
 
         // chatState.messages is what the UI renders and is sourced from
         // AppState.visibleMessages (the filtered view), NOT the raw messages field.
@@ -780,9 +772,8 @@ class ChatViewModelTest : MainViewModelTestBase() {
         val composerVM = cn.vectory.ocdroid.ui.ComposerViewModel(core)
         val orchestratorVM = cn.vectory.ocdroid.ui.OrchestratorViewModel(core)
         val viewModel = ChatViewModel(core)  // primary VM under test
-        core.updateState {
-            it.copy(currentSessionId = "session-1", sessions = listOf(session), messages = mixed)
-        }
+        core.writeChat { it.copy(currentSessionId = "session-1", messages = mixed) }
+        core.writeSessionList { it.copy(sessions = listOf(session)) }
 
         val visible = visibleMessages(chatVM.chatFlow.value.messages, currentSession(sessionVM.sessionListFlow.value.sessions, chatVM.chatFlow.value.currentSessionId))
         // Revert cut keeps m1, m2, m3 (id < "m4"); role filter then drops m2 (system).
@@ -806,13 +797,15 @@ class ChatViewModelTest : MainViewModelTestBase() {
         val composerVM = cn.vectory.ocdroid.ui.ComposerViewModel(core)
         val orchestratorVM = cn.vectory.ocdroid.ui.OrchestratorViewModel(core)
         val viewModel = ChatViewModel(core)  // primary VM under test
-        core.updateState {
+        core.writeChat {
             // No revert on the session → revert filter is a no-op.
             it.copy(
                 currentSessionId = "session-1",
-                sessions = listOf(Session(id = "session-1", directory = "/tmp")),
                 messages = mixed
             )
+        }
+        core.writeSessionList {
+            it.copy(sessions = listOf(Session(id = "session-1", directory = "/tmp")))
         }
 
         val visible = visibleMessages(chatVM.chatFlow.value.messages, currentSession(sessionVM.sessionListFlow.value.sessions, chatVM.chatFlow.value.currentSessionId))
@@ -838,7 +831,7 @@ class ChatViewModelTest : MainViewModelTestBase() {
         val viewModel = ChatViewModel(core)  // primary VM under test
         val seededTexts = mapOf("part-1" to "streaming-latest")
         val seededReasoning = Part(id = "part-1", messageId = "a2", sessionId = "session-1", type = "reasoning")
-        core.updateState {
+        core.writeChat {
             it.copy(
                 currentSessionId = "session-1",
                 streamingPartTexts = seededTexts,
@@ -872,13 +865,15 @@ class ChatViewModelTest : MainViewModelTestBase() {
         val viewModel = ChatViewModel(core)  // primary VM under test
         val seededTexts = mapOf("part-1" to "streaming-latest")
         val seededReasoning = Part(id = "part-1", messageId = "a2", sessionId = "session-1", type = "reasoning")
-        core.updateState {
+        core.writeChat {
             it.copy(
                 currentSessionId = "session-1",
                 streamingPartTexts = seededTexts,
-                streamingReasoningPart = seededReasoning,
-                sessionStatuses = mapOf("session-1" to SessionStatus(type = "busy"))
+                streamingReasoningPart = seededReasoning
             )
+        }
+        core.writeSessionList {
+            it.copy(sessionStatuses = mapOf("session-1" to SessionStatus(type = "busy")))
         }
 
         chatVM.loadMessages("session-1", resetLimit = true)
@@ -924,7 +919,7 @@ class ChatViewModelTest : MainViewModelTestBase() {
         val composerVM = cn.vectory.ocdroid.ui.ComposerViewModel(core)
         val orchestratorVM = cn.vectory.ocdroid.ui.OrchestratorViewModel(core)
         val viewModel = ChatViewModel(core)  // primary VM under test
-        core.updateState { it.copy(currentSessionId = "session-1") }
+        core.writeChat { it.copy(currentSessionId = "session-1") }
 
         chatVM.abortSession()
         advanceUntilIdle()
@@ -950,7 +945,7 @@ class ChatViewModelTest : MainViewModelTestBase() {
         val composerVM = cn.vectory.ocdroid.ui.ComposerViewModel(core)
         val orchestratorVM = cn.vectory.ocdroid.ui.OrchestratorViewModel(core)
         val viewModel = ChatViewModel(core)  // primary VM under test
-        core.updateState {
+        core.writeChat {
             it.copy(
                 currentSessionId = "session-1",
                 // Stale partial overlay from a just-finished stream:
@@ -998,11 +993,10 @@ class ChatViewModelTest : MainViewModelTestBase() {
     @Test
     fun `sendMessage draft mode creates session only once on rapid double tap`() = runTest {
         val created = cn.vectory.ocdroid.data.model.Session(id = "s1", directory = "/home/user/proj")
-        coEvery { repository.createSession(title = null) } returns Result.success(created)
+        coEvery { repository.createSession(title = null, directory = any()) } returns Result.success(created)
         coEvery { repository.sendMessage(any(), any(), any(), any(), any()) } returns Result.success(Unit)
         coEvery { repository.getSessions(any()) } returns Result.success(listOf(created))
         coEvery { repository.getSession(any()) } returns Result.success(created)
-        every { repository.setCurrentDirectory(any()) } just runs
 
         val core = createCore()
         val chatVM = cn.vectory.ocdroid.ui.ChatViewModel(core)
@@ -1023,13 +1017,12 @@ class ChatViewModelTest : MainViewModelTestBase() {
         chatVM.sendMessage()
         advanceUntilIdle()
 
-        coVerify(exactly = 1) { repository.createSession(title = null) }
+        coVerify(exactly = 1) { repository.createSession(title = null, directory = any()) }
     }
 
     @Test
     fun `sendMessage draft mode restores draftWorkdir when createSession fails so user can retry`() = runTest {
-        coEvery { repository.createSession(title = null) } returns Result.failure(IllegalStateException("network error"))
-        every { repository.setCurrentDirectory(any()) } just runs
+        coEvery { repository.createSession(title = null, directory = any()) } returns Result.failure(IllegalStateException("network error"))
 
         val core = createCore()
         val chatVM = cn.vectory.ocdroid.ui.ChatViewModel(core)
@@ -1051,8 +1044,8 @@ class ChatViewModelTest : MainViewModelTestBase() {
         assertNull(chatVM.chatFlow.value.currentSessionId)
         // input text preserved for retry
         assertEquals("hello", composerVM.composerFlow.value.inputText)
-        assertNotNull(core.state.value.error)
-        assertTrue(core.state.value.error!!.contains("network error"))
+        assertNotNull(core.recentTestErrors.lastOrNull())
+        assertTrue(core.recentTestErrors.lastOrNull()!!.contains("network error"))
     }
 
     @Test
@@ -1081,7 +1074,7 @@ class ChatViewModelTest : MainViewModelTestBase() {
         val composerVM = cn.vectory.ocdroid.ui.ComposerViewModel(core)
         val orchestratorVM = cn.vectory.ocdroid.ui.OrchestratorViewModel(core)
         val viewModel = ChatViewModel(core)  // primary VM under test
-        core.updateState { it.copy(sessions = listOf(sessionA, sessionB)) }
+        core.writeSessionList { it.copy(sessions = listOf(sessionA, sessionB)) }
 
         // Open A — populates the cache with [m_a1, m_a2].
         sessionVM.selectSession("session-A")
@@ -1160,7 +1153,7 @@ class ChatViewModelTest : MainViewModelTestBase() {
         val composerVM = cn.vectory.ocdroid.ui.ComposerViewModel(core)
         val orchestratorVM = cn.vectory.ocdroid.ui.OrchestratorViewModel(core)
         val viewModel = ChatViewModel(core)  // primary VM under test
-        core.updateState { it.copy(sessions = listOf(sessionA, sessionB)) }
+        core.writeSessionList { it.copy(sessions = listOf(sessionA, sessionB)) }
 
         sessionVM.selectSession("session-A")
         advanceUntilIdle()
@@ -1212,7 +1205,7 @@ class ChatViewModelTest : MainViewModelTestBase() {
         val orchestratorVM = cn.vectory.ocdroid.ui.OrchestratorViewModel(core)
         val viewModel = ChatViewModel(core)  // primary VM under test
         // Pre-populate sessions so selectSession has something to find.
-        core.updateState {
+        core.writeSessionList {
             it.copy(sessions = (1..13).map { i ->
                 Session(id = "session-$i", directory = "/tmp/$i")
             })
@@ -1230,7 +1223,7 @@ class ChatViewModelTest : MainViewModelTestBase() {
 
         // Open sessions 1..13 in order. Each loadMessages seeds the cache.
         for (i in 1..13) {
-            core.updateState { it.copy(currentSessionId = "session-$i") }
+            core.writeChat { it.copy(currentSessionId = "session-$i") }
             chatVM.loadMessages("session-$i")
             advanceUntilIdle()
         }
@@ -1264,7 +1257,7 @@ class ChatViewModelTest : MainViewModelTestBase() {
         val composerVM = cn.vectory.ocdroid.ui.ComposerViewModel(core)
         val orchestratorVM = cn.vectory.ocdroid.ui.OrchestratorViewModel(core)
         val viewModel = ChatViewModel(core)  // primary VM under test
-        core.updateState {
+        core.writeSessionList {
             it.copy(sessions = (1..13).map { i -> Session(id = "session-$i", directory = "/tmp/$i") })
         }
         for (i in 1..13) {
@@ -1274,7 +1267,7 @@ class ChatViewModelTest : MainViewModelTestBase() {
 
         // Load sessions 1..12 — fills the cache exactly to capacity.
         for (i in 1..12) {
-            core.updateState { it.copy(currentSessionId = "session-$i") }
+            core.writeChat { it.copy(currentSessionId = "session-$i") }
             chatVM.loadMessages("session-$i")
             advanceUntilIdle()
         }
@@ -1282,13 +1275,13 @@ class ChatViewModelTest : MainViewModelTestBase() {
         assertNotNull(core.peekSessionWindow("session-1"))
 
         // Re-visit session-1 to promote it to MRU.
-        core.updateState { it.copy(currentSessionId = "session-1") }
+        core.writeChat { it.copy(currentSessionId = "session-1") }
         chatVM.loadMessages("session-1")
         advanceUntilIdle()
 
         // Load session-13 — overflows; evicts the new LRU (session-2), NOT
         // session-1 (which is now MRU after the re-visit).
-        core.updateState { it.copy(currentSessionId = "session-13") }
+        core.writeChat { it.copy(currentSessionId = "session-13") }
         chatVM.loadMessages("session-13")
         advanceUntilIdle()
 
@@ -1334,7 +1327,7 @@ class ChatViewModelTest : MainViewModelTestBase() {
         val composerVM = cn.vectory.ocdroid.ui.ComposerViewModel(core)
         val orchestratorVM = cn.vectory.ocdroid.ui.OrchestratorViewModel(core)
         val viewModel = ChatViewModel(core)  // primary VM under test
-        core.updateState { it.copy(currentSessionId = "session-A") }
+        core.writeChat { it.copy(currentSessionId = "session-A") }
 
         // Kick off a load; do NOT advance time so isLoadingMessages stays true.
         chatVM.loadMessages("session-A")
@@ -1375,7 +1368,7 @@ class ChatViewModelTest : MainViewModelTestBase() {
         val composerVM = cn.vectory.ocdroid.ui.ComposerViewModel(core)
         val orchestratorVM = cn.vectory.ocdroid.ui.OrchestratorViewModel(core)
         val viewModel = ChatViewModel(core)  // primary VM under test
-        core.updateState {
+        core.writeChat {
             it.copy(
                 currentSessionId = "session-A",
                 messages = listOf(older),
@@ -1398,10 +1391,9 @@ class ChatViewModelTest : MainViewModelTestBase() {
         // Gap wiped — a cold-start snapshot has no断层 reference.
         assertNull(chatVM.chatFlow.value.gapInfo)
         // §3 (glm-1 🔴 regression guard): refreshNonce MUST survive the
-        // performGlobalColdStartRefresh → updateState chain. Before the
-        // syncSlicesFromAppState .copy() fix, the wholesale ChatState rebuild
-        // reset refreshNonce to 0, so ChatScreen's clear-on-refresh signal
-        // never fired. Asserting > 0 here locks the fix in.
+        // performGlobalColdStartRefresh → writeChat chain. Before the
+        // wholesale ChatState rebuild fix, refreshNonce reset to 0, so
+        // ChatScreen's clear-on-refresh signal never fired. Asserting > 0 here locks the fix in.
         assertTrue(
             "refreshNonce incremented by performGlobalColdStartRefresh (got ${chatVM.chatFlow.value.refreshNonce})",
             chatVM.chatFlow.value.refreshNonce > 0L
@@ -1431,13 +1423,16 @@ class ChatViewModelTest : MainViewModelTestBase() {
         val composerVM = cn.vectory.ocdroid.ui.ComposerViewModel(core)
         val orchestratorVM = cn.vectory.ocdroid.ui.OrchestratorViewModel(core)
         val viewModel = ChatViewModel(core)  // primary VM under test
-        core.updateState { it.copy(currentSessionId = "session-A") }
+        core.writeChat { it.copy(currentSessionId = "session-A") }
 
         chatVM.refreshCurrentSession()
         advanceUntilIdle()
 
-        // Both health AND messages succeeded → "已刷新" toast posted.
-        assertEquals("已刷新", core.state.value.successMessage)
+        // Both health AND messages succeeded → "Refreshed" toast posted.
+        // §R18 Phase 2-G: production emits UiEvent.Success(R.string.success_refreshed);
+        // the test-only resolver (TestUiEventCollector.testStringFor) renders the
+        // default-locale English text "Refreshed".
+        assertEquals("Refreshed", core.recentTestSuccesses.lastOrNull())
         // Badge recovered (the §4-A motivation).
         assertTrue("badge recovered to connected", connectionVM.connectionFlow.value.isConnected)
     }
@@ -1461,7 +1456,7 @@ class ChatViewModelTest : MainViewModelTestBase() {
         val composerVM = cn.vectory.ocdroid.ui.ComposerViewModel(core)
         val orchestratorVM = cn.vectory.ocdroid.ui.OrchestratorViewModel(core)
         val viewModel = ChatViewModel(core)  // primary VM under test
-        core.updateState { it.copy(currentSessionId = "session-1") }
+        core.writeChat { it.copy(currentSessionId = "session-1") }
 
         handleSse(core,
             SSEEvent(
@@ -1500,7 +1495,7 @@ class ChatViewModelTest : MainViewModelTestBase() {
         val composerVM2 = cn.vectory.ocdroid.ui.ComposerViewModel(core2)
         val orchestratorVM2 = cn.vectory.ocdroid.ui.OrchestratorViewModel(core2)
         val viewModel2 = ChatViewModel(core2)
-        core2.updateState { it.copy(currentSessionId = "session-1") }
+        core2.writeChat { it.copy(currentSessionId = "session-1") }
 
         handleSse(core2,
             SSEEvent(
@@ -1544,7 +1539,7 @@ class ChatViewModelTest : MainViewModelTestBase() {
         val composerVM = cn.vectory.ocdroid.ui.ComposerViewModel(core)
         val orchestratorVM = cn.vectory.ocdroid.ui.OrchestratorViewModel(core)
         val viewModel = ChatViewModel(core)  // primary VM under test
-        core.updateState {
+        core.writeChat {
             it.copy(
                 currentSessionId = "session-1",
                 messages = listOf(existing)

@@ -16,6 +16,7 @@ import cn.vectory.ocdroid.R
 import cn.vectory.ocdroid.data.model.PermissionRequest
 import cn.vectory.ocdroid.data.model.QuestionRequest
 import cn.vectory.ocdroid.data.repository.OpenCodeRepository
+import cn.vectory.ocdroid.util.SettingsManager
 import cn.vectory.ocdroid.util.runSuspendCatching
 import dagger.Module
 import dagger.Provides
@@ -81,7 +82,11 @@ object ApplicationScopeModule {
 class AppLifecycleMonitor @Inject constructor(
     private val application: Application,
     @ApplicationScope private val appScope: CoroutineScope,
-    private val repository: OpenCodeRepository
+    private val repository: OpenCodeRepository,
+    // §R18 Phase 2-E step 1: needed to pass the explicit directory header to
+    // getPendingQuestions for the background poll (was injected from the
+    // global currentDirectory before; that fallback is being phased out).
+    private val settingsManager: SettingsManager
 ) {
     private val _isInForeground = MutableStateFlow(true)
     val isInForeground: StateFlow<Boolean> = _isInForeground.asStateFlow()
@@ -193,7 +198,11 @@ class AppLifecycleMonitor @Inject constructor(
             .onSuccess { permissions -> permissions.forEach { handlePendingPermission(it) } }
             .onFailure { Log.w(TAG, "Background poll getPendingPermissions failed", it) }
         // Questions
-        runSuspendCatching { repository.getPendingQuestions().getOrDefault(emptyList()) }
+        // §R18 Phase 2-E step 1: explicit directory header (was injected from
+        // the global currentDirectory before).
+        runSuspendCatching {
+            repository.getPendingQuestions(settingsManager.currentWorkdir).getOrDefault(emptyList())
+        }
             .onSuccess { questions -> questions.forEach { handlePendingQuestion(it) } }
             .onFailure { Log.w(TAG, "Background poll getPendingQuestions failed", it) }
     }

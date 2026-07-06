@@ -3,9 +3,8 @@ package cn.vectory.ocdroid.ui.controller
 import cn.vectory.ocdroid.data.model.ComposerImageAttachment
 import cn.vectory.ocdroid.ui.ChatState
 import cn.vectory.ocdroid.ui.ComposerState
+import cn.vectory.ocdroid.ui.SharedStateStore
 import cn.vectory.ocdroid.util.SettingsManager
-import kotlinx.coroutines.flow.MutableStateFlow
-import kotlinx.coroutines.flow.update
 
 /**
  * R-16 M2 → R-17 batch3b: owns the composer-domain state mutation logic.
@@ -37,23 +36,23 @@ import kotlinx.coroutines.flow.update
  * R-17 §4 strategy A, §9.2 — no dispatcher batch reliance).
  */
 internal class ComposerController(
-    private val composerFlow: MutableStateFlow<ComposerState>,
-    private val chatFlow: MutableStateFlow<ChatState>,
-    private val expandedParts: MutableStateFlow<Map<String, Boolean>>,
+    private val store: SharedStateStore,
     private val settingsManager: SettingsManager,
 ) {
     /**
      * §R-17 M3→M5→batch2: writes the composer slice only (slice is the
      * authoritative read path). The deprecated AppState mirror write was
      * removed in R-17 batch2 sub-step d (Fixer C).
+     *
+     * §R18 Phase 4 (P0-9): funnels through [SharedStateStore.mutateComposer].
      */
     private fun writeComposer(transform: (ComposerState) -> ComposerState) {
-        composerFlow.update(transform)
+        store.mutateComposer(transform)
     }
 
     fun setInputText(text: String) {
         writeComposer { it.copy(inputText = text) }
-        chatFlow.value.currentSessionId?.let { settingsManager.setDraftText(it, text) }
+        store.chatFlow.value.currentSessionId?.let { settingsManager.setDraftText(it, text) }
     }
 
     fun addImageAttachments(attachments: List<ComposerImageAttachment>) {
@@ -72,7 +71,7 @@ internal class ComposerController(
      * resume/cold start. No-op when there is no active draft.
      */
     fun clearDraftIfActive() {
-        if (composerFlow.value.draftWorkdir == null || chatFlow.value.currentSessionId != null) return
+        if (store.composerFlow.value.draftWorkdir == null || store.chatFlow.value.currentSessionId != null) return
         settingsManager.currentWorkdir = null
         writeComposer {
             it.copy(draftWorkdir = null, inputText = "", imageAttachments = emptyList())
@@ -88,11 +87,15 @@ internal class ComposerController(
      * the displayed value makes the toggle always invert what the user sees.
      */
     fun togglePartExpand(key: String, currentValue: Boolean) {
-        expandedParts.value = expandedParts.value + (key to !currentValue)
+        // §R18 Phase 3 Wave 1 (C-2): .value = → .update { } (CAS, atomic).
+        // §R18 Phase 4 (P0-9): write via SharedStateStore.mutateExpandedParts.
+        store.mutateExpandedParts { it + (key to !currentValue) }
     }
 
     /** Reset the collapsible-card expansion state (e.g. on session switch). */
     fun clearExpandedParts() {
-        expandedParts.value = emptyMap()
+        // §R18 Phase 3 Wave 1 (C-2): .value = → .update { } (CAS, atomic).
+        // §R18 Phase 4 (P0-9): write via SharedStateStore.mutateExpandedParts.
+        store.mutateExpandedParts { emptyMap() }
     }
 }

@@ -39,6 +39,7 @@ import cn.vectory.ocdroid.ui.ConnectionViewModel
 import cn.vectory.ocdroid.ui.HostViewModel
 import cn.vectory.ocdroid.ui.OrchestratorViewModel
 import cn.vectory.ocdroid.ui.SessionViewModel
+import cn.vectory.ocdroid.ui.SettingsViewModel
 import cn.vectory.ocdroid.ui.chat.ChatScreen
 import cn.vectory.ocdroid.ui.chat.LocalWindowSizeClass
 import cn.vectory.ocdroid.ui.files.FilesScreen
@@ -365,12 +366,12 @@ private fun PhoneLayout(viewModel: OrchestratorViewModel, initialPage: Int = 0) 
                         val hostViewModel: HostViewModel = hiltViewModel()
                         val composerVM: ComposerViewModel = hiltViewModel()
                         val connectionVM: ConnectionViewModel = hiltViewModel()
-                        val orchestratorVM: OrchestratorViewModel = hiltViewModel()
+                        val settingsVM: SettingsViewModel = hiltViewModel()
                         SettingsScreen(
                             viewModel = hostViewModel,
                             composerVM = composerVM,
                             connectionVM = connectionVM,
-                            orchestratorVM = orchestratorVM,
+                            settingsVM = settingsVM,
                             onBack = { switchToPage(screens.indexOf(Screen.Chat)) }
                         )
                     }

@@ -12,6 +12,7 @@ import cn.vectory.ocdroid.data.model.QuestionRequest
 import cn.vectory.ocdroid.data.model.Session
 import cn.vectory.ocdroid.data.model.SessionStatus
 import cn.vectory.ocdroid.data.model.TodoItem
+import cn.vectory.ocdroid.ui.ConnectionPhase
 import cn.vectory.ocdroid.ui.GapInfo
 import cn.vectory.ocdroid.ui.MainViewModelTimings
 import cn.vectory.ocdroid.ui.TunnelActivationState
@@ -34,7 +35,7 @@ data class SeedFixture(
     val isConnected: Boolean = false,
     val isConnecting: Boolean = false,
     val serverVersion: String? = null,
-    val connectionPhase: String? = null,
+    val connectionPhase: ConnectionPhase = ConnectionPhase.Idle,
     val tunnelActivationState: TunnelActivationState = TunnelActivationState.Idle,
     // traffic-domain
     val trafficSent: Long = 0L,

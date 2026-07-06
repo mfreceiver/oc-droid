@@ -1,5 +1,6 @@
 package cn.vectory.ocdroid
 
+import android.content.Context
 import android.util.Log
 import cn.vectory.ocdroid.data.model.HostProfile
 import cn.vectory.ocdroid.data.model.ProvidersResponse
@@ -33,9 +34,11 @@ import org.junit.Rule
  * domain tests need (repository / settings / host-profile / traffic /
  * AppLifecycle mocks) and constructs an [AppCore] (the shared engine).
  *
- * Slice writes use the test-only [AppState] shim ([updateState] /
- * [AppCore.state]) defined alongside this class — that's why historical
- * `updateState { copy(field = ...) }` calls keep working post-split.
+ * §R18 Phase 4 (P2-3): slice writes go directly through the AppCore
+ * `writeXxx { it.copy(field = ...) }` helpers (the former test-only
+ * `AppState` shim — `updateState` / `AppCore.state` — was deleted in this
+ * phase). UiEvent Error/Success assertions read the ring buffers populated
+ * by [createCore] via [AppCore.recentTestErrors] / [AppCore.recentTestSuccesses].
  *
  * Each domain test file extends this class, adds the domain VM it needs
  * (e.g. `val chatVM = ChatViewModel(core)`), and writes tests that call VM
@@ -96,7 +99,7 @@ abstract class MainViewModelTestBase {
         every { settingsManager.getModelForSession(any()) } returns null
         every { settingsManager.setModelForSession(any(), any(), any()) } just runs
 
-        every { repository.connectSSE() } returns emptyFlow()
+        every { repository.connectSSE(any()) } returns emptyFlow()
         coEvery { repository.getSessions(any()) } returns Result.success(emptyList())
         coEvery { repository.getSessionsForDirectory(any(), any()) } returns Result.success(emptyList())
         coEvery { repository.getSessionStatus() } returns Result.success(emptyMap())
@@ -106,7 +109,7 @@ abstract class MainViewModelTestBase {
         coEvery { repository.getAgents() } returns Result.success(emptyList())
         coEvery { repository.getProviders() } returns Result.success(ProvidersResponse())
         coEvery { repository.getCommands() } returns Result.success(emptyList())
-        coEvery { repository.getPendingQuestions() } returns Result.success(emptyList())
+        coEvery { repository.getPendingQuestions(any()) } returns Result.success(emptyList())
     }
 
     @After
@@ -116,6 +119,12 @@ abstract class MainViewModelTestBase {
 
     /** Builds a fresh [AppCore] for a single test. */
     protected fun createCore(): AppCore {
+        // §R18 Phase 2-G: AppCore now takes a `@ApplicationContext Context` to
+        // resolve UiEvent.Error's @StringRes resId for the AppLifecycleMonitor
+        // notification path. The monitor itself is mocked (relaxed) so the
+        // resolved text is unused; a relaxed Context mock satisfies the
+        // constructor without dragging Robolectric into every test.
+        val appContext = mockk<Context>(relaxed = true)
         val core = AppCore(
             SharedStateStore(),
             repository,
@@ -125,12 +134,15 @@ abstract class MainViewModelTestBase {
             appLifecycleMonitor,
             cn.vectory.ocdroid.data.repository.ServerCompatProfile(),
             SharedEffectBus(),
+            appContext,
         )
-        // §R-17 batch3e: side-channel Error/Success UiEvents into a per-core
-        // ring buffer so the test-only [aggregateState] can surface them as
-        // `state.value.error` / `state.value.successMessage` (matching the
-        // historical AppState API). The collector runs on the test's Main
-        // dispatcher (unconfined so emissions reach the buffer synchronously).
+        // §R-17 batch3e → §R18 Phase 4: side-channel Error/Success UiEvents
+        // into a per-core ring buffer so tests can read the most-recent event
+        // via [AppCore.recentTestErrors] / [AppCore.recentTestSuccesses]
+        // (former `state.value.error` / `state.value.successMessage` API
+        // was removed with the TestAppStateShim). The collector runs on the
+        // test's Main dispatcher (unconfined so emissions reach the buffer
+        // synchronously).
         core.installTestUiEventCollector(
             kotlinx.coroutines.CoroutineScope(mainDispatcherRule.dispatcher)
         )

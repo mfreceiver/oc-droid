@@ -29,6 +29,8 @@ case "$MODE" in
   --full)
     echo "==> lintDebug"
     $GRADLE lintDebug
+    echo "==> koverVerify（覆盖率门控）"
+    $GRADLE koverVerify
     echo "==> koverHtmlReport → app/build/reports/kover/html/index.html"
     $GRADLE koverHtmlReport
     ;;
