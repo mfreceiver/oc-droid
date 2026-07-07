@@ -79,8 +79,16 @@ object CacheModule {
 
     @Provides
     @Singleton
-    fun provideCacheRepository(dao: CacheDao, db: CacheDatabase): CacheRepository =
-        CacheRepositoryImpl(dao, db)
+    fun provideGapMarkerDao(db: CacheDatabase): cn.vectory.ocdroid.data.cache.GapMarkerDao =
+        db.gapMarkerDao()
+
+    @Provides
+    @Singleton
+    fun provideCacheRepository(
+        dao: CacheDao,
+        gapDao: cn.vectory.ocdroid.data.cache.GapMarkerDao,
+        db: CacheDatabase
+    ): CacheRepository = CacheRepositoryImpl(dao, gapDao, db)
 
     /**
      * R-20 Phase 1 (dser I-1): true iff the persistent encrypted DB is

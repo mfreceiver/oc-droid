@@ -4,8 +4,13 @@ import androidx.room.withTransaction
 import cn.vectory.ocdroid.data.model.Message
 import cn.vectory.ocdroid.data.model.Part
 import cn.vectory.ocdroid.ui.CachedSessionWindow
+import cn.vectory.ocdroid.ui.chat.Entry
+import cn.vectory.ocdroid.ui.chat.GapFillState
+import cn.vectory.ocdroid.ui.chat.GapMarker
+import cn.vectory.ocdroid.ui.chat.withGaps
 import kotlinx.serialization.builtins.ListSerializer
 import kotlinx.serialization.encodeToString
+import java.util.UUID
 import javax.inject.Inject
 import javax.inject.Singleton
 
@@ -121,16 +126,66 @@ interface CacheRepository {
     // Declared for signature stability; bodies land in Phase 2.
 
     /**
-     * Phase 2: gap-aware non-contiguous message layout. Returns null in
-     * Phase 1 (safe placeholder — dser review: the prior `TODO()` would
-     * throw NotImplementedError at runtime if any early-wired caller reached
-     * it; plan §2 stipulates "stubbed with safe defaults so callers wired
-     * early do not crash").
+     * Phase 2: gap-aware non-contiguous message layout. Assembles the cached
+     * messages for `(serverGroupFp, sessionId)` interleaved with any open
+     * [GapMarker]s (sorted by upperBoundary message time ascending). Returns
+     * null when no cached session row exists (cold start).
      */
     suspend fun loadSessionLayout(
         serverGroupFp: String,
         sessionId: String
-    ): CachedSessionLayout? = null
+    ): CachedSessionLayout?
+
+    // ─────────── Phase 2: per-gap cursor + state ──────────────────────────
+    // Plan §2 signatures. openGap returns the synthetic gapId; the other
+    // methods are keyed by it. appendOlderSlice + resolveGap are atomic
+    // (single Room transaction) per the GapMarker invariant (plan §3).
+
+    /**
+     * Open a new gap marker. Persists a row with the given boundaries + cursor
+     * and `state = Idle`. Returns the generated synthetic [GapMarkerEntity.gapId].
+     */
+    suspend fun openGap(
+        serverGroupFp: String,
+        sessionId: String,
+        lowerAnchorMessageId: String,
+        upperBoundaryMessageId: String,
+        initialNextBeforeCursor: String
+    ): String
+
+    /**
+     * Append one backward-fill step for [gapId]. **Single Room transaction**
+     * (plan §3 GapMarker invariant):
+     *  1. insert the older messages (upsert, dedup by compound PK);
+     *  2. if [BackfillAlgorithm.stepCoversAnchor]-equivalent (an older message
+     *     id equals ANY open gap's lowerAnchor in this session) → resolve that
+     *     gap (delete its marker) inside the SAME transaction — this covers
+     *     both the target gap and any cross-gap overlap (one append bridging a
+     *     neighbouring gap's anchor);
+     *  3. else if [returnedCursor] == null → set the gap's state = Exhausted
+     *     (history ended below the gap; UI shows "无法补齐");
+     *  4. else → advance `upperBoundaryMessageId = older.oldest().id` +
+     *     `nextBeforeCursor = returnedCursor` + `state = Idle` so the next
+     *     tap/user-step pages further back.
+     *
+     * @param returnedCursor the `X-Next-Cursor` from the step's REST response
+     *   (null ⇒ history exhausted).
+     */
+    suspend fun appendOlderSlice(
+        gapId: String,
+        older: List<Message>,
+        partsByMessage: Map<String, List<Part>>,
+        returnedCursor: String?
+    )
+
+    /** Set the gap's fill state (Idle/Filling/Exhausted/Error). */
+    suspend fun setGapState(gapId: String, state: GapFillState)
+
+    /** Atomically resolve (delete) the gap marker — the two slices are contiguous. */
+    suspend fun resolveGap(gapId: String)
+
+    /** All open gap markers for `(serverGroupFp, sessionId)`, in upperBoundary-time order. */
+    suspend fun gapsOf(serverGroupFp: String, sessionId: String): List<GapMarker>
 
     // ─────────── Phase 3 stubs (eviction + sweep) ─────────────────────────
     // Declared for signature stability; bodies land in Phase 3. These are
@@ -192,26 +247,35 @@ data class DailySweepReport(
 enum class AliveCompleteness { Complete, Incomplete }
 
 /**
- * R-20 Phase 2 (plan §2): gap-aware non-contiguous message layout. Declared
- * here (not in the ui layer) so [CacheRepository.loadSessionLayout] can
- * reference it without a layering violation. Phase 1 returns null — this
- * type exists only for the interface signature to compile.
+ * R-20 Phase 2 (plan §2): gap-aware non-contiguous message layout — the
+ * [CacheRepository.loadSessionLayout] return type. [entries] is the
+ * [Entry]-list (Message + GapMarker) ordered oldest-first with markers at
+ * their seams; [oldestCursor]/[newestMessageId] mirror CachedSessionWindow
+ * for the loadMessages merge path.
  */
 data class CachedSessionLayout(
     val serverGroupFp: String,
     val sessionId: String,
-    val entries: List<GapAwareMessageListEntry>,
+    val entries: List<Entry>,
     val oldestCursor: String?,
     val newestMessageId: String?
-)
-
-/**
- * R-20 Phase 2 (plan §2): placeholder for [GapAwareMessageList.Entry] (Phase 2
- * defines the real sealed interface in the ui layer). Phase 1 has no consumer;
- * this typealias lets [CachedSessionLayout] compile as a forward declaration.
- * Phase 2 will replace it with the real Entry type.
- */
-typealias GapAwareMessageListEntry = Any
+) {
+    /**
+     * Phase-1-compatible projection: the messages only (gaps dropped), with a
+     * synthetic [CachedSessionWindow] envelope. Used by paths that pre-date
+     * the gap-aware model (e.g. the in-memory LRU mirror). When there are no
+     * gaps this is equivalent to the Phase-1 window.
+     */
+    fun toCachedSessionWindow(partsByMessage: Map<String, List<Part>>): CachedSessionWindow {
+        val messages = entries.mapNotNull { (it as? Entry.Message)?.message }
+        return CachedSessionWindow(
+            messages = messages,
+            partsByMessage = partsByMessage,
+            olderMessagesCursor = oldestCursor,
+            hasMoreMessages = oldestCursor != null
+        )
+    }
+}
 
 /** Atomic verify-and-load outcome (plan §2 HydrateResult). */
 sealed interface HydrateResult {
@@ -240,6 +304,7 @@ sealed interface FingerprintResult {
 @Singleton
 class CacheRepositoryImpl @Inject constructor(
     private val dao: CacheDao,
+    private val gapDao: GapMarkerDao,
     private val db: CacheDatabase
 ) : CacheRepository {
 
@@ -364,6 +429,7 @@ class CacheRepositoryImpl @Inject constructor(
         db.withTransaction {
             dao.deleteSession(serverGroupFp, sessionId)
             dao.deleteSessionMessages(serverGroupFp, sessionId)
+            gapDao.deleteSessionGaps(serverGroupFp, sessionId)
         }
     }
 
@@ -371,6 +437,7 @@ class CacheRepositoryImpl @Inject constructor(
         db.withTransaction {
             dao.deleteGroupSessions(serverGroupFp)
             dao.deleteGroupMessages(serverGroupFp)
+            gapDao.deleteGroupGaps(serverGroupFp)
         }
     }
 
@@ -378,6 +445,7 @@ class CacheRepositoryImpl @Inject constructor(
         db.withTransaction {
             dao.clearAllSessions()
             dao.clearAllMessages()
+            gapDao.clearAllGaps()
         }
     }
 
@@ -401,17 +469,154 @@ class CacheRepositoryImpl @Inject constructor(
         }
     }
 
-    // ─────────── Phase 2 stub (impl) ───────────────────────────────────────
-    // loadSessionLayout is defaulted in the interface (returns null). Override
-    // added here so the impl is explicit (Phase 2 fills it).
+    // ─────────── Phase 2 (gap-aware layout + per-gap ops) ─────────────────
 
     override suspend fun loadSessionLayout(
         serverGroupFp: String,
         sessionId: String
-    ): CachedSessionLayout? = null
+    ): CachedSessionLayout? = db.withTransaction {
+        // Read messages + gaps in one transaction so the assembled layout is
+        // consistent (a concurrent appendOlderSlice cannot land between the two
+        // reads and produce a marker whose boundary message is not yet present).
+        dao.session(serverGroupFp, sessionId) ?: return@withTransaction null
+        val msgs = dao.messages(serverGroupFp, sessionId)
+        val gaps = gapDao.gaps(serverGroupFp, sessionId)
+        if (msgs.isEmpty() && gaps.isEmpty()) return@withTransaction null
+        val messages = msgs.map { it.toMessage() }
+        val gapMarkers = gaps.map { it.toDomain() }
+        val entries = messages.withGaps(gapMarkers)
+        CachedSessionLayout(
+            serverGroupFp = serverGroupFp,
+            sessionId = sessionId,
+            entries = entries,
+            // oldestCursor: derived from the oldest cached message id + time
+            // (the server cursor is base64url({id,time_ms}) — but Phase 1
+            // never persisted a server cursor for the cache window, so we
+            // surface null here and let loadMessages re-establish it via the
+            // resetLimit=false merge. This matches the Phase-1 toWindow path.)
+            oldestCursor = null,
+            newestMessageId = messages.maxByOrNull { it.time?.created ?: -1L }?.id
+        )
+    }
+
+    override suspend fun openGap(
+        serverGroupFp: String,
+        sessionId: String,
+        lowerAnchorMessageId: String,
+        upperBoundaryMessageId: String,
+        initialNextBeforeCursor: String
+    ): String {
+        val now = System.currentTimeMillis()
+        val gapId = UUID.randomUUID().toString()
+        gapDao.upsertGap(
+            GapMarkerEntity(
+                gapId = gapId,
+                serverGroupFp = serverGroupFp,
+                sessionId = sessionId,
+                lowerAnchorMessageId = lowerAnchorMessageId,
+                upperBoundaryMessageId = upperBoundaryMessageId,
+                nextBeforeCursor = initialNextBeforeCursor.takeIf { it.isNotEmpty() },
+                state = GapFillState.Idle.name,
+                createdAt = now,
+                updatedAt = now
+            )
+        )
+        return gapId
+    }
+
+    override suspend fun appendOlderSlice(
+        gapId: String,
+        older: List<Message>,
+        partsByMessage: Map<String, List<Part>>,
+        returnedCursor: String?
+    ) {
+        if (older.isEmpty() && returnedCursor != null) {
+            // Nothing new but more history remains — just advance the cursor.
+            // (Rare; kept for completeness.)
+            val g = gapDao.gap(gapId) ?: return
+            gapDao.advanceBoundary(
+                gapId = gapId,
+                upperBoundary = g.upperBoundaryMessageId,
+                cursor = returnedCursor,
+                state = GapFillState.Idle.name,
+                now = System.currentTimeMillis()
+            )
+            return
+        }
+        val now = System.currentTimeMillis()
+        val target = gapDao.gap(gapId)
+        if (target == null) {
+            // Gap already resolved (e.g. a concurrent overlap resolve, or a
+            // stale step after the user dismissed it). We cannot upsert the
+            // messages without the (fp, sessionId) compound key, and a resolved
+            // gap means the slices are already contiguous — drop the step.
+            return
+        }
+        db.withTransaction {
+            // ① insert the older slice.
+            if (older.isNotEmpty()) {
+                dao.upsertMessages(
+                    older.map {
+                        it.toEntity(target.serverGroupFp, target.sessionId, partsByMessage[it.id])
+                    }
+                )
+            }
+            // ② cross-gap overlap + anchor resolution: if any older id equals
+            // the lowerAnchor of ANY open gap in this session, that gap is now
+            // bridged → resolve it inside this same transaction. This covers
+            // both the target gap and any neighbouring gap whose anchor this
+            // append happened to reach (plan §3 "跨 gap overlap → 同事务 resolve").
+            val olderIds = older.map { it.id }.toHashSet()
+            val sessionGaps = gapDao.gaps(target.serverGroupFp, target.sessionId)
+            // Resolve the target gap if its anchor was reached ...
+            val targetResolved = target.lowerAnchorMessageId in olderIds
+            if (targetResolved) {
+                gapDao.deleteGap(gapId)
+            }
+            // ... and resolve every sibling gap whose anchor this append covered
+            // (cross-gap overlap — one backward step may bridge a neighbour).
+            for (g in sessionGaps) {
+                if (g.gapId != gapId && g.lowerAnchorMessageId in olderIds) {
+                    gapDao.deleteGap(g.gapId)
+                }
+            }
+            if (targetResolved) return@withTransaction
+            // ③ cursor exhausted below the gap → state = Exhausted.
+            if (returnedCursor == null) {
+                gapDao.setState(gapId, GapFillState.Exhausted.name, now)
+                return@withTransaction
+            }
+            // ④ advance boundary + cursor, state = Idle.
+            val newBoundary = older.minByOrNull { it.time?.created ?: Long.MAX_VALUE }
+                ?.id ?: target.upperBoundaryMessageId
+            gapDao.advanceBoundary(
+                gapId = gapId,
+                upperBoundary = newBoundary,
+                cursor = returnedCursor,
+                state = GapFillState.Idle.name,
+                now = now
+            )
+        }
+    }
+
+    override suspend fun setGapState(gapId: String, state: GapFillState) {
+        gapDao.setState(gapId, state.name, System.currentTimeMillis())
+    }
+
+    override suspend fun resolveGap(gapId: String) {
+        // Atomic per plan §3. Single-statement DELETE is itself atomic in
+        // SQLite; the withTransaction wrapper documents the invariant and
+        // keeps the call site uniform with appendOlderSlice.
+        db.withTransaction {
+            gapDao.deleteGap(gapId)
+        }
+    }
+
+    override suspend fun gapsOf(serverGroupFp: String, sessionId: String): List<GapMarker> =
+        gapDao.gaps(serverGroupFp, sessionId).map { it.toDomain() }
 
     // ─────────── Phase 3 stubs (impl) ──────────────────────────────────────
-    // TODO("Phase 3") — these never run in Phase 1 (no caller). Phase 3 fills
+    // TODO("Phase 3") — these never run in Phase 1/2 (no caller). Phase 3 fills
     // them with the real LRU/age/alive logic. Declared so the interface
     // signature is locked (dser review #8).
 
@@ -478,5 +683,15 @@ class CacheRepositoryImpl @Inject constructor(
         sessionId = sessionId,
         role = role,
         time = Message.TimeInfo(created = time)
+    )
+
+    private fun GapMarkerEntity.toDomain(): GapMarker = GapMarker(
+        gapId = gapId,
+        lowerAnchorMessageId = lowerAnchorMessageId,
+        upperBoundaryMessageId = upperBoundaryMessageId,
+        nextBeforeCursor = nextBeforeCursor,
+        // Forward-compatible state decode: an unknown column value (future
+        // state added without a migration) falls back to Idle.
+        fillState = runCatching { GapFillState.valueOf(state) }.getOrDefault(GapFillState.Idle)
     )
 }

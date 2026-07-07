@@ -313,7 +313,7 @@ internal fun AppCore.performGlobalColdStartRefresh(currentId: String) {
         it.copy(
             streamingPartTexts = emptyMap(),
             streamingReasoningPart = null,
-            gapInfo = null,
+            gapMarkers = emptyList(),
             staleNotice = false,
             messages = emptyList(),
             partsByMessage = emptyMap(),
@@ -325,13 +325,29 @@ internal fun AppCore.performGlobalColdStartRefresh(currentId: String) {
 }
 
 internal fun AppCore.catchUpAfterDisconnectOrForeground(sessionId: String) {
+    // R-20 Phase 2: capture fp once (glm-3 🟡#1 single-read) for the cache hook
+    // + the coordinator's openGap compound key + the G6 current-workdir input.
+    val fp = hostProfileStore.currentProfile().serverGroupFp.ifBlank { hostProfileStore.currentProfile().id }
+    // G6 inputs: SSE coverage baseline + the live SSE workdir (drives shouldProbe).
+    val sseSnap = sessionSyncCoordinator.sseSyncStateSnapshot()
+    val sseWorkdir = store.connectionFlow.value.isConnected.let { connected ->
+        // The SSE feed is attached to the current workdir when connected; null
+        // when disconnected (no live feed → never SSE-covered).
+        if (connected) settingsManager.currentWorkdir else null
+    }
     launchCatchUp(
         scope = appScope,
         repository = repository,
         slices = store.slices,
         sessionId = sessionId,
         settingsManager = settingsManager,
-        onCacheWindow = makeCacheHook(hostProfileStore.currentProfile().serverGroupFp.ifBlank { hostProfileStore.currentProfile().id }),
+        onCacheWindow = makeCacheHook(fp),
+        // R-20 Phase 2: delegate gap open + 50-step fill to the coordinator.
+        gapFillCoordinator = gapFillCoordinator,
+        currentServerGroupFp = { fp },
+        sseCurrentWorkdir = sseWorkdir,
+        sessionsEverColdSnapshotted = sseSnap.sessionsEverColdSnapshotted,
+        onColdSnapshot = { sid -> sessionSyncCoordinator.markSessionColdSnapshotted(sid) },
     )
     // §R18 Phase 3 Wave 3 (P1-9 wire-up): fan-out pending-questions catch-up
     // across EVERY known workdir (in-memory directorySessions keys +

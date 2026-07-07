@@ -254,7 +254,7 @@ class SessionSwitcher(
                 partsByMessage = emptyMap(),
                 streamingPartTexts = emptyMap(),
                 streamingReasoningPart = null,
-                gapInfo = null,
+                gapMarkers = emptyList(),
                 staleNotice = false,
                 // §model-selection (V1-per-prompt): drop the outgoing session's
                 // currentModel so dispatchSendMessage (which reads

@@ -184,6 +184,27 @@ class SessionSyncCoordinator(
      */
     internal fun sseSyncStateSnapshot(): SseSyncState = sseSyncState
 
+    /**
+     * R-20 Phase 2 (G6): mark [sessionId] as having an established cold-snapshot
+     * baseline. Called by [cn.vectory.ocdroid.ui.launchCatchUp]'s onColdSnapshot
+     * callback on every successful catch-up. Future probe gating
+     * ([cn.vectory.ocdroid.ui.chat.BackfillAlgorithm.shouldProbe]) treats a
+     * session in this set + a live SSE feed for its workdir as covered (skip
+     * the REST probe). Idempotent (set-add). Reset to empty by HostReconfigured.
+     *
+     * Confined to the coordinator's main-thread scope (matching sseSyncState's
+     * write discipline); safe because launchCatchUp's onColdSnapshot fires from
+     * a main-immediate coroutine.
+     */
+    internal fun markSessionColdSnapshotted(sessionId: String) {
+        if (sessionId.isBlank()) return
+        if (sessionId !in sseSyncState.sessionsEverColdSnapshotted) {
+            sseSyncState = sseSyncState.copy(
+                sessionsEverColdSnapshotted = sseSyncState.sessionsEverColdSnapshotted + sessionId
+            )
+        }
+    }
+
     init {
         // §P1-10: observe the disconnect / host-reconfigure signals that the
         // SSE collector (ConnectionCoordinator) emits on the effects bus, so

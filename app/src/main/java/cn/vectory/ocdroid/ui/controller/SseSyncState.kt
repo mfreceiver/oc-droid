@@ -67,11 +67,21 @@ package cn.vectory.ocdroid.ui.controller
  *   against a late SSE frame from the PREVIOUS host (its collection job was
  *   cancelled by `cancelSseForReconfigure` but a buffered frame still lands)
  *   erroneously triggering a reload of the NEW host's session.
+ * @param sessionsEverColdSnapshotted R-20 Phase 2 (G6): sessions for which a
+ *   catch-up cold snapshot has established the SSE-coverage baseline. A session
+ *   is SSE-covered (no probe needed) iff the live SSE feed is attached to its
+ *   workdir AND it appears in this set ([cn.vectory.ocdroid.ui.chat.BackfillAlgorithm.shouldProbe]
+ *   is the negation). Populated by [cn.vectory.ocdroid.ui.launchCatchUp]'s
+ *   onColdSnapshot callback (fired on every successful catch-up); reset to
+ *   empty by [SseReconnectTrigger.HostReconfigured] so a host switch cannot
+ *   carry a stale baseline across to an unrelated server (avoiding a false
+ *   "covered" verdict that would skip a needed probe).
  */
 data class SseSyncState(
     val connectedOnce: Boolean = false,
     val lastDisconnectAt: Long? = null,
     val sessionsDirty: Set<String> = emptySet(),
+    val sessionsEverColdSnapshotted: Set<String> = emptySet(),
     val hostGeneration: Long = 0L
 )
 

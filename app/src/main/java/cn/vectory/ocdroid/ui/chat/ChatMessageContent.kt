@@ -46,7 +46,6 @@ import cn.vectory.ocdroid.data.model.Message
 import cn.vectory.ocdroid.data.model.Part
 import cn.vectory.ocdroid.data.model.isEffectivelyRenderableEmpty
 import cn.vectory.ocdroid.data.repository.OpenCodeRepository
-import cn.vectory.ocdroid.ui.GapInfo
 import cn.vectory.ocdroid.ui.ChatViewModel
 import cn.vectory.ocdroid.ui.ComposerViewModel
 import cn.vectory.ocdroid.ui.SessionViewModel
@@ -120,13 +119,17 @@ internal fun ChatMessageList(
         sessionListState.sessionStatuses[id]?.let { it.isBusy || it.isRetry }
     } == true
     val hasMoreMessages: Boolean = chatState.hasMoreMessages
-    val gapInfo: GapInfo? = chatState.gapInfo
+    // R-20 Phase 2: gap markers drive the non-contiguous dividers (replaces the
+    // legacy single ChatState.gapInfo). Rendered via messages.withGaps below.
+    val gapMarkers: List<GapMarker> = chatState.gapMarkers
     val repository: OpenCodeRepository = chatVM.repository
     val workspaceDirectory: String? = currentSession?.directory
     val onLoadMore: () -> Unit = chatVM::loadMoreMessages
     val onOpenSubAgent: (String) -> Unit = sessionVM::openSubAgent
     val onToggleExpand: (String, Boolean) -> Unit = composerVM::togglePartExpand
-    val onCloseGap: () -> Unit = chatVM::closeGap
+    // R-20 Phase 2: per-gap fill trigger (replaces the no-arg onCloseGap). The
+    // tapped marker's gapId is routed back to GapFillCoordinator.fillSingleGap.
+    val onFillGap: (String) -> Unit = chatVM::fillGap
 
     // §stale-question: compute the set of part ids that are stuck "running"
     // question parts WITHOUT a matching live QuestionRequest — these render

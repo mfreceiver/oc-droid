@@ -40,7 +40,7 @@ class CacheRepositoryTest {
         db = Room.inMemoryDatabaseBuilder(ctx, CacheDatabase::class.java)
             .allowMainThreadQueries()
             .build()
-        repo = CacheRepositoryImpl(db.cacheDao(), db)
+        repo = CacheRepositoryImpl(db.cacheDao(), db.gapMarkerDao(), db)
     }
 
     @After

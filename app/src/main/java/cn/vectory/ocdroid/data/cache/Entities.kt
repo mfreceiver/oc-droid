@@ -2,6 +2,7 @@ package cn.vectory.ocdroid.data.cache
 
 import androidx.room.ColumnInfo
 import androidx.room.Entity
+import androidx.room.Index
 
 /**
  * R-20 Phase 0: cached session metadata.
@@ -76,4 +77,61 @@ data class CachedMessageEntity(
     @ColumnInfo(name = "time") val time: Long,
     @ColumnInfo(name = "role") val role: String,
     @ColumnInfo(name = "parts") val parts: String
+)
+
+/**
+ * R-20 Phase 2 (plan §1 / §3): a history gap marker for the non-contiguous
+ * message model (slice + gap marker, ≥1 gap per session).
+ *
+ * The cache stores a session's messages as one or more contiguous SLICES; a
+ * [GapMarkerEntity] records that a slice boundary exists between
+ * [lowerAnchorMessageId] (the newest message of the OLDER slice — the fill
+ * resolution target) and [upperBoundaryMessageId] (the oldest message of the
+ * NEWER slice — the visual seam). The gap is paged backward (server `before`
+ * cursor) from [nextBeforeCursor] until [lowerAnchorMessageId] reappears in a
+ * step → the gap resolves and the row is deleted.
+ *
+ * Primary key is the synthetic [gapId] (UUID generated at openGap time) so a
+ * single session may carry multiple independent gaps, each with its own cursor
+ * + state. The compound index `(server_group_fp, session_id)` scopes queries
+ * to one session under one host group (plan §0 复合键控 — ses_xxxx is a branded
+ * string, not a UUID, so the server-group fp namespaces it).
+ *
+ * [state] stores [cn.vectory.ocdroid.ui.chat.GapFillState].name — the four
+ * states (idle / filling / exhausted / error) drive both the UI divider label
+ * and the coordinator's resume decisions. Stored as TEXT rather than an enum
+ * so a future state addition does not require a migration (forward-compatible
+ * decode: unknown → idle).
+ *
+ * Two timestamps mirror the CachedSession pattern: [createdAt] is the openGap
+ * time; [updatedAt] bumps on every appendOlderSlice / setGapState so stale
+ * long-open gaps can be aged out (Phase 3).
+ *
+ * @param lowerAnchorMessageId the newest message id of the OLDER slice — the
+ *   fill target. `stepCoversAnchor` returns true once a backward step contains
+ *   this id, at which point the gap resolves (the slices are contiguous).
+ * @param upperBoundaryMessageId the oldest message id of the NEWER slice — the
+ *   visual seam where the UI renders the gap divider. Advances toward the
+ *   anchor as each appendOlderSlice lands an older slice above it.
+ * @param nextBeforeCursor the server `before` cursor to page the NEXT older
+ *   step from. `null` means history is exhausted below this gap (state →
+ *   exhausted). The cursor is the raw server response-header value
+ *   (`base64url({id,time_ms})`) — the client NEVER synthesizes it.
+ * @param state [cn.vectory.ocdroid.ui.chat.GapFillState].name.
+ */
+@Entity(
+    tableName = "gap_marker",
+    primaryKeys = ["gap_id"],
+    indices = [Index("server_group_fp", "session_id")]
+)
+data class GapMarkerEntity(
+    @ColumnInfo(name = "gap_id") val gapId: String,
+    @ColumnInfo(name = "server_group_fp") val serverGroupFp: String,
+    @ColumnInfo(name = "session_id") val sessionId: String,
+    @ColumnInfo(name = "lower_anchor_message_id") val lowerAnchorMessageId: String,
+    @ColumnInfo(name = "upper_boundary_message_id") val upperBoundaryMessageId: String,
+    @ColumnInfo(name = "next_before_cursor") val nextBeforeCursor: String?,
+    @ColumnInfo(name = "state") val state: String,
+    @ColumnInfo(name = "created_at") val createdAt: Long,
+    @ColumnInfo(name = "updated_at") val updatedAt: Long
 )

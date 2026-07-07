@@ -110,6 +110,13 @@ class AppCore @Inject constructor(
     internal val sessionSyncCoordinator: SessionSyncCoordinator,
     internal val connectionCoordinator: ConnectionCoordinator,
     /**
+     * R-20 Phase 2: the gap-fill state machine (probe→detect→50-step fill).
+     * Owned here so [catchUpAfterDisconnectOrForeground] / ChatViewModel can
+     * delegate a detected gap to it; it is a @Singleton (plan §3 N3) so its
+     * session-level Mutex map persists across the calls.
+     */
+    internal val gapFillCoordinator: cn.vectory.ocdroid.ui.chat.GapFillCoordinator,
+    /**
      * R-20 Phase 1: persistent encrypted chat cache. Injected here so the
      * VerifyAndHydrate / EvictSession / EvictGroup effect handlers in
      * [dispatchSessionEffect] / [dispatchHostEffect] can call into it

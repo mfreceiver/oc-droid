@@ -12,6 +12,7 @@ import cn.vectory.ocdroid.data.model.QuestionRequest
 import cn.vectory.ocdroid.data.model.Session
 import cn.vectory.ocdroid.data.model.SessionStatus
 import cn.vectory.ocdroid.data.model.TodoItem
+import cn.vectory.ocdroid.ui.chat.GapMarker
 import cn.vectory.ocdroid.util.MarkdownFontSizes
 import cn.vectory.ocdroid.util.ThemeMode
 import kotlinx.coroutines.flow.StateFlow
@@ -173,7 +174,21 @@ data class ChatState(
     val olderMessagesCursor: String? = null,
     val hasMoreMessages: Boolean = true,
     val isLoadingMessages: Boolean = false,
-    val gapInfo: GapInfo? = null,
+    /**
+     * R-20 Phase 2: the session's open gap markers (non-contiguous message
+     * model — plan §3 N5 / glmer B1). **Replaces** the legacy single
+     * `gapInfo: GapInfo?`; a session may now carry ≥1 independent gap, each
+     * rendered as a tappable [cn.vectory.ocdroid.ui.chat.Entry.GapMarker]
+     * divider via [cn.vectory.ocdroid.ui.chat.withGaps]. The UI layer composes
+     * `messages.withGaps(gapMarkers)` at render time (minimal-churn migration:
+     * `messages` stays a flat List<Message>; the dividers are interleaved only
+     * in the rendered Entry list, not in the authoritative slice).
+     *
+     * Mirrored from the cache by [cn.vectory.ocdroid.ui.chat.GapFillCoordinator]
+     * after each fill step (the encrypted Room DB is the source of truth for
+     * gap state across restarts; the slice is the live UI mirror).
+     */
+    val gapMarkers: List<GapMarker> = emptyList(),
     val staleNotice: Boolean = false,
     /**
      * §model-selection (V1-per-prompt): the intended-next-model for the active
@@ -296,26 +311,15 @@ data class CachedSessionWindow(
 )
 
 /**
- * §Phase1C gap (断层) state. Set by [MainViewModel.catchUpAfterDisconnectOrForeground]
- * when a tail reload detects the pre-reload newest message [anchorNewestId] is
- * NOT in the freshly-fetched latest window — meaning messages arrived during
- * the disconnect that fall outside the 5-message tail. The user can then tap
- * the gap divider to page older (loadMore-style) from [tailOldestCursor] until
- * [anchorNewestId] reappears (gap closed, [open] = false).
- *
- * - [anchorNewestId]: pre-reload local newest message id (by time.created).
- * - [tailOldestId]: the oldest id in the fetched tail window — the visual
- *   seam where the gap divider is rendered (between this and older history).
- * - [tailOldestCursor]: server cursor for paging OLDER from the tail's oldest
- *   (the gap-closure direction). Updated as the user pages.
- * - [open]: true while the gap is still unresolved.
+ * §Phase1C gap (断层) state — **REMOVED in R-20 Phase 2** (plan §3 N5 / glmer B1).
+ * The single-gap `GapInfo` was replaced by the multi-gap
+ * [cn.vectory.ocdroid.ui.chat.GapMarker] model on [ChatState.gapMarkers].
+ * The class definition and its field were deleted; every prior reader/writer
+ * now routes through [cn.vectory.ocdroid.ui.chat.GapFillCoordinator] /
+ * [cn.vectory.ocdroid.ui.chat.BackfillAlgorithm] /
+ * [cn.vectory.ocdroid.data.cache.CacheRepository] gap methods. See
+ * `docs/features/persistent-chat-cache-plan.md` §3 Phase 2.
  */
-data class GapInfo(
-    val anchorNewestId: String,
-    val tailOldestId: String,
-    val tailOldestCursor: String?,
-    val open: Boolean = true
-)
 
 data class ConnectionFormSettings(
     val serverUrl: String,

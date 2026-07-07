@@ -106,3 +106,50 @@ interface CacheDao {
     suspend fun clearAllMessages()
 }
 
+/**
+ * R-20 Phase 2 (plan §1 / §3): DAO for [GapMarkerEntity] — the per-gap cursor
+ * + state operations backing the non-contiguous message model.
+ *
+ * Every query is scoped by `(server_group_fp, session_id)` (the compound
+ * session key) or by the synthetic [GapMarkerEntity.gapId]. The single-transaction
+ * invariants (appendOlderSlice resolving the gap atomically; resolveGap
+ * deleting the marker + cascading overlap resolution) are orchestrated in
+ * [CacheRepositoryImpl] via [androidx.room.withTransaction] blocks that call
+ * these primitives — the DAO itself stays free of cross-table logic.
+ */
+@Dao
+interface GapMarkerDao {
+    @Upsert
+    suspend fun upsertGap(entity: GapMarkerEntity)
+
+    @Query("SELECT * FROM gap_marker WHERE gap_id = :gapId")
+    suspend fun gap(gapId: String): GapMarkerEntity?
+
+    @Query("SELECT * FROM gap_marker WHERE server_group_fp = :fp AND session_id = :sid")
+    suspend fun gaps(fp: String, sid: String): List<GapMarkerEntity>
+
+    @Query("UPDATE gap_marker SET state = :state, updated_at = :now WHERE gap_id = :gapId")
+    suspend fun setState(gapId: String, state: String, now: Long)
+
+    @Query("UPDATE gap_marker SET upper_boundary_message_id = :upperBoundary, next_before_cursor = :cursor, state = :state, updated_at = :now WHERE gap_id = :gapId")
+    suspend fun advanceBoundary(
+        gapId: String,
+        upperBoundary: String,
+        cursor: String?,
+        state: String,
+        now: Long
+    )
+
+    @Query("DELETE FROM gap_marker WHERE gap_id = :gapId")
+    suspend fun deleteGap(gapId: String)
+
+    @Query("DELETE FROM gap_marker WHERE server_group_fp = :fp AND session_id = :sid")
+    suspend fun deleteSessionGaps(fp: String, sid: String)
+
+    @Query("DELETE FROM gap_marker WHERE server_group_fp = :fp")
+    suspend fun deleteGroupGaps(fp: String)
+
+    @Query("DELETE FROM gap_marker")
+    suspend fun clearAllGaps()
+}
+

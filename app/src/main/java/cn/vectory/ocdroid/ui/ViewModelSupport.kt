@@ -45,6 +45,20 @@ internal object MainViewModelTimings {
      */
     const val gapCloseMessagePageSize = 10
     /**
+     * R-20 Phase 2: probe page size for the catch-up gap detection. Replaces
+     * the legacy `catchUpMessagePageSize` tail fetch on the gap path — a
+     * dedicated 5-message probe feeds [cn.vectory.ocdroid.ui.chat.BackfillAlgorithm.detectGap].
+     * The sentinel off-by-one boundary now sits at exactly-4-new (anchor in
+     * the 5th slot → contiguous) vs exactly-5-new (anchor absent → gap).
+     */
+    const val gapProbeMessagePageSize = 5
+    /**
+     * R-20 Phase 2: backward-fill step size for [cn.vectory.ocdroid.ui.chat.GapFillCoordinator].
+     * Mirrors [historyMessagePageSize] (50) — large step = fewer round-trips
+     * to close a big gap, each step comfortably under the 32MB response guard.
+     */
+    const val gapFillMessagePageSize = 50
+    /**
      * Page size for manual "load more history" paging. A typical page stays
      * well under the 32MB guard (50 × p99(81KB) ≈ 4MB). If a pathological page
      * ever trips the guard, loadMore surfaces the error and the user can retry

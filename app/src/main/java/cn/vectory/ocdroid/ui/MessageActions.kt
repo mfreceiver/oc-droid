@@ -125,7 +125,7 @@ internal fun launchLoadMessages(
                     val srcStreamingReasoning = slices.chat.value.streamingReasoningPart
                     val srcCursor = slices.chat.value.olderMessagesCursor
                     val srcHasMore = slices.chat.value.hasMoreMessages
-                    val srcGap = slices.chat.value.gapInfo
+                    val srcGapMarkers = slices.chat.value.gapMarkers
                     val srcSessionStatuses = slices.sessionList.value.sessionStatuses
 
                     val fetchedIds = page.items.map { m -> m.info.id }.toHashSet()
@@ -221,9 +221,9 @@ internal fun launchLoadMessages(
                     // §Phase1C (gpt-2 S1): a resetLimit=true reload is an
                     // authoritative snapshot replace — any open gap
                     // belonged to the previous window and is now stale
-                    // (anchor/tailOldest may no longer be present). Clear
-                    // it; a fresh gap can only re-open via launchCatchUp.
-                    val newGap = if (resetLimit) null else srcGap
+                    // (anchor/boundary may no longer be present). Clear it;
+                    // a fresh gap can only re-open via launchCatchUp.
+                    val newGapMarkers = if (resetLimit) emptyList() else srcGapMarkers
                     // §model-selection: track the model bound to the
                     // active session by inferring it from the latest
                     // assistant message's resolvedModel. Surfaces in
@@ -246,7 +246,7 @@ internal fun launchLoadMessages(
                             streamingReasoningPart = newStreamingReasoning,
                             olderMessagesCursor = newCursor,
                             hasMoreMessages = newHasMore,
-                            gapInfo = newGap,
+                            gapMarkers = newGapMarkers,
                             currentModel = newModel
                         )
                     }
