@@ -111,14 +111,16 @@ versionCode: $(awk -F'= ' '/versionCode *= */{print $2; exit}' app/build.gradle.
 TAG="v$VERSION"
 git tag -a "$TAG" -F "$NOTE_FILE"
 
-# --- 8. 对外发布命令（人工执行） ---
+# --- 8. 对外发布（人工执行：git push + curl Gitea API） ---
+#    不再依赖 tea CLI（语法/超时问题）。改用原生 git push + curl Gitea REST API。
+#    详见 docs/build-apk.md §发版上传。
 echo ""
 echo "════════════════════════════════════════════════════════════"
 echo "✅ 发版准备完成: $VERSION (tag $TAG)"
+echo "  APK:   $APK_DST"
+echo "  Notes: $NOTE_FILE"
 echo ""
-echo "确认无误后执行（push + Gitea Release）:"
+echo "确认无误后执行（详见 docs/build-apk.md §发版上传）:"
 echo "  git push origin main && git push origin $TAG"
-echo "  /home/mar/tools/tea/tea releases create -r mfreceiver/oc-droid \\"
-echo "    --tag $TAG -t $TAG -f \"$NOTE_FILE\" \\"
-echo "    -a \"$APK_DST\""
+echo "  ./scripts/upload-release.sh $VERSION   # curl Gitea API: 建release + 上传APK + 更新notes"
 echo "════════════════════════════════════════════════════════════"

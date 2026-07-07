@@ -123,7 +123,7 @@ versionName = "0.2.4"     // 当前版本
 ./scripts/release.sh patch       # patch | minor | major
 ```
 
-`git push` 与 `tea releases create` **不自动执行**（对外发布需人工确认），脚本会打印命令。
+`git push` 与 Gitea release 上传 **不自动执行**（对外发布需人工确认），脚本会打印命令。
 
 > 发版前的多 agent 评审（如 `glmer` + `gpter`）按评审意见修订；评审产物按 `.opencode/policies/review-gate.md` 归档到 `.opencode/runs/reviews/`。
 
@@ -144,24 +144,44 @@ VERSION=$(grep 'versionName' app/build.gradle.kts | head -1 | sed 's/.*"\([^"]*\
 cp app/build/outputs/apk/release/app-release.apk "APK/oc-droid-$VERSION.apk"
 ```
 
-### 6.3 发版到自建 Gitea（用 tea CLI）
+### 6.3 发版到自建 Gitea（git push + curl REST API）
 
-本机已装 `tea` CLI（`/home/mar/tools/tea/tea`）。`release.sh` 已自动生成 changelog 文件 `APK/oc-droid-$VERSION.md`，发布时用 `-f`（note-file）传入：
+不再依赖 `tea` CLI（曾遇 flag 语法错位 + 大 APK 上传超时）。改用**原生 git push** + **curl Gitea REST API**，封装在 `scripts/upload-release.sh`。
+
+**前提**：Gitea token 可从两处取（脚本自动）：① 环境变量 `GITEA_TOKEN`；② 本机 `~/.config/tea/config.yml`（tea 登录残留，仅读 token，不调 tea）。
 
 ```bash
-TAG="v$VERSION"   # 如 v0.2.3
-git tag -a "$TAG" -F "APK/oc-droid-$VERSION.md"   # tag 注释也用 changelog
-git push origin "$TAG"
+VERSION="0.5.0"   # versionName，与 release.sh bump 出的一致
+TAG="v$VERSION"
 
-/home/mar/tools/tea/tea releases create -r mfreceiver/oc-droid \
-  --tag "$TAG" \
-  -t "$TAG" \
-  -f "APK/oc-droid-$VERSION.md" \
-  -a "APK/oc-droid-$VERSION.apk"
+# 1) push main + tag（Gitea 收到 tag 后自动建 release 占位）
+git push origin main && git push origin "$TAG"
+
+# 2) 上传 APK + 更新 release notes（建/找 release → POST assets → PATCH body）
+./scripts/upload-release.sh "$VERSION"
+```
+
+`upload-release.sh` 内部三步（纯 curl，可单独复用）：
+
+```bash
+GITEA_TOKEN="$(grep 'token:' ~/.config/tea/config.yml | head -1 | awk '{print $2}')"
+API="https://git.vectory.cn:18443/api/v1/repos/mfreceiver/oc-droid/releases"
+# 找 release id（Gitea 自动建的）
+RID=$(curl -s -H "Authorization: token $GITEA_TOKEN" "$API?name=$VERSION" \
+  | python3 -c 'import sys,json;print(json.load(sys.stdin)[0]["id"])')
+# 上传 APK 附件
+curl -X POST "$API/$RID/assets?name=oc-droid-$VERSION.apk" \
+  -H "Authorization: token $GITEA_TOKEN" -H "Content-Type: application/octet-stream" \
+  --data-binary @"APK/oc-droid-$VERSION.apk"
+# 更新 release notes
+curl -X PATCH "$API/$RID" -H "Authorization: token $GITEA_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d "$(python3 -c 'import json;print(json.dumps({"body":open("APK/oc-droid-VERSION.md").read()}))')"
 ```
 
 - `main` 分支为开发主线，tag 打在 `main` 的发布提交上。
 - 应用名称为 **OC Droid**；`origin` = `https://git.vectory.cn:18443/mfreceiver/oc-droid.git`。
+- 若 `tea` 仍可用作 fallback，旧命令 `/home/mar/tools/tea/tea releases create -r mfreceiver/oc-droid --tag $TAG -t $TAG -f APK/oc-droid-$VERSION.md -a APK/oc-droid-$VERSION.apk`（注意 `releases delete` 不接 `--tag`，要用 release id）。
 
 ---
 
