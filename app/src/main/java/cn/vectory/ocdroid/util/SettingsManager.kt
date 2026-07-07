@@ -153,14 +153,32 @@ class SettingsManager @Inject constructor(
      * and the second write clobbers the first — losing the first caller's
      * workdir (read-modify-write race). SharedPreferences itself is process-
      * thread-safe but the read→filter→write compound is not.
+     *
+     * §grouping-rewrite Round-6 F4: dedup is now by NORMALIZED EQUIVALENCE
+     * via [WorkdirPaths.normalize] (symmetric with [removeRecentWorkdir]'s
+     * normalized match per C4). Pre-F4 the dedup was exact-trimmed, so
+     * adding "/proj-a" then "proj-a/" would store BOTH — they normalize
+     * together but compared unequal under raw `==`. The asymmetry vs
+     * removeRecentWorkdir (which normalized) meant the disconnect would
+     * remove both via normalized match but a re-add could leave a stale
+     * twin. Both sides now agree: add removes any existing entry whose
+     * normalized form matches the new entry's, then prepends the new
+     * entry's stored form.
+     *
+     * **Storage stays ORIGINAL-form** (the trimmed string the server
+     * returned) — NOT the normalized key. The server needs the real path
+     * for `getSessionsForDirectory`; normalizing on store would break the
+     * cold-start fan-out. Only the comparison is normalized.
      */
     fun addRecentWorkdir(serverGroupFp: String, workdir: String) {
         if (serverGroupFp.isBlank()) return
-        val normalized = workdir.trim()
-        if (normalized.isEmpty()) return
+        val storedForm = workdir.trim()
+        if (storedForm.isEmpty()) return
+        val normalizedKey = WorkdirPaths.normalize(storedForm)
         synchronized(this) {
-            val updated = (listOf(normalized) + getRecentWorkdirs(serverGroupFp).filter { it != normalized })
-                .take(MAX_RECENT_WORKDIRS)
+            val updated = (listOf(storedForm) + getRecentWorkdirs(serverGroupFp).filter {
+                WorkdirPaths.normalize(it) != normalizedKey
+            }).take(MAX_RECENT_WORKDIRS)
             setRecentWorkdirs(serverGroupFp, updated)
         }
     }

@@ -15,12 +15,11 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Close
-import androidx.compose.material3.Card
-import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
@@ -222,18 +221,22 @@ fun SettingsScreen(
         }
     }
 
-    // §grouping-rewrite 项 3: cache-management popup. The Dialog wraps a Card
-    // that carries the popup title (with a close affordance) above the section
-    // body. CacheManagementSection already renders its own inner card; the
-    // outer card provides the popup chrome (title bar + dismissal).
+    // §grouping-rewrite 项 3 (+ Round-6 F5): cache-management popup. A
+    // [Surface] carries the popup chrome (title row + close affordance); the
+    // section body is [CacheManagementSection], which renders its OWN inner
+    // card. Pre-F5 the popup wrapped the section in a Card-in-Card (Dialog →
+    // outer Card → title row + CacheManagementSection's own Card) — the
+    // redundant outer Card was visual noise (two stacked surfaces with
+    // identical container colour). Surface is the right drop-in: it gives
+    // the popup its shape + tonal elevation + dismissal affordance, and
+    // CacheManagementSection's inner Card remains the content surface.
     if (showCacheDialog) {
         Dialog(onDismissRequest = { showCacheDialog = false }) {
-            Card(
+            Surface(
                 modifier = Modifier.fillMaxWidth(),
                 shape = MaterialTheme.shapes.large,
-                colors = CardDefaults.cardColors(
-                    containerColor = MaterialTheme.colorScheme.surface
-                )
+                color = MaterialTheme.colorScheme.surface,
+                tonalElevation = 6.dp,
             ) {
                 Column(modifier = Modifier.padding(bottom = 16.dp)) {
                     Row(

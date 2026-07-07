@@ -238,7 +238,24 @@ fun SessionsScreen(
                     val isExpanded = expandedWorkdirs.contains(workdir)
                     val displayName = workdir.split("/").filter { it.isNotEmpty() }.lastOrNull()
                         ?: workdir
-                    val isDraft = workdir == draftWorkdir && sessionsInWorkdir.isEmpty()
+                    // §grouping-rewrite Round-6 F3: normalize-match the draft
+                    // badge. The visibility gate (buildWorkdirGroups) uses
+                    // WorkdirPaths.normalize for the visible-set, so a draft
+                    // whose raw form is a slash variant of a visible workdir
+                    // (e.g. draftWorkdir="proj-a/" while the displayed group's
+                    // workdir is "/proj-a") collapses onto the same group —
+                    // the badge MUST fire for that group, not silently miss
+                    // because the raw strings differ. Mirrors the C3/C4/C5
+                    // pipeline's normalization contract.
+                    //
+                    // Capture draftWorkdir into a local val first so Kotlin
+                    // can smart-cast the null-check (draftWorkdir is a
+                    // delegated property — the compiler refuses to smart-cast
+                    // those inline).
+                    val draft = draftWorkdir
+                    val isDraft = sessionsInWorkdir.isEmpty() &&
+                        draft != null &&
+                        WorkdirPaths.normalize(workdir) == WorkdirPaths.normalize(draft)
 
                     Column(modifier = Modifier.fillMaxWidth()) {
                         // Workdir header row (click = expand/collapse, long-click = disconnect).

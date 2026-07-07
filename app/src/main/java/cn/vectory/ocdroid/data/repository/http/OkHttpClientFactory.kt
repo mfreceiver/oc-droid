@@ -130,11 +130,23 @@ class OkHttpClientFactory @Inject constructor(
      * in `AppCoreOrchestration.executeCommand` is the second line of defence
      * for the (now rare) >300 s case.
      *
-     * NB: deliberately omits the [responseSizeGuardInterceptor] — command
-     * responses are tiny JSON acks, not bulk payloads.
+     * §grouping-rewrite Round-6 F2 (kimo release review #4): the
+     * [responseSizeGuardInterceptor] is now included (was previously omitted
+     * because legitimate command acks are tiny JSON). Rationale: the 300 s
+     * read timeout widens the window during which a compromised or
+     * pathological server could stream a very large response body before the
+     * read timeout fires; without the size guard, kotlinx-serialization's
+     * whole-body String allocation (≈2× bytes) could OOM the 256 MB heap
+     * before the timeout ever triggers. The guard's
+     * [ResponseSizeGuardInterceptor.MAX_RESPONSE_BYTES] cap (32 MB) is
+     * orders of magnitude above any legitimate command ack (typically < 1 KB
+     * JSON), so it does not constrain real traffic — it is purely a
+     * defence-in-depth bound that brings [commandClient]'s body-size
+     * posture in line with [restClient]'s.
      */
     fun commandClient(allowInsecure: Boolean): OkHttpClient =
         baseBuilder(allowInsecure)
+            .addInterceptor(responseSizeGuardInterceptor)
             .readTimeout(300, TimeUnit.SECONDS)
             .build()
 

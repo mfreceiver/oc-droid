@@ -222,9 +222,6 @@
     <string name="debug_log_level_all">All</string>
     <string name="debug_log_empty">(no logs yet)</string>
     <string name="debug_log_empty_filtered">(no logs under current filter)</string>
-    <string name="debug_effect_bus_dropped_title">Effect Bus Dropped</string>
-    <string name="debug_sse_unknown_events_title">SSE Unknown Events</string>
-    <string name="debug_diagnostics_none">None</string>
     <string name="chat_load_more_history">Load more history</string>
     <string name="chat_loading">Loading…</string>
     <string name="chat_no_messages">No messages yet</string>
@@ -306,8 +303,6 @@
     <string name="cache_management_action_clear_project">Clear project</string>
     <string name="cache_management_action_sweep">Scan for orphans now</string>
     <string name="cache_management_action_clear_all">Clear all cached sessions</string>
-    <string name="cache_management_action_split">Split into its own group</string>
-    <string name="cache_management_action_split_hint">Copy-on-split escape hatch: this profile\'s cache stops being shared with the rest of its group. Full configuration copy lands with Phase 5.</string>
     <string name="cache_management_clear_all_title">Clear ALL cached sessions?</string>
     <string name="cache_management_clear_all_body">This wipes every cached session across every server group (messages, parts, gap markers). Host profiles, connection info, and tunnel passwords are preserved. The cache rebuilds from the server as you re-open sessions.</string>
     <string name="cache_management_clear_all_confirm">Clear all</string>

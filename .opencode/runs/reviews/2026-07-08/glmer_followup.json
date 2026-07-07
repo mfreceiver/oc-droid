@@ -1,0 +1,18 @@
+{
+  "agent": "glmer",
+  "scope": "feature-grouping-rewrite-followup",
+  "date": "2026-07-08",
+  "round": "follow-up (post-v0.5.1, no release)",
+  "reviewed_commit": "4aa0774",
+  "diff": ".opencode/runs/plans/2026-07-08_followup-diff.patch",
+  "version_target": "no release (push main only)",
+  "verdict": "pass",
+  "score": 9.7,
+  "blocking_issues": [],
+  "non_blocking_issues": [
+    "1. [test-coverage, F3] isDraft badge normalize-match (SessionsScreen.kt:255-258) has no direct unit test — inlined in Composable. Logic mirrors tested buildWorkdirGroups (same normalize contract), 3 lines, low risk. Optional: extract pure isDraftGroup(workdir, draft, sessions) fn for pinning. Non-blocking.",
+    "2. [test-coverage, F2] commandClient guard wiring has no explicit test — but mirrors restClient pattern (OkHttpClientFactory.kt:107, same chain position); guard body has ResponseSizeGuardInterceptorTest. Factory-code trust. Non-blocking.",
+    "3. [carry-over, intentional] evictWorkdirInGroup perf N+1 + D2 message-sniff — task's NOT CHANGED list, not re-flagged."
+  ],
+  "notes": "PASS. All 5 follow-up fixes correct, minimal, consistent with established C3/C4/C5 normalize contract, no regression. F1: 5 dead strings truly zero-ref (independent grep, whole app dir). F2: commandClient wires responseSizeGuardInterceptor at SAME chain position as restClient (baseBuilder→guard→readTimeout); guard genuinely defence-in-depth (ForwardingSource body-wrapping defeats chunked/missing-Content-Length bypass — security claim REAL); 32MB cap has 4 orders of magnitude headroom over legit <1KB command acks, no false-positive risk. F3: normalize-match badge correct, smart-cast workaround sound (val draft=draftWorkdir for delegated property), short-circuit sane, no double-fire. F4: storage TRULY stays original-form (storedForm=workdir.trim(); normalizedKey only for comparison); STRICTLY symmetric with C4 removeRecentWorkdir; MRU last-added-wins; 2 new tests pin slash-variant dedup + sibling-survival; normalize does NOT case-fold (consistent with C4/C5). F5: Surface popup chrome sound (valid Dialog child, tonalElevation 6dp M3 modal standard, shape preserved, content verbatim). Visual effect of tonalElevation not confirmable in text review but structural/API risk zero + check.sh GREEN. Composite (with kimo 9.6) = 9.65 met. Recommend commit + push main (no version bump, per task)."
+}

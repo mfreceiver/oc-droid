@@ -130,6 +130,45 @@ class SettingsManagerTest {
     }
 
     @Test
+    fun `addRecentWorkdir deduplicates across slash variants by normalized match`() {
+        // §grouping-rewrite Round-6 F4: pre-F4 the dedup was exact-trimmed, so
+        // adding "/proj-a" then "proj-a/" stored BOTH (raw `==` saw them as
+        // distinct). Both normalize to "proj-a" via WorkdirPaths.normalize →
+        // the second add now removes the first variant before prepending.
+        // The latest-trimmed-original form lands at the front; the stale
+        // twin is gone. Storage stays original-form (server-facing).
+        settings.addRecentWorkdir(rwFp, "/proj-a")
+        settings.addRecentWorkdir(rwFp, "proj-a/") // slash-variant twin
+        val result = settings.getRecentWorkdirs(rwFp)
+        assertEquals(
+            "exactly one entry — the slash variant collapsed onto the prior",
+            1,
+            result.size,
+        )
+        assertEquals(
+            "the latest add's stored form is at the front (MRU)",
+            listOf("proj-a/"),
+            result,
+        )
+    }
+
+    @Test
+    fun `addRecentWorkdir normalized dedup leaves sibling workdirs intact`() {
+        // Over-removal guard: the normalized-match dedup must not accidentally
+        // nuke a sibling whose name is a substring or shares a prefix.
+        settings.addRecentWorkdir(rwFp, "/proj-a")
+        settings.addRecentWorkdir(rwFp, "/proj-b")
+        // Re-add /proj-a via a slash variant → /proj-a's prior form is
+        // replaced, /proj-b is untouched.
+        settings.addRecentWorkdir(rwFp, "proj-a/")
+        assertEquals(
+            "sibling survived; new variant at front",
+            listOf("proj-a/", "/proj-b"),
+            settings.getRecentWorkdirs(rwFp),
+        )
+    }
+
+    @Test
     fun `addRecentWorkdir ignores blank entries`() {
         settings.addRecentWorkdir(rwFp, "   ")
         assertTrue(settings.getRecentWorkdirs(rwFp).isEmpty())

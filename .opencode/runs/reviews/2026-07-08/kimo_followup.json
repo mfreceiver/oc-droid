@@ -1,0 +1,16 @@
+{
+  "agent": "kimo",
+  "scope": "feature-grouping-rewrite-followup",
+  "date": "2026-07-08",
+  "round": "follow-up",
+  "reviewed_commit": "4aa0774",
+  "version_target": "no release (push main only)",
+  "verdict": "pass",
+  "score": 9.6,
+  "blocking_issues": [],
+  "non_blocking_issues": [
+    "1. [edge, pre-existing] F4 addRecentWorkdir does not guard against a workdir whose normalized key is empty (e.g. '/'). It stores raw '/'; buildWorkdirGroups later drops it as invisible, removeRecentWorkdir ignores it. Pre-existing edge case, not a regression from F4.",
+    "2. [ux] F5 Surface uses tonalElevation=6.dp blind (no screenshot review). Correct M3 dialog pattern, but a final visual pass recommended."
+  ],
+  "notes": "Fresh-eyes review of 5 follow-up fixes. F1: 5 dead strings verified removed (0 hits both locales). F2: commandClient wires responseSizeGuardInterceptor (OkHttpClientFactory.kt:147-151); 32MB cap handles Content-Length + chunked, skips text/event-stream; >32MB command response now IOException→Error instead of OOM before 300s; threshold sensible for <1KB acks. F3: isDraft badge (SessionsScreen.kt:255-258) normalize-matches via WorkdirPaths.normalize, mirrors C3/C4/C5, null-safe (local val capture before smart-cast), badge still only for empty workdir. F4: addRecentWorkdir (SettingsManager.kt:139-149) normalized dedup, stores original trimmed form, symmetric with removeRecentWorkdir; 2 new tests cover slash-variant collapse + sibling preservation; exact-match subset so no existing test broken. F5: popup Card→Surface (SettingsScreen.kt:233-261), removes Card-in-Card, inner Card remains content surface, imports cleaned. No regressions. By-design items (evictWorkdirInGroup perf, saveHostProfile fp-change) correctly unchanged. Diff minimal + well-targeted, check.sh green. Recommend pass."
+}
