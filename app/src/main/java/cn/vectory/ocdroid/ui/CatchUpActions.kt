@@ -157,7 +157,7 @@ internal fun launchCatchUp(
                                 staleNotice = false
                             )
                         }
-                        syncAgentFromPage(slices, sessionId, page, settingsManager)
+                        syncAgentFromPage(slices, currentServerGroupFp(), sessionId, page, settingsManager)
                         onCacheWindow(
                             sessionId,
                             snapshotCurrentWindow(slices, sessionId)
@@ -172,7 +172,7 @@ internal fun launchCatchUp(
                             // clear the catch-up loading flag here (the gap's
                             // own Filling state is the per-marker indicator).
                             slices.mutateChat { c -> c.copy(isLoadingMessages = false, staleNotice = false) }
-                            syncAgentFromPage(slices, sessionId, page, settingsManager)
+                            syncAgentFromPage(slices, currentServerGroupFp(), sessionId, page, settingsManager)
                             // openAndFill is suspend; launch it fire-and-forget
                             // so the catch-up coroutine returns immediately. The
                             // session-level Mutex inside the coordinator keeps
@@ -204,7 +204,7 @@ internal fun launchCatchUp(
                                     staleNotice = false
                                 )
                             }
-                            syncAgentFromPage(slices, sessionId, page, settingsManager)
+                            syncAgentFromPage(slices, currentServerGroupFp(), sessionId, page, settingsManager)
                             onCacheWindow(
                                 sessionId,
                                 snapshotCurrentWindow(slices, sessionId)
@@ -250,13 +250,14 @@ private fun mergeProbeIntoSlice(
 /** Mirror of the legacy agent-name sync from the last assistant in the page. */
 private fun syncAgentFromPage(
     slices: SliceFlows,
+    serverGroupFp: String,
     @Suppress("UNUSED_PARAMETER") sessionId: String,
     page: cn.vectory.ocdroid.data.repository.MessagesPage,
     settingsManager: SettingsManager?,
 ) {
     val lastAssistant = page.items.lastOrNull { it.info.isAssistant }
     val inferredAgentName = lastAssistant?.info?.agent
-    val agentName = settingsManager?.getAgentForSession(sessionId) ?: inferredAgentName
+    val agentName = settingsManager?.getAgentForSession(serverGroupFp, sessionId) ?: inferredAgentName
     slices.mutateSettings { it.copy(selectedAgentName = agentName ?: it.selectedAgentName) }
 }
 

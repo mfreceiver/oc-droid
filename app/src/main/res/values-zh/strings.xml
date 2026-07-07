@@ -277,4 +277,37 @@
     <string name="error_connection_failed">连接失败：%1$s</string>
     <string name="error_sse_failed">SSE 错误：%1$s</string>
     <string name="error_respond_permission_failed">响应权限请求失败：%1$s</string>
+
+    <!-- R-20 Phase 4: 存储管理 UI（CacheManagementSection）— 持久化聊天缓存的
+         管理面板，挂在「调试」分组下。 -->
+    <string name="settings_section_cache">聊天缓存</string>
+    <string name="cache_management_title">已缓存的会话</string>
+    <string name="cache_management_empty">尚无缓存会话——打开过的会话会自动缓存到这里。</string>
+    <string name="cache_management_loading">正在读取缓存…</string>
+    <string name="cache_management_error">读取缓存失败：%1$s</string>
+    <string name="cache_management_degraded_warning">缓存已降级——加密存储无法打开，重启后缓存会丢失。</string>
+    <string name="cache_management_offline_hint">请先连接服务器再执行扫描——孤儿扫描需要服务器端的实时会话列表。</string>
+    <string name="cache_management_group_header">服务器分组：%1$s</string>
+    <string name="cache_management_group_member_count">%1$d 个会话，%2$d 个接入点</string>
+    <string name="cache_management_row_workdir">项目目录：%1$s</string>
+    <string name="cache_management_row_workdir_unknown">（未知项目目录）</string>
+    <string name="cache_management_row_session_id">会话：%1$s</string>
+    <string name="cache_management_row_created_at">缓存时间：%1$s</string>
+    <string name="cache_management_row_newest_at">最新消息：%1$s</string>
+    <string name="cache_management_row_verified_at">最近校验：%1$s</string>
+    <string name="cache_management_row_suspect">疑似废弃（最近校验已超过 7 天）</string>
+    <string name="cache_management_row_exhausted">存在无法补齐的间隔</string>
+    <string name="cache_management_action_clear_session">清除会话</string>
+    <string name="cache_management_action_clear_project">清除项目</string>
+    <string name="cache_management_action_sweep">立即扫描孤儿</string>
+    <string name="cache_management_action_clear_all">清除全部缓存</string>
+    <string name="cache_management_action_split">拆分为独立分组</string>
+    <string name="cache_management_action_split_hint">解除归并逃生口：此接入点的缓存不再与同组其它接入点共享。完整配置复制需要 Phase 5 完成。</string>
+    <string name="cache_management_clear_all_title">清除全部缓存会话？</string>
+    <string name="cache_management_clear_all_body">将清除所有服务器分组下的全部缓存会话（消息、parts、间隔标记）。接入点、连接信息、隧道口令会保留。重新打开会话时缓存会从服务器重新拉取。</string>
+    <string name="cache_management_clear_all_confirm">全部清除</string>
+    <string name="cache_management_sweep_result_complete">扫描完成：已校验 %1$d 个，已清除 %2$d 个。</string>
+    <string name="cache_management_sweep_result_incomplete">扫描降级（实时会话集不完整）：已校验 %1$d 个，未清除任何会话。</string>
+    <string name="cache_management_never_verified">（从未校验）</string>
+    <string name="cache_management_unknown_time">（未知）</string>
 </resources>

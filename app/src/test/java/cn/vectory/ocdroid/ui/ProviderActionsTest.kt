@@ -56,7 +56,9 @@ class ProviderActionsTest {
         repository = mockk(relaxed = true)
         settingsManager = mockk(relaxed = true)
         hostProfileStore = mockk(relaxed = true)
-        every { hostProfileStore.currentProfile() } returns HostProfile.defaultDirect(serverUrl = "https://h.test")
+        // R-20 Phase 5: stub the profile with a fixed fp so tests can match
+        // the per-fp keys (was per-baseUrl before Phase 5).
+        every { hostProfileStore.currentProfile() } returns HostProfile.defaultDirect(serverUrl = "https://h.test").copy(serverGroupFp = "fp-h-test")
         scope = TestScope(UnconfinedTestDispatcher())
     }
 
@@ -88,7 +90,8 @@ class ProviderActionsTest {
         )
         coEvery { repository.getProviders() } returns Result.success(providers)
         // Persisted disabled set: one still-available + one removed-server-side.
-        every { settingsManager.getDisabledModels("https://h.test") } returns
+        // R-20 Phase 5: keyed by serverGroupFp ("fp-h-test" — set in setUp).
+        every { settingsManager.getDisabledModels("fp-h-test") } returns
             setOf("openai/gpt-4", "ghost/model")
 
         launchLoadProviders(
@@ -106,11 +109,11 @@ class ProviderActionsTest {
         // Availability set persisted.
         verify {
             settingsManager.setModelAvailability(
-                "https://h.test",
+                "fp-h-test",
                 setOf("openai/gpt-4", "openai/gpt-3.5", "anthropic/claude"),
             )
         }
-        verify { settingsManager.setDisabledModels("https://h.test", setOf("openai/gpt-4")) }
+        verify { settingsManager.setDisabledModels("fp-h-test", setOf("openai/gpt-4")) }
         assertEquals(providers, slices.settings.value.providers)
     }
 

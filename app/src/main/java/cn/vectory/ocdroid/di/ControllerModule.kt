@@ -101,9 +101,11 @@ object ControllerModule {
     fun provideComposerController(
         store: SharedStateStore,
         settingsManager: SettingsManager,
+        hostProfileStore: HostProfileStore,
     ): ComposerController = ComposerController(
         store = store,
         settingsManager = settingsManager,
+        hostProfileStore = hostProfileStore,
     )
 
     @Provides

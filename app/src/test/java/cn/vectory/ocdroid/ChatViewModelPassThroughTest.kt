@@ -223,7 +223,7 @@ class ChatViewModelPassThroughTest : MainViewModelTestBase() {
         advanceUntilIdle()
 
         coVerify { repository.revertSession("s1", "m1", null) }
-        verify { settingsManager.setDraftText("s1", "original prompt") }
+        verify { settingsManager.setDraftText(any(), "s1", "original prompt") }
     }
 
     @Test

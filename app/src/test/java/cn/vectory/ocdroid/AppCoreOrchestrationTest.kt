@@ -200,8 +200,8 @@ class AppCoreOrchestrationTest : MainViewModelTestBase() {
         core.materializeDraftSession { }
         advanceUntilIdle()
 
-        verify { settingsManager.setModelForSession("new", "openai", "gpt-5") }
-        verify { settingsManager.setAgentForSession("new", "code") }
+        verify { settingsManager.setModelForSession(any(), "new", "openai", "gpt-5") }
+        verify { settingsManager.setAgentForSession(any(), "new", "code") }
     }
 
     // ── executeCommand ────────────────────────────────────────────────────────

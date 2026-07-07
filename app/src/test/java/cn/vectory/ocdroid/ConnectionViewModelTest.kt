@@ -88,7 +88,7 @@ class ConnectionViewModelTest : MainViewModelTestBase() {
         // Previous run connected A then B (B most recent). currentWorkdir is
         // the single last-used value; recentWorkdirs remembers BOTH.
         every { settingsManager.currentWorkdir } returns workdirB
-        every { settingsManager.recentWorkdirs } returns listOf(workdirB, workdirA)
+        every { settingsManager.getRecentWorkdirs(any()) } returns listOf(workdirB, workdirA)
 
         // Healthy connect → loadInitialData.
         coEvery { repository.checkHealth() } returns
@@ -137,7 +137,7 @@ class ConnectionViewModelTest : MainViewModelTestBase() {
         val sessionB = cn.vectory.ocdroid.data.model.Session(id = "s-b1", directory = workdirB, title = "B chat")
 
         every { settingsManager.currentWorkdir } returns workdirB
-        every { settingsManager.recentWorkdirs } returns emptyList()
+        every { settingsManager.getRecentWorkdirs(any()) } returns emptyList()
         coEvery { repository.checkHealth() } returns
             Result.success(HealthResponse(healthy = true, version = "1.0"))
         coEvery { repository.getSessions(10) } returns Result.success(listOf(sessionB))

@@ -135,7 +135,7 @@ class SessionViewModelPassThroughTest : MainViewModelTestBase() {
         vm.closeSession("s1")
         advanceUntilIdle()
 
-        verify { settingsManager.setDraftText("s1", "draft text") }
+        verify { settingsManager.setDraftText(any(), "s1", "draft text") }
     }
 
     @Test

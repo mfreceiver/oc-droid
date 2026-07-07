@@ -124,7 +124,9 @@ class SessionViewModel @Inject constructor(
     fun closeSession(sessionId: String) {
         val isCurrent = store.chatFlow.value.currentSessionId == sessionId
         if (isCurrent) {
-            settingsManager.setDraftText(sessionId, store.composerFlow.value.inputText)
+            // glm-3 🟡#1: single-read fp.
+            val fp = hostProfileStore.currentProfile().serverGroupFp.ifBlank { hostProfileStore.currentProfile().id }
+            settingsManager.setDraftText(fp, sessionId, store.composerFlow.value.inputText)
         }
         val updated = settingsManager.openSessionIds.filter { it != sessionId }
         settingsManager.openSessionIds = updated
@@ -188,7 +190,9 @@ class SessionViewModel @Inject constructor(
             it.copy(inputText = "", imageAttachments = emptyList(), draftWorkdir = workdir)
         }
         settingsManager.currentWorkdir = workdir
-        settingsManager.addRecentWorkdir(workdir)
+        // glm-3 🟡#1: single-read fp.
+        val fp = hostProfileStore.currentProfile().serverGroupFp.ifBlank { hostProfileStore.currentProfile().id }
+        settingsManager.addRecentWorkdir(fp, workdir)
         // §R18 Phase 3 Wave 2 (drift #6): ephemeral directory-session prefetch
         // → viewModelScope. If the user navigates away mid-fetch the partial
         // directorySessions write is acceptable (refreshDirectorySessions
@@ -312,8 +316,7 @@ class SessionViewModel @Inject constructor(
      * session. Behaviour preserved verbatim.
      */
     fun loadSessions() {
-        // glm-3 🟡#1: single-read fp.
-        val fp = hostProfileStore.currentProfile().serverGroupFp.ifBlank { hostProfileStore.currentProfile().id }
+        val expectedFp = hostProfileStore.currentProfile().serverGroupFp.ifBlank { hostProfileStore.currentProfile().id }
         launchLoadSessions(
             scope = appScope,
             repository = repository,
@@ -328,7 +331,11 @@ class SessionViewModel @Inject constructor(
             // loadSessions path too. AppCore holds the cacheRepository
             // singleton; this VM holds its own (Hilt-bound same instance).
             cacheRepository = cacheRepository,
-            currentServerGroupFp = { fp },
+            expectedServerGroupFp = expectedFp,
+            currentServerGroupFp = { hostProfileStore.currentProfile().serverGroupFp.ifBlank { hostProfileStore.currentProfile().id } },
+            // R-20 Phase 5 (plan §3 G1): wire hostProfileStore for the
+            // cross-group merge step (LAN + tunnel same-server detection).
+            hostProfileStore = hostProfileStore,
         )
     }
 

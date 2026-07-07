@@ -1,6 +1,7 @@
 package cn.vectory.ocdroid.ui.controller
 
 import cn.vectory.ocdroid.data.model.ComposerImageAttachment
+import cn.vectory.ocdroid.data.repository.HostProfileStore
 import cn.vectory.ocdroid.ui.ChatState
 import cn.vectory.ocdroid.ui.ComposerState
 import cn.vectory.ocdroid.ui.SharedStateStore
@@ -34,10 +35,15 @@ import cn.vectory.ocdroid.util.SettingsManager
  * `writeComposer` mirrors the orchestrator's M3 helper: writes the composer
  * slice via `composerFlow.update` so subscribers see a consistent value (RFC
  * R-17 §4 strategy A, §9.2 — no dispatcher batch reliance).
+ *
+ * R-20 Phase 5: [hostProfileStore] injected so draft writes can derive the
+ * current serverGroupFp (composite `(fp, sessionId)` key — see
+ * [SettingsManager.setDraftText]).
  */
 class ComposerController(
     private val store: SharedStateStore,
     private val settingsManager: SettingsManager,
+    private val hostProfileStore: HostProfileStore,
 ) {
     /**
      * §R-17 M3→M5→batch2: writes the composer slice only (slice is the
@@ -52,7 +58,10 @@ class ComposerController(
 
     fun setInputText(text: String) {
         writeComposer { it.copy(inputText = text) }
-        store.chatFlow.value.currentSessionId?.let { settingsManager.setDraftText(it, text) }
+        // R-20 Phase 5: per-(fp, sessionId) composite key — the draft is
+        // scoped to the current host group + the active session.
+        val fp = hostProfileStore.currentProfile().serverGroupFp.ifBlank { hostProfileStore.currentProfile().id }
+        store.chatFlow.value.currentSessionId?.let { settingsManager.setDraftText(fp, it, text) }
     }
 
     fun addImageAttachments(attachments: List<ComposerImageAttachment>) {

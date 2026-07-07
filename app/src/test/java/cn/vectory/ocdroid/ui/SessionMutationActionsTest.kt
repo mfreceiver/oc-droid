@@ -61,8 +61,8 @@ class SessionMutationActionsTest {
         slices = store.slices
         repository = mockk(relaxed = true)
         settingsManager = mockk(relaxed = true)
-        every { settingsManager.getAgentForSession(any()) } returns null
-        every { settingsManager.getModelForSession(any()) } returns null
+        every { settingsManager.getAgentForSession(any(), any()) } returns null
+        every { settingsManager.getModelForSession(any(), any()) } returns null
         every { settingsManager.openSessionIds } returns emptyList()
         scope = TestScope(UnconfinedTestDispatcher())
         emitted = mutableListOf()

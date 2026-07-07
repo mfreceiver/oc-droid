@@ -211,7 +211,8 @@ class ConnectionActionsTest {
     fun `applyReloadDisabledModelsForCurrentHost writes per-host disabled set into settings slice`() {
         val profile = HostProfile.defaultDirect(serverUrl = "https://h1.test")
         every { hostProfileStore.currentProfile() } returns profile
-        every { settingsManager.getDisabledModels("https://h1.test") } returns setOf("anthropic/claude")
+        // R-20 Phase 5: per-serverGroupFp keying (was per-baseUrl).
+        every { settingsManager.getDisabledModels(profile.serverGroupFp.ifBlank { profile.id }) } returns setOf("anthropic/claude")
 
         applyReloadDisabledModelsForCurrentHost(settingsManager, hostProfileStore, slices)
 

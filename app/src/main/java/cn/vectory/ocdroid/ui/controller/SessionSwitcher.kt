@@ -240,13 +240,18 @@ class SessionSwitcher(
         // Save old draft, set currentSessionId, restore new draft, clear chat.
         val oldSessionId = slices.chat.value.currentSessionId
         val currentInputText = slices.composer.value.inputText
+        // R-20 Phase 5: capture fp ONCE — both draft writes (save outgoing +
+        // restore incoming) MUST use the same fp so they land in / read from
+        // the same per-(fp, sessionId) slot. A re-read between them could race
+        // a host switch.
+        val fp = currentServerGroupFp()
         if (oldSessionId != null) {
-            settingsManager.setDraftText(oldSessionId, currentInputText)
+            settingsManager.setDraftText(fp, oldSessionId, currentInputText)
         }
         // §R18 Phase 2-F: chatFlow.currentSessionId (set in the chat.update
         // below) is the sole runtime source; the AppCore collector persists
         // the new non-null id back to SettingsManager. No manual write here.
-        val restoredDraft = settingsManager.getDraftText(sessionId)
+        val restoredDraft = settingsManager.getDraftText(fp, sessionId)
         slices.mutateChat {
             it.copy(
                 currentSessionId = sessionId,

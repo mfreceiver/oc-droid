@@ -21,6 +21,16 @@ internal fun applySavedSettings(
 ) {
 
     val currentProfile = hostProfileStore.currentProfile()
+    // R-20 Phase 5 (plan §3, cold-start migration trigger): migrate the
+    // legacy global / baseUrl-keyed / sessionId-keyed storage slots to the
+    // current host's fp-keyed slots. Idempotent per fp via the
+    // `cache_migration_v1_done_<fp>` flag in EncryptedSharedPreferences
+    // (NOT Room — migration runs at AppCore.init, before the cache DB is
+    // necessarily open). Pure ESP synchronous read+write, no network.
+    // Repeated cold starts skip the rewrite. See SettingsManager.migrateLegacyKeysToFp.
+    val currentFp = currentProfile.serverGroupFp.ifBlank { currentProfile.id }
+    settingsManager.migrateLegacyKeysToFp(currentFp, currentProfile.serverUrl)
+
     val password = currentProfile.basicAuth?.passwordId?.let { settingsManager.basicAuthPassword(it) }
     repository.configure(
         baseUrl = currentProfile.serverUrl,
@@ -88,10 +98,10 @@ internal fun applySavedSettings(
     // prefs. Runs synchronously alongside the slice updates above; intermediate
     // state legal.
     val seedAgent = settingsManager.selectedAgentName ?: "build"
-    // §model-selection: load per-baseUrl disabled-model set for the active
-    // host so the chat quick-switch picker + Settings render the right
-    // entries on cold start.
-    val seedDisabledModels = settingsManager.getDisabledModels(currentProfile.serverUrl)
+    // §model-selection / R-20 Phase 5: load per-serverGroupFp disabled-model
+    // set for the active host (was per-baseUrl before Phase 5) so the chat
+    // quick-switch picker + Settings render the right entries on cold start.
+    val seedDisabledModels = settingsManager.getDisabledModels(currentFp)
     slices.mutateSettings {
         it.copy(
             selectedAgentName = seedAgent,
@@ -134,7 +144,10 @@ internal fun applyReloadDisabledModelsForCurrentHost(
     hostProfileStore: HostProfileStore,
     slices: SliceFlows,
 ) {
-    val baseUrl = hostProfileStore.currentProfile().serverUrl
-    val set = settingsManager.getDisabledModels(baseUrl)
+    // R-20 Phase 5: per-serverGroupFp (was per-baseUrl). The current profile's
+    // fp isolates the disable set so two profiles reaching the same URL but in
+    // different groups don't clobber each other.
+    val fp = hostProfileStore.currentProfile().serverGroupFp.ifBlank { hostProfileStore.currentProfile().id }
+    val set = settingsManager.getDisabledModels(fp)
     slices.mutateSettings { it.copy(disabledModels = set) }
 }

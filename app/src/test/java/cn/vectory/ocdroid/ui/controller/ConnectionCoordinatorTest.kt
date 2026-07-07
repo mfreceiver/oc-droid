@@ -458,7 +458,7 @@ class ConnectionCoordinatorTest {
         // just currentWorkdir — otherwise a non-current workdir whose sessions
         // fall outside the getSessions(limit) first page vanishes after restart.
         every { settingsManager.currentWorkdir } returns "/current"
-        every { settingsManager.recentWorkdirs } returns listOf("/current", "/other")
+        every { settingsManager.getRecentWorkdirs(any()) } returns listOf("/current", "/other")
         coEvery { repository.getCommands() } returns Result.success(emptyList())
         val currentSessions = listOf(Session(id = "s-cur", directory = "/current"))
         val otherSessions = listOf(Session(id = "s-oth", directory = "/other"))
@@ -479,7 +479,7 @@ class ConnectionCoordinatorTest {
     @Test
     fun `loadInitialData skips the directory fetch when no workdir is restored`() {
         every { settingsManager.currentWorkdir } returns null
-        every { settingsManager.recentWorkdirs } returns emptyList()
+        every { settingsManager.getRecentWorkdirs(any()) } returns emptyList()
         coEvery { repository.getCommands() } returns Result.success(emptyList())
 
         coordinator.loadInitialData()
@@ -498,7 +498,7 @@ class ConnectionCoordinatorTest {
         // launches) amplifies the in-flight window, so the generation check
         // gates every onSuccess write.
         every { settingsManager.currentWorkdir } returns "/proj"
-        every { settingsManager.recentWorkdirs } returns listOf("/proj")
+        every { settingsManager.getRecentWorkdirs(any()) } returns listOf("/proj")
         coEvery { repository.getCommands() } returns Result.success(emptyList())
         // Suspend the fetch so we can interleave a reconfigure before it returns.
         val pending = CompletableDeferred<Result<List<Session>>>()
@@ -526,7 +526,7 @@ class ConnectionCoordinatorTest {
         // Positive control for the generation guard: identical setup but NO
         // reconfigure interleaved → the result IS written.
         every { settingsManager.currentWorkdir } returns "/proj"
-        every { settingsManager.recentWorkdirs } returns listOf("/proj")
+        every { settingsManager.getRecentWorkdirs(any()) } returns listOf("/proj")
         coEvery { repository.getCommands() } returns Result.success(emptyList())
         val sessions = listOf(Session(id = "s1", directory = "/proj"))
         coEvery { repository.getSessionsForDirectory("/proj") } returns Result.success(sessions)
@@ -728,7 +728,7 @@ class ConnectionCoordinatorTest {
         // (Log.w) fires for diagnosability WITHOUT a user-facing error toast.
         // This covers the previously-uncovered onFailure branch (lines 661-664).
         every { settingsManager.currentWorkdir } returns "/proj"
-        every { settingsManager.recentWorkdirs } returns listOf("/proj")
+        every { settingsManager.getRecentWorkdirs(any()) } returns listOf("/proj")
         coEvery { repository.getCommands() } returns Result.success(emptyList())
         coEvery { repository.getSessionsForDirectory("/proj") } returns
             Result.failure(IOException("dir fetch boom"))
@@ -755,7 +755,7 @@ class ConnectionCoordinatorTest {
         // §generation-guard × onFailure: a directory fetch that fails AFTER a
         // host switch must not even log — the error belongs to the stale host.
         every { settingsManager.currentWorkdir } returns "/proj"
-        every { settingsManager.recentWorkdirs } returns listOf("/proj")
+        every { settingsManager.getRecentWorkdirs(any()) } returns listOf("/proj")
         coEvery { repository.getCommands() } returns Result.success(emptyList())
         val pending = CompletableDeferred<Result<List<Session>>>()
         coEvery { repository.getSessionsForDirectory("/proj") } coAnswers { pending.await() }
@@ -856,7 +856,7 @@ class ConnectionCoordinatorTest {
         // can still poll A's pending questions. This test pins the precondition
         // — the SessionSyncCoordinator side is exercised in its own test file.
         every { settingsManager.currentWorkdir } returns "/B"
-        every { settingsManager.recentWorkdirs } returns listOf("/A", "/B")
+        every { settingsManager.getRecentWorkdirs(any()) } returns listOf("/A", "/B")
         coEvery { repository.getCommands() } returns Result.success(emptyList())
         val aSessions = listOf(Session(id = "s-a", directory = "/A"))
         val bSessions = listOf(Session(id = "s-b", directory = "/B"))

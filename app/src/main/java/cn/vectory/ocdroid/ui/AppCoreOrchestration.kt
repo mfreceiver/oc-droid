@@ -183,14 +183,14 @@ internal fun AppCore.materializeDraftSession(onSessionReady: (String) -> Unit) {
                 // above) is the sole runtime source; the AppCore init collector
                 // persists session.id to SettingsManager. No manual write here.
                 store.chatFlow.value.currentModel?.let { model ->
-                    settingsManager.setModelForSession(session.id, model.providerId, model.modelId)
+                    settingsManager.setModelForSession(currentServerGroupFp(), session.id, model.providerId, model.modelId)
                 }
                 // §bug3-defensive: persist the agent too so the next dispatchSendMessage
                 // picks up the per-session agent (mirrors the model copy above; previously
                 // the agent was not copied here, causing a one-message lag when switching
                 // agents in draft mode).
                 store.settingsFlow.value.selectedAgentName?.let { agent ->
-                    settingsManager.setAgentForSession(session.id, agent)
+                    settingsManager.setAgentForSession(currentServerGroupFp(), session.id, agent)
                 }
                 persistSessionCache(
                     settingsManager = settingsManager,
@@ -240,14 +240,14 @@ private fun AppCore.dispatchSendMessage(sessionId: String) {
     if (text.isEmpty() && attachments.isEmpty()) return
 
     writeComposer { state -> state.copy(sendingSessionIds = state.sendingSessionIds + sessionId) }
-    settingsManager.setDraftText(sessionId, "")
+    settingsManager.setDraftText(currentServerGroupFp(), sessionId, "")
     writeComposer { it.copy(inputText = "") }
 
     val currentSession = currentSession(store.sessionListFlow.value.sessions, store.chatFlow.value.currentSessionId)
 
     fun dispatchSend() {
-        val agent = settingsManager.getAgentForSession(sessionId) ?: store.settingsFlow.value.selectedAgentName
-        val model: Message.ModelInfo? = settingsManager.getModelForSession(sessionId) ?: store.chatFlow.value.currentModel
+        val agent = settingsManager.getAgentForSession(currentServerGroupFp(), sessionId) ?: store.settingsFlow.value.selectedAgentName
+        val model: Message.ModelInfo? = settingsManager.getModelForSession(currentServerGroupFp(), sessionId) ?: store.chatFlow.value.currentModel
         launchSendMessage(
             scope = appScope,
             repository = repository,
@@ -260,7 +260,7 @@ private fun AppCore.dispatchSendMessage(sessionId: String) {
             onRefreshMessages = { sid, reset -> loadMessagesWithRetry(sid, reset) },
             onRefreshSessions = { loadSessionsForEffect() },
             onSuccess = {
-                settingsManager.setDraftText(sessionId, "")
+                settingsManager.setDraftText(currentServerGroupFp(), sessionId, "")
                 writeComposer { it.copy(imageAttachments = emptyList()) }
             },
             onComplete = {
@@ -282,7 +282,7 @@ private fun AppCore.dispatchSendMessage(sessionId: String) {
                 .onFailure { error ->
                     val currentInput = store.composerFlow.value.inputText
                     val restored = if (currentInput.isBlank()) text else currentInput
-                    if (restored != currentInput) settingsManager.setDraftText(sessionId, restored)
+                    if (restored != currentInput) settingsManager.setDraftText(currentServerGroupFp(), sessionId, restored)
                     effectBus.tryEmitUiEvent(UiEvent.Error(R.string.error_restore_session_failed, listOf(errorMessageOrFallback(error, "unknown error"))))
                     writeComposer { c ->
                         c.copy(sendingSessionIds = c.sendingSessionIds - sessionId, inputText = restored)
@@ -433,7 +433,13 @@ internal fun AppCore.loadSessionsForEffect() {
         // the session list arrives. MismatchEvicted → drop currentSessionId
         // (cold-start fallback). See launchLoadSessions doc.
         cacheRepository = cacheRepository,
-        currentServerGroupFp = { hostProfileStore.currentProfile().serverGroupFp.ifBlank { hostProfileStore.currentProfile().id } },
+        expectedServerGroupFp = currentServerGroupFp(),
+        currentServerGroupFp = currentServerGroupFp,
+        // R-20 Phase 5 (plan §3 G1 三条件): wire hostProfileStore so
+        // launchLoadSessions can merge cross-group profiles that reach the
+        // same server (LAN + tunnel, etc.) on first (id + createdAt + dir +
+        // non-empty) match.
+        hostProfileStore = hostProfileStore,
     )
 }
 
@@ -469,7 +475,7 @@ private fun AppCore.createSessionInWorkdirForEffect(workdir: String) {
         it.copy(inputText = "", imageAttachments = emptyList(), draftWorkdir = workdir)
     }
     settingsManager.currentWorkdir = workdir
-    settingsManager.addRecentWorkdir(workdir)
+    settingsManager.addRecentWorkdir(currentServerGroupFp(), workdir)
     appScope.launch {
         repository.getSessionsForDirectory(workdir)
             .onSuccess { sessions ->

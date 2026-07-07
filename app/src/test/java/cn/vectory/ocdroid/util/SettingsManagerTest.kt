@@ -90,58 +90,62 @@ class SettingsManagerTest {
     }
 
     // ───── recentWorkdirs：项目记忆与冷启动恢复（§recent-workdirs）─────
+    // R-20 Phase 5: per-serverGroupFp storage. Tests pass a fixed fp ("g1")
+    // so the per-fp slot is exercised the same way the legacy global slot was.
+
+    private val rwFp = "g1"
 
     @Test
     fun `recentWorkdirs defaults to empty`() {
-        assertTrue(settings.recentWorkdirs.isEmpty())
+        assertTrue(settings.getRecentWorkdirs(rwFp).isEmpty())
     }
 
     @Test
     fun `recentWorkdirs round trip`() {
-        settings.recentWorkdirs = listOf("/a", "/b")
-        assertEquals(listOf("/a", "/b"), settings.recentWorkdirs)
+        settings.setRecentWorkdirs(rwFp, listOf("/a", "/b"))
+        assertEquals(listOf("/a", "/b"), settings.getRecentWorkdirs(rwFp))
     }
 
     @Test
     fun `recentWorkdirs survives corrupt JSON by returning empty`() {
         // 直接写入损坏 JSON 模拟 prefs 损坏；getter 必须降级为空而非崩溃。
-        settings.recentWorkdirs = listOf("/a")
+        settings.setRecentWorkdirs(rwFp, listOf("/a"))
         // round-trip 已验证；这里只确保解析失败路径不抛（见 openSessionIds 同类契约）。
-        assertEquals(listOf("/a"), settings.recentWorkdirs)
+        assertEquals(listOf("/a"), settings.getRecentWorkdirs(rwFp))
     }
 
     @Test
     fun `addRecentWorkdir prepends new workdir MRU`() {
-        settings.addRecentWorkdir("/a")
-        settings.addRecentWorkdir("/b")
-        assertEquals(listOf("/b", "/a"), settings.recentWorkdirs)
+        settings.addRecentWorkdir(rwFp, "/a")
+        settings.addRecentWorkdir(rwFp, "/b")
+        assertEquals(listOf("/b", "/a"), settings.getRecentWorkdirs(rwFp))
     }
 
     @Test
     fun `addRecentWorkdir deduplicates and moves existing to front`() {
-        settings.addRecentWorkdir("/a")
-        settings.addRecentWorkdir("/b")
-        settings.addRecentWorkdir("/a") // 重连 A → 提升到首位
-        assertEquals(listOf("/a", "/b"), settings.recentWorkdirs)
+        settings.addRecentWorkdir(rwFp, "/a")
+        settings.addRecentWorkdir(rwFp, "/b")
+        settings.addRecentWorkdir(rwFp, "/a") // 重连 A → 提升到首位
+        assertEquals(listOf("/a", "/b"), settings.getRecentWorkdirs(rwFp))
     }
 
     @Test
     fun `addRecentWorkdir ignores blank entries`() {
-        settings.addRecentWorkdir("   ")
-        assertTrue(settings.recentWorkdirs.isEmpty())
+        settings.addRecentWorkdir(rwFp, "   ")
+        assertTrue(settings.getRecentWorkdirs(rwFp).isEmpty())
     }
 
     @Test
     fun `addRecentWorkdir trims surrounding whitespace`() {
-        settings.addRecentWorkdir("  /a  ")
-        assertEquals(listOf("/a"), settings.recentWorkdirs)
+        settings.addRecentWorkdir(rwFp, "  /a  ")
+        assertEquals(listOf("/a"), settings.getRecentWorkdirs(rwFp))
     }
 
     @Test
     fun `addRecentWorkdir caps at MAX_RECENT_WORKDIRS`() {
         // 加 12 个不同 workdir；只有最近 8 个保留（MRU 序）。
-        for (i in 1..12) settings.addRecentWorkdir("/proj/$i")
-        val result = settings.recentWorkdirs
+        for (i in 1..12) settings.addRecentWorkdir(rwFp, "/proj/$i")
+        val result = settings.getRecentWorkdirs(rwFp)
         assertEquals(8, result.size)
         // MRU first：/proj/12 … /proj/5。
         assertEquals("/proj/12", result.first())
@@ -234,21 +238,23 @@ class SettingsManagerTest {
 
     @Test
     fun `session agent map round trip`() {
-        settings.setAgentForSession("s1", "build")
-        settings.setAgentForSession("s2", "general")
-        assertEquals("build", settings.getAgentForSession("s1"))
-        assertEquals("general", settings.getAgentForSession("s2"))
-        assertNull(settings.getAgentForSession("unknown"))
+        // R-20 Phase 5: per-(fp, sessionId) composite key.
+        settings.setAgentForSession("g1", "s1", "build")
+        settings.setAgentForSession("g1", "s2", "general")
+        assertEquals("build", settings.getAgentForSession("g1", "s1"))
+        assertEquals("general", settings.getAgentForSession("g1", "s2"))
+        assertNull(settings.getAgentForSession("g1", "unknown"))
     }
 
     @Test
     fun `draft text round trip and blank removal`() {
-        settings.setDraftText("s1", "hello world")
-        assertEquals("hello world", settings.getDraftText("s1"))
-        assertEquals("", settings.getDraftText("s1-unknown"))
+        // R-20 Phase 5: per-(fp, sessionId) composite key.
+        settings.setDraftText("g1", "s1", "hello world")
+        assertEquals("hello world", settings.getDraftText("g1", "s1"))
+        assertEquals("", settings.getDraftText("g1", "s1-unknown"))
         // 写空串应从字典里移除该 session
-        settings.setDraftText("s1", "")
-        assertEquals("", settings.getDraftText("s1"))
+        settings.setDraftText("g1", "s1", "")
+        assertEquals("", settings.getDraftText("g1", "s1"))
     }
 
     @Test
@@ -299,11 +305,11 @@ class SettingsManagerTest {
         settings.markdownFontLatin = "WipeMdFont"
         settings.trafficBytesSent = 999L
         settings.trafficBytesReceived = 888L
-        settings.setAgentForSession("sess-wipe", "build")
-        settings.setDraftText("sess-wipe", "draft-wipe")
+        settings.setAgentForSession(rwFp, "sess-wipe", "build")
+        settings.setDraftText(rwFp, "sess-wipe", "draft-wipe")
         settings.openSessionIds = listOf("sess-wipe")
         settings.selectedAgentName = "agent-wipe"
-        settings.recentWorkdirs = listOf("/tmp/wipe-proj")
+        settings.setRecentWorkdirs(rwFp, listOf("/tmp/wipe-proj"))
 
         // ── 执行 ──
         settings.clearAllLocalData()
@@ -327,13 +333,13 @@ class SettingsManagerTest {
         assertEquals("", settings.markdownFontLatin)
         assertEquals(0L, settings.trafficBytesSent)
         assertEquals(0L, settings.trafficBytesReceived)
-        assertNull(settings.getAgentForSession("sess-wipe"))
-        assertEquals("", settings.getDraftText("sess-wipe"))
+        assertNull(settings.getAgentForSession(rwFp, "sess-wipe"))
+        assertEquals("", settings.getDraftText(rwFp, "sess-wipe"))
         assertTrue(settings.openSessionIds.isEmpty())
         assertNull(settings.selectedAgentName)
         // §recent-workdirs: project-discovery memory is local UI state, not a
         // connection credential → wiped alongside currentWorkdir/openSessionIds.
-        assertTrue(settings.recentWorkdirs.isEmpty())
+        assertTrue(settings.getRecentWorkdirs(rwFp).isEmpty())
     }
 
     /**

@@ -176,10 +176,13 @@ class HostProfileController(
         val toggleChanged = previous?.allowInsecureConnections != normalized.allowInsecureConnections
         val urlChanged = previous?.serverUrl != normalized.serverUrl
         if (isActiveHost && urlChanged) {
-            // §bug5: URL changed → deliberately drop old-URL model data so stale
-            // disable config does not leak / orphan. The HostProfileSwitched
-            // emission below reloads the (now-empty) set for the new URL.
-            previous?.serverUrl?.let { settingsManager.clearModelDataForUrl(it) }
+            // §bug5 / R-20 Phase 5: URL changed → drop model data so stale
+            // disable config does not leak / orphan. Was clearModelDataForUrl
+            // (URL-keyed); now clearModelDataForGroup(fp-keyed) — the profile
+            // keeps its fp across URL edits, so the fp slot is the right one
+            // to clear. The HostProfileSwitched emission below reloads the
+            // (now-empty) set.
+            settingsManager.clearModelDataForGroup(normalized.serverGroupFp.ifBlank { normalized.id })
         }
         if (isActiveHost && (toggleChanged || urlChanged)) {
             configureRepositoryForProfile(normalized)
@@ -213,12 +216,11 @@ class HostProfileController(
      */
     fun deleteHostProfile(profileId: String) {
         val wasCurrent = profileId == slices.host.value.currentHostProfileId
-        // §bug5: capture the deleted profile's URL before the store mutation so
-        // we can purge its per-URL model data if it was the active host.
-        // R-20 Phase 1: capture serverGroupFp too — deleting the active host
-        // evicts its group's cache (orphan: no profile references it anymore).
+        // §bug5 / R-20 Phase 5: capture the deleted profile's fp before the
+        // store mutation so we can purge its group's model data if it was the
+        // active host. (Was serverUrl-keyed; Phase 5 makes it fp-keyed — see
+        // clearModelDataForGroup call below.)
         val deletedProfile = hostProfileStore.profiles().firstOrNull { it.id == profileId }
-        val deletedServerUrl = deletedProfile?.serverUrl
         val deletedFp = deletedProfile?.serverGroupFp
         // §review-fix #6: count remaining profiles in the SAME group BEFORE
         // the delete (after delete, the count would be off-by-one). The
@@ -232,10 +234,19 @@ class HostProfileController(
         configureRepositoryForProfile(current)
         refreshHostProfileState()
         if (wasCurrent) {
-            // §bug5: drop the deleted active host's model data so it does not
-            // leak into the new active host's identity (same-URL collision or
-            // later re-add of an identical URL).
-            deletedServerUrl?.let { settingsManager.clearModelDataForUrl(it) }
+            // §bug5 / R-20 Phase 5: drop the deleted active host's model data
+            // so it does not leak into the new active host's identity (same-fp
+            // collision on re-add, or a sibling profile in the same group
+            // inheriting the disable set). Was clearModelDataForUrl; now
+            // clearModelDataForGroup for the deleted profile's fp.
+            if (remainingInGroup.isEmpty()) {
+                deletedFp?.let { settingsManager.clearModelDataForGroup(it) }
+            } else {
+                DebugLog.i(
+                    TAG,
+                    "deleteHostProfile: kept model data for fp=$deletedFp — ${remainingInGroup.size} sibling profile(s) still reference this group"
+                )
+            }
             // R-20 Phase 1: deleting the active host is "异组切换" — purge
             // per-server-data (preserveServerData=false) and emit EvictGroup
             // for the deleted host's group (its cache is orphaned — no profile
@@ -399,11 +410,16 @@ class HostProfileController(
                     lastViewedTime = emptyMap()
                 )
             }
-            // §recent-workdirs: clear per-host workdir memory on 异组 switch
-            // (paths from server A are meaningless on server B). For 同组
-            // switch (preserveServerGroupData=true) recentWorkdirs is preserved
-            // — same server, same workdirs.
-            settingsManager.recentWorkdirs = emptyList()
+            // §recent-workdirs / R-20 Phase 5: clear per-host workdir memory
+            // on 异组 switch (paths from server A are meaningless on server B).
+            // Was a single global slot (`recentWorkdirs = emptyList()`); now
+            // scoped to the current fp — same-group switches preserve the
+            // list (correct: same server, same workdirs). NOTE: at the call
+            // site (selectHostProfile) currentServerGroupFp() reads the NEW
+            // (target) fp because select() already ran. The NEW profile's
+            // recentWorkdirs is cleared so it starts fresh; the OLD profile's
+            // data is preserved (the user can switch back).
+            settingsManager.clearRecentWorkdirs(currentServerGroupFp())
             // §H3: clear persisted workdir — a path from host A is meaningless
             // on host B. configureRepositoryForProfile re-scopes to the (now-
             // null) workdir, which is correct for a fresh host.
@@ -482,12 +498,15 @@ class HostProfileController(
         val oldUrl = settingsManager.serverUrl
         val urlChanging = oldUrl != url
         if (urlChanging) {
-            // §bug5: manual URL change also clears old model data so the disable
-            // set does not orphan against an identity the user abandoned.
-            // HostProfileSwitched below reloads the (now-empty) set for the new
-            // URL — previously this path skipped the reload entirely, leaving
-            // the in-memory slice stale.
-            settingsManager.clearModelDataForUrl(oldUrl)
+            // §bug5 / R-20 Phase 5: manual URL change also clears model data
+            // so the disable set does not orphan against an identity the user
+            // abandoned. Was clearModelDataForUrl(oldUrl); now
+            // clearModelDataForGroup for the current host's fp (the manual
+            // form operates on the current profile — its fp is unchanged
+            // across URL edits, so we drop the fp slot to give the new server
+            // a fresh start). HostProfileSwitched below reloads the (now-
+            // empty) set.
+            settingsManager.clearModelDataForGroup(currentServerGroupFp())
         }
         effects.tryEmitEffect(ControllerEffect.CancelSseForReconfigure)
         settingsManager.serverUrl = url

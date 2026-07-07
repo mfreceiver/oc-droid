@@ -124,7 +124,7 @@ class ChatViewModelTest : MainViewModelTestBase() {
         // `getModelForSession(any()) returns null`; MockK resolves the last
         // matching stub, so the precise-sessionId stub wins (same override
         // pattern as getMessagesPaged("session-1", ...) at line ~1444).
-        every { settingsManager.getModelForSession("session-1") } returns
+        every { settingsManager.getModelForSession(any(), "session-1") } returns
             Message.ModelInfo("openai", "gpt-5")
 
         val core = createCore()
@@ -170,7 +170,7 @@ class ChatViewModelTest : MainViewModelTestBase() {
         coEvery { repository.getMessagesPaged("session-1", any(), any()) } returns
             Result.success(MessagesPage(messages, null))
         // Stored per-session model — MUST win over the assistant-message inference.
-        every { settingsManager.getModelForSession("session-1") } returns
+        every { settingsManager.getModelForSession(any(), "session-1") } returns
             Message.ModelInfo("anthropic", "claude")
 
         val core = createCore()
@@ -672,7 +672,7 @@ class ChatViewModelTest : MainViewModelTestBase() {
         val viewModel = ChatViewModel(core)  // primary VM under test
         core.writeChat { it.copy(currentSessionId = "session-1") }
         // Explicit per-session override — must win over the history-inferred "build".
-        every { settingsManager.getAgentForSession("session-1") } returns "plan"
+        every { settingsManager.getAgentForSession(any(), "session-1") } returns "plan"
 
         chatVM.loadMessages("session-1")
         advanceUntilIdle()
@@ -904,7 +904,7 @@ class ChatViewModelTest : MainViewModelTestBase() {
         chatVM.sendMessage()
         advanceUntilIdle()
 
-        verify { settingsManager.setDraftText("s1", "") }
+        verify { settingsManager.setDraftText(any(), "s1", "") }
     }
 
     @Test

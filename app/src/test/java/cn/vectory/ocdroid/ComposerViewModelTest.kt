@@ -99,7 +99,7 @@ class ComposerViewModelTest : MainViewModelTestBase() {
         composerVM.switchSessionModel("openai", "gpt-5")
 
         // V1-per-prompt: choice is persisted LOCALLY per session (no server call).
-        verify { settingsManager.setModelForSession("session-1", "openai", "gpt-5") }
+        verify { settingsManager.setModelForSession(any(), "session-1", "openai", "gpt-5") }
         // Synchronous in-memory update so the picker reflects the choice with no
         // launch/await (switchSessionModel is a plain fun, not a suspend/coroutine).
         assertEquals(
@@ -134,7 +134,7 @@ class ComposerViewModelTest : MainViewModelTestBase() {
             chatVM.chatFlow.value.currentModel
         )
         // No real session exists yet → must NOT persist (no valid session id).
-        verify(exactly = 0) { settingsManager.setModelForSession(any(), any(), any()) }
+        verify(exactly = 0) { settingsManager.setModelForSession(any(), any(), any(), any()) }
     }
 
     @Test
@@ -172,7 +172,7 @@ class ComposerViewModelTest : MainViewModelTestBase() {
         // The in-memory draft choice MUST be persisted to the now-real session
         // id, so subsequent loadMessages reads it via getModelForSession instead
         // of falling back to inference.
-        verify { settingsManager.setModelForSession("draft-1", "openai", "gpt-5") }
+        verify { settingsManager.setModelForSession(any(), "draft-1", "openai", "gpt-5") }
         // And the outgoing prompt carries the chosen model.
         coVerify {
             repository.sendMessage(
@@ -199,7 +199,7 @@ class ComposerViewModelTest : MainViewModelTestBase() {
 
         composerVM.setInputText("hello")
 
-        verify { settingsManager.setDraftText("s1", "hello") }
+        verify { settingsManager.setDraftText(any(), "s1", "hello") }
     }
 
     @Test
@@ -216,7 +216,7 @@ class ComposerViewModelTest : MainViewModelTestBase() {
 
         composerVM.selectAgent("oracle")
 
-        verify { settingsManager.setAgentForSession("s1", "oracle") }
+        verify { settingsManager.setAgentForSession(any(), "s1", "oracle") }
     }
 
 }

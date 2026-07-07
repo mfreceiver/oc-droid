@@ -190,7 +190,7 @@ class ChatViewModel @Inject constructor(
                         state.copy(sessions = state.sessions.map { session -> if (session.id == sessionId) updatedSession else session })
                     }
                     core.writeComposer { c -> c.copy(inputText = draft, imageAttachments = emptyList()) }
-                    core.settingsManager.setDraftText(sessionId, draft)
+                    core.settingsManager.setDraftText(core.currentServerGroupFp(), sessionId, draft)
                     loadMessages(sessionId, resetLimit = true)
                     core.loadSessionsForEffect()
                 }

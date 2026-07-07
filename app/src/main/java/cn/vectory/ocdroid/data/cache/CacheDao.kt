@@ -1,6 +1,8 @@
 package cn.vectory.ocdroid.data.cache
 
+import androidx.room.ColumnInfo
 import androidx.room.Dao
+import androidx.room.Embedded
 import androidx.room.Query
 import androidx.room.Transaction
 import androidx.room.Upsert
@@ -56,6 +58,63 @@ interface CacheDao {
     @Query("SELECT * FROM cached_session WHERE server_group_fp = :fp")
     suspend fun sessionsInGroup(fp: String): List<CachedSessionEntity>
 
+    /**
+     * R-20 Phase 4 (plan §3): all cached sessions in [fp] ordered by
+     * `newest_cached_at DESC` — newest content first. Used by the
+     * CacheManagementSection UI list to render each cached row.
+     *
+     * Distinct from [sessionsInGroup] (no order guarantee) so Phase 3's sweep
+     * paths keep their existing SQL plan while the UI gets a stable
+     * "most-recently-cached first" ordering the user expects.
+     */
+    @Query(
+        """
+        SELECT s.*,
+          (SELECT COUNT(*) FROM cached_message m
+           WHERE m.server_group_fp = s.server_group_fp
+             AND m.session_id = s.session_id) AS msg_count
+        FROM cached_session s
+        WHERE s.server_group_fp = :fp
+        ORDER BY s.newest_cached_at DESC
+        """
+    )
+    suspend fun sessionsByGroup(fp: String): List<CachedSessionWithMessageCount>
+
+    /**
+     * R-20 Phase 4 (plan §3): every distinct `server_group_fp` that has at
+     * least one cached session row. Used by the CacheManagementSection UI to
+     * group the cache listing by server group. Empty result ⇒ nothing cached.
+     */
+    @Query("SELECT DISTINCT server_group_fp FROM cached_session")
+    suspend fun allGroups(): List<String>
+
+    /**
+     * R-20 Phase 4 (plan §3 Phase 4 "clearProject" action): cascade-delete
+     * every session row in [fp] whose `workdir == :workdir`. Used by
+     * [CacheRepository.evictWorkdirInGroup] (the "clear this project's cache"
+     * action); the messages + gaps are deleted in the same Room transaction.
+     */
+    @Query("DELETE FROM cached_session WHERE server_group_fp = :fp AND workdir = :workdir")
+    suspend fun deleteSessionsByWorkdir(fp: String, workdir: String)
+
+    /**
+     * R-20 Phase 4: cascade-delete every cached message belonging to a session
+     * in [fp] whose session row has `workdir == :workdir`. The subquery
+     * references the un-modified `cached_session` (the session DELETE in the
+     * wrapping transaction runs AFTER this one so the join still resolves).
+     */
+    @Query(
+        """
+        DELETE FROM cached_message
+        WHERE server_group_fp = :fp
+          AND session_id IN (
+            SELECT session_id FROM cached_session
+            WHERE server_group_fp = :fp AND workdir = :workdir
+          )
+        """
+    )
+    suspend fun deleteSessionMessagesByWorkdir(fp: String, workdir: String)
+
     // ───────────────────── updates ───────────────────────────────────────
 
     /**
@@ -78,6 +137,34 @@ interface CacheDao {
      */
     @Query("UPDATE cached_session SET newest_cached_at = MAX(newest_cached_at, :now) WHERE server_group_fp = :fp AND session_id = :sid")
     suspend fun bumpNewestCachedAt(fp: String, sid: String, now: Long)
+
+    @Query("UPDATE cached_session SET server_group_fp = :into WHERE server_group_fp = :from")
+    suspend fun rekeySessions(from: String, into: String)
+
+    @Query("UPDATE cached_message SET server_group_fp = :into WHERE server_group_fp = :from")
+    suspend fun rekeyMessages(from: String, into: String)
+
+    @Query(
+        """
+        DELETE FROM cached_message
+        WHERE server_group_fp = :into
+          AND session_id IN (
+            SELECT session_id FROM cached_message WHERE server_group_fp = :from
+          )
+        """
+    )
+    suspend fun deleteIntoMessagesConflictingWithFrom(from: String, into: String)
+
+    @Query(
+        """
+        DELETE FROM cached_session
+        WHERE server_group_fp = :into
+          AND session_id IN (
+            SELECT session_id FROM cached_session WHERE server_group_fp = :from
+          )
+        """
+    )
+    suspend fun deleteIntoSessionsConflictingWithFrom(from: String, into: String)
 
     // ───────────────────── delete (session-scoped) ───────────────────────
 
@@ -195,6 +282,11 @@ interface CacheDao {
     suspend fun workdirsInGroup(fp: String): List<String>
 }
 
+data class CachedSessionWithMessageCount(
+    @Embedded val session: CachedSessionEntity,
+    @ColumnInfo(name = "msg_count") val messageCount: Int,
+)
+
 /**
  * R-20 Phase 2 (plan §1 / §3): DAO for [GapMarkerEntity] — the per-gap cursor
  * + state operations backing the non-contiguous message model.
@@ -219,6 +311,20 @@ interface GapMarkerDao {
 
     @Query("UPDATE gap_marker SET state = :state, updated_at = :now WHERE gap_id = :gapId")
     suspend fun setState(gapId: String, state: String, now: Long)
+
+    @Query("UPDATE gap_marker SET server_group_fp = :into WHERE server_group_fp = :from")
+    suspend fun rekeyGaps(from: String, into: String)
+
+    @Query(
+        """
+        DELETE FROM gap_marker
+        WHERE server_group_fp = :into
+          AND session_id IN (
+            SELECT session_id FROM gap_marker WHERE server_group_fp = :from
+          )
+        """
+    )
+    suspend fun deleteIntoGapsConflictingWithFrom(from: String, into: String)
 
     @Query("UPDATE gap_marker SET upper_boundary_message_id = :upperBoundary, next_before_cursor = :cursor, state = :state, updated_at = :now WHERE gap_id = :gapId")
     suspend fun advanceBoundary(
@@ -284,5 +390,23 @@ interface GapMarkerDao {
         """
     )
     suspend fun evictByLastVerifiedAtGaps(fp: String, cutoff: Long)
-}
 
+    /**
+     * R-20 Phase 4 (plan §3 "clearProject"): cascade-delete every gap marker
+     * belonging to a session in [fp] whose session row has
+     * `workdir == :workdir`. Subquery references the un-modified
+     * `cached_session` (the session DELETE in the wrapping transaction runs
+     * AFTER this one).
+     */
+    @Query(
+        """
+        DELETE FROM gap_marker
+        WHERE server_group_fp = :fp
+          AND session_id IN (
+            SELECT session_id FROM cached_session
+            WHERE server_group_fp = :fp AND workdir = :workdir
+          )
+        """
+    )
+    suspend fun deleteGapsByWorkdir(fp: String, workdir: String)
+}

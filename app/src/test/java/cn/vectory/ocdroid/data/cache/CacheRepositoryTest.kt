@@ -10,6 +10,7 @@ import cn.vectory.ocdroid.ui.CachedSessionWindow
 import kotlinx.coroutines.test.runTest
 import org.junit.After
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
@@ -476,6 +477,58 @@ class CacheRepositoryTest {
         repo.openGap("g1", "s1", "m1", "m2", "c1")
         repo.evictSession("g1", "s1")
         assertTrue(repo.gapsOf("g1", "s1").isEmpty())
+    }
+
+    @Test
+    fun `mergeCacheGroup rekeys sessions messages and gaps in one group`() = runTest {
+        seedWindowWithIds("gB", "sB", listOf("m1" to 100L, "m2" to 200L))
+        repo.openGap("gB", "sB", "m1", "m2", "cursor")
+
+        repo.mergeCacheGroup(fromFp = "gB", intoFp = "gA")
+
+        assertEquals(listOf("sB"), repo.listGroupSessions("gA").map { it.sessionId })
+        assertTrue(repo.listGroupSessions("gB").isEmpty())
+        assertEquals(listOf("m1", "m2"), db.cacheDao().messages("gA", "sB").map { it.messageId })
+        assertTrue(db.cacheDao().messages("gB", "sB").isEmpty())
+        assertEquals(1, repo.gapsOf("gA", "sB").size)
+        assertTrue(repo.gapsOf("gB", "sB").isEmpty())
+        assertFalse(repo.allServerGroupFps().contains("gB"))
+    }
+
+    @Test
+    fun `mergeCacheGroup blank and same-fp are no-ops`() = runTest {
+        seedWindowWithIds("gA", "sA", listOf("m1" to 100L))
+
+        repo.mergeCacheGroup(fromFp = "", intoFp = "gA")
+        repo.mergeCacheGroup(fromFp = "gA", intoFp = "gA")
+
+        assertEquals(listOf("sA"), repo.listGroupSessions("gA").map { it.sessionId })
+    }
+
+    @Test
+    fun `mergeCacheGroup resolves target PK conflicts by letting source overwrite`() = runTest {
+        seedWindowWithIds("gA", "same", listOf("into-old" to 100L))
+        seedWindowWithIds("gB", "same", listOf("from-new" to 200L))
+        repo.openGap("gA", "same", "into-old", "into-next", "old-cursor")
+        repo.openGap("gB", "same", "from-new", "from-next", "new-cursor")
+
+        repo.mergeCacheGroup(fromFp = "gB", intoFp = "gA")
+
+        assertEquals(listOf("same"), repo.listGroupSessions("gA").map { it.sessionId })
+        assertEquals(listOf("from-new"), db.cacheDao().messages("gA", "same").map { it.messageId })
+        assertEquals("from-new", repo.gapsOf("gA", "same").single().lowerAnchorMessageId)
+        assertTrue(repo.listGroupSessions("gB").isEmpty())
+    }
+
+    @Test
+    fun `listGroupSessions reports real messageCount for empty and non-empty rows`() = runTest {
+        seedWindowWithIds("g1", "empty", emptyList())
+        seedWindowWithIds("g1", "non-empty", listOf("m1" to 100L, "m2" to 200L))
+
+        val rows = repo.listGroupSessions("g1").associateBy { it.sessionId }
+
+        assertEquals(0, rows.getValue("empty").messageCount)
+        assertEquals(2, rows.getValue("non-empty").messageCount)
     }
 
     // ─────────── helpers ──────────────────────────────────────────────────

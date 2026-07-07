@@ -65,8 +65,8 @@ class MessageActionsTest {
         slices = store.slices
         repository = mockk(relaxed = true)
         settingsManager = mockk(relaxed = true)
-        every { settingsManager.getAgentForSession(any()) } returns null
-        every { settingsManager.getModelForSession(any()) } returns null
+        every { settingsManager.getAgentForSession(any(), any()) } returns null
+        every { settingsManager.getModelForSession(any(), any()) } returns null
         scope = TestScope(UnconfinedTestDispatcher())
         emitted = mutableListOf()
         emit = EventEmitter { event -> emitted.add(event) }
@@ -266,7 +266,7 @@ class MessageActionsTest {
         val msgs = listOf(MessageWithParts(info = Message(id = "a1", role = "assistant", agent = "build")))
         coEvery { repository.getMessagesPaged("s1", any(), any()) } returns Result.success(MessagesPage(msgs, null))
         coEvery { repository.getSessionTodos("s1") } returns Result.success(emptyList())
-        every { settingsManager.getAgentForSession("s1") } returns "plan"
+        every { settingsManager.getAgentForSession(any(), "s1") } returns "plan"
         store.mutateChat { it.copy(currentSessionId = "s1") }
 
         launchLoadMessages(scope, repository, slices, "s1", settingsManager = settingsManager, emit = emit)

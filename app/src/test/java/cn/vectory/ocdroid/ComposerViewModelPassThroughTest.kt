@@ -168,7 +168,7 @@ class ComposerViewModelPassThroughTest : MainViewModelTestBase() {
             core.chatFlow.value.currentModel,
         )
         // No session id → no persistence call.
-        verify(exactly = 0) { settingsManager.setModelForSession(any(), any(), any()) }
+        verify(exactly = 0) { settingsManager.setModelForSession(any(), any(), any(), any()) }
     }
 
     @Test

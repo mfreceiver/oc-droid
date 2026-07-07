@@ -356,8 +356,14 @@ class ConnectionCoordinator(
         // poll pending questions/permissions for BACKGROUND workdirs (the SSE
         // only feeds currentWorkdir). Skipping this fan-out would silently
         // drop pending questions for any workdir that isn't currently active.
+        // R-20 Phase 5: recentWorkdirs is now per-serverGroupFp (was a single
+        // global key). The migration in applySavedSettings (cold start) copies
+        // the legacy global list to the current fp's slot, so this read sees
+        // the right list for the active host. Same-group switches share the
+        // list (correct — two entry points to the same server share project
+        // memory); 异组 switches get their own list.
         val restoreWorkdirs = (
-            settingsManager.recentWorkdirs + listOfNotNull(settingsManager.currentWorkdir)
+            settingsManager.getRecentWorkdirs(currentServerGroupFp()) + listOfNotNull(settingsManager.currentWorkdir)
         ).distinct().filter { it.isNotBlank() }
         restoreWorkdirs.forEach { workdir ->
             scope.launch {

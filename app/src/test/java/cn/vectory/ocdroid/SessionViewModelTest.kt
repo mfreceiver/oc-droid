@@ -105,7 +105,7 @@ class SessionViewModelTest : MainViewModelTestBase() {
         // when the user sends without explicitly switching.
         assertNull(chatVM.chatFlow.value.currentModel)
         // No session exists → nothing persisted.
-        verify(exactly = 0) { settingsManager.setModelForSession(any(), any(), any()) }
+        verify(exactly = 0) { settingsManager.setModelForSession(any(), any(), any(), any()) }
     }
 
     @Test
@@ -498,7 +498,7 @@ class SessionViewModelTest : MainViewModelTestBase() {
         assertEquals(workdir, composerVM.composerFlow.value.draftWorkdir)
         // §recent-workdirs: connecting a project records it so cold-start
         // loadInitialData can restore its directory sessions after restart.
-        verify { settingsManager.addRecentWorkdir(workdir) }
+        verify { settingsManager.addRecentWorkdir(any(), workdir) }
         val dirSessions = sessionVM.sessionListFlow.value.directorySessions[workdir]
         assertNotNull("directorySessions should contain an entry for the workdir", dirSessions)
         assertEquals(2, dirSessions!!.size)
@@ -554,7 +554,7 @@ class SessionViewModelTest : MainViewModelTestBase() {
         advanceUntilIdle()
 
         verify { settingsManager.currentWorkdir = trimmed }
-        verify { settingsManager.addRecentWorkdir(trimmed) }
+        verify { settingsManager.addRecentWorkdir(any(), trimmed) }
         coVerify { repository.getSessionsForDirectory(trimmed, any()) }
         // §R18 Phase 2-E step 2: the repository.setCurrentDirectory verify
         // was removed (the API is gone); the workdir is now carried by
@@ -634,7 +634,7 @@ class SessionViewModelTest : MainViewModelTestBase() {
 
     @Test
     fun `selectSession saves old draft and restores new draft from settings manager`() = runTest {
-        every { settingsManager.getDraftText("s2") } returns "draft2"
+        every { settingsManager.getDraftText(any(), "s2") } returns "draft2"
 
         val core = createCore()
         val chatVM = cn.vectory.ocdroid.ui.ChatViewModel(core)
@@ -650,8 +650,8 @@ class SessionViewModelTest : MainViewModelTestBase() {
         sessionVM.selectSession("s2")
         advanceUntilIdle()
 
-        verify { settingsManager.setDraftText("s1", "draft1") }
-        verify { settingsManager.getDraftText("s2") }
+        verify { settingsManager.setDraftText(any(), "s1", "draft1") }
+        verify { settingsManager.getDraftText(any(), "s2") }
         assertEquals("draft2", composerVM.composerFlow.value.inputText)
     }
 
@@ -744,7 +744,7 @@ class SessionViewModelTest : MainViewModelTestBase() {
     fun `closeSession preserves closed session draft and does not pollute next session draft`() = runTest {
         every { settingsManager.openSessionIds } returns listOf("s1", "s2")
         every { settingsManager.openSessionIds = any() } just runs
-        every { settingsManager.getDraftText("s2") } returns "s2draft"
+        every { settingsManager.getDraftText(any(), "s2") } returns "s2draft"
 
         val core = createCore()
         val chatVM = cn.vectory.ocdroid.ui.ChatViewModel(core)
@@ -762,9 +762,9 @@ class SessionViewModelTest : MainViewModelTestBase() {
         advanceUntilIdle()
 
         // Closed session's draft must be saved under its own id (not lost).
-        verify(atLeast = 1) { settingsManager.setDraftText("s1", "s1-unsent-draft") }
+        verify(atLeast = 1) { settingsManager.setDraftText(any(), "s1", "s1-unsent-draft") }
         // The next session must NOT inherit the closed session's draft text.
-        verify(exactly = 0) { settingsManager.setDraftText("s2", "s1-unsent-draft") }
+        verify(exactly = 0) { settingsManager.setDraftText(any(), "s2", "s1-unsent-draft") }
         // s2 becomes current and its own draft is restored.
         assertEquals("s2", chatVM.chatFlow.value.currentSessionId)
         assertEquals("s2draft", composerVM.composerFlow.value.inputText)

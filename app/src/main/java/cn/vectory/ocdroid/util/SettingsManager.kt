@@ -98,17 +98,23 @@ class SettingsManager @Inject constructor(
         set(value) = encryptedPrefs.edit().putString(KEY_CURRENT_WORKDIR, value).apply()
 
     /**
-     * The set of workdirs the user has recently connected to (MRU order), so
-     * cold-start [cn.vectory.ocdroid.ui.controller.ConnectionCoordinator.loadInitialData]
-     * can re-fetch directory-scoped sessions for EVERY connected project —
-     * not just the single [currentWorkdir]. Without this, a non-current
-     * workdir whose sessions fall outside the global `getSessions(limit=10)`
-     * first page vanishes from the Sessions screen after restart (the "one of
-     * my frequent projects randomly disappeared" bug). Capped at
-     * [MAX_RECENT_WORKDIRS].
+     * R-20 Phase 5: the set of workdirs the user has recently connected to
+     * (MRU order), keyed per [serverGroupFp] so the right set survives a cold
+     * start for the active host AND so two profiles reaching the same server
+     * (same fp) share the workdir-discovery memory. Without this, a non-
+     * current workdir whose sessions fall outside the global
+     * `getSessions(limit=10)` first page vanishes from the Sessions screen
+     * after restart (the "one of my frequent projects randomly disappeared"
+     * bug). Capped at [MAX_RECENT_WORKDIRS].
+     *
+     * Plan §3 Phase 5 (v4): the legacy global `recent_workdirs` single key is
+     * migrated to `recent_workdirs_<fp>` once per fp by
+     * [migrateLegacyKeysToFp] (idempotent via the `cache_migration_v1_done_<fp>`
+     * flag) — see [ConnectionActions.applySavedSettings].
      */
-    var recentWorkdirs: List<String>
-        get() = synchronized(this) {
+    fun getRecentWorkdirs(serverGroupFp: String): List<String> {
+        if (serverGroupFp.isBlank()) return emptyList()
+        return synchronized(this) {
             // §R18 Phase 4 (P2-9) Gate-4 fix (maxer): lock the read too so it
             // cannot observe a value mid-flight from a concurrent
             // addRecentWorkdir write (the getter is otherwise a separate
@@ -117,41 +123,58 @@ class SettingsManager @Inject constructor(
             // (e.g. loadInitialData computing the fan-out workdir set) could
             // base its decision on a list that addRecentWorkdir is about to
             // change. Synchronized(this) pairs with addRecentWorkdir's lock.
-            val json = encryptedPrefs.getString(KEY_RECENT_WORKDIRS, null) ?: return@synchronized emptyList()
+            val json = encryptedPrefs.getString(recentWorkdirsKey(serverGroupFp), null)
+                ?: return@synchronized emptyList()
             try {
                 Json.decodeFromString<List<String>>(json)
             } catch (e: Exception) {
-                Log.w(TAG, "Failed to parse recent workdirs, using empty", e)
+                Log.w(TAG, "Failed to parse recent workdirs for fp=$serverGroupFp, using empty", e)
                 emptyList()
             }
         }
-        set(value) {
-            val json = Json.encodeToString(value)
-            encryptedPrefs.edit().putString(KEY_RECENT_WORKDIRS, json).apply()
-        }
+    }
+
+    fun setRecentWorkdirs(serverGroupFp: String, workdirs: List<String>) {
+        if (serverGroupFp.isBlank()) return
+        val json = Json.encodeToString(workdirs)
+        encryptedPrefs.edit().putString(recentWorkdirsKey(serverGroupFp), json).apply()
+    }
 
     /**
-     * Prepends [workdir] to [recentWorkdirs] (MRU), deduplicating and capping
-     * at [MAX_RECENT_WORKDIRS]. Called when the user connects a project via
-     * `createSessionInWorkdir` so the workdir survives restart even after it
-     * is later superseded as [currentWorkdir]. Blank/whitespace-only entries
-     * are ignored.
+     * Prepends [workdir] to the [serverGroupFp]'s recent-workdirs list (MRU),
+     * deduplicating and capping at [MAX_RECENT_WORKDIRS]. Called when the user
+     * connects a project via `createSessionInWorkdir` so the workdir survives
+     * restart even after it is later superseded as [currentWorkdir]. Blank/
+     * whitespace-only entries are ignored.
      *
-     * §R18 Phase 4 (P2-9): the read-filter-write across [recentWorkdirs] is
+     * §R18 Phase 4 (P2-9): the read-filter-write across [getRecentWorkdirs] is
      * wrapped in `synchronized(this)` to make the sequence atomic. Without
      * this, two concurrent callers can both read the old list, both prepend,
      * and the second write clobbers the first — losing the first caller's
      * workdir (read-modify-write race). SharedPreferences itself is process-
      * thread-safe but the read→filter→write compound is not.
      */
-    fun addRecentWorkdir(workdir: String) {
+    fun addRecentWorkdir(serverGroupFp: String, workdir: String) {
+        if (serverGroupFp.isBlank()) return
         val normalized = workdir.trim()
         if (normalized.isEmpty()) return
         synchronized(this) {
-            val updated = (listOf(normalized) + recentWorkdirs.filter { it != normalized })
+            val updated = (listOf(normalized) + getRecentWorkdirs(serverGroupFp).filter { it != normalized })
                 .take(MAX_RECENT_WORKDIRS)
-            recentWorkdirs = updated
+            setRecentWorkdirs(serverGroupFp, updated)
         }
+    }
+
+    /**
+     * R-20 Phase 5: clears the [serverGroupFp]'s recent-workdirs list. Used
+     * by [cn.vectory.ocdroid.ui.controller.HostProfileController.purgePerHostState]
+     * on a DIFFERENT-group switch (the old fp's workdirs are meaningless on
+     * the new server). Same-group switches preserve the list (the new
+     * profile reaches the same server).
+     */
+    fun clearRecentWorkdirs(serverGroupFp: String) {
+        if (serverGroupFp.isBlank()) return
+        encryptedPrefs.edit().remove(recentWorkdirsKey(serverGroupFp)).apply()
     }
 
     var selectedAgentName: String?
@@ -276,26 +299,43 @@ class SettingsManager @Inject constructor(
             encryptedPrefs.edit().putString(KEY_SESSION_CACHE, json).apply()
         }
 
-    fun getDraftText(sessionId: String): String {
+    /**
+     * R-20 Phase 5: per-(serverGroupFp, sessionId) draft text. The composite
+     * map key is `"<fp>\u0000<sessionId>"` (NUL separator — fp is a UUID /
+     * branded string that never contains NUL, so the split is unambiguous).
+     *
+     * Plan §3 Phase 5 (v4 freegpt #4): sessionId is a branded `ses_xxxx`
+     * string, NOT a UUID — clone/reset servers can collide. A bare sessionId
+     * key would let a draft typed on server A's `ses_xyz` leak into server B
+     * when B happens to issue the same id. The composite key eliminates the
+     * cross-server collision. Drafts contain unsent text (potentially
+     * sensitive) so the isolation is privacy-critical.
+     *
+     * Legacy storage: a single global `session_drafts` JSON map keyed by
+     * bare sessionId. [migrateLegacyKeysToFp] rewrites every legacy entry to
+     * `"<currentFp>\u0000<sessionId>"` once per fp (idempotent).
+     */
+    fun getDraftText(serverGroupFp: String, sessionId: String): String {
         val json = encryptedPrefs.getString(KEY_SESSION_DRAFTS, null) ?: return ""
         return try {
-            Json.decodeFromString<Map<String, String>>(json)[sessionId] ?: ""
+            Json.decodeFromString<Map<String, String>>(json)[compositeSessionKey(serverGroupFp, sessionId)] ?: ""
         } catch (e: Exception) {
             ""
         }
     }
 
-    fun setDraftText(sessionId: String, text: String) {
+    fun setDraftText(serverGroupFp: String, sessionId: String, text: String) {
         val json = encryptedPrefs.getString(KEY_SESSION_DRAFTS, null)
         val map: MutableMap<String, String> = try {
             json?.let { Json.decodeFromString<Map<String, String>>(it).toMutableMap() } ?: mutableMapOf()
         } catch (e: Exception) {
             mutableMapOf()
         }
+        val key = compositeSessionKey(serverGroupFp, sessionId)
         if (text.isBlank()) {
-            map.remove(sessionId)
+            map.remove(key)
         } else {
-            map[sessionId] = text
+            map[key] = text
         }
         encryptedPrefs.edit().putString(KEY_SESSION_DRAFTS, Json.encodeToString(map)).apply()
     }
@@ -313,40 +353,47 @@ class SettingsManager @Inject constructor(
         get() = encryptedPrefs.getLong(KEY_TRAFFIC_RECEIVED, 0L)
         set(value) = encryptedPrefs.edit().putLong(KEY_TRAFFIC_RECEIVED, value).apply()
 
-    fun getAgentForSession(sessionId: String): String? {
+    /**
+     * R-20 Phase 5: per-(serverGroupFp, sessionId) agent override. Composite
+     * map key `"<fp>\u0000<sessionId>"` — see [getDraftText] for the
+     * collision-defense rationale.
+     */
+    fun getAgentForSession(serverGroupFp: String, sessionId: String): String? {
         val json = encryptedPrefs.getString(KEY_SESSION_AGENTS, null) ?: return null
         return try {
-            Json.decodeFromString<Map<String, String>>(json)[sessionId]
+            Json.decodeFromString<Map<String, String>>(json)[compositeSessionKey(serverGroupFp, sessionId)]
         } catch (e: Exception) {
             null
         }
     }
 
-    fun setAgentForSession(sessionId: String, agentName: String) {
+    fun setAgentForSession(serverGroupFp: String, sessionId: String, agentName: String) {
         val json = encryptedPrefs.getString(KEY_SESSION_AGENTS, null)
         val map: MutableMap<String, String> = try {
             json?.let { Json.decodeFromString<Map<String, String>>(it).toMutableMap() } ?: mutableMapOf()
         } catch (e: Exception) {
             mutableMapOf()
         }
-        map[sessionId] = agentName
+        map[compositeSessionKey(serverGroupFp, sessionId)] = agentName
         encryptedPrefs.edit().putString(KEY_SESSION_AGENTS, Json.encodeToString(map)).apply()
     }
 
     /**
-     * §model-selection: per-session intended-next-model override, persisted across
-     * cold starts. Stored as a JSON map `sessionId -> "providerId/modelId"` mirroring
-     * the per-session agent map. Returns null when no model has been chosen for the
-     * session (caller falls back to inferring from the latest assistant message).
+     * §model-selection: per-(serverGroupFp, sessionId) intended-next-model
+     * override, persisted across cold starts. Stored as a JSON map keyed by
+     * the composite `"<fp>\u0000<sessionId>"` (R-20 Phase 5) mirroring the
+     * per-session agent map. Returns null when no model has been chosen for
+     * the (fp, session) pair (caller falls back to inferring from the latest
+     * assistant message).
      *
      * Model: V1-per-prompt semantics — the stored value is the model that will be
      * attached to the NEXT outgoing prompt's [PromptRequest.model]; it is NOT a
      * server-side session binding.
      */
-    fun getModelForSession(sessionId: String): Message.ModelInfo? {
+    fun getModelForSession(serverGroupFp: String, sessionId: String): Message.ModelInfo? {
         val json = encryptedPrefs.getString(KEY_SESSION_MODELS, null) ?: return null
         return try {
-            val raw = Json.decodeFromString<Map<String, String>>(json)[sessionId] ?: return null
+            val raw = Json.decodeFromString<Map<String, String>>(json)[compositeSessionKey(serverGroupFp, sessionId)] ?: return null
             val parts = raw.split("/", limit = 2)
             if (parts.size != 2) null else Message.ModelInfo(providerId = parts[0], modelId = parts[1])
         } catch (e: Exception) {
@@ -354,35 +401,42 @@ class SettingsManager @Inject constructor(
         }
     }
 
-    fun setModelForSession(sessionId: String, providerId: String, modelId: String) {
+    fun setModelForSession(serverGroupFp: String, sessionId: String, providerId: String, modelId: String) {
         val json = encryptedPrefs.getString(KEY_SESSION_MODELS, null)
         val map: MutableMap<String, String> = try {
             json?.let { Json.decodeFromString<Map<String, String>>(it).toMutableMap() } ?: mutableMapOf()
         } catch (e: Exception) {
             mutableMapOf()
         }
-        map[sessionId] = "$providerId/$modelId"
+        map[compositeSessionKey(serverGroupFp, sessionId)] = "$providerId/$modelId"
         encryptedPrefs.edit().putString(KEY_SESSION_MODELS, Json.encodeToString(map)).apply()
     }
 
     /**
-     * §model-selection: per-baseUrl disabled-model set. Models the user has
-     * unchecked in Settings → Model management; those entries are hidden from
-     * the chat quick-switch picker. Storage key format:
-     * `disabled_models_<normalizedBaseUrl>` where normalize strips scheme +
-     * trailing slash (e.g. `http://localhost:4096/` → `localhost:4096`).
-     * Stored as a StringSet whose entries are `"$providerId/$modelId"`.
+     * §model-selection / R-20 Phase 5: per-serverGroupFp disabled-model set.
+     * Models the user has unchecked in Settings → Model management; those
+     * entries are hidden from the chat quick-switch picker. Storage key
+     * format: `disabled_models_<serverGroupFp>` (was `disabled_models_<normalizedBaseUrl>`
+     * before Phase 5 — the URL dimension could not distinguish two profiles
+     * reaching the same URL but treated as separate caches, and leaked
+     * across identities sharing a URL). Stored as a StringSet whose entries
+     * are `"$providerId/$modelId"`.
+     *
+     * Plan §3 Phase 5: legacy `disabled_models_<normalizedBaseUrl>` is migrated
+     * to `disabled_models_<fp>` once per fp by [migrateLegacyKeysToFp]
+     * (idempotent).
      */
-    fun getDisabledModels(baseUrl: String): Set<String> {
-        return encryptedPrefs.getStringSet(disabledModelsKey(baseUrl), emptySet()) ?: emptySet()
+    fun getDisabledModels(serverGroupFp: String): Set<String> {
+        return encryptedPrefs.getStringSet(disabledModelsKey(serverGroupFp), emptySet()) ?: emptySet()
     }
 
     /**
-     * §model-selection: toggle a single model's disabled flag for [baseUrl].
-     * [providerId]/[modelId] form the entry key `"$providerId/$modelId"`.
+     * §model-selection: toggle a single model's disabled flag for
+     * [serverGroupFp]. [providerId]/[modelId] form the entry key
+     * `"$providerId/$modelId"`.
      */
-    fun setModelDisabled(baseUrl: String, providerId: String, modelId: String, disabled: Boolean) {
-        val key = disabledModelsKey(baseUrl)
+    fun setModelDisabled(serverGroupFp: String, providerId: String, modelId: String, disabled: Boolean) {
+        val key = disabledModelsKey(serverGroupFp)
         val current = (encryptedPrefs.getStringSet(key, emptySet()) ?: emptySet()).toMutableSet()
         val entry = "$providerId/$modelId"
         if (disabled) current.add(entry) else current.remove(entry)
@@ -390,34 +444,64 @@ class SettingsManager @Inject constructor(
     }
 
     /**
-     * §bug5: bulk replace the disabled set for a URL (used by manual refresh
-     * inherit so we don't issue N incremental writes). Entries are
+     * §bug5: bulk replace the disabled set for a serverGroupFp (used by manual
+     * refresh inherit so we don't issue N incremental writes). Entries are
      * `"$providerId/$modelId"`.
      */
-    fun setDisabledModels(baseUrl: String, disabledKeys: Set<String>) {
-        encryptedPrefs.edit().putStringSet(disabledModelsKey(baseUrl), disabledKeys).apply()
+    fun setDisabledModels(serverGroupFp: String, disabledKeys: Set<String>) {
+        encryptedPrefs.edit().putStringSet(disabledModelsKey(serverGroupFp), disabledKeys).apply()
     }
 
-    // §bug5: per-URL model availability catalog (server-fetched full set) so that
-    // manual refresh can inherit disable status only for models still present.
-    fun getModelAvailability(baseUrl: String): Set<String> {
-        return encryptedPrefs.getStringSet(modelAvailabilityKey(baseUrl), emptySet()) ?: emptySet()
+    // §bug5: per-serverGroupFp model availability catalog (server-fetched full
+    // set) so that manual refresh can inherit disable status only for models
+    // still present.
+    fun getModelAvailability(serverGroupFp: String): Set<String> {
+        return encryptedPrefs.getStringSet(modelAvailabilityKey(serverGroupFp), emptySet()) ?: emptySet()
     }
 
-    fun setModelAvailability(baseUrl: String, availableKeys: Set<String>) {
-        encryptedPrefs.edit().putStringSet(modelAvailabilityKey(baseUrl), availableKeys).apply()
+    fun setModelAvailability(serverGroupFp: String, availableKeys: Set<String>) {
+        encryptedPrefs.edit().putStringSet(modelAvailabilityKey(serverGroupFp), availableKeys).apply()
     }
 
     /**
-     * §bug5: clear ALL per-URL model data (availability + disabled) — used on URL
-     * change or server-profile deletion so stale data does not leak across
-     * identities.
+     * R-20 Phase 5: clear ALL per-serverGroupFp model data (availability +
+     * disabled) — used on异组 host switch / server-profile deletion so stale
+     * data does not leak across identities. Replaces the legacy
+     * `clearModelDataForUrl(baseUrl)` (URL was the wrong dimension: two
+     * profiles with same URL but different group would clobber each other).
      */
-    fun clearModelDataForUrl(baseUrl: String) {
+    fun clearModelDataForGroup(serverGroupFp: String) {
         encryptedPrefs.edit()
-            .remove(modelAvailabilityKey(baseUrl))
-            .remove(disabledModelsKey(baseUrl))
+            .remove(modelAvailabilityKey(serverGroupFp))
+            .remove(disabledModelsKey(serverGroupFp))
             .apply()
+    }
+
+    /**
+     * R-20 Phase 5 copy-on-split escape hatch (plan §0 G1): copies all
+     * per-serverGroupFp configuration from [fromFp] to [toFp] without deleting
+     * or mutating the source group. Used when a profile is split out of a
+     * merged group so the newly-independent group starts with the same local
+     * user configuration instead of losing drafts/model choices/recent dirs.
+     */
+    fun copyPerFpConfig(fromFp: String, toFp: String) {
+        if (fromFp.isBlank() || toFp.isBlank() || fromFp == toFp) return
+        val e = encryptedPrefs.edit()
+
+        encryptedPrefs.getString(recentWorkdirsKey(fromFp), null)?.let {
+            e.putString(recentWorkdirsKey(toFp), it)
+        }
+        encryptedPrefs.getStringSet(disabledModelsKey(fromFp), null)?.let {
+            e.putStringSet(disabledModelsKey(toFp), it)
+        }
+        encryptedPrefs.getStringSet(modelAvailabilityKey(fromFp), null)?.let {
+            e.putStringSet(modelAvailabilityKey(toFp), it)
+        }
+        copyCompositeSessionMapPrefix(KEY_SESSION_DRAFTS, fromFp, toFp, e)
+        copyCompositeSessionMapPrefix(KEY_SESSION_AGENTS, fromFp, toFp, e)
+        copyCompositeSessionMapPrefix(KEY_SESSION_MODELS, fromFp, toFp, e)
+
+        e.apply()
     }
 
     // ───────────── R-20 Phase 3: per-serverGroup daily-sweep dedup ─────────
@@ -445,6 +529,148 @@ class SettingsManager @Inject constructor(
     fun setLastSweepEpochDay(serverGroupFp: String, epochDay: Long) {
         if (serverGroupFp.isBlank()) return
         encryptedPrefs.edit().putLong(lastSweepEpochKey(serverGroupFp), epochDay).apply()
+    }
+
+    // ───────────── R-20 Phase 5: legacy → fp-keyed migration (once per fp) ─────
+
+    /**
+     * R-20 Phase 5: one-shot migration of the three legacy global / baseUrl-
+     * keyed / sessionId-keyed categories to per-serverGroupFp storage.
+     *
+     * Plan §3 Phase 5 (dser/maxer): [cn.vectory.ocdroid.ui.ConnectionActions.applySavedSettings]
+     * is the cold-start trigger — it runs early (AppCore.init) and is
+     * idempotent per fp via the `cache_migration_v1_done_<fp>` flag. Once an
+     * fp has been migrated, subsequent cold starts skip the rewrite.
+     *
+     * Categories migrated:
+     *  1. `recent_workdirs` (global single key) → `recent_workdirs_<fp>`.
+     *  2. `disabled_models_<normalizedBaseUrl>` + `model_availability_<normalizedBaseUrl>`
+     *     (where baseUrl normalizes to the current profile's URL) →
+     *     `disabled_models_<fp>` + `model_availability_<fp>`.
+     *  3. `session_drafts` / `session_agents` / `session_models` JSON maps
+     *     (bare-sessionId keys) → composite keys `"<fp>\u0000<sessionId>"`
+     *     inside the same JSON maps.
+     *
+     * The migration is non-destructive: legacy keys are NOT removed (they'd
+     * be reclaimed by [clearAllLocalData] eventually). This keeps the
+     * migration reversible in case of a rollback — the new code reads only
+     * the fp-keyed slot; old code reading the legacy slot sees its original
+     * value. Idempotency comes from the per-fp flag.
+     *
+     * @param serverGroupFp the current host's fp (never blank — caller
+     *   normalizes via `serverGroupFp.ifBlank { id }`).
+     * @param legacyBaseUrl the current host's normalized baseUrl (used to
+     *   locate the legacy `disabled_models_*` / `model_availability_*` slot
+     *   for THIS server only — other URLs' data is left in place as orphan).
+     */
+    fun migrateLegacyKeysToFp(serverGroupFp: String, legacyBaseUrl: String) {
+        if (serverGroupFp.isBlank()) return
+        val flagKey = migrationFlagKey(serverGroupFp)
+        if (encryptedPrefs.getBoolean(flagKey, false)) return
+
+        val e = encryptedPrefs.edit()
+
+        // ── 1) recent_workdirs (global) → recent_workdirs_<fp> ───────────────
+        // Only copy if the fp slot is empty (defensive: never overwrite a
+        // value that a prior partial migration wrote).
+        val legacyWorkdirsJson = encryptedPrefs.getString(KEY_RECENT_WORKDIRS, null)
+        if (legacyWorkdirsJson != null &&
+            !encryptedPrefs.contains(recentWorkdirsKey(serverGroupFp))
+        ) {
+            e.putString(recentWorkdirsKey(serverGroupFp), legacyWorkdirsJson)
+        }
+
+        // ── 2) disabled_models / model_availability (per-baseUrl) → per-fp ──
+        // Locate the legacy slots for THIS server's baseUrl. Other URLs' data
+        // stays orphaned (multi-host users would need to migrate each host's
+        // data on first cold-start of that host).
+        if (!legacyBaseUrl.isBlank()) {
+            val legacyDisabledKey = disabledModelsLegacyKey(legacyBaseUrl)
+            val legacyAvailabilityKey = modelAvailabilityLegacyKey(legacyBaseUrl)
+            if (!encryptedPrefs.contains(disabledModelsKey(serverGroupFp))) {
+                encryptedPrefs.getStringSet(legacyDisabledKey, null)?.let {
+                    e.putStringSet(disabledModelsKey(serverGroupFp), it)
+                }
+            }
+            if (!encryptedPrefs.contains(modelAvailabilityKey(serverGroupFp))) {
+                encryptedPrefs.getStringSet(legacyAvailabilityKey, null)?.let {
+                    e.putStringSet(modelAvailabilityKey(serverGroupFp), it)
+                }
+            }
+        }
+
+        // ── 3) session_drafts / agents / models (bare sessionId) → composite ─
+        // Rewrite the JSON maps in place: each entry's key is prefixed with
+        // `<fp>\u0000`. Entries that already carry the composite prefix (a
+        // prior partial migration wrote some entries before the flag landed)
+        // are left alone.
+        rewriteSessionMapLegacyToFp(KEY_SESSION_DRAFTS, serverGroupFp, e)
+        rewriteSessionMapLegacyToFp(KEY_SESSION_AGENTS, serverGroupFp, e)
+        rewriteSessionMapLegacyToFp(KEY_SESSION_MODELS, serverGroupFp, e)
+
+        e.putBoolean(flagKey, true)
+        e.apply()
+    }
+
+    /**
+     * Helper: rewrites a JSON Map<String, String> ESP entry from bare-sessionId
+     * keys to composite `"<fp>\u0000<sessionId>"` keys, in place. Entries
+     * already carrying the NUL prefix are preserved as-is (idempotent across
+     * partial migrations). The edit is staged into [editor] so the whole
+     * migration is a single batched apply().
+     */
+    private fun rewriteSessionMapLegacyToFp(
+        key: String,
+        serverGroupFp: String,
+        editor: SharedPreferences.Editor
+    ) {
+        val json = encryptedPrefs.getString(key, null) ?: return
+        val map: MutableMap<String, String> = try {
+            Json.decodeFromString<Map<String, String>>(json).toMutableMap()
+        } catch (e: Exception) {
+            return
+        }
+        val prefix = serverGroupFp + COMPOSITE_KEY_SEPARATOR
+        var changed = false
+        val updated = map.mapKeys { (k, _) ->
+            if (k.contains(COMPOSITE_KEY_SEPARATOR)) {
+                // Already composite (prior partial migration) — leave alone.
+                k
+            } else {
+                changed = true
+                prefix + k
+            }
+        }
+        if (changed) {
+            editor.putString(key, Json.encodeToString(updated))
+        }
+    }
+
+    private fun copyCompositeSessionMapPrefix(
+        key: String,
+        fromFp: String,
+        toFp: String,
+        editor: SharedPreferences.Editor
+    ) {
+        val json = encryptedPrefs.getString(key, null) ?: return
+        val map: MutableMap<String, String> = try {
+            Json.decodeFromString<Map<String, String>>(json).toMutableMap()
+        } catch (e: Exception) {
+            return
+        }
+        val fromPrefix = fromFp + COMPOSITE_KEY_SEPARATOR
+        val toPrefix = toFp + COMPOSITE_KEY_SEPARATOR
+        var changed = false
+        for ((k, v) in map.toList()) {
+            if (k.startsWith(fromPrefix)) {
+                val copiedKey = toPrefix + k.removePrefix(fromPrefix)
+                if (map[copiedKey] != v) {
+                    map[copiedKey] = v
+                    changed = true
+                }
+            }
+        }
+        if (changed) editor.putString(key, Json.encodeToString(map))
     }
 
     /**
@@ -551,10 +777,51 @@ class SettingsManager @Inject constructor(
         private fun lastSweepEpochKey(serverGroupFp: String): String = "last_sweep_epoch_$serverGroupFp"
 
         /**
-         * §bug5: shared URL normalizer for the per-URL model keys. Strips
-         * scheme + trailing slash, lowercases the host (collision defense —
-         * `http://Host:4096` vs `http://host:4096`), and keeps any path so the
-         * identity matches the URL the user actually configured.
+         * R-20 Phase 5: separator used in the composite `(serverGroupFp,
+         * sessionId)` map key. NUL (\u0000) is chosen because serverGroupFp
+         * is a UUID / branded string (Phase 0 guarantees nonblank + the
+         * HostProfile decode normalize step never produces one containing
+         * NUL), so `"$fp\u0000$sessionId"` is an unambiguous reversible
+         * encoding — no fp value can collide with a sessionId prefix.
+         *
+         * Public so tests + [rewriteSessionMapLegacyToFp] share the constant.
+         */
+        const val COMPOSITE_KEY_SEPARATOR = '\u0000'
+
+        /**
+         * R-20 Phase 5: builds the composite map key for per-(fp, sessionId)
+         * storage (drafts / agents / models). See [COMPOSITE_KEY_SEPARATOR].
+         */
+        private fun compositeSessionKey(serverGroupFp: String, sessionId: String): String =
+            "$serverGroupFp$COMPOSITE_KEY_SEPARATOR$sessionId"
+
+        /** R-20 Phase 5: per-fp recent-workdirs key. */
+        private fun recentWorkdirsKey(serverGroupFp: String): String =
+            "recent_workdirs_$serverGroupFp"
+
+        /** R-20 Phase 5: per-fp disabled-models key (replaces the legacy
+         *  baseUrl-keyed slot). */
+        private fun disabledModelsKey(serverGroupFp: String): String =
+            "disabled_models_$serverGroupFp"
+
+        /** R-20 Phase 5: per-fp model-availability key. */
+        private fun modelAvailabilityKey(serverGroupFp: String): String =
+            "model_availability_$serverGroupFp"
+
+        /** R-20 Phase 5: per-fp migration flag (idempotency). */
+        private fun migrationFlagKey(serverGroupFp: String): String =
+            "cache_migration_v1_done_$serverGroupFp"
+
+        // ── Legacy (pre-Phase-5) key helpers — kept ONLY for
+        // [migrateLegacyKeysToFp] to read the old slots. New code MUST use
+        // the per-fp versions above. ────────────────────────────────────────
+
+        /**
+         * §bug5 / pre-Phase-5: shared URL normalizer for the legacy per-URL
+         * model keys. Strips scheme + trailing slash, lowercases the host
+         * (collision defense — `http://Host:4096` vs `http://host:4096`),
+         * and keeps any path so the identity matches the URL the user
+         * actually configured.
          */
         private fun normalizeBaseUrl(baseUrl: String): String {
             val withoutScheme = baseUrl.substringAfter("://").trimEnd('/')
@@ -563,16 +830,13 @@ class SettingsManager @Inject constructor(
             return if (path.isEmpty()) host else "$host/$path"
         }
 
-        private fun modelAvailabilityKey(baseUrl: String): String {
+        /** Pre-Phase-5 legacy key — see [migrateLegacyKeysToFp]. */
+        private fun modelAvailabilityLegacyKey(baseUrl: String): String {
             return "model_availability_${normalizeBaseUrl(baseUrl)}"
         }
 
-        /**
-         * §model-selection: storage key for the per-baseUrl disabled-model
-         * set. Strips scheme + trailing slash so `http://h:1/` and `https://h:1`
-         * share storage (same server, alternate transport).
-         */
-        private fun disabledModelsKey(baseUrl: String): String {
+        /** Pre-Phase-5 legacy key — see [migrateLegacyKeysToFp]. */
+        private fun disabledModelsLegacyKey(baseUrl: String): String {
             return "disabled_models_${normalizeBaseUrl(baseUrl)}"
         }
     }

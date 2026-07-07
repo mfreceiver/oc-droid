@@ -890,13 +890,16 @@ class SessionSwitcherTest {
 
     init {
         // SettingsManager answers — capture into our lists for assertion.
-        every { settingsManager.setDraftText(any(), any()) } answers {
-            saveDraftCalls.add(firstArg<String>() to secondArg<String>())
+        // R-20 Phase 5: setDraftText/getDraftText now take (fp, sessionId[, text])
+        // — the captured "key" for saveDraft is the SECOND arg (sessionId);
+        // drafts map is keyed by sessionId (fp agnostic within the test).
+        every { settingsManager.setDraftText(any(), any(), any()) } answers {
+            saveDraftCalls.add(secondArg<String>() to thirdArg<String>())
             callOrder += "saveDraft"
         }
-        every { settingsManager.getDraftText(any()) } answers {
+        every { settingsManager.getDraftText(any(), any()) } answers {
             callOrder += "getDraft"
-            drafts[firstArg<String>()] ?: ""
+            drafts[secondArg<String>()] ?: ""
         }
         every { settingsManager.currentSessionId = any() } answers {
             setCurrentSessionIdCalls.add(firstArg())

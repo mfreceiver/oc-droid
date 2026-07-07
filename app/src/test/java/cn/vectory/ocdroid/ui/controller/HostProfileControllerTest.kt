@@ -665,7 +665,7 @@ class HostProfileControllerTest {
         verify { settingsManager.openSessionIds = emptyList() }
         verify { settingsManager.sessionCache = emptyList() }
         verify { settingsManager.currentWorkdir = null }
-        verify { settingsManager.recentWorkdirs = emptyList() }
+        verify { settingsManager.clearRecentWorkdirs(any()) }
     }
 
     @Test
@@ -687,6 +687,33 @@ class HostProfileControllerTest {
         assertTrue("forceReconnect recorded", reconnectIdx >= 0)
         assertTrue("EvictGroup fires before configure cancels SSE", evictIdx < cancelIdx)
         assertTrue("configure cancels SSE before reconnect", cancelIdx < reconnectIdx)
+    }
+
+    // ── selectHostProfile (R-20 Phase 5: same-group recentWorkdirs preservation) ─
+
+    @Test
+    fun `selectHostProfile same-group preserves recentWorkdirs (per-fp semantics)`() {
+        // R-20 Phase 5 (plan §3 glmer I2 字段分类): same-group switches preserve
+        // per-server data (sessions / unread / cache / recentWorkdirs /
+        // disabled_models). purgePerHostState(preserveServerGroupData=true) MUST
+        // NOT call clearRecentWorkdirs — the new profile reaches the same
+        // server, same workdirs, so its per-fp recentWorkdirs slot stays valid.
+        // Construct a sibling profile in the SAME group as profileA (g-A).
+        val profileASibling = profileA.copy(id = "p-A-sibling", name = "Host A Sibling")
+        seedStore(listOf(profileA, profileASibling, profileB), currentId = "p-A")
+        every { store.select("p-A-sibling") } returns profileASibling
+
+        controller.selectHostProfile("p-A-sibling")
+        runPending()
+
+        // Same-group → EvictGroup MUST NOT fire (only异组 emits it).
+        assertTrue(
+            "same-group switch must NOT emit EvictGroup",
+            collectedEffects.filterIsInstance<ControllerEffect.EvictGroup>().isEmpty(),
+        )
+        // Same-group → clearRecentWorkdirs MUST NOT be called (per-fp slot
+        // belongs to the same server group, data is still valid).
+        verify(exactly = 0) { settingsManager.clearRecentWorkdirs(any()) }
     }
 
     // ── configureServer (direct connection form) ───────────────────────────
@@ -926,7 +953,7 @@ class HostProfileControllerTest {
         scope.testScheduler.advanceUntilIdle()
 
         // §bug5: old-URL model data dropped so the disable set does not orphan.
-        verify { settingsManager.clearModelDataForUrl("http://a:4096") }
+        verify { settingsManager.clearModelDataForGroup("g-A") }
         // Reconfigured for the updated profileA at the new URL.
         verify { repository.configure(moved.serverUrl, any(), any(), moved.allowInsecureConnections) }
         // forceReconnect fired so clients rebuild against the new endpoint.
@@ -948,7 +975,7 @@ class HostProfileControllerTest {
         controller.saveHostProfile(moved, basicAuthEdited = false)
         scope.testScheduler.advanceUntilIdle()
 
-        verify(exactly = 1) { settingsManager.clearModelDataForUrl("http://a:4096") }
+        verify(exactly = 1) { settingsManager.clearModelDataForGroup("g-A") }
         verify { repository.configure("http://new:4096", any(), any(), true) }
         assertEquals(1, collectedEffects.filterIsInstance<ControllerEffect.ForceReconnect>().size)
         assertEquals(1, collectedEffects.filterIsInstance<ControllerEffect.HostProfileSwitched>().size)
@@ -974,7 +1001,7 @@ class HostProfileControllerTest {
         scope.testScheduler.advanceUntilIdle()
 
         // Deleted active host's old URL model data purged.
-        verify { settingsManager.clearModelDataForUrl("http://a:4096") }
+        verify { settingsManager.clearModelDataForGroup("g-A") }
         // Reconfigured for the replacement profileB.
         verify { repository.configure(profileB.serverUrl, any(), any(), profileB.allowInsecureConnections) }
         // wasCurrent → purge + forceReconnect + hostProfileSwitched.
@@ -988,6 +1015,22 @@ class HostProfileControllerTest {
             1,
             collectedEffects.filterIsInstance<ControllerEffect.EvictGroup>().size,
         )
+    }
+
+    @Test
+    fun `deleteHostProfile of current profile keeps model data when sibling remains in group`() {
+        val sibling = profileA.copy(id = "p-A2", name = "Host A sibling")
+        seedStore(listOf(profileA, sibling, profileB), currentId = "p-A")
+        seed { it.copy(currentHostProfileId = "p-A") }
+        every { store.profilesInGroup("g-A") } returns listOf(profileA, sibling)
+        every { store.currentProfile() } returns profileB
+
+        controller.deleteHostProfile("p-A")
+        scope.testScheduler.advanceUntilIdle()
+
+        verify(exactly = 0) { settingsManager.clearModelDataForGroup("g-A") }
+        assertTrue(collectedEffects.filterIsInstance<ControllerEffect.EvictGroup>().isEmpty())
+        assertEquals(1, collectedEffects.filterIsInstance<ControllerEffect.ForceReconnect>().size)
     }
 
     // ── configureServer (URL-unchanged branch) ─────────────────────────────
@@ -1005,7 +1048,7 @@ class HostProfileControllerTest {
         controller.configureServer("http://same:4096", "u", "p")
 
         // Old-URL model data NOT cleared (URL did not change).
-        verify(exactly = 0) { settingsManager.clearModelDataForUrl(any()) }
+        verify(exactly = 0) { settingsManager.clearModelDataForGroup(any()) }
         // SSE still cancelled before reconfigure (Stage D — always fires).
         assertEquals(1, collectedEffects.filterIsInstance<ControllerEffect.CancelSseForReconfigure>().size)
         // Settings + repository reconfigured with the (unchanged) URL + new creds.

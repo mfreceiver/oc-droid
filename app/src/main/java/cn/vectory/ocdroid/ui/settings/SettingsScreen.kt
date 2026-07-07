@@ -173,9 +173,14 @@ fun SettingsScreen(
 
             Spacer(modifier = Modifier.height(24.dp))
 
-            // ── 调试 (Debug): debug log + danger zone under one header. ──
+            // ── 调试 (Debug): debug log + cache management + danger zone under
+            // one header. Cache management groups under the same "Debug" header
+            // because it is a power-user / diagnostic surface — most users do
+            // not need to manually evict cached sessions. ──
             SectionHeader(title = stringResource(R.string.settings_section_debug))
             DebugLogSection(hideHeader = true)
+            Spacer(modifier = Modifier.height(12.dp))
+            CacheManagementSection(vm = settingsVM, hideHeader = true)
             Spacer(modifier = Modifier.height(12.dp))
             DangerZoneSection(
                 onClearLocalData = viewModel::resetLocalDataAndResync,

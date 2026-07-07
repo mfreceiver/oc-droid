@@ -106,6 +106,9 @@ interface CacheRepository {
     /** Nuke everything (manual 全清 button + reset). */
     suspend fun clearAll()
 
+    /** Rekey cached sessions/messages/gaps when two server groups are merged. */
+    suspend fun mergeCacheGroup(fromFp: String, intoFp: String)
+
     /**
      * Phase 1 helper (maxer I11): a `message.updated` SSE event for a
      * currently-cached session appended a NEW message — persist it so the
@@ -229,11 +232,74 @@ interface CacheRepository {
     suspend fun applyEvictionPolicy(serverGroupFp: String): EvictionReport
 
     /**
-     * R-20 Phase 3: distinct workdirs cached under [serverGroupFp]. Used by
+     * R-20 Phase 3 (plan §3): distinct workdirs cached under [serverGroupFp]. Used by
      * [CacheMaintenanceCoordinator]'s alive-set enumeration to fan out
      * per-workdir roots queries.
      */
     suspend fun cachedWorkdirsInGroup(serverGroupFp: String): List<String>
+
+    // ─────────── Phase 4 (storage management UI) ────────────────────────────
+
+    /**
+     * R-20 Phase 4 (plan §3 Phase 4): the cache-management UI's display row.
+     *
+     * Pure data projection of one cached session — does NOT expose the Room
+     * [CachedSessionEntity] (whose column shape is a persistence concern and
+     * would couple the UI to schema changes). The UI reads only the fields
+     * it renders: identifiers (fp / sessionId / workdir), the two timestamps
+     * (createdAt fingerprint, newestCachedAt content freshness,
+     * lastVerifiedAt server-confirmation), and whether any open gap for the
+     * session is Exhausted (UI marks the row "无法补齐" — never reaches into
+     * the gap table from the UI layer).
+     *
+     * `hasExhaustedGap` is computed in [listGroupSessions] (one `gapsOf`
+     * query per session) so the UI gets a fully-populated row in a single
+     * repository call; the alternative (the UI issuing its own gap queries)
+     * would force the UI layer to know the gap-DAO contract.
+     */
+    data class CachedSessionRow(
+        val serverGroupFp: String,
+        val sessionId: String,
+        val workdir: String,
+        val createdAt: Long?,
+        val newestCachedAt: Long,
+        val lastVerifiedAt: Long,
+        val messageCount: Int = 0,
+        val hasExhaustedGap: Boolean
+    )
+
+    /**
+     * R-20 Phase 4 (plan §3): list every cached session under [serverGroupFp]
+     * (newest first) as a [CachedSessionRow]. Each row's `hasExhaustedGap`
+     * is computed here so the UI gets a render-ready projection in one call.
+     *
+     * Empty list if [serverGroupFp] is blank (defensive — the host-profile
+     * fp provider normalizes blank → id, but a corrupt state could slip a
+     * blank through; the UI would otherwise render every cached row under
+     * every fp, which is the worst kind of cross-server leak).
+     */
+    suspend fun listGroupSessions(serverGroupFp: String): List<CachedSessionRow>
+
+    /**
+     * R-20 Phase 4 (plan §3): every distinct `server_group_fp` that has at
+     * least one cached session. Used by the UI to group the listing by
+     * server group (one section header per fp). Empty list ⇒ cache empty.
+     */
+    suspend fun allServerGroupFps(): List<String>
+
+    /**
+     * R-20 Phase 4 (plan §3 "clearProject" action): cascade-delete every
+     * cached session, message, and gap marker whose session row has
+     * `workdir == [workdir]` under [serverGroupFp]. Single Room transaction
+     * so the cache stays consistent (a concurrent reader cannot observe a
+     * half-deleted state).
+     *
+     * NOT [clearAll] — this is the project-scoped "clear this workdir's
+     * cache" button, which preserves every other workdir's cached sessions
+     * in the same server group. The "全清" (nuke) action is a separate UI
+     * button that calls [clearAll].
+     */
+    suspend fun evictWorkdirInGroup(serverGroupFp: String, workdir: String)
 }
 
 /**
@@ -774,6 +840,66 @@ class CacheRepositoryImpl @Inject constructor(
 
     override suspend fun cachedWorkdirsInGroup(serverGroupFp: String): List<String> =
         dao.workdirsInGroup(serverGroupFp)
+
+    // ─────────── Phase 4 (storage management UI) ────────────────────────────
+
+    override suspend fun listGroupSessions(
+        serverGroupFp: String
+    ): List<CacheRepository.CachedSessionRow> {
+        if (serverGroupFp.isBlank()) return emptyList()
+        // One transaction so the snapshot is consistent — a concurrent
+        // putSessionWindow cannot land between the session-list read and the
+        // per-session gapsOf reads (otherwise `hasExhaustedGap` could be set
+        // against a stale gap row that was since resolved).
+        return db.withTransaction {
+            dao.sessionsByGroup(serverGroupFp).map { row ->
+                val entity = row.session
+                val gaps = gapDao.gaps(serverGroupFp, entity.sessionId)
+                CacheRepository.CachedSessionRow(
+                    serverGroupFp = entity.serverGroupFp,
+                    sessionId = entity.sessionId,
+                    workdir = entity.workdir,
+                    createdAt = entity.createdAt,
+                    newestCachedAt = entity.newestCachedAt,
+                    lastVerifiedAt = entity.lastVerifiedAt,
+                    messageCount = row.messageCount,
+                    hasExhaustedGap = gaps.any {
+                        runCatching { GapFillState.valueOf(it.state) }
+                            .getOrDefault(GapFillState.Idle) == GapFillState.Exhausted
+                    }
+                )
+            }
+        }
+    }
+
+    override suspend fun allServerGroupFps(): List<String> = dao.allGroups()
+
+    override suspend fun mergeCacheGroup(fromFp: String, intoFp: String) {
+        if (fromFp.isBlank() || intoFp.isBlank() || fromFp == intoFp) return
+        db.withTransaction {
+            // Prefer the source group's rows during a merge. If the target
+            // group already has the same sessionId, delete the target copy
+            // first so rekeying the source cannot violate compound PKs.
+            dao.deleteIntoMessagesConflictingWithFrom(fromFp, intoFp)
+            gapDao.deleteIntoGapsConflictingWithFrom(fromFp, intoFp)
+            dao.deleteIntoSessionsConflictingWithFrom(fromFp, intoFp)
+            dao.rekeySessions(fromFp, intoFp)
+            dao.rekeyMessages(fromFp, intoFp)
+            gapDao.rekeyGaps(fromFp, intoFp)
+        }
+    }
+
+    override suspend fun evictWorkdirInGroup(serverGroupFp: String, workdir: String) {
+        if (serverGroupFp.isBlank() || workdir.isBlank()) return
+        db.withTransaction {
+            // Cascade order (messages → gaps → sessions): the messages/gaps
+            // subqueries reference the un-modified cached_session, so they
+            // MUST run before the session DELETE wipes the join rows.
+            dao.deleteSessionMessagesByWorkdir(serverGroupFp, workdir)
+            gapDao.deleteGapsByWorkdir(serverGroupFp, workdir)
+            dao.deleteSessionsByWorkdir(serverGroupFp, workdir)
+        }
+    }
 
     // ─────────── helpers ──────────────────────────────────────────────────
 

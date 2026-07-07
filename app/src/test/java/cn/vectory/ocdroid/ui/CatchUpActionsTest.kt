@@ -59,7 +59,7 @@ class CatchUpActionsTest {
         slices = store.slices
         repository = mockk(relaxed = true)
         settingsManager = mockk(relaxed = true)
-        every { settingsManager.getAgentForSession(any()) } returns null
+        every { settingsManager.getAgentForSession(any(), any()) } returns null
         scope = TestScope(UnconfinedTestDispatcher())
         cachedWindows = mutableListOf()
     }

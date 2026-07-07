@@ -1,6 +1,8 @@
 package cn.vectory.ocdroid.ui.controller
 
 import cn.vectory.ocdroid.data.model.ComposerImageAttachment
+import cn.vectory.ocdroid.data.model.HostProfile
+import cn.vectory.ocdroid.data.repository.HostProfileStore
 import cn.vectory.ocdroid.ui.ChatState
 import cn.vectory.ocdroid.ui.ComposerState
 import cn.vectory.ocdroid.ui.SharedStateStore
@@ -35,6 +37,7 @@ class ComposerControllerTest {
     private lateinit var composerFlow: StateFlow<ComposerState>
     private lateinit var expandedParts: StateFlow<Map<String, Boolean>>
     private lateinit var settingsManager: SettingsManager
+    private lateinit var hostProfileStore: HostProfileStore
     private lateinit var controller: ComposerController
 
     @Before
@@ -44,9 +47,15 @@ class ComposerControllerTest {
         composerFlow = store.composerFlow
         expandedParts = store.expandedParts
         settingsManager = mockk(relaxed = true)
+        hostProfileStore = mockk(relaxed = true)
+        // R-20 Phase 5: ComposerController derives the current serverGroupFp
+        // from the host profile; stub it so the draft-write path resolves.
+        val profile = HostProfile.defaultDirect("http://test")
+        every { hostProfileStore.currentProfile() } returns profile
         controller = ComposerController(
             store = store,
             settingsManager = settingsManager,
+            hostProfileStore = hostProfileStore,
         )
     }
 
@@ -65,7 +74,7 @@ class ComposerControllerTest {
 
         controller.setInputText("draft text")
 
-        verify { settingsManager.setDraftText("s1", "draft text") }
+        verify { settingsManager.setDraftText(any(), "s1", "draft text") }
     }
 
     @Test
@@ -75,7 +84,7 @@ class ComposerControllerTest {
         controller.setInputText("no session")
 
         assertEquals("no session", composerFlow.value.inputText)
-        verify(exactly = 0) { settingsManager.setDraftText(any(), any()) }
+        verify(exactly = 0) { settingsManager.setDraftText(any(), any(), any()) }
     }
 
     @Test

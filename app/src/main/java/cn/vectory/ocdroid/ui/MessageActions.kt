@@ -233,7 +233,7 @@ internal fun launchLoadMessages(
                     // user switch across periodic reloads during streaming. Inference from the
                     // latest assistant message is the fallback for sessions first opened on
                     // another client (no local stored choice yet).
-                    val newModel = settingsManager?.getModelForSession(sessionId)
+                    val newModel = settingsManager?.getModelForSession(currentServerGroupFp(), sessionId)
                         ?: inferCurrentModel(mergedMessages)
 
                     val beforeMergeSize = srcMessages.size
@@ -254,7 +254,7 @@ internal fun launchLoadMessages(
                     // §bug3-defensive: only sync global selectedAgentName from history when the session
                     // has an explicit per-session agent override; otherwise preserve the user's global
                     // choice so opening an old session does not clobber their picker selection.
-                    val perSessionAgent = settingsManager?.getAgentForSession(sessionId)
+                    val perSessionAgent = settingsManager?.getAgentForSession(currentServerGroupFp(), sessionId)
                     if (perSessionAgent != null) {
                         slices.mutateSettings { it.copy(selectedAgentName = perSessionAgent) }
                     }

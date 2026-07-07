@@ -92,12 +92,12 @@ abstract class MainViewModelTestBase {
         every { settingsManager.selectedAgentName = any() } just runs
         every { settingsManager.themeMode = any() } just runs
 
-        every { settingsManager.getDraftText(any()) } returns ""
-        every { settingsManager.setDraftText(any(), any()) } just runs
-        every { settingsManager.getAgentForSession(any()) } returns null
-        every { settingsManager.setAgentForSession(any(), any()) } just runs
-        every { settingsManager.getModelForSession(any()) } returns null
-        every { settingsManager.setModelForSession(any(), any(), any()) } just runs
+        every { settingsManager.getDraftText(any(), any()) } returns ""
+        every { settingsManager.setDraftText(any(), any(), any()) } just runs
+        every { settingsManager.getAgentForSession(any(), any()) } returns null
+        every { settingsManager.setAgentForSession(any(), any(), any()) } just runs
+        every { settingsManager.getModelForSession(any(), any()) } returns null
+        every { settingsManager.setModelForSession(any(), any(), any(), any()) } just runs
 
         every { repository.connectSSE(any()) } returns emptyFlow()
         coEvery { repository.getSessions(any()) } returns Result.success(emptyList())
@@ -149,6 +149,7 @@ abstract class MainViewModelTestBase {
         val composerController = cn.vectory.ocdroid.ui.controller.ComposerController(
             store = store,
             settingsManager = settingsManager,
+            hostProfileStore = hostProfileStore,
         )
         val sessionSwitcher = cn.vectory.ocdroid.ui.controller.SessionSwitcher(
             store = store,
