@@ -5,6 +5,8 @@ import cn.vectory.ocdroid.data.model.Message
 import cn.vectory.ocdroid.data.model.MessageWithParts
 import cn.vectory.ocdroid.data.repository.MessagesPage
 import cn.vectory.ocdroid.data.repository.OpenCodeRepository
+import cn.vectory.ocdroid.ui.chat.GapDetection
+import cn.vectory.ocdroid.ui.chat.GapFillCoordinator
 import cn.vectory.ocdroid.util.SettingsManager
 import io.mockk.coEvery
 import io.mockk.coVerify
@@ -12,6 +14,7 @@ import io.mockk.every
 import io.mockk.mockk
 import io.mockk.mockkStatic
 import io.mockk.unmockkAll
+import io.mockk.verify
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.test.TestScope
 import kotlinx.coroutines.test.UnconfinedTestDispatcher
@@ -20,19 +23,19 @@ import kotlinx.coroutines.test.runTest
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
-import org.junit.Assert.assertNotNull
-import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
 
 /**
- * §R18 Phase 5+: direct unit tests for [launchCatchUp] and [launchCloseGap].
+ * R-18 Phase 5+ → R-20 Phase 2: direct unit tests for [launchCatchUp].
  *
- * High-yield tail-reload + gap-detection + auto-closure budget logic (~320
- * lines). The skip probe, the sentinel off-by-one (anchor at 4th slot is still
- * contiguous → no gap), the progressive closeGap walk, and the cursor-exhausted
- * / maxSteps stop conditions all have observable slice effects.
+ * The legacy `launchCloseGap` section was removed (plan §3 N5 — the function
+ * was deleted; its 50-step fill logic now lives in [GapFillCoordinator],
+ * covered by `GapFillCoordinatorTest`). The catch-up probe + gap-detection
+ * path is retained, with the sentinel off-by-one boundary now at exactly-4-new
+ * (anchor in the 5-slot probe → contiguous) vs exactly-5-new (gap) — the
+ * Phase-2 generalisation, see [CatchUpGapTest] for the boundary regression.
  */
 @OptIn(ExperimentalCoroutinesApi::class)
 class CatchUpActionsTest {
@@ -108,6 +111,7 @@ class CatchUpActionsTest {
         val anchor = Message(id = "anchor", role = "assistant", time = Message.TimeInfo(created = 50L))
         store.mutateChat { it.copy(currentSessionId = "s1", messages = listOf(anchor), staleNotice = true) }
         coEvery { repository.probeLatestMessageId("s1") } returns Result.success("server-newer")
+        // Fetched contains anchor (2 msgs, < probe page) → contiguous / NoGap.
         val fetched = listOf(
             MessageWithParts(info = Message(id = "anchor", role = "assistant", time = Message.TimeInfo(created = 50L))),
             MessageWithParts(info = Message(id = "new1", role = "user", time = Message.TimeInfo(created = 100L))),
@@ -119,31 +123,53 @@ class CatchUpActionsTest {
 
         // anchor detected in fetched → no gap; staleNotice cleared.
         assertFalse(slices.chat.value.isLoadingMessages)
-        assertNull(slices.chat.value.gapInfo)
+        assertTrue("no gap markers when anchor in fetched window", slices.chat.value.gapMarkers.isEmpty())
         assertFalse(slices.chat.value.staleNotice)
         assertEquals(1, cachedWindows.size)
     }
 
     @Test
-    fun `launchCatchUp opens gap when anchor not in fetched window`() = runTest {
+    fun `launchCatchUp delegates to coordinator on full-page gap`() = runTest {
+        // R-20 Phase 2: a full 5-message probe page WITHOUT the anchor →
+        // detectGap returns GapExists → launchCatchUp delegates to
+        // GapFillCoordinator.openAndFill. The coordinator (mocked here) owns
+        // the fetched5 merge + the 50-step fill; launchCatchUp just clears its
+        // own loading flag.
         val anchor = Message(id = "anchor", role = "assistant", time = Message.TimeInfo(created = 50L))
         store.mutateChat { it.copy(currentSessionId = "s1", messages = listOf(anchor)) }
         coEvery { repository.probeLatestMessageId("s1") } returns Result.success("server-newer")
-        // Anchor NOT in fetched tail → gap.
-        val fetched = listOf(
-            MessageWithParts(info = Message(id = "new1", role = "user", time = Message.TimeInfo(created = 100L))),
-            MessageWithParts(info = Message(id = "new2", role = "assistant", time = Message.TimeInfo(created = 110L))),
-        )
+        val fetched = (1..5).map { i ->
+            MessageWithParts(info = Message(id = "new$i", role = "user", time = Message.TimeInfo(created = 100L + i)))
+        }
         coEvery { repository.getMessagesPaged("s1", any(), any()) } returns Result.success(MessagesPage(fetched, nextCursor = "tailCursor"))
+        val coordinator = mockk<GapFillCoordinator>(relaxed = true)
 
-        launchCatchUp(scope, repository, slices, "s1")
+        launchCatchUp(
+            scope = scope,
+            repository = repository,
+            slices = slices,
+            sessionId = "s1",
+            gapFillCoordinator = coordinator,
+            currentServerGroupFp = { "fp1" },
+        )
         advanceUntilIdle()
 
-        val gap = slices.chat.value.gapInfo
-        assertNotNull(gap)
-        assertTrue(gap!!.open)
-        assertEquals("anchor", gap.anchorNewestId)
-        assertEquals("tailCursor", gap.tailOldestCursor)
+        // openAndFill delegated exactly once with the GapExists detection.
+        coVerify(exactly = 1) {
+            coordinator.openAndFill(
+                slices = any(),
+                serverGroupFp = "fp1",
+                sessionId = "s1",
+                detection = any<GapDetection.GapExists>(),
+                fetched5 = any(),
+                fetched5Parts = any(),
+                onCacheWindow = any(),
+                onColdSnapshot = any(),
+            )
+        }
+        // launchCatchUp's own loading flag is cleared (the gap's Filling state
+        // is the per-marker indicator, orthogonal to isLoadingMessages).
+        assertFalse(slices.chat.value.isLoadingMessages)
     }
 
     @Test
@@ -194,148 +220,25 @@ class CatchUpActionsTest {
         assertEquals("preserved", cachedWindows.single().second.olderMessagesCursor)
     }
 
-    // ── launchCloseGap ────────────────────────────────────────────────────────
-
     @Test
-    fun `launchCloseGap no-ops when there is no gapInfo`() = runTest {
-        store.mutateChat { it.copy(currentSessionId = "s1", gapInfo = null) }
+    fun `launchCatchUp skips probe when SSE covers the session workdir`() = runTest {
+        // R-20 Phase 2 (G6): when the SSE feed is live for the session's workdir
+        // AND the session was cold-snapshotted, shouldProbe=false → skip.
+        every { settingsManager.currentWorkdir } returns "/repo"
+        store.mutateChat { it.copy(currentSessionId = "s1") }
 
-        launchCloseGap(scope, repository, slices, "s1")
+        launchCatchUp(
+            scope = scope,
+            repository = repository,
+            slices = slices,
+            sessionId = "s1",
+            settingsManager = settingsManager,
+            sseCurrentWorkdir = "/repo",
+            sessionsEverColdSnapshotted = setOf("s1"),
+        )
         advanceUntilIdle()
 
+        coVerify(exactly = 0) { repository.probeLatestMessageId(any()) }
         coVerify(exactly = 0) { repository.getMessagesPaged(any(), any(), any()) }
-    }
-
-    @Test
-    fun `launchCloseGap no-ops when gap is already closed`() = runTest {
-        store.mutateChat {
-            it.copy(
-                currentSessionId = "s1",
-                gapInfo = GapInfo(anchorNewestId = "a", tailOldestId = "t", tailOldestCursor = "c", open = false),
-            )
-        }
-
-        launchCloseGap(scope, repository, slices, "s1")
-        advanceUntilIdle()
-
-        coVerify(exactly = 0) { repository.getMessagesPaged(any(), any(), any()) }
-    }
-
-    @Test
-    fun `launchCloseGap closes gap when null cursor means no more history to page`() = runTest {
-        store.mutateChat {
-            it.copy(
-                currentSessionId = "s1",
-                gapInfo = GapInfo(anchorNewestId = "a", tailOldestId = "t", tailOldestCursor = null, open = true),
-            )
-        }
-
-        launchCloseGap(scope, repository, slices, "s1")
-        advanceUntilIdle()
-
-        // No cursor → mark gap closed (open=false), no fetch.
-        coVerify(exactly = 0) { repository.getMessagesPaged(any(), any(), any()) }
-        assertFalse(slices.chat.value.gapInfo!!.open)
-    }
-
-    @Test
-    fun `launchCloseGap closes when anchor reappears in fetched page`() = runTest {
-        val current = Message(id = "tail1", role = "user", time = Message.TimeInfo(created = 100L))
-        store.mutateChat {
-            it.copy(
-                currentSessionId = "s1",
-                messages = listOf(current),
-                gapInfo = GapInfo(anchorNewestId = "anchor", tailOldestId = "tail1", tailOldestCursor = "c1", open = true),
-            )
-        }
-        // Page returns the anchor → closed.
-        val page = listOf(
-            MessageWithParts(info = Message(id = "bridge1", role = "user", time = Message.TimeInfo(created = 80L))),
-            MessageWithParts(info = Message(id = "anchor", role = "assistant", time = Message.TimeInfo(created = 50L))),
-        )
-        coEvery { repository.getMessagesPaged("s1", any(), eq("c1")) } returns Result.success(MessagesPage(page, nextCursor = null))
-
-        launchCloseGap(scope, repository, slices, "s1")
-        advanceUntilIdle()
-
-        assertNull(slices.chat.value.gapInfo)
-        // Bridged messages merged in.
-        assertTrue(slices.chat.value.messages.any { it.id == "bridge1" })
-        assertFalse(slices.chat.value.isLoadingMessages)
-    }
-
-    @Test
-    fun `launchCloseGap marks gap closed when cursor exhausted without anchor`() = runTest {
-        val current = Message(id = "tail1", role = "user", time = Message.TimeInfo(created = 100L))
-        store.mutateChat {
-            it.copy(
-                currentSessionId = "s1",
-                messages = listOf(current),
-                gapInfo = GapInfo(anchorNewestId = "anchor", tailOldestId = "tail1", tailOldestCursor = "c1", open = true),
-            )
-        }
-        // Page returns messages but no anchor and no nextCursor → can't bridge.
-        val page = listOf(
-            MessageWithParts(info = Message(id = "bridge1", role = "user", time = Message.TimeInfo(created = 80L))),
-        )
-        coEvery { repository.getMessagesPaged("s1", any(), eq("c1")) } returns Result.success(MessagesPage(page, nextCursor = null))
-
-        launchCloseGap(scope, repository, slices, "s1")
-        advanceUntilIdle()
-
-        // cursor null → gap marked closed (open=false).
-        assertFalse(slices.chat.value.gapInfo!!.open)
-    }
-
-    @Test
-    fun `launchCloseGap stops at maxSteps budget leaving gap open`() = runTest {
-        val current = Message(id = "tail1", role = "user", time = Message.TimeInfo(created = 1000L))
-        store.mutateChat {
-            it.copy(
-                currentSessionId = "s1",
-                messages = listOf(current),
-                gapInfo = GapInfo(anchorNewestId = "anchor", tailOldestId = "tail1", tailOldestCursor = "c1", open = true),
-            )
-        }
-        // Each step returns one bridged msg + next cursor, never finding anchor.
-        coEvery { repository.getMessagesPaged("s1", any(), any()) } returns Result.success(
-            MessagesPage(
-                listOf(MessageWithParts(info = Message(id = "bridge", role = "user", time = Message.TimeInfo(created = 500L)))),
-                nextCursor = "c2",
-            )
-        )
-
-        launchCloseGap(scope, repository, slices, "s1", step = 1, maxSteps = 2)
-        advanceUntilIdle()
-
-        // Exactly 2 fetches (budget), gap still open.
-        coVerify(exactly = 2) { repository.getMessagesPaged(eq("s1"), any(), any()) }
-        assertTrue(slices.chat.value.gapInfo!!.open)
-        assertFalse(slices.chat.value.isLoadingMessages)
-    }
-
-    @Test
-    fun `launchCloseGap preserves already-loaded messages across walk`() = runTest {
-        // Sanity: closeGap merges bridged pages WITHOUT losing existing tail messages.
-        val current = Message(id = "tail1", role = "user", time = Message.TimeInfo(created = 1000L))
-        store.mutateChat {
-            it.copy(
-                currentSessionId = "s1",
-                messages = listOf(current),
-                gapInfo = GapInfo(anchorNewestId = "anchor", tailOldestId = "tail1", tailOldestCursor = "c1", open = true),
-            )
-        }
-        val page = listOf(
-            MessageWithParts(info = Message(id = "bridge1", role = "user", time = Message.TimeInfo(created = 500L))),
-            MessageWithParts(info = Message(id = "anchor", role = "assistant", time = Message.TimeInfo(created = 50L))),
-        )
-        coEvery { repository.getMessagesPaged("s1", any(), eq("c1")) } returns Result.success(MessagesPage(page, nextCursor = null))
-
-        launchCloseGap(scope, repository, slices, "s1")
-        advanceUntilIdle()
-
-        // tail1 preserved; bridge + anchor merged.
-        val ids = slices.chat.value.messages.map { it.id }
-        assertTrue(ids.containsAll(listOf("tail1", "bridge1", "anchor")))
     }
 }

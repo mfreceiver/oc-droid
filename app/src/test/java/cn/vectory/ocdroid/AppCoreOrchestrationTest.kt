@@ -530,7 +530,15 @@ class AppCoreOrchestrationTest : MainViewModelTestBase() {
             it.copy(
                 currentSessionId = "s1",
                 messages = listOf(Message(id = "stale", role = "user")),
-                gapInfo = cn.vectory.ocdroid.ui.GapInfo("a", "b", "c", open = true),
+                gapMarkers = listOf(
+                    cn.vectory.ocdroid.ui.chat.GapMarker(
+                        gapId = "g1",
+                        lowerAnchorMessageId = "a",
+                        upperBoundaryMessageId = "b",
+                        nextBeforeCursor = "c",
+                        fillState = cn.vectory.ocdroid.ui.chat.GapFillState.Idle,
+                    )
+                ),
                 staleNotice = true,
                 streamingPartTexts = mapOf("p" to "x"),
             )
@@ -541,7 +549,7 @@ class AppCoreOrchestrationTest : MainViewModelTestBase() {
         advanceUntilIdle()
 
         assertEquals(nonceBefore + 1, core.chatFlow.value.refreshNonce)
-        assertNull(core.chatFlow.value.gapInfo)
+        assertTrue("cold-start refresh clears stale gap markers", core.chatFlow.value.gapMarkers.isEmpty())
         assertFalse(core.chatFlow.value.staleNotice)
         assertTrue(core.chatFlow.value.streamingPartTexts.isEmpty())
     }
@@ -604,5 +612,61 @@ class AppCoreOrchestrationTest : MainViewModelTestBase() {
         coVerify(atLeast = 1) { repository.getPendingQuestions("/wA") }
         coVerify(atLeast = 1) { repository.getPendingQuestions("/wB") }
         coVerify(atLeast = 1) { repository.getPendingQuestions("/wC") }
+    }
+
+    // ── R-20 Phase 2 复审 #2: launchCatchUp live fp provider ────────────────
+
+    @Test
+    fun `fix-2 catchUpAfterDisconnectOrForeground drops onSuccess merge when host switched during probe`() = runTest {
+        // gpter 复审 #2 (glm-3 前次 #3 修复的实现错误): the previous code passed
+        // currentServerGroupFp = { fp } (captured lambda) into launchCatchUp,
+        // which made the onSuccess guard `currentServerGroupFp() !=
+        // expectedServerGroupFp` 恒等 (no-op): both sides read the SAME
+        // captured snapshot. A host switch during the probe REST was never
+        // detected, and the stale fp-A tail was merged into fp-B's slice.
+        // After the fix, the call passes the LIVE provider
+        // (core.currentServerGroupFp) so currentServerGroupFp() reads the
+        // current host's fp each call. A mid-probe host switch makes the guard
+        // fire → onSuccess early-returns without merging.
+        val originalProfile = cn.vectory.ocdroid.data.model.HostProfile(
+            id = "host-A",
+            name = "A",
+            serverUrl = "http://a",
+            serverGroupFp = "fp-A",
+        )
+        val switchedProfile = cn.vectory.ocdroid.data.model.HostProfile(
+            id = "host-B",
+            name = "B",
+            serverUrl = "http://b",
+            serverGroupFp = "fp-B",
+        )
+        every { hostProfileStore.currentProfile() } returns originalProfile
+        coEvery { repository.probeLatestMessageId(any()) } returns Result.success("server-new")
+        // The probe-page REST: simulate the host switch DURING the suspend.
+        // Before the page returns, flip hostProfileStore so the live
+        // core.currentServerGroupFp() provider returns fp-B.
+        val tail = listOf(MessageWithParts(info = Message(id = "stale-A", role = "user")))
+        coEvery { repository.getMessagesPaged(any(), any(), any()) } answers {
+            every { hostProfileStore.currentProfile() } returns switchedProfile
+            Result.success(MessagesPage(tail, null))
+        }
+        val core = wire()
+        core.writeChat {
+            it.copy(currentSessionId = "s1", messages = listOf(Message(id = "anchor", role = "user")))
+        }
+
+        core.catchUpAfterDisconnectOrForeground("s1")
+        advanceUntilIdle()
+
+        // The stale fp-A tail MUST NOT be merged into fp-B's slice. The anchor
+        // is preserved; "stale-A" is dropped by the now-functional onSuccess
+        // guard.
+        assertEquals(
+            "stale fp-A probe tail must NOT merge into fp-B's slice (guard must fire)",
+            listOf("anchor"),
+            core.chatFlow.value.messages.map { it.id },
+        )
+        // Loading flag cleared on the early return.
+        assertFalse(core.chatFlow.value.isLoadingMessages)
     }
 }

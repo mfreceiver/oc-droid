@@ -202,6 +202,15 @@ abstract class MainViewModelTestBase {
             serverCompatProfile = cn.vectory.ocdroid.data.repository.ServerCompatProfile(),
         )
         val fpProvider: () -> String = { hostProfileStore.currentProfile().serverGroupFp.ifBlank { hostProfileStore.currentProfile().id } }
+        // R-20 Phase 2: gap-fill coordinator (real instance; the relaxed-mock
+        // cacheRepository backs its openGap / appendOlderSlice / gapsOf calls).
+        // §fix-#3: pass the SAME fp provider every controller uses so the
+        // coordinator's compound-key guards resolve identically to production.
+        val gapFillCoordinator = cn.vectory.ocdroid.ui.chat.GapFillCoordinator(
+            repository = repository,
+            cacheRepository = cacheRepository,
+            currentServerGroupFp = fpProvider,
+        )
         val core = AppCore(
             store,
             repository,
@@ -218,6 +227,7 @@ abstract class MainViewModelTestBase {
             hostProfileController,
             sessionSyncCoordinator,
             connectionCoordinator,
+            gapFillCoordinator,
             cacheRepository,
             // §review-fix #1: same fp provider every controller uses.
             fpProvider,

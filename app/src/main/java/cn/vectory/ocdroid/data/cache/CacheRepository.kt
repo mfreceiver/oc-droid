@@ -532,27 +532,42 @@ class CacheRepositoryImpl @Inject constructor(
     ) {
         if (older.isEmpty() && returnedCursor != null) {
             // Nothing new but more history remains — just advance the cursor.
-            // (Rare; kept for completeness.)
-            val g = gapDao.gap(gapId) ?: return
-            gapDao.advanceBoundary(
-                gapId = gapId,
-                upperBoundary = g.upperBoundaryMessageId,
-                cursor = returnedCursor,
-                state = GapFillState.Idle.name,
-                now = System.currentTimeMillis()
-            )
+            // (Rare; kept for completeness.) §fix-#4: read the gap row inside
+            // the same transaction as the advance (single-transaction invariant
+            // — a concurrent resolveGap cannot land between the read here and
+            // the advance below, which would otherwise resurrect a resolved
+            // gap's cursor).
+            db.withTransaction {
+                val g = gapDao.gap(gapId) ?: return@withTransaction
+                gapDao.advanceBoundary(
+                    gapId = gapId,
+                    upperBoundary = g.upperBoundaryMessageId,
+                    cursor = returnedCursor,
+                    state = GapFillState.Idle.name,
+                    now = System.currentTimeMillis()
+                )
+            }
             return
         }
         val now = System.currentTimeMillis()
-        val target = gapDao.gap(gapId)
-        if (target == null) {
-            // Gap already resolved (e.g. a concurrent overlap resolve, or a
-            // stale step after the user dismissed it). We cannot upsert the
-            // messages without the (fp, sessionId) compound key, and a resolved
-            // gap means the slices are already contiguous — drop the step.
-            return
-        }
+        // §fix-#4 (gpter #4 TOCTOU): the gap row + sessionGaps reads were
+        // previously OUTSIDE this transaction, weakening the single-transaction
+        // invariant (a concurrent resolveGap could land between the read and
+        // the transaction → upsert/resolve against a stale gap snapshot). Move
+        // BOTH reads inside so the snapshot is consistent with the writes. The
+        // early `target == null` return now lives inside the transaction; the
+        // outer function delegates the whole atomic read + insert + resolve /
+        // advance / exhaust block to one Room @Transaction.
         db.withTransaction {
+            val target = gapDao.gap(gapId)
+            if (target == null) {
+                // Gap already resolved (e.g. a concurrent overlap resolve, or a
+                // stale step after the user dismissed it). We cannot upsert the
+                // messages without the (fp, sessionId) compound key, and a
+                // resolved gap means the slices are already contiguous — drop
+                // the step.
+                return@withTransaction
+            }
             // ① insert the older slice.
             if (older.isNotEmpty()) {
                 dao.upsertMessages(

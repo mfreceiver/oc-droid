@@ -329,7 +329,172 @@ class CacheRepositoryTest {
     // contract is enforced structurally by db.withTransaction; the schema
     // test suite verifies the underlying transactions serialize correctly.)
 
+    // ─────────── R-20 Phase 2: gap methods (plan §3) ────────────────────────
+
+    @Test
+    fun `openGap returns a gapId and gapsOf lists it`() = runTest {
+        seedWindowWithIds("g1", "s1", listOf("m1" to 100L, "m2" to 200L))
+        val gapId = repo.openGap("g1", "s1", lowerAnchorMessageId = "m1", upperBoundaryMessageId = "m2", initialNextBeforeCursor = "cursor-1")
+        assertTrue(gapId.isNotBlank())
+        val gaps = repo.gapsOf("g1", "s1")
+        assertEquals(1, gaps.size)
+        assertEquals(gapId, gaps.single().gapId)
+        assertEquals("m1", gaps.single().lowerAnchorMessageId)
+        assertEquals("m2", gaps.single().upperBoundaryMessageId)
+        assertEquals("cursor-1", gaps.single().nextBeforeCursor)
+        assertEquals(cn.vectory.ocdroid.ui.chat.GapFillState.Idle, gaps.single().fillState)
+    }
+
+    @Test
+    fun `resolveGap atomically deletes the marker`() = runTest {
+        seedWindowWithIds("g1", "s1", listOf("m1" to 100L, "m2" to 200L))
+        val gapId = repo.openGap("g1", "s1", "m1", "m2", "cursor-1")
+        repo.resolveGap(gapId)
+        assertTrue("resolveGap removes the marker", repo.gapsOf("g1", "s1").isEmpty())
+    }
+
+    @Test
+    fun `appendOlderSlice resolves the gap when the step covers the anchor`() = runTest {
+        // anchor = m1 (lower). A backward step that includes m1 → resolved.
+        seedWindowWithIds("g1", "s1", listOf("m1" to 100L))
+        val gapId = repo.openGap("g1", "s1", lowerAnchorMessageId = "m1", upperBoundaryMessageId = "m2", initialNextBeforeCursor = "c1")
+        val older = listOf(
+            Message(id = "bridge", role = "user", time = Message.TimeInfo(created = 150L)),
+            Message(id = "m1", role = "user", time = Message.TimeInfo(created = 100L))
+        )
+        repo.appendOlderSlice(gapId, older, partsByMessage = emptyMap(), returnedCursor = "c2")
+        // stepCoversAnchor (m1 in older) → gap resolved in the same transaction.
+        assertTrue("anchor-covering step resolves the gap", repo.gapsOf("g1", "s1").isEmpty())
+        // The older messages were persisted.
+        val msgs = db.cacheDao().messages("g1", "s1").map { it.messageId }
+        assertTrue(msgs.containsAll(listOf("m1", "bridge")))
+    }
+
+    @Test
+    fun `appendOlderSlice marks Exhausted when cursor is null without reaching anchor`() = runTest {
+        seedWindowWithIds("g1", "s1", listOf("m1" to 100L))
+        val gapId = repo.openGap("g1", "s1", "m1", "m2", "c1")
+        // Older step does NOT contain the anchor + null cursor → Exhausted.
+        val older = listOf(Message(id = "bridge", role = "user", time = Message.TimeInfo(created = 150L)))
+        repo.appendOlderSlice(gapId, older, partsByMessage = emptyMap(), returnedCursor = null)
+        val gap = repo.gapsOf("g1", "s1").single()
+        assertEquals(cn.vectory.ocdroid.ui.chat.GapFillState.Exhausted, gap.fillState)
+    }
+
+    @Test
+    fun `appendOlderSlice advances boundary and cursor when more history remains`() = runTest {
+        seedWindowWithIds("g1", "s1", listOf("m1" to 100L))
+        val gapId = repo.openGap("g1", "s1", "m1", "m2", "c1")
+        // Older step does NOT contain the anchor + non-null cursor → advance.
+        val older = listOf(
+            Message(id = "oldest", role = "user", time = Message.TimeInfo(created = 50L)),
+            Message(id = "bridge", role = "user", time = Message.TimeInfo(created = 80L))
+        )
+        repo.appendOlderSlice(gapId, older, partsByMessage = emptyMap(), returnedCursor = "c2")
+        val gap = repo.gapsOf("g1", "s1").single()
+        assertEquals(cn.vectory.ocdroid.ui.chat.GapFillState.Idle, gap.fillState)
+        // upperBoundary advanced to the oldest id in the step.
+        assertEquals("oldest", gap.upperBoundaryMessageId)
+        assertEquals("c2", gap.nextBeforeCursor)
+    }
+
+    @Test
+    fun `appendOlderSlice resolves cross-gap overlap in the same transaction`() = runTest {
+        // Two gaps in one session. Appending for gap A lands a step that
+        // contains gap B's lowerAnchor → gap B must also resolve (plan §3).
+        seedWindowWithIds("g1", "s1", listOf("anchorA" to 100L))
+        val gapA = repo.openGap("g1", "s1", "anchorA", "upperA", "cA")
+        val gapB = repo.openGap("g1", "s1", "anchorB", "upperB", "cB")
+        assertEquals(2, repo.gapsOf("g1", "s1").size)
+        // Step for gapA happens to contain anchorB (overlap).
+        val older = listOf(
+            Message(id = "x", role = "user", time = Message.TimeInfo(created = 90L)),
+            Message(id = "anchorB", role = "user", time = Message.TimeInfo(created = 80L))
+        )
+        repo.appendOlderSlice(gapA, older, partsByMessage = emptyMap(), returnedCursor = null)
+        val remaining = repo.gapsOf("g1", "s1")
+        // gapB resolved by overlap; gapA is Exhausted (anchorA not reached, null cursor).
+        assertTrue("overlap must resolve the sibling gap", remaining.none { it.gapId == gapB })
+        assertTrue(remaining.any { it.gapId == gapA && it.fillState == cn.vectory.ocdroid.ui.chat.GapFillState.Exhausted })
+    }
+
+    @Test
+    fun `loadSessionLayout interleaves messages and gap markers`() = runTest {
+        seedWindowWithIds("g1", "s1", listOf("m1" to 100L, "m2" to 200L, "m3" to 300L))
+        repo.openGap("g1", "s1", lowerAnchorMessageId = "m1", upperBoundaryMessageId = "m2", initialNextBeforeCursor = "c1")
+        val layout = repo.loadSessionLayout("g1", "s1")
+        assertNotNull(layout)
+        val kinds = layout!!.entries.map {
+            when (val e = it) {
+                is cn.vectory.ocdroid.ui.chat.Entry.Message -> "msg:${e.message.id}"
+                is cn.vectory.ocdroid.ui.chat.Entry.GapMarker -> "gap:${e.gapId}"
+            }
+        }
+        // Gap inserted before m2 (its upperBoundary): m1, gap, m2, m3.
+        assertEquals(listOf("msg:m1", "gap", "msg:m2", "msg:m3"), kinds.map { if (it.startsWith("gap")) "gap" else it })
+    }
+
+    @Test
+    fun `loadSessionLayout returns null for a cold-start session`() = runTest {
+        assertNull(repo.loadSessionLayout("g1", "never-seen"))
+    }
+
+    // ─────────── R-20 Phase 2 fix-#4: appendOlderSlice atomicity ─────────
+
+    @Test
+    fun `fix-4 appendOlderSlice no-ops atomically when the gap was resolved concurrently`() = runTest {
+        // gpter #4 TOCTOU: the gap row + sessionGaps reads were previously
+        // OUTSIDE the db.withTransaction, weakening the single-transaction
+        // invariant (a concurrent resolveGap could land between the read and
+        // the transaction → upsert/resolve against a stale gap snapshot).
+        // After the fix, both reads live INSIDE the transaction; this test
+        // pins the contract by exercising the "target == null → drop" branch
+        // — a gap pre-resolved before appendOlderSlice is invoked must NOT
+        // resurrect any rows (no message upsert, no marker write).
+        seedWindowWithIds("g1", "s1", listOf("m1" to 100L))
+        val gapId = repo.openGap("g1", "s1", "m1", "m2", "c1")
+        // Pre-resolve the gap (simulating a concurrent overlap resolution).
+        repo.resolveGap(gapId)
+
+        val older = listOf(Message(id = "bridge", role = "user", time = Message.TimeInfo(created = 150L)))
+        repo.appendOlderSlice(gapId, older, partsByMessage = emptyMap(), returnedCursor = "c2")
+
+        // The "bridge" message MUST NOT be persisted — the transaction saw
+        // target == null and dropped the step atomically (no half-write).
+        val msgs = db.cacheDao().messages("g1", "s1").map { it.messageId }
+        assertTrue(
+            "concurrently-resolved gap must not resurrect messages (atomic drop)",
+            msgs.none { it == "bridge" },
+        )
+        // No gap marker re-created.
+        assertTrue(repo.gapsOf("g1", "s1").isEmpty())
+    }
+
+    @Test
+    fun `evictSession also clears the session gap markers`() = runTest {
+        seedWindowWithIds("g1", "s1", listOf("m1" to 100L))
+        repo.openGap("g1", "s1", "m1", "m2", "c1")
+        repo.evictSession("g1", "s1")
+        assertTrue(repo.gapsOf("g1", "s1").isEmpty())
+    }
+
     // ─────────── helpers ──────────────────────────────────────────────────
+
+    /**
+     * R-20 Phase 2: seed a session window whose messages carry the given ids +
+     * ascending times (oldest-first), so gap tests can reference known anchors.
+     */
+    private suspend fun seedWindowWithIds(fp: String, sid: String, ids: List<Pair<String, Long>>) {
+        repo.putSessionWindow(
+            fp, sid, createdAt = 1L, workdir = "/proj",
+            CachedSessionWindow(
+                messages = ids.map { (id, t) -> Message(id = id, role = "user", time = Message.TimeInfo(created = t)) },
+                partsByMessage = emptyMap(),
+                olderMessagesCursor = null,
+                hasMoreMessages = true
+            )
+        )
+    }
 
     private suspend fun seedWindow(fp: String, sid: String, createdAt: Long?) {
         repo.putSessionWindow(

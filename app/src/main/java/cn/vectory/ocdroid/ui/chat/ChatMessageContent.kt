@@ -434,45 +434,38 @@ internal fun ChatMessageList(
     // page, and matches the product decision that most users rarely need deep
     // history. Messages are not persisted — re-fetched fresh on each open.
 
-    // 消息结构计算提到 LazyColumn body 之外（gap 分割需要 beforeGap/afterGap）。
+    // 消息结构计算提到 LazyColumn body 之外（gap 分割需要 Entry 列表）。
     //
     // remember 覆盖 messages/partsByMessage/streamingReasoningPart/sessionIsRunning
     // 不变的情况；但 streamingPartTexts 在 SSE 流式时每 ~100ms 变化（SessionSync
-    // 每次 emit 新 Map），仍会触发 reversedMessages 重建。这是预期的——重建是 O(n)
+    // 每次 emit 新 Map），仍会触发 reversedEntries 重建。这是预期的——重建是 O(n)
     // 单遍 filterNot，100 条消息下 ~10-20μs，远低于 LazyColumn item 渲染成本，可
     // 忽略（评审 maxer/gpter 实测确认）。
-    val reversedMessages = remember(messages, partsByMessage, streamingPartTexts, streamingReasoningPart, sessionIsRunning) {
-        messages.reversed().filterNot { msg ->
-            val msgParts = partsByMessage[msg.id].orEmpty()
-            val isStreamingMsg = msgParts.any { it.id in streamingPartTexts } ||
-                streamingReasoningPart?.messageId == msg.id ||
-                (!msg.isUser && msgParts.isEmpty() && sessionIsRunning)
-            // §empty-msg: user messages are never filtered here. Streaming
-            // assistant messages are kept — the items block renders an inline
-            // "生成中…" placeholder for the in-flight empty shell (msgParts
-            // empty + sessionIsRunning) and full content for the rest. For
-            // NON-streaming assistant messages, drop both the no-parts shell
-            // (legacy case) and the persistent empty shell whose parts exist
-            // but carry no renderable content (e.g. a placeholder text Part
-            // with text=null returned by the server after a reload). The
-            // streaming guard above robustly protects live turns whose
-            // streamingPartTexts/reasoning are still filling in.
-            // §error-feedback (Issue 4): keep assistant messages carrying a
-            // non-blank error message so ErrorCard can render — without this
-            // an error-only turn (error set, no renderable parts) is filtered
-            // out and the user gets no in-app feedback for rate-limit/quota.
-            !msg.isUser && !isStreamingMsg &&
-                msg.error?.message.isNullOrBlank() &&
-                isEffectivelyRenderableEmpty(msgParts)
+    // R-20 Phase 2: build the non-contiguous Entry list (Message + GapMarker)
+    // from the filtered oldest-first [messages] + the session's open
+    // [gapMarkers], then reverse + filter for the reverseLayout display. A gap
+    // divider is interleaved at each marker's upperBoundary seam (≥1 gap). The
+    // same streaming/empty filter that applies to plain messages is applied to
+    // Message entries here; GapMarker entries are always kept (a divider whose
+    // boundary message got filtered is dropped by withGaps upstream).
+    val reversedEntries = remember(messages, gapMarkers, partsByMessage, streamingPartTexts, streamingReasoningPart, sessionIsRunning) {
+        val entries = messages.withGaps(gapMarkers)
+        entries.reversed().filterNot { entry ->
+            (entry is Entry.Message) && run {
+                val msg = entry.message
+                val msgParts = partsByMessage[msg.id].orEmpty()
+                val isStreamingMsg = msgParts.any { it.id in streamingPartTexts } ||
+                    streamingReasoningPart?.messageId == msg.id ||
+                    (!msg.isUser && msgParts.isEmpty() && sessionIsRunning)
+                // §empty-msg / §error-feedback: same filter as the legacy
+                // reversedMessages (kept verbatim so rendering is byte-identical
+                // for the non-gap path).
+                !msg.isUser && !isStreamingMsg &&
+                    msg.error?.message.isNullOrBlank() &&
+                    isEffectivelyRenderableEmpty(msgParts)
+            }
         }
     }
-    val showGap = gapInfo != null && gapInfo.open
-    val gapInsertIndex = if (showGap) {
-        val idx = reversedMessages.indexOfFirst { it.id == gapInfo!!.tailOldestId }
-        if (idx >= 0) idx + 1 else -1
-    } else -1
-    val beforeGap = if (gapInsertIndex > 0) reversedMessages.subList(0, gapInsertIndex) else reversedMessages
-    val afterGap = if (gapInsertIndex > 0) reversedMessages.subList(gapInsertIndex, reversedMessages.size) else emptyList()
 
     // §Phase8-nav: Box 包裹 LazyColumn + 导航 FAB overlay（右侧中下）。
     Box(modifier = Modifier.fillMaxSize()) {
@@ -517,80 +510,61 @@ internal fun ChatMessageList(
                 }
             }
         }
-        // §Phase8-nav: reversedMessages / beforeGap / afterGap / showGap 已提到
-        // LazyColumn 外（供消息导航 FAB 复用）。下方 §flicker-fix-D 的 empty-message
-        // 过滤逻辑见外层 hoisted 块。gap divider 语义不变。
-        items(beforeGap, key = { it.id }) { message ->
-            // §s3-markers: synthetic metadata-marker messages render as
-            // inline rows (agent / model chip or compaction divider) instead
-            // of a full MessageRow.
-            if (message.role in METADATA_MARKER_ROLES) {
-                MetadataMarkerRow(
-                    role = message.role,
-                    label = markerLabelFor(message),
-                    modifier = Modifier.fillMaxWidth()
-                )
-            } else {
-                // §empty-msg: in-flight empty assistant shell (message.updated
-                // arrived, first part hasn't) renders a lightweight loading
-                // row instead of a bare timestamp bubble. Matches the streaming
-                // guard in reversedMessages above so the row is consistently
-                // kept there and rendered here.
-                val msgParts = partsByMessage[message.id].orEmpty()
-                val isInFlightEmpty = !message.isUser && msgParts.isEmpty() && sessionIsRunning
-                if (isInFlightEmpty) {
-                    InFlightEmptyLoading()
-                } else {
-                    MessageRow(
-                        message = message,
-                        parts = msgParts,
-                        streamingPartTexts = streamingPartTexts,
-                        streamingReasoningPartId = streamingReasoningPart?.id,
-                        repository = repository,
-                        workspaceDirectory = workspaceDirectory,
-                        onFileClick = onFileClick,
-                        onOpenSubAgent = onOpenSubAgent,
-                        expandedParts = expandedParts,
-                        onToggleExpand = onToggleExpand,
-                        staleQuestionPartKeys = staleQuestionPartKeys
-                    )
+        // §Phase8-nav: reversedEntries（Message + GapMarker）已提到 LazyColumn 外
+        // （供消息导航 FAB 复用）。R-20 Phase 2：gap divider 由 Entry.GapMarker 渲染，
+        // 一个 items() 块统一处理消息行 + 分割线（替代旧的 beforeGap/gap-divider/afterGap
+        // 三段式，支持 ≥1 gap）。
+        items(reversedEntries, key = { entry ->
+            when (entry) {
+                is Entry.Message -> entry.message.id
+                is Entry.GapMarker -> "gap-${entry.gapId}"
+            }
+        }) { entry ->
+            when (entry) {
+                is Entry.Message -> {
+                    val message = entry.message
+                    // §s3-markers: synthetic metadata-marker messages render as
+                    // inline rows (agent / model chip or compaction divider).
+                    if (message.role in METADATA_MARKER_ROLES) {
+                        MetadataMarkerRow(
+                            role = message.role,
+                            label = markerLabelFor(message),
+                            modifier = Modifier.fillMaxWidth()
+                        )
+                    } else {
+                        // §empty-msg: in-flight empty assistant shell render a
+                        // lightweight loading row; full MessageRow otherwise.
+                        val msgParts = partsByMessage[message.id].orEmpty()
+                        val isInFlightEmpty = !message.isUser && msgParts.isEmpty() && sessionIsRunning
+                        if (isInFlightEmpty) {
+                            InFlightEmptyLoading()
+                        } else {
+                            MessageRow(
+                                message = message,
+                                parts = msgParts,
+                                streamingPartTexts = streamingPartTexts,
+                                streamingReasoningPartId = streamingReasoningPart?.id,
+                                repository = repository,
+                                workspaceDirectory = workspaceDirectory,
+                                onFileClick = onFileClick,
+                                onOpenSubAgent = onOpenSubAgent,
+                                expandedParts = expandedParts,
+                                onToggleExpand = onToggleExpand,
+                                staleQuestionPartKeys = staleQuestionPartKeys
+                            )
+                        }
+                    }
                 }
-            }
-        }
-        if (gapInsertIndex > 0) {
-            item(key = "gap-divider") {
-                GapDivider(
-                    isLoading = isLoading,
-                    onClick = onCloseGap,
-                    modifier = Modifier.fillMaxWidth()
-                )
-            }
-        }
-        items(afterGap, key = { it.id }) { message ->
-            if (message.role in METADATA_MARKER_ROLES) {
-                MetadataMarkerRow(
-                    role = message.role,
-                    label = markerLabelFor(message),
-                    modifier = Modifier.fillMaxWidth()
-                )
-            } else {
-                val msgParts = partsByMessage[message.id].orEmpty()
-                val isInFlightEmpty = !message.isUser && msgParts.isEmpty() && sessionIsRunning
-                if (isInFlightEmpty) {
-                    InFlightEmptyLoading()
-                } else {
-                    MessageRow(
-                        message = message,
-                        parts = msgParts,
-                        streamingPartTexts = streamingPartTexts,
-                        streamingReasoningPartId = streamingReasoningPart?.id,
-                        repository = repository,
-                        workspaceDirectory = workspaceDirectory,
-                        onFileClick = onFileClick,
-                        onOpenSubAgent = onOpenSubAgent,
-                        expandedParts = expandedParts,
-                        onToggleExpand = onToggleExpand,
-                        staleQuestionPartKeys = staleQuestionPartKeys
+                is Entry.GapMarker -> {
+                    // R-20 Phase 2: the gap divider. Tapping routes the gap's
+                    // id back to GapFillCoordinator.fillSingleGap (50-step
+                    // backward fill). Exhausted gaps render a non-tappable
+                    // "无法补齐" hint (Filling shows the spinner).
+                    GapDivider(
+                        isLoading = entry.fillState == GapFillState.Filling,
+                        exhausted = entry.fillState == GapFillState.Exhausted,
+                        onClick = { onFillGap(entry.gapId) },
+                        modifier = Modifier.fillMaxWidth()
                     )
                 }
             }
@@ -722,7 +696,11 @@ private fun InFlightEmptyLoading(modifier: Modifier = Modifier) {
 private fun GapDivider(
     isLoading: Boolean,
     onClick: () -> Unit,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    /** R-20 Phase 2: when true the gap is Exhausted (history ended below it,
+     *  cannot be bridged). The chip renders a non-tappable "无法补齐"-style
+     *  hint instead of the tappable load hint. */
+    exhausted: Boolean = false,
 ) {
     val interactionSource = remember { MutableInteractionSource() }
     val isPressed by interactionSource.collectIsPressedAsState()
@@ -730,12 +708,14 @@ private fun GapDivider(
         targetValue = if (isPressed) 0.6f else 1f,
         label = "gap-divider-press"
     )
+    // Tappable only when idle (not loading, not exhausted).
+    val tappable = !isLoading && !exhausted
 
     Box(
         modifier = modifier
             .padding(horizontal = 16.dp, vertical = 8.dp)
             .then(
-                if (!isLoading) {
+                if (tappable) {
                     Modifier.clickable(
                         interactionSource = interactionSource,
                         indication = null,
@@ -775,7 +755,11 @@ private fun GapDivider(
                         Spacer(modifier = Modifier.width(6.dp))
                     }
                     Text(
-                        text = if (isLoading) stringResource(R.string.chat_loading) else stringResource(R.string.chat_gap_divider_hint),
+                        text = when {
+                            isLoading -> stringResource(R.string.chat_loading)
+                            exhausted -> stringResource(R.string.chat_gap_divider_exhausted)
+                            else -> stringResource(R.string.chat_gap_divider_hint)
+                        },
                         style = MaterialTheme.typography.labelSmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = alpha)
                     )

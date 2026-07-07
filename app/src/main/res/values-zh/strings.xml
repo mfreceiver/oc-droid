@@ -243,6 +243,9 @@
     <string name="chat_phase_disconnected">已断开</string>
     <string name="chat_jump_to_latest">跳到最新</string>
     <string name="chat_gap_divider_hint">可能有未加载的消息 · 点击加载</string>
+    <!-- R-20 Phase 2: gap 已 Exhausted（服务端历史在 gap 下方结束，无法补齐）。
+         不可点击。Phase 2 fix-#5: 补 zh 翻译，消除 MissingTranslation lint error。 -->
+    <string name="chat_gap_divider_exhausted">部分消息无法加载</string>
 
     <!-- §R18 Phase 2-G: UiEvent.Error / UiEvent.Success 资源字符串。
          格式参数（%1$s 等）由 LocalContext.getString / appContext.getString

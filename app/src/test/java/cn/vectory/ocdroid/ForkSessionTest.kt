@@ -173,6 +173,10 @@ class ForkSessionTest {
             effects = effectBus,
             serverCompatProfile = cn.vectory.ocdroid.data.repository.ServerCompatProfile(),
         )
+        val gapFillCoordinator = cn.vectory.ocdroid.ui.chat.GapFillCoordinator(
+            repository = repository,
+            cacheRepository = cacheRepository,
+        )
         return AppCore(
             store,
             repository,
@@ -189,6 +193,7 @@ class ForkSessionTest {
             hostProfileController,
             sessionSyncCoordinator,
             connectionCoordinator,
+            gapFillCoordinator,
             cacheRepository,
             // §review-fix #1: fp provider (same as MainViewModelTestBase).
             { hostProfileStore.currentProfile().serverGroupFp.ifBlank { hostProfileStore.currentProfile().id } },

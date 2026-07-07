@@ -73,6 +73,15 @@ internal fun launchCatchUp(
      * cache compound key when delegating to the coordinator. Default { "" }.
      */
     currentServerGroupFp: () -> String = { "" },
+    /**
+     * §fix-#3 (gpter #3): the serverGroupFp captured AT CALL TIME (when the
+     * probe REST request was initiated). Compared against
+     * [currentServerGroupFp] at onSuccess — a mismatch means the user switched
+     * host group during the probe; the stale response must NOT be merged.
+     * Defaults to the same value as `currentServerGroupFp()` so legacy callers
+     * that wire only the provider get fp-guard = no-op (both sides equal).
+     */
+    expectedServerGroupFp: String = currentServerGroupFp(),
     /** R-20 Phase 2 (G6): the SSE job's current workdir, or null if no feed. */
     sseCurrentWorkdir: String? = null,
     /** R-20 Phase 2 (G6): sessions with an established cold-snapshot baseline. */
@@ -117,7 +126,15 @@ internal fun launchCatchUp(
 
         repository.getMessagesPaged(sessionId, MainViewModelTimings.gapProbeMessagePageSize, before = null)
             .onSuccess { page ->
-                if (sessionId != slices.chat.value.currentSessionId) {
+                // §fix-#3 (gpter #3): compound-key guard (fp + sessionId).
+                // The probe REST call suspends; the user may switch session OR
+                // host group during it. A cross-group same-sessionId collision
+                // (plan §0 N1) would otherwise let the stale probe write into
+                // the new group's chat slice. Both legs must match — fp first,
+                // sessionId second.
+                if (sessionId != slices.chat.value.currentSessionId ||
+                    currentServerGroupFp() != expectedServerGroupFp
+                ) {
                     slices.mutateChat { c -> c.copy(isLoadingMessages = false) }
                     return@onSuccess
                 }
@@ -156,17 +173,24 @@ internal fun launchCatchUp(
                             // own Filling state is the per-marker indicator).
                             slices.mutateChat { c -> c.copy(isLoadingMessages = false, staleNotice = false) }
                             syncAgentFromPage(slices, sessionId, page, settingsManager)
-                            coordinator.openAndFill(
-                                scope = scope,
-                                slices = slices,
-                                serverGroupFp = currentServerGroupFp(),
-                                sessionId = sessionId,
-                                detection = detection,
-                                fetched5 = fetched,
-                                fetched5Parts = fetchedParts,
-                                onCacheWindow = onCacheWindow,
-                                onColdSnapshot = onColdSnapshot,
-                            )
+                            // openAndFill is suspend; launch it fire-and-forget
+                            // so the catch-up coroutine returns immediately. The
+                            // session-level Mutex inside the coordinator keeps
+                            // this session's fills serial.
+                            scope.launch {
+                                runCatching {
+                                    coordinator.openAndFill(
+                                        slices = slices,
+                                        serverGroupFp = currentServerGroupFp(),
+                                        sessionId = sessionId,
+                                        detection = detection,
+                                        fetched5 = fetched,
+                                        fetched5Parts = fetchedParts,
+                                        onCacheWindow = onCacheWindow,
+                                        onColdSnapshot = onColdSnapshot,
+                                    )
+                                }
+                            }
                         } else {
                             // No coordinator wired (legacy/test path): merge the
                             // fetched window; the gap is not tracked.

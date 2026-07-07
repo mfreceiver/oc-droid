@@ -659,7 +659,7 @@ class HostProfileController(
                 olderMessagesCursor = null,
                 hasMoreMessages = true,
                 isLoadingMessages = false,
-                gapInfo = null,
+                gapMarkers = emptyList(),
                 staleNotice = false,
                 currentModel = null
             )

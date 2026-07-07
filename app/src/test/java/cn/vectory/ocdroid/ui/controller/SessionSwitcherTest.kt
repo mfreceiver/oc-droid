@@ -170,7 +170,7 @@ class SessionSwitcherTest {
                 olderMessagesCursor = s.olderMessagesCursor,
                 hasMoreMessages = s.hasMoreMessages,
                 isLoadingMessages = s.isLoadingMessages,
-                gapInfo = s.gapInfo,
+                gapMarkers = s.gapMarkers,
                 staleNotice = s.staleNotice,
                 currentModel = s.currentModel
             )

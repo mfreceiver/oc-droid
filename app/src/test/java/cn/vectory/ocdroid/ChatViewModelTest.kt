@@ -1377,8 +1377,14 @@ class ChatViewModelTest : MainViewModelTestBase() {
                 messages = listOf(older),
                 olderMessagesCursor = "cursor-1",
                 hasMoreMessages = true,
-                gapInfo = cn.vectory.ocdroid.ui.GapInfo(
-                    anchorNewestId = "m_older", tailOldestId = "m_older", tailOldestCursor = "c", open = true
+                gapMarkers = listOf(
+                    cn.vectory.ocdroid.ui.chat.GapMarker(
+                        gapId = "g1",
+                        lowerAnchorMessageId = "m_older",
+                        upperBoundaryMessageId = "m_older",
+                        nextBeforeCursor = "c",
+                        fillState = cn.vectory.ocdroid.ui.chat.GapFillState.Idle,
+                    )
                 )
             )
         }
@@ -1392,7 +1398,7 @@ class ChatViewModelTest : MainViewModelTestBase() {
         // Cursor reseeded from the fresh fetch (nextCursor=null → no more).
         assertNull(chatVM.chatFlow.value.olderMessagesCursor)
         // Gap wiped — a cold-start snapshot has no断层 reference.
-        assertNull(chatVM.chatFlow.value.gapInfo)
+        assertTrue("cold-start refresh wipes gap markers", chatVM.chatFlow.value.gapMarkers.isEmpty())
         // §3 (glm-1 🔴 regression guard): refreshNonce MUST survive the
         // performGlobalColdStartRefresh → writeChat chain. Before the
         // wholesale ChatState rebuild fix, refreshNonce reset to 0, so

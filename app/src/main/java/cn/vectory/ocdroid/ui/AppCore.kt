@@ -479,12 +479,42 @@ class AppCore @Inject constructor(
                 }
                 when (r) {
                     is HydrateResult.Verified -> {
+                        // §fix-#1 (gpter 头号 / dser 共识): the verified
+                        // window (CachedSessionWindow) is FLAT — it carries
+                        // messages only, not gap markers. Before this fix the
+                        // handler injected messages but left `gapMarkers` empty,
+                        // so a session with open gaps in the persistent
+                        // gap_marker table rendered CONTIGUOUSLY (the fault
+                        // hidden — non-contiguous history flattened). Re-hydrate
+                        // the markers from the cache here so the UI's
+                        // `messages.withGaps(gapMarkers)` renders the dividers.
+                        // gapsOf is suspend; we're already in appScope.launch.
+                        // 二次 fp / sessionId guard above guarantees the gaps
+                        // belong to the CURRENT session/group.
+                        val gaps = cacheRepository.gapsOf(effect.serverGroupFp, effect.sessionId)
+                        // 🔴 三次重检 (gpter 复审 #1): gapsOf 是 suspend，返回
+                        // 后到 mutateChat 前没重检 fp/sessionId。用户可在 gapsOf
+                        // 期间切走（切 session 或切 host）。没有这第三次 guard，
+                        // 旧 session/group 的 gaps 会被注入到新 view。三次 guard
+                        // 与二次同语义：fp + sessionId 都未变才注入。
+                        if (effect.serverGroupFp != currentServerGroupFp() ||
+                            effect.sessionId != store.chatFlow.value.currentSessionId
+                        ) {
+                            DebugLog.d(
+                                TAG,
+                                "VerifyAndHydrate dropped: fp or session changed during gapsOf " +
+                                    "(effect.fp=${effect.serverGroupFp} current.fp=${currentServerGroupFp()} " +
+                                    "effect.sid=${effect.sessionId} current.sid=${store.chatFlow.value.currentSessionId})"
+                            )
+                            return@launch
+                        }
                         store.mutateChat {
                             it.copy(
                                 messages = r.window.messages,
                                 partsByMessage = r.window.partsByMessage,
                                 olderMessagesCursor = r.window.olderMessagesCursor,
-                                hasMoreMessages = r.window.hasMoreMessages
+                                hasMoreMessages = r.window.hasMoreMessages,
+                                gapMarkers = gaps,
                             )
                         }
                         // resetLimit=false: keep the verified-cached older

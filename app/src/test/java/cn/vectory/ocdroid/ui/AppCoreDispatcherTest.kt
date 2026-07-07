@@ -657,6 +657,143 @@ class AppCoreDispatcherTest : MainViewModelTestBase() {
     }
 
     // ═══════════════════════════════════════════════════════════════════════
+    // R-20 Phase 2 fix-#1: Verified hydrate restores gapMarkers
+    // ═══════════════════════════════════════════════════════════════════════
+
+    @Test
+    fun `fix-1 Verified hydrate injects gapMarkers from gapsOf so non-contiguous history renders`() = runTest {
+        // gpter #1 (头号): verifyAndLoad returns a FLAT CachedSessionWindow
+        // (messages only). Before the fix, the handler injected messages but
+        // left `gapMarkers` empty, so a session with open gaps in the
+        // persistent gap_marker table rendered CONTIGUOUSLY (fault hidden).
+        // After the fix, the handler ALSO calls cacheRepository.gapsOf and
+        // injects the markers so the UI's `messages.withGaps(gapMarkers)`
+        // renders the dividers.
+        val c = newCore()
+        // Pin the host profile's fp to a known value so the 二次重检 guard
+        // passes (effect.serverGroupFp == currentServerGroupFp()).
+        val pinnedProfile = cn.vectory.ocdroid.data.model.HostProfile(
+            id = "test-host",
+            name = "Test",
+            serverUrl = "http://server.test",
+            serverGroupFp = "test-fp",
+        )
+        io.mockk.every { hostProfileStore.currentProfile() } returns pinnedProfile
+        c.store.mutateChat { it.copy(currentSessionId = "sess-A") }
+        // Stub verifyAndLoad → Verified with two flat messages.
+        io.mockk.coEvery {
+            c.cacheRepository.verifyAndLoad(any(), any(), any())
+        } returns cn.vectory.ocdroid.data.cache.HydrateResult.Verified(
+            cn.vectory.ocdroid.ui.CachedSessionWindow(
+                messages = listOf(
+                    io.mockk.mockk(relaxed = true),
+                    io.mockk.mockk(relaxed = true),
+                ),
+                partsByMessage = emptyMap(),
+                olderMessagesCursor = null,
+                hasMoreMessages = false,
+            )
+        )
+        // Stub gapsOf → one open gap marker between the two messages.
+        val gapMarker = cn.vectory.ocdroid.ui.chat.GapMarker(
+            gapId = "gap-1",
+            lowerAnchorMessageId = "anchor",
+            upperBoundaryMessageId = "upper",
+            nextBeforeCursor = "c1",
+            fillState = cn.vectory.ocdroid.ui.chat.GapFillState.Idle,
+        )
+        io.mockk.coEvery { c.cacheRepository.gapsOf(any(), any()) } returns listOf(gapMarker)
+
+        c.dispatchSessionEffect(
+            ControllerEffect.VerifyAndHydrate("test-fp", "sess-A", createdAt = 1L)
+        )
+        advanceUntilIdle()
+
+        // gapsOf was queried for the verified session's (fp, sid).
+        io.mockk.coVerify { c.cacheRepository.gapsOf("test-fp", "sess-A") }
+        // gapMarkers injected — the UI's withGaps will render the divider.
+        assertEquals(
+            "Verified hydrate must inject gapMarkers from gapsOf",
+            listOf("gap-1"),
+            c.store.chatFlow.value.gapMarkers.map { it.gapId },
+        )
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // R-20 Phase 2 复审 #1: VerifyAndHydrate 三次重检 (after gapsOf suspend)
+    // ═══════════════════════════════════════════════════════════════════════
+
+    @Test
+    fun `fix-1-third VerifyAndHydrate drops injection when session switched during gapsOf`() = runTest {
+        // gpter 复审 #1: 二次重检 gates verifyAndLoad, but gapsOf (suspend,
+        // used to re-hydrate gapMarkers for a Verified window) is the THIRD
+        // suspend point in the handler. A user can switch session during it
+        // — the 二次 guard already passed (it ran before gapsOf was even
+        // called). Without the 三次 guard, old session's gaps would be
+        // injected into the new session's view. After the fix, the third
+        // guard re-checks (fp + sessionId) between gapsOf-return and
+        // mutateChat, dropping the injection on mismatch.
+        val c = newCore()
+        // Pin the host profile so currentServerGroupFp() == effect.serverGroupFp
+        // ("test-fp") — otherwise the 二次 guard (which checks fp too) would
+        // fire before gapsOf is reached and the test would not exercise the
+        // 三次 guard path. (Mirrors the existing fix-1 test's pinning.)
+        val pinnedProfile = cn.vectory.ocdroid.data.model.HostProfile(
+            id = "test-host",
+            name = "Test",
+            serverUrl = "http://server.test",
+            serverGroupFp = "test-fp",
+        )
+        io.mockk.every { hostProfileStore.currentProfile() } returns pinnedProfile
+        c.store.mutateChat { it.copy(currentSessionId = "sess-A") }
+        // Stub verifyAndLoad → Verified (passes 二次 guard).
+        io.mockk.coEvery {
+            c.cacheRepository.verifyAndLoad(any(), any(), any())
+        } returns cn.vectory.ocdroid.data.cache.HydrateResult.Verified(
+            cn.vectory.ocdroid.ui.CachedSessionWindow(
+                messages = listOf(io.mockk.mockk(relaxed = true)),
+                partsByMessage = emptyMap(),
+                olderMessagesCursor = null,
+                hasMoreMessages = false,
+            )
+        )
+        // Stub gapsOf to simulate the suspend-time switch: when it's called,
+        // flip currentSessionId to B (as if the user switched during the IO).
+        // Then return a non-empty gap list (the stale A gaps).
+        val staleGap = cn.vectory.ocdroid.ui.chat.GapMarker(
+            gapId = "stale-gap-A",
+            lowerAnchorMessageId = "anchor-a",
+            upperBoundaryMessageId = "upper-a",
+            nextBeforeCursor = "c1",
+            fillState = cn.vectory.ocdroid.ui.chat.GapFillState.Idle,
+        )
+        io.mockk.coEvery {
+            c.cacheRepository.gapsOf(any(), any())
+        } answers {
+            // Simulate the user switching to B during the gapsOf suspend.
+            c.store.mutateChat { it.copy(currentSessionId = "sess-B") }
+            listOf(staleGap)
+        }
+
+        c.dispatchSessionEffect(
+            ControllerEffect.VerifyAndHydrate("test-fp", "sess-A", createdAt = null)
+        )
+        advanceUntilIdle()
+
+        // currentSessionId is B (set by the simulated switch during gapsOf).
+        assertEquals("sess-B", c.store.chatFlow.value.currentSessionId)
+        // The stale A gap MUST NOT be injected into B's view. The 三次 guard
+        // dropped the mutateChat; gapMarkers stays empty.
+        assertTrue(
+            "VerifyAndHydrate must NOT inject sess-A's gaps after session switched to B during gapsOf",
+            c.store.chatFlow.value.gapMarkers.none { it.gapId == "stale-gap-A" },
+        )
+        // The verified messages are also NOT injected (the third guard gates
+        // the whole mutateChat block, not just the gapMarkers field).
+        // The mockk message is opaque; we verify via gapMarkers above.
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
     // R-20 Phase 1 review-fix #3: makeCacheHook looks up directorySessions
     // ═══════════════════════════════════════════════════════════════════════
 

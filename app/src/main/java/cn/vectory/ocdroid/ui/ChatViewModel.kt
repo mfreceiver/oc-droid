@@ -120,14 +120,15 @@ class ChatViewModel @Inject constructor(
     fun fillGap(gapId: String) {
         val sessionId = core.store.chatFlow.value.currentSessionId ?: return
         val fp = core.currentServerGroupFp()
-        core.gapFillCoordinator.fillSingleGap(
-            scope = core.appScope,
-            slices = core.store.slices,
-            serverGroupFp = fp,
-            sessionId = sessionId,
-            gapId = gapId,
-            onCacheWindow = core.makeCacheHook(fp),
-        )
+        core.appScope.launch {
+            core.gapFillCoordinator.fillSingleGap(
+                slices = core.store.slices,
+                serverGroupFp = fp,
+                sessionId = sessionId,
+                gapId = gapId,
+                onCacheWindow = core.makeCacheHook(fp),
+            )
+        }
     }
 
     fun compactSession() {

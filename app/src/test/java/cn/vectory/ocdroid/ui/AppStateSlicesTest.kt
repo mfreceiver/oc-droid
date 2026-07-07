@@ -179,19 +179,10 @@ class AppStateSlicesTest {
         assertEquals("boom", (error as TunnelActivationState.Error).message)
     }
 
-    @Test
-    fun `GapInfo constructor round-trips`() {
-        val g = cn.vectory.ocdroid.ui.GapInfo(
-            anchorNewestId = "a1",
-            tailOldestId = "t1",
-            tailOldestCursor = "c1",
-            open = true,
-        )
-        assertEquals("t1", g.tailOldestId)
-        assertEquals("c1", g.tailOldestCursor)
-        assertEquals("a1", g.anchorNewestId)
-        assertTrue(g.open)
-    }
+    // R-20 Phase 2: the legacy single-gap `GapInfo` class + its constructor
+    // round-trip test were removed (plan §3 N5). The multi-gap replacement
+    // (cn.vectory.ocdroid.ui.chat.GapMarker) is covered by GapAwareMessageListTest
+    // + BackfillAlgorithmTest.
 
     @Test
     fun `NavState default lastNavPage is zero`() {

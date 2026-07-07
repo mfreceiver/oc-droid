@@ -245,6 +245,9 @@
     <string name="chat_phase_disconnected">disconnected</string>
     <string name="chat_jump_to_latest">Jump to latest</string>
     <string name="chat_gap_divider_hint">Some messages may be unloaded · tap to load</string>
+    <!-- R-20 Phase 2: shown when a gap is Exhausted (server history ended below
+         the gap; cannot be bridged). Non-tappable. -->
+    <string name="chat_gap_divider_exhausted">Some messages could not be loaded</string>
 
     <!-- §R18 Phase 2-G: UiEvent.Error / UiEvent.Success resource strings.
          Format args (%1$s etc.) are filled at resolution time by

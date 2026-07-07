@@ -344,7 +344,21 @@ internal fun AppCore.catchUpAfterDisconnectOrForeground(sessionId: String) {
         onCacheWindow = makeCacheHook(fp),
         // R-20 Phase 2: delegate gap open + 50-step fill to the coordinator.
         gapFillCoordinator = gapFillCoordinator,
-        currentServerGroupFp = { fp },
+        // §fix-#2 (gpter 复审 #2 — glm-3 前次 #3 修复的实现错误): pass the
+        // LIVE fp provider (the injected @Named("currentServerGroupFp")
+        // reference on AppCore), NOT `{ fp }`. The previous `{ fp }` captured
+        // the same snapshot as `expectedServerGroupFp = fp` below → the onSuccess
+        // guard `currentServerGroupFp() != expectedServerGroupFp` was恒等
+        // (no-op): a host switch during the probe REST was never detected, and
+        // the stale response was merged into the new group's slice. With the
+        // live provider, currentServerGroupFp() reads the current host's fp
+        // each call, so a mid-probe host switch makes the guard fire.
+        currentServerGroupFp = currentServerGroupFp,
+        // §fix-#3 (gpter #3): the fp captured AT CALL TIME (initiation
+        // snapshot). The onSuccess guard compares this vs the live
+        // currentServerGroupFp() — a mismatch means the user switched host
+        // group during the probe; the stale response must NOT be merged.
+        expectedServerGroupFp = fp,
         sseCurrentWorkdir = sseWorkdir,
         sessionsEverColdSnapshotted = sseSnap.sessionsEverColdSnapshotted,
         onColdSnapshot = { sid -> sessionSyncCoordinator.markSessionColdSnapshotted(sid) },
