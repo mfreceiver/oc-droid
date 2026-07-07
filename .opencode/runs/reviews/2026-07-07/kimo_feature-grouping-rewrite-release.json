@@ -1,0 +1,20 @@
+{
+  "agent": "kimo",
+  "scope": "feature-grouping-rewrite-release",
+  "date": "2026-07-08",
+  "reviewed_commit": "1c4526f",
+  "round": "release (fresh independent)",
+  "version_target": "0.5.1 (patch; pending patch-vs-minor confirmation — see notes)",
+  "verdict": "pass",
+  "score": 9.5,
+  "blocking_issues": [],
+  "non_blocking_issues": [
+    "1. [cleanup] Dead strings cache_management_action_split / cache_management_action_split_hint remain after copy-on-split UI removed (values/strings.xml:309-310, values-zh:304-305).",
+    "2. [cleanup] Dead strings debug_effect_bus_dropped_title / debug_sse_unknown_events_title / debug_diagnostics_none remain after diagnostic panels removed (values/strings.xml:225-227, values-zh:225-227).",
+    "3. [perf, carried] evictWorkdirInGroup loads full CachedSessionEntity rows for the fp via sessionsInGroup + filters in Kotlin + N×3 per-session DELETE (CacheRepository.kt:910-925) vs old one indexed bulk SQL DELETE. Slower for very large groups; acceptable for manual disconnect path.",
+    "4. [security/perf] commandClient deliberately omits responseSizeGuardInterceptor (OkHttpClientFactory.kt:136-139). Command responses expected tiny JSON acks, but a compromised server could return a large body before the 300s read timeout.",
+    "5. [design-risk, by-design] saveHostProfile only reconfigures/reconnects on active-host URL or allowInsecure change (HostProfileController.kt:175-197); changing the active profile's serverGroupFp in the editor does not trigger a purge/reconnect, even though fp is the cache/workdir/model key. Matches spec '改组=只改 fp 指针不搬缓存' + warning string; can leave mixed-fp state until manual clear-all-data or restart.",
+    "6. [ux edge] isDraft badge compares workdir == draftWorkdir exactly (SessionsScreen.kt:241). If draft string is a slash variant of a recent workdir normalizing to the same key, the draft badge won't show even though draft is active."
+  ],
+  "notes": "Fresh independent review of committed rewrite. Spot-checked source + spec + R5 diff, cross-read glmer/gpter R5 artifacts only AFTER forming own conclusions. FP derivation: every call site uses the same contract (@Named currentServerGroupFp provider or inline profile.serverGroupFp.ifBlank{id}; HostProfileStore normalizes blank on read/write) — no inconsistency. WorkdirPaths.normalize: gate/remove/evict pipeline all funnel through trim().trim('/'); addRecentWorkdir exact-trim dedup is a duplicate-MRU edge not a match-then-leak. 300s command timeout: dedicated commandApi/commandHttp rebuilt alongside rest/sse on configure(); in-flight commands keep old client, new use new; classifyCommandPostError correctly distinguishes read(Info)/connect(Error) STE, 3 branches pinned; UiEvent.Info exhaustive in ChatScreen + test collector. Soft-migration ghost links: editor intentionally preserves legacy non-slot fp when selector unchanged (Q3 decision), internally consistent; UX quirk = two 'Standalone' profiles can still share cache/workdirs/drafts. Cache zombie fix: applyArchiveEviction updates directorySessions matching the active archive path. No release-blocking integration or regression risk. Recommend gate clears ≥9.5 with pass. Version-policy note: rewrite removes user-visible features + changes MRU semantics + adds manual grouping model → semantically closer to MINOR (0.6.0); 0.y.z SemVer affords latitude; confirm intent pre-release."
+}

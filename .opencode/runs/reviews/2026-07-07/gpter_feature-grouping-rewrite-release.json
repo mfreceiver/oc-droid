@@ -1,0 +1,17 @@
+{
+  "agent": "gpter",
+  "scope": "feature-grouping-rewrite-release",
+  "date": "2026-07-07",
+  "reviewed_commit": "1c4526f",
+  "round": "release-readiness-confirm",
+  "prior_round_score": 9.6,
+  "version_target": "0.5.1 (patch; pending patch-vs-minor confirmation)",
+  "verdict": "pass",
+  "score": 9.6,
+  "blocking_issues": [],
+  "non_blocking_issues": [
+    "1. [carried, edge-acceptable] addRecentWorkdir still dedupes by exact trimmed string → slash variants can occupy multiple MRU slots. Display + disconnect paths normalize; cache eviction normalizes (C5). Edge-acceptable.",
+    "2. [carried] Command timeout classification relies on OkHttp exception message text for connect-vs-read. Covered by tests; acceptable for release but inherently fragile."
+  ],
+  "notes": "Release-readiness confirmed. Sampled committed critical sites vs round-5 target: WorkdirPaths.normalize, SettingsManager.removeRecentWorkdir, SessionsScreen.buildWorkdirGroups, CacheRepository.evictWorkdirInGroup all match round-5 design. No last-mile drift in areas that carried prior blockers. check.sh green + C5 present in committed code → 1c4526f ship-ready."
+}

@@ -1,0 +1,19 @@
+{
+  "agent": "glmer",
+  "scope": "feature-grouping-rewrite-release",
+  "date": "2026-07-07",
+  "reviewed_commit": "1c4526f",
+  "round": "release-readiness-confirm",
+  "prior_round_score": 9.8,
+  "version_target": "0.5.1 (patch; pending patch-vs-minor confirmation — see non_blocking #1)",
+  "verdict": "pass",
+  "score": 9.8,
+  "blocking_issues": [],
+  "non_blocking_issues": [
+    "1. [version-policy, human-confirm] version_target 0.5.1 (patch) may warrant MINOR (0.6.0): rewrite removes user-visible features (copy-on-split UI, EffectBus/SSE diagnostic panels), changes MRU semantics 8→30, adds manual grouping model. 0.y.z SemVer affords latitude; release.sh handles bump internally. Not blocking — confirm intent pre-release.",
+    "2. [perf, carried r5] evictWorkdirInGroup N×3 per-session DELETE vs old 3 bulk SQL (CacheRepository.kt:920-924). Manual disconnect path, non-hot, SQLite PK-indexed <100ms, atomicity intact. Non-issue.",
+    "3. [robustness, carried r5] classifyCommandPostError OkHttp message-text sniff for 'connect' (AppCoreOrchestration.kt:262). 4 tests pin 3 branches; unsafe-direction default is non-fatal Info. Acceptable failure mode.",
+    "4. [observability, carried r5] Diagnostic panels removed from DebugLogSection; stats migrated to ConnectionProfileSection. Deliberate scope reduction per spec."
+  ],
+  "notes": "SHIP-READY. Drift check NONE — committed 1c4526f matches diff-r5.patch byte-for-byte across sampled critical files (CacheDao/CacheRepository/SettingsManager/SessionsScreen/AppCoreOrchestration; SessionListMergeTest deleted; 4 r5-new tests present). Integration regression CLEAN — 12 removed symbols (mergeCacheGroup/mergeServerGroup/splitProfileToOwnGroup/copyPerFpConfig/attemptCrossGroupMerge/directoriesMatchOrIntersect/splitProfile/3 deleteXxxByWorkdir/copyCompositeSessionMapPrefix) appear ONLY in breadcrumb comments, 0 orphan callers → corroborates check.sh GREEN. Composite gate comfortably met (glmer 9.8 + gpter 9.6 + momo 10.0; kimo pending). 5-round arc 8.5→9.6→9.7→9.8→9.8 converged, no new regression; every round fixed a concrete issue (C3 disconnect-live-sessions → C4 recent-normalization → C5 cache-normalization). Disconnect pipeline end-to-end consistent via WorkdirPaths.normalize across 4 layers. Cannot independently re-run check.sh (read-only) but orphan-caller grep + structural consistency provide strong indirect evidence. Recommend ship after version-bump intent confirmed."
+}
