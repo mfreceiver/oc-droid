@@ -415,6 +415,126 @@ class CacheRepositoryEvictionTest {
         assertEquals(listOf("/real"), workdirs)
     }
 
+    // ─────────── §grouping-rewrite Round-5 C5: evictWorkdirInGroup normalize-match ──
+    // The displayed/trimmed workdir passed in comes from buildWorkdirGroups's
+    // output (often the absolute leading-slash form like "/proj-a"); cache
+    // rows may persist slash variants the server originally returned
+    // ("proj-a/"). Pre-C5 the exact-string SQL WHERE workdir = :workdir
+    // silently missed variants → cached messages survived disconnect →
+    // reappeared on reconnect (violated Q14). These tests pin the in-Kotlin
+    // normalize-match via WorkdirPaths.normalize and the per-session cascade
+    // (sessions + messages + gap markers all gone for matching workdirs).
+
+    @Test
+    fun `evictWorkdirInGroup evicts slash-variant cached rows by normalized match`() = runTest {
+        // THE C5 BLOCKER TEST. Cache row stores workdir as "proj-a/" (the
+        // trailing-slash variant the server returned); disconnect is invoked
+        // with "/proj-a" (the absolute leading-slash form buildWorkdirGroups
+        // emits as the display dir). Pre-C5 the exact-match SQL would NOT
+        // delete this row → cached messages + gap survived → reappeared on
+        // reconnect. Both forms normalize to "proj-a" via WorkdirPaths.normalize
+        // → match → evicted (session + message + gap all gone).
+        seedSession("g1", "s-variant", createdAt = 1L, workdir = "proj-a/")
+        // Seed a gap marker on the variant session so the gap cascade is
+        // exercised too (seedSession only seeds messages).
+        repo.openGap(
+            "g1", "s-variant",
+            lowerAnchorMessageId = "m1",
+            upperBoundaryMessageId = "m2",
+            initialNextBeforeCursor = "c1"
+        )
+        // Sanity: session + 2 messages + 1 gap are seeded.
+        assertNotNull(db.cacheDao().session("g1", "s-variant"))
+        assertEquals(2, db.cacheDao().messages("g1", "s-variant").size)
+        assertEquals(1, db.gapMarkerDao().gaps("g1", "s-variant").size)
+
+        // Disconnect the absolute-form display dir.
+        repo.evictWorkdirInGroup("g1", "/proj-a")
+
+        // All three caches for the variant session are gone.
+        assertNull(
+            "session row evicted despite the workdir slash-variant mismatch",
+            db.cacheDao().session("g1", "s-variant"),
+        )
+        assertTrue(
+            "messages cascade-evicted for the variant session",
+            db.cacheDao().messages("g1", "s-variant").isEmpty(),
+        )
+        assertTrue(
+            "gap marker cascade-evicted for the variant session",
+            db.gapMarkerDao().gaps("g1", "s-variant").isEmpty(),
+        )
+    }
+
+    @Test
+    fun `evictWorkdirInGroup still evicts exact match`() = runTest {
+        // Sanity: the pre-C5 exact-match path is preserved (the normalize
+        // match is a strict superset — it matches everything exact-match
+        // matched, plus the variants).
+        seedSession("g1", "s-exact", createdAt = 1L, workdir = "/proj-a")
+
+        repo.evictWorkdirInGroup("g1", "/proj-a")
+
+        assertNull(db.cacheDao().session("g1", "s-exact"))
+        assertTrue(db.cacheDao().messages("g1", "s-exact").isEmpty())
+    }
+
+    @Test
+    fun `evictWorkdirInGroup does NOT evict sibling workdirs`() = runTest {
+        // Over-eviction guard: the normalize match must not accidentally nuke
+        // a sibling project whose name is a substring or shares a prefix.
+        // proj-a and proj-b are distinct under any normalization rule.
+        seedSession("g1", "s-a", createdAt = 1L, workdir = "/proj-a")
+        seedSession("g1", "s-b", createdAt = 1L, workdir = "/proj-b")
+
+        repo.evictWorkdirInGroup("g1", "/proj-a")
+
+        assertNull("target session evicted", db.cacheDao().session("g1", "s-a"))
+        assertNotNull(
+            "sibling project's session MUST survive",
+            db.cacheDao().session("g1", "s-b"),
+        )
+        assertEquals(
+            "sibling project's messages MUST survive",
+            2,
+            db.cacheDao().messages("g1", "s-b").size,
+        )
+    }
+
+    @Test
+    fun `evictWorkdirInGroup evicts ALL variant rows for the target but leaves siblings`() = runTest {
+        // The cluster case: TWO cached sessions for the same logical workdir
+        // under different slash variants (one "proj-a/", one "/proj-a"), PLUS
+        // a sibling project. Evicting "/proj-a" must drop BOTH variants
+        // (normalize-match catches each) and leave the sibling intact.
+        // This is the case that exercised the bug most visibly pre-C5: even
+        // if the user (or an earlier fix attempt) happened to match one
+        // variant, the other would survive and resurface.
+        seedSession("g1", "s-trailing-slash", createdAt = 1L, workdir = "proj-a/")
+        seedSession("g1", "s-leading-slash", createdAt = 1L, workdir = "/proj-a")
+        seedSession("g1", "s-sibling", createdAt = 1L, workdir = "/proj-b")
+
+        repo.evictWorkdirInGroup("g1", "/proj-a")
+
+        assertNull(
+            "trailing-slash variant evicted",
+            db.cacheDao().session("g1", "s-trailing-slash"),
+        )
+        assertNull(
+            "leading-slash variant evicted",
+            db.cacheDao().session("g1", "s-leading-slash"),
+        )
+        assertNotNull(
+            "sibling project MUST survive both variant evictions",
+            db.cacheDao().session("g1", "s-sibling"),
+        )
+        assertEquals(
+            "sibling's messages MUST survive",
+            2,
+            db.cacheDao().messages("g1", "s-sibling").size,
+        )
+    }
+
     // ─────────── helpers ───────────────────────────────────────────────────
 
     /**

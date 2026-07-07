@@ -115,6 +115,30 @@ class OkHttpClientFactory @Inject constructor(
             .build()
 
     /**
+     * §grouping-rewrite item 4: dedicated client for `executeCommand`
+     * (POST /session/{id}/command). The REST [restClient] caps read at 30 s,
+     * but a slash command may force the server to do heavy synchronous work
+     * BEFORE it ACKs the POST (compaction, slow skill load, ...) — a >30 s
+     * wait then surfaces as [java.net.SocketTimeoutException] and gets shown
+     * to the user as a false-negative `error_command_failed`, even though the
+     * SSE client (read timeout 0) is still delivering the command's results
+     * fine. This client bumps the read timeout to 300 s on the SAME base
+     * chain (so connectTimeout 10 s + every interceptor / Basic Auth /
+     * directory header / cache / traffic / logging still apply), making the
+     * ACK wait effectively unbounded for the practical server-side processing
+     * window. The non-fatal `SocketTimeoutException` → `UiEvent.Info` branch
+     * in `AppCoreOrchestration.executeCommand` is the second line of defence
+     * for the (now rare) >300 s case.
+     *
+     * NB: deliberately omits the [responseSizeGuardInterceptor] — command
+     * responses are tiny JSON acks, not bulk payloads.
+     */
+    fun commandClient(allowInsecure: Boolean): OkHttpClient =
+        baseBuilder(allowInsecure)
+            .readTimeout(300, TimeUnit.SECONDS)
+            .build()
+
+    /**
      * Tunnel activation client: SSL via the shared entry point + 15 s/15 s
      * timeouts, NO base interceptors — tunnel auth uses a form-encoded POST
      * (not HTTP Basic Auth), so the [AuthInterceptor] MUST NOT touch this

@@ -102,6 +102,13 @@ internal fun AppCore.installTestUiEventCollector(
                         appCoreSuccessEventBuffer.getOrPut(this@installTestUiEventCollector) { mutableListOf() }.add(event)
                     }
                 }
+                // §grouping-rewrite item 4: neutral Info events (e.g. command
+                // POST timed out on ACK; SSE carries results). Test ring
+                // buffers only care about Error/Success for historical
+                // assertions — Info is a no-op here. Branch exists so the
+                // sealed-class `when` stays exhaustive after adding the
+                // UiEvent.Info variant.
+                is UiEvent.Info -> Unit
                 is UiEvent.Debug -> Unit
             }
         }
@@ -143,6 +150,7 @@ private val TEST_UI_EVENT_STRING_TABLE: Map<Int, String> = mapOf(
     R.string.error_load_sessions_failed to "Failed to load sessions: %1\$s",
     R.string.error_load_more_sessions_failed to "Failed to load more sessions: %1\$s",
     R.string.error_command_failed to "Command /%1\$s failed: %2\$s",
+    R.string.command_submitted_processing to "Command submitted, processing…",
     R.string.chat_command_no_session to "Open or create a session before running /%1\$s",
     R.string.error_create_session_in_workdir_failed to "Failed to create session in %1\$s: %2\$s",
     R.string.error_restore_session_failed to "Failed to restore session: %1\$s",

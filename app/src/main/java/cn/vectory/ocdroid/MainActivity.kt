@@ -307,11 +307,13 @@ private fun PhoneLayout(viewModel: OrchestratorViewModel, initialPage: Int = 0) 
                                     val sessionViewModel: SessionViewModel = hiltViewModel()
                                     val composerVM: ComposerViewModel = hiltViewModel()
                                     val orchestratorVM: OrchestratorViewModel = hiltViewModel()
+                                    val settingsVM: SettingsViewModel = hiltViewModel()
                                     val filesVM: FilesViewModel = hiltViewModel()
                                     SessionsScreen(
                                         viewModel = sessionViewModel,
                                         composerVM = composerVM,
                                         orchestratorVM = orchestratorVM,
+                                        settingsVM = settingsVM,
                                         repository = filesVM.repository,
                                         // Q4: panel 选中会话保持打开；chat pane 永远在右，
                                         // onSwitchToChat 在面板内 no-op。
@@ -353,11 +355,13 @@ private fun PhoneLayout(viewModel: OrchestratorViewModel, initialPage: Int = 0) 
                         val sessionViewModel: SessionViewModel = hiltViewModel()
                         val composerVM: ComposerViewModel = hiltViewModel()
                         val orchestratorVM: OrchestratorViewModel = hiltViewModel()
+                        val settingsVM: SettingsViewModel = hiltViewModel()
                         val filesVM: FilesViewModel = hiltViewModel()
                         SessionsScreen(
                             viewModel = sessionViewModel,
                             composerVM = composerVM,
                             orchestratorVM = orchestratorVM,
+                            settingsVM = settingsVM,
                             repository = filesVM.repository,
                             onSwitchToChat = { switchToPage(screens.indexOf(Screen.Chat)) }
                         )
@@ -405,5 +409,4 @@ private fun PhoneLayout(viewModel: OrchestratorViewModel, initialPage: Int = 0) 
         }
     }
 }
-
 

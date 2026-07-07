@@ -1,0 +1,21 @@
+{
+  "agent": "glmer",
+  "scope": "feature-grouping-rewrite",
+  "date": "2026-07-07",
+  "reviewed_commit": "1448df1a35a5a9dd48db11f7490a808a02ced420",
+  "version_target": "0.5.1 (patch; pending patch-vs-minor confirmation)",
+  "verdict": "pass-with-fixes",
+  "score": 8.5,
+  "blocking_issues": [],
+  "non_blocking_issues": [
+    "1. [important, borderline-blocking, score-dragging] disconnect UI does not refresh. disconnectWorkdir (SettingsViewModel.kt:628-638) does removeRecentWorkdir+evictWorkdirInGroup+refreshCacheListing, none of which re-emit hostFlow/sessionListFlow; recentWorkdirs (combine of those, :533-543) doesn't re-derive; SessionsScreen workdirGroups (:140-184) keeps showing the disconnected workdir's placeholder until an unrelated change. Old hiddenWorkdirs local state gave immediate feedback; this rewrite deleted it without replacement. Spec verification 'disconnect → disappears from list' fails. Borderline-block: data state correct + eventually consistent, but user-visible regression.",
+    "2. [important, score-dragging] Manual sweep does not bypass 24h dedup (Known Deviation A). sweepNow/sweepAllGroups (SettingsViewModel.kt:307-345) call dailySweepIfNeeded whose dedup early-returns (CacheMaintenanceCoordinator.kt:79-92). Spec 项3 明文 '手动按钮绕过 24h 去重'. After auto connect-sweep, both manual buttons are 24h no-ops showing zero-count Incomplete — feels broken. KDoc (:321-324) rationalizes it post-hoc as 'contract', not a user decision.",
+    "3. [important, item-4 correctness] SocketTimeoutException over-broadly classified as Info. AppCoreOrchestration.kt:117-122 & :138-143 emit command_submitted_processing for ALL SocketTimeoutException, but OkHttp throws it for BOTH connect-timeout (server unreachable / DNS / TLS) and read-timeout. Connect-side failure → POST never reached server → SSE won't deliver → user waits for a result that never comes. Should be Error. Fix: message-inspection (contains 'connect' → Error, else Info) or okhttp EventListener to distinguish phase.",
+    "4. [suggestion] NamedGroupLabels duplicated (SettingsSections.kt end + HostProfilesManagerScreen.kt:285). Drift risk.",
+    "5. [suggestion] Three combines in SettingsViewModel (:533-574) each re-call hostProfileStore.currentProfile() (@Synchronized ESP read) + a Room read; merge into one triple data class to cut IO + recomposition.",
+    "6. [suggestion] Dead code: directoriesMatchOrIntersect (SessionListActions.kt:436, sole caller deleted).",
+    "7. [note/trade-off] MRU 8→30 (SettingsManager.kt:726) — original comment says cap 'bounds cold-start directory-fetch fan-out'; 4x growth may slow cold start for heavy users. Note in changelog or verify.",
+    "8. [cosmetic] Card-in-Dialog nesting (SettingsScreen.kt:1445-1473 + CacheManagementSection inner Card). Consider Surface or hideInnerCard param."
+  ],
+  "notes": "Core data integrity (item 1) SOUND: soft-migration + 'selectedGroup != initialGroup才改 fp' closes the loop — legacy UUID fp reads as no-group in editor, unchanged on save unless user explicitly picks; no two profiles unintentionally share cache (sharing requires explicit same-slot choice). Stranding by-design, host_group_warning covers it. applyArchiveEviction zombie fix (SessionSyncCoordinator.kt:1133-1142) is verbatim-identical to user-archive path (SessionMutationActions.kt:107-109), not a compile-only stub. commandApi rebuildClients @Synchronized + var atomic; in-flight POST completes on old client (consistent with existing api). Test coverage for deletions adequate. Verdict pass-with-fixes: 3 🟠 touch spec明文 / user-visible; ~100 lines, no architecture change, fixes reach 9.5+. Not proactively blocking."
+}

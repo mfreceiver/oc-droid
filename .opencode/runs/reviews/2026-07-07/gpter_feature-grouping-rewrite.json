@@ -1,0 +1,22 @@
+{
+  "agent": "gpter",
+  "scope": "feature-grouping-rewrite",
+  "date": "2026-07-07",
+  "reviewed_commit": "1448df1a35a5a9dd48db11f7490a808a02ced420",
+  "version_target": "0.5.1 (patch; pending patch-vs-minor confirmation)",
+  "verdict": "block",
+  "score": 7.2,
+  "blocking_issues": [
+    "1. Soft-migration invariant not enforced at runtime cache/config keying. Code still uses profile.serverGroupFp.ifBlank { profile.id } everywhere; a legacy merged UUID shared by two profiles continues sharing chat cache/drafts/model-prefs/workdirs/sweep-epoch while UI labels it standalone. Sites: di/ControllerModule.kt:79-80, ui/SettingsViewModel.kt:127-160, ui/controller/ComposerController.kt:63-64, ui/ComposerViewModel.kt:76-98, ui/SessionViewModel.kt (128,194,217,230,244,319,335,359,385), data/repository/HostProfileStore.kt:246-248. NOTE: orchestrator flags this as a spec-interpretation question — Q3 grilling decision was explicitly 'soft migration, preserve legacy ghost links'; gpter reads 'fp not in {A,B,C,D} => no-group' as requiring runtime effective-fp normalization. Needs user decision.",
+    "2. disconnectWorkdir not reactive. recentWorkdirs StateFlow combines only store.hostFlow + store.sessionListFlow (SettingsViewModel.kt:120-130); disconnectWorkdir mutates only SettingsManager + cache listing (SettingsViewModel.kt:347-356), so no observed flow re-emits — Sessions UI keeps showing the disconnected 0-live workdir until an unrelated change or restart. Breaks item 5 'disconnect removes from list immediately'.",
+    "3. Manual sweep does not bypass 24h dedup. Both per-group and all-groups paths call dailySweepIfNeeded (SettingsViewModel.kt:307-310, 330-339), whose first action skips when today's epoch is stamped (CacheMaintenanceCoordinator.kt:79-91). New manual maintenance button is often a no-op after the auto connect-sweep. Contradicts item 3 / grilling Q9."
+  ],
+  "non_blocking_issues": [
+    "1. refreshCacheListing lists only cacheRepository.allServerGroupFps() (SettingsViewModel.kt:226-243) — popup won't show profile groups that have zero cached sessions, though sweepAllGroups uses profile-derived fps. Behavior/listing scope diverge.",
+    "2. NamedGroupLabels duplicated: centralized in SettingsSections.kt:1543-1550 but editor uses local listOf(\"A\",\"B\",\"C\",\"D\") in HostProfilesManagerScreen.kt:1260. Drift risk.",
+    "3. 'single-read fp' comments are inaccurate — still calls hostProfileStore.currentProfile() twice inside ifBlank lambdas (SessionViewModel.kt:128,194; ComposerController.kt:63; ComposerViewModel.kt:76). Usually harmless (blank normalized) but fragile around corrupt/legacy rows.",
+    "4. UiEvent.Info shape as List<Any> is acceptable; matches Error/Success. Exhaustive handling covered in UiEvent.resolveMessage, ChatScreen, test collector.",
+    "5. Command-timeout impl mostly sound. Rebuilding commandApi on host switch does not corrupt an already-started Retrofit call (holds own client). No obvious state mutation on success. Cancellation unchanged."
+  ],
+  "notes": "Known deviations: A = blocking vs current spec (soft-migration interpretation); B = acceptable; C = acceptable but clean up; D = acceptable UI compromise; E = not fully sound — disconnect persistence not reflected reactively; live/0-live semantics need another pass. Deepest release risk: missing effective-fp normalization — without it legacy UUID groups keep sharing exactly the data the rewrite says must become no-group."
+}

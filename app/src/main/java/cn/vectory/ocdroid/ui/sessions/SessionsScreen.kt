@@ -3,6 +3,7 @@ package cn.vectory.ocdroid.ui.sessions
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
@@ -37,8 +38,10 @@ import cn.vectory.ocdroid.data.repository.OpenCodeRepository
 import cn.vectory.ocdroid.ui.ComposerViewModel
 import cn.vectory.ocdroid.ui.OrchestratorViewModel
 import cn.vectory.ocdroid.ui.SessionViewModel
+import cn.vectory.ocdroid.ui.SettingsViewModel
 import cn.vectory.ocdroid.ui.chat.workdirTone
 import cn.vectory.ocdroid.util.DebugLog
+import cn.vectory.ocdroid.util.WorkdirPaths
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.map
 import java.text.SimpleDateFormat
@@ -51,6 +54,7 @@ fun SessionsScreen(
     viewModel: SessionViewModel,
     composerVM: ComposerViewModel,
     orchestratorVM: OrchestratorViewModel,
+    settingsVM: SettingsViewModel,
     /** §R-17 batch3e: repository for the DirectoryPickerSheet (was
      *  `viewModel.core.repository`). Injected via the activity-scoped
      *  [FilesViewModel] at the call site; passed in directly here so this
@@ -85,10 +89,9 @@ fun SessionsScreen(
         .collectAsStateWithLifecycle(initialValue = null)
     val unreadSessions by remember { viewModel.unreadFlow.map { it.unreadSessions }.distinctUntilChanged() }
         .collectAsStateWithLifecycle(initialValue = emptySet())
+    val recentWorkdirs by settingsVM.recentWorkdirs.collectAsStateWithLifecycle()
     var showNewWorkdirDialog by remember { mutableStateOf(false) }
     var expandedWorkdirs by remember { mutableStateOf(setOf<String>()) }
-    // Locally-hidden workdirs (long-press → disconnect). UI-only; reset on refresh/re-enter tab.
-    var hiddenWorkdirs by remember { mutableStateOf(setOf<String>()) }
     var pendingDisconnectWorkdir by remember { mutableStateOf<String?>(null) }
     // M7: long-press a session card → archive confirmation dialog. Null = hidden.
     var pendingArchiveSession by remember { mutableStateOf<Session?>(null) }
@@ -113,74 +116,33 @@ fun SessionsScreen(
         }
     }
 
-    // Derive workdir groups, excluding locally-hidden workdirs and sub-agents
-    // (parentId != null). Sub-agents are only reachable from within a parent
-    // conversation via SubAgentCard, never from this workdir list.
+    // Derive workdir groups for the "Connected projects" list, sub-agents
+    // (parentId != null) excluded. Sub-agents are only reachable from within
+    // a parent conversation via SubAgentCard, never from this workdir list.
     //
-    // The draft workdir (when the user has invoked createSessionInWorkdir but
-    // no session has been POSTed yet) is appended with an empty session list
-    // so the in-progress "connect" is visible alongside connected projects.
+    // §grouping-rewrite Round-3 C3: derivation is now GATED by recent_workdirs
+    // membership — a workdir is visible iff it is in recentWorkdirs OR it is
+    // the active draftWorkdir. This makes the persistent recent_workdirs list
+    // the single source of truth for "connected" so disconnecting a workdir
+    // (which removes it from recent_workdirs + evicts its cache) hides it
+    // from this list EVEN WHEN its live sessions are still in sessionListFlow
+    // (the common case during the window between disconnect and the server
+    // list refresh). The disconnect dialog promises "removed from the list"
+    // unconditionally — the pre-C3 logic broke that promise for any workdir
+    // with at least one live (non-archived, parentId==null) session.
     //
-    // Source merges sessionListState.sessions with sessionListState.directory
-    // Sessions (#10) so a workdir that has only been discovered via the
-    // directory-scoped fetch (and not yet promoted into the global list by a
-    // periodic refresh) still shows its sessions here. Deduplicated by id to
-    // avoid double-rendering.
+    // The derivation lives in [buildWorkdirGroups] (top-level, pure, testable);
+    // this derivedStateOf just feeds it the live slice values + caches the
+    // structurally-equal result so SSE chat deltas / typing (which do not
+    // touch any of the input slices) do not recompose the workdir LazyColumn.
     val workdirGroups by remember {
-        // R-17 Stage 3: derivedStateOf auto-tracks every State read inside the
-        // block (sessionListState.sessions / sessionListState.directorySessions
-        // / draftWorkdir / hiddenWorkdirs) and only notifies downstream when
-        // the resulting list changes structurally. SSE chat deltas / typing
-        // no longer touch any of these (draftWorkdir is a field-level Flow),
-        // so the equal result is suppressed and the workdir LazyColumn is not
-        // recomposed.
         derivedStateOf {
-        val allSessions = (sessionListState.sessions + sessionListState.directorySessions.values.flatten())
-            .distinctBy { it.id }
-        // Fix #6b: normalize directory keys (trim + strip surrounding slashes)
-        // so a web-created session whose directory differs only by a trailing
-        // or leading slash groups under the EXISTING project instead of
-        // spawning a hidden duplicate group. Normalization is applied
-        // consistently to the hiddenWorkdirs filter, the groupBy key, and the
-        // draft check. The representative ORIGINAL directory
-        // (keyToDisplayDir) is preserved for display and for VM calls
-        // (browseFilesInWorkdir / createSessionInWorkdir) which expect the
-        // un-normalized path.
-        val normalizedHidden = hiddenWorkdirs.mapTo(mutableSetOf()) { normalizeDirectory(it) }
-        val groupsByKey = LinkedHashMap<String, MutableList<Session>>()
-        val keyToDisplayDir = LinkedHashMap<String, String>()
-        for (s in allSessions) {
-            if (s.parentId != null) continue
-            // Hide archived sessions from the connected-projects list too (the
-            // "recent sessions" list already filters them at line 99). Without
-            // this, the 归档 button in this list would hide nothing.
-            if (s.isArchived) continue
-            val key = normalizeDirectory(s.directory)
-            if (key in normalizedHidden) continue
-            groupsByKey.getOrPut(key) { mutableListOf() }.add(s)
-            // Prefer an absolute-style (leading "/") representative for
-            // display; otherwise keep the first seen. Two sessions that
-            // normalize together usually differ only by surrounding slashes,
-            // so any pick is functionally equivalent for the VM's
-            // directory-scoped APIs.
-            val current = keyToDisplayDir[key]
-            if (current == null || (s.directory.startsWith('/') && !current.startsWith('/'))) {
-                keyToDisplayDir[key] = s.directory
-            }
-        }
-        draftWorkdir?.let { draft ->
-            val key = normalizeDirectory(draft)
-            if (key !in groupsByKey && key !in normalizedHidden) {
-                groupsByKey[key] = mutableListOf()
-                keyToDisplayDir.putIfAbsent(key, draft)
-            }
-        }
-        // (displayDir, sessions), sorted by normalized key for stable ordering.
-        groupsByKey.entries
-            .map { (key, sessList) ->
-                (keyToDisplayDir[key] ?: key) to sessList.sortedByDescending { it.time?.updated ?: 0L }
-            }
-            .sortedBy { normalizeDirectory(it.first) }
+            buildWorkdirGroups(
+                allSessions = (sessionListState.sessions + sessionListState.directorySessions.values.flatten())
+                    .distinctBy { it.id },
+                recentWorkdirs = recentWorkdirs,
+                draftWorkdir = draftWorkdir,
+            )
         }
     }
 
@@ -272,7 +234,7 @@ fun SessionsScreen(
                     EmptyRow(stringResource(R.string.sessions_tab_no_workdirs))
                 }
             } else {
-                items(workdirGroups, key = { "workdir_${normalizeDirectory(it.first)}" }) { (workdir, sessionsInWorkdir) ->
+                items(workdirGroups, key = { "workdir_${WorkdirPaths.normalize(it.first)}" }) { (workdir, sessionsInWorkdir) ->
                     val isExpanded = expandedWorkdirs.contains(workdir)
                     val displayName = workdir.split("/").filter { it.isNotEmpty() }.lastOrNull()
                         ?: workdir
@@ -401,12 +363,20 @@ fun SessionsScreen(
                         // inset (was start=40dp) so session cards use the full
                         // screen width instead of being squeezed into a narrow
                         // column; SessionCard itself adds 8dp horizontal padding.
-                        AnimatedVisibility(visible = isExpanded && sessionsInWorkdir.isNotEmpty()) {
+                        AnimatedVisibility(visible = isExpanded) {
                             Column(
                                 modifier = Modifier
                                     .fillMaxWidth()
                                     .padding(horizontal = 8.dp)
                             ) {
+                                if (sessionsInWorkdir.isEmpty()) {
+                                    EmptyWorkdirPlaceholder(
+                                        onClick = {
+                                            viewModel.createSessionInWorkdir(workdir)
+                                            onSwitchToChat()
+                                        }
+                                    )
+                                }
                                 sessionsInWorkdir.forEach { session ->
                                     SessionCard(
                                         session = session,
@@ -426,24 +396,24 @@ fun SessionsScreen(
         }
     }
 
-    // --- Disconnect workdir confirmation dialog (UI-only filter) ---
+    // --- Disconnect workdir confirmation dialog (persistent disconnect) ---
     pendingDisconnectWorkdir?.let { workdir ->
         AlertDialog(
             onDismissRequest = { pendingDisconnectWorkdir = null },
-            title = { Text(stringResource(R.string.sessions_disconnect_workdir)) },
+            title = { Text(stringResource(R.string.workdir_disconnect_title)) },
             text = {
                 val name = workdir.split("/").filter { it.isNotEmpty() }.lastOrNull() ?: workdir
-                Text(stringResource(R.string.sessions_disconnect_confirm) + "\n\n" + name + "\n" + workdir)
+                Text(stringResource(R.string.workdir_disconnect_message) + "\n\n" + name + "\n" + workdir)
             },
             confirmButton = {
                 TextButton(
                     onClick = {
-                        hiddenWorkdirs = hiddenWorkdirs + workdir
+                        settingsVM.disconnectWorkdir(workdir)
                         expandedWorkdirs = expandedWorkdirs - workdir
                         pendingDisconnectWorkdir = null
                     }
                 ) {
-                    Text(stringResource(R.string.sessions_disconnect_workdir))
+                    Text(stringResource(R.string.workdir_disconnect_confirm))
                 }
             },
             dismissButton = {
@@ -656,6 +626,31 @@ private fun EmptyRow(text: String) {
     )
 }
 
+@Composable
+private fun EmptyWorkdirPlaceholder(onClick: () -> Unit) {
+    ListItem(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(vertical = 2.dp)
+            .clickable { onClick() },
+        headlineContent = {
+            Text(
+                text = stringResource(R.string.workdir_empty_placeholder),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        },
+        leadingContent = {
+            Icon(
+                Icons.Default.AddComment,
+                contentDescription = null,
+                modifier = Modifier.size(18.dp),
+                tint = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        }
+    )
+}
+
 /**
  * M6: Small (~8dp) status indicator rendered on the right edge of a session
  * card's title row, just before the unread dot. Mapping:
@@ -689,10 +684,129 @@ private fun formatTime(epochMs: Long): String {
 }
 
 /**
- * Strip surrounding whitespace and slashes so directories that differ only by
- * a leading or trailing "/" (common between phone- and web-created sessions)
- * compare and group as equal. Fix #6b. Used only for grouping/membership keys
- * in [SessionsScreen]; the representative ORIGINAL directory is preserved for
- * display and VM calls.
+ * §grouping-rewrite Round-4 C4: workdir-path normalization is now funnelled
+ * through the shared [WorkdirPaths.normalize] helper so the disconnect
+ * pipeline (buildWorkdirGroups visibility gating ↔ SettingsManager.
+ * removeRecentWorkdir matching ↔ recent_workdirs persistent storage) agrees
+ * on what "same workdir" means end-to-end. The previous file-local
+ * `normalizeDirectory` was the load-bearing logic for the visibility gate
+ * but only `trim()`-matched on the removal side, so slash variants
+ * ("/proj-a" vs "proj-a/") stayed anchored in recent_workdirs after a
+ * disconnect. See [WorkdirPaths] for the contract.
+ *
+ * Call sites use [WorkdirPaths.normalize] directly now — no file-local
+ * wrapper — so there is a single source of truth (any future tweak to the
+ * normalization rule lands in one place and both layers pick it up).
  */
-private fun normalizeDirectory(dir: String): String = dir.trim().trim('/')
+
+/**
+ * §grouping-rewrite Round-3 C3: pure derivation of the "Connected projects"
+ * workdir groups for [SessionsScreen]. Extracted from the composable so the
+ * gating logic can be unit-tested (see SessionsScreenTest).
+ *
+ * **GATING (C3 fix)**: a workdir is visible iff it is in [recentWorkdirs] OR
+ * it is the active [draftWorkdir] (the in-progress "connect new project" the
+ * user typed but has not yet POSTed). This makes the persistent
+ * `recent_workdirs_<fp>` list the single source of truth for "connected" — a
+ * disconnect (which removes the workdir from recent_workdirs + evicts its
+ * cache) hides the workdir from the list EVEN WHEN its live sessions are
+ * still in [allSessions] (the common case during the window between disconnect
+ * and the server list refresh). The disconnect dialog promises "removed from
+ * the list" unconditionally; the pre-C3 derivation broke that promise for any
+ * workdir with at least one live (parentId==null, non-archived) session.
+ *
+ * **Preserved behaviour** (verified against the pre-C3 inline derivation):
+ *  - Directory keys are normalised (trim + strip surrounding slashes) so
+ *    phone- and web-created sessions that differ only by leading/trailing "/"
+ *    group together.
+ *  - The representative ORIGINAL directory (preferring absolute / leading-"/"
+ *    form) is preserved in the output's `first` for display + VM calls
+ *    (browseFilesInWorkdir / createSessionInWorkdir).
+ *  - The active `draftWorkdir` is included even when absent from
+ *    recentWorkdirs (the "Connect new project" draft must stay visible while
+ *    the user is mid-typing).
+ *  - Visible workdirs with zero live sessions are still emitted (the
+ *    `workdir_empty_placeholder` row in the UI handles them) — this
+ *    preserves the pre-C3 0-live fallback for workdirs the user just
+ *    connected but has not yet started a conversation in.
+ *  - Output sorted by normalized key for stable ordering.
+ *
+ * @param allSessions every session the UI currently knows about (typically
+ *   `sessionListState.sessions + sessionListState.directorySessions.values.flatten()`,
+ *   deduplicated by id by the caller — this function does NOT dedupe; passing
+ *   already-deduped input keeps the grouping keys stable).
+ * @param recentWorkdirs the persistent `recent_workdirs_<fp>` list — the
+ *   source of truth for "connected".
+ * @param draftWorkdir the in-progress "connect new project" workdir, or null.
+ * @return list of (displayDirectory, liveSessionsSortedByUpdatedDesc) pairs,
+ *   one per visible workdir, sorted by normalized directory.
+ */
+internal fun buildWorkdirGroups(
+    allSessions: List<Session>,
+    recentWorkdirs: List<String>,
+    draftWorkdir: String?,
+): List<Pair<String, List<Session>>> {
+    // ── Step 1: visible set (the GATE). Insertion-ordered (recent first, then
+    // draft) so the output ordering matches the user's mental model: recent
+    // connections appear before the in-progress draft. Keyed by normalized
+    // directory; we also remember the first-seen ORIGINAL dir string per key
+    // so 0-session visible workdirs get a sensible displayDir fallback.
+    //
+    // §grouping-rewrite Round-4 C4: normalization goes through the shared
+    // [WorkdirPaths.normalize] so the visibility gate here agrees with
+    // [SettingsManager.removeRecentWorkdir]'s removal-side matching.
+    val keyToVisibleDir = LinkedHashMap<String, String>()
+    fun addVisible(dir: String) {
+        val key = WorkdirPaths.normalize(dir)
+        if (key.isBlank()) return
+        keyToVisibleDir.putIfAbsent(key, dir)
+    }
+    recentWorkdirs.forEach(::addVisible)
+    if (draftWorkdir != null) addVisible(draftWorkdir)
+    val visibleKeys = keyToVisibleDir.keys // LinkedHashSet view; ordered
+
+    // ── Step 2: attach live sessions to their group — IF AND ONLY IF the
+    // group is in the visible set. Sessions whose workdir is NOT visible
+    // (e.g. just-disconnected but still in the live list, OR a workdir that
+    // was never connected and only surfaced via a directory-fetch) are
+    // dropped here. This is the load-bearing change vs the pre-C3 logic.
+    val groupsByKey = LinkedHashMap<String, MutableList<Session>>()
+    val keyToDisplayDir = LinkedHashMap<String, String>()
+    for (s in allSessions) {
+        if (s.parentId != null) continue
+        // Hide archived sessions from the connected-projects list too. The
+        // top "recent sessions" list filters them separately.
+        if (s.isArchived) continue
+        val key = WorkdirPaths.normalize(s.directory)
+        if (key.isBlank()) continue
+        // C3 gate: sessions for INVISIBLE workdirs do not re-introduce the
+        // workdir into the output.
+        if (key !in visibleKeys) continue
+        groupsByKey.getOrPut(key) { mutableListOf() }.add(s)
+        // Prefer an absolute-style (leading "/") representative for display;
+        // otherwise keep the first seen. Two sessions that normalize together
+        // usually differ only by surrounding slashes, so any pick is
+        // functionally equivalent for the VM's directory-scoped APIs.
+        val current = keyToDisplayDir[key]
+        if (current == null || (s.directory.startsWith('/') && !current.startsWith('/'))) {
+            keyToDisplayDir[key] = s.directory
+        }
+    }
+
+    // ── Step 3: ensure every visible key has an entry (0-live placeholder)
+    // and a displayDir (fall back to the visible-set's original dir string).
+    for (key in visibleKeys) {
+        groupsByKey.getOrPut(key) { mutableListOf() }
+        if (key !in keyToDisplayDir) {
+            keyToDisplayDir[key] = keyToVisibleDir.getValue(key)
+        }
+    }
+
+    // ── Step 4: output (displayDir, sessions sorted by updated desc), sorted
+    // by normalized key for stable ordering — matches the pre-C3 ordering.
+    return groupsByKey.entries
+        .map { (key, sessList) ->
+            (keyToDisplayDir[key] ?: key) to sessList.sortedByDescending { it.time?.updated ?: 0L }
+        }
+        .sortedBy { WorkdirPaths.normalize(it.first) }
+}

@@ -61,8 +61,21 @@ class CacheMaintenanceCoordinator @Inject constructor(
      * sweep returns an Incomplete report with zero counts (the caller does
      * not need to distinguish "skipped" from "incomplete enumeration" — both
      * mean "no eviction this round").
+     *
+     * §grouping-rewrite Round-2 C2: [force] bypasses the 24h epoch-day dedup.
+     * The auto connect-sweep (ConnectionCoordinator) keeps the default
+     * `force=false` so a reconnect within 24h does not re-enumerate. The
+     * manual sweep buttons (`SettingsViewModel.sweepNow` / `sweepAllGroups`)
+     * pass `force=true` because the user explicitly asked for a sweep — the
+     * dedup would otherwise make both manual buttons no-ops for the rest of
+     * the calendar day after the auto connect-sweep ran. After a forced run
+     * the epoch is still stamped (Step 3 below), so the NEXT auto connect-
+     * sweep within the same day still dedups correctly.
      */
-    suspend fun dailySweepIfNeeded(serverGroupFp: String): DailySweepReport {
+    suspend fun dailySweepIfNeeded(
+        serverGroupFp: String,
+        force: Boolean = false
+    ): DailySweepReport {
         if (serverGroupFp.isBlank()) {
             // Defensive: an empty fp should never reach here (the
             // currentServerGroupFp provider normalizes blank → id), but a
@@ -77,9 +90,12 @@ class CacheMaintenanceCoordinator @Inject constructor(
         }
 
         // ── 24h dedup ───────────────────────────────────────────────────────
+        // Skipped when [force] is true (manual sweep buttons). The epoch
+        // stamp below (Step 3) is still written so subsequent non-forced
+        // calls dedup normally.
         val todayEpochDay = System.currentTimeMillis() / MILLIS_PER_DAY
         val lastSweepDay = settings.getLastSweepEpochDay(serverGroupFp)
-        if (lastSweepDay == todayEpochDay) {
+        if (!force && lastSweepDay == todayEpochDay) {
             // Already swept today — skip. The daily sweep is idempotent; a
             // reconnect within 24h must not re-enumerate + re-evict.
             return DailySweepReport(

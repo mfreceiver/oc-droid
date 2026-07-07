@@ -1,13 +1,26 @@
 package cn.vectory.ocdroid.ui.settings
 
-import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.statusBarsPadding
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.filled.Close
+import androidx.compose.material3.Card
+import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
@@ -16,9 +29,11 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.window.Dialog
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import cn.vectory.ocdroid.R
 import cn.vectory.ocdroid.ui.ComposerViewModel
@@ -34,6 +49,11 @@ import kotlinx.coroutines.flow.map
  * sections: connection profile, traffic, appearance, debug, about). The
  * HostProfile management sub-flow lives in [HostProfilesManagerScreen] and is
  * reached from here via the "manage profiles" action.
+ *
+ * §grouping-rewrite 项 3: cache management used to live inline under the
+ * Debug section; it now opens as a modal popup triggered by the stats line
+ * under the connection profile (the popup title is `cache_management_popup_title`).
+ * The Debug section keeps DebugLogSection + DangerZone in place.
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -85,6 +105,10 @@ fun SettingsScreen(
         .collectAsStateWithLifecycle(initialValue = 1f)
     val traffic by connectionVM.trafficFlow.collectAsStateWithLifecycle()
     val connection by connectionVM.connectionFlow.collectAsStateWithLifecycle()
+    // §grouping-rewrite 项 2: group-stats counts for the connection-profile
+    // stats line (drives the popup entry point).
+    val groupProfileCount by settingsVM.activeGroupProfileCount.collectAsStateWithLifecycle()
+    val cachedSessionCount by settingsVM.activeGroupCachedSessionCount.collectAsStateWithLifecycle()
 
     // Refresh traffic counters once when the Settings screen enters
     // composition so the displayed totals reflect the latest background
@@ -95,6 +119,10 @@ fun SettingsScreen(
     }
 
     var showHostProfiles by remember { mutableStateOf(false) }
+    // §grouping-rewrite 项 3: cache-management popup state. Opened from the
+    // ConnectionProfileSection stats line; the popup hosts the (formerly
+    // inline) CacheManagementSection under the `cache_management_popup_title`.
+    var showCacheDialog by remember { mutableStateOf(false) }
 
     if (showHostProfiles) {
         HostProfilesManagerScreen(
@@ -136,6 +164,9 @@ fun SettingsScreen(
             ConnectionProfileSection(
                 profile = host.hostProfiles.firstOrNull { it.id == host.currentHostProfileId } ?: viewModel.currentHostProfile(),
                 connectionState = connection,
+                groupProfileCount = groupProfileCount,
+                cachedSessionCount = cachedSessionCount,
+                onStatsClick = { showCacheDialog = true },
                 onManageProfiles = { showHostProfiles = true },
                 hideHeader = true
             )
@@ -173,14 +204,12 @@ fun SettingsScreen(
 
             Spacer(modifier = Modifier.height(24.dp))
 
-            // ── 调试 (Debug): debug log + cache management + danger zone under
-            // one header. Cache management groups under the same "Debug" header
-            // because it is a power-user / diagnostic surface — most users do
-            // not need to manually evict cached sessions. ──
+            // ── 调试 (Debug): debug log + danger zone under one header.
+            // §grouping-rewrite 项 3: cache management has moved into a modal
+            // popup (opened from the Connections section stats line) and is
+            // no longer rendered inline here. ──
             SectionHeader(title = stringResource(R.string.settings_section_debug))
             DebugLogSection(hideHeader = true)
-            Spacer(modifier = Modifier.height(12.dp))
-            CacheManagementSection(vm = settingsVM, hideHeader = true)
             Spacer(modifier = Modifier.height(12.dp))
             DangerZoneSection(
                 onClearLocalData = viewModel::resetLocalDataAndResync,
@@ -190,6 +219,42 @@ fun SettingsScreen(
             Spacer(modifier = Modifier.height(24.dp))
 
             AboutSection()
+        }
+    }
+
+    // §grouping-rewrite 项 3: cache-management popup. The Dialog wraps a Card
+    // that carries the popup title (with a close affordance) above the section
+    // body. CacheManagementSection already renders its own inner card; the
+    // outer card provides the popup chrome (title bar + dismissal).
+    if (showCacheDialog) {
+        Dialog(onDismissRequest = { showCacheDialog = false }) {
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                shape = MaterialTheme.shapes.large,
+                colors = CardDefaults.cardColors(
+                    containerColor = MaterialTheme.colorScheme.surface
+                )
+            ) {
+                Column(modifier = Modifier.padding(bottom = 16.dp)) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth().padding(16.dp),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            stringResource(R.string.cache_management_popup_title),
+                            style = MaterialTheme.typography.titleLarge
+                        )
+                        IconButton(onClick = { showCacheDialog = false }) {
+                            Icon(
+                                Icons.Default.Close,
+                                contentDescription = stringResource(R.string.common_close)
+                            )
+                        }
+                    }
+                    CacheManagementSection(vm = settingsVM, hideHeader = true)
+                }
+            }
         }
     }
 }

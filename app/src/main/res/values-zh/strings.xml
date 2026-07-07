@@ -310,4 +310,18 @@
     <string name="cache_management_sweep_result_incomplete">扫描降级（实时会话集不完整）：已校验 %1$d 个，未清除任何会话。</string>
     <string name="cache_management_never_verified">（从未校验）</string>
     <string name="cache_management_unknown_time">（未知）</string>
+
+    <!-- §分组重写 2026-07-07：人工服务器分组（项1/2/3/4/5）。 -->
+    <string name="host_group_label">服务器分组</string>
+    <string name="host_group_none">不分组</string>
+    <string name="host_group_warning">同组 profile 共享：聊天历史、草稿、模型偏好、最近目录。选错组会导致这些数据串台或搁浅，仅可用「清除全部数据」恢复。</string>
+    <string name="group_stats_named">%1$s · %2$d 个连接 · %3$d 条缓存会话</string>
+    <string name="group_stats_solo">独立 · 1 个连接 · %1$d 条缓存会话</string>
+    <string name="cache_management_popup_title">缓存与维护</string>
+    <string name="cache_management_sweep_all">扫所有分组</string>
+    <string name="command_submitted_processing">命令已提交，处理中…</string>
+    <string name="workdir_disconnect_title">断开此项目？</string>
+    <string name="workdir_disconnect_message">将从列表移除并清除该项目的本地缓存，无法恢复。</string>
+    <string name="workdir_disconnect_confirm">断开</string>
+    <string name="workdir_empty_placeholder">无活跃会话，点此新建</string>
 </resources>

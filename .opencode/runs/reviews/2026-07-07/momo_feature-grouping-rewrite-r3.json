@@ -1,0 +1,16 @@
+{
+  "agent": "momo",
+  "scope": "feature-grouping-rewrite",
+  "date": "2026-07-07",
+  "round": 3,
+  "reviewed_commit": "1448df1a35a5a9dd48db11f7490a808a02ced420",
+  "version_target": "0.5.1 (patch; pending patch-vs-minor confirmation)",
+  "verdict": "pass",
+  "score": 9.8,
+  "blocking_issues": [],
+  "non_blocking_issues": [
+    "1. [acknowledged -0.1] UiEvent.Info List<Any> type — left; matches Error/Success.",
+    "2. [acknowledged -0.1] OkHttp message-format fragility in classifyCommandPostError — safe direction (no-match ⇒ Error); known limitation."
+  ],
+  "notes": "C3 extraction deep-verified: buildWorkdirGroups is pure, gating `if (key !in visibleKeys) continue` correct — disconnected workdir (not in recentWorkdirs) hidden even with live sessions; no over-hide (workdir in recentWorkdirs still shows), no leak (not-in-recent non-draft never shows). derivedStateOf interaction sound (recentWorkdirs=StateFlow collectAsStateWithLifecycle; draftWorkdir=field-level Flow distinctUntilChanged; SSE chat deltas don't touch inputs → no recompose). 11 tests pin: C3 with-live-sessions disconnect, stay-visible-while-in-recent, draftWorkdir visibility+dedup, 0-live placeholder, parentId/archived filters, normalization, sort, display-dir preference, empty boundary. All preserved behaviors verified with evidence (SessionsScreen.kt L1213-1263). N1/N2/#4 all resolved. All R1/R2 issues 0 residual. NOTE: momo did NOT independently surface the removeRecentWorkdir normalization-mismatch (C4) that gpter found — momo verified the gating logic but not the removal-side exact-match. check.sh GREEN orchestrator-verified."
+}

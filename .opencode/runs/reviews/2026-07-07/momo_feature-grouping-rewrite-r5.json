@@ -1,0 +1,13 @@
+{
+  "agent": "momo",
+  "scope": "feature-grouping-rewrite",
+  "date": "2026-07-07",
+  "round": 5,
+  "reviewed_commit": "1448df1a35a5a9dd48db11f7490a808a02ced420",
+  "version_target": "0.5.1 (patch; pending patch-vs-minor confirmation)",
+  "verdict": "pass",
+  "score": 10.0,
+  "blocking_issues": [],
+  "non_blocking_issues": [],
+  "notes": "C5 evictWorkdirInGroup rewrite verified: normalize-match via shared WorkdirPaths.normalize (same fn as C4/buildWorkdirGroups); single db.withTransaction preserves atomicity; cascade order messages→gaps→session preserved (matches old impl); sibling safety (only normalize-matching sessionIds selected); early-return on blank; empty-group no-op. 3 deleted exact-match DAO methods (deleteSessionsByWorkdir/deleteSessionMessagesByWorkdir/deleteGapsByWorkdir) confirmed 0 callers (grep hits all breadcrumb comments only; Room compiler cleared them). 4 new C5 tests: blocker (proj-a/ vs /proj-a → all cascade gone), exact-match preserved, sibling guard, two-variant cluster. Independent audit confirms ONLY 2 workdir-match-for-persistent-store sites (removeRecentWorkdir C4 + evictWorkdirInGroup C5) — both normalized. No regression (LRU-50/age/orphan-sweep/gap-cascade/cachedWorkdirsInGroup all green). 5-round arc 9.2→9.6→9.8→9.9→10.0; every round fixed a concrete issue with no new regression. check.sh GREEN. Clean-up round, 0 residual. Ship."
+}

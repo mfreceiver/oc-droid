@@ -88,32 +88,18 @@ interface CacheDao {
     @Query("SELECT DISTINCT server_group_fp FROM cached_session")
     suspend fun allGroups(): List<String>
 
-    /**
-     * R-20 Phase 4 (plan §3 Phase 4 "clearProject" action): cascade-delete
-     * every session row in [fp] whose `workdir == :workdir`. Used by
-     * [CacheRepository.evictWorkdirInGroup] (the "clear this project's cache"
-     * action); the messages + gaps are deleted in the same Room transaction.
-     */
-    @Query("DELETE FROM cached_session WHERE server_group_fp = :fp AND workdir = :workdir")
-    suspend fun deleteSessionsByWorkdir(fp: String, workdir: String)
-
-    /**
-     * R-20 Phase 4: cascade-delete every cached message belonging to a session
-     * in [fp] whose session row has `workdir == :workdir`. The subquery
-     * references the un-modified `cached_session` (the session DELETE in the
-     * wrapping transaction runs AFTER this one so the join still resolves).
-     */
-    @Query(
-        """
-        DELETE FROM cached_message
-        WHERE server_group_fp = :fp
-          AND session_id IN (
-            SELECT session_id FROM cached_session
-            WHERE server_group_fp = :fp AND workdir = :workdir
-          )
-        """
-    )
-    suspend fun deleteSessionMessagesByWorkdir(fp: String, workdir: String)
+    // §grouping-rewrite Round-5 C5: the three exact-match-by-workdir DELETE
+    // methods that used to live here (`deleteSessionsByWorkdir` /
+    // `deleteSessionMessagesByWorkdir` / `deleteGapsByWorkdir` — all
+    // `WHERE workdir = :workdir`) have been removed. They were the sole
+    // implementation behind [CacheRepository.evictWorkdirInGroup], which now
+    // normalize-matches via [cn.vectory.ocdroid.util.WorkdirPaths.normalize]
+    // in Kotlin (SQLite cannot call that helper) and cascades per-session via
+    // [deleteSession] / [deleteSessionMessages] + GapMarkerDao.deleteSessionGaps.
+    // The exact-match queries are intentionally NOT preserved: a future caller
+    // reaching for one would silently re-introduce the slash-variant
+    // disconnect-leak (cache row `workdir='proj-a/'` survives a disconnect
+    // invoked with `/proj-a`).
 
     // ───────────────────── updates ───────────────────────────────────────
 
@@ -391,22 +377,9 @@ interface GapMarkerDao {
     )
     suspend fun evictByLastVerifiedAtGaps(fp: String, cutoff: Long)
 
-    /**
-     * R-20 Phase 4 (plan §3 "clearProject"): cascade-delete every gap marker
-     * belonging to a session in [fp] whose session row has
-     * `workdir == :workdir`. Subquery references the un-modified
-     * `cached_session` (the session DELETE in the wrapping transaction runs
-     * AFTER this one).
-     */
-    @Query(
-        """
-        DELETE FROM gap_marker
-        WHERE server_group_fp = :fp
-          AND session_id IN (
-            SELECT session_id FROM cached_session
-            WHERE server_group_fp = :fp AND workdir = :workdir
-          )
-        """
-    )
-    suspend fun deleteGapsByWorkdir(fp: String, workdir: String)
+    // §grouping-rewrite Round-5 C5: `deleteGapsByWorkdir(fp, workdir)` was
+    // here (cascade-delete every gap marker for sessions in [fp] whose
+    // workdir == :workdir). Removed along with `deleteSessionsByWorkdir` +
+    // `deleteSessionMessagesByWorkdir` — see the breadcrumb near line 91 for
+    // the rationale (prevent re-introducing the slash-variant disconnect-leak).
 }

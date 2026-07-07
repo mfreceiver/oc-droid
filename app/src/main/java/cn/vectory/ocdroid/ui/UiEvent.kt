@@ -20,6 +20,19 @@ import androidx.annotation.StringRes
 sealed class UiEvent {
     data class Error(@StringRes val resId: Int, val args: List<Any> = emptyList()) : UiEvent()
     data class Success(@StringRes val resId: Int, val args: List<Any> = emptyList()) : UiEvent()
+    /**
+     * §grouping-rewrite item 4: neutral, NON-FATAL informational event.
+     * Same shape as [Error] / [Success] (so collectors resolve it through
+     * the same `@StringRes resId` + format-args path). Used by
+     * `AppCoreOrchestration.executeCommand` when the command POST raises a
+     * `java.net.SocketTimeoutException` waiting for the server's ACK: the
+     * command may legitimately still be running server-side, and SSE
+     * (separate client, read timeout 0) will deliver the results — the user
+     * sees a neutral "command submitted, processing…" snackbar instead of a
+     * red "command failed" one. True HTTP 4xx/5xx failures still go through
+     * [Error].
+     */
+    data class Info(@StringRes val resId: Int, val args: List<Any> = emptyList()) : UiEvent()
     /** Developer-facing debug event; message stays a raw String (not user-visible). */
     data class Debug(val message: String) : UiEvent()
 }
@@ -40,6 +53,7 @@ sealed class UiEvent {
 fun UiEvent.resolveMessage(context: android.content.Context): String = when (this) {
     is UiEvent.Error -> context.getString(resId, *args.toTypedArray())
     is UiEvent.Success -> context.getString(resId, *args.toTypedArray())
+    is UiEvent.Info -> context.getString(resId, *args.toTypedArray())
     is UiEvent.Debug -> message
 }
 

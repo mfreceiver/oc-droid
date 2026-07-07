@@ -13,7 +13,6 @@ import cn.vectory.ocdroid.data.cache.CacheRepository
 import cn.vectory.ocdroid.data.cache.FingerprintResult
 import cn.vectory.ocdroid.data.model.Session
 import cn.vectory.ocdroid.data.model.toCacheEntry
-import cn.vectory.ocdroid.data.repository.HostProfileStore
 import cn.vectory.ocdroid.data.repository.OpenCodeRepository
 import cn.vectory.ocdroid.util.DebugLog
 import cn.vectory.ocdroid.util.SettingsManager
@@ -82,17 +81,11 @@ internal fun launchLoadSessions(
      * to key the verifyFingerprint call. Null = caller has not been migrated.
      */
     currentServerGroupFp: (() -> String)? = null,
-    /**
-     * R-20 Phase 5 (plan §3 G1 三条件): the host-profile store, used by the
-     * cross-connection merge step. When non-null AND [cacheRepository] /
-     * [currentServerGroupFp] are also wired, the freshly-fetched session
-     * list is matched against cached sessions under OTHER server-group fps;
-     * a (id + createdAt + directory + non-empty) match triggers
-     * [HostProfileStore.mergeServerGroup] (one-directional: otherFp →
-     * currentFp). Null = legacy caller; merge is skipped (preserves prior
-     * behavior).
-     */
-    hostProfileStore: HostProfileStore? = null,
+    // §grouping-rewrite Round-2 #5: hostProfileStore parameter removed — it
+    // was wired in by R-20 Phase 5 for the cross-group merge that item 1 of
+    // this rewrite deleted (attemptCrossGroupMerge was the sole consumer
+    // inside this function body). Both call sites (SessionViewModel,
+    // AppCoreOrchestration) and one test updated to drop the now-unused arg.
 ) {
 
     scope.launch {
@@ -133,35 +126,8 @@ internal fun launchLoadSessions(
                     currentOpenIds.toSet()
                 )
                 val newHasMore = mergedSessions.size >= limit
-                // R-20 Phase 5 (plan §3 G1 三条件 + dser: 归并靠 loadSessions
-                // 非 SSE — SSE 单 workdir 看不到跨接入点). Before the auto-
-                // select / verify cluster, check if any freshly-fetched session
-                // ALSO exists under a DIFFERENT server-group fp with matching
-                // (id + createdAt) + intersecting/identical workdir + non-empty
-                // messages. If so, this is two profiles pointing at the same
-                // server (LAN + tunnel, etc.) — merge the other fp INTO the
-                // current fp (one-directional, plan §3 G1). All three
-                // conditions must hold; an empty session or a divergent
-                // directory is NOT a merge signal (plan §3 G1).
-                //
-                // runCatching wraps the cache + store IO so a failure never
-                // blocks the load-sessions fan-out. The merge is best-effort:
-                // if it fails, the next loadSessions retries (idempotent —
-                // mergeServerGroup is a no-op once the groups already match).
                 if (staleHostAfterSuspend()) {
                     return@onSuccess
-                }
-                if (cacheRepository != null && currentServerGroupFp != null && hostProfileStore != null) {
-                    runCatching {
-                        attemptCrossGroupMerge(
-                            cacheRepository = cacheRepository,
-                            hostProfileStore = hostProfileStore,
-                            currentServerGroupFp = currentServerGroupFp,
-                            fetchedSessions = mergedSessions,
-                        )
-                    }.onFailure { e ->
-                        DebugLog.w("SessionListActions", "cross-group merge attempt failed: ${e.message}")
-                    }
                 }
                 if (staleHostAfterSuspend()) return@onSuccess
                 val refreshedSessions = mergedSessions
@@ -464,97 +430,6 @@ internal fun launchLoadAgents(
     }
 }
 
-// ───────────────── R-20 Phase 5: cross-group merge (plan §3 G1 三条件) ──────
-
-/**
- * R-20 Phase 5 (plan §3 G1): inspects every OTHER server-group fp's cached
- * sessions for a (id + createdAt) match against [fetchedSessions], and if the
- * directory also matches/intersects AND the cached session has at least one
- * cached message, merges the other fp INTO [currentServerGroupFp]
- * (one-directional — the user can undo via Phase 4 copy-on-split).
- *
- * The three conditions (plan §3):
- *  (a) sessionId + createdAt both equal.
- *  (b) directory same OR intersecting (one is a prefix of the other — handles
- *      "/repo" vs "/repo/sub" edge cases where the same logical session was
- *      opened from a slightly different path).
- *  (c) cached session non-empty (messageCount > 0). An empty cached row is
- *      just a metadata stub from an empty window / fingerprint verify — it
- *      does NOT prove the same logical session.
- *
- * All three must hold. The first matching (otherFp, cachedSession) triggers
- * the merge and returns; later candidates are skipped (one merge per
- * loadSessions call — the next call re-evaluates with the merged fp set).
- *
- * Idempotent: [HostProfileStore.mergeServerGroup] is a no-op when the groups
- * already match, so a redundant call after a prior merge is safe.
- *
- * Best-effort: callers wrap in runCatching so a cache/DB failure never blocks
- * the load-sessions fan-out.
- */
-internal suspend fun attemptCrossGroupMerge(
-    cacheRepository: CacheRepository,
-    hostProfileStore: HostProfileStore,
-    currentServerGroupFp: () -> String,
-    fetchedSessions: List<Session>,
-) {
-    val capturedFp = currentServerGroupFp()
-    val targetFp = capturedFp
-    if (targetFp.isBlank() || fetchedSessions.isEmpty()) return
-    val allFps = runCatching { cacheRepository.allServerGroupFps() }.getOrNull() ?: return
-    for (otherFp in allFps) {
-        if (capturedFp != currentServerGroupFp()) return
-        if (otherFp == targetFp) continue
-        val otherSessions = runCatching { cacheRepository.listGroupSessions(otherFp) }
-            .getOrNull()
-            ?: continue
-        if (capturedFp != currentServerGroupFp()) return
-        // Find the first cached row under otherFp that satisfies all 3 merge
-        // conditions against some freshly-fetched session.
-        val matched = otherSessions.firstOrNull { cached ->
-            val fetched = fetchedSessions.firstOrNull { it.id == cached.sessionId }
-                ?: return@firstOrNull false
-            // (a) id + createdAt match (both non-null + equal).
-            val createdAt = fetched.time?.created
-            if (createdAt == null || cached.createdAt == null || createdAt != cached.createdAt) {
-                return@firstOrNull false
-            }
-            // (b) directory same/intersect.
-            if (!directoriesMatchOrIntersect(fetched.directory, cached.workdir)) {
-                return@firstOrNull false
-            }
-            // (c) session non-empty (at least one message was cached).
-            cached.messageCount > 0
-        }
-        if (matched != null) {
-            DebugLog.i(
-                "SessionListActions",
-                "cross-group merge: fp=$otherFp → fp=$targetFp " +
-                    "(matched session=${matched.sessionId} createdAt=${matched.createdAt} workdir=${matched.workdir})"
-            )
-            if (capturedFp != currentServerGroupFp()) return
-            cacheRepository.mergeCacheGroup(fromFp = otherFp, intoFp = targetFp)
-            if (capturedFp != currentServerGroupFp()) return
-            hostProfileStore.mergeServerGroup(from = otherFp, into = targetFp)
-            return
-        }
-    }
-}
-
-/**
- * Phase 5 (plan §3 G1 condition b): two workdirs are considered matching if
- * they're equal OR one is a parent directory of the other (prefix on path
- * separator). Blank workdir matches nothing (a session with no directory
- * cannot prove it's the same project as a directory-bearing one).
- */
-internal fun directoriesMatchOrIntersect(a: String?, b: String): Boolean {
-    if (a.isNullOrBlank() || b.isBlank()) return false
-    if (a == b) return true
-    // Normalize trailing separators so "/repo" vs "/repo/" match.
-    val na = a.trimEnd('/')
-    val nb = b.trimEnd('/')
-    if (na == nb) return true
-    // Parent-child relationship (one is a path prefix of the other on a path
-    // separator boundary — guards against "/repo" matching "/repo-other").
-    return na.startsWith("$nb/") || nb.startsWith("$na/")
-}
+// §grouping-rewrite Round-2 #5: `directoriesMatchOrIntersect(...)` was here
+// (Phase 5 G1 condition b helper) — sole caller was `attemptCrossGroupMerge`,
+// which item 1 of this rewrite deleted. Removed as dead code.

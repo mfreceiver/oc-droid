@@ -1135,6 +1135,9 @@ internal fun SessionListState.applyArchiveEviction(
     newOpenIds: List<String>
 ): Pair<SessionListState, List<SseSideEffect>> = copy(
     sessions = upsertSession(sessions, updated),
+    directorySessions = directorySessions.mapValues { (_, list) ->
+        list.map { session -> if (session.id == updated.id) updated else session }
+    },
     openSessionIds = newOpenIds
 ) to emptyList()
 

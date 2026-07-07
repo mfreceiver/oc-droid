@@ -25,7 +25,6 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.CallSplit
 import androidx.compose.material.icons.filled.CleaningServices
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.DeleteSweep
@@ -130,6 +129,32 @@ internal fun CacheManagementSection(
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
     ) {
         Column(modifier = Modifier.padding(16.dp)) {
+            // ── §grouping-rewrite 项 3: "Sweep all groups" — the popup's
+            // primary action. Fanned out across every distinct fp via
+            // [SettingsViewModel.sweepAllGroups]; disabled offline for the
+            // same reason the per-group sweep button is (a sweep without a
+            // live connection cannot enumerate the alive set).
+            Button(
+                onClick = { vm.sweepAllGroups() },
+                enabled = isOnline,
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Icon(Icons.Default.CleaningServices, contentDescription = null, modifier = Modifier.size(16.dp))
+                Spacer(modifier = Modifier.width(4.dp))
+                Text(stringResource(R.string.cache_management_sweep_all))
+            }
+
+            if (!isOnline) {
+                Spacer(modifier = Modifier.height(4.dp))
+                Text(
+                    stringResource(R.string.cache_management_offline_hint),
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+
+            Spacer(modifier = Modifier.height(12.dp))
+
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceBetween,
@@ -200,8 +225,7 @@ internal fun CacheManagementSection(
                                     onClearProject = { workdir ->
                                         vm.clearProject(group.serverGroupFp, workdir)
                                     },
-                                    onSweep = { vm.sweepNow(group.serverGroupFp) },
-                                    onSplit = { profileId -> vm.splitProfile(profileId) }
+                                    onSweep = { vm.sweepNow(group.serverGroupFp) }
                                 )
                                 HorizontalDivider()
                             }
@@ -251,7 +275,7 @@ internal fun CacheManagementSection(
 // ─────────── Per-group card ─────────────────────────────────────────────
 
 /**
- * One server-group's section: header (fp + member counts) + sweep/split
+ * One server-group's section: header (fp + member counts) + sweep
  * row actions + the cached-session list. Each row carries its own clear-
  * session + clear-project buttons.
  */
@@ -262,7 +286,6 @@ private fun CacheGroupCard(
     onClearSession: (String) -> Unit,
     onClearProject: (String) -> Unit,
     onSweep: () -> Unit,
-    onSplit: (String) -> Unit,
 ) {
     Column(modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp)) {
         Text(
@@ -283,10 +306,7 @@ private fun CacheGroupCard(
 
         Spacer(modifier = Modifier.height(8.dp))
 
-        // ── Group-level actions: sweep now (offline-disabled) + per-profile
-        // copy-on-split escape hatch (only surfaced when more than one
-        // profile is in the group — splitting a single-member group is a
-        // no-op).
+        // ── Group-level action: sweep now (offline-disabled).
         Row(
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.spacedBy(8.dp)
@@ -309,31 +329,6 @@ private fun CacheGroupCard(
                 style = MaterialTheme.typography.labelSmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
-        }
-
-        if (group.profiles.size > 1) {
-            Spacer(modifier = Modifier.height(8.dp))
-            Text(
-                stringResource(R.string.cache_management_action_split_hint),
-                style = MaterialTheme.typography.labelSmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
-            )
-            Spacer(modifier = Modifier.height(4.dp))
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(8.dp)
-            ) {
-                group.profiles.forEach { profile ->
-                    OutlinedButton(
-                        onClick = { onSplit(profile.id) },
-                        modifier = Modifier.weight(1f)
-                    ) {
-                        Icon(Icons.AutoMirrored.Filled.CallSplit, contentDescription = null, modifier = Modifier.size(16.dp))
-                        Spacer(modifier = Modifier.width(4.dp))
-                        Text(profile.displayName, maxLines = 1)
-                    }
-                }
-            }
         }
 
         Spacer(modifier = Modifier.height(8.dp))
@@ -736,6 +731,18 @@ private fun CacheManagementSectionPreviewHost(
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
     ) {
         Column(modifier = Modifier.padding(16.dp)) {
+            // §grouping-rewrite 项 3: primary "Sweep all groups" action
+            // (disabled in the preview host — the host has no VM to invoke).
+            Button(
+                onClick = {},
+                enabled = isOnline,
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Icon(Icons.Default.CleaningServices, contentDescription = null, modifier = Modifier.size(16.dp))
+                Spacer(modifier = Modifier.width(4.dp))
+                Text("Sweep all groups")
+            }
+            Spacer(modifier = Modifier.height(12.dp))
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceBetween,
@@ -792,8 +799,7 @@ private fun CacheManagementSectionPreviewHost(
                                     isOnline = isOnline,
                                     onClearSession = {},
                                     onClearProject = {},
-                                    onSweep = {},
-                                    onSplit = {}
+                                    onSweep = {}
                                 )
                                 HorizontalDivider()
                             }

@@ -17,6 +17,7 @@ import cn.vectory.ocdroid.ui.SessionViewModel
 import cn.vectory.ocdroid.ui.SharedEffectBus
 import cn.vectory.ocdroid.ui.UiEvent
 import cn.vectory.ocdroid.ui.catchUpAfterDisconnectOrForeground
+import cn.vectory.ocdroid.ui.classifyCommandPostError
 import cn.vectory.ocdroid.ui.executeCommand
 import cn.vectory.ocdroid.ui.loadMessagesForEffect
 import cn.vectory.ocdroid.ui.materializeDraftSession
@@ -668,5 +669,93 @@ class AppCoreOrchestrationTest : MainViewModelTestBase() {
         )
         // Loading flag cleared on the early return.
         assertFalse(core.chatFlow.value.isLoadingMessages)
+    }
+
+    // ─────────── §grouping-rewrite Round-3 N1: classifyCommandPostError ────
+
+    @Test
+    fun `classifyCommandPostError — read-timeout SocketTimeoutException is non-fatal Info`() {
+        // §grouping-rewrite Round-2 D2 + Round-3 N1: a READ-side timeout
+        // (POST accepted, slow ACK) is non-fatal — SSE carries the result.
+        // OkHttp's exception message for this branch is "Read timed out" (or
+        // similar) — NO "connect" / "failed to connect" phrase.
+        val error = java.net.SocketTimeoutException("Read timed out")
+
+        val event = classifyCommandPostError(error, cmd = "compact")
+
+        assertTrue("read-timeout should yield UiEvent.Info, got $event", event is UiEvent.Info)
+        assertEquals(
+            R.string.command_submitted_processing,
+            (event as UiEvent.Info).resId,
+        )
+    }
+
+    @Test
+    fun `classifyCommandPostError — connect-side SocketTimeoutException is fatal Error`() {
+        // §grouping-rewrite Round-2 D2 + Round-3 N1: a CONNECT-side timeout
+        // (server unreachable / DNS / TLS) means the POST never reached the
+        // server → SSE cannot deliver → must surface as a real Error.
+        // OkHttp's exception message for this branch contains "failed to
+        // connect" (the case-insensitive "connect" sniff catches it).
+        val error = java.net.SocketTimeoutException("failed to connect to /1.2.3.4:443")
+
+        val event = classifyCommandPostError(error, cmd = "compact")
+
+        assertTrue("connect-timeout should yield UiEvent.Error, got $event", event is UiEvent.Error)
+        val err = event as UiEvent.Error
+        assertEquals(R.string.error_command_failed, err.resId)
+        // Format args: [cmd, fallbackMessage]. cmd is first.
+        assertEquals("compact", err.args.first())
+    }
+
+    @Test
+    fun `classifyCommandPostError — plain IOException (non-timeout) is fatal Error`() {
+        // §grouping-rewrite Round-2 D2 + Round-3 N1: anything that is NOT a
+        // SocketTimeoutException (HTTP 4xx/5xx, IOException, etc.) stays a
+        // real Error — the read-vs-connect distinction only applies to
+        // SocketTimeoutException.
+        val error = java.io.IOException("boom")
+
+        val event = classifyCommandPostError(error, cmd = "compact")
+
+        assertTrue("non-timeout IOException should yield UiEvent.Error, got $event", event is UiEvent.Error)
+        val err = event as UiEvent.Error
+        assertEquals(R.string.error_command_failed, err.resId)
+        assertEquals("compact", err.args.first())
+        // The fallback message propagates as the 2nd format arg.
+        assertTrue(
+            "error message should propagate via the fallback, got args=${err.args}",
+            err.args.any { it.toString().contains("boom") },
+        )
+    }
+
+    @Test
+    fun `classifyCommandPostError — SocketTimeoutException with null message defaults to non-fatal Info`() {
+        // §grouping-rewrite Round-4 N1-r3: pin the unsafe-direction default
+        // for a SocketTimeoutException with no message. The "connect" sniff
+        // does `error.message?.lowercase().orEmpty()` → "" → does NOT contain
+        // "connect" → falls through to the read-side path → Info (non-fatal).
+        //
+        // This is the unsafe-direction choice documented in
+        // classifyCommandPostError's KDoc: when we cannot tell connect-side
+        // from read-side apart (no message to sniff), assume read (non-fatal)
+        // because SSE will surface a real failure if the POST truly never
+        // reached the server. OkHttp always carries a message in practice
+        // (so this is a defensive pin against future sniff changes that would
+        // accidentally flip the default), but the contract is load-bearing:
+        // a false-positive Error on an actually-non-fatal timeout would lie
+        // to the user about a command that is still running server-side.
+        val error = java.net.SocketTimeoutException(null as String?)
+
+        val event = classifyCommandPostError(error, cmd = "compact")
+
+        assertTrue(
+            "null-message SocketTimeoutException should default to non-fatal Info, got $event",
+            event is UiEvent.Info,
+        )
+        assertEquals(
+            R.string.command_submitted_processing,
+            (event as UiEvent.Info).resId,
+        )
     }
 }

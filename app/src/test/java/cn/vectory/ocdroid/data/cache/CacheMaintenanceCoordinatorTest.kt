@@ -108,6 +108,33 @@ class CacheMaintenanceCoordinatorTest {
     }
 
     @Test
+    fun `dailySweepIfNeeded force=true bypasses 24h dedup and runs the full pipeline`() = runTest {
+        // §grouping-rewrite Round-2 C2: the manual sweep buttons pass force=true
+        // to bypass the same-day dedup. Verify that even when the epoch is
+        // already stamped today (which would otherwise short-circuit), the
+        // forced call (a) runs the orphan sweep and (b) re-stamps the epoch.
+        val today = System.currentTimeMillis() / (24L * 60L * 60L * 1000L)
+        every { settings.getLastSweepEpochDay("g1") } returns today
+        // Seed an orphan: cached but not in any alive source (defaults return
+        // empty) → evicted iff the pipeline actually runs.
+        seedCachedSession("g1", "would-be-orphan")
+
+        val report = coordinator.dailySweepIfNeeded("g1", force = true)
+
+        // force bypassed the dedup → full pipeline ran → orphan evicted.
+        assertNull(
+            "force=true bypassed the dedup and the orphan sweep ran",
+            db.cacheDao().session("g1", "would-be-orphan"),
+        )
+        // Epoch re-stamped (so the next non-forced call within the same day
+        // still dedups correctly).
+        verify(exactly = 1) { settings.setLastSweepEpochDay("g1", today) }
+        // Sanity: AliveCompleteness reflects the actual run (not the
+        // dedup-skipped Incomplete placeholder).
+        assertEquals(AliveCompleteness.Complete, report.completeness)
+    }
+
+    @Test
     fun `dailySweepIfNeeded proceeds when last sweep was a previous day`() = runTest {
         val today = System.currentTimeMillis() / (24L * 60L * 60L * 1000L)
         every { settings.getLastSweepEpochDay("g1") } returns today - 1

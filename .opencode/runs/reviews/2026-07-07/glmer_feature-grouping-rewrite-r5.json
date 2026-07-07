@@ -1,0 +1,17 @@
+{
+  "agent": "glmer",
+  "scope": "feature-grouping-rewrite",
+  "date": "2026-07-07",
+  "round": 5,
+  "reviewed_commit": "1448df1a35a5a9dd48db11f7490a808a02ced420",
+  "version_target": "0.5.1 (patch; pending patch-vs-minor confirmation)",
+  "verdict": "pass",
+  "score": 9.8,
+  "blocking_issues": [],
+  "non_blocking_issues": [
+    "1. [perf, non-issue] evictWorkdirInGroup for-loop vs bulk SQL (CacheRepository.kt:261-265): old=3 bulk DELETE w/ subquery (O(1) round-trips); new=1 sessionsInGroup (full entities) + N×3 per-session DELETE. 5-session workdir=16 queries, 20-session=61. NOT a problem: manual disconnect path (user-tap, not hot); SQLite PK-indexed DELETE <100ms; atomicity intact. Optional micro-opt: SELECT only (session_id, workdir) to cut entity materialization — not worth DAO surface change.",
+    "2. [carry-over] add-side dedup asymmetry (addRecentWorkdir exact-trim vs remove/evict normalized) — harmless (UI folds variants; disconnect clears all).",
+    "Carried 🟡 (intentionally left / changelog): Card-in-Dialog nesting; MRU 8→30 cold-start fan-out; D2 message-sniff cross-OkHttp-version (4 tests pin)."
+  ],
+  "notes": "DEFINITIVE PASS. C5 closed: evictWorkdirInGroup normalize-matches via WorkdirPaths.normalize, cascades messages→gaps→session in ONE db.withTransaction (atomicity preserved, cascade order mirrors evictSession, sibling safety confirmed). 4 referenced DAO methods grep-verified to exist (sessionsInGroup/deleteSessionMessages/deleteSession/gapDao.deleteSessionGaps). in-Kotlin (not SQL) approach cleaner+testable (SQLite trim semantics don't align with Kotlin trim().trim('/')). 3 dead exact-match DAO methods removed cleanly (0 orphan callers — all grep hits are breadcrumb comments; defensive doc warns against re-introduction). 4 new C5 tests incl. the blocker pin (seeds gap marker too — validates 3rd cascade layer) + cluster case. 16-site audit independently re-verified: enumerated evictSession/clearAll/listGroupSessions/cachedWorkdirsInGroup/applyEvictionPolicy/verifyFingerprint/clearProject/createSessionInWorkdir/browseFilesInWorkdir — NO C6 site. Disconnect pipeline final state: 4 layers consistent via WorkdirPaths.normalize (gate C3 / removeRecentWorkdir C4 / evictWorkdirInGroup C5 / storage original-form by design). 5-round arc 8.5→9.6→9.7→9.8→9.8, every round fixed a concrete issue with no new regression. Comfortably exceeds 9.5. Recommend ship."
+}

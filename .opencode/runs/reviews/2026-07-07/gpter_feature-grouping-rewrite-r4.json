@@ -1,0 +1,18 @@
+{
+  "agent": "gpter",
+  "scope": "feature-grouping-rewrite",
+  "date": "2026-07-07",
+  "round": 4,
+  "reviewed_commit": "1448df1a35a5a9dd48db11f7490a808a02ced420",
+  "version_target": "0.5.1 (patch; pending patch-vs-minor confirmation)",
+  "verdict": "block",
+  "score": 9.0,
+  "blocking_issues": [
+    "1. C5 — cache eviction in the disconnect pipeline still uses exact workdir match, same variant class as C4. SettingsViewModel.disconnectWorkdir passes the displayed/trimmed wd directly to cacheRepository.evictWorkdirInGroup(fp, wd) (SettingsViewModel.kt:385-392); CacheDao deletes by exact workdir = :workdir (CacheDao.kt:97, :112). So stored/cache row workdir='proj-a/' with displayed live group '/proj-a' → disconnect removes recent (normalized, post-C4) but cache eviction only tries '/proj-a' and misses 'proj-a/' → cached messages survive/reappear on reconnect. Violates the disconnect dialog/spec promise 'clears this project local cache' (user requirement Q14). Must align cache eviction with normalized workdir equivalence (same as C4 did for recent_workdirs)."
+  ],
+  "non_blocking_issues": [
+    "1. C4 recent_workdirs visibility fix itself is correct: WorkdirPaths.normalize shared (util/WorkdirPaths.kt:43-54); removeRecentWorkdir filters stored by normalized equivalence (SettingsManager.kt:195-203); buildWorkdirGroups uses same normalization for visible-set gate (SessionsScreen.kt:758-784).",
+    "2. addRecentWorkdir still dedupes exact trimmed strings → slash variants can coexist in storage. Edge-acceptable for visibility/disconnect (buildWorkdirGroups dedupes by normalized key; removeRecentWorkdir removes all normalized matches); residual impact = duplicate cold-start fetch / MRU slot usage."
+  ],
+  "notes": "Final blocker is NARROWER than the previous one: the workdir now hides correctly (incl. slash variants) but cache clearance still uses exact workdir matching. Since disconnect explicitly promises cache removal, would not ship without aligning cache eviction with the same normalized workdir equivalence, or otherwise proving cached workdir strings cannot differ from displayed workdir strings."
+}

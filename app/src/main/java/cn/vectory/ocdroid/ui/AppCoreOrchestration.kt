@@ -114,7 +114,25 @@ internal fun AppCore.executeCommand(command: String, arguments: String) {
                 appScope.launch {
                     repository.executeCommand(existing, cmd, arguments, directory = commandDirectory)
                         .onFailure { error ->
-                            effectBus.tryEmitUiEvent(UiEvent.Error(R.string.error_command_failed, listOf(cmd, errorMessageOrFallback(error, "unknown error"))))
+                            // §grouping-rewrite item 4: command POST runs on
+                            // a 300 s-read-timeout client (OkHttpClientFactory.
+                            // commandClient). A read-side SocketTimeoutException
+                            // means even that window expired waiting for the
+                            // server's ACK — but SSE (its own client, read
+                            // timeout 0) is still delivering results, so that
+                            // case is non-fatal: emit a neutral Info snackbar
+                            // and let SSE update the UI.
+                            //
+                            // §grouping-rewrite Round-2 D2: but a CONNECT-side
+                            // SocketTimeoutException (server unreachable / DNS /
+                            // TLS handshake) means the POST never reached the
+                            // server → SSE will not deliver → must surface as a
+                            // real Error. OkHttp's exception message distinguishes
+                            // the two ("connect timeout" / "failed to connect" vs
+                            // "timeout" / "read timeout"); we case-insensitively
+                            // sniff for "connect". All non-timeout failures stay
+                            // Error.
+                            effectBus.tryEmitUiEvent(classifyCommandPostError(error, cmd))
                         }
                 }
             } else if (store.composerFlow.value.draftWorkdir != null) {
@@ -123,7 +141,10 @@ internal fun AppCore.executeCommand(command: String, arguments: String) {
                     appScope.launch {
                         repository.executeCommand(sessionId, cmd, arguments, directory = commandDirectory)
                             .onFailure { error ->
-                                effectBus.tryEmitUiEvent(UiEvent.Error(R.string.error_command_failed, listOf(cmd, errorMessageOrFallback(error, "unknown error"))))
+                                // §grouping-rewrite item 4 + Round-2 D2: see
+                                // comment in the non-draft branch above — same
+                                // connect-vs-read timeout classification.
+                                effectBus.tryEmitUiEvent(classifyCommandPostError(error, cmd))
                             }
                     }
                 }
@@ -211,6 +232,44 @@ internal fun AppCore.materializeDraftSession(onSessionReady: (String) -> Unit) {
 
 /** Full-stack local reset (host → connection → session purge → chat clear). */
 internal fun AppCore.resetLocalDataAndResync() { hostProfileController.resetLocalDataAndResync() }
+
+/**
+ * §grouping-rewrite Round-2 D2 (+ Round-3 N1): classify a `/command` POST
+ * failure for the UI. Two flavours of [java.net.SocketTimeoutException] come
+ * out of OkHttp, and only ONE is non-fatal:
+ *
+ *  - **read-side timeout** (POST accepted, server slow to ACK within the
+ *    commandClient's 300 s read-timeout) → SSE (its own client, read timeout
+ *    0) is still delivering results → emit [UiEvent.Info] with
+ *    `command_submitted_processing` and let SSE update the UI.
+ *  - **connect-side timeout** (server unreachable / DNS / TLS handshake did
+ *    not complete within the connect-timeout) → the POST never reached the
+ *    server → SSE cannot deliver → must surface as [UiEvent.Error] with
+ *    `error_command_failed`.
+ *
+ * OkHttp's exception message distinguishes the two (typical phrases: "connect
+ * timeout", "failed to connect"). We case-insensitively sniff for "connect"
+ * (which also covers "failed to connect"). All non-SocketTimeoutException
+ * failures (HTTP 4xx/5xx, IOException, etc.) stay [UiEvent.Error].
+ *
+ * §grouping-rewrite Round-3 N1: visibility changed `private` → `internal` so
+ * [cn.vectory.ocdroid.AppCoreOrchestrationTest] can pin the three branches
+ * (read-timeout → Info; connect-timeout → Error; non-timeout → Error).
+ */
+internal fun classifyCommandPostError(error: Throwable, cmd: String): UiEvent {
+    if (error is java.net.SocketTimeoutException) {
+        val msg = error.message?.lowercase().orEmpty()
+        val isConnectSide = "connect" in msg || "failed to connect" in msg
+        if (!isConnectSide) {
+            // read-timeout → non-fatal, SSE will carry the result.
+            return UiEvent.Info(R.string.command_submitted_processing)
+        }
+    }
+    return UiEvent.Error(
+        R.string.error_command_failed,
+        listOf(cmd, errorMessageOrFallback(error, "unknown error"))
+    )
+}
 
 // ── sendMessage helpers (private to this file) ─────────────────────────────
 
@@ -435,11 +494,10 @@ internal fun AppCore.loadSessionsForEffect() {
         cacheRepository = cacheRepository,
         expectedServerGroupFp = currentServerGroupFp(),
         currentServerGroupFp = currentServerGroupFp,
-        // R-20 Phase 5 (plan §3 G1 三条件): wire hostProfileStore so
-        // launchLoadSessions can merge cross-group profiles that reach the
-        // same server (LAN + tunnel, etc.) on first (id + createdAt + dir +
-        // non-empty) match.
-        hostProfileStore = hostProfileStore,
+        // §grouping-rewrite Round-2 #5: the hostProfileStore arg that R-20
+        // Phase 5 wired here (for cross-group merge of LAN + tunnel same-server
+        // profiles) is removed — attemptCrossGroupMerge was deleted by item 1
+        // of this rewrite.
     )
 }
 

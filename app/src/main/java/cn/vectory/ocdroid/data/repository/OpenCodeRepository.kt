@@ -102,6 +102,21 @@ class OpenCodeRepository @Inject constructor(
     private var sseClient: SSEClient = SSEClient(sseHttp)
 
     /**
+     * §grouping-rewrite item 4: dedicated OkHttp client + Retrofit instance
+     * for `executeCommand` (POST /session/{id}/command). Built on
+     * [OkHttpClientFactory.commandClient] (read timeout 300 s vs [restHttp]'s
+     * 30 s) so a slow synchronous server-side command step does not blow past
+     * the read timeout and surface as a false-negative command-failed error
+     * (SSE still carries the results). The [commandApi] reuses the SAME
+     * [OpenCodeApi] interface, baseUrl, JSON converter and interceptor chain
+     * (auth / directory / cache / traffic) as [api]; only the OkHttp client
+     * differs. All other API methods stay on [api].
+     */
+    private var commandHttp: OkHttpClient = clientFactory.commandClient(hostConfig.allowInsecure)
+    private var commandRetrofit: Retrofit = buildRetrofit(commandHttp, hostConfig.baseUrl)
+    private var commandApi: OpenCodeApi = commandRetrofit.create(OpenCodeApi::class.java)
+
+    /**
      * §model-selection: a SECOND Retrofit instance rooted at
      * `<baseUrl>/api/` for the v2 model list endpoint (GET /api/model). Built
      * with the SAME OkHttp [restHttp] client as [api] so auth / cache / traffic
@@ -146,6 +161,11 @@ class OpenCodeRepository @Inject constructor(
         sseHttp = clientFactory.sseClient(hostConfig.allowInsecure)
         retrofit = buildRetrofit(restHttp, hostConfig.baseUrl)
         api = retrofit.create(OpenCodeApi::class.java)
+        // §grouping-rewrite item 4: rebuild the command-side client + Retrofit
+        // so a host switch (configure) refreshes baseUrl / auth on it too.
+        commandHttp = clientFactory.commandClient(hostConfig.allowInsecure)
+        commandRetrofit = buildRetrofit(commandHttp, hostConfig.baseUrl)
+        commandApi = commandRetrofit.create(OpenCodeApi::class.java)
         v2Retrofit = buildV2Retrofit(restHttp, hostConfig.baseUrl)
         apiV2 = v2Retrofit.create(OpenCodeApiV2::class.java)
         sseClient = SSEClient(sseHttp)
@@ -424,6 +444,12 @@ class OpenCodeRepository @Inject constructor(
      * the directory context is supplied EXPLICITLY by the caller (the
      * session's workdir); the OkHttp interceptor no longer injects the
      * global workdir fallback over it.
+     *
+     * §grouping-rewrite item 4: routes through [commandApi] (own OkHttp
+     * client with a 300 s read timeout) instead of [api] (30 s) so a slow
+     * synchronous server-side command step does not trip a false-negative
+     * command-failed timeout — SSE still delivers the results on its own
+     * 0-timeout client. See [OkHttpClientFactory.commandClient].
      */
     suspend fun executeCommand(
         sessionId: String,
@@ -432,7 +458,7 @@ class OpenCodeRepository @Inject constructor(
         agent: String? = null,
         directory: String?
     ): Result<Unit> = runSuspendCatching {
-        val response = api.executeCommand(
+        val response = commandApi.executeCommand(
             sessionId,
             CommandRequest(command = command, arguments = arguments, agent = agent),
             directory

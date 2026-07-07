@@ -1,0 +1,20 @@
+{
+  "agent": "gpter",
+  "scope": "feature-grouping-rewrite",
+  "date": "2026-07-07",
+  "round": 2,
+  "reviewed_commit": "1448df1a35a5a9dd48db11f7490a808a02ced420",
+  "version_target": "0.5.1 (patch; pending patch-vs-minor confirmation)",
+  "verdict": "block",
+  "score": 8.6,
+  "blocking_issues": [
+    "1. disconnectWorkdir still not behaviorally sound for workdirs WITH live/non-archived sessions. SessionsScreen.workdirGroups builds from allSessions (live) FIRST (SessionsScreen.kt:152-159) then adds recentWorkdirs fallback (170-175); disconnectWorkdir (SettingsViewModel.kt:371-387) only removes from recent_workdirs + evicts cache, does NOT filter sessionListFlow live rows. So a project with cached/live sessions remains visible after disconnect — contradicts the disconnect dialog ('将从列表移除') and item-5 verification. R2 C1 test only covers the 0-live recent-fallback path, not this more common path."
+  ],
+  "non_blocking_issues": [
+    "1. Soft-migration runtime normalization — ACCEPTED as resolved by clarified user decision (spec L37 now explicit: legacy UUID ghost links intentionally preserved at cache/config-key level, UI-label-only interpretation). No longer blocking.",
+    "2. Manual sweep dedup bypass — FIXED & verified (dailySweepIfNeeded force=false default; sweepNow/sweepAllGroups force=true; new test targeted).",
+    "3. D2 command-timeout classification via exception-message sniff — acceptable but fragile; a TLS/handshake timeout whose STE message lacks 'connect' could misclassify as Info. Not release-blocking; worth future test/telemetry.",
+    "4. sweepAllGroups sweeps profile-derived fps only (SettingsViewModel.kt:354-363) while popup listing is cache-derived (245-260) — cache-only groups can be displayed but not swept. UX/semantics gap; non-blocking if cache-only groups are edge cases."
+  ],
+  "notes": "Round-1 blockers #1 (soft-migration) and #3 (sweep dedup) resolved. #2 (disconnect) only PARTIALLY resolved: the reactive tick fixes 0-live recent placeholders, but disconnect does not remove groups backed by session-list rows. Would not clear a 9.5 gate until the with-live-sessions path is addressed (or spec/dialog narrows disconnect to 0-live only — but the user-facing dialog promises unconditional removal, so the code must match)."
+}

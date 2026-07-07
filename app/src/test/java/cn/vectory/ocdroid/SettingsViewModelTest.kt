@@ -13,6 +13,7 @@ import io.mockk.coVerify
 import io.mockk.every
 import io.mockk.verify
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.advanceUntilIdle
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
@@ -32,7 +33,7 @@ import org.junit.Test
  *
  * R-20 Phase 4 (plan §3): extended to cover the cache-management action
  * surface — clearSession / clearProject / clearAll / sweepNow /
- * splitProfile / refreshCacheListing. Each test verifies the action reaches
+ * refreshCacheListing. Each test verifies the action reaches
  * the underlying Repository / Coordinator / HostProfileStore (the relaxed
  * mock on `core.cacheRepository` lets us coVerify the suspend calls).
  */
@@ -210,18 +211,40 @@ class SettingsViewModelTest : MainViewModelTestBase() {
     }
 
     @Test
-    fun `splitProfile copies old group config to new profile fp after split`() = runTest {
+    fun `sweepAllGroups sweeps the UNION of profile-derived + cache-derived fps`() = runTest {
+        // §grouping-rewrite Round-3 #4: the popup listing is cache-derived
+        // (refreshCacheListing → allServerGroupFps), but sweepAllGroups used
+        // to sweep profile-derived fps only — so a group with cached sessions
+        // but no live profile (e.g. all profiles for that group were deleted)
+        // would show in the popup but be skipped by "Sweep all groups". The
+        // union closes that gap.
         val core = createCore()
         val vm = SettingsViewModel(core)
-        every {
-            hostProfileStore.profiles()
-        } returns listOf(HostProfile(id = "profile-1", name = "Profile", serverUrl = "http://h", serverGroupFp = "old-fp"))
 
-        vm.splitProfile("profile-1")
+        // Arrange: profile-derived fp = "fp-profile-only"; cache-derived fps
+        // include "fp-profile-only" (overlap, should not duplicate sweep) AND
+        // "fp-cache-only" (the gap case).
+        val profileFpProfile = HostProfile(
+            id = "p1",
+            name = "p1",
+            serverUrl = "http://x",
+            serverGroupFp = "fp-profile-only",
+        )
+        every { hostProfileStore.profiles() } returns listOf(profileFpProfile)
+        coEvery { core.cacheRepository.allServerGroupFps() } returns listOf("fp-profile-only", "fp-cache-only")
+        // Stub the per-fp coordinator deps so the sweep completes cleanly
+        // under the test dispatcher (applyEvictionPolicy + cachedWorkdirsInGroup
+        // are invoked by the real coordinator built in the test-only ctor).
+        io.mockk.coEvery { core.cacheRepository.cachedWorkdirsInGroup(any()) } returns emptyList()
+
+        vm.sweepAllGroups()
         advanceUntilIdle()
 
-        verify { hostProfileStore.splitProfileToOwnGroup("profile-1") }
-        verify { settingsManager.copyPerFpConfig(fromFp = "old-fp", toFp = "profile-1") }
+        // Both distinct fps were swept (the union, not just the profile set).
+        // applyEvictionPolicy is the first thing dailySweepIfNeeded runs per
+        // fp; verifying it ran for both proves both fps entered the pipeline.
+        io.mockk.coVerify(atLeast = 1) { core.cacheRepository.applyEvictionPolicy("fp-profile-only") }
+        io.mockk.coVerify(atLeast = 1) { core.cacheRepository.applyEvictionPolicy("fp-cache-only") }
     }
 
     @Test
@@ -299,5 +322,50 @@ class SettingsViewModelTest : MainViewModelTestBase() {
         // route the @Named("cacheDegraded") Boolean from the Hilt graph.
         val vm = SettingsViewModel(createCore())
         assertFalse(vm.isCacheDegraded)
+    }
+
+    // ─────────── §grouping-rewrite Round-2 C1: disconnect reactivity ──────
+
+    @Test
+    fun `disconnectWorkdir re-derives recentWorkdirs even when hostFlow + sessionListFlow are quiet`() = runTest {
+        // C1: disconnectWorkdir mutates SettingsManager + cacheRepository,
+        // neither of which pokes hostFlow / sessionListFlow. Without the
+        // explicit re-derivation trigger the disconnected workdir would stay
+        // in recentWorkdirs (regression of the old hiddenWorkdirs behaviour).
+        val core = createCore()
+        val vm = SettingsViewModel(core)
+
+        // Simulate removeRecentWorkdir by flipping a flag the getRecentWorkdirs
+        // stub reads — this mirrors how the real ESP-backed store would drop
+        // /a after the removal call lands.
+        var removed = false
+        every { settingsManager.removeRecentWorkdir(any(), eq("/a")) } answers { removed = true }
+        every { settingsManager.getRecentWorkdirs(any()) } answers {
+            if (removed) listOf("/b") else listOf("/a", "/b")
+        }
+
+        // recentWorkdirs is WhileSubscribed(5_000); keep a long-lived
+        // collector alive so the upstream combine is active for the whole
+        // test (otherwise .value would be stale by the time we re-read it).
+        val collected = mutableListOf<List<String>>()
+        val job = launch { vm.recentWorkdirs.collect { collected.add(it) } }
+        advanceUntilIdle()
+
+        // Initial derivation: both workdirs visible.
+        assertEquals(listOf("/a", "/b"), collected.last())
+
+        vm.disconnectWorkdir("/a")
+        advanceUntilIdle()
+
+        // Tick bumped → combine re-derived → /a dropped from the new snapshot.
+        // Without the C1 fix this would still be listOf("/a", "/b") (the
+        // settingsManager mutation is invisible to hostFlow/sessionListFlow).
+        assertEquals(listOf("/b"), collected.last())
+
+        // Side-effect sanity: the removal + eviction both fired.
+        verify { settingsManager.removeRecentWorkdir(any(), "/a") }
+        coVerify { core.cacheRepository.evictWorkdirInGroup(any(), "/a") }
+
+        job.cancel()
     }
 }

@@ -143,13 +143,92 @@ class SettingsManagerTest {
 
     @Test
     fun `addRecentWorkdir caps at MAX_RECENT_WORKDIRS`() {
-        // 加 12 个不同 workdir；只有最近 8 个保留（MRU 序）。
-        for (i in 1..12) settings.addRecentWorkdir(rwFp, "/proj/$i")
+        // §grouping-rewrite 项 5: MRU cap is 30. 加 32 个不同 workdir；只有最近
+        // 30 个保留（MRU 序）。
+        for (i in 1..32) settings.addRecentWorkdir(rwFp, "/proj/$i")
         val result = settings.getRecentWorkdirs(rwFp)
-        assertEquals(8, result.size)
-        // MRU first：/proj/12 … /proj/5。
-        assertEquals("/proj/12", result.first())
-        assertEquals("/proj/5", result.last())
+        assertEquals(30, result.size)
+        // MRU first：/proj/32 … /proj/3。
+        assertEquals("/proj/32", result.first())
+        assertEquals("/proj/3", result.last())
+    }
+
+    // ───── §grouping-rewrite Round-4 C4: removeRecentWorkdir normalized matching ─
+    // The display dir passed to disconnectWorkdir comes from buildWorkdirGroups
+    // (often the absolute leading-slash form like "/proj-a"); recent_workdirs
+    // may persist a slash variant ("proj-a/"). Pre-C4, exact-string matching
+    // silently failed to remove → the variant persisted → the workdir
+    // reappeared. These tests pin normalized-equivalence matching on the
+    // removal side while storage stays original-form (server-facing).
+
+    @Test
+    fun `removeRecentWorkdir removes by normalized match across slash variants`() {
+        // Stored "proj-a/" (trailing slash) → remove "/proj-a" (leading slash)
+        // → both normalize to "proj-a" → match → removed.
+        settings.setRecentWorkdirs(rwFp, listOf("proj-a/"))
+        settings.removeRecentWorkdir(rwFp, "/proj-a")
+        assertEquals(emptyList<String>(), settings.getRecentWorkdirs(rwFp))
+    }
+
+    @Test
+    fun `removeRecentWorkdir still removes exact match`() {
+        // Sanity: the pre-C4 exact-match path is preserved (the change is a
+        // strict superset of matching, never an unrelated regression).
+        settings.setRecentWorkdirs(rwFp, listOf("/proj-a"))
+        settings.removeRecentWorkdir(rwFp, "/proj-a")
+        assertEquals(emptyList<String>(), settings.getRecentWorkdirs(rwFp))
+    }
+
+    @Test
+    fun `removeRecentWorkdir does not over-remove non-matching entries`() {
+        // Stored [proj-a, proj-b] → remove /proj-a → only proj-b remains.
+        // Critical: the normalized match must not accidentally nuke a sibling
+        // project whose name is a substring or shares a prefix.
+        settings.setRecentWorkdirs(rwFp, listOf("proj-a", "proj-b"))
+        settings.removeRecentWorkdir(rwFp, "/proj-a")
+        assertEquals(listOf("proj-b"), settings.getRecentWorkdirs(rwFp))
+    }
+
+    @Test
+    fun `removeRecentWorkdir handles trailing and leading slash variants both ways`() {
+        // Stored "/proj-a/" (BOTH surrounding slashes) → remove "proj-a" (no
+        // slashes) → all three normalize to "proj-a" → match → removed.
+        settings.setRecentWorkdirs(rwFp, listOf("/proj-a/"))
+        settings.removeRecentWorkdir(rwFp, "proj-a")
+        assertEquals(emptyList<String>(), settings.getRecentWorkdirs(rwFp))
+    }
+
+    @Test
+    fun `removeRecentWorkdir handles surrounding-whitespace variants`() {
+        // Stored with whitespace padding → remove trimmed form → both
+        // normalize the same way → removed. WorkdirPaths.normalize trims
+        // whitespace BEFORE stripping slashes, so "  /proj-a  " and
+        // "/proj-a\t" both collapse to "proj-a".
+        settings.setRecentWorkdirs(rwFp, listOf("  /proj-a  "))
+        settings.removeRecentWorkdir(rwFp, "/proj-a")
+        assertEquals(emptyList<String>(), settings.getRecentWorkdirs(rwFp))
+    }
+
+    @Test
+    fun `removeRecentWorkdir no-ops when target not present`() {
+        // Defensive: removing an unrelated workdir must not change the list.
+        settings.setRecentWorkdirs(rwFp, listOf("/proj-a", "/proj-b"))
+        settings.removeRecentWorkdir(rwFp, "/proj-c")
+        assertEquals(listOf("/proj-a", "/proj-b"), settings.getRecentWorkdirs(rwFp))
+    }
+
+    @Test
+    fun `getRecentWorkdirs returns original stored forms post-add - server-facing preserved`() {
+        // §grouping-rewrite Round-4 C4: addRecentWorkdir storage is UNCHANGED
+        // — it stores the trimmed ORIGINAL string the server returned, NOT a
+        // normalized form. The server needs the real path for
+        // getSessionsForDirectory; normalizing on store would break the
+        // cold-start fan-out. Only the removal-side comparison normalizes.
+        settings.addRecentWorkdir(rwFp, "/proj-a/")
+        settings.addRecentWorkdir(rwFp, "proj-b")
+        // Both original forms survive verbatim (modulo the leading-space trim
+        // addRecentWorkdir has always applied).
+        assertEquals(listOf("proj-b", "/proj-a/"), settings.getRecentWorkdirs(rwFp))
     }
 
     @Test

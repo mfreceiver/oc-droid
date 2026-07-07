@@ -1,0 +1,18 @@
+{
+  "agent": "glmer",
+  "scope": "feature-grouping-rewrite",
+  "date": "2026-07-07",
+  "round": 3,
+  "reviewed_commit": "1448df1a35a5a9dd48db11f7490a808a02ced420",
+  "version_target": "0.5.1 (patch; pending patch-vs-minor confirmation)",
+  "verdict": "pass",
+  "score": 9.7,
+  "blocking_issues": [],
+  "non_blocking_issues": [
+    "N1-r3. classifyCommandPostError lacks a null-message boundary test (AppCoreOrchestration.kt:422-424). error.message?.lowercase().orEmpty() ⇒ null msg ⇒ \"\" ⇒ isConnectSide=false ⇒ Info (unsafe-direction default). 3 tests all use non-null messages. Add SocketTimeoutException(null) case. Rare (OkHttp always carries a message) but pins the sniff's unsafe-direction default.",
+    "N2-r3. createSessionInWorkdir timing (SessionsScreen.kt:1060-1065 buildWorkdirGroups call site) — if addRecentWorkdir lags SSE session.created landing in allSessions, the new session's workdir is briefly hidden (C3 gate filters it). draftWorkdir mechanism theoretically bridges the window but draft-clear vs addRecentWorkdir timing isn't unit-tested. Suggest emulator smoke: connect-new-project → send message → observe workdir stays visible. Non-blocking (single-frame flicker at worst).",
+    "Carried round-2 🟡: Card-in-Dialog nesting (cosmetic); MRU 8→30 cold-start fan-out trade-off (changelog note); D2 message-sniff cross-OkHttp-version stability (now test-pinned, will catch on upgrade).",
+    "Observation (not a defect): C3 gate also hides directorySessions-discovered sessions whose workdir isn't in recent_workdirs — matches spec ('Connected = recent_workdirs'); users relying on the OLD 'all server sessions grouped by workdir' view will see fewer entries (those sessions still reachable via Recent sessions list). Emulator-verify no dead-end (a session existing but in neither recent-sessions nor connected-projects)."
+  ],
+  "notes": "Round-3 delta all precisely landed with high-quality tests. C3 buildWorkdirGroups extraction is a best-practice pure-function + derivedStateOf-wrapper; the blocking-case pin test (SessionsScreenTest.kt:27-72) explicitly constructs gpter's round-2 race and comments 'Pre-C3 /proj-a would stay visible' — among the best regression tests. KDoc (SessionsScreen.kt:1158-1199) lists 6 preserved behaviors + gate rationale. N1 tests use realistic OkHttp message strings (pins the sniff heuristic). N2 atomic CAS. #4 sweepAllGroups UNION with defensive runCatching + overlap-distinct test. No regressions (item 1-5 core logic unchanged; refactor preserved all pre-C3 behavior except the intentional gate). Comfortably exceeds 9.5 gate. 9.7 for extraction quality + my N1/N2 precise closure."
+}

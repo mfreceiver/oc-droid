@@ -1,0 +1,15 @@
+{
+  "agent": "momo",
+  "scope": "feature-grouping-rewrite",
+  "date": "2026-07-07",
+  "round": 4,
+  "reviewed_commit": "1448df1a35a5a9dd48db11f7490a808a02ced420",
+  "version_target": "0.5.1 (patch; pending patch-vs-minor confirmation)",
+  "verdict": "pass",
+  "score": 9.9,
+  "blocking_issues": [],
+  "non_blocking_issues": [
+    "1. [minor -0.1, functional no-impact] addRecentWorkdir dedup still uses trim() not WorkdirPaths.normalize (SettingsManager.kt:162). If the same workdir is added in different slash forms (/proj-a vs proj-a) both get stored. No functional impact (buildWorkdirGroups normalizes to one key; removeRecentWorkdir removes all variants at once) — just 1-2 redundant SharedPreferences entries. In practice the same workdir's slash form comes from the same server and is consistent. Left intentionally (changing add dedup forces a storage-form decision that affects getSessionsForDirectory server-call params)."
+  ],
+  "notes": "WorkdirPaths.normalize byte-identical to old SessionsScreen.normalizeDirectory (pure refactor; 11 SessionsScreenTest unchanged). 4 SessionsScreen call sites migrated cleanly. removeRecentWorkdir normalized-equivalence matching closes the real C4 gap (display /proj-a vs stored proj-a/). addRecentWorkdir/getRecentWorkdirs/storage unchanged (server-path integrity preserved). trim().trim('/') boundary analyzed (./proj-a not normalized but never in real server data; //proj-a → proj-a; whitespace → empty skipped by caller). KDoc declares intentional non-handling of ./../inner-//. No regression (all historical tests pass). check.sh GREEN."
+}

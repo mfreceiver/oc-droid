@@ -101,10 +101,10 @@ class HostProfileStore @Inject constructor(
         // R-20 Phase 0: duplicate is "clone configuration into an independent
         // connection point" — by plan §1's "import 默认新建独立组" logic, a
         // duplicate starts as its own single-member group rather than
-        // inheriting the source's group. Two entry points that legitimately
-        // reach the same server can later be merged via [mergeServerGroup];
-        // defaulting to a fresh group avoids accidental cross-contamination
-        // of the cache when the duplicate points at a different server.
+        // inheriting the source's group. Defaulting to a fresh group avoids
+        // accidental cross-contamination of the cache when the duplicate
+        // points at a different server; the user may later pick A/B/C/D in
+        // the editor to share intentionally.
         val newId = java.util.UUID.randomUUID().toString()
         val copy = source.copy(
             id = newId,
@@ -234,51 +234,6 @@ class HostProfileStore @Inject constructor(
         val safe = profiles.map { it.normalizeGroupFp() }
         settingsManager.hostProfilesJson = json.encodeToString(safe)
         settingsManager.currentHostProfileId = currentId ?: safe.firstOrNull()?.id
-    }
-
-    /**
-     * R-20 Phase 0: merge all profiles in group [from] into group [into]
-     * (one-directional). After the call, no profile has `serverGroupFp == from`;
-     * every previously-`from` profile now carries `into`. Persists the change.
-     *
-     * Use case: the user has two profiles pointing at the same server (e.g. a
-     * LAN entry and a tunnel entry) and wants them to share cached chat
-     * content. Idempotent: if [from] is already empty / does not exist, this
-     * is a no-op.
-     */
-    @Synchronized
-    fun mergeServerGroup(from: String, into: String) {
-        if (from.isBlank() || from == into) return
-        val all = profiles()
-        val changed = all.any { it.serverGroupFp == from }
-        if (!changed) return
-        val updated = all.map { p ->
-            if (p.serverGroupFp == from) p.copy(serverGroupFp = into) else p
-        }
-        val currentId = settingsManager.currentHostProfileId
-        saveProfiles(updated, currentId)
-    }
-
-    /**
-     * R-20 Phase 0: split [profileId] into its own independent single-member
-     * group (sets its `serverGroupFp = profileId`). Persists the change.
-     *
-     * Use case (plan §4 G1 "copy-on-split" escape hatch, surfaced in Phase 4
-     * management UI): the user accidentally merged two unrelated profiles and
-     * wants to undo the cache sharing without losing either side's config.
-     * Idempotent: if the profile is already its own group, this is a no-op.
-     */
-    @Synchronized
-    fun splitProfileToOwnGroup(profileId: String) {
-        if (profileId.isBlank()) return
-        val all = profiles()
-        val target = all.firstOrNull { it.id == profileId } ?: return
-        if (target.serverGroupFp == profileId) return
-        val updated = all.map { p ->
-            if (p.id == profileId) p.copy(serverGroupFp = profileId) else p
-        }
-        val currentId = settingsManager.currentHostProfileId
-        saveProfiles(updated, currentId)
     }
 
     /**

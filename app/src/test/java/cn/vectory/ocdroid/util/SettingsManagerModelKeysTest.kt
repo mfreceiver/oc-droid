@@ -149,28 +149,6 @@ class SettingsManagerModelKeysTest {
         assertTrue(settings.getDisabledModels("g2").contains("p/m"))
     }
 
-    @Test
-    fun `copyPerFpConfig copies per-fp config to new fp and keeps source intact`() {
-        settings.setRecentWorkdirs("old-fp", listOf("/repo-a", "/repo-b"))
-        settings.setDisabledModels("old-fp", setOf("p/disabled"))
-        settings.setModelAvailability("old-fp", setOf("p/available"))
-        settings.setDraftText("old-fp", "ses-1", "draft")
-        settings.setAgentForSession("old-fp", "ses-1", "build")
-        settings.setModelForSession("old-fp", "ses-1", "openai", "gpt-4o")
-
-        settings.copyPerFpConfig("old-fp", "new-fp")
-
-        assertEquals(listOf("/repo-a", "/repo-b"), settings.getRecentWorkdirs("new-fp"))
-        assertEquals(setOf("p/disabled"), settings.getDisabledModels("new-fp"))
-        assertEquals(setOf("p/available"), settings.getModelAvailability("new-fp"))
-        assertEquals("draft", settings.getDraftText("new-fp", "ses-1"))
-        assertEquals("build", settings.getAgentForSession("new-fp", "ses-1"))
-        assertEquals("gpt-4o", settings.getModelForSession("new-fp", "ses-1")?.modelId)
-
-        assertEquals(listOf("/repo-a", "/repo-b"), settings.getRecentWorkdirs("old-fp"))
-        assertEquals("draft", settings.getDraftText("old-fp", "ses-1"))
-    }
-
     // ───────────────── getModelForSession / setModelForSession (composite key) ─────────────────
     // Phase 5: composite (fp, sessionId) map key — see SettingsManager.getDraftText doc.
 

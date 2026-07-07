@@ -1,0 +1,16 @@
+{
+  "agent": "gpter",
+  "scope": "feature-grouping-rewrite",
+  "date": "2026-07-07",
+  "round": 5,
+  "reviewed_commit": "1448df1a35a5a9dd48db11f7490a808a02ced420",
+  "version_target": "0.5.1 (patch; pending patch-vs-minor confirmation)",
+  "verdict": "pass",
+  "score": 9.6,
+  "blocking_issues": [],
+  "non_blocking_issues": [
+    "1. [edge-acceptable] addRecentWorkdir still dedupes by exact trimmed string (SettingsManager.kt:157-164) — slash variants can coexist in storage. Visibility dedupes by WorkdirPaths.normalize; disconnect removes all normalized recent variants (C4) AND cache variants (C5). Remaining impact = duplicate MRU slots / duplicate cold-start fetches, NOT a correctness break.",
+    "2. [edge-acceptable] directorySessions can retain disconnected workdirs in memory, but buildWorkdirGroups gates display by normalized recentWorkdirs ∪ draftWorkdir, so retained live/session-list rows do not re-anchor the UI. Read-side/in-memory state, not a persistent match-then-clear path; acceptable for this release."
+  ],
+  "notes": "C5 CLOSED. evictWorkdirInGroup now normalize-matches cache rows via the same WorkdirPaths.normalize contract and cascades messages/gaps/session in one transaction (CacheRepository.kt:896-925). C5 tests cover slash variants, exact match, siblings, multi-variant clusters. Combined with C4 removeRecentWorkdir normalized removal, disconnect now hides AND clears cache for plausible slash-variant cases. Found NO remaining blocking workdir persistent-store match site. 4-round blocking arc (R2 C3 disconnect-live-sessions → R3 C4 recent-normalization → R4 C5 cache-normalization) fully resolved."
+}

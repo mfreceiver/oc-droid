@@ -166,6 +166,45 @@ class SettingsManager @Inject constructor(
     }
 
     /**
+     * Remove [workdir] from the [serverGroupFp]'s recent-workdirs list.
+     *
+     * §grouping-rewrite Round-4 C4: matching is by NORMALIZED EQUIVALENCE, not
+     * exact trimmed string. The display dir passed in here comes from
+     * `buildWorkdirGroups`'s output, which is often the absolute leading-slash
+     * form taken from a live session (e.g. `/proj-a`), while recent_workdirs
+     * may persist a slash variant the server originally returned (e.g.
+     * `proj-a/`). Under exact-string matching the disconnect would silently
+     * fail to match → the variant would persist → the normalized visible key
+     * would still exist → the workdir would reappear after disconnect (the
+     * disconnect dialog's "将从列表移除" promise broken for variant cases).
+     *
+     * Both the incoming [workdir] and each stored entry are funnelled through
+     * [WorkdirPaths.normalize] — the SAME normalization
+     * `buildWorkdirGroups`/`SessionsScreen` uses for visibility gating — so
+     * the disconnect pipeline is closed end-to-end:
+     *
+     *   display dir → disconnectWorkdir → removeRecentWorkdir (normalized)
+     *   → removed → recentWorkdirsTick bumped → buildWorkdirGroups re-derives
+     *   → workdir no longer in visible set → hidden.
+     *
+     * Storage behaviour is unchanged: `getRecentWorkdirs` still returns the
+     * ORIGINAL stored forms (server-facing paths); only the comparison is
+     * normalized. `addRecentWorkdir` also still stores the trimmed original
+     * (not the normalized form) — see its KDoc for why.
+     */
+    fun removeRecentWorkdir(serverGroupFp: String, workdir: String) {
+        if (serverGroupFp.isBlank()) return
+        val targetNormalized = WorkdirPaths.normalize(workdir)
+        if (targetNormalized.isEmpty()) return
+        synchronized(this) {
+            val updated = getRecentWorkdirs(serverGroupFp).filter { stored ->
+                WorkdirPaths.normalize(stored) != targetNormalized
+            }
+            setRecentWorkdirs(serverGroupFp, updated)
+        }
+    }
+
+    /**
      * R-20 Phase 5: clears the [serverGroupFp]'s recent-workdirs list. Used
      * by [cn.vectory.ocdroid.ui.controller.HostProfileController.purgePerHostState]
      * on a DIFFERENT-group switch (the old fp's workdirs are meaningless on
@@ -477,33 +516,6 @@ class SettingsManager @Inject constructor(
             .apply()
     }
 
-    /**
-     * R-20 Phase 5 copy-on-split escape hatch (plan §0 G1): copies all
-     * per-serverGroupFp configuration from [fromFp] to [toFp] without deleting
-     * or mutating the source group. Used when a profile is split out of a
-     * merged group so the newly-independent group starts with the same local
-     * user configuration instead of losing drafts/model choices/recent dirs.
-     */
-    fun copyPerFpConfig(fromFp: String, toFp: String) {
-        if (fromFp.isBlank() || toFp.isBlank() || fromFp == toFp) return
-        val e = encryptedPrefs.edit()
-
-        encryptedPrefs.getString(recentWorkdirsKey(fromFp), null)?.let {
-            e.putString(recentWorkdirsKey(toFp), it)
-        }
-        encryptedPrefs.getStringSet(disabledModelsKey(fromFp), null)?.let {
-            e.putStringSet(disabledModelsKey(toFp), it)
-        }
-        encryptedPrefs.getStringSet(modelAvailabilityKey(fromFp), null)?.let {
-            e.putStringSet(modelAvailabilityKey(toFp), it)
-        }
-        copyCompositeSessionMapPrefix(KEY_SESSION_DRAFTS, fromFp, toFp, e)
-        copyCompositeSessionMapPrefix(KEY_SESSION_AGENTS, fromFp, toFp, e)
-        copyCompositeSessionMapPrefix(KEY_SESSION_MODELS, fromFp, toFp, e)
-
-        e.apply()
-    }
-
     // ───────────── R-20 Phase 3: per-serverGroup daily-sweep dedup ─────────
 
     /**
@@ -646,32 +658,9 @@ class SettingsManager @Inject constructor(
         }
     }
 
-    private fun copyCompositeSessionMapPrefix(
-        key: String,
-        fromFp: String,
-        toFp: String,
-        editor: SharedPreferences.Editor
-    ) {
-        val json = encryptedPrefs.getString(key, null) ?: return
-        val map: MutableMap<String, String> = try {
-            Json.decodeFromString<Map<String, String>>(json).toMutableMap()
-        } catch (e: Exception) {
-            return
-        }
-        val fromPrefix = fromFp + COMPOSITE_KEY_SEPARATOR
-        val toPrefix = toFp + COMPOSITE_KEY_SEPARATOR
-        var changed = false
-        for ((k, v) in map.toList()) {
-            if (k.startsWith(fromPrefix)) {
-                val copiedKey = toPrefix + k.removePrefix(fromPrefix)
-                if (map[copiedKey] != v) {
-                    map[copiedKey] = v
-                    changed = true
-                }
-            }
-        }
-        if (changed) editor.putString(key, Json.encodeToString(map))
-    }
+    // §grouping-rewrite Round-2 #5: `copyCompositeSessionMapPrefix(...)` was
+    // here — sole caller was `copyPerFpConfig(...)`, which item 1 of this
+    // rewrite deleted. Removed as dead code.
 
     /**
      * Hard reset: wipes EVERY persisted key EXCEPT the connection-credential
@@ -743,8 +732,16 @@ class SettingsManager @Inject constructor(
         private const val KEY_LAST_NAV_PAGE = "last_nav_page"
         private const val KEY_CURRENT_WORKDIR = "current_workdir"
         private const val KEY_RECENT_WORKDIRS = "recent_workdirs"
-        /** Cap for [recentWorkdirs] — bounds cold-start directory-fetch fan-out. */
-        private const val MAX_RECENT_WORKDIRS = 8
+        /**
+         * Cap for [recentWorkdirs] — bounds cold-start directory-fetch fan-out.
+         *
+         * §grouping-rewrite 项 5 (spec decision): 30 — the recent-workdir list
+         * doubles as the persistent "Connected projects" surface (0-live wds
+         * are retained as placeholders so the user can re-enter / disconnect
+         * them), so the cap is sized for navigation memory rather than fetch
+         * fan-out alone.
+         */
+        private const val MAX_RECENT_WORKDIRS = 30
         private const val KEY_AGENT_NAME = "agent_name"
         private const val KEY_THEME = "theme"
         private const val KEY_UI_FONT_SCALE = "ui_font_scale"

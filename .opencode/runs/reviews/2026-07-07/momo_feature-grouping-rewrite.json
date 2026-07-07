@@ -1,0 +1,21 @@
+{
+  "agent": "momo",
+  "scope": "feature-grouping-rewrite",
+  "date": "2026-07-07",
+  "reviewed_commit": "1448df1a35a5a9dd48db11f7490a808a02ced420",
+  "version_target": "0.5.1 (patch; pending patch-vs-minor confirmation)",
+  "verdict": "pass-with-fixes",
+  "score": 9.2,
+  "blocking_issues": [],
+  "non_blocking_issues": [
+    "1. [important, score-dragging] Manual sweep does not bypass 24h dedup. SettingsViewModel.kt:307-345 (sweepNow + sweepAllGroups) call dailySweepIfNeeded, which has epoch-day dedup (CacheMaintenanceCoordinator.kt:79-92). After the auto connect-sweep, manual button is a silent no-op returning Incomplete/0-count — feels broken. Fix: add force:Boolean to dailySweepIfNeeded or a sweepNowBypass(fp).",
+    "2. [important, score-dragging] disconnectWorkdir not reactive. recentWorkdirs combines only hostFlow+sessionListFlow (SettingsViewModel.kt:120-130); disconnectWorkdir (347-358) writes SharedPreferences but triggers neither flow — SessionsScreen keeps showing the disconnected workdir's EmptyWorkdirPlaceholder until an unrelated sessionListFlow emission. Old hiddenWorkdirs local state gave immediate feedback; new impl lost it. Fix: add a direct trigger (MutableSharedFlow<Unit>) emitted from disconnectWorkdir/addRecentWorkdir, or force-emit to recentWorkdirs backing flow.",
+    "3. [minor] UiEvent.Info uses List<Any> not List<String> (UiEvent.kt:32). Currently safe (sole call passes 0 args) but imprecise — getString with non-String args would ClassCastException. Error/Success also List<Any>; ideally align all but scope-wise only Info here.",
+    "4. [suggestion] NamedGroupLabels duplicated: centralized SettingsSections.kt:168 but editor uses local listOf in HostProfilesManagerScreen.kt:285. Drift risk — import the constant.",
+    "5. [suggestion] Dead code: SessionListActions.kt:85 (hostProfileStore param no longer used by launchLoadSessions), :436 (directoriesMatchOrIntersect — sole caller attemptCrossGroupMerge deleted), SettingsManager.kt:632 (copyCompositeSessionMapPrefix — only used by deleted copyPerFpConfig).",
+    "6. [suggestion] Card-in-Dialog nesting (SettingsScreen.kt:225-256 + CacheManagementSection.kt:127) — double Card. Drop outer Card or add hideOuterCard param.",
+    "7. [non-blocking] 300s POST coroutine not cancelled on host-switch (AppCoreOrchestration.kt:114-132) — captures old commandApi ref, rebuildClients doesn't cancel in-flight. Rare in practice, non-fatal (times out → Info snackbar).",
+    "8. [non-blocking, by-design] Group reassignment strands cache (HostProfilesManagerScreen.kt:519-525) — intended per 'repoint fp only, no rekey'; warning text covers it."
+  ],
+  "notes": "No blockers. Dead-lane cleanup thorough (all callers + tests + files removed, grep-confirmed 0 residual). applyArchiveEviction zombie fix correct (directorySessions update + distinctBy dedup). commandClient architecture sound. Item-5 host.currentProfile→hostProfileStore.currentProfile() hand-fix verified behaviorally equivalent (matches all other call sites). check.sh not run by reviewer (read-only) — orchestrator confirmed GREEN independently. Score: 10 −0.3 (sweep dedup) −0.3 (disconnect timing) −0.1 (Info type) −0.1 (dead code/dup) = 9.2."
+}

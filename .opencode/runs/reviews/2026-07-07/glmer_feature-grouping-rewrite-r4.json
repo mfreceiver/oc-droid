@@ -1,0 +1,16 @@
+{
+  "agent": "glmer",
+  "scope": "feature-grouping-rewrite",
+  "date": "2026-07-07",
+  "round": 4,
+  "reviewed_commit": "1448df1a35a5a9dd48db11f7490a808a02ced420",
+  "version_target": "0.5.1 (patch; pending patch-vs-minor confirmation)",
+  "verdict": "pass",
+  "score": 9.8,
+  "blocking_issues": [],
+  "non_blocking_issues": [
+    "1. [optional polish] add-side dedup asymmetry: addRecentWorkdir still exact-trim dedup while removeRecentWorkdir is normalized-equivalence (SettingsManager.kt:157-166). Harmless (buildWorkdirGroups dedupes by normalized key; disconnect removes all variants at once); only cost = a few redundant ESP entries bounded by MAX_RECENT_WORKDIRS=30. Future: align add dedup to WorkdirPaths.normalize for symmetry. Non-blocking (pre-C4 add was also exact-match — not a regression).",
+    "Carried 🟡 (all intentionally left / changelog-level): Card-in-Dialog nesting (cosmetic); MRU 8→30 cold-start fan-out trade-off (changelog); D2 message-sniff cross-OkHttp-version stability (4 tests pin)."
+  ],
+  "notes": "DEFINITIVE PASS. C4 (gpter round-3 block) fully closed: WorkdirPaths.kt extraction is the best single-point abstraction seen across 4 rounds — KDoc documents the cross-layer pipeline (gate ↔ remove ↔ storage) + intentional non-goals (no case-fold/./../inner-//) + which tests to coordinate before extending. removeRecentWorkdir normalized-equivalence matching verified (target + stored both normalized; survivors stay original-form; synchronized atomic). 7 new tests incl. the C4 blocker pin + a storage-original-form pin (forward-looking — prevents future 'helpful' refactors from normalizing storage and breaking server-facing path contract). N1-r3 null-message test correctly pins the unsafe-direction default with honest rationale. 4-round issue closure summary: R1 disconnect-UI → R2 C1 tick → R3 C3 gate extraction → R4 C4 normalized matching (complete disconnect-correctness loop); R1 sweep-dedup → R2 C2 force; R1 STE-misclassification → R2 D2 sniff → R3 N1 tests → R4 N1-r3 null-test. Test coverage: buildWorkdirGroups×11, removeRecentWorkdir×7, classifyCommandPostError×4, C1×1, C2×1, sweepAllGroups×1, MRU×1 + all deletion tests cleaned. Comfortably exceeds 9.5. Recommend ship."
+}

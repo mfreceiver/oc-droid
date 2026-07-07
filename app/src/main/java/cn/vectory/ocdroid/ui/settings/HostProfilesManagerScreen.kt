@@ -36,6 +36,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.input.PasswordVisualTransformation
@@ -281,6 +282,7 @@ internal fun HostProfileEditorDialog(
         onResult: (Boolean, String) -> Unit
     ) -> Unit = { _, _, _, _, _, _, _ -> }
 ) {
+    val groupLabels = NamedGroupLabels // §grouping-rewrite Round-2 #4: was a local listOf("A","B","C","D") — centralised in SettingsSections.kt so the editor + ConnectionProfileSection stats line stay in lockstep.
     var name by remember(initial.id) { mutableStateOf(initial.name) }
     var serverUrl by remember(initial.id) { mutableStateOf(initial.serverUrl) }
     var authUsername by remember(initial.id) { mutableStateOf(initial.basicAuth?.username.orEmpty()) }
@@ -291,6 +293,10 @@ internal fun HostProfileEditorDialog(
     var showBasicPassword by remember(initial.id) { mutableStateOf(false) }
     var showTunnelPassword by remember(initial.id) { mutableStateOf(false) }
     var showDeleteConfirm by remember(initial.id) { mutableStateOf(false) }
+    val initialGroup = remember(initial.id, initial.serverGroupFp) {
+        initial.serverGroupFp.takeIf { it in groupLabels }
+    }
+    var selectedGroup by remember(initial.id, initial.serverGroupFp) { mutableStateOf(initialGroup) }
     // R-01: per-host "接受不安全连接"开关（自签证书/内网 TLS 用户需要显式启用，
     // 否则全局 strict 校验会直接拒绝连接）。种子取自当前 HostProfile。
     var allowInsecure by remember(initial.id) { mutableStateOf(initial.allowInsecureConnections) }
@@ -392,6 +398,37 @@ internal fun HostProfileEditorDialog(
                         }
                     }
                 )
+                Spacer(modifier = Modifier.height(12.dp))
+                Text(stringResource(R.string.host_group_label), style = MaterialTheme.typography.labelMedium)
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    OutlinedButton(
+                        onClick = { selectedGroup = null },
+                        modifier = Modifier.weight(1f),
+                        colors = ButtonDefaults.outlinedButtonColors(
+                            containerColor = if (selectedGroup == null) MaterialTheme.colorScheme.secondaryContainer else Color.Transparent
+                        )
+                    ) { Text(stringResource(R.string.host_group_none), maxLines = 1) }
+                    groupLabels.forEach { label ->
+                        OutlinedButton(
+                            onClick = { selectedGroup = label },
+                            modifier = Modifier.weight(1f),
+                            colors = ButtonDefaults.outlinedButtonColors(
+                                containerColor = if (selectedGroup == label) MaterialTheme.colorScheme.secondaryContainer else Color.Transparent
+                            )
+                        ) { Text(label) }
+                    }
+                }
+                if (selectedGroup != null) {
+                    Text(
+                        stringResource(R.string.host_group_warning),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(top = 4.dp)
+                    )
+                }
                 Spacer(modifier = Modifier.height(12.dp))
                 // R-01: per-host insecure-connections toggle. Off by default
                 // (strict TLS); enabling it downgrades this host's REST/SSE/
@@ -507,7 +544,12 @@ internal fun HostProfileEditorDialog(
                             serverUrl = serverUrl,
                             basicAuth = basicAuth,
                             tunnelPasswordId = tunnelId,
-                            allowInsecureConnections = allowInsecure
+                            allowInsecureConnections = allowInsecure,
+                            serverGroupFp = if (selectedGroup != initialGroup) {
+                                selectedGroup ?: initial.id
+                            } else {
+                                initial.serverGroupFp
+                            }
                         )
                         // If the user blanks the username on a profile that
                         // previously had basic auth, force passwordEdited so

@@ -8,6 +8,7 @@ import cn.vectory.ocdroid.ui.chat.Entry
 import cn.vectory.ocdroid.ui.chat.GapFillState
 import cn.vectory.ocdroid.ui.chat.GapMarker
 import cn.vectory.ocdroid.ui.chat.withGaps
+import cn.vectory.ocdroid.util.WorkdirPaths
 import kotlinx.serialization.builtins.ListSerializer
 import kotlinx.serialization.encodeToString
 import java.util.UUID
@@ -105,9 +106,6 @@ interface CacheRepository {
 
     /** Nuke everything (manual 全清 button + reset). */
     suspend fun clearAll()
-
-    /** Rekey cached sessions/messages/gaps when two server groups are merged. */
-    suspend fun mergeCacheGroup(fromFp: String, intoFp: String)
 
     /**
      * Phase 1 helper (maxer I11): a `message.updated` SSE event for a
@@ -290,9 +288,30 @@ interface CacheRepository {
     /**
      * R-20 Phase 4 (plan §3 "clearProject" action): cascade-delete every
      * cached session, message, and gap marker whose session row has
-     * `workdir == [workdir]` under [serverGroupFp]. Single Room transaction
-     * so the cache stays consistent (a concurrent reader cannot observe a
-     * half-deleted state).
+     * Evict every cache row (sessions + messages + gap markers) whose workdir
+     * NORMALIZE-matches [workdir] under [serverGroupFp]. Single Room
+     * transaction so the cache stays consistent (a concurrent reader cannot
+     * observe a half-deleted state).
+     *
+     * §grouping-rewrite Round-5 C5: matching is by NORMALIZED EQUIVALENCE via
+     * [WorkdirPaths.normalize] (the same normalization
+     * `buildWorkdirGroups`/`SessionsScreen` uses for visibility gating and
+     * [cn.vectory.ocdroid.util.SettingsManager.removeRecentWorkdir] uses for
+     * recent-workdirs removal). Pre-C5 the SQL `WHERE workdir = :workdir`
+     * matched by exact string, so a cache row whose workdir was a slash
+     * variant of the input (e.g. cache row `workdir='proj-a/'`, disconnect
+     * called with `/proj-a` from `buildWorkdirGroups`'s absolute-form display
+     * output) silently survived → cached messages reappeared on reconnect,
+     * violating the disconnect promise "clears this project local cache"
+     * (user requirement Q14). C4 fixed this exact variant class for
+     * recent_workdirs; C5 closes the same gap for the cache.
+     *
+     * Because SQLite cannot call [WorkdirPaths.normalize], the match runs
+     * in-Kotlin: enumerate the fp's sessions via `sessionsInGroup`, filter by
+     * normalized workdir equivalence, evict each match via the standard
+     * per-session cascade (messages → gaps → session row, in the wrapping
+     * transaction). Sibling workdirs whose normalized form differs are left
+     * untouched.
      *
      * NOT [clearAll] — this is the project-scoped "clear this workdir's
      * cache" button, which preserves every other workdir's cached sessions
@@ -874,30 +893,35 @@ class CacheRepositoryImpl @Inject constructor(
 
     override suspend fun allServerGroupFps(): List<String> = dao.allGroups()
 
-    override suspend fun mergeCacheGroup(fromFp: String, intoFp: String) {
-        if (fromFp.isBlank() || intoFp.isBlank() || fromFp == intoFp) return
-        db.withTransaction {
-            // Prefer the source group's rows during a merge. If the target
-            // group already has the same sessionId, delete the target copy
-            // first so rekeying the source cannot violate compound PKs.
-            dao.deleteIntoMessagesConflictingWithFrom(fromFp, intoFp)
-            gapDao.deleteIntoGapsConflictingWithFrom(fromFp, intoFp)
-            dao.deleteIntoSessionsConflictingWithFrom(fromFp, intoFp)
-            dao.rekeySessions(fromFp, intoFp)
-            dao.rekeyMessages(fromFp, intoFp)
-            gapDao.rekeyGaps(fromFp, intoFp)
-        }
-    }
-
     override suspend fun evictWorkdirInGroup(serverGroupFp: String, workdir: String) {
         if (serverGroupFp.isBlank() || workdir.isBlank()) return
+        // §grouping-rewrite Round-5 C5: normalize-match. See the interface
+        // KDoc for the rationale — closing the same slash-variant gap C4
+        // closed for recent_workdirs, on the cache side. SQLite cannot call
+        // [WorkdirPaths.normalize], so the match runs in-Kotlin: enumerate the
+        // fp's sessions, filter by normalized workdir equivalence, evict each
+        // match via the standard per-session cascade (the same cascade
+        // [evictSession] uses, inlined here so the whole operation runs in
+        // ONE Room transaction — a concurrent reader cannot observe a half-
+        // deleted state, and the messages/gaps sub-cascades see the session
+        // rows they reference before the session DELETE wipes them).
+        val targetNormalized = WorkdirPaths.normalize(workdir)
+        if (targetNormalized.isEmpty()) return
         db.withTransaction {
-            // Cascade order (messages → gaps → sessions): the messages/gaps
-            // subqueries reference the un-modified cached_session, so they
-            // MUST run before the session DELETE wipes the join rows.
-            dao.deleteSessionMessagesByWorkdir(serverGroupFp, workdir)
-            gapDao.deleteGapsByWorkdir(serverGroupFp, workdir)
-            dao.deleteSessionsByWorkdir(serverGroupFp, workdir)
+            val matchingSessionIds = dao.sessionsInGroup(serverGroupFp)
+                .asSequence()
+                .filter { WorkdirPaths.normalize(it.workdir) == targetNormalized }
+                .map { it.sessionId }
+                .toList()
+            // Per-session cascade order (messages → gaps → session) mirrors
+            // [evictSession]'s body and the original evictWorkdirInGroup's
+            // order rationale: messages/gaps reference the session row, so
+            // they're deleted first; the session row is deleted last.
+            for (sid in matchingSessionIds) {
+                dao.deleteSessionMessages(serverGroupFp, sid)
+                gapDao.deleteSessionGaps(serverGroupFp, sid)
+                dao.deleteSession(serverGroupFp, sid)
+            }
         }
     }
 

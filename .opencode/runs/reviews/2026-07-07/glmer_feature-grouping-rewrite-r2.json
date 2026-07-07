@@ -1,0 +1,18 @@
+{
+  "agent": "glmer",
+  "scope": "feature-grouping-rewrite",
+  "date": "2026-07-07",
+  "round": 2,
+  "reviewed_commit": "1448df1a35a5a9dd48db11f7490a808a02ced420",
+  "version_target": "0.5.1 (patch; pending patch-vs-minor confirmation)",
+  "verdict": "pass",
+  "score": 9.6,
+  "blocking_issues": [],
+  "non_blocking_issues": [
+    "N1. [most-wanted polish] classifyCommandPostError (AppCoreOrchestration.kt:417-430) lacks a unit test — C1/C2 got precise tests, D2 did not. Function is private; 3 branches (read-timeout→Info / connect-timeout→Error / non-STE→Error) + fragile string sniff. Suggest: make internal + 3 tests (SocketTimeoutException('timeout'), STE('failed to connect to /1.2.3.4:443'), plain IOException). Non-blocking (emulator smoke covers behavior).",
+    "N2. recentWorkdirsTick.value + 1L non-atomic (SettingsViewModel.kt:837). Read-modify-write; in practice harmless (UI single-thread, appScope Main.immediate, tick is just 'something changed' signal). Suggest recentWorkdirsTick.update { it + 1L }. Defensive.",
+    "N3. recentWorkdirsTick bumped only in disconnectWorkdir, not addRecentWorkdir. In practice SSE session.created → sessionListFlow mutate re-triggers; but 'add workdir without creating session' edge could lag. Not a round-1 regression. Evaluate in changelog/polish.",
+    "N4. Card-in-Dialog nesting (SettingsScreen.kt:1445-1473) — cosmetic, unchanged from round 1. Acceptable."
+  ],
+  "notes": "All 3 round-1 important issues RESOLVED: C1 (borderline-block cleared — recentWorkdirsTick StateFlow<Long>(0L) design correct, combine-cold-start reasoning sound; test asserts the regression condition); C2 (force param + epoch-stamp invariant preserved; test covers 'force still stamps epoch'); D2 (landed per my round-1 suggestion — message sniff; KDoc honestly marks it as sniff; OkHttp 4.x connect-side msg reliably contains 'connect'). No regressions: item1 fp-repoint + soft-migration sound; item4 commandApi @Synchronized rebuildClients consistent; item5 zombie fix verbatim-matches user-archive path; launchLoadSessions hostProfileStore param removal fully propagated (SessionViewModel + AppCoreOrchestration + tests), no dangling refs. Test cleanup for deletions complete (SessionListMergeTest.kt whole file deleted). D1 (gpter's round-1 block, I defended) — spec now explicitly clarifies UI-label-only soft migration; defense holds. Meets 9.5 gate. 9.6 because C1/C2 test quality (precisely locks regression conditions, not just presence) earns the 0.1. N1 is the one I'd most like added but it's non-blocking for ship."
+}

@@ -1,0 +1,19 @@
+{
+  "agent": "gpter",
+  "scope": "feature-grouping-rewrite",
+  "date": "2026-07-07",
+  "round": 3,
+  "reviewed_commit": "1448df1a35a5a9dd48db11f7490a808a02ced420",
+  "version_target": "0.5.1 (patch; pending patch-vs-minor confirmation)",
+  "verdict": "block",
+  "score": 9.1,
+  "blocking_issues": [
+    "1. C4 normalization mismatch in disconnect path. C3's gating is by NORMALIZED keys, but buildWorkdirGroups returns a DISPLAY dir taken from a live session and prefers the absolute form (SessionsScreen.kt:778-780). The long-click stores that display string (SessionsScreen.kt:266); confirmation calls settingsVM.disconnectWorkdir(workdir) with the DISPLAY string (SessionsScreen.kt:447-448). SettingsManager.removeRecentWorkdir removes by EXACT trimmed string, NOT normalized equivalence (SettingsManager.kt:168-174). Example: recentWorkdirs holds 'proj-a/', live session dir is '/proj-a' → row displays '/proj-a' → disconnect removes '/proj-a' → exact match fails → 'proj-a/' persists → normalized visible key still exists → workdir reappears. The code supports slash variants in display/gating but not in removal, so the disconnect guarantee fails for known slash-variant cases. Direct residual violation of the disconnect promise in the very path C3 fixes."
+  ],
+  "non_blocking_issues": [
+    "1. C3 core gating logic IS correct: buildWorkdirGroups builds visibleKeys from recentWorkdirs ∪ draftWorkdir first (SessionsScreen.kt:746-754) and attaches sessions only if key in visibleKeys (763-773). SSE/refetch after disconnect should not re-anchor the workdir if recent_workdirs was actually removed. Round-2 blocker cleared IN PRINCIPLE.",
+    "2. sweepAllGroups now sweeps union(profile-fps, cache-fps) (SettingsViewModel.kt:365-377) — prior cache-only gap resolved.",
+    "3. D2 timeout classification acceptable with tests; still inherently message-string based (known limitation)."
+  ],
+  "notes": "Would clear the round-2 blocker in principle — the extracted pure derivation + tests prove the intended live-session gating. The remaining block is the removal/display normalization mismatch, which can make the gate ineffective for the slash-variant cases the code explicitly supports elsewhere."
+}

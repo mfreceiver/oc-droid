@@ -333,9 +333,10 @@ class SessionViewModel @Inject constructor(
             cacheRepository = cacheRepository,
             expectedServerGroupFp = expectedFp,
             currentServerGroupFp = { hostProfileStore.currentProfile().serverGroupFp.ifBlank { hostProfileStore.currentProfile().id } },
-            // R-20 Phase 5 (plan §3 G1): wire hostProfileStore for the
-            // cross-group merge step (LAN + tunnel same-server detection).
-            hostProfileStore = hostProfileStore,
+            // §grouping-rewrite Round-2 #5: the hostProfileStore arg that R-20
+            // Phase 5 wired here is removed — its sole consumer inside
+            // launchLoadSessions (attemptCrossGroupMerge) was deleted by item 1
+            // of this rewrite.
         )
     }
 

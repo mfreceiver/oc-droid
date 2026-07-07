@@ -7,7 +7,6 @@ import cn.vectory.ocdroid.data.model.PermissionRequest
 import cn.vectory.ocdroid.data.model.QuestionRequest
 import cn.vectory.ocdroid.data.model.Session
 import cn.vectory.ocdroid.data.model.SessionCacheEntry
-import cn.vectory.ocdroid.data.repository.HostProfileStore
 import cn.vectory.ocdroid.data.repository.OpenCodeRepository
 import cn.vectory.ocdroid.util.SettingsManager
 import io.mockk.coEvery
@@ -232,7 +231,6 @@ class SessionListActionsTest {
     @Test
     fun `launchLoadSessions drops stale REST success after live fp changes`() = runTest {
         var currentFp = "g1"
-        val hostProfileStore = mockk<HostProfileStore>(relaxed = true)
         coEvery { repository.getSessions(any()) } answers {
             currentFp = "g2"
             Result.success(listOf(Session(id = "stale", directory = "/x")))
@@ -250,55 +248,13 @@ class SessionListActionsTest {
             cacheRepository = cacheRepository,
             expectedServerGroupFp = "g1",
             currentServerGroupFp = { currentFp },
-            hostProfileStore = hostProfileStore,
+            // §grouping-rewrite Round-2 #5: hostProfileStore arg removed.
         )
         advanceUntilIdle()
 
         assertTrue(slices.sessionList.value.sessions.isEmpty())
         assertFalse(slices.sessionList.value.isRefreshingSessions)
         coVerify(exactly = 0) { cacheRepository.allServerGroupFps() }
-    }
-
-    @Test
-    fun `launchLoadSessions drops result when fp changes during merge suspend before slice write`() = runTest {
-        var currentFp = "g1"
-        val hostProfileStore = mockk<HostProfileStore>(relaxed = true)
-        val sessions = listOf(Session(id = "s1", directory = "/repo", time = Session.TimeInfo(created = 1L)))
-        val cached = cn.vectory.ocdroid.data.cache.CacheRepository.CachedSessionRow(
-            serverGroupFp = "other-fp",
-            sessionId = "s1",
-            workdir = "/repo",
-            createdAt = 1L,
-            newestCachedAt = 10L,
-            lastVerifiedAt = 0L,
-            messageCount = 1,
-            hasExhaustedGap = false,
-        )
-        coEvery { repository.getSessions(any()) } returns Result.success(sessions)
-        coEvery { cacheRepository.allServerGroupFps() } returns listOf("other-fp")
-        coEvery { cacheRepository.listGroupSessions("other-fp") } answers {
-            currentFp = "g2"
-            listOf(cached)
-        }
-
-        launchLoadSessions(
-            scope = scope,
-            repository = repository,
-            slices = slices,
-            settingsManager = settingsManager,
-            onSelectSession = {},
-            onLoadSessionStatus = {},
-            onLoadMessages = {},
-            emit = emit,
-            cacheRepository = cacheRepository,
-            expectedServerGroupFp = "g1",
-            currentServerGroupFp = { currentFp },
-            hostProfileStore = hostProfileStore,
-        )
-        advanceUntilIdle()
-
-        assertTrue(slices.sessionList.value.sessions.isEmpty())
-        coVerify(exactly = 0) { hostProfileStore.mergeServerGroup(any(), any()) }
     }
 
     @Test

@@ -476,6 +476,16 @@ fun ChatScreen(
                         durationMillis = 2_500L
                     )
                 }
+                is UiEvent.Info -> {
+                    // §grouping-rewrite item 4: neutral, non-fatal snackbar
+                    // (e.g. command POST timed out on its ACK but SSE carries
+                    // the results). Same short duration as Success; no action,
+                    // no error styling — distinct from the red 10 s Error path.
+                    snackbarHostState.showTimed(
+                        message = message,
+                        durationMillis = 2_500L
+                    )
+                }
                 is UiEvent.Debug -> Unit
             }
         }
