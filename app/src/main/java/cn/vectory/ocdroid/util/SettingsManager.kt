@@ -420,6 +420,33 @@ class SettingsManager @Inject constructor(
             .apply()
     }
 
+    // ───────────── R-20 Phase 3: per-serverGroup daily-sweep dedup ─────────
+
+    /**
+     * R-20 Phase 3 (plan §3): the epoch-day (UTC) on which the daily sweep
+     * last ran for [serverGroupFp]. Used by
+     * [cn.vectory.ocdroid.data.cache.CacheMaintenanceCoordinator.dailySweepIfNeeded]
+     * to skip a sweep that already ran today (idempotent within a calendar
+     * day — a reconnect within 24h must not re-enumerate + re-evict).
+     *
+     * Returns null if no sweep has ever been recorded for this fp (first
+     * connect, or the row was wiped by [clearAllLocalData]).
+     *
+     * Key format: `last_sweep_epoch_<serverGroupFp>`. The fp is a stable host
+     * identifier (profile id or merged group id) so the key survives host
+     * list edits as long as the fp value itself does.
+     */
+    fun getLastSweepEpochDay(serverGroupFp: String): Long? {
+        if (serverGroupFp.isBlank()) return null
+        val key = lastSweepEpochKey(serverGroupFp)
+        return if (encryptedPrefs.contains(key)) encryptedPrefs.getLong(key, -1L) else null
+    }
+
+    fun setLastSweepEpochDay(serverGroupFp: String, epochDay: Long) {
+        if (serverGroupFp.isBlank()) return
+        encryptedPrefs.edit().putLong(lastSweepEpochKey(serverGroupFp), epochDay).apply()
+    }
+
     /**
      * Hard reset: wipes EVERY persisted key EXCEPT the connection-credential
      * keys and the per-host password secrets (basic-auth + tunnel), then leaves
@@ -514,6 +541,14 @@ class SettingsManager @Inject constructor(
 
         private fun basicAuthPasswordKey(passwordId: String): String = "basic_auth_password_$passwordId"
         private fun tunnelPasswordKey(id: String): String = "tunnel_password_$id"
+
+        /**
+         * R-20 Phase 3: storage key for [getLastSweepEpochDay] /
+         * [setLastSweepEpochDay]. Prefix `last_sweep_epoch_` + the
+         * serverGroupFp (a stable host identifier, never blank by the time
+         * it reaches here — the public methods blank-guard upstream).
+         */
+        private fun lastSweepEpochKey(serverGroupFp: String): String = "last_sweep_epoch_$serverGroupFp"
 
         /**
          * §bug5: shared URL normalizer for the per-URL model keys. Strips

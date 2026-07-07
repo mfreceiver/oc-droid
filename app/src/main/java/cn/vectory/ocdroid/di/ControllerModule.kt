@@ -177,6 +177,8 @@ object ControllerModule {
         settingsManager: SettingsManager,
         effectBus: SharedEffectBus,
         serverCompatProfile: ServerCompatProfile,
+        cacheMaintenanceCoordinator: cn.vectory.ocdroid.data.cache.CacheMaintenanceCoordinator,
+        @Named("currentServerGroupFp") currentServerGroupFp: () -> String,
     ): ConnectionCoordinator = ConnectionCoordinator(
         scope = appScope,
         slices = store.slices,
@@ -184,5 +186,7 @@ object ControllerModule {
         settingsManager = settingsManager,
         effects = effectBus,
         serverCompatProfile = serverCompatProfile,
+        cacheMaintenanceCoordinator = cacheMaintenanceCoordinator,
+        currentServerGroupFp = currentServerGroupFp,
     )
 }

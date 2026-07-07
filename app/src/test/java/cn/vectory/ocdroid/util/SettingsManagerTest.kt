@@ -436,4 +436,46 @@ class SettingsManagerTest {
         assertNotNull(SettingsManager.CACHE_DB_KEY)
         assertFalse(SettingsManager.CACHE_DB_KEY.isBlank())
     }
+
+    // ───────────── R-20 Phase 3: per-serverGroup daily-sweep dedup ─────────
+
+    @Test
+    fun `lastSweepEpochDay returns null when no sweep has been recorded`() {
+        assertNull("fresh install has no sweep recorded", settings.getLastSweepEpochDay("g1"))
+    }
+
+    @Test
+    fun `lastSweepEpochDay round-trips per serverGroupFp`() {
+        settings.setLastSweepEpochDay("g1", 19_000L)
+        settings.setLastSweepEpochDay("g2", 19_001L)
+        assertEquals(19_000L, settings.getLastSweepEpochDay("g1"))
+        assertEquals(19_001L, settings.getLastSweepEpochDay("g2"))
+        // Independent keys per fp.
+        settings.setLastSweepEpochDay("g1", 19_999L)
+        assertEquals(19_999L, settings.getLastSweepEpochDay("g1"))
+        assertEquals(19_001L, settings.getLastSweepEpochDay("g2"))
+    }
+
+    @Test
+    fun `lastSweepEpochDay is wiped by clearAllLocalData`() {
+        // The sweep-day marker is a per-process cache-management key, NOT a
+        // connection credential — it MUST be wiped on reset so the next
+        // connect re-sweeps. (If it survived, a post-reset cache would skip
+        // its first sweep and stale rows would linger.)
+        settings.setLastSweepEpochDay("g1", 19_000L)
+        settings.clearAllLocalData()
+        assertNull(
+            "sweep-day marker wiped by clearAllLocalData",
+            settings.getLastSweepEpochDay("g1"),
+        )
+    }
+
+    @Test
+    fun `lastSweepEpochDay blank-fp guard is a no-op`() {
+        // Defensive: a blank fp would corrupt the SettingsManager key
+        // namespace (collide with `last_sweep_epoch_` itself). The public
+        // methods blank-guard upstream.
+        settings.setLastSweepEpochDay("", 19_000L)
+        assertNull("blank-fp write is a no-op", settings.getLastSweepEpochDay(""))
+    }
 }

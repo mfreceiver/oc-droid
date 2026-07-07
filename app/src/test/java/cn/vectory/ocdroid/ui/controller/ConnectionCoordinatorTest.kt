@@ -275,6 +275,86 @@ class ConnectionCoordinatorTest {
         assertTrue("healthy connect emits no error event", recordedEvents.filterIsInstance<UiEvent.Error>().isEmpty())
     }
 
+    // ── R-20 Phase 3: daily cache sweep hook on healthy connect ─────────────
+
+    @Test
+    fun `testConnection on healthy fires the daily cache sweep against the current fp`() {
+        // R-20 Phase 3 (plan §3): a healthy connect triggers fire-and-forget
+        // CacheMaintenanceCoordinator.dailySweepIfNeeded(currentServerGroupFp()).
+        // The coordinator does its own 24h dedup; we only verify the hook is
+        // wired (the call fires + passes the current fp).
+        coEvery { repository.checkHealth() } returns Result.success(HealthResponse(healthy = true, version = "1.0"))
+        every { repository.connectSSE(any()) } returns flowOf()
+        coEvery { repository.getCommands() } returns Result.success(emptyList())
+        val cacheMaintenance = mockk<cn.vectory.ocdroid.data.cache.CacheMaintenanceCoordinator>(relaxed = true)
+        val sweepCoordinator = ConnectionCoordinator(
+            scope = scope,
+            slices = slices,
+            repository = repository,
+            settingsManager = settingsManager,
+            effects = effects,
+            serverCompatProfile = cn.vectory.ocdroid.data.repository.ServerCompatProfile(),
+            cacheMaintenanceCoordinator = cacheMaintenance,
+            currentServerGroupFp = { "fp-test" },
+            clock = { now },
+        )
+
+        sweepCoordinator.testConnection()
+        runPending()
+
+        coVerify { cacheMaintenance.dailySweepIfNeeded("fp-test") }
+    }
+
+    @Test
+    fun `testConnection on healthy does not crash when cacheMaintenanceCoordinator is null`() {
+        // Pre-Phase-3 construction (or test paths) leave
+        // cacheMaintenanceCoordinator null. The hook must be a no-op rather
+        // than NPE — the connection itself must succeed.
+        coEvery { repository.checkHealth() } returns Result.success(HealthResponse(healthy = true, version = "1.0"))
+        every { repository.connectSSE(any()) } returns flowOf()
+        coEvery { repository.getCommands() } returns Result.success(emptyList())
+
+        coordinator.testConnection() // null cacheMaintenanceCoordinator
+        runPending()
+
+        assertTrue(connectionFlow.value.isConnected)
+    }
+
+    @Test
+    fun `testConnection on healthy swallows daily-sweep failures`() {
+        // The sweep is fire-and-forget — a failure (e.g. DB locked) MUST NOT
+        // propagate up and break the connection's healthy state.
+        coEvery { repository.checkHealth() } returns Result.success(HealthResponse(healthy = true, version = "1.0"))
+        every { repository.connectSSE(any()) } returns flowOf()
+        coEvery { repository.getCommands() } returns Result.success(emptyList())
+        val cacheMaintenance = mockk<cn.vectory.ocdroid.data.cache.CacheMaintenanceCoordinator>()
+        coEvery { cacheMaintenance.dailySweepIfNeeded(any()) } throws java.io.IOException("db locked")
+        val sweepCoordinator = ConnectionCoordinator(
+            scope = scope,
+            slices = slices,
+            repository = repository,
+            settingsManager = settingsManager,
+            effects = effects,
+            serverCompatProfile = cn.vectory.ocdroid.data.repository.ServerCompatProfile(),
+            cacheMaintenanceCoordinator = cacheMaintenance,
+            currentServerGroupFp = { "fp-test" },
+            clock = { now },
+        )
+
+        sweepCoordinator.testConnection()
+        runPending()
+
+        assertTrue(
+            "sweep failure does not break the healthy connect",
+            connectionFlow.value.isConnected,
+        )
+        // The connection did NOT surface the sweep failure as a user-facing error.
+        assertTrue(
+            "sweep failure swallowed (no UiEvent.Error surfaced)",
+            recordedEvents.filterIsInstance<UiEvent.Error>().isEmpty(),
+        )
+    }
+
     // ── coldStartReconnect ─────────────────────────────────────────────────
 
     @Test

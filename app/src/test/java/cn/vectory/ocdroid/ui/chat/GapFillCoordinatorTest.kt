@@ -20,6 +20,7 @@ import kotlinx.coroutines.test.runTest
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
@@ -558,6 +559,78 @@ class GapFillCoordinatorTest {
             "switch-away must reset Filling → Idle so the UI does not show a permanent spinner",
             GapFillState.Idle,
             gap.fillState,
+        )
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // R-20 Phase 3 前置 (gpter 复审 COND-PASS): snapshotWindow fp guard
+    // ═══════════════════════════════════════════════════════════════════════
+
+    @Test
+    fun `phase3-pre snapshotWindow does not write the cache hook when host group switched mid-fill`() = runTest {
+        // gpter 复审 COND-PASS: the prior snapshotWindow guard only checked
+        // `currentSessionId != sessionId`. A cross-group same-sessionId
+        // collision (plan §0 N1) would let a fill targeting fp-A write its
+        // chat window back through the cache hook into fp-B's slot. After the
+        // fix, snapshotWindow re-checks the fp leg and drops the snapshot on
+        // mismatch — same drop-on-stale rule stillCurrent uses for slice merges.
+        //
+        // We exercise the snapshotWindow fp guard via the exhausted-at-entry
+        // path. The spy flips currentFp on the SECOND gapsOf call (the first
+        // is fillSingleGap's Exhausted pre-check; the second is runFill's
+        // post-entry-guard read). So the runFill entry guard still sees fp-A
+        // (passes), but by the time setGapState + refreshGapMarkers +
+        // snapshotWindow run, the fp legs mismatch and snapshotWindow drops.
+        val anchor = Message(id = "anchor", role = "user", time = Message.TimeInfo(created = 100L))
+        val upper = Message(id = "upper", role = "assistant", time = Message.TimeInfo(created = 500L))
+        seedSession("fp-A", listOf(anchor, upper))
+        var currentFp = "fp-A"
+        var gapsOfCallCount = 0
+        val spyCache = io.mockk.mockk<cn.vectory.ocdroid.data.cache.CacheRepository>(relaxed = true)
+        io.mockk.coEvery { spyCache.gapsOf(any(), any()) } coAnswers {
+            val result = cacheRepo.gapsOf(firstArg(), secondArg())
+            gapsOfCallCount++
+            // Flip on the 2nd+ call (the 1st is fillSingleGap's Exhausted
+            // pre-check; the 2nd is runFill's post-entry-guard read).
+            if (gapsOfCallCount >= 2) currentFp = "fp-B"
+            result
+        }
+        io.mockk.coEvery {
+            spyCache.openGap(any(), any(), any(), any(), any())
+        } coAnswers {
+            cacheRepo.openGap(firstArg(), secondArg(), thirdArg(), arg(3), arg(4))
+        }
+        io.mockk.coEvery { spyCache.setGapState(any(), any()) } coAnswers {
+            cacheRepo.setGapState(firstArg(), secondArg())
+        }
+        val switchedCoordinator = GapFillCoordinator(
+            repository = repository,
+            cacheRepository = spyCache,
+            currentServerGroupFp = { currentFp },
+        )
+        store.mutateChat { it.copy(currentSessionId = "s1", messages = listOf(anchor, upper)) }
+        // Open with empty cursor → fix-#2 exhausted-at-entry path runs the
+        // snapshotWindow call we want to guard.
+        val gapId = cacheRepo.openGap("fp-A", "s1", "anchor", "upper", "")
+
+        var capturedFpB: CachedSessionWindow? = null
+        switchedCoordinator.fillSingleGap(store.slices, "fp-A", "s1", gapId) { sid, window ->
+            // The cache hook callback — should NEVER fire when fp-A != fp-B.
+            if (sid == "s1") capturedFpB = window
+        }
+        advanceUntilIdle()
+
+        // The fp guard dropped the snapshot — fp-B's hook captured nothing.
+        assertNull(
+            "snapshotWindow must NOT write the cache hook when serverGroupFp switched mid-fill",
+            capturedFpB,
+        )
+        // The cache state is still correct: fp-A's gap is Exhausted (the
+        // setGapState(Exhausted) ran in the cursor-null branch AFTER the fp
+        // flip; the cache is keyed by gapId so it targets fp-A's row).
+        assertEquals(
+            GapFillState.Exhausted,
+            cacheRepo.gapsOf("fp-A", "s1").single().fillState,
         )
     }
 }

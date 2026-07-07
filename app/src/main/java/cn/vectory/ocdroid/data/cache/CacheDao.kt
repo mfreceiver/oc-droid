@@ -104,6 +104,95 @@ interface CacheDao {
 
     @Query("DELETE FROM cached_message")
     suspend fun clearAllMessages()
+
+    // ───────────── R-20 Phase 3: triple eviction (per serverGroupFp) ──────
+    // Plan §3 Phase 3: LRU-50 (per fp) + 30d (newestCachedAt) + 7d
+    // (lastVerifiedAt). All cascades run BEFORE the cached_session DELETE so
+    // the per-table subqueries see the un-evicted session set (no FK; the
+    // cascade is manual). The Repository wraps each policy in a single
+    // db.withTransaction so the three statements commit atomically.
+
+    /**
+     * R-20 Phase 3: deletes the per-group LRU overflow (sessions whose
+     * `newestCachedAt` ranks below the top [limit] for this group). The
+     * matching [evictLruExcessMessages] / [GapMarkerDao.evictLruExcessGaps]
+     * cascades run in the same transaction (Repository-orchestrated).
+     *
+     * The subquery is self-contained on `cached_session`: it computes the
+     * top-[limit] by `newestCachedAt DESC` for THIS fp, then the outer
+     * DELETE removes everything else. Both queries reference the un-modified
+     * `cached_session` state because the cascade (messages/gaps) runs first
+     * inside the wrapping transaction.
+     */
+    @Query(
+        """
+        DELETE FROM cached_session
+        WHERE server_group_fp = :fp
+          AND session_id NOT IN (
+            SELECT session_id FROM cached_session
+            WHERE server_group_fp = :fp
+            ORDER BY newest_cached_at DESC
+            LIMIT :limit
+          )
+        """
+    )
+    suspend fun evictLruExcessSessions(fp: String, limit: Int)
+
+    @Query(
+        """
+        DELETE FROM cached_message
+        WHERE server_group_fp = :fp
+          AND session_id NOT IN (
+            SELECT session_id FROM cached_session
+            WHERE server_group_fp = :fp
+            ORDER BY newest_cached_at DESC
+            LIMIT :limit
+          )
+        """
+    )
+    suspend fun evictLruExcessMessages(fp: String, limit: Int)
+
+    /** R-20 Phase 3: 30d age eviction on `newestCachedAt`. */
+    @Query("DELETE FROM cached_session WHERE server_group_fp = :fp AND newest_cached_at < :cutoff")
+    suspend fun evictByNewestCachedAtSessions(fp: String, cutoff: Long)
+
+    @Query(
+        """
+        DELETE FROM cached_message
+        WHERE server_group_fp = :fp
+          AND session_id IN (
+            SELECT session_id FROM cached_session
+            WHERE server_group_fp = :fp AND newest_cached_at < :cutoff
+          )
+        """
+    )
+    suspend fun evictByNewestCachedAtMessages(fp: String, cutoff: Long)
+
+    /** R-20 Phase 3: 7d abandon eviction on `lastVerifiedAt`. */
+    @Query("DELETE FROM cached_session WHERE server_group_fp = :fp AND last_verified_at < :cutoff")
+    suspend fun evictByLastVerifiedAtSessions(fp: String, cutoff: Long)
+
+    @Query(
+        """
+        DELETE FROM cached_message
+        WHERE server_group_fp = :fp
+          AND session_id IN (
+            SELECT session_id FROM cached_session
+            WHERE server_group_fp = :fp AND last_verified_at < :cutoff
+          )
+        """
+    )
+    suspend fun evictByLastVerifiedAtMessages(fp: String, cutoff: Long)
+
+    /**
+     * R-20 Phase 3: the set of distinct workdirs cached for [fp]. Used by the
+     * [CacheMaintenanceCoordinator] alive-set enumeration to fan out per-
+     * workdir `getSessionsForDirectory` roots queries (the authoritative
+     * source for "is this session still on the server" — the global
+     * `getSessions(limit)` first page can miss workdir-local sessions).
+     */
+    @Query("SELECT DISTINCT workdir FROM cached_session WHERE server_group_fp = :fp AND workdir != ''")
+    suspend fun workdirsInGroup(fp: String): List<String>
 }
 
 /**
@@ -151,5 +240,49 @@ interface GapMarkerDao {
 
     @Query("DELETE FROM gap_marker")
     suspend fun clearAllGaps()
+
+    // ───────────── R-20 Phase 3: triple eviction cascades ─────────────────
+    // Mirror [CacheDao]'s LRU/30d/7d session deletions so a single
+    // db.withTransaction in the Repository evicts session + messages + gaps
+    // atomically. The subqueries reference the un-evicted cached_session
+    // state (they run BEFORE the session DELETE).
+
+    @Query(
+        """
+        DELETE FROM gap_marker
+        WHERE server_group_fp = :fp
+          AND session_id NOT IN (
+            SELECT session_id FROM cached_session
+            WHERE server_group_fp = :fp
+            ORDER BY newest_cached_at DESC
+            LIMIT :limit
+          )
+        """
+    )
+    suspend fun evictLruExcessGaps(fp: String, limit: Int)
+
+    @Query(
+        """
+        DELETE FROM gap_marker
+        WHERE server_group_fp = :fp
+          AND session_id IN (
+            SELECT session_id FROM cached_session
+            WHERE server_group_fp = :fp AND newest_cached_at < :cutoff
+          )
+        """
+    )
+    suspend fun evictByNewestCachedAtGaps(fp: String, cutoff: Long)
+
+    @Query(
+        """
+        DELETE FROM gap_marker
+        WHERE server_group_fp = :fp
+          AND session_id IN (
+            SELECT session_id FROM cached_session
+            WHERE server_group_fp = :fp AND last_verified_at < :cutoff
+          )
+        """
+    )
+    suspend fun evictByLastVerifiedAtGaps(fp: String, cutoff: Long)
 }
 

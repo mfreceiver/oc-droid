@@ -240,12 +240,12 @@ class GapFillCoordinator @Inject constructor(
          // time) OR a resumed gap whose cursor was somehow cleared. Mark
          // Exhausted + refresh markers + snapshot the window so the cache +
          // slice converge (without this the marker is stuck Filling forever).
-         if (cursor == null) {
-             cacheRepository.setGapState(gapId, GapFillState.Exhausted)
-             refreshGapMarkers(slices, serverGroupFp, sessionId)
-             snapshotWindow(slices, sessionId, onCacheWindow)
-             return true // exhausted-at-entry counts as caught up
-         }
+          if (cursor == null) {
+              cacheRepository.setGapState(gapId, GapFillState.Exhausted)
+              refreshGapMarkers(slices, serverGroupFp, sessionId)
+              snapshotWindow(slices, serverGroupFp, sessionId, onCacheWindow)
+              return true // exhausted-at-entry counts as caught up
+          }
          while (cursor != null) {
              // §fix-#3: re-check the compound key each step (a switch can land
              // mid-loop between two suspend points — openGap / appendOlderSlice
@@ -257,15 +257,15 @@ class GapFillCoordinator @Inject constructor(
                  cacheRepository.setGapState(gapId, GapFillState.Idle)
                  return false
              }
-             val page = repository.getMessagesPaged(
-                 sessionId, MainViewModelTimings.gapFillMessagePageSize, before = cursor
-             ).getOrElse {
-                 DebugLog.e(TAG, "gap fill step failed for session=$sessionId gap=$gapId", it)
-                 cacheRepository.setGapState(gapId, GapFillState.Error)
-                 refreshGapMarkers(slices, serverGroupFp, sessionId)
-                 snapshotWindow(slices, sessionId, onCacheWindow)
-                 return false
-             }
+              val page = repository.getMessagesPaged(
+                  sessionId, MainViewModelTimings.gapFillMessagePageSize, before = cursor
+              ).getOrElse {
+                  DebugLog.e(TAG, "gap fill step failed for session=$sessionId gap=$gapId", it)
+                  cacheRepository.setGapState(gapId, GapFillState.Error)
+                  refreshGapMarkers(slices, serverGroupFp, sessionId)
+                  snapshotWindow(slices, serverGroupFp, sessionId, onCacheWindow)
+                  return false
+              }
 
              // §fix-#3-b (gpter 复审 #3): re-check after the getMessagesPaged
              // suspend. The REST fetch can take hundreds of ms; a host/session
@@ -298,19 +298,19 @@ class GapFillCoordinator @Inject constructor(
 
              val anchor = slices.chat.value.messages.firstOrNull { it.id == gap!!.lowerAnchorMessageId }
              val resolved = BackfillAlgorithm.stepCoversAnchor(older, anchor)
-             // Refresh the slice markers from the cache (now-accurate state).
-             val stillOpen = refreshGapMarkers(slices, serverGroupFp, sessionId)
-             snapshotWindow(slices, sessionId, onCacheWindow)
-             if (resolved) return true
-             if (page.nextCursor == null) return true // exhausted (appendOlderSlice set Exhausted)
+              // Refresh the slice markers from the cache (now-accurate state).
+              val stillOpen = refreshGapMarkers(slices, serverGroupFp, sessionId)
+              snapshotWindow(slices, serverGroupFp, sessionId, onCacheWindow)
+              if (resolved) return true
+              if (page.nextCursor == null) return true // exhausted (appendOlderSlice set Exhausted)
 
-             gap = cacheRepository.gapsOf(serverGroupFp, sessionId).firstOrNull { it.gapId == gapId }
-             if (gap == null) return true // resolved by overlap → caught up
-             cursor = gap.nextBeforeCursor
-         }
-         snapshotWindow(slices, sessionId, onCacheWindow)
-         return true
-     }
+              gap = cacheRepository.gapsOf(serverGroupFp, sessionId).firstOrNull { it.gapId == gapId }
+              if (gap == null) return true // resolved by overlap → caught up
+              cursor = gap.nextBeforeCursor
+          }
+          snapshotWindow(slices, serverGroupFp, sessionId, onCacheWindow)
+          return true
+      }
 
     /**
      * §fix-#3 helper: returns true iff `(serverGroupFp, sessionId)` still
@@ -421,12 +421,26 @@ class GapFillCoordinator @Inject constructor(
         return gaps.isNotEmpty()
     }
 
-    /** Snapshot the current chat window for the cache hook + memory LRU. */
+    /**
+     * Snapshot the current chat window for the cache hook + memory LRU.
+     *
+     * §fp-guard (R-20 Phase 3 前置, gpter 复审 COND-PASS): the prior guard
+     * only checked `currentSessionId != sessionId`. A cross-group same-
+     * sessionId collision (plan §0 N1 — `ses_xxxx` is a branded string,
+     * clone/reset server can collide) would let a fill targeting fp-A write
+     * its chat window back through the cache hook into fp-B's LRU slot +
+     * persistent cache. The fix adds the fp leg: if the snapshot's
+     * `serverGroupFp` no longer matches `currentServerGroupFp()` (the user
+     * switched hosts mid-fill), drop the snapshot — same drop-on-stale rule
+     * [stillCurrent] uses for the slice merges.
+     */
     private fun snapshotWindow(
         slices: SliceFlows,
+        serverGroupFp: String,
         sessionId: String,
         onCacheWindow: (String, CachedSessionWindow) -> Unit,
     ) {
+        if (serverGroupFp != currentServerGroupFp()) return
         val c = slices.chat.value
         if (c.currentSessionId != sessionId) return
         onCacheWindow(

@@ -194,7 +194,14 @@ interface CacheRepository {
     // contract). The impl stubs TODO — they never run in Phase 1 (no caller).
 
     /** Phase 3: evict orphan sessions (cached but NOT in the alive set). Caller
-     *  MUST prove the alive set is complete (plan §3 Phase 3 N4). */
+     *  MUST prove the alive set is complete (plan §3 Phase 3 N4).
+     *
+     *  R-20 Phase 3: also refreshes `lastVerifiedAt = now` for the alive
+     *  sessions (a complete sweep is the strongest form of "server confirmed
+     *  alive" — the survivors count toward the 7d abandon rule for the next
+     *  sweep). Without this, the alive sessions would drift toward the 7d
+     *  cliff between daily sweeps and get evicted by the age rule instead of
+     *  the orphan sweep. */
     suspend fun sweepOrphansWithCompleteAliveSet(
         serverGroupFp: String,
         aliveSessionIds: Set<String>
@@ -207,13 +214,26 @@ interface CacheRepository {
         seenAliveSessionIds: Set<String>
     )
 
-    /** Phase 3: LRU-50 (per fp) + newestCachedAt>30d + lastVerifiedAt>7d. */
-    suspend fun applyEvictionPolicy(): EvictionReport
+    /**
+     * Phase 3: triple eviction (LRU-50 per fp + newestCachedAt>30d +
+     * lastVerifiedAt>7d) scoped to [serverGroupFp]. Single Room transaction.
+     *
+     * R-20 Phase 3 signature refinement (task §2): the plan-§2 stub was
+     * no-arg; the real Phase 3 driver (`CacheMaintenanceCoordinator.
+     * dailySweepIfNeeded`) operates per-fp, so the eviction policy is
+     * scoped to the same fp (LRU-50 / age are inherently per-group — the
+     * top-50 ranking and the cutoff thresholds make sense only against one
+     * server's session set). The orchestrator/ConnectionCoordinator hook
+     * passes the current host's fp explicitly.
+     */
+    suspend fun applyEvictionPolicy(serverGroupFp: String): EvictionReport
 
-    /** Phase 3: high-level daily sweep entry — alive completeness internalized
-     *  (CacheMaintenanceCoordinator enumerates + 24h dedup). Caller does NOT
-     *  pass aliveSessionIds. */
-    suspend fun dailySweepIfNeeded(serverGroupFp: String): DailySweepReport
+    /**
+     * R-20 Phase 3: distinct workdirs cached under [serverGroupFp]. Used by
+     * [CacheMaintenanceCoordinator]'s alive-set enumeration to fan out
+     * per-workdir roots queries.
+     */
+    suspend fun cachedWorkdirsInGroup(serverGroupFp: String): List<String>
 }
 
 /**
@@ -234,6 +254,10 @@ data class EvictionReport(
  * R-20 Phase 3 (plan §2): daily sweep report — alive completeness internalized
  * (plan v4 freegpt 建议2). [completeness] drives the Complete→evict vs
  * Incomplete→mark-only degradation path.
+ *
+ * Returned by [CacheMaintenanceCoordinator.dailySweepIfNeeded] (NOT by
+ * CacheRepository directly — the high-level entry moved to the coordinator in
+ * Phase 3 since it owns the alive enumeration + 24h dedup).
  */
 data class DailySweepReport(
     val serverGroupFp: String,
@@ -630,26 +654,126 @@ class CacheRepositoryImpl @Inject constructor(
     override suspend fun gapsOf(serverGroupFp: String, sessionId: String): List<GapMarker> =
         gapDao.gaps(serverGroupFp, sessionId).map { it.toDomain() }
 
-    // ─────────── Phase 3 stubs (impl) ──────────────────────────────────────
-    // TODO("Phase 3") — these never run in Phase 1/2 (no caller). Phase 3 fills
-    // them with the real LRU/age/alive logic. Declared so the interface
-    // signature is locked (dser review #8).
+    // ─────────── Phase 3: eviction + sweep ──────────────────────────────────
 
+    /**
+     * R-20 Phase 3 (plan §3): triple eviction scoped to [serverGroupFp].
+     *
+     * Single Room transaction. The three policies run in cascade order
+     * (messages → gaps → sessions) per-policy, and in LRU → 30d → 7d policy
+     * order. Each cascade subquery references the CURRENT `cached_session`
+     * state; running messages/gaps DELETE before sessions DELETE keeps the
+     * subquery self-consistent (otherwise the matching session rows would be
+     * gone before the cascade runs and the orphaned messages/gaps would
+     * survive).
+     *
+     * Returns the cumulative [EvictionReport] across all three policies. The
+     * `keptCount` is the surviving session count for [serverGroupFp] after
+     * the full transaction commits.
+     */
+    override suspend fun applyEvictionPolicy(serverGroupFp: String): EvictionReport {
+        val now = System.currentTimeMillis()
+        return db.withTransaction {
+            // Snapshot the before-count for the report.
+            val before = dao.sessionsInGroup(serverGroupFp).size
+
+            // ── Policy 1: LRU-50 (per fp) ───────────────────────────────────
+            // Top-50 by newestCachedAt DESC survive; everything else goes.
+            dao.evictLruExcessMessages(serverGroupFp, LRU_LIMIT_PER_GROUP)
+            gapDao.evictLruExcessGaps(serverGroupFp, LRU_LIMIT_PER_GROUP)
+            dao.evictLruExcessSessions(serverGroupFp, LRU_LIMIT_PER_GROUP)
+
+            // ── Policy 2: 30d age (newestCachedAt) ──────────────────────────
+            // Sessions whose newest CACHED message is older than 30d — content
+            // is stale; the user has not pulled a fresh window in a month.
+            val cutoff30d = now - AGE_30D_MS
+            dao.evictByNewestCachedAtMessages(serverGroupFp, cutoff30d)
+            gapDao.evictByNewestCachedAtGaps(serverGroupFp, cutoff30d)
+            dao.evictByNewestCachedAtSessions(serverGroupFp, cutoff30d)
+
+            // ── Policy 3: 7d abandon (lastVerifiedAt) ───────────────────────
+            // Sessions the server has not confirmed alive in 7d — the daily
+            // sweep refreshes lastVerifiedAt for confirmed-alive rows; a row
+            // still showing 7d+ here was either archived/deleted server-side
+            // or the daily sweep has not run (incomplete alive set) for that
+            // long. Either way: evict.
+            val cutoff7d = now - AGE_7D_MS
+            dao.evictByLastVerifiedAtMessages(serverGroupFp, cutoff7d)
+            gapDao.evictByLastVerifiedAtGaps(serverGroupFp, cutoff7d)
+            dao.evictByLastVerifiedAtSessions(serverGroupFp, cutoff7d)
+
+            val after = dao.sessionsInGroup(serverGroupFp).size
+            EvictionReport(
+                evictedCount = before - after,
+                keptCount = after,
+                orphanIds = emptyList() // LRU/age are policy evictions, not orphan sweep
+            )
+        }
+    }
+
+    /**
+     * R-20 Phase 3 (plan §3): orphan sweep with a PROVEN-complete alive set
+     * (plan N4 — the caller, [CacheMaintenanceCoordinator], MUST have verified
+     * the enumeration). Cached sessions not in [aliveSessionIds] are deleted
+     * + cascaded; survivors have their `lastVerifiedAt` refreshed (a
+     * complete sweep is the strongest form of "server confirmed alive").
+     *
+     * Single Room transaction: read the cached set, compute the orphans,
+     * cascade-delete them, then touch the survivors — all atomic so a
+     * concurrent [putSessionWindow] cannot observe a half-swept state.
+     */
     override suspend fun sweepOrphansWithCompleteAliveSet(
         serverGroupFp: String,
         aliveSessionIds: Set<String>
-    ): EvictionReport = TODO("Phase 3: sweepOrphansWithCompleteAliveSet")
+    ): EvictionReport = db.withTransaction {
+        val allSessions = dao.sessionsInGroup(serverGroupFp)
+        val orphanIds = allSessions
+            .filter { it.sessionId !in aliveSessionIds }
+            .map { it.sessionId }
+        // Cascade delete: messages + gaps + session, per orphan id (no FK).
+        for (sid in orphanIds) {
+            dao.deleteSessionMessages(serverGroupFp, sid)
+            gapDao.deleteSessionGaps(serverGroupFp, sid)
+            dao.deleteSession(serverGroupFp, sid)
+        }
+        // Refresh lastVerifiedAt for the confirmed-alive survivors so the 7d
+        // rule does not evict them between daily sweeps.
+        val now = System.currentTimeMillis()
+        for (sid in aliveSessionIds) {
+            dao.touchLastVerifiedAt(serverGroupFp, sid, now)
+        }
+        EvictionReport(
+            evictedCount = orphanIds.size,
+            keptCount = allSessions.size - orphanIds.size,
+            orphanIds = orphanIds
+        )
+    }
 
+    /**
+     * R-20 Phase 3 (plan §3): mark-only degraded sweep. The alive set is
+     * INCOMPLETE (server-side fetch failed / truncated), so we MUST NOT
+     * delete — a cached session absent from the partial alive set may still
+     * be alive (just outside what we managed to enumerate). Only refresh
+     * `lastVerifiedAt` for the sessions we DID confirm; unseen-but-alive
+     * sessions stay where they are (the next complete sweep will catch them).
+     *
+     * This is the mark-only degradation path (plan N4) — the conservative
+     * default when the enumeration cannot prove completeness.
+     */
     override suspend fun markSeenAliveOnly(
         serverGroupFp: String,
         seenAliveSessionIds: Set<String>
-    ): Unit = TODO("Phase 3: markSeenAliveOnly")
+    ) {
+        val now = System.currentTimeMillis()
+        db.withTransaction {
+            for (sid in seenAliveSessionIds) {
+                dao.touchLastVerifiedAt(serverGroupFp, sid, now)
+            }
+        }
+    }
 
-    override suspend fun applyEvictionPolicy(): EvictionReport =
-        TODO("Phase 3: applyEvictionPolicy")
-
-    override suspend fun dailySweepIfNeeded(serverGroupFp: String): DailySweepReport =
-        TODO("Phase 3: dailySweepIfNeeded")
+    override suspend fun cachedWorkdirsInGroup(serverGroupFp: String): List<String> =
+        dao.workdirsInGroup(serverGroupFp)
 
     // ─────────── helpers ──────────────────────────────────────────────────
 
@@ -709,4 +833,21 @@ class CacheRepositoryImpl @Inject constructor(
         // state added without a migration) falls back to Idle.
         fillState = runCatching { GapFillState.valueOf(state) }.getOrDefault(GapFillState.Idle)
     )
+
+    private companion object {
+        /**
+         * R-20 Phase 3 (plan §3): per-serverGroup LRU cap. Sessions whose
+         * `newestCachedAt` ranks below the top-50 for this group are evicted
+         * by [applyEvictionPolicy]. 50 is the plan's spec'd constant — large
+         * enough to keep the user's active working set across reconnects,
+         * small enough to bound the on-disk cache per server group.
+         */
+        private const val LRU_LIMIT_PER_GROUP = 50
+
+        /** 30d in ms (newestCachedAt age rule). */
+        private const val AGE_30D_MS = 30L * 24L * 60L * 60L * 1000L
+
+        /** 7d in ms (lastVerifiedAt abandon rule). */
+        private const val AGE_7D_MS = 7L * 24L * 60L * 60L * 1000L
+    }
 }
