@@ -4,7 +4,7 @@
 #
 # 用法: ./scripts/upload-release.sh <versionName>
 # 前提:
-#   - tag v<versionName> 已 push（Gitea 收到 tag 后自动建 release）
+#   - tag v<versionName> 已 push（本脚本按 tag 查 release；找不到则创建）
 #   - tea config (~/.config/tea/config.yml) 有 Gitea token；或导出 GITEA_TOKEN
 #   - APK/oc-droid-<versionName>.apk + APK/oc-droid-<versionName>.md 已由 release.sh 生成
 set -euo pipefail
@@ -34,12 +34,15 @@ fi
 API="$GITEA_URL/api/v1/repos/$REPO/releases"
 AUTH="Authorization: token $GITEA_TOKEN"
 
-# --- 1. 查找 release（Gitea 收到 tag push 后通常自动建）---
-echo "==> 查找 Gitea release $TAG ..."
-RID=$(curl -sf -H "$AUTH" "$API?name=$VERSION" 2>/dev/null \
-  | python3 -c 'import sys,json;d=json.load(sys.stdin);print(d[0]["id"] if d else "")' 2>/dev/null || true)
+# --- 1. 按 tag 精确查找 release ---
+# §fix(release-target): Gitea 的 GET /releases 列表端点不支持 ?name= 过滤，
+#   旧行为会忽略该参数并取 d[0]，把 APK 挂到错误的 release（如把 0.5.1 挂到 0.5.0）。
+#   改用 /releases/tags/{tag} 端点精确按 tag 查；找不到则创建（tag 必须已 push）。
+echo "==> 查找 Gitea release by tag $TAG ..."
+RID=$(curl -sf -H "$AUTH" "$GITEA_URL/api/v1/repos/$REPO/releases/tags/$TAG" 2>/dev/null \
+  | python3 -c 'import sys,json;print(json.load(sys.stdin)["id"])' 2>/dev/null || true)
 if [[ -z "$RID" ]]; then
-  echo "==> Gitea 未自动建 release，创建中 ..."
+  echo "==> 未找到 $TAG 对应的 release，创建中（tag 必须已 push）..."
   RID=$(curl -sf -X POST "$API" -H "$AUTH" -H "Content-Type: application/json" \
     -d "{\"tag_name\":\"$TAG\",\"name\":\"$TAG\",\"draft\":false,\"prerelease\":false}" \
     | python3 -c 'import sys,json;print(json.load(sys.stdin)["id"])')
