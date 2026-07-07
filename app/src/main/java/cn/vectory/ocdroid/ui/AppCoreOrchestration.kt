@@ -331,7 +331,7 @@ internal fun AppCore.catchUpAfterDisconnectOrForeground(sessionId: String) {
         slices = store.slices,
         sessionId = sessionId,
         settingsManager = settingsManager,
-        onCacheWindow = ::writeSessionWindow,
+        onCacheWindow = makeCacheHook(hostProfileStore.currentProfile().serverGroupFp.ifBlank { hostProfileStore.currentProfile().id }),
     )
     // §R18 Phase 3 Wave 3 (P1-9 wire-up): fan-out pending-questions catch-up
     // across EVERY known workdir (in-memory directorySessions keys +
@@ -360,6 +360,17 @@ internal fun AppCore.catchUpAfterDisconnectOrForeground(sessionId: String) {
  * [ChatViewModel.loadMessages], callable from [AppCore.dispatchEffect] +
  * [performGlobalColdStartRefresh] + [loadMessagesWithRetry] (AppCore cannot
  * reference [ChatViewModel]).
+ *
+ * R-20 Phase 1: the onCacheWindow hook now routes through [AppCore.makeCacheHook]
+ * so each window-write is mirrored to the persistent encrypted cache. The
+ * fp is captured AT THIS CALL (current host) so a profile switch mid-flight
+ * cannot re-key a write to the wrong group (plan §3 closure-capture rule).
+ *
+ * gpter 复审 final-fix: passes the compound-key guard params
+ * ([AppCore.currentServerGroupFp] captured + provider) so the REST onSuccess
+ * re-checks the fp after the async fetch. The VerifyAndHydrate handler
+ * calls this AFTER its own 二次 guard confirmed fp match, so
+ * `currentServerGroupFp()` here equals `effect.serverGroupFp`.
  */
 internal fun AppCore.loadMessagesForEffect(sessionId: String, resetLimit: Boolean) {
     launchLoadMessages(
@@ -369,8 +380,11 @@ internal fun AppCore.loadMessagesForEffect(sessionId: String, resetLimit: Boolea
         sessionId = sessionId,
         resetLimit = resetLimit,
         settingsManager = settingsManager,
-        onCacheWindow = ::writeSessionWindow,
+        onCacheWindow = makeCacheHook(currentServerGroupFp()),
         emit = EventEmitter { event -> effectBus.tryEmitUiEvent(event) },
+        // gpter 复审 final-fix: compound-key guard (captured fp + provider).
+        expectedServerGroupFp = currentServerGroupFp(),
+        currentServerGroupFp = currentServerGroupFp,
     )
 }
 
@@ -385,6 +399,11 @@ internal fun AppCore.loadSessionsForEffect() {
         onLoadSessionStatus = { launchLoadSessionStatus(appScope, repository, store.slices) },
         onLoadMessages = { sessionId -> loadMessagesForEffect(sessionId, resetLimit = true) },
         emit = EventEmitter { event -> effectBus.tryEmitUiEvent(event) },
+        // R-20 Phase 1 (C7): verify currentSessionId's cache fingerprint when
+        // the session list arrives. MismatchEvicted → drop currentSessionId
+        // (cold-start fallback). See launchLoadSessions doc.
+        cacheRepository = cacheRepository,
+        currentServerGroupFp = { hostProfileStore.currentProfile().serverGroupFp.ifBlank { hostProfileStore.currentProfile().id } },
     )
 }
 

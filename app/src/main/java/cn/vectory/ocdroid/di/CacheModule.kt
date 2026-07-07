@@ -1,24 +1,30 @@
 package cn.vectory.ocdroid.di
 
 import android.content.Context
+import androidx.room.Room
 import cn.vectory.ocdroid.data.cache.CacheDatabase
 import cn.vectory.ocdroid.data.cache.CacheKeyStore
+import cn.vectory.ocdroid.data.cache.CacheRepository
+import cn.vectory.ocdroid.data.cache.CacheRepositoryImpl
+import cn.vectory.ocdroid.data.cache.CacheDao
 import cn.vectory.ocdroid.util.DebugLog
-import androidx.room.Room
 import dagger.Module
 import dagger.Provides
 import dagger.hilt.InstallIn
 import dagger.hilt.android.qualifiers.ApplicationContext
 import dagger.hilt.components.SingletonComponent
 import net.zetetic.database.sqlcipher.SupportOpenHelperFactory
+import java.util.concurrent.atomic.AtomicBoolean
+import javax.inject.Named
 import javax.inject.Singleton
 
 /**
- * R-20 Phase 0: Hilt module wiring the encrypted [CacheDatabase].
+ * R-20 Phase 0 → Phase 1: Hilt module wiring the encrypted [CacheDatabase] +
+ * [CacheRepository].
  *
  * Three concerns, in order:
  *  1. `System.loadLibrary("sqlcipher")` MUST run before any SQLCipher class
- *     is touched. Done at the top of [provideCacheDatabase] so it precedes
+ *     is touched. Done at the top of [buildOrFallback] so it precedes
  *     `SupportOpenHelperFactory` construction. (Loading is idempotent — a
  *     second call is a no-op — so safe even if other paths also load it.)
  *  2. The DB is opened with [SupportOpenHelperFactory] from
@@ -39,18 +45,68 @@ import javax.inject.Singleton
  *     only catches config-class errors. If even the post-reset rebuild
  *     fails, we degrade to an in-memory unencrypted DB (plan §5 "不崩").
  *
- * `fallbackToDestructiveMigration` is the Phase 0 default; once the schema
- * stabilizes (end of Phase 3) it is replaced by explicit Migration classes.
+ * R-20 Phase 1 (dser I-3): the build + fallback chain is extracted to
+ * [buildOrFallback] so instrumented tests can call it directly against a
+ * distinct DB filename, eliminating the copy-paste drift between
+ * CacheModule and CacheDatabaseInstrumentedTest. The cacheDegraded flag
+ * (dser I-1) records whether the in-memory fallback fired so Phase 4's
+ * management UI can surface "cache is degraded" to the user.
  */
 @Module
 @InstallIn(SingletonComponent::class)
 object CacheModule {
+
+    /**
+     * R-20 Phase 1 (dser I-1): JVM-static flag flipped to `true` iff
+     * [buildOrFallback] fell through to the in-memory fallback. Read via
+     * [provideCacheDegraded]. Phase 4 surfaces this in the management UI;
+     * Phase 1 callers do not branch on it (they just persist / read with
+     * whatever DB Hilt handed them — the in-memory fallback is still a
+     * CacheDatabase, just non-persistent).
+     */
+    private val cacheDegraded = AtomicBoolean(false)
 
     @Provides
     @Singleton
     fun provideCacheDatabase(
         @ApplicationContext ctx: Context,
         keyStore: CacheKeyStore
+    ): CacheDatabase = buildOrFallback(ctx, keyStore, DB_NAME)
+
+    @Provides
+    @Singleton
+    fun provideCacheDao(db: CacheDatabase): CacheDao = db.cacheDao()
+
+    @Provides
+    @Singleton
+    fun provideCacheRepository(dao: CacheDao, db: CacheDatabase): CacheRepository =
+        CacheRepositoryImpl(dao, db)
+
+    /**
+     * R-20 Phase 1 (dser I-1): true iff the persistent encrypted DB is
+     * unavailable and [provideCacheDatabase] handed out an in-memory
+     * substitute. Phase 4's CacheManagementSection surfaces this so the user
+     * knows their cache will not survive the next restart.
+     */
+    @Provides
+    @Singleton
+    @Named("cacheDegraded")
+    fun provideCacheDegraded(): Boolean = cacheDegraded.get()
+
+    /**
+     * R-20 Phase 1 (dser I-3): the build + fallback chain extracted so
+     * androidTest can call it against a test DB name without copy-pasting
+     * the production logic (which previously drifted in
+     * CacheDatabaseInstrumentedTest's `replayProvideCacheDatabaseFlow`).
+     *
+     * Public so test code in the `cn.vectory.ocdroid.di` package (or an
+     * `internal` test in the same module) can invoke it; production only
+     * reaches it via [provideCacheDatabase].
+     */
+    internal fun buildOrFallback(
+        ctx: Context,
+        keyStore: CacheKeyStore,
+        dbName: String
     ): CacheDatabase {
         // MUST load before any net.zetetic.database.sqlcipher.* class is loaded.
         // Idempotent — repeated calls across multiple providers are no-ops.
@@ -63,19 +119,16 @@ object CacheModule {
                 DebugLog.e("CacheModule", "Failed to load libsqlcipher", it)
             }
 
-        // R-20 Phase 0 fix (glmer blocker #1): buildDatabase now does an EAGER
-        // open (db.openHelper.writableDatabase) so a SQLCipher key mismatch /
-        // corruption / schema rot surfaces INSIDE this runCatching — not on
-        // the first DAO call after the provider has returned. The previous
-        // build() is lazy and only catches config-class errors (bad class
-        // name, missing KSP output); the G4 contract (plan §0 "destructive
-        // reset on key mismatch") was effectively dead code.
-        return runCatching { buildDatabase(ctx, keyStore.getOrCreateKey()) }
+        // Reset the degraded flag optimistically — only set true if the
+        // in-memory fallback actually fires below.
+        cacheDegraded.set(false)
+
+        return runCatching { buildDatabase(ctx, keyStore.getOrCreateKey(), dbName) }
             .getOrElse { failure1 ->
                 DebugLog.e("CacheModule", "cache DB open failed, destructive reset", failure1)
-                runCatching { ctx.deleteDatabase(DB_NAME) }
+                runCatching { ctx.deleteDatabase(dbName) }
                 keyStore.reset()
-                runCatching { buildDatabase(ctx, keyStore.getOrCreateKey()) }
+                runCatching { buildDatabase(ctx, keyStore.getOrCreateKey(), dbName) }
                     .getOrElse { failure2 ->
                         // Plan §5 "不崩": even the post-reset rebuild failed
                         // (persistent FS corruption, key store broken, etc).
@@ -91,6 +144,7 @@ object CacheModule {
                             "cache DB rebuild failed after reset, degrading to in-memory",
                             failure2
                         )
+                        cacheDegraded.set(true)
                         Room.inMemoryDatabaseBuilder(ctx, CacheDatabase::class.java)
                             .fallbackToDestructiveMigration()
                             .build()
@@ -98,9 +152,14 @@ object CacheModule {
             }
     }
 
-    private fun buildDatabase(ctx: Context, passphrase: ByteArray): CacheDatabase {
+    /**
+     * R-20 Phase 1 (dser I-3): the eager-open build step, extracted next to
+     * [buildOrFallback] so test code exercises the exact same factory chain
+     * (loadLibrary → SupportOpenHelperFactory → Room.builder → eager open).
+     */
+    private fun buildDatabase(ctx: Context, passphrase: ByteArray, dbName: String): CacheDatabase {
         val factory = SupportOpenHelperFactory(passphrase)
-        val db = Room.databaseBuilder(ctx, CacheDatabase::class.java, DB_NAME)
+        val db = Room.databaseBuilder(ctx, CacheDatabase::class.java, dbName)
             .openHelperFactory(factory)
             .fallbackToDestructiveMigration()
             .build()

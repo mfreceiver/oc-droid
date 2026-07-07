@@ -281,8 +281,14 @@ data class HostState(
  * [MainViewModel.sessionWindowCache]; the post-restore tail fetch
  * (`loadMessages(resetLimit = false)`) still runs to merge fresh messages
  * non-destructively, so a stale snapshot never hides new content.
+ *
+ * R-20 Phase 1: visibility changed from `internal` to `public` because the
+ * cache layer ([cn.vectory.ocdroid.data.cache.CacheRepository]) exposes this
+ * type in its public interface (the cache persists + returns these windows).
+ * This is an app module (no library consumers), so the `internal` modifier
+ * served no real purpose.
  */
-internal data class CachedSessionWindow(
+data class CachedSessionWindow(
     val messages: List<Message>,
     val partsByMessage: Map<String, List<Part>>,
     val olderMessagesCursor: String?,

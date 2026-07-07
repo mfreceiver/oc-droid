@@ -155,7 +155,21 @@ abstract class MainViewModelTestBase {
             settingsManager = settingsManager,
             repository = repository,
             effects = effectBus,
+            currentServerGroupFp = { hostProfileStore.currentProfile().serverGroupFp.ifBlank { hostProfileStore.currentProfile().id } },
         )
+        val cacheRepository = io.mockk.mockk<cn.vectory.ocdroid.data.cache.CacheRepository>(relaxed = true)
+        // R-20 Phase 1: stub verifyAndLoad / verifyFingerprint to return
+        // UnknownColdStart by default — relaxed mockk returns null for
+        // non-primitive return types, which would crash AppCore's
+        // dispatchSessionEffect VerifyAndHydrate `when` (sealed interface
+        // without a null branch). Tests that need a different result
+        // re-stub per-test.
+        io.mockk.coEvery {
+            cacheRepository.verifyAndLoad(any(), any(), any())
+        } returns cn.vectory.ocdroid.data.cache.HydrateResult.UnknownColdStart
+        io.mockk.coEvery {
+            cacheRepository.verifyFingerprint(any(), any(), any())
+        } returns cn.vectory.ocdroid.data.cache.FingerprintResult.UnknownColdStart
         val hostProfileController = cn.vectory.ocdroid.ui.controller.HostProfileController(
             scope = appScope,
             slices = store.slices,
@@ -164,12 +178,20 @@ abstract class MainViewModelTestBase {
             settingsManager = settingsManager,
             trafficTracker = trafficTracker,
             effects = effectBus,
+            currentServerGroupFp = { hostProfileStore.currentProfile().serverGroupFp.ifBlank { hostProfileStore.currentProfile().id } },
+            appContext = appContext,
+            cacheRepository = cacheRepository,
         )
         val sessionSyncCoordinator = cn.vectory.ocdroid.ui.controller.SessionSyncCoordinator(
             scope = appScope,
             slices = store.slices,
             settingsManager = settingsManager,
             effects = effectBus,
+            currentServerGroupFp = { hostProfileStore.currentProfile().serverGroupFp.ifBlank { hostProfileStore.currentProfile().id } },
+            // R-20 Phase 1 (C4): wire the cache mock so message.updated new-
+            // insert appends reach the (relaxed) mock. Tests that need to
+            // verify the append call re-stub per-test.
+            cacheRepository = cacheRepository,
         )
         val connectionCoordinator = cn.vectory.ocdroid.ui.controller.ConnectionCoordinator(
             scope = appScope,
@@ -179,6 +201,7 @@ abstract class MainViewModelTestBase {
             effects = effectBus,
             serverCompatProfile = cn.vectory.ocdroid.data.repository.ServerCompatProfile(),
         )
+        val fpProvider: () -> String = { hostProfileStore.currentProfile().serverGroupFp.ifBlank { hostProfileStore.currentProfile().id } }
         val core = AppCore(
             store,
             repository,
@@ -195,6 +218,9 @@ abstract class MainViewModelTestBase {
             hostProfileController,
             sessionSyncCoordinator,
             connectionCoordinator,
+            cacheRepository,
+            // §review-fix #1: same fp provider every controller uses.
+            fpProvider,
             appScope,
         )
         // §R-17 batch3e → §R18 Phase 4: side-channel Error/Success UiEvents
@@ -220,5 +246,62 @@ abstract class MainViewModelTestBase {
     /** Routes an SSE event to AppCore's internal handler. */
     protected fun handleSse(viewModel: AppCore, event: cn.vectory.ocdroid.data.model.SSEEvent) {
         viewModel.handleSSEEvent(event)
+    }
+
+    /**
+     * R-20 Phase 1: re-stub the relaxed-mock [AppCore.cacheRepository] on [core]
+     * to behave like an in-memory persistent cache (putSessionWindow writes;
+     * verifyAndLoad reads with the same 3-state semantics as the real impl).
+     *
+     * Used by tests that need to verify the Phase 1 verify-before-hydrate
+     * round-trip (e.g. cached messages survive A→B→A) without dragging in
+     * Robolectric/Room. The default relaxed mock returns UnknownColdStart for
+     * every verifyAndLoad, which short-circuits the handler to a cold-start
+     * REST fetch — fine for most tests but not for the cache-persistence
+     * regressions that need a Verified window to land.
+     *
+     * Call AFTER [createCore] / [newCore] so the stubs install on the core's
+     * cacheRepository instance.
+     */
+    protected fun installInMemoryPersistentCache(core: AppCore) {
+        // (fp, sessionId) -> (storedCreatedAt, window)
+        val cache = mutableMapOf<Pair<String, String>, Pair<Long?, cn.vectory.ocdroid.ui.CachedSessionWindow>>()
+        io.mockk.coEvery {
+            core.cacheRepository.putSessionWindow(any(), any(), any(), any(), any())
+        } answers {
+            val fp = firstArg<String>()
+            val sid = secondArg<String>()
+            val createdAt = thirdArg<Long?>()
+            val window = arg<cn.vectory.ocdroid.ui.CachedSessionWindow>(4)
+            cache[fp to sid] = createdAt to window
+        }
+        io.mockk.coEvery {
+            core.cacheRepository.verifyAndLoad(any(), any(), any())
+        } answers {
+            val fp = firstArg<String>()
+            val sid = secondArg<String>()
+            val createdAt = thirdArg<Long?>()
+            val stored = cache[fp to sid]
+            when {
+                createdAt == null -> cn.vectory.ocdroid.data.cache.HydrateResult.UnknownColdStart
+                stored == null -> cn.vectory.ocdroid.data.cache.HydrateResult.UnknownColdStart
+                stored.first != createdAt -> cn.vectory.ocdroid.data.cache.HydrateResult.MismatchEvicted
+                else -> cn.vectory.ocdroid.data.cache.HydrateResult.Verified(stored.second)
+            }
+        }
+        io.mockk.coEvery {
+            core.cacheRepository.verifyFingerprint(any(), any(), any())
+        } answers {
+            val fp = firstArg<String>()
+            val sid = secondArg<String>()
+            val createdAt = thirdArg<Long?>()
+            val stored = cache[fp to sid]
+            when {
+                createdAt == null -> cn.vectory.ocdroid.data.cache.FingerprintResult.UnknownColdStart
+                stored == null -> cn.vectory.ocdroid.data.cache.FingerprintResult.UnknownColdStart
+                stored.first != createdAt -> cn.vectory.ocdroid.data.cache.FingerprintResult.MismatchEvicted
+                else -> cn.vectory.ocdroid.data.cache.FingerprintResult.Verified
+            }
+        }
     }
 }

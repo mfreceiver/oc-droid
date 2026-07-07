@@ -16,8 +16,10 @@ import cn.vectory.ocdroid.util.TrafficTracker
 import dagger.Module
 import dagger.Provides
 import dagger.hilt.InstallIn
+import dagger.hilt.android.qualifiers.ApplicationContext
 import dagger.hilt.components.SingletonComponent
 import kotlinx.coroutines.CoroutineScope
+import javax.inject.Named
 import javax.inject.Singleton
 
 /**
@@ -50,6 +52,33 @@ import javax.inject.Singleton
 @Module
 @InstallIn(SingletonComponent::class)
 object ControllerModule {
+
+    /**
+     * R-20 Phase 1: zero-arg lambda returning the CURRENT host profile's
+     * serverGroupFp. Injected into every controller/helper that emits
+     * [cn.vectory.ocdroid.ui.controller.ControllerEffect.VerifyAndHydrate]
+     * / [cn.vectory.ocdroid.ui.controller.ControllerEffect.EvictSession]
+     * / [cn.vectory.ocdroid.ui.controller.ControllerEffect.EvictGroup] so
+     * they all derive the fp the SAME way — none of them can read the
+     * HostProfileStore directly without a constructor dep, and the
+     * round-3 consensus (plan §3 freegpt #3 + maxer) was "one authoritative
+     * provider, not each controller re-deriving it".
+     *
+     * `.ifBlank { id }` is the nonblank-invariant fallback
+     * (see [HostProfile.serverGroupFp] + [HostProfileStore.decodeProfiles]
+     * normalize step — legacy JSON that predates Phase 0 normalizes blank
+     * → id on read, so this is belt-and-braces for a corrupt row that
+     * skipped normalization).
+     */
+    @Provides
+    @Singleton
+    @Named("currentServerGroupFp")
+    fun provideCurrentServerGroupFp(
+        hostProfileStore: HostProfileStore
+    ): () -> String = {
+        val profile = hostProfileStore.currentProfile()
+        profile.serverGroupFp.ifBlank { profile.id }
+    }
 
     @Provides
     @Singleton
@@ -84,16 +113,19 @@ object ControllerModule {
         settingsManager: SettingsManager,
         repository: OpenCodeRepository,
         effectBus: SharedEffectBus,
+        @Named("currentServerGroupFp") currentServerGroupFp: () -> String,
     ): SessionSwitcher = SessionSwitcher(
         store = store,
         settingsManager = settingsManager,
         repository = repository,
         effects = effectBus,
+        currentServerGroupFp = currentServerGroupFp,
     )
 
     @Provides
     @Singleton
     fun provideHostProfileController(
+        @ApplicationContext appContext: android.content.Context,
         @UiApplicationScope appScope: CoroutineScope,
         store: SharedStateStore,
         hostProfileStore: HostProfileStore,
@@ -101,6 +133,8 @@ object ControllerModule {
         settingsManager: SettingsManager,
         trafficTracker: TrafficTracker,
         effectBus: SharedEffectBus,
+        cacheRepository: cn.vectory.ocdroid.data.cache.CacheRepository,
+        @Named("currentServerGroupFp") currentServerGroupFp: () -> String,
     ): HostProfileController = HostProfileController(
         scope = appScope,
         slices = store.slices,
@@ -109,6 +143,9 @@ object ControllerModule {
         settingsManager = settingsManager,
         trafficTracker = trafficTracker,
         effects = effectBus,
+        currentServerGroupFp = currentServerGroupFp,
+        appContext = appContext,
+        cacheRepository = cacheRepository,
     )
 
     @Provides
@@ -118,11 +155,17 @@ object ControllerModule {
         store: SharedStateStore,
         settingsManager: SettingsManager,
         effectBus: SharedEffectBus,
+        cacheRepository: cn.vectory.ocdroid.data.cache.CacheRepository,
+        @Named("currentServerGroupFp") currentServerGroupFp: () -> String,
     ): SessionSyncCoordinator = SessionSyncCoordinator(
         scope = appScope,
         slices = store.slices,
         settingsManager = settingsManager,
         effects = effectBus,
+        currentServerGroupFp = currentServerGroupFp,
+        // R-20 Phase 1 (C4): persistent cache for the message.updated
+        // new-insert append path (maxer I11).
+        cacheRepository = cacheRepository,
     )
 
     @Provides

@@ -77,6 +77,12 @@ class SessionSyncCoordinatorTest {
     private lateinit var scope: TestScope
     private lateinit var coordinator: SessionSyncCoordinator
     /**
+     * R-20 Phase 1 (C4): persistent cache mock. Relaxed by default (returns
+     * Unit / null); individual tests re-stub to verify the
+     * appendMessageIfSessionCached call on message.updated new-insert.
+     */
+    private lateinit var cacheRepository: cn.vectory.ocdroid.data.cache.CacheRepository
+    /**
      * §R-17 batch2 step e final: in-test fixture carrying the prior snapshot
      * so successive `seed { ... }` calls compose against the prior state.
      * Production no longer has an AppState mirror; this fixture exists only
@@ -101,10 +107,15 @@ class SessionSyncCoordinatorTest {
         effects = SharedEffectBus()
         collectedEffects = mutableListOf()
         scope = TestScope(UnconfinedTestDispatcher())
+        cacheRepository = io.mockk.mockk(relaxed = true)
         // Drain every emitted effect into collectedEffects so the test bodies
         // can filter by type. Launched in scope so it auto-cancels at test end.
         scope.launch(start = kotlinx.coroutines.CoroutineStart.UNDISPATCHED) { effects.effectsConsumed.toList(collectedEffects) }
-        coordinator = SessionSyncCoordinator(scope, slices, settingsManager, effects)
+        coordinator = SessionSyncCoordinator(
+            scope, slices, settingsManager, effects,
+            currentServerGroupFp = { "test-fp" },
+            cacheRepository = cacheRepository,
+        )
     }
 
     @After
@@ -576,6 +587,89 @@ class SessionSyncCoordinatorTest {
 
         // Defensive session guard: list untouched.
         assertEquals(listOf("m1"), slices.chat.value.messages.map { it.id })
+    }
+
+    // ── R-20 Phase 1 (C4, maxer I11): message.updated new-insert writes DB ──
+
+    @Test
+    fun `C4 message updated new insert appends to persistent cache`() {
+        // found=false (id absent from local list) → the message was just
+        // inserted into the slice. The persistent cache must mirror it via
+        // appendMessageIfSessionCached so a subsequent switch-back sees it.
+        // The coordinator's scope uses UnconfinedTestDispatcher, so the
+        // scope.launch append runs eagerly before the assertion below.
+        setCurrentSession("session-1")
+        seed { it.copy(messages = listOf(Message(id = "m1", role = "user"))) }
+
+        coordinator.handleEvent(event("message.updated") {
+            put("sessionID", JsonPrimitive("session-1"))
+            put("info", buildJsonObject {
+                put("id", JsonPrimitive("m2"))
+                put("role", JsonPrimitive("assistant"))
+            })
+        })
+
+        // Verify appendMessageIfSessionCached was called once for the new id.
+        io.mockk.coVerify(exactly = 1) {
+            cacheRepository.appendMessageIfSessionCached(
+                "test-fp",
+                "session-1",
+                match { it.id == "m2" },
+                emptyList(),
+            )
+        }
+    }
+
+    @Test
+    fun `C4 message updated patch does NOT append to persistent cache`() {
+        // found=true (id already in local list) → the message was patched in
+        // place. The cache must NOT be re-appended (the existing entry is
+        // already correct; appending would be a redundant write + would
+        // overwrite the cached parts with emptyList).
+        setCurrentSession("session-1")
+        seed {
+            it.copy(
+                messages = listOf(
+                    Message(id = "m1", role = "user"),
+                    Message(id = "m2", role = "assistant"),
+                )
+            )
+        }
+
+        coordinator.handleEvent(event("message.updated") {
+            put("sessionID", JsonPrimitive("session-1"))
+            put("info", buildJsonObject {
+                put("id", JsonPrimitive("m1"))
+                put("role", JsonPrimitive("user"))
+                put("cost", JsonPrimitive(0.5))
+            })
+        })
+
+        // Patch path: appendMessageIfSessionCached MUST NOT fire.
+        io.mockk.coVerify(exactly = 0) {
+            cacheRepository.appendMessageIfSessionCached(any(), any(), any(), any())
+        }
+    }
+
+    @Test
+    fun `C4 message updated non-current session does NOT append to cache`() {
+        // Defensive session guard: append (like the slice insert) only fires
+        // for the CURRENT session. A non-current session's insert is ignored
+        // entirely (no slice write, no cache write).
+        setCurrentSession("session-1")
+        seed { it.copy(messages = listOf(Message(id = "m1", role = "user"))) }
+
+        coordinator.handleEvent(event("message.updated") {
+            put("sessionID", JsonPrimitive("session-other"))
+            put("info", buildJsonObject {
+                put("id", JsonPrimitive("m2"))
+                put("role", JsonPrimitive("assistant"))
+            })
+        })
+
+        io.mockk.coVerify(exactly = 0) {
+            cacheRepository.appendMessageIfSessionCached(any(), any(), any(), any())
+        }
     }
 
     // ── message.part.updated (full text / delta / part.created) ─────────────

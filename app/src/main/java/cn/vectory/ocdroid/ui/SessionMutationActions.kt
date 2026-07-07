@@ -12,6 +12,7 @@ import cn.vectory.ocdroid.R
 import cn.vectory.ocdroid.data.model.ComposerImageAttachment
 import cn.vectory.ocdroid.data.model.Message
 import cn.vectory.ocdroid.data.repository.OpenCodeRepository
+import cn.vectory.ocdroid.ui.controller.ControllerEffect
 import cn.vectory.ocdroid.util.SettingsManager
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.launch
@@ -67,7 +68,20 @@ internal fun launchSetSessionArchived(
     settingsManager: SettingsManager,
     sessionId: String,
     archived: Boolean,
-    emit: EventEmitter = EventEmitter { }
+    emit: EventEmitter = EventEmitter { },
+    /**
+     * R-20 Phase 1 (C3): provider for the current host's serverGroupFp. Used
+     * to key the [ControllerEffect.EvictSession] emission per archived subtree
+     * id (plan §3 矩阵 "用户归档" 行). Null = caller has not been migrated yet;
+     * no eviction emits (preserves the legacy behavior for unmigrated callers).
+     */
+    currentServerGroupFp: (() -> String)? = null,
+    /**
+     * R-20 Phase 1 (C3): sink for the [ControllerEffect.EvictSession] emissions.
+     * Typically the VM's `effectBus.tryEmitEffect` closure. Null = caller has
+     * not been migrated yet; no eviction emits.
+     */
+    emitEffect: ((ControllerEffect) -> Unit)? = null,
 ) {
 
     scope.launch {
@@ -127,6 +141,18 @@ internal fun launchSetSessionArchived(
                             )
                         }
                     }
+                    // R-20 Phase 1 (C3, plan §3 矩阵 "用户归档" 行): emit
+                    // EvictSession for each successfully-archived subtree id
+                    // AFTER the REST call confirmed. The eviction is gated on
+                    // isArchive — restoring a session (archived=false) must
+                    // NOT evict its cache (the user wants to see it again).
+                    // Both memory LRU + persistent cache are cleared by
+                    // AppCore.dispatchHostEffect's EvictSession handler.
+                    // emit happens inside onSuccess to avoid optimistic
+                    // eviction on a failed archive.
+                    if (isArchive && currentServerGroupFp != null && emitEffect != null) {
+                        emitEffect(ControllerEffect.EvictSession(currentServerGroupFp(), id))
+                    }
                 }
                 .onFailure { error ->
                     emit.emit(UiEvent.Error(
@@ -156,7 +182,18 @@ internal fun launchDeleteSession(
     settingsManager: SettingsManager,
     sessionId: String,
     onSelectSession: (String) -> Unit,
-    emit: EventEmitter = EventEmitter { }
+    emit: EventEmitter = EventEmitter { },
+    /**
+     * R-20 Phase 1 (C3): provider for the current host's serverGroupFp. Used
+     * to key the [ControllerEffect.EvictSession] emission on delete (plan §3
+     * 矩阵 "用户删除" 行). Null = caller has not been migrated yet.
+     */
+    currentServerGroupFp: (() -> String)? = null,
+    /**
+     * R-20 Phase 1 (C3): sink for the [ControllerEffect.EvictSession] emission.
+     * Null = caller has not been migrated yet.
+     */
+    emitEffect: ((ControllerEffect) -> Unit)? = null,
 ) {
 
     scope.launch {
@@ -189,6 +226,14 @@ internal fun launchDeleteSession(
                         // the AppCore collector drops null so no manual write.
                         slices.mutateChat { c -> c.copy(currentSessionId = null, messages = emptyList(), partsByMessage = emptyMap()) }
                     }
+                }
+                // R-20 Phase 1 (C3, plan §3 矩阵 "用户删除" 行): emit EvictSession
+                // AFTER the REST delete confirmed. The eviction (memory LRU +
+                // persistent cache) is routed through AppCore.dispatchHostEffect.
+                // Emits inside onSuccess to avoid optimistic eviction on a failed
+                // delete.
+                if (currentServerGroupFp != null && emitEffect != null) {
+                    emitEffect(ControllerEffect.EvictSession(currentServerGroupFp(), sessionId))
                 }
             }
             .onFailure { error ->

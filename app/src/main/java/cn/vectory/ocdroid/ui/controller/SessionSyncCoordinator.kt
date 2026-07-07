@@ -3,6 +3,7 @@ package cn.vectory.ocdroid.ui.controller
 import cn.vectory.ocdroid.BuildConfig
 import cn.vectory.ocdroid.R
 import cn.vectory.ocdroid.data.api.NOISY_SSE_LOG_EVENTS
+import cn.vectory.ocdroid.data.cache.CacheRepository
 import cn.vectory.ocdroid.data.model.Message
 import cn.vectory.ocdroid.data.model.Part
 import cn.vectory.ocdroid.data.model.SSEEvent
@@ -91,6 +92,20 @@ class SessionSyncCoordinator(
     private val slices: SliceFlows,
     private val settingsManager: SettingsManager,
     private val effects: SharedEffectBus,
+    /** R-20 Phase 1: provider for the current host's serverGroupFp. Used to
+     *  key the [ControllerEffect.EvictSession] emission on the session.updated
+     *  archived branch (plan §3 矩阵 "SSE 归档 session" 行). */
+    internal val currentServerGroupFp: () -> String,
+    /**
+     * R-20 Phase 1 (C4, maxer I11): persistent cache for the message.updated
+     * new-insert append path. When a `message.updated` SSE event for the
+     * current session inserts a NEW message (found=false in
+     * [ChatState.applyMessageUpdated]), the cached window for that session
+     * (if any) must stay in sync without a full putSessionWindow round-trip.
+     * Fire-and-forget: failures only log via DebugLog.e; the user is never
+     * blocked (plan §5 不崩).
+     */
+    internal val cacheRepository: CacheRepository? = null,
 ) {
     /** Tag for [reportNonFatalIssue]; mirrors the original MainViewModel TAG. */
     private val tag: String = "SessionSyncCoordinator"
@@ -412,6 +427,18 @@ class SessionSyncCoordinator(
                         } else {
                             slices.mutateSessionList { s -> s.applyArchiveEviction(updated, newOpenIds).first }
                         }
+                        // R-20 Phase 1 (plan §3 矩阵 "SSE 归档 session" 行):
+                        // evict the archived session from both the memory LRU
+                        // and the persistent cache. The fp comes from the
+                        // currentServerGroupFp provider (the SSE feed is
+                        // generation-guarded by ConnectionCoordinator so a
+                        // stale-host event cannot reach here — see
+                        // §P1-10 hostGeneration guard). Routed through the
+                        // effect bus so AppCore.dispatchHostEffect runs the
+                        // memory + persistent halves.
+                        effects.tryEmitEffect(
+                            ControllerEffect.EvictSession(currentServerGroupFp(), updated.id)
+                        )
                     } else {
                         slices.mutateSessionList { s -> s.applySessionUpsert(updated).first }
                     }
@@ -562,6 +589,41 @@ class SessionSyncCoordinator(
                             DebugLog.d("Sync", "message.updated: patched")
                         } else {
                             DebugLog.i("Sync", "message.updated: inserted (new message, absent from local list)")
+                            // R-20 Phase 1 (C4, maxer I11): the new message
+                            // was appended to the slice. Mirror it into the
+                            // persistent cache so a subsequent switch-back
+                            // (VerifyAndHydrate → Verified) sees it without a
+                            // full putSessionWindow round-trip. Append is
+                            // scoped to the CURRENT session (eventSessionId
+                            // was already guarded above to equal
+                            // currentSessionId), and appendMessageIfSessionCached
+                            // is a no-op when no cached session row exists
+                            // (cold-start sessions don't proactively build a
+                            // cache — only already-cached sessions stay fresh).
+                            // Fire-and-forget on scope; failures only log.
+                            if (cacheRepository != null) {
+                                val fp = currentServerGroupFp()
+                                val sid = eventSessionId!!
+                                scope.launch {
+                                    runCatching {
+                                        cacheRepository.appendMessageIfSessionCached(
+                                            fp,
+                                            sid,
+                                            updated,
+                                            // §parts-by-message: the new message
+                                            // has no parts yet (its first
+                                            // part.created / part.updated will
+                                            // arrive separately). Persist an
+                                            // empty list; the next part event +
+                                            // the post-turn idle reload fills
+                                            // them in.
+                                            emptyList(),
+                                        )
+                                    }.onFailure {
+                                        DebugLog.e(tag, "appendMessageIfSessionCached failed fp=$fp sid=$sid", it)
+                                    }
+                                }
+                            }
                         }
                     }
                 }

@@ -36,6 +36,24 @@ sealed class ControllerEffect {
     data object LoadPendingQuestions : ControllerEffect()
     /** Drop all pending delta buffers in SessionSyncCoordinator. */
     data object ClearDeltaBuffers : ControllerEffect()
+    /**
+     * R-20 Phase 1: verify-and-hydrate the cached window for `(serverGroupFp,
+     * sessionId)` BEFORE showing it to the user (plan §0 N2 privacy +
+     * verify-before-hydrate). Dispatched by SessionSwitcher.switchTo instead
+     * of the synchronous LRU seed + synchronous LoadMessages (the old path
+     * hydrated the cache without fingerprint-checking it first).
+     *
+     * Handled by AppCore.dispatchSessionEffect (this domain) — the handler
+     * calls `cacheRepository.verifyAndLoad(...)` and dispatches a follow-up
+     * LoadMessages inside the same launch (plan §3 v4 round-3 code skeleton).
+     * [createdAt] is the server-side `Session.time.created`; null = cold
+     * start (no fingerprint eviction).
+     */
+    data class VerifyAndHydrate(
+        val serverGroupFp: String,
+        val sessionId: String,
+        val createdAt: Long?
+    ) : ControllerEffect()
 
     // ── HostProfileController ──
     /** Cancel SSE feed BEFORE repository reconfigure. */
@@ -50,6 +68,29 @@ sealed class ControllerEffect {
     data object ResetLocalDataAndResync : ControllerEffect()
     /** Drop the per-session message-window cache (SessionSwitcher owns it). */
     data object ClearSessionWindowCache : ControllerEffect()
+    /**
+     * R-20 Phase 1: evict one cached session + its messages, scoped to
+     * `(serverGroupFp, sessionId)`. Emitted by:
+     *  - SessionMutationActions.launchSetSessionArchived (per subtree id)
+     *  - SessionMutationActions.launchDeleteSession (REST onSuccess)
+     *  - SessionSyncCoordinator session.updated archived branch
+     *
+     * Handled by AppCore.dispatchHostEffect (HostProfileController domain) —
+     * it synchronously clears the in-memory window and async-evicts the
+     * persistent row (plan §3 N6).
+     */
+    data class EvictSession(val serverGroupFp: String, val sessionId: String) : ControllerEffect()
+    /**
+     * R-20 Phase 1: evict a whole server-group's worth of cached sessions +
+     * messages (异组 host switch / profile delete). Emitted by
+     * HostProfileController.selectHostProfile when previousFp != targetFp
+     * (plan §3 select 4-step).
+     *
+     * Naming: this is **EvictGroup** (NOT ClearGroup) — freegpt+maxer round-3
+     * convergence: "clear" suggests "clear all caches", "evict" scopes it to
+     * the named group (plan §3 N6 explicitly forbids ClearGroup).
+     */
+    data class EvictGroup(val serverGroupFp: String) : ControllerEffect()
 
     // ── ConnectionCoordinator ──
     /** A host/profile switch → reset foreground catch-up state machine. */

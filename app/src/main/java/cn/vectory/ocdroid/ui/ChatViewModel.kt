@@ -60,6 +60,18 @@ class ChatViewModel @Inject constructor(
         // §R-17 batch3d: body moved verbatim from AppCore; reaches the shared
         // store/controllers/free-functions directly instead of delegating back
         // to AppCore.loadMessages.
+        // R-20 Phase 1: onCacheWindow routes through AppCore.makeCacheHook so
+        // the in-memory LRU write is mirrored to the persistent encrypted
+        // cache. fp captured at this call (current host) — see makeCacheHook
+        // doc for the closure-capture rationale.
+        //
+        // glm-3 🟡#1 / gpter 复审 final-fix: single-read the profile into a
+        // local val so the fp derivation (serverGroupFp.ifBlank { id }) reads
+        // currentProfile() exactly once (avoids the theoretical TOCTOU where
+        // two reads could see different profiles if a switch raced between
+        // them). The same `fp` is used for the cache hook, the captured guard,
+        // and the provider — all three are consistent by construction.
+        val fp = core.currentServerGroupFp()
         launchLoadMessages(
             scope = core.appScope,
             repository = core.repository,
@@ -67,8 +79,11 @@ class ChatViewModel @Inject constructor(
             sessionId = sessionId,
             resetLimit = resetLimit,
             settingsManager = core.settingsManager,
-            onCacheWindow = core.sessionSwitcher::writeSessionWindow,
+            onCacheWindow = core.makeCacheHook(fp),
             emit = EventEmitter { event -> core.effectBus.tryEmitUiEvent(event) },
+            // gpter 复审 final-fix: compound-key guard.
+            expectedServerGroupFp = fp,
+            currentServerGroupFp = core.currentServerGroupFp,
         )
     }
 
@@ -80,12 +95,17 @@ class ChatViewModel @Inject constructor(
 
     fun loadMoreMessages() {
         val sessionId = core.store.chatFlow.value.currentSessionId ?: return
+        // glm-3 🟡#1 / gpter 复审 final-fix: single-read fp.
+        val fp = core.currentServerGroupFp()
         launchLoadMoreMessages(
             scope = core.appScope,
             repository = core.repository,
             slices = core.store.slices,
             sessionId = sessionId,
-            onCacheWindow = core.sessionSwitcher::writeSessionWindow,
+            onCacheWindow = core.makeCacheHook(fp),
+            // gpter 复审 final-fix: compound-key guard.
+            expectedServerGroupFp = fp,
+            currentServerGroupFp = core.currentServerGroupFp,
         )
     }
 
@@ -96,7 +116,7 @@ class ChatViewModel @Inject constructor(
             repository = core.repository,
             slices = core.store.slices,
             sessionId = sessionId,
-            onCacheWindow = core.sessionSwitcher::writeSessionWindow,
+            onCacheWindow = core.makeCacheHook(core.hostProfileStore.currentProfile().serverGroupFp.ifBlank { core.hostProfileStore.currentProfile().id }),
         )
     }
 

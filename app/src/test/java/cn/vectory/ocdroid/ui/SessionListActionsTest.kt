@@ -47,6 +47,8 @@ class SessionListActionsTest {
     private lateinit var scope: TestScope
     private lateinit var emitted: MutableList<UiEvent>
     private lateinit var emit: EventEmitter
+    /** R-20 Phase 1 (C7): persistent cache mock for currentSessionId verify. */
+    private lateinit var cacheRepository: cn.vectory.ocdroid.data.cache.CacheRepository
 
     @Before
     fun setUp() {
@@ -66,6 +68,11 @@ class SessionListActionsTest {
         scope = TestScope(UnconfinedTestDispatcher())
         emitted = mutableListOf()
         emit = EventEmitter { event -> emitted.add(event) }
+        cacheRepository = io.mockk.mockk(relaxed = true)
+        // C7: default fingerprint result is Verified (cache healthy / no-op).
+        io.mockk.coEvery {
+            cacheRepository.verifyFingerprint(any(), any(), any())
+        } returns cn.vectory.ocdroid.data.cache.FingerprintResult.Verified
     }
 
     @After
@@ -219,6 +226,133 @@ class SessionListActionsTest {
 
         assertNull(slices.chat.value.currentSessionId)
         assertTrue(slices.chat.value.messages.isEmpty())
+    }
+
+    // ── R-20 Phase 1 (C7): currentSessionId fingerprint verify ────────────────
+
+    @Test
+    fun `C7 launchLoadSessions drops currentSessionId on fingerprint mismatch`() = runTest {
+        // Server returns the session list with session-A in it; the current
+        // chatFlow points at session-A. cacheRepository.verifyFingerprint
+        // returns MismatchEvicted → the cached window's createdAt differs
+        // from the freshly-fetched server copy → drop currentSessionId +
+        // re-select the first session so the user lands somewhere valid.
+        val sessions = listOf(Session(id = "s1", directory = "/x", time = Session.TimeInfo(created = 1L)))
+        coEvery { repository.getSessions(any()) } returns Result.success(sessions)
+        store.mutateChat { it.copy(currentSessionId = "s1") }
+        io.mockk.coEvery {
+            cacheRepository.verifyFingerprint(any(), any(), any())
+        } returns cn.vectory.ocdroid.data.cache.FingerprintResult.MismatchEvicted
+        var selected: String? = null
+
+        launchLoadSessions(
+            scope, repository, slices, settingsManager,
+            onSelectSession = { selected = it },
+            onLoadSessionStatus = {},
+            onLoadMessages = {},
+            emit = emit,
+            cacheRepository = cacheRepository,
+            currentServerGroupFp = { "g-test" },
+        )
+        advanceUntilIdle()
+
+        // currentSessionId cleared by the mismatch branch, then onSelectSession
+        // fired for the first refreshed session.
+        assertNull(
+            "fingerprint mismatch must clear currentSessionId (stale cached window)",
+            slices.chat.value.currentSessionId,
+        )
+        assertEquals(
+            "mismatch branch must fall through to first-select",
+            "s1",
+            selected,
+        )
+    }
+
+    @Test
+    fun `C7 launchLoadSessions keeps currentSessionId on fingerprint match`() = runTest {
+        // verifyFingerprint returns Verified → cache is self-consistent →
+        // keep currentSessionId, fire the normal onLoadSessionStatus +
+        // onLoadMessages cascade (no eviction, no first-select).
+        val sessions = listOf(Session(id = "s1", directory = "/x", time = Session.TimeInfo(created = 1L)))
+        coEvery { repository.getSessions(any()) } returns Result.success(sessions)
+        store.mutateChat { it.copy(currentSessionId = "s1") }
+        io.mockk.coEvery {
+            cacheRepository.verifyFingerprint(any(), any(), any())
+        } returns cn.vectory.ocdroid.data.cache.FingerprintResult.Verified
+        var selected: String? = null
+        var msgLoads = 0
+        var statusLoads = 0
+
+        launchLoadSessions(
+            scope, repository, slices, settingsManager,
+            onSelectSession = { selected = it },
+            onLoadSessionStatus = { statusLoads += 1 },
+            onLoadMessages = { msgLoads += 1 },
+            emit = emit,
+            cacheRepository = cacheRepository,
+            currentServerGroupFp = { "g-test" },
+        )
+        advanceUntilIdle()
+
+        assertEquals("fingerprint match must keep currentSessionId", "s1", slices.chat.value.currentSessionId)
+        assertNull("fingerprint match must NOT auto-select", selected)
+        assertEquals(1, msgLoads)
+        assertEquals(1, statusLoads)
+    }
+
+    @Test
+    fun `C7 launchLoadSessions treats UnknownColdStart as no-op`() = runTest {
+        // UnknownColdStart = no cached row (or createdAt=null). The verify is
+        // inconclusive; behave like the legacy path (keep currentSessionId,
+        // run the onLoadMessages cascade). No eviction.
+        val sessions = listOf(Session(id = "s1", directory = "/x", time = Session.TimeInfo(created = 1L)))
+        coEvery { repository.getSessions(any()) } returns Result.success(sessions)
+        store.mutateChat { it.copy(currentSessionId = "s1") }
+        io.mockk.coEvery {
+            cacheRepository.verifyFingerprint(any(), any(), any())
+        } returns cn.vectory.ocdroid.data.cache.FingerprintResult.UnknownColdStart
+        var msgLoads = 0
+
+        launchLoadSessions(
+            scope, repository, slices, settingsManager,
+            onSelectSession = {},
+            onLoadSessionStatus = {},
+            onLoadMessages = { msgLoads += 1 },
+            emit = emit,
+            cacheRepository = cacheRepository,
+            currentServerGroupFp = { "g-test" },
+        )
+        advanceUntilIdle()
+
+        assertEquals("UnknownColdStart must keep currentSessionId", "s1", slices.chat.value.currentSessionId)
+        assertEquals(1, msgLoads)
+    }
+
+    @Test
+    fun `C7 launchLoadSessions without cacheRepository params preserves legacy behavior`() = runTest {
+        // Backward-compat: callers that haven't been migrated (no
+        // cacheRepository / currentServerGroupFp) MUST behave as before
+        // (no verify call, no currentSessionId churn).
+        val sessions = listOf(Session(id = "s1", directory = "/x"))
+        coEvery { repository.getSessions(any()) } returns Result.success(sessions)
+        store.mutateChat { it.copy(currentSessionId = "s1") }
+        var msgLoads = 0
+
+        launchLoadSessions(
+            scope, repository, slices, settingsManager,
+            onSelectSession = {},
+            onLoadSessionStatus = {},
+            onLoadMessages = { msgLoads += 1 },
+            emit = emit,
+            // cacheRepository + currentServerGroupFp intentionally omitted (legacy caller).
+        )
+        advanceUntilIdle()
+
+        assertEquals("legacy caller must keep currentSessionId", "s1", slices.chat.value.currentSessionId)
+        assertEquals(1, msgLoads)
+        // Cache mock never invoked on the legacy path.
+        io.mockk.coVerify(exactly = 0) { cacheRepository.verifyFingerprint(any(), any(), any()) }
     }
 
     // ── launchLoadMoreSessions ────────────────────────────────────────────────

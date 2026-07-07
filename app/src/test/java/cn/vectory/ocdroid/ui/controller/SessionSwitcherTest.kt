@@ -100,6 +100,7 @@ class SessionSwitcherTest {
             settingsManager = settingsManager,
             repository = repository,
             effects = effects,
+            currentServerGroupFp = { "test-fp" },
             clock = { nowMs }
         )
     }
@@ -322,19 +323,48 @@ class SessionSwitcherTest {
         assertTrue("no saveDraft when previousSessionId is null", callbacks.saveDraftCalls.isEmpty())
     }
 
-    // ── Step 3: cache restore ───────────────────────────────────────────────
+    // ── Step 3 (R-20 Phase 1): verify-before-hydrate effect ─────────────────
+    // Phase 1: switchTo no longer synchronously seeds the chat slice from
+    // the LRU; it emits a VerifyAndHydrate effect. The handler in
+    // AppCore.dispatchSessionEffect runs cacheRepository.verifyAndLoad and
+    // ONLY on Verified copies the cached window into the slice. The tests
+    // below assert the effect is emitted with the right (fp, sid, createdAt);
+    // the chat slice stays empty until the handler runs (asserted for
+    // regression — the user must never see unverified cached content).
 
     @Test
-    fun `switchTo restores cached window on cache hit`() {
+    fun `switchTo emits VerifyAndHydrate with createdAt from the target session`() {
+        val created = 1_700_000L
         seed {
             it.copy(
-            currentSessionId = null,
-            sessions = listOf(Session(id = "s1", directory = "/d"))
+                currentSessionId = null,
+                sessions = listOf(Session(id = "s1", directory = "/d", time = Session.TimeInfo(created = created)))
             )
         }
-        val cachedMessages = listOf(Message(id = "cached-m1", role = "user"))
-        switcher.writeSessionWindow("s1", CachedSessionWindow(
-            messages = cachedMessages,
+
+        switcher.switchTo("s1")
+
+        val verify = collectedEffects.filterIsInstance<ControllerEffect.VerifyAndHydrate>().singleOrNull()
+        assertNotNull("VerifyAndHydrate must be emitted", verify)
+        assertEquals("s1", verify!!.sessionId)
+        assertEquals("test-fp", verify.serverGroupFp)
+        assertEquals(created, verify.createdAt)
+    }
+
+    @Test
+    fun `switchTo does NOT synchronously seed the chat slice from the LRU`() {
+        // Privacy regression (plan §0 N2 verify-before-hydrate): even with a
+        // cached window present, switchTo must NOT hydrate the chat slice
+        // synchronously — the cache may be stale or fingerprint-mismatched,
+        // and the user must not see unverified content even for one frame.
+        seed {
+            it.copy(
+                currentSessionId = null,
+                sessions = listOf(Session(id = "s1", directory = "/d"))
+            )
+        }
+        switcher.writeSessionWindow("test-fp", "s1", CachedSessionWindow(
+            messages = listOf(Message(id = "cached-m1", role = "user")),
             partsByMessage = mapOf("cached-m1" to emptyList()),
             olderMessagesCursor = "cursor-abc",
             hasMoreMessages = true
@@ -342,44 +372,30 @@ class SessionSwitcherTest {
 
         switcher.switchTo("s1")
 
-        assertEquals("cached-m1", slices.chat.value.messages[0].id)
-        assertEquals("cursor-abc", slices.chat.value.olderMessagesCursor)
-        assertTrue(slices.chat.value.hasMoreMessages)
+        // Slice stays empty — VerifyAndHydrate handler (run by AppCore, not
+        // tested here) is responsible for the verified hydrate.
+        assertTrue("chat messages must stay empty until verify completes",
+            slices.chat.value.messages.isEmpty())
     }
 
     @Test
-    fun `switchTo loads messages with resetLimit=true on cache miss`() {
+    fun `switchTo does NOT emit LoadMessages - the VerifyAndHydrate handler owns it`() {
+        // Phase 1 plan §3 v4 round-3: "Step 7 移除 LoadMessages — LoadMessages
+        // 由 handler 唯一调度，禁 switchTo 同步发". Emitting LoadMessages here
+        // would race the handler's verify-and-then-load.
         seed {
             it.copy(
-            currentSessionId = null,
-            sessions = listOf(Session(id = "s1", directory = "/d"))
+                currentSessionId = null,
+                sessions = listOf(Session(id = "s1", directory = "/d"))
             )
         }
 
         switcher.switchTo("s1")
 
-        assertEquals(1, callbacks.loadMessagesCalls.size)
-        assertEquals("s1", callbacks.loadMessagesCalls[0].first)
-        assertTrue("resetLimit=true on cache miss", callbacks.loadMessagesCalls[0].second)
-    }
-
-    @Test
-    fun `switchTo loads messages with resetLimit=false on cache hit`() {
-        seed {
-            it.copy(
-            currentSessionId = null,
-            sessions = listOf(Session(id = "s1", directory = "/d"))
-            )
-        }
-        switcher.writeSessionWindow("s1", CachedSessionWindow(
-            messages = emptyList(), partsByMessage = emptyMap(),
-            olderMessagesCursor = null, hasMoreMessages = false
-        ))
-
-        switcher.switchTo("s1")
-
-        assertEquals(1, callbacks.loadMessagesCalls.size)
-        assertFalse("resetLimit=false on cache hit", callbacks.loadMessagesCalls[0].second)
+        assertTrue(
+            "switchTo must not emit LoadMessages (VerifyAndHydrate handler owns it)",
+            collectedEffects.none { it is ControllerEffect.LoadMessages }
+        )
     }
 
     // ── Step 4: directory-only session upsert ──────────────────────────────
@@ -427,7 +443,11 @@ class SessionSwitcherTest {
     // ── Step 7: load callbacks ──────────────────────────────────────────────
 
     @Test
-    fun `switchTo triggers loadMessages loadSessionStatus loadChildSessions`() {
+    fun `switchTo triggers VerifyAndHydrate loadSessionStatus loadChildSessions`() {
+        // Phase 1: LoadMessages is no longer emitted by switchTo (the
+        // VerifyAndHydrate handler owns it). The remaining Step 7 emissions
+        // are LoadSessionStatus + LoadChildSessions — assert those + the
+        // new VerifyAndHydrate effect.
         seed {
             it.copy(
             currentSessionId = null,
@@ -437,9 +457,13 @@ class SessionSwitcherTest {
 
         switcher.switchTo("s1")
 
-        assertEquals(1, callbacks.loadMessagesCalls.size)
         assertEquals(1, callbacks.loadSessionStatusCalls)
         assertEquals(listOf("s1"), callbacks.loadChildSessionsCalls)
+        assertEquals(
+            "VerifyAndHydrate emitted exactly once (Phase 1 replaces LoadMessages)",
+            1,
+            collectedEffects.count { it is ControllerEffect.VerifyAndHydrate }
+        )
     }
 
     // ── Step 6.5: pending-questions refresh ────────────────────────────────
@@ -475,18 +499,18 @@ class SessionSwitcherTest {
         // so the relative order between same-domain calls and cross-domain
         // effects is observable across the two recordings).
         val loadPendingIdx = collectedEffects.indexOfFirst { it is ControllerEffect.LoadPendingQuestions }
-        val loadMsgIdx = collectedEffects.indexOfFirst { it is ControllerEffect.LoadMessages }
+        val verifyIdx = collectedEffects.indexOfFirst { it is ControllerEffect.VerifyAndHydrate }
         assertTrue(
             "loadPendingQuestions must be recorded in collectedEffects (got $collectedEffects)",
             loadPendingIdx >= 0
         )
         assertTrue(
-            "loadMessages must be recorded in collectedEffects (got $collectedEffects)",
-            loadMsgIdx >= 0
+            "VerifyAndHydrate must be recorded in collectedEffects (got $collectedEffects)",
+            verifyIdx >= 0
         )
         assertTrue(
-            "loadPendingQuestions (idx=$loadPendingIdx) must fire BEFORE loadMessages (idx=$loadMsgIdx); effects=$collectedEffects",
-            loadPendingIdx < loadMsgIdx
+            "VerifyAndHydrate (Step 3, idx=$verifyIdx) must fire BEFORE loadPendingQuestions (Step 6.5, idx=$loadPendingIdx); effects=$collectedEffects",
+            verifyIdx < loadPendingIdx
         )
         assertFalse(
             "clearPendingQuestions must never appear in callOrder; the callback was removed",
@@ -722,7 +746,7 @@ class SessionSwitcherTest {
         // But since we're using RecordingCallbacks (which doesn't actually call
         // writeSessionWindow), we write directly:
         for (i in 1..12) {
-            switcher.writeSessionWindow("s$i", CachedSessionWindow(
+            switcher.writeSessionWindow("test-fp", "s$i", CachedSessionWindow(
                 messages = listOf(Message(id = "m$i", role = "user")),
                 partsByMessage = emptyMap(), olderMessagesCursor = null, hasMoreMessages = false
             ))
@@ -730,7 +754,7 @@ class SessionSwitcherTest {
         assertEquals(12, switcher.sessionWindowCacheSize())
 
         // Write one more — should evict the LRU (s1)
-        switcher.writeSessionWindow("s13", CachedSessionWindow(
+        switcher.writeSessionWindow("test-fp", "s13", CachedSessionWindow(
             messages = emptyList(), partsByMessage = emptyMap(),
             olderMessagesCursor = null, hasMoreMessages = false
         ))
@@ -742,7 +766,7 @@ class SessionSwitcherTest {
 
     @Test
     fun `clearSessionWindowCache drops all entries`() {
-        switcher.writeSessionWindow("s1", CachedSessionWindow(
+        switcher.writeSessionWindow("test-fp", "s1", CachedSessionWindow(
             messages = emptyList(), partsByMessage = emptyMap(),
             olderMessagesCursor = null, hasMoreMessages = false
         ))
@@ -752,6 +776,53 @@ class SessionSwitcherTest {
 
         assertEquals(0, switcher.sessionWindowCacheSize())
     }
+
+    // ── R-20 Phase 1 review-fix #2: writeSessionWindow uses captured fp ────
+
+    @Test
+    fun `review-fix 2 writeSessionWindow keys by explicit fp not currentServerGroupFp`() {
+        // The writeSessionWindow signature takes an explicit serverGroupFp
+        // (review-fix #2). The prior signature read currentServerGroupFp()
+        // internally — a host switch mid-flight would route the old fetch's
+        // data into the NEW group's LRU slot. Now the caller passes the
+        // CAPTURED fp so the write lands in the correct group.
+        val window = CachedSessionWindow(
+            messages = emptyList(), partsByMessage = emptyMap(),
+            olderMessagesCursor = null, hasMoreMessages = false
+        )
+        // Write under "old-fp" explicitly (captured at hook-factory time).
+        switcher.writeSessionWindow("old-fp", "s1", window)
+        // Switch the currentServerGroupFp provider to "new-fp" (simulating a
+        // host switch). The entry should still be under "old-fp", NOT "new-fp".
+        val switcher2 = SessionSwitcher(
+            store = store,
+            settingsManager = settingsManager,
+            repository = repository,
+            effects = effects,
+            currentServerGroupFp = { "new-fp" },
+        )
+        // switcher2 shares the same sessionWindowCache (same store/controller instance pair)?
+        // No — each SessionSwitcher has its own LRU. So we verify on `switcher`:
+        // the entry is under old-fp.
+        assertEquals(1, switcher.sessionWindowCacheSize())
+        // peekSessionWindow reads under currentServerGroupFp() = "test-fp",
+        // so it won't find the "old-fp" entry. Verify the write went to old-fp
+        // by checking cache size is 1 and a second write under new-fp creates
+        // a separate entry.
+        switcher.writeSessionWindow("new-fp", "s1", window)
+        assertEquals(
+            "writes under different fps create independent LRU entries",
+            2,
+            switcher.sessionWindowCacheSize(),
+        )
+    }
+
+    // ── R-20 Phase 1 review-fix #3: directorySessions createdAt lookup ─────
+    // (Tested at the AppCore.makeCacheHook level in AppCoreDispatcherTest /
+    // ChatViewModelTest; SessionSwitcher.writeSessionWindow itself doesn't
+    // look up metadata — it just writes. The fix is in AppCore.makeCacheHook +
+    // SessionViewModel.launchLoadMessagesForEffect where session lookup
+    // changed from sessions-only to sessions+directorySessions.)
 
     // ── Callback ordering (Step 2 before Step 7 before Step 8) ──────────────
 
@@ -778,12 +849,12 @@ class SessionSwitcherTest {
         // The chatFlow.currentSessionId write also happens in Step 2 (before
         // any effect emission); verified post-hoc below.
         assertTrue("saveDraft fired", callbacks.saveDraftCalls.isNotEmpty())
-        val loadMsgIdx = collectedEffects.indexOfFirst { it is ControllerEffect.LoadMessages }
-        assertTrue("loadMessages effect emitted", loadMsgIdx >= 0)
+        val verifyIdx = collectedEffects.indexOfFirst { it is ControllerEffect.VerifyAndHydrate }
+        assertTrue("VerifyAndHydrate effect emitted (Phase 1: replaces LoadMessages)", verifyIdx >= 0)
         // Both settings calls run synchronously before any effect emission.
         assertEquals("saveDraft called exactly once", 1, callbacks.saveDraftCalls.size)
         assertEquals("currentSessionId set on chatFlow", "new", slices.chat.value.currentSessionId)
-        assertTrue("loadMessages emitted", collectedEffects.any { it is ControllerEffect.LoadMessages })
+        assertTrue("VerifyAndHydrate emitted", collectedEffects.any { it is ControllerEffect.VerifyAndHydrate })
     }
 
     // ── RecordingCallbacks (batch 3b: facade over mockk + collectedEffects) ─

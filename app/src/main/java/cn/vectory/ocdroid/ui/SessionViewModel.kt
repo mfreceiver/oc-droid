@@ -3,11 +3,14 @@ package cn.vectory.ocdroid.ui
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import cn.vectory.ocdroid.R
+import cn.vectory.ocdroid.data.cache.CacheRepository
+import cn.vectory.ocdroid.data.repository.HostProfileStore
 import cn.vectory.ocdroid.data.repository.OpenCodeRepository
 import cn.vectory.ocdroid.di.UiApplicationScope
 import cn.vectory.ocdroid.ui.controller.ComposerController
 import cn.vectory.ocdroid.ui.controller.ConnectionCoordinator
 import cn.vectory.ocdroid.ui.controller.SessionSwitcher
+import cn.vectory.ocdroid.util.DebugLog
 import cn.vectory.ocdroid.util.SettingsManager
 import cn.vectory.ocdroid.util.runSuspendCatching
 import dagger.hilt.android.lifecycle.HiltViewModel
@@ -50,6 +53,12 @@ class SessionViewModel @Inject constructor(
     private val repository: OpenCodeRepository,
     private val settingsManager: SettingsManager,
     private val effectBus: SharedEffectBus,
+    /** R-20 Phase 1: persistent cache mirror — needed so this VM's
+     *  loadSessions → onLoadMessages path persists newly-fetched windows
+     *  to the encrypted cache, parallel to AppCore.loadMessagesForEffect. */
+    private val cacheRepository: CacheRepository,
+    /** R-20 Phase 1: serverGroupFp source for the cache mirror hook. */
+    private val hostProfileStore: HostProfileStore,
     @UiApplicationScope private val appScope: CoroutineScope,
 ) : ViewModel() {
 
@@ -66,6 +75,8 @@ class SessionViewModel @Inject constructor(
         core.repository,
         core.settingsManager,
         core.effectBus,
+        core.cacheRepository,
+        core.hostProfileStore,
         core.appScope,
     )
 
@@ -198,23 +209,42 @@ class SessionViewModel @Inject constructor(
     }
 
     fun archiveSession(sessionId: String) {
+        // glm-3 🟡#1: single-read fp (was inline lambda double-read currentProfile).
+        val fp = hostProfileStore.currentProfile().serverGroupFp.ifBlank { hostProfileStore.currentProfile().id }
         launchSetSessionArchived(
             appScope, repository, store.slices, settingsManager, sessionId, archived = true,
-            EventEmitter { event -> effectBus.tryEmitUiEvent(event) }
+            EventEmitter { event -> effectBus.tryEmitUiEvent(event) },
+            // R-20 Phase 1 (C3): emit EvictSession per archived subtree id so
+            // the cache (memory + persistent) is cleared for dismissed sessions.
+            currentServerGroupFp = { fp },
+            emitEffect = { effect -> effectBus.tryEmitEffect(effect) },
         )
     }
 
     fun restoreSession(sessionId: String) {
+        // glm-3 🟡#1: single-read fp.
+        val fp = hostProfileStore.currentProfile().serverGroupFp.ifBlank { hostProfileStore.currentProfile().id }
         launchSetSessionArchived(
             appScope, repository, store.slices, settingsManager, sessionId, archived = false,
-            EventEmitter { event -> effectBus.tryEmitUiEvent(event) }
+            EventEmitter { event -> effectBus.tryEmitUiEvent(event) },
+            // C3: restore does not emit EvictSession (gated on isArchive inside
+            // launchSetSessionArchived); pass the providers anyway for symmetry
+            // so a future restore-also-evicts change is a one-liner.
+            currentServerGroupFp = { fp },
+            emitEffect = { effect -> effectBus.tryEmitEffect(effect) },
         )
     }
 
     fun deleteSession(sessionId: String) {
+        // glm-3 🟡#1: single-read fp.
+        val fp = hostProfileStore.currentProfile().serverGroupFp.ifBlank { hostProfileStore.currentProfile().id }
         launchDeleteSession(
             appScope, repository, store.slices, settingsManager, sessionId, ::selectSession,
-            EventEmitter { event -> effectBus.tryEmitUiEvent(event) }
+            EventEmitter { event -> effectBus.tryEmitUiEvent(event) },
+            // R-20 Phase 1 (C3): emit EvictSession on delete so the cache is
+            // cleared for the removed session (privacy + storage hygiene).
+            currentServerGroupFp = { fp },
+            emitEffect = { effect -> effectBus.tryEmitEffect(effect) },
         )
     }
 
@@ -282,6 +312,8 @@ class SessionViewModel @Inject constructor(
      * session. Behaviour preserved verbatim.
      */
     fun loadSessions() {
+        // glm-3 🟡#1: single-read fp.
+        val fp = hostProfileStore.currentProfile().serverGroupFp.ifBlank { hostProfileStore.currentProfile().id }
         launchLoadSessions(
             scope = appScope,
             repository = repository,
@@ -291,14 +323,47 @@ class SessionViewModel @Inject constructor(
             onLoadSessionStatus = { launchLoadSessionStatus(appScope, repository, store.slices) },
             onLoadMessages = { sessionId -> launchLoadMessagesForEffect(sessionId) },
             emit = EventEmitter { event -> effectBus.tryEmitUiEvent(event) },
+            // R-20 Phase 1 (C7): mirror AppCore.loadSessionsForEffect's wiring
+            // so the currentSessionId fingerprint verify runs on this VM's
+            // loadSessions path too. AppCore holds the cacheRepository
+            // singleton; this VM holds its own (Hilt-bound same instance).
+            cacheRepository = cacheRepository,
+            currentServerGroupFp = { fp },
         )
     }
 
     /** §R-19 P2-5: extracted from the former AppCore.loadMessagesForEffect so
      *  [loadSessions]'s onLoadMessages callback stays self-contained. Mirrors
      *  the AppCoreOrchestration.kt helper's body (which is preserved verbatim
-     *  for AppCore's own dispatch helpers). */
-    private fun launchLoadMessagesForEffect(sessionId: String) {
+     *  for AppCore's own dispatch helpers).
+     *
+     *  R-20 Phase 1: onCacheWindow mirrors the in-memory LRU write to the
+     *  persistent encrypted cache. fp captured at this call (current host)
+     *  so a profile switch mid-flight cannot re-key a write to the wrong
+     *  group. Mirrors [AppCore.makeCacheHook]; the body is duplicated rather
+     *  than injected because the §R-19 P2-5 design rule keeps AppCore out of
+     *  this VM's constructor (precise injection only).
+     *
+     *  §review-fix #2 (gpter #2): memory LRU write uses the CAPTURED fp (was
+     *  re-reading currentServerGroupFp via SessionSwitcher — now passes fp
+     *  explicitly). §review-fix #3 (gpter #3): session metadata lookup
+     *  includes directorySessions. */
+     private fun launchLoadMessagesForEffect(sessionId: String) {
+         val fp = hostProfileStore.currentProfile().serverGroupFp.ifBlank { hostProfileStore.currentProfile().id }
+         val cacheHook: (String, CachedSessionWindow) -> Unit = { sid, window ->
+             sessionSwitcher.writeSessionWindow(fp, sid, window)
+             // §review-fix #3: include directorySessions so directory-only
+             // sessions get their real createdAt/workdir cached.
+             val sessionList = store.sessionListFlow.value
+             val session = (sessionList.sessions + sessionList.directorySessions.values.flatten())
+                 .firstOrNull { it.id == sid }
+             val createdAt = session?.time?.created
+             val workdir = session?.directory ?: settingsManager.currentWorkdir ?: ""
+             appScope.launch {
+                 runCatching { cacheRepository.putSessionWindow(fp, sid, createdAt, workdir, window) }
+                     .onFailure { DebugLog.e(TAG, "cache write failed for fp=$fp sid=$sid", it) }
+             }
+         }
         launchLoadMessages(
             scope = appScope,
             repository = repository,
@@ -306,8 +371,11 @@ class SessionViewModel @Inject constructor(
             sessionId = sessionId,
             resetLimit = true,
             settingsManager = settingsManager,
-            onCacheWindow = sessionSwitcher::writeSessionWindow,
+            onCacheWindow = cacheHook,
             emit = EventEmitter { event -> effectBus.tryEmitUiEvent(event) },
+            // gpter 复审 final-fix: compound-key guard.
+            expectedServerGroupFp = fp,
+            currentServerGroupFp = { hostProfileStore.currentProfile().serverGroupFp.ifBlank { hostProfileStore.currentProfile().id } },
         )
     }
 

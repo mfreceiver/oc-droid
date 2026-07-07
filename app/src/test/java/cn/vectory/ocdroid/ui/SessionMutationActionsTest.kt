@@ -305,6 +305,167 @@ class SessionMutationActionsTest {
         assertEquals(R.string.error_delete_session_failed, emitted.filterIsInstance<UiEvent.Error>().single().resId)
     }
 
+    // ── R-20 Phase 1 (C3): EvictSession emission on archive / delete ──────────
+
+    @Test
+    fun `C3 launchSetSessionArchived emits EvictSession per subtree id on archive`() = runTest {
+        // archive=true → parentFirst=false → children first, then parent.
+        // Subtree = {c1, c2, p} (3 ids) → 3 EvictSession emissions, one per id.
+        val parent = Session(id = "p", directory = "/x")
+        val c1 = Session(id = "c1", directory = "/x", parentId = "p")
+        val c2 = Session(id = "c2", directory = "/x", parentId = "p")
+        store.mutateSessionList { it.copy(sessions = listOf(parent, c1, c2)) }
+        coEvery { repository.updateSessionArchived("c1", any()) } returns Result.success(c1.copy(time = Session.TimeInfo(archived = 1L)))
+        coEvery { repository.updateSessionArchived("c2", any()) } returns Result.success(c2.copy(time = Session.TimeInfo(archived = 1L)))
+        coEvery { repository.updateSessionArchived("p", any()) } returns Result.success(parent.copy(time = Session.TimeInfo(archived = 1L)))
+        val emittedEffects = mutableListOf<cn.vectory.ocdroid.ui.controller.ControllerEffect>()
+
+        launchSetSessionArchived(
+            scope, repository, slices, settingsManager,
+            sessionId = "p", archived = true,
+            emit = emit,
+            currentServerGroupFp = { "g-test" },
+            emitEffect = { emittedEffects.add(it) },
+        )
+        advanceUntilIdle()
+
+        val evictions = emittedEffects.filterIsInstance<cn.vectory.ocdroid.ui.controller.ControllerEffect.EvictSession>()
+        assertEquals(
+            "archive subtree of 3 ids must emit 3 EvictSession effects (one per archived id)",
+            3,
+            evictions.size,
+        )
+        assertEquals(
+            "evicted ids must cover the full subtree",
+            setOf("p", "c1", "c2"),
+            evictions.map { it.sessionId }.toSet(),
+        )
+        assertEquals(
+            "every EvictSession must carry the currentServerGroupFp",
+            setOf("g-test"),
+            evictions.map { it.serverGroupFp }.toSet(),
+        )
+    }
+
+    @Test
+    fun `C3 launchSetSessionArchived does NOT emit EvictSession on restore`() = runTest {
+        // archived=false (restore): the user wants to see the session again;
+        // evicting its cache would defeat the purpose. EvictSession MUST NOT
+        // fire on the restore path (gated on isArchive inside onSuccess).
+        val session = Session(id = "s1", directory = "/x", time = Session.TimeInfo(archived = 1L))
+        store.mutateSessionList { it.copy(sessions = listOf(session)) }
+        coEvery { repository.updateSessionArchived("s1", any()) } returns Result.success(session.copy(time = Session.TimeInfo(archived = null)))
+        val emittedEffects = mutableListOf<cn.vectory.ocdroid.ui.controller.ControllerEffect>()
+
+        launchSetSessionArchived(
+            scope, repository, slices, settingsManager,
+            sessionId = "s1", archived = false,
+            emit = emit,
+            currentServerGroupFp = { "g-test" },
+            emitEffect = { emittedEffects.add(it) },
+        )
+        advanceUntilIdle()
+
+        assertTrue(
+            "restore must not emit any EvictSession",
+            emittedEffects.filterIsInstance<cn.vectory.ocdroid.ui.controller.ControllerEffect.EvictSession>().isEmpty(),
+        )
+    }
+
+    @Test
+    fun `C3 launchSetSessionArchived skips EvictSession when providers are null - legacy caller`() = runTest {
+        // Backward-compat: callers that haven't been migrated (no
+        // currentServerGroupFp / emitEffect) MUST behave as before (no
+        // eviction). This protects any test/caller that hasn't been updated.
+        val session = Session(id = "s1", directory = "/x")
+        store.mutateSessionList { it.copy(sessions = listOf(session)) }
+        coEvery { repository.updateSessionArchived("s1", any()) } returns Result.success(session.copy(time = Session.TimeInfo(archived = 1L)))
+        val emittedEffects = mutableListOf<cn.vectory.ocdroid.ui.controller.ControllerEffect>()
+
+        launchSetSessionArchived(
+            scope, repository, slices, settingsManager,
+            sessionId = "s1", archived = true,
+            emit = emit,
+            // currentServerGroupFp + emitEffect intentionally omitted (legacy caller).
+        )
+        advanceUntilIdle()
+
+        assertTrue(
+            "legacy caller path must not emit any EvictSession",
+            emittedEffects.filterIsInstance<cn.vectory.ocdroid.ui.controller.ControllerEffect.EvictSession>().isEmpty(),
+        )
+    }
+
+    @Test
+    fun `C3 launchSetSessionArchived does NOT emit EvictSession on failed archive`() = runTest {
+        // The eviction must fire AFTER the REST call confirms success (plan
+        // §3 N6: "避免乐观清缓存"). A failed archive MUST NOT evict.
+        val session = Session(id = "s1", directory = "/x")
+        store.mutateSessionList { it.copy(sessions = listOf(session)) }
+        coEvery { repository.updateSessionArchived(any(), any()) } returns Result.failure(IllegalStateException("denied"))
+        val emittedEffects = mutableListOf<cn.vectory.ocdroid.ui.controller.ControllerEffect>()
+
+        launchSetSessionArchived(
+            scope, repository, slices, settingsManager,
+            sessionId = "s1", archived = true,
+            emit = emit,
+            currentServerGroupFp = { "g-test" },
+            emitEffect = { emittedEffects.add(it) },
+        )
+        advanceUntilIdle()
+
+        assertTrue(
+            "failed archive must not emit any EvictSession (no optimistic eviction)",
+            emittedEffects.filterIsInstance<cn.vectory.ocdroid.ui.controller.ControllerEffect.EvictSession>().isEmpty(),
+        )
+    }
+
+    @Test
+    fun `C3 launchDeleteSession emits exactly one EvictSession on success`() = runTest {
+        val session = Session(id = "s1", directory = "/x")
+        store.mutateSessionList { it.copy(sessions = listOf(session)) }
+        coEvery { repository.deleteSession(any()) } returns Result.success(Unit)
+        val emittedEffects = mutableListOf<cn.vectory.ocdroid.ui.controller.ControllerEffect>()
+
+        launchDeleteSession(
+            scope, repository, slices, settingsManager,
+            sessionId = "s1", onSelectSession = {},
+            emit = emit,
+            currentServerGroupFp = { "g-test" },
+            emitEffect = { emittedEffects.add(it) },
+        )
+        advanceUntilIdle()
+
+        val evictions = emittedEffects.filterIsInstance<cn.vectory.ocdroid.ui.controller.ControllerEffect.EvictSession>()
+        assertEquals("delete must emit exactly one EvictSession", 1, evictions.size)
+        assertEquals("s1", evictions.single().sessionId)
+        assertEquals("g-test", evictions.single().serverGroupFp)
+    }
+
+    @Test
+    fun `C3 launchDeleteSession does NOT emit EvictSession on failure`() = runTest {
+        // Same optimistic-eviction guard as archive: a failed delete MUST NOT
+        // evict (the session still exists server-side).
+        val session = Session(id = "s1", directory = "/x")
+        store.mutateSessionList { it.copy(sessions = listOf(session)) }
+        coEvery { repository.deleteSession(any()) } returns Result.failure(IllegalStateException("denied"))
+        val emittedEffects = mutableListOf<cn.vectory.ocdroid.ui.controller.ControllerEffect>()
+
+        launchDeleteSession(
+            scope, repository, slices, settingsManager,
+            sessionId = "s1", onSelectSession = {},
+            emit = emit,
+            currentServerGroupFp = { "g-test" },
+            emitEffect = { emittedEffects.add(it) },
+        )
+        advanceUntilIdle()
+
+        assertTrue(
+            "failed delete must not emit any EvictSession",
+            emittedEffects.filterIsInstance<cn.vectory.ocdroid.ui.controller.ControllerEffect.EvictSession>().isEmpty(),
+        )
+    }
+
     // ── launchSendMessage ─────────────────────────────────────────────────────
 
     @Test

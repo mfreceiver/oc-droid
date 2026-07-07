@@ -9,9 +9,12 @@ package cn.vectory.ocdroid.ui
  */
 
 import cn.vectory.ocdroid.R
+import cn.vectory.ocdroid.data.cache.CacheRepository
+import cn.vectory.ocdroid.data.cache.FingerprintResult
 import cn.vectory.ocdroid.data.model.Session
 import cn.vectory.ocdroid.data.model.toCacheEntry
 import cn.vectory.ocdroid.data.repository.OpenCodeRepository
+import cn.vectory.ocdroid.util.DebugLog
 import cn.vectory.ocdroid.util.SettingsManager
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.flow.update
@@ -65,7 +68,18 @@ internal fun launchLoadSessions(
     onSelectSession: (String) -> Unit,
     onLoadSessionStatus: () -> Unit,
     onLoadMessages: (String) -> Unit,
-    emit: EventEmitter = EventEmitter { }
+    emit: EventEmitter = EventEmitter { },
+    /**
+     * R-20 Phase 1 (C7): persistent cache for the currentSessionId fingerprint
+     * self-consistency check. Null = caller has not been migrated yet; the
+     * verify is skipped (preserves the legacy behavior for unmigrated callers).
+     */
+    cacheRepository: CacheRepository? = null,
+    /**
+     * R-20 Phase 1 (C7): provider for the current host's serverGroupFp. Used
+     * to key the verifyFingerprint call. Null = caller has not been migrated.
+     */
+    currentServerGroupFp: (() -> String)? = null,
 ) {
 
     scope.launch {
@@ -131,8 +145,49 @@ internal fun launchLoadSessions(
                     // created, or a directory session), tolerate it — reload
                     // its messages but do NOT silently reselect first(). #10.
                     currentSessionId != null -> {
-                        onLoadSessionStatus()
-                        onLoadMessages(currentSessionId)
+                        // R-20 Phase 1 (C7, plan §3 矩阵 "session list 到达"
+                        // 行): verify the currentSessionId's cache fingerprint
+                        // against the freshly-fetched server copy. This is a
+                        // CACHE SELF-CONSISTENCY check (defends against DB
+                        // corruption / fp drift / a stale cached window whose
+                        // session was recreated with a different createdAt).
+                        // The full cross-connection MERGE is Phase 5's job
+                        // (gap-aware); here we only reconcile the one
+                        // currentSessionId. MismatchEvicted → drop
+                        // currentSessionId (the cached window is stale; the
+                        // next switchTo / loadMessages will cold-start it).
+                        // Verified / UnknownColdStart → no-op.
+                        if (cacheRepository != null && currentServerGroupFp != null) {
+                            val targetSession = refreshedSessions.firstOrNull { it.id == currentSessionId }
+                            val createdAt = targetSession?.time?.created
+                            val fp = currentServerGroupFp()
+                            // Suspend: we're already inside scope.launch. Wrap
+                            // in runCatching so a cache IO failure never blocks
+                            // the load-sessions fan-out.
+                            val verifyResult = runCatching {
+                                cacheRepository.verifyFingerprint(fp, currentSessionId, createdAt)
+                            }.getOrNull()
+                            if (verifyResult is FingerprintResult.MismatchEvicted) {
+                                DebugLog.i(
+                                    "SessionListActions",
+                                    "loadSessions: currentSessionId=$currentSessionId fingerprint mismatch → clearing currentSessionId (cold-start fallback)"
+                                )
+                                slices.mutateChat { c -> c.copy(currentSessionId = null, messages = emptyList(), partsByMessage = emptyMap()) }
+                                // After clearing, fall through to the
+                                // first-select path so the user lands on a
+                                // valid session instead of the empty state
+                                // (mirrors the cold-start UX).
+                                if (slices.composer.value.draftWorkdir == null && refreshedSessions.isNotEmpty()) {
+                                    onSelectSession(refreshedSessions.first().id)
+                                }
+                            } else {
+                                onLoadSessionStatus()
+                                onLoadMessages(currentSessionId)
+                            }
+                        } else {
+                            onLoadSessionStatus()
+                            onLoadMessages(currentSessionId)
+                        }
                     }
                     else -> {
                         slices.mutateChat { c -> c.copy(currentSessionId = null, messages = emptyList(), partsByMessage = emptyMap()) }

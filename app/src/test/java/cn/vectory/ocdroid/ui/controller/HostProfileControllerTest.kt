@@ -89,13 +89,20 @@ class HostProfileControllerTest {
     private val recordedEvents = mutableListOf<UiEvent>()
 
     // Real data-class fixtures (avoid relaxed-mock proxies for value types).
-    private val profileA = HostProfile(id = "p-A", name = "Host A", serverUrl = "http://a:4096")
+    // R-20 Phase 1: explicit serverGroupFp so the two profiles are DIFFERENT
+    // groups (selectHostProfile's 4-step异组 path needs this to fire). Without
+    // explicit fps both default to "" → same group → the purgePerHostState
+    // preserveServerGroupData branch keeps server data, breaking tests that
+    // expect the full purge (currentSessionId null, ClearSessionWindowCache
+    // emitted, etc).
+    private val profileA = HostProfile(id = "p-A", name = "Host A", serverUrl = "http://a:4096", serverGroupFp = "g-A")
     private val profileB = HostProfile(
         id = "p-B",
         name = "Host B",
         serverUrl = "http://b:4096",
         basicAuth = BasicAuthConfig(username = "user-b", passwordId = "p-B"),
-        allowInsecureConnections = true
+        allowInsecureConnections = true,
+        serverGroupFp = "g-B"
     )
 
     @Before
@@ -135,6 +142,9 @@ class HostProfileControllerTest {
             settingsManager = settingsManager,
             trafficTracker = trafficTracker,
             effects = effects,
+            currentServerGroupFp = { "test-fp" },
+            appContext = io.mockk.mockk<android.content.Context>(relaxed = true),
+            cacheRepository = io.mockk.mockk<cn.vectory.ocdroid.data.cache.CacheRepository>(relaxed = true),
         )
         // Default store seeding; tests re-stub as needed (last stub wins).
         seedStore(listOf(profileA, profileB), currentId = "p-A")
@@ -515,8 +525,13 @@ class HostProfileControllerTest {
             openSessionIds = listOf("sess-old")
             )
         }
-        // After deleting the current, the store picks profileB as the new current.
-        seedStore(listOf(profileB), currentId = "p-B")
+        // §review-fix #6: keep BOTH profiles in store.profiles() so
+        // deleteHostProfile can capture deletedProfile.serverGroupFp. The
+        // prior seedStore(listOf(profileB)) re-stub dropped profileA before
+        // the production code could read its fp, leaving deletedFp=null and
+        // skipping EvictGroup. Only re-stub currentProfile (the replacement
+        // host the store picks after deletion).
+        every { store.currentProfile() } returns profileB
 
         controller.deleteHostProfile("p-A")
         scope.testScheduler.advanceUntilIdle()
@@ -525,7 +540,16 @@ class HostProfileControllerTest {
         verify { repository.configure(profileB.serverUrl, any(), any(), profileB.allowInsecureConnections) }
         // wasCurrent → purge + forceReconnect.
         assertEquals(1, collectedEffects.filterIsInstance<ControllerEffect.ForceReconnect>().size)
-        assertEquals(1, collectedEffects.filterIsInstance<ControllerEffect.ClearSessionWindowCache>().size)
+        // §review-fix #5/#6: ClearSessionWindowCache was removed from
+        // purgePerHostState (over-broad nuke). EvictGroup(g-A) replaces it
+        // (group-scoped clear) — profileA's group has no remaining siblings
+        // (profilesInGroup is a relaxed mock → empty), so EvictGroup fires.
+        assertEquals(
+            "EvictGroup(g-A) replaces ClearSessionWindowCache (group-scoped)",
+            1,
+            collectedEffects.filterIsInstance<ControllerEffect.EvictGroup>().size,
+        )
+        assertEquals("g-A", collectedEffects.filterIsInstance<ControllerEffect.EvictGroup>().single().serverGroupFp)
         // Per-host state purged.
         assertNull("currentSessionId purged", slices.chat.value.currentSessionId)
         assertTrue("sessions purged", slices.sessionList.value.sessions.isEmpty())
@@ -619,7 +643,21 @@ class HostProfileControllerTest {
         controller.selectHostProfile("p-B")
         runPending()
 
-        assertEquals(1, collectedEffects.filterIsInstance<ControllerEffect.ClearSessionWindowCache>().size)
+        // §review-fix #5: ClearSessionWindowCache was removed from
+        // purgePerHostState (over-broad nuke replaced by group-scoped
+        // EvictGroup). profileA (g-A) → profileB (g-B) is cross-group →
+        // EvictGroup(g-A) fires.
+        assertEquals(
+            "EvictGroup(g-A) replaces ClearSessionWindowCache",
+            1,
+            collectedEffects.filterIsInstance<ControllerEffect.EvictGroup>().size,
+        )
+        assertEquals("g-A", collectedEffects.filterIsInstance<ControllerEffect.EvictGroup>().single().serverGroupFp)
+        // ClearSessionWindowCache is no longer emitted here.
+        assertTrue(
+            "ClearSessionWindowCache must NOT fire (EvictGroup handles group-scoped clear)",
+            collectedEffects.filterIsInstance<ControllerEffect.ClearSessionWindowCache>().isEmpty(),
+        )
         // §R18 Phase 2-F: currentSessionId is no longer written to
         // SettingsManager here (purgePerHostState clears it on the chat slice,
         // asserted below); the AppCore collector persists non-null changes only.
@@ -631,20 +669,23 @@ class HostProfileControllerTest {
     }
 
     @Test
-    fun `selectHostProfile forces a reconnect and the callback order is cache-clear before sse-cancel before reconnect`() {
+    fun `selectHostProfile forces a reconnect and the callback order is evict-group before sse-cancel before reconnect`() {
         every { store.select("p-B") } returns profileB
 
         controller.selectHostProfile("p-B")
         runPending()
 
         assertEquals(1, collectedEffects.filterIsInstance<ControllerEffect.ForceReconnect>().size)
-        val clearIdx = collectedEffects.indexOfFirst { it is ControllerEffect.ClearSessionWindowCache }
+        // §review-fix #5: EvictGroup replaces ClearSessionWindowCache in the
+        // ordering assertion. EvictGroup fires from selectHostProfile's
+        // cross-group branch BEFORE configureRepositoryForProfile cancels SSE.
+        val evictIdx = collectedEffects.indexOfFirst { it is ControllerEffect.EvictGroup }
         val cancelIdx = collectedEffects.indexOfFirst { it is ControllerEffect.CancelSseForReconfigure }
         val reconnectIdx = collectedEffects.indexOfFirst { it is ControllerEffect.ForceReconnect }
-        assertTrue("clearSessionWindowCache recorded", clearIdx >= 0)
+        assertTrue("EvictGroup recorded", evictIdx >= 0)
         assertTrue("cancelSseForReconfigure recorded", cancelIdx >= 0)
         assertTrue("forceReconnect recorded", reconnectIdx >= 0)
-        assertTrue("purge clears cache before configure cancels SSE", clearIdx < cancelIdx)
+        assertTrue("EvictGroup fires before configure cancels SSE", evictIdx < cancelIdx)
         assertTrue("configure cancels SSE before reconnect", cancelIdx < reconnectIdx)
     }
 
@@ -939,7 +980,14 @@ class HostProfileControllerTest {
         // wasCurrent → purge + forceReconnect + hostProfileSwitched.
         assertEquals(1, collectedEffects.filterIsInstance<ControllerEffect.ForceReconnect>().size)
         assertEquals(1, collectedEffects.filterIsInstance<ControllerEffect.HostProfileSwitched>().size)
-        assertEquals(1, collectedEffects.filterIsInstance<ControllerEffect.ClearSessionWindowCache>().size)
+        // §review-fix #5/#6: ClearSessionWindowCache replaced by group-scoped
+        // EvictGroup. profilesInGroup is a relaxed mock returning empty → no
+        // remaining siblings → EvictGroup(g-A) fires.
+        assertEquals(
+            "EvictGroup(g-A) replaces ClearSessionWindowCache",
+            1,
+            collectedEffects.filterIsInstance<ControllerEffect.EvictGroup>().size,
+        )
     }
 
     // ── configureServer (URL-unchanged branch) ─────────────────────────────
@@ -976,4 +1024,74 @@ class HostProfileControllerTest {
     // The handwritten spy was replaced by direct filtering on
     // [collectedEffects] + [trafficTracker] mockk verification. See the
     // class kdoc at the top for the new pattern.
+
+    // ── R-20 Phase 1 review-fix #5/#6: cache eviction granularity ──────────
+
+    @Test
+    fun `review-fix 5 selectHostProfile cross-group does NOT emit ClearSessionWindowCache nuke-all`() {
+        // §review-fix #5: the prior code emitted ClearSessionWindowCache
+        // (nukes ALL groups' memory LRU). The fix removes it; EvictGroup
+        // (group-scoped) replaces it. Assert ClearSessionWindowCache is absent.
+        every { store.select("p-B") } returns profileB
+
+        controller.selectHostProfile("p-B")
+        runPending()
+
+        assertTrue(
+            "ClearSessionWindowCache (nuke-all) must NOT fire on cross-group switch — EvictGroup (group-scoped) handles it",
+            collectedEffects.filterIsInstance<ControllerEffect.ClearSessionWindowCache>().isEmpty(),
+        )
+        assertEquals(
+            "EvictGroup(g-A) fires for the previous group only",
+            1,
+            collectedEffects.filterIsInstance<ControllerEffect.EvictGroup>().size,
+        )
+    }
+
+    @Test
+    fun `review-fix 6 deleteHostProfile skips EvictGroup when sibling profile remains in group`() {
+        // §review-fix #6 (gpter #5): reference-counted EvictGroup. profileA
+        // and profileASibling share g-A. Deleting profileA leaves the sibling
+        // → group still referenced → EvictGroup must NOT fire (would orphan
+        // the sibling's hot cache).
+        val profileASibling = HostProfile(
+            id = "p-A2",
+            name = "Sibling",
+            serverUrl = "http://a:4096",
+            serverGroupFp = "g-A" // same group as profileA
+        )
+        seed { it.copy(currentHostProfileId = "p-A") }
+        // profiles() returns [profileA, profileASibling, profileB]; current → profileB (replacement)
+        every { store.profiles() } returns listOf(profileA, profileASibling, profileB)
+        every { store.currentProfile() } returns profileB
+        // profilesInGroup("g-A") returns the two siblings (NOT including the deleted profileA).
+        every { store.profilesInGroup("g-A") } returns listOf(profileA, profileASibling)
+
+        controller.deleteHostProfile("p-A")
+        scope.testScheduler.advanceUntilIdle()
+
+        assertTrue(
+            "EvictGroup must NOT fire when a sibling profile still references the group",
+            collectedEffects.filterIsInstance<ControllerEffect.EvictGroup>().isEmpty(),
+        )
+    }
+
+    @Test
+    fun `review-fix 6 deleteHostProfile emits EvictGroup when no sibling remains in group`() {
+        // Counterpart: no siblings → group is orphaned → EvictGroup fires.
+        seed { it.copy(currentHostProfileId = "p-A") }
+        every { store.currentProfile() } returns profileB
+        // profilesInGroup returns only profileA (will be deleted → no remaining).
+        every { store.profilesInGroup("g-A") } returns listOf(profileA)
+
+        controller.deleteHostProfile("p-A")
+        scope.testScheduler.advanceUntilIdle()
+
+        assertEquals(
+            "EvictGroup(g-A) fires when no sibling remains",
+            1,
+            collectedEffects.filterIsInstance<ControllerEffect.EvictGroup>().size,
+        )
+        assertEquals("g-A", collectedEffects.filterIsInstance<ControllerEffect.EvictGroup>().single().serverGroupFp)
+    }
 }

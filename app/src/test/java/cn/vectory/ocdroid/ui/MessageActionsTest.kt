@@ -417,4 +417,144 @@ class MessageActionsTest {
 
         assertEquals(1, loadCalls)
     }
+
+    // ── R-20 Phase 1 (gpter 复审 final-fix): compound-key fp guard ──────────
+
+    @Test
+    fun `gpter-final-fix launchLoadMessages drops stale REST response when host group changed during fetch`() = runTest {
+        // gpter scenario: G1/s1 REST in-flight → user switches to G2/s1
+        // (collision: same sessionId, different serverGroupFp). The REST
+        // response from G1 must NOT write G1's messages into G2's chat slice.
+        // sessionId guard alone passes (s1==s1); the fp guard catches the
+        // cross-group collision.
+        val msgs = listOf(MessageWithParts(info = Message(id = "g1-msg", role = "user")))
+        coEvery { repository.getMessagesPaged("s1", any(), any()) } returns Result.success(MessagesPage(msgs, null))
+        coEvery { repository.getSessionTodos("s1") } returns Result.success(emptyList())
+        store.mutateChat { it.copy(currentSessionId = "s1") }
+
+        // Launch with expectedServerGroupFp = "g1" (the old group).
+        // The currentServerGroupFp provider returns "g2" (the new group,
+        // simulating a host switch that happened during the REST call).
+        launchLoadMessages(
+            scope = scope,
+            repository = repository,
+            slices = slices,
+            sessionId = "s1",
+            onCacheWindow = { _, _ -> },
+            emit = emit,
+            expectedServerGroupFp = "g1",
+            currentServerGroupFp = { "g2" }, // simulate post-switch fp
+        )
+        advanceUntilIdle()
+
+        // G1's messages must NOT be written — the fp guard dropped them.
+        assertTrue(
+            "stale G1 REST response must not write to slice after host group switch (fp mismatch)",
+            slices.chat.value.messages.isEmpty(),
+        )
+        assertFalse(slices.chat.value.isLoadingMessages)
+    }
+
+    @Test
+    fun `gpter-final-fix launchLoadMessages writes when fp matches (happy path)`() = runTest {
+        // Counterpart: fp matches → normal write proceeds.
+        val msgs = listOf(MessageWithParts(info = Message(id = "m1", role = "user")))
+        coEvery { repository.getMessagesPaged("s1", any(), any()) } returns Result.success(MessagesPage(msgs, null))
+        coEvery { repository.getSessionTodos("s1") } returns Result.success(emptyList())
+        store.mutateChat { it.copy(currentSessionId = "s1") }
+
+        launchLoadMessages(
+            scope = scope,
+            repository = repository,
+            slices = slices,
+            sessionId = "s1",
+            onCacheWindow = { _, _ -> },
+            emit = emit,
+            expectedServerGroupFp = "g1",
+            currentServerGroupFp = { "g1" }, // same fp → guard passes
+        )
+        advanceUntilIdle()
+
+        assertEquals(listOf("m1"), slices.chat.value.messages.map { it.id })
+    }
+
+    @Test
+    fun `gpter-final-fix launchLoadMessages default empty fp params preserve legacy behavior`() = runTest {
+        // Backward-compat: when fp params are not passed (default ""), the
+        // guard is a no-op (both sides "" → equal). Legacy callers and tests
+        // that don't pass fp are unaffected.
+        val msgs = listOf(MessageWithParts(info = Message(id = "m1", role = "user")))
+        coEvery { repository.getMessagesPaged("s1", any(), any()) } returns Result.success(MessagesPage(msgs, null))
+        coEvery { repository.getSessionTodos("s1") } returns Result.success(emptyList())
+        store.mutateChat { it.copy(currentSessionId = "s1") }
+
+        launchLoadMessages(
+            scope = scope,
+            repository = repository,
+            slices = slices,
+            sessionId = "s1",
+            emit = emit,
+            // fp params intentionally omitted (default "").
+        )
+        advanceUntilIdle()
+
+        assertEquals(listOf("m1"), slices.chat.value.messages.map { it.id })
+    }
+
+    @Test
+    fun `gpter-final-fix launchLoadMoreMessages drops stale REST response when host group changed during fetch`() = runTest {
+        // Same guard for the older-page pagination path.
+        val existing = Message(id = "cur1", role = "user", time = Message.TimeInfo(created = 500L))
+        val olderPage = listOf(
+            MessageWithParts(info = Message(id = "g1-old", role = "user", time = Message.TimeInfo(created = 100L))),
+        )
+        coEvery { repository.getMessagesPaged("s1", any(), eq("c1")) } returns Result.success(MessagesPage(olderPage, nextCursor = "c2"))
+        store.mutateChat {
+            it.copy(currentSessionId = "s1", messages = listOf(existing), olderMessagesCursor = "c1", hasMoreMessages = true)
+        }
+
+        launchLoadMoreMessages(
+            scope = scope,
+            repository = repository,
+            slices = slices,
+            sessionId = "s1",
+            expectedServerGroupFp = "g1",
+            currentServerGroupFp = { "g2" }, // simulate post-switch fp
+            onCacheWindow = { _, _ -> },
+        )
+        advanceUntilIdle()
+
+        // G1's older page must NOT be prepended — the fp guard dropped it.
+        assertEquals(
+            "stale G1 older-page response must not write after host group switch",
+            listOf("cur1"),
+            slices.chat.value.messages.map { it.id },
+        )
+        assertFalse(slices.chat.value.isLoadingMessages)
+    }
+
+    @Test
+    fun `gpter-final-fix launchLoadMoreMessages writes when fp matches (happy path)`() = runTest {
+        val existing = Message(id = "cur1", role = "user", time = Message.TimeInfo(created = 500L))
+        val olderPage = listOf(
+            MessageWithParts(info = Message(id = "old1", role = "user", time = Message.TimeInfo(created = 100L))),
+        )
+        coEvery { repository.getMessagesPaged("s1", any(), eq("c1")) } returns Result.success(MessagesPage(olderPage, nextCursor = null))
+        store.mutateChat {
+            it.copy(currentSessionId = "s1", messages = listOf(existing), olderMessagesCursor = "c1", hasMoreMessages = true)
+        }
+
+        launchLoadMoreMessages(
+            scope = scope,
+            repository = repository,
+            slices = slices,
+            sessionId = "s1",
+            expectedServerGroupFp = "g1",
+            currentServerGroupFp = { "g1" },
+            onCacheWindow = { _, _ -> },
+        )
+        advanceUntilIdle()
+
+        assertEquals(listOf("old1", "cur1"), slices.chat.value.messages.map { it.id })
+    }
 }

@@ -408,7 +408,7 @@ class GapReconcileIntegrationTest {
         scope.launch(start = kotlinx.coroutines.CoroutineStart.UNDISPATCHED) {
             effects.effectsConsumed.toList(collectedEffects)
         }
-        coordinator = SessionSyncCoordinator(scope, slices, settingsManager, effects)
+        coordinator = SessionSyncCoordinator(scope, slices, settingsManager, effects, currentServerGroupFp = { "test-fp" })
     }
 
     @After

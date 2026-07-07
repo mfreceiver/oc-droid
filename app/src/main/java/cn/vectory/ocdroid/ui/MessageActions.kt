@@ -26,7 +26,23 @@ internal fun launchLoadMessages(
     resetLimit: Boolean = true,
     settingsManager: SettingsManager? = null,
     onCacheWindow: (sessionId: String, window: CachedSessionWindow) -> Unit = { _, _ -> },
-    emit: EventEmitter = EventEmitter { }
+    emit: EventEmitter = EventEmitter { },
+    /**
+     * R-20 Phase 1 (gpter 复审 final-fix): the serverGroupFp captured AT
+     * CALL TIME (when the REST request was initiated). Used to guard the
+     * async onSuccess against cross-group same-sessionId collision (plan §0
+     * N1: ses_xxxx is a branded string, not UUID — clone/reset server can
+     * collide). Default "" → fp guard is a no-op (both sides "" → equal),
+     * preserving backward compat for tests/legacy callers.
+     */
+    expectedServerGroupFp: String = "",
+    /**
+     * R-20 Phase 1 (gpter 复审 final-fix): provider for the CURRENT host's
+     * serverGroupFp, read at onSuccess time. Compared against
+     * [expectedServerGroupFp] — a mismatch means the user switched host
+     * group during the REST call; the stale response must NOT be written.
+     */
+    currentServerGroupFp: () -> String = { "" },
 ) {
 
     // Coalesce concurrent loads. ADB showed startup triggers message loads from
@@ -53,7 +69,19 @@ internal fun launchLoadMessages(
                 // capture reused through the merge-compute cluster below — no
                 // writes between here and the slice update near the bottom of
                 // this block.
-                if (sessionId == slices.chat.value.currentSessionId) {
+                //
+                // R-20 Phase 1 (gpter 复审 final-fix): COMPOUND-KEY guard.
+                // The prior guard only compared sessionId — a cross-group
+                // same-sessionId collision (plan §0 N1: ses_xxxx branded
+                // string, clone/reset server can collide) would let a stale
+                // G1 REST response write into G2's chat slice. Adding the fp
+                // re-check closes the last downstream TOCTOU: if the user
+                // switched host group during the REST call,
+                // expectedServerGroupFp != currentServerGroupFp() → drop.
+                // Default "" for both → equal → no-op (backward compat).
+                if (sessionId == slices.chat.value.currentSessionId &&
+                    expectedServerGroupFp == currentServerGroupFp()
+                ) {
                     // §preserveUnfetched (mirrors opencode-web reconcileFetched):
                     // a periodic reload (resetLimit=false) fetches the latest
                     // window but must NOT erase already-loaded older history
@@ -302,7 +330,17 @@ internal fun launchLoadMoreMessages(
     repository: OpenCodeRepository,
     slices: SliceFlows,
     sessionId: String,
-    onCacheWindow: (sessionId: String, window: CachedSessionWindow) -> Unit = { _, _ -> }
+    /**
+     * R-20 Phase 1 (gpter 复审 final-fix): captured fp for compound-key
+     * guard. See [launchLoadMessages] doc. Default "" → no-op.
+     */
+    expectedServerGroupFp: String = "",
+    /**
+     * R-20 Phase 1 (gpter 复审 final-fix): current fp provider for the
+     * onSuccess re-check. See [launchLoadMessages] doc.
+     */
+    currentServerGroupFp: () -> String = { "" },
+    onCacheWindow: (sessionId: String, window: CachedSessionWindow) -> Unit = { _, _ -> },
 ) {
 
     // §R-17 batch2 step e final: slice-only reads. Single capture for this
@@ -325,7 +363,14 @@ internal fun launchLoadMoreMessages(
                 // §R-17 batch2 step e final: slice-only guard + merge-source
                 // capture. Single fresh capture for the synchronous cluster up
                 // to the slice update below.
-                if (sessionId == slices.chat.value.currentSessionId) {
+                //
+                // R-20 Phase 1 (gpter 复审 final-fix): COMPOUND-KEY guard —
+                // same rationale as launchLoadMessages. Cross-group same-
+                // sessionId collision must not let a stale older-page response
+                // write into the wrong group's chat slice.
+                if (sessionId == slices.chat.value.currentSessionId &&
+                    expectedServerGroupFp == currentServerGroupFp()
+                ) {
                     // Capture current chat-domain values from the slice so we
                     // can compute the post-merge values used by the cache
                     // snapshot below.

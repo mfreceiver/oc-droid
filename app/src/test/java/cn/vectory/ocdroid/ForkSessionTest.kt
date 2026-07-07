@@ -111,6 +111,7 @@ class ForkSessionTest {
         // constructor params (Hilt-injected in production). Tests construct
         // them inline with the same wiring [cn.vectory.ocdroid.di.ControllerModule]
         // uses — see MainViewModelTestBase.createCore for the same pattern.
+        val appContext = io.mockk.mockk<android.content.Context>(relaxed = true)
         val store = SharedStateStore()
         val effectBus = SharedEffectBus()
         val appScope = kotlinx.coroutines.CoroutineScope(
@@ -133,7 +134,18 @@ class ForkSessionTest {
             settingsManager = settingsManager,
             repository = repository,
             effects = effectBus,
+            currentServerGroupFp = { "test-fp" },
         )
+        val cacheRepository = io.mockk.mockk<cn.vectory.ocdroid.data.cache.CacheRepository>(relaxed = true)
+        // R-20 Phase 1: stub verifyAndLoad to a non-null default — relaxed
+        // mockk returns null for sealed-interface return types, which crashes
+        // AppCore's VerifyAndHydrate handler `when`.
+        io.mockk.coEvery {
+            cacheRepository.verifyAndLoad(any(), any(), any())
+        } returns cn.vectory.ocdroid.data.cache.HydrateResult.UnknownColdStart
+        io.mockk.coEvery {
+            cacheRepository.verifyFingerprint(any(), any(), any())
+        } returns cn.vectory.ocdroid.data.cache.FingerprintResult.UnknownColdStart
         val hostProfileController = cn.vectory.ocdroid.ui.controller.HostProfileController(
             scope = appScope,
             slices = store.slices,
@@ -142,12 +154,16 @@ class ForkSessionTest {
             settingsManager = settingsManager,
             trafficTracker = trafficTracker,
             effects = effectBus,
+            currentServerGroupFp = { "test-fp" },
+            appContext = appContext,
+            cacheRepository = cacheRepository,
         )
         val sessionSyncCoordinator = cn.vectory.ocdroid.ui.controller.SessionSyncCoordinator(
             scope = appScope,
             slices = store.slices,
             settingsManager = settingsManager,
             effects = effectBus,
+            currentServerGroupFp = { "test-fp" },
         )
         val connectionCoordinator = cn.vectory.ocdroid.ui.controller.ConnectionCoordinator(
             scope = appScope,
@@ -173,6 +189,9 @@ class ForkSessionTest {
             hostProfileController,
             sessionSyncCoordinator,
             connectionCoordinator,
+            cacheRepository,
+            // §review-fix #1: fp provider (same as MainViewModelTestBase).
+            { hostProfileStore.currentProfile().serverGroupFp.ifBlank { hostProfileStore.currentProfile().id } },
             appScope,
         )
     }

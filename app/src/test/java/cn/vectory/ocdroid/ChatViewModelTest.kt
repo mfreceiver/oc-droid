@@ -1050,8 +1050,8 @@ class ChatViewModelTest : MainViewModelTestBase() {
 
     @Test
     fun `session switch A to B to A restores cached messages without re-wiping`() = runTest {
-        val sessionA = Session(id = "session-A", directory = "/tmp/a")
-        val sessionB = Session(id = "session-B", directory = "/tmp/b")
+        val sessionA = Session(id = "session-A", directory = "/tmp/a", time = Session.TimeInfo(created = 1_700_000L))
+        val sessionB = Session(id = "session-B", directory = "/tmp/b", time = Session.TimeInfo(created = 1_700_100L))
         val aMessagesInitial = listOf(
             MessageWithParts(info = Message(id = "m_a1", role = "user")),
             MessageWithParts(info = Message(id = "m_a2", role = "assistant"))
@@ -1067,6 +1067,15 @@ class ChatViewModelTest : MainViewModelTestBase() {
             Result.success(MessagesPage(bMessages, null))
 
         val core = createCore()
+        // R-20 Phase 1: switchTo now emits VerifyAndHydrate instead of
+        // synchronously seeding from the memory LRU. The handler queries the
+        // persistent cache (cacheRepository.verifyAndLoad). The default
+        // relaxed mock returns UnknownColdStart → cold-start REST (which would
+        // re-fetch only m_a1 and lose m_a2). Install an in-memory persistent
+        // cache so putSessionWindow writes + verifyAndLoad reads round-trip
+        // the cached window — this is the Phase 1 equivalent of the old LRU
+        // memory cache that the test was originally asserting on.
+        installInMemoryPersistentCache(core)
         val chatVM = cn.vectory.ocdroid.ui.ChatViewModel(core)
         val sessionVM = cn.vectory.ocdroid.ui.SessionViewModel(core)
         val connectionVM = cn.vectory.ocdroid.ui.ConnectionViewModel(core)
@@ -1084,8 +1093,6 @@ class ChatViewModelTest : MainViewModelTestBase() {
             listOf("m_a1", "m_a2"),
             chatVM.chatFlow.value.messages.map { it.id }
         )
-        assertEquals(1, core.sessionWindowCacheSize())
-        assertNotNull(core.peekSessionWindow("session-A"))
 
         // Switch to B — A's window is captured into the cache on switch-away.
         sessionVM.selectSession("session-B")
@@ -1095,7 +1102,6 @@ class ChatViewModelTest : MainViewModelTestBase() {
             listOf("m_b1"),
             chatVM.chatFlow.value.messages.map { it.id }
         )
-        assertEquals(2, core.sessionWindowCacheSize())
 
         // Re-mock A: now the server "returns" only m_a1. Without the cache
         // this would silently lose m_a2.
@@ -1120,8 +1126,8 @@ class ChatViewModelTest : MainViewModelTestBase() {
 
     @Test
     fun `loadMore result survives a switch round-trip via the cache`() = runTest {
-        val sessionA = Session(id = "session-A", directory = "/tmp/a")
-        val sessionB = Session(id = "session-B", directory = "/tmp/b")
+        val sessionA = Session(id = "session-A", directory = "/tmp/a", time = Session.TimeInfo(created = 1_700_000L))
+        val sessionB = Session(id = "session-B", directory = "/tmp/b", time = Session.TimeInfo(created = 1_700_100L))
         val aLatest = listOf(
             MessageWithParts(info = Message(id = "m_latest1", role = "user")),
             MessageWithParts(info = Message(id = "m_latest2", role = "assistant"))
@@ -1146,6 +1152,10 @@ class ChatViewModelTest : MainViewModelTestBase() {
             Result.success(MessagesPage(emptyList(), null))
 
         val core = createCore()
+        // R-20 Phase 1: install an in-memory persistent cache so the
+        // VerifyAndHydrate handler round-trips cached windows (see the
+        // session-switch A→B→A test above for the rationale).
+        installInMemoryPersistentCache(core)
         val chatVM = cn.vectory.ocdroid.ui.ChatViewModel(core)
         val sessionVM = cn.vectory.ocdroid.ui.SessionViewModel(core)
         val connectionVM = cn.vectory.ocdroid.ui.ConnectionViewModel(core)
@@ -1167,13 +1177,6 @@ class ChatViewModelTest : MainViewModelTestBase() {
         assertEquals(listOf("m_older1", "m_older2", "m_latest1", "m_latest2"), afterMore)
         assertNull(chatVM.chatFlow.value.olderMessagesCursor)
         assertFalse(chatVM.chatFlow.value.hasMoreMessages)
-
-        // Snapshot the cached window — must mirror the post-loadMore state.
-        val cached = core.peekSessionWindow("session-A")
-        assertNotNull("session-A must be cached after loadMore", cached)
-        assertEquals(4, cached!!.messages.size)
-        assertTrue(cached.messages.map { it.id }.contains("m_older1"))
-        assertTrue(cached.messages.map { it.id }.contains("m_older2"))
 
         // Switch away and back. The post-restore fetch returns the latest 2
         // again (matches the `any()` fallback), and the §preserveUnfetched
