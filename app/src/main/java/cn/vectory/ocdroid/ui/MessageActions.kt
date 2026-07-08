@@ -216,8 +216,13 @@ internal fun launchLoadMessages(
                     // Only (re)seed the history cursor on a fresh open; a
                     // periodic reload must NOT clobber an existing cursor
                     // (now safe because older history is preserved above).
-                    val newCursor = if (resetLimit) page.nextCursor else srcCursor
-                    val newHasMore = if (resetLimit) (page.nextCursor != null) else srcHasMore
+                    // §F3-rebuild: 但缓存水合后 srcCursor==null（toWindow 重建为 null），
+                    // 此时即便 resetLimit=false 也必须用 page.nextCursor 建立 cursor/hasMore，
+                    // 否则"加载更多"按钮永不出现（从死按钮矫枉过正成无按钮）。一旦 cursor
+                    // 已建立，后续 periodic reload 仍保留它（不改写）。
+                    val cursorUnseeded = srcCursor == null
+                    val newCursor = if (resetLimit || cursorUnseeded) page.nextCursor else srcCursor
+                    val newHasMore = if (resetLimit || cursorUnseeded) (page.nextCursor != null) else srcHasMore
                     // §Phase1C (gpt-2 S1): a resetLimit=true reload is an
                     // authoritative snapshot replace — any open gap
                     // belonged to the previous window and is now stale

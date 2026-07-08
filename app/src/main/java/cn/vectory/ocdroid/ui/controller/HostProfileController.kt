@@ -676,7 +676,8 @@ class HostProfileController(
                 streamingPartTexts = emptyMap(),
                 streamingReasoningPart = null,
                 olderMessagesCursor = null,
-                hasMoreMessages = true,
+                // §F3-load-more: reset 时 hasMore 与 cursor 保持一致（均"无更多"）。
+                hasMoreMessages = false,
                 isLoadingMessages = false,
                 gapMarkers = emptyList(),
                 staleNotice = false,

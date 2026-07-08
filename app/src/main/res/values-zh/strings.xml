@@ -1,6 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">OC Droid</string>
+    <string name="chat_title_app_version">%1$s v%2$s</string>
     <string name="nav_chat">聊天</string>
     <string name="nav_files">文件</string>
     <string name="nav_sessions">会话</string>

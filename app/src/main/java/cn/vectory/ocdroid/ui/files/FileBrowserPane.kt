@@ -1,6 +1,7 @@
 package cn.vectory.ocdroid.ui.files
 
-import androidx.compose.foundation.clickable
+import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -22,24 +23,29 @@ import cn.vectory.ocdroid.ui.theme.SemanticColors
 internal fun FileBrowserPane(
     files: List<FileNode>,
     fileStatuses: Map<String, String>,
-    onFileSelected: (FileNode) -> Unit
+    onFileSelected: (FileNode) -> Unit,
+    // §F5: 文件名长按 → 分享（仅文件，目录不参与）。
+    onFileLongPress: (FileNode) -> Unit = {}
 ) {
     LazyColumn(modifier = Modifier.fillMaxWidth()) {
         items(files, key = { it.path }) { file ->
             FileRow(
                 file = file,
                 status = fileStatuses[file.path],
-                onClick = { onFileSelected(file) }
+                onClick = { onFileSelected(file) },
+                onLongClick = if (!file.isDirectory) { { onFileLongPress(file) } } else null
             )
         }
     }
 }
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 internal fun FileRow(
     file: FileNode,
     status: String?,
-    onClick: () -> Unit
+    onClick: () -> Unit,
+    onLongClick: (() -> Unit)? = null
 ) {
     val statusColor = when (status) {
         "added" -> SemanticColors.addedFile
@@ -49,7 +55,10 @@ internal fun FileRow(
     }
 
     ListItem(
-        modifier = Modifier.clickable(onClick = onClick),
+        modifier = Modifier.combinedClickable(
+            onClick = onClick,
+            onLongClick = onLongClick
+        ),
         leadingContent = {
             Icon(
                 imageVector = if (file.isDirectory) Icons.Default.Folder else Icons.AutoMirrored.Filled.InsertDriveFile,

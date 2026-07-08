@@ -1,6 +1,7 @@
 package cn.vectory.ocdroid.ui.chat
 
 import androidx.compose.foundation.background
+import androidx.compose.ui.draw.drawBehind
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
@@ -490,6 +491,9 @@ internal fun WrappedTable(model: MarkdownComponentModel) {
                 cellPadding = cellPadding,
                 style = style,
                 dividerColor = MaterialTheme.colorScheme.outline,
+                // §F4: 表格底色为 surfaceContainerLow，斑马纹用 surfaceContainer
+                // （高一个 tonal step）做奇数行填充，明暗主题都柔和可辨。
+                zebraColor = MaterialTheme.colorScheme.surfaceContainer,
                 content = content
             )
         }
@@ -520,11 +524,16 @@ private fun TableGrid(
     cellPadding: Dp,
     style: TextStyle,
     dividerColor: Color,
+    zebraColor: Color,
     content: String
 ) {
     val density = LocalDensity.current
     val capPx = with(density) { maxColumnWidth.roundToPx() }
     val dividerThicknessPx = with(density) { 1.dp.roundToPx() }
+    // §F4: 行条带几何缓存——放置阶段写入（非 snapshot，不触发重组），drawBehind
+    // 读取后给奇数 body 行填底色（斑马纹）。逐 cell 背景/绘制无法做到，因同行各
+    // cell 高度按自身内容测量、未必等于行高，会有缝隙；只能按行 y/高统一画条带。
+    val bandCache = remember { RowBandCache() }
 
     // Flat (rowIndex, colIndex, isHeader, cellNode) list, row-major.
     val cells: List<TableEntry> = remember(headerNode, bodyRows, columnsCount) {
@@ -544,6 +553,20 @@ private fun TableGrid(
     val rowCount = remember(cells) { (cells.maxOfOrNull { it.rowIndex } ?: 0) + 1 }
 
     Layout(
+        modifier = Modifier.drawBehind {
+            // §F4: 奇数 body 行斑马纹。bands 下标 0=header，1..=body 行；
+            // 下标为奇数（1/3/5…）= 第 1/3/5… 个 body 行 = "奇数行"。
+            val w = size.width
+            bandCache.bands.forEachIndexed { idx, (y, h) ->
+                if (idx % 2 == 1) {
+                    drawRect(
+                        color = zebraColor,
+                        topLeft = androidx.compose.ui.geometry.Offset(0f, y.toFloat()),
+                        size = androidx.compose.ui.geometry.Size(w, h.toFloat())
+                    )
+                }
+            }
+        },
         content = {
             cells.forEach { entry ->
                 Column(modifier = Modifier.padding(cellPadding)) {
@@ -658,6 +681,10 @@ private fun TableGrid(
                         accY += dividerThicknessPx
                     }
                 }
+                // §F4: 记录每行 (y, height) 供 drawBehind 画斑马纹（含 header 行，
+                // 下标 0；drawBehind 跳过偶数下标）。非 snapshot 写入——放置阶段写、
+                // 绘制阶段读，不触发重组。
+                bandCache.bands = (0 until rowCount).map { rowY[it] to rowHeights[it] }
                 for (i in 0 until totalCells) {
                     val e = cells[i]
                     placeables[i].placeRelative(colX[e.colIndex], rowY[e.rowIndex])
@@ -673,3 +700,8 @@ private data class TableEntry(
     val isHeader: Boolean,
     val cell: org.intellij.markdown.ast.ASTNode
 )
+
+/** §F4: 斑马纹行几何缓存（放置阶段写、绘制阶段读；非 snapshot，不触发重组）。 */
+private class RowBandCache {
+    var bands: List<Pair<Int, Int>> = emptyList()
+}

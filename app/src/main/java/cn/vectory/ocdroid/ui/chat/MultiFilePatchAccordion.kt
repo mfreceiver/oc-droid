@@ -109,12 +109,11 @@ internal fun MultiFilePatchAccordion(
         (parts.firstOrNull()?.tool ?: "patch").replaceFirstChar { it.uppercase() }
     }
 
-    Surface(
-        modifier = modifier
-            .padding(vertical = 2.dp)
-            .testTag("toolcard.multi_patch.${files.size}"),
-        shape = RectangleShape,
-        color = if (expanded) MaterialTheme.colorScheme.surfaceContainerLow else Color.Transparent
+    // §gpter-B3: 多文件 patch 同样套用统一工具卡容器（surfaceContainer + 1dp 边框），
+    // 与单文件 PatchCard 展开态一致。
+    ToolCardContainer(
+        expanded = expanded,
+        modifier = modifier.testTag("toolcard.multi_patch.${files.size}")
     ) {
         Column(modifier = Modifier.then(if (isRunning) Modifier else Modifier.animateContentSize(AppMotion.expandSizeSpec))) {
             // Header: "N files" + aggregate +N -M + expand/collapse-all toggle.

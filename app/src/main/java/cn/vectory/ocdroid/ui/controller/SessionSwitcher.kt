@@ -261,6 +261,11 @@ class SessionSwitcher(
                 streamingReasoningPart = null,
                 gapMarkers = emptyList(),
                 staleNotice = false,
+                // §F3-load-more: 切换会话时显式重置 cursor/hasMore，保证 chat slice
+                // 始终内部一致（cursor=null ∧ hasMore=false），由随后的
+                // launchLoadMessages(resetLimit=true) 用服务端 X-Next-Cursor 重建。
+                olderMessagesCursor = null,
+                hasMoreMessages = false,
                 // §model-selection (V1-per-prompt): drop the outgoing session's
                 // currentModel so dispatchSendMessage (which reads
                 // _chatFlow.value.currentModel synchronously) can't leak it

@@ -307,35 +307,49 @@ internal fun ChatTopBar(
                     }
     
                     else -> {
-                        // §17: the dropdown session switcher moved to the persistent
-                        // tab strip rendered as the TopAppBar's second row. The title
-                        // slot shows the current session title with a subtitle (#10)
-                        // carrying the last segment of the session's working
-                        // directory, so the user can tell which project the session
-                        // belongs to at a glance.
-                        Column(modifier = Modifier.widthIn(max = TITLE_SLOT_MAX_WIDTH)) {
+                        if (currentSession != null) {
+                            // §17: the dropdown session switcher moved to the
+                            // persistent tab strip rendered as the TopAppBar's
+                            // second row. The title slot shows the current session
+                            // title with a subtitle (#10) carrying the last segment
+                            // of the session's working directory, so the user can
+                            // tell which project the session belongs to at a glance.
+                            Column(modifier = Modifier.widthIn(max = TITLE_SLOT_MAX_WIDTH)) {
+                                Text(
+                                    text = currentSession.displayName,
+                                    style = MaterialTheme.typography.titleLarge,
+                                    color = MaterialTheme.colorScheme.onSurface,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                                // #10: subtitle = basename of currentSession.directory.
+                                currentSession.directory
+                                    ?.substringAfterLast("/")
+                                    ?.takeIf { it.isNotEmpty() }
+                                    ?.let { workdir ->
+                                        Text(
+                                            text = workdir,
+                                            style = MaterialTheme.typography.labelSmall,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis
+                                        )
+                                    }
+                            }
+                        } else {
+                            // §F1: 所有会话 tab 已关闭、无当前会话时，顶栏显示
+                            // 「OC Droid v<version>」，取代原先的 "—" 占位。
                             Text(
-                                text = currentSession?.displayName ?: "—",
+                                text = stringResource(
+                                    R.string.chat_title_app_version,
+                                    stringResource(R.string.app_name),
+                                    cn.vectory.ocdroid.BuildConfig.VERSION_NAME
+                                ),
                                 style = MaterialTheme.typography.titleLarge,
                                 color = MaterialTheme.colorScheme.onSurface,
                                 maxLines = 1,
                                 overflow = TextOverflow.Ellipsis
                             )
-                            // #10: subtitle = basename of currentSession.directory.
-                            // Hidden when there is no session (the "—" placeholder
-                            // case) or when the basename is empty.
-                            currentSession?.directory
-                                ?.substringAfterLast("/")
-                                ?.takeIf { it.isNotEmpty() }
-                                ?.let { workdir ->
-                                    Text(
-                                        text = workdir,
-                                        style = MaterialTheme.typography.labelSmall,
-                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                        maxLines = 1,
-                                        overflow = TextOverflow.Ellipsis
-                                    )
-                                }
                         }
                     }
                 }

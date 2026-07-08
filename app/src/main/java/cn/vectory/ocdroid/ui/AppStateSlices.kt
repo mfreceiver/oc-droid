@@ -172,7 +172,9 @@ data class ChatState(
     val streamingPartTexts: Map<String, String> = emptyMap(),
     val streamingReasoningPart: Part? = null,
     val olderMessagesCursor: String? = null,
-    val hasMoreMessages: Boolean = true,
+    // §F3-load-more: 默认 false，与 olderMessagesCursor=null 对称——避免任何
+    // 路径在 cursor 缺失时仍显示"加载更多"按钮（点击会因 cursor=null 无反应）。
+    val hasMoreMessages: Boolean = false,
     val isLoadingMessages: Boolean = false,
     /**
      * R-20 Phase 2: the session's open gap markers (non-contiguous message

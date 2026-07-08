@@ -377,7 +377,8 @@ internal fun AppCore.performGlobalColdStartRefresh(currentId: String) {
             messages = emptyList(),
             partsByMessage = emptyMap(),
             olderMessagesCursor = null,
-            hasMoreMessages = true,
+            // §F3-load-more: cold-start reset 时 hasMore 与 cursor 一致。
+            hasMoreMessages = false,
         )
     }
     loadMessagesForEffect(currentId, resetLimit = true)

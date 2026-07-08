@@ -119,6 +119,9 @@ internal fun ChatMessageList(
         sessionListState.sessionStatuses[id]?.let { it.isBusy || it.isRetry }
     } == true
     val hasMoreMessages: Boolean = chatState.hasMoreMessages
+    // §F3-load-more: 同时取 cursor——渲染门加 cursor 守卫，任何 cursor 缺失/不一致
+    // 都不显示"加载更多"按钮（避免按钮显示但点击因 cursor=null 无反应）。
+    val olderMessagesCursor: String? = chatState.olderMessagesCursor
     // R-20 Phase 2: gap markers drive the non-contiguous dividers (replaces the
     // legacy single ChatState.gapInfo). Rendered via messages.withGaps below.
     val gapMarkers: List<GapMarker> = chatState.gapMarkers
@@ -590,7 +593,9 @@ internal fun ChatMessageList(
                 }
             }
         }
-        if (messages.isNotEmpty() && hasMoreMessages) {
+        // §F3-load-more: 渲染门加 olderMessagesCursor 守卫——hasMore 与 cursor 必须
+        // 同时满足才显示按钮，杜绝 hasMore=true ∧ cursor=null 的死按钮状态。
+        if (messages.isNotEmpty() && hasMoreMessages && olderMessagesCursor != null) {
             item(key = "load-more") {
                 // Manual history paging: click to fetch 5 older messages.
                 // Spinner while a fetch is in flight; otherwise a tappable label.

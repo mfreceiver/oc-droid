@@ -929,6 +929,11 @@ class SessionSyncCoordinator(
                 // 直接跳过（server-sdk.tsx:195）。ocdroid 不做多端回放，同样不消费；
                 // 显式 case 替代落入 else 的告警——已知且刻意忽略。
             }
+            "models-dev.refreshed" -> {
+                // §F3: 服务端 models.dev 模型目录刷新通知（上游 schema/models-dev.ts:5，
+                // payload 为空对象）。ocdroid 不动态响应目录刷新，显式 no-op 以消除
+                // unrecognized event 告警。与 load-more 失效无关。
+            }
             "session.idle" -> {
                 // §issue-1(2): 已废弃事件（schema/session-status-event.ts:43 标注
                 // deprecated）。服务端在 session.status{type:idle} 之后总是再发一次

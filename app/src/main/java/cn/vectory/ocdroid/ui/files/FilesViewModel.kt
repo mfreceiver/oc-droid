@@ -1,5 +1,6 @@
 package cn.vectory.ocdroid.ui.files
 
+import android.content.Context
 import android.util.Log
 
 import androidx.lifecycle.ViewModel
@@ -8,12 +9,15 @@ import cn.vectory.ocdroid.data.model.FileContent
 import cn.vectory.ocdroid.data.model.FileNode
 import cn.vectory.ocdroid.data.repository.OpenCodeRepository
 import dagger.hilt.android.lifecycle.HiltViewModel
+import dagger.hilt.android.qualifiers.ApplicationContext
 import javax.inject.Inject
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 data class FilesUiState(
     val currentPath: String = "",
@@ -36,7 +40,9 @@ data class FilesUiState(
 
 @HiltViewModel
 class FilesViewModel @Inject constructor(
-    val repository: OpenCodeRepository
+    val repository: OpenCodeRepository,
+    // §F5: 文件长按分享需 FileProvider + startActivity，注入 Application Context。
+    @ApplicationContext private val appContext: Context
 ) : ViewModel() {
 
     private val _state = MutableStateFlow(FilesUiState())
@@ -124,6 +130,28 @@ class FilesViewModel @Inject constructor(
 
     fun clearError() {
         _state.update { it.copy(error = null) }
+    }
+
+    /**
+     * §F5: 长按文件分享。文件在远端服务器——先 getFileContent 取内容（文本=UTF-8
+     * 字符串、二进制=base64），再落盘 + 系统分享（见 [shareFileContent]，覆盖所有
+     * 格式）。§kimo-B5: 落盘/解码切到 Dispatchers.IO 避免主线程写盘/ANR；整段
+     * runCatching 兜底 IOException/SecurityException，失败仅记日志（长按是次要路径，
+     * 不崩溃优于弹窗）。
+     */
+    fun shareFile(file: FileNode) {
+        val dir = _state.value.workdir ?: return
+        val relPath = file.path
+        viewModelScope.launch {
+            repository.getFileContent(dir, relPath)
+                .onSuccess { content ->
+                    withContext(Dispatchers.IO) {
+                        runCatching { shareFileContent(appContext, relPath, content) }
+                            .onFailure { Log.w("FilesViewModel", "shareFile failed: ${it.message}") }
+                    }
+                }
+                .onFailure { Log.w("FilesViewModel", "shareFile fetch failed: ${it.message}") }
+        }
     }
 
     fun syncPathToShow(pathToShow: String?, sessionDirectory: String?) {

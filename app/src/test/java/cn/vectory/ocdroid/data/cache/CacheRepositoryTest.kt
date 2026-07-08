@@ -207,6 +207,30 @@ class CacheRepositoryTest {
         assertEquals(2, hydrated.partsByMessage.size)
         assertEquals("hello", hydrated.partsByMessage["m1"]?.firstOrNull()?.text)
         assertEquals("world", hydrated.partsByMessage["m2"]?.firstOrNull()?.text)
+        // §glmer-F3: 钉死 toWindow 的重建语义——即便存入 hasMore=true，重建输出也
+        // 必为 false（cursor/hasMore 不持久化，由 toWindow 按一致不变量重建）。
+        assertNull(hydrated.olderMessagesCursor)
+        assertFalse(hydrated.hasMoreMessages)
+    }
+
+    @Test
+    fun `verifyAndLoad reconstructs a consistent cursor state (no dead load-more button)`() = runTest {
+        // §F3-load-more: 缓存水合重建的窗口必须 cursor/hasMore 一致。此前 toWindow
+        // 硬编码 cursor=null ∧ hasMore=true，导致"加载更多"按钮显示但点击无反应。
+        // 修复后：无持久化 cursor 时 hasMore=false，由随后的 REST 加载重建。
+        val window = CachedSessionWindow(
+            messages = listOf(Message(id = "m1", role = "user")),
+            partsByMessage = emptyMap(),
+            olderMessagesCursor = null,
+            hasMoreMessages = false
+        )
+        repo.putSessionWindow("g1", "s1", createdAt = 1_700_000L, workdir = "/p", window = window)
+
+        val r = repo.verifyAndLoad("g1", "s1", createdAt = 1_700_000L)
+        val hydrated = (r as HydrateResult.Verified).window
+        // 不变量：hasMore 为真当且仅当 cursor 非空。此处 cursor 缺失 → hasMore 必为 false。
+        assertNull(hydrated.olderMessagesCursor)
+        assertFalse(hydrated.hasMoreMessages)
     }
 
     @Test

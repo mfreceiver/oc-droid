@@ -44,7 +44,10 @@ object ToolCardClassifier {
      * Read-only file tools fall through to the FileCard grid.
      */
     fun isWriteFileOperation(part: Part): Boolean {
-        if (part.isPatch && part.filePathsForNavigationFiltered.isNotEmpty()) return true
+        // §kimo-B4: 任意 patch 类型部分都进 PatchCard（不再要求 navigable path）——
+        // PatchCard 已对无路径情况做内容回退（inputSummary/output），避免无扩展名
+        // (Makefile/Dockerfile) 或服务端未填路径的 patch 落到 BasicCard 且展开为空。
+        if (part.isPatch) return true
         if (!part.isTool) return false
         val tool = part.tool?.lowercase() ?: return false
         return writeFilePrefixes.any { tool.startsWith(it) }

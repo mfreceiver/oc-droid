@@ -64,6 +64,12 @@ fun FilesScreen(
         viewModel.syncPathToShow(pathToShow, sessionDirectory)
     }
 
+    // §F5: 预览（含 md）开启时，系统返回键先关闭预览、回到刚才的文件列表同层级，
+    // 而不是直接弹出 FilesScreen 回到会话 list（预览是 FilesScreen 内部状态，非独立 destination）。
+    androidx.activity.compose.BackHandler(enabled = state.selectedFilePath != null) {
+        viewModel.closePreview()
+    }
+
     // The snackbar is rendered as a sibling overlay (NOT a child of the Column)
     // so appearing/disappearing does not push the file tree vertically.
     Box(modifier = Modifier.fillMaxSize()) {
@@ -125,7 +131,9 @@ fun FilesScreen(
                     FileBrowserPane(
                         files = state.files,
                         fileStatuses = state.fileStatuses,
-                        onFileSelected = { file -> viewModel.selectFile(file, onFileClick) }
+                        onFileSelected = { file -> viewModel.selectFile(file, onFileClick) },
+                        // §F5: 文件名长按 → 下载并系统分享（所有文件格式）。
+                        onFileLongPress = viewModel::shareFile
                     )
                 }
             }

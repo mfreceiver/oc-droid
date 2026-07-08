@@ -249,6 +249,52 @@ class MessageActionsTest {
     }
 
     @Test
+    fun `launchLoadMessages rebuilds cursor when resetLimit=false but cursor is unseeded`() = runTest {
+        // §F3-rebuild: 缓存水合后 olderMessagesCursor=null / hasMoreMessages=false（toWindow
+        // 重建结果）。Verified 分支的跟随加载是 resetLimit=false——此时必须用 page.nextCursor
+        // 重建 cursor/hasMore，否则"加载更多"按钮永不出现（从死按钮矫枉过正成无按钮）。
+        val fetched = listOf(MessageWithParts(info = Message(id = "m1", role = "user")))
+        coEvery { repository.getMessagesPaged("s1", any(), any()) } returns Result.success(MessagesPage(fetched, nextCursor = "cursor-1"))
+        coEvery { repository.getSessionTodos("s1") } returns Result.success(emptyList())
+        store.mutateChat {
+            it.copy(
+                currentSessionId = "s1",
+                messages = listOf(Message(id = "m1", role = "user")),
+                olderMessagesCursor = null,
+                hasMoreMessages = false
+            )
+        }
+
+        launchLoadMessages(scope, repository, slices, "s1", resetLimit = false, emit = emit)
+        advanceUntilIdle()
+
+        assertEquals("cursor-1", slices.chat.value.olderMessagesCursor)
+        assertTrue(slices.chat.value.hasMoreMessages)
+    }
+
+    @Test
+    fun `launchLoadMessages preserves an existing cursor on resetLimit=false`() = runTest {
+        // §F3-rebuild 反向：用户已加载过历史、cursor 已建立——periodic reload(resetLimit=false)
+        // 不得改写它（否则在途拉取会破坏分页位置）。
+        val fetched = listOf(MessageWithParts(info = Message(id = "m1", role = "user")))
+        coEvery { repository.getMessagesPaged("s1", any(), any()) } returns Result.success(MessagesPage(fetched, nextCursor = "server-new-cursor"))
+        coEvery { repository.getSessionTodos("s1") } returns Result.success(emptyList())
+        store.mutateChat {
+            it.copy(
+                currentSessionId = "s1",
+                olderMessagesCursor = "user-cursor",
+                hasMoreMessages = true
+            )
+        }
+
+        launchLoadMessages(scope, repository, slices, "s1", resetLimit = false, emit = emit)
+        advanceUntilIdle()
+
+        assertEquals("user-cursor", slices.chat.value.olderMessagesCursor)
+        assertTrue(slices.chat.value.hasMoreMessages)
+    }
+
+    @Test
     fun `launchLoadMessages writes session todos after success`() = runTest {
         val todo = cn.vectory.ocdroid.data.model.TodoItem(id = "t1", content = "done", status = "completed", priority = "high")
         coEvery { repository.getMessagesPaged("s1", any(), any()) } returns Result.success(MessagesPage(emptyList(), null))

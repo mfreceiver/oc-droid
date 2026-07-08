@@ -104,6 +104,14 @@ class ToolCardClassifierTest {
     }
 
     @Test
+    fun `isWriteFileOperation true for pathless patch (content fallback in PatchCard)`() {
+        // §kimo-F2: 无路径/无扩展名（Makefile 等）或服务端未填路径的 patch 也算写操作，
+        // 路由到 PatchCard（由其 inputSummary/output 内容回退兜底）。
+        val part = Part(id = "p1", type = "patch")
+        assertTrue(ToolCardClassifier.isWriteFileOperation(part))
+    }
+
+    @Test
     fun `isWriteFileOperation true for edit and write tools`() {
         for (tool in listOf("edit_file", "edit", "write_file", "write", "apply_patch", "patch")) {
             val part = Part(id = "p1", type = "tool", tool = tool)

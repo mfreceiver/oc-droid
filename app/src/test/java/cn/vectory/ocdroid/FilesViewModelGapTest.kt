@@ -1,5 +1,6 @@
 package cn.vectory.ocdroid
 
+import android.content.Context
 import cn.vectory.ocdroid.data.model.FileContent
 import cn.vectory.ocdroid.data.model.FileNode
 import cn.vectory.ocdroid.data.repository.OpenCodeRepository
@@ -40,6 +41,8 @@ class FilesViewModelGapTest {
     val mainDispatcherRule = MainDispatcherRule()
 
     private lateinit var repository: OpenCodeRepository
+    // §F5: FilesViewModel 现注入 Application Context（长按分享用）；测试用 relaxed mock。
+    private val context: Context = mockk(relaxed = true)
     private val workdir = "workspace"
 
     @Before
@@ -58,7 +61,7 @@ class FilesViewModelGapTest {
             java.io.IOException("tree fetch failed"),
         )
 
-        val vm = FilesViewModel(repository)
+        val vm = FilesViewModel(repository, context)
         vm.bindWorkdir(workdir)
         advanceUntilIdle()
 
@@ -73,7 +76,7 @@ class FilesViewModelGapTest {
         )
         coEvery { repository.getFileTree(workdir, any()) } returns Result.success(emptyList())
 
-        val vm = FilesViewModel(repository)
+        val vm = FilesViewModel(repository, context)
         vm.bindWorkdir(workdir)
         advanceUntilIdle()
 
@@ -92,7 +95,7 @@ class FilesViewModelGapTest {
         )
         coEvery { repository.getFileTree(workdir, any()) } returns Result.success(emptyList())
 
-        val vm = FilesViewModel(repository)
+        val vm = FilesViewModel(repository, context)
         vm.bindWorkdir(workdir)
         advanceUntilIdle()
 
@@ -106,7 +109,7 @@ class FilesViewModelGapTest {
         )
         coEvery { repository.getFileTree(workdir, any()) } returns Result.success(emptyList())
 
-        val vm = FilesViewModel(repository)
+        val vm = FilesViewModel(repository, context)
         vm.bindWorkdir(workdir)
         advanceUntilIdle()
 
@@ -120,7 +123,7 @@ class FilesViewModelGapTest {
         )
         coEvery { repository.getFileTree(workdir, any()) } returns Result.success(emptyList())
 
-        val vm = FilesViewModel(repository)
+        val vm = FilesViewModel(repository, context)
         vm.bindWorkdir(workdir)
         advanceUntilIdle()
 
@@ -143,7 +146,7 @@ class FilesViewModelGapTest {
         )
         coEvery { repository.getFileTree(workdir, null) } returns Result.success(emptyList())
 
-        val vm = FilesViewModel(repository)
+        val vm = FilesViewModel(repository, context)
         advanceUntilIdle()
 
         vm.syncPathToShow("workspace/src", workdir)
@@ -159,7 +162,7 @@ class FilesViewModelGapTest {
             listOf(FileNode(name = "Main.kt", path = "src/Main.kt", type = "file")),
         )
 
-        val vm = FilesViewModel(repository)
+        val vm = FilesViewModel(repository, context)
         vm.bindWorkdir(workdir)
         advanceUntilIdle()
 
@@ -192,7 +195,7 @@ class FilesViewModelGapTest {
         )
         coEvery { repository.getFileTree(workdir, null) } returns Result.success(emptyList())
 
-        val vm = FilesViewModel(repository)
+        val vm = FilesViewModel(repository, context)
         advanceUntilIdle()
 
         vm.syncPathToShow("workspace/src", workdir)
@@ -206,7 +209,7 @@ class FilesViewModelGapTest {
 
     @Test
     fun `refreshPreview without selection is a no-op`() = runTest {
-        val vm = FilesViewModel(repository)
+        val vm = FilesViewModel(repository, context)
         vm.bindWorkdir(workdir)
         advanceUntilIdle()
 
@@ -220,7 +223,7 @@ class FilesViewModelGapTest {
 
     @Test
     fun `closePreview clears selection and refresh flag`() = runTest {
-        val vm = FilesViewModel(repository)
+        val vm = FilesViewModel(repository, context)
         vm.bindWorkdir(workdir)
         advanceUntilIdle()
         vm.selectFile(FileNode(name = "M.kt", path = "M.kt", type = "file"))
@@ -239,7 +242,7 @@ class FilesViewModelGapTest {
         coEvery { repository.getFileTree(workdir, any()) } returns Result.failure(
             java.io.IOException("err"),
         )
-        val vm = FilesViewModel(repository)
+        val vm = FilesViewModel(repository, context)
         vm.bindWorkdir(workdir)
         advanceUntilIdle()
         assertNotNull(vm.state.value.error)
@@ -251,7 +254,7 @@ class FilesViewModelGapTest {
 
     @Test
     fun `bindWorkdir with same directory is a no-op`() = runTest {
-        val vm = FilesViewModel(repository)
+        val vm = FilesViewModel(repository, context)
         vm.bindWorkdir(workdir)
         advanceUntilIdle()
         coVerify(exactly = 1) { repository.getFileTree(workdir, any()) }
@@ -264,7 +267,7 @@ class FilesViewModelGapTest {
 
     @Test
     fun `syncPathToShow with null workdir surfaces an error`() = runTest {
-        val vm = FilesViewModel(repository)
+        val vm = FilesViewModel(repository, context)
         advanceUntilIdle()
 
         vm.syncPathToShow("workspace/file.txt", null)
@@ -277,7 +280,7 @@ class FilesViewModelGapTest {
 
     @Test
     fun `syncPathToShow with blank workdir surfaces an error`() = runTest {
-        val vm = FilesViewModel(repository)
+        val vm = FilesViewModel(repository, context)
         advanceUntilIdle()
 
         vm.syncPathToShow("workspace/file.txt", "")
@@ -289,7 +292,7 @@ class FilesViewModelGapTest {
 
     @Test
     fun `syncPathToShow null with prior selection clears preview`() = runTest {
-        val vm = FilesViewModel(repository)
+        val vm = FilesViewModel(repository, context)
         vm.bindWorkdir(workdir)
         advanceUntilIdle()
         vm.selectFile(FileNode(name = "M.kt", path = "M.kt", type = "file"))
@@ -304,7 +307,7 @@ class FilesViewModelGapTest {
 
     @Test
     fun `syncPathToShow updates workdir when caller-supplied directory differs`() = runTest {
-        val vm = FilesViewModel(repository)
+        val vm = FilesViewModel(repository, context)
         vm.bindWorkdir("first")
         advanceUntilIdle()
         assertEquals("first", vm.state.value.workdir)

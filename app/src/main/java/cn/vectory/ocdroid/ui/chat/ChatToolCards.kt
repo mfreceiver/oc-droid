@@ -1,5 +1,6 @@
 package cn.vectory.ocdroid.ui.chat
 
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -112,6 +113,32 @@ internal fun countDiffLines(text: String): Pair<Int, Int> {
         }
     }
     return add to del
+}
+
+/**
+ * §F2: 统一工具卡展开容器——[surfaceContainer] 填充（与 ReasoningCard/SubAgentCard
+ * 同 tonal step，清晰区隔于聊天背景）+ 1dp [outlineVariant] 真边框 + RectangleShape
+ * （保持与 reasoning/subagent 同样的全宽 flush 形态，整体卡片家族一致）。折叠态
+ * 透明融入聊天流。
+ *
+ * 应用于 Shell(BasicTool) / Patch / Edit / Write(PatchCard) / Explored(ContextToolGroup)
+ * / Question 历史(BasicTool)。**不**用于 ReasoningCard / SubAgentCard（用户要求其保持
+ * 既有无框 surfaceContainer 外观）。
+ */
+@Composable
+internal fun ToolCardContainer(
+    expanded: Boolean,
+    modifier: Modifier = Modifier,
+    content: @Composable () -> Unit
+) {
+    Surface(
+        modifier = modifier.padding(vertical = 2.dp),
+        shape = RectangleShape,
+        color = if (expanded) MaterialTheme.colorScheme.surfaceContainer else Color.Transparent,
+        border = if (expanded) BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant) else null
+    ) {
+        content()
+    }
 }
 
 @Composable
@@ -359,10 +386,11 @@ internal fun BasicTool(
         }
     }
 
-    Surface(
-        modifier = modifier.padding(vertical = 2.dp),
-        shape = RectangleShape,
-        color = if (expanded && canExpand) MaterialTheme.colorScheme.surfaceContainerLow else Color.Transparent
+    // §F2: 统一工具卡容器（surfaceContainer + 1dp 边框），取代原裸 Surface。
+    val showContainer = expanded && canExpand
+    ToolCardContainer(
+        expanded = showContainer,
+        modifier = modifier
     ) {
         Column(modifier = Modifier.then(if (isRunning) Modifier else Modifier.animateContentSize(AppMotion.expandSizeSpec))) {
             Row(
@@ -446,6 +474,17 @@ internal fun BasicTool(
                                 style = MaterialTheme.typography.bodySmall,
                                 fontFamily = BundledMonoFamily,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                    } else {
+                        // §gpter-B2: 非 bash（含 Question 历史）展开也显示 inputSummary
+                        // （问题/输入文本），否则 Question 历史只能看到回答、看不到问题。
+                        val input = part.toolInputSummary
+                        if (!input.isNullOrEmpty()) {
+                            Text(
+                                text = input,
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurface
                             )
                         }
                     }

@@ -1,5 +1,6 @@
 package cn.vectory.ocdroid
 
+import android.content.Context
 import cn.vectory.ocdroid.data.model.FileContent
 import cn.vectory.ocdroid.data.model.FileNode
 import cn.vectory.ocdroid.data.model.FileStatusEntry
@@ -25,6 +26,8 @@ class FilesViewModelTest {
     val mainDispatcherRule = MainDispatcherRule()
 
     private lateinit var repository: OpenCodeRepository
+    // §F5: FilesViewModel 现注入 Application Context（长按分享用）；测试用 relaxed mock。
+    private val context: Context = mockk(relaxed = true)
 
     private val workdir = "workspace"
 
@@ -56,7 +59,7 @@ class FilesViewModelTest {
         coEvery { repository.getFileTree(workdir, null) } returns Result.success(files)
         coEvery { repository.getFileStatus(workdir) } returns Result.success(statuses)
 
-        val viewModel = FilesViewModel(repository)
+        val viewModel = FilesViewModel(repository, context)
         viewModel.bindWorkdir(workdir)
         advanceUntilIdle()
 
@@ -78,7 +81,7 @@ class FilesViewModelTest {
             listOf(FileNode(name = "Main.kt", path = "src/Main.kt", type = "file"))
         )
 
-        val viewModel = FilesViewModel(repository)
+        val viewModel = FilesViewModel(repository, context)
         viewModel.bindWorkdir(workdir)
         advanceUntilIdle()
 
@@ -97,7 +100,7 @@ class FilesViewModelTest {
         coEvery { repository.getFileTree(workdir, null) } returns Result.success(emptyList())
         coEvery { repository.getFileContent(workdir, "src/Main.kt") } returns Result.success(content)
 
-        val viewModel = FilesViewModel(repository)
+        val viewModel = FilesViewModel(repository, context)
         viewModel.bindWorkdir(workdir)
         advanceUntilIdle()
 
@@ -118,7 +121,7 @@ class FilesViewModelTest {
         coEvery { repository.getFileTree(workdir, null) } returns Result.success(emptyList())
         coEvery { repository.getFileContent(workdir, "src/Main.kt") } returns Result.success(content)
 
-        val viewModel = FilesViewModel(repository)
+        val viewModel = FilesViewModel(repository, context)
         advanceUntilIdle()
 
         viewModel.syncPathToShow("workspace/src/Main.kt", workdir)
@@ -141,7 +144,7 @@ class FilesViewModelTest {
             FileContent(type = "text", content = "")
         )
 
-        val viewModel = FilesViewModel(repository)
+        val viewModel = FilesViewModel(repository, context)
         advanceUntilIdle()
 
         viewModel.syncPathToShow("workspace/empty.txt", workdir)
@@ -169,7 +172,7 @@ class FilesViewModelTest {
         )
         coEvery { repository.getFileTree(workdir, "src") } returns Result.success(tree)
 
-        val viewModel = FilesViewModel(repository)
+        val viewModel = FilesViewModel(repository, context)
         advanceUntilIdle()
 
         viewModel.syncPathToShow("workspace/src", workdir)
@@ -186,7 +189,7 @@ class FilesViewModelTest {
     fun `syncPathToShow null clears preview state`() = runTest {
         coEvery { repository.getFileTree(workdir, null) } returns Result.success(emptyList())
 
-        val viewModel = FilesViewModel(repository)
+        val viewModel = FilesViewModel(repository, context)
         viewModel.bindWorkdir(workdir)
         advanceUntilIdle()
 
@@ -209,7 +212,7 @@ class FilesViewModelTest {
             Result.success(FileContent(type = "text", content = "after"))
         )
 
-        val viewModel = FilesViewModel(repository)
+        val viewModel = FilesViewModel(repository, context)
         viewModel.bindWorkdir(workdir)
         advanceUntilIdle()
 
@@ -243,7 +246,7 @@ class FilesViewModelTest {
             Result.success(refreshedTree)
         )
 
-        val viewModel = FilesViewModel(repository)
+        val viewModel = FilesViewModel(repository, context)
         advanceUntilIdle()
 
         viewModel.syncPathToShow("workspace/src", workdir)
@@ -274,7 +277,7 @@ class FilesViewModelTest {
         coEvery { repository.getFileTree("old", null) } returns Result.success(staleTree)
         coEvery { repository.getFileTree("new", null) } returns Result.success(freshTree)
 
-        val viewModel = FilesViewModel(repository)
+        val viewModel = FilesViewModel(repository, context)
         viewModel.bindWorkdir("old")
         // Switch BEFORE the old load resolves — old response must be discarded.
         viewModel.bindWorkdir("new")
@@ -290,7 +293,7 @@ class FilesViewModelTest {
      */
     @Test
     fun `refresh without workdir skips repository calls`() = runTest {
-        val viewModel = FilesViewModel(repository)
+        val viewModel = FilesViewModel(repository, context)
         viewModel.refresh()
         advanceUntilIdle()
 
@@ -311,7 +314,7 @@ class FilesViewModelTest {
     fun `navigateUp normalizes trailing slash before computing parent`() = runTest {
         coEvery { repository.getFileTree(workdir, any()) } returns Result.success(emptyList())
 
-        val viewModel = FilesViewModel(repository)
+        val viewModel = FilesViewModel(repository, context)
         viewModel.bindWorkdir(workdir)
         advanceUntilIdle()
 
@@ -332,7 +335,7 @@ class FilesViewModelTest {
     fun `navigateUp is a no-op at root`() = runTest {
         coEvery { repository.getFileTree(workdir, any()) } returns Result.success(emptyList())
 
-        val viewModel = FilesViewModel(repository)
+        val viewModel = FilesViewModel(repository, context)
         viewModel.bindWorkdir(workdir)
         advanceUntilIdle()
         // currentPath is "" at root.
@@ -358,7 +361,7 @@ class FilesViewModelTest {
     fun `navigateUp from first-level child returns to root`() = runTest {
         coEvery { repository.getFileTree(workdir, any()) } returns Result.success(emptyList())
 
-        val viewModel = FilesViewModel(repository)
+        val viewModel = FilesViewModel(repository, context)
         viewModel.bindWorkdir(workdir)
         advanceUntilIdle()
 

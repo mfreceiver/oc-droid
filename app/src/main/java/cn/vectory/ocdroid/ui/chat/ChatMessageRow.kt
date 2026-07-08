@@ -94,7 +94,10 @@ internal fun MessageRow(
                 continue
             }
             val streamingText = streamingPartTexts[part.id]
-            val isToolLike = part.isTool || (part.isPatch && part.filePathsForNavigationFiltered.isNotEmpty())
+            // §kimo-B4: isToolLike 入口不再要求 patch 带可导航路径——无路径/无扩展名
+            // (Makefile 等) 或服务端未填路径的 patch 也要进入 run，由 PatchCard 的
+            // 内容回退兜底（避免展开为空）。与 ToolCardClassifier.isWriteFileOperation 放宽一致。
+            val isToolLike = part.isTool || part.isPatch
             if (isToolLike) {
                 // Buffer a contiguous run of tool/patch parts, then classify and
                 // render each according to the opencode-web paradigm:
@@ -107,7 +110,7 @@ internal fun MessageRow(
                 var j = i
                 while (j < parts.size) {
                     val p = parts[j]
-                    if (p.isTool || (p.isPatch && p.filePathsForNavigationFiltered.isNotEmpty())) {
+                    if (p.isTool || p.isPatch) {
                         run.add(p)
                         j++
                     } else break

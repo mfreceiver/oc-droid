@@ -960,10 +960,14 @@ class CacheRepositoryImpl @Inject constructor(
         return CachedSessionWindow(
             messages = messages,
             partsByMessage = partsByMessage,
-            // Phase 1 has no older-cursor concept — loadMessages will
-            // re-establish the cursor via resetLimit=false (cache hit) merge.
+            // §F3-load-more: 旧缓存量化的 cursor/hasMore 不持久化，由本方法重建。
+            // 此前硬编码 cursor=null ∧ hasMore=true 是自相矛盾的——缓存水合后
+            // messages 非空，渲染门（仅查 hasMore）会显示"加载更多"按钮，但
+            // loadMoreMessages 因 cursor=null 直接 return → 点击无反应（bug）。
+            // 正确语义：旧缓存无 cursor 信息，按"无更多历史"返回 hasMore=false，
+            // 由随后的 loadMessages(resetLimit) 用服务端 X-Next-Cursor 重建两者。
             olderMessagesCursor = null,
-            hasMoreMessages = true
+            hasMoreMessages = false
         )
     }
 

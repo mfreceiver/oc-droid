@@ -337,6 +337,17 @@ class MessageModelSerializationTest {
     }
 
     @Test
+    fun `isEffectivelyRenderableEmpty false when pathless patch has inputSummary`() {
+        // §kimo-F2: 无路径/无扩展名的 patch 但带 inputSummary（如 Makefile 的 patch 文本）
+        // 不应被判空过滤——PatchCard 会用 inputSummary/output 内容回退渲染。
+        val part = Part(
+            id = "1", type = "patch",
+            state = PartState(displayString = "x", inputSummary = "--- a/Makefile\n+b:new")
+        )
+        assertFalse(isEffectivelyRenderableEmpty(listOf(part)))
+    }
+
+    @Test
     fun `isEffectivelyRenderableEmpty true when file part has blank filename`() {
         assertTrue(isEffectivelyRenderableEmpty(listOf(Part(id = "1", type = "file"))))
     }

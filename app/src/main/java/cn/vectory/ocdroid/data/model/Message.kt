@@ -117,7 +117,7 @@ fun isRenderableEmptyMessage(
  *
  *   - text / reasoning → blank [Part.text]
  *   - tool             → blank tool name AND output AND inputSummary
- *   - patch            → no navigable file paths AND blank output
+ *   - patch            → no file paths AND blank output AND blank inputSummary
  *   - file             → blank filename
  *   - any other type   → treated as empty (defensive)
  *
@@ -135,8 +135,12 @@ fun isEffectivelyRenderableEmpty(partsForMessage: List<Part>): Boolean {
             part.isTool -> part.tool.isNullOrBlank() &&
                 part.toolOutput.isNullOrBlank() &&
                 part.toolInputSummary.isNullOrBlank()
-            part.isPatch -> part.filePathsForNavigationFiltered.isEmpty() &&
-                part.toolOutput.isNullOrBlank()
+            // §kimo-F2: patch 判空用未过滤路径（含无扩展名如 Makefile）并补查
+            // toolInputSummary——与 PatchCard 的"无路径时内容回退"对齐，避免无路径/
+            // 无扩展名但带 inputSummary 的 patch 被判空、在 message 级被过滤而到不了 PatchCard。
+            part.isPatch -> part.filePathsForNavigation.isEmpty() &&
+                part.toolOutput.isNullOrBlank() &&
+                part.toolInputSummary.isNullOrBlank()
             part.isFile -> part.filename.isNullOrBlank()
             else -> true
         }

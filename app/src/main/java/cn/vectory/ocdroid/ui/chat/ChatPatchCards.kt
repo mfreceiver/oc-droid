@@ -68,7 +68,9 @@ internal fun PatchCard(
     modifier: Modifier = Modifier.fillMaxWidth()
 ) {
     val primaryFile = part.files?.firstOrNull()
-    val allPaths = part.filePathsForNavigationFiltered
+    // §F2-fix: 用未过滤的 filePathsForNavigation（而非 ...Filtered）——后者要求最后一段
+    // 含 "."，会把无扩展名文件（Makefile/Dockerfile/README）丢弃，导致 Write 展开体为空。
+    val allPaths = part.filePathsForNavigation
     val primaryPath = remember(part) {
         primaryFile?.path?.replace("\\", "/")?.trim()
             ?: part.metadata?.path?.takeIf { it.isNotEmpty() }
@@ -106,12 +108,10 @@ internal fun PatchCard(
     // Diff stats colored green/red — parity with MultiFilePatchAccordion
     // header (stateSuccessFg / stateDangerFg). Prior §5.4 v3 desaturated
     // them to onSurfaceVariant; updated per user request for consistency.
-    Surface(
-        modifier = modifier
-            .padding(vertical = 2.dp)
-            .testTag("toolcard.patch.$basename"),
-        shape = RectangleShape,
-        color = if (expanded) MaterialTheme.colorScheme.surfaceContainerLow else Color.Transparent
+    // §F2: 统一工具卡容器（surfaceContainer + 1dp 边框）。
+    ToolCardContainer(
+        expanded = expanded,
+        modifier = modifier.testTag("toolcard.patch.$basename")
     ) {
         Column(modifier = Modifier.then(if (isRunning) Modifier else Modifier.animateContentSize(AppMotion.expandSizeSpec))) {
             Row(
@@ -215,6 +215,25 @@ internal fun PatchCard(
                             softWrap = true,
                             overflow = TextOverflow.Visible
                         )
+                    } else {
+                        // §F2-fix: 路径全缺（服务端未填充 files/metadata/state.pathFromInput）
+                        // 时，展示实际写入内容摘要，确保展开永远有内容、可看出改了什么。
+                        val body = remember(part) {
+                            buildString {
+                                part.state?.inputSummary?.let { append(it); append('\n') }
+                                part.state?.output?.let { append(it) }
+                            }.trim().take(600)
+                        }
+                        if (body.isNotEmpty()) {
+                            Text(
+                                text = body,
+                                style = MaterialTheme.typography.bodySmall,
+                                fontFamily = BundledMonoFamily,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                softWrap = true,
+                                overflow = TextOverflow.Visible
+                            )
+                        }
                     }
                 }
             }
@@ -257,11 +276,8 @@ internal fun ContextToolGroup(
 
     val stateWord = if (isRunning) "Exploring" else "Explored"
 
-    Surface(
-        modifier = modifier.padding(vertical = 2.dp),
-        shape = RectangleShape,
-        color = if (expanded) MaterialTheme.colorScheme.surfaceContainerLow else Color.Transparent
-    ) {
+    // §F2: 统一工具卡容器（surfaceContainer + 1dp 边框）。
+    ToolCardContainer(expanded = expanded, modifier = modifier) {
         Column(modifier = Modifier.then(if (isRunning) Modifier else Modifier.animateContentSize(AppMotion.expandSizeSpec))) {
             Row(
                 modifier = Modifier
@@ -304,9 +320,12 @@ internal fun ContextToolGroup(
                 Column(modifier = Modifier.padding(start = 8.dp, top = 2.dp, end = 8.dp, bottom = 4.dp)) {
                     for (part in parts) {
                         val toolLabel = contextToolLabel(part)
+                        // §F2-fix: 路径/输入摘要全缺时，回退到输出首行（读了什么的第一行），
+                        // 避免 Explored 展开后只剩 "Read · " 空内容。
                         val subtitle = part.toolInputSummary
                             ?: part.state?.pathFromInput
                             ?: part.metadata?.path
+                            ?: part.state?.output?.lineSequence()?.firstOrNull()?.take(80)
                             ?: ""
                         Row(
                             modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp),

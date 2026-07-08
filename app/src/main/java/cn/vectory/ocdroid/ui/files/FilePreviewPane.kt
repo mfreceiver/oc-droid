@@ -18,8 +18,8 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.Article
 import androidx.compose.material.icons.filled.Close
-import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Share
 import androidx.compose.material3.CircularProgressIndicator
@@ -128,7 +128,9 @@ internal fun FilePreviewPane(
                 if (previewKind == FilePreviewUtils.PreviewContentKind.MARKDOWN) {
                     Box {
                         IconButton(onClick = { modeMenuExpanded = true }) {
-                            Icon(Icons.Default.MoreVert, contentDescription = stringResource(R.string.files_preview_mode))
+                            // §F5: 查看模式切换——MoreVert（"更多"语义模糊）改为 Article
+                            // （带格式排版的文档），更清晰地表达"预览/格式模式"。
+                            Icon(Icons.AutoMirrored.Filled.Article, contentDescription = stringResource(R.string.files_preview_mode))
                         }
                         DropdownMenu(
                             expanded = modeMenuExpanded,
@@ -154,8 +156,20 @@ internal fun FilePreviewPane(
                         }
                     }
                 }
-                IconButton(onClick = onRefresh, enabled = !isRefreshing) {
-                    Icon(Icons.Default.Refresh, contentDescription = stringResource(R.string.common_refresh))
+                // §F5: md 预览右上角去掉刷新按钮——内容在打开时已加载，刷新冗余。
+                // 其它预览（图片/文本）保留刷新以便重取/重解码。
+                if (previewKind != FilePreviewUtils.PreviewContentKind.MARKDOWN) {
+                    IconButton(onClick = onRefresh, enabled = !isRefreshing) {
+                        Icon(Icons.Default.Refresh, contentDescription = stringResource(R.string.common_refresh))
+                    }
+                }
+                // §F5: md/文本分享（下载内容→系统分享）。图片仍走 shareImage（已解码位图）。
+                if (previewKind == FilePreviewUtils.PreviewContentKind.MARKDOWN ||
+                    previewKind == FilePreviewUtils.PreviewContentKind.TEXT
+                ) {
+                    IconButton(onClick = { shareFileContent(context, path, fileContent) }) {
+                        Icon(Icons.Default.Share, contentDescription = stringResource(R.string.files_share))
+                    }
                 }
                 if (imagePayload != null) {
                     IconButton(onClick = { shareImage(context, path, imagePayload.bytes) }) {

@@ -1,6 +1,8 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">OC Droid</string>
+    <!-- §F1: 顶栏在关闭所有会话 tab 时显示「<app> v<version>」 -->
+    <string name="chat_title_app_version">%1$s v%2$s</string>
     <string name="nav_chat">Chat</string>
     <string name="nav_files">Files</string>
     <string name="nav_sessions">Sessions</string>
