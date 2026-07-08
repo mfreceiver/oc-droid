@@ -10,8 +10,10 @@ import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Dns
 import androidx.compose.material.icons.filled.Edit
+import androidx.compose.material.icons.filled.NetworkCheck
 import androidx.compose.material.icons.filled.Visibility
 import androidx.compose.material.icons.filled.VisibilityOff
+import androidx.compose.material.icons.outlined.Info
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -22,9 +24,11 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.ListItem
 import androidx.compose.material3.ListItemDefaults
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.RadioButton
+import androidx.compose.material3.SegmentedButton
+import androidx.compose.material3.SegmentedButtonDefaults
+import androidx.compose.material3.SingleChoiceSegmentedButtonRow
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -36,7 +40,6 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.input.PasswordVisualTransformation
@@ -300,50 +303,83 @@ internal fun HostProfileEditorDialog(
     // R-01: per-host "接受不安全连接"开关（自签证书/内网 TLS 用户需要显式启用，
     // 否则全局 strict 校验会直接拒绝连接）。种子取自当前 HostProfile。
     var allowInsecure by remember(initial.id) { mutableStateOf(initial.allowInsecureConnections) }
+    // §issue-5: 测试连接状态上提——触发器移入 confirmButton 的 test icon，结果
+    // 回显仍在 text 列；两者共享状态，故从 Column 内部上提到 dialog 作用域。
+    var testStatus by remember(initial.id) { mutableStateOf<Pair<Boolean, String>?>(null) }
+    var isTesting by remember(initial.id) { mutableStateOf(false) }
+    // §issue-4: 分组说明改为 i 按钮点击弹窗（替代常驻描述行，省高度）。
+    var showGroupInfo by remember(initial.id) { mutableStateOf(false) }
+
+    // §issue-5: 测试连接触发逻辑抽成局部函数——原表单内全宽按钮移除，触发器改为
+    // confirmButton 里的 test icon；结果回显仍在表单内。两者共享此函数。
+    // §fix-401 / §fix-401-credential 语义不变：编辑已有 profile 且未改密码时回退
+    // 已保存密码（write-only 字段不回填）；主动清空则按无 auth 测试。
+    fun triggerTestConnection() {
+        if (isTesting || serverUrl.isBlank()) return
+        isTesting = true
+        testStatus = null
+        onTestConnection(
+            serverUrl,
+            authUsername.ifBlank { null },
+            authPassword.ifBlank { null },
+            allowInsecure,
+            initial.id.takeIf { initial.basicAuth != null },
+            passwordEdited
+        ) { success, msg ->
+            isTesting = false
+            testStatus = success to msg
+        }
+    }
 
     AlertDialog(
         onDismissRequest = onDismiss,
         title = { Text(if (initial.name.isBlank()) stringResource(R.string.host_profile_add_title) else stringResource(R.string.host_profile_edit_title)) },
         text = {
-            Column {
-                // 配置名 (required)
-                Text(stringResource(R.string.host_profile_name), style = MaterialTheme.typography.labelMedium)
+            // §issue-6: 内容列加 verticalScroll + heightIn 兜底——编辑表单在小屏 /
+            // 大字号 / 键盘弹起时不再被裁切。叠加下述 label 槽化 + 分组/测试改造，
+            // 常规尺寸下整体高度也显著下降。
+            Column(
+                modifier = Modifier
+                    .heightIn(max = 560.dp)
+                    .verticalScroll(rememberScrollState())
+            ) {
+                // 配置名 (required) — label 槽替代上方独立 Text（M3 idiom + 省 1 行，§issue-6）
                 OutlinedTextField(
                     value = name,
                     onValueChange = { name = it },
-                    placeholder = { Text(stringResource(R.string.host_profile_name)) },
+                    label = { Text(stringResource(R.string.host_profile_name)) },
                     singleLine = true,
                     modifier = Modifier.fillMaxWidth()
                 )
-                Spacer(modifier = Modifier.height(8.dp))
-                // 服务器地址 (required)
-                Text(stringResource(R.string.settings_server_url), style = MaterialTheme.typography.labelMedium)
+                Spacer(modifier = Modifier.height(6.dp))
+                // 服务器地址 (required) — label 槽（§issue-6）
                 OutlinedTextField(
                     value = serverUrl,
                     onValueChange = { serverUrl = it },
+                    label = { Text(stringResource(R.string.settings_server_url)) },
                     placeholder = { Text(stringResource(R.string.host_profile_url_placeholder)) },
                     singleLine = true,
                     modifier = Modifier.fillMaxWidth()
                 )
-                Spacer(modifier = Modifier.height(8.dp))
-                // Username (optional)
-                Text(stringResource(R.string.host_profile_basic_auth_username), style = MaterialTheme.typography.labelMedium)
+                Spacer(modifier = Modifier.height(6.dp))
+                // Username (optional) — label 槽（§issue-6）
                 OutlinedTextField(
                     value = authUsername,
                     onValueChange = { authUsername = it },
+                    label = { Text(stringResource(R.string.host_profile_basic_auth_username)) },
                     placeholder = { Text(stringResource(R.string.common_optional)) },
                     singleLine = true,
                     modifier = Modifier.fillMaxWidth()
                 )
-                Spacer(modifier = Modifier.height(8.dp))
-                // Password (optional, masked)
-                Text(stringResource(R.string.host_profile_basic_auth_password), style = MaterialTheme.typography.labelMedium)
+                Spacer(modifier = Modifier.height(6.dp))
+                // Password (optional, masked) — label 槽（§issue-6）
                 OutlinedTextField(
                     value = authPassword,
                     onValueChange = {
                         passwordEdited = true
                         authPassword = it
                     },
+                    label = { Text(stringResource(R.string.host_profile_basic_auth_password)) },
                     placeholder = {
                         // Mirror the tunnel-password field: the password is
                         // write-only (never echoed back), but show masked dots
@@ -366,15 +402,15 @@ internal fun HostProfileEditorDialog(
                         }
                     }
                 )
-                Spacer(modifier = Modifier.height(8.dp))
-                // Tunnel auth (optional, masked)
-                Text(stringResource(R.string.host_profile_tunnel_password_label), style = MaterialTheme.typography.labelMedium)
+                Spacer(modifier = Modifier.height(6.dp))
+                // Tunnel auth (optional, masked) — label 槽（§issue-6）
                 OutlinedTextField(
                     value = tunnelPassword,
                     onValueChange = {
                         tunnelEdited = true
                         tunnelPassword = it
                     },
+                    label = { Text(stringResource(R.string.host_profile_tunnel_password_label)) },
                     placeholder = {
                         // When a tunnel password is already stored for this host
                         // (and the user hasn't started editing), show masked dots
@@ -399,35 +435,44 @@ internal fun HostProfileEditorDialog(
                     }
                 )
                 Spacer(modifier = Modifier.height(12.dp))
-                Text(stringResource(R.string.host_group_label), style = MaterialTheme.typography.labelMedium)
+                // §issue-4: 分组选择改用 M3 SingleChoiceSegmentedButtonRow（替代 5 个
+                // OutlinedButton 平铺），选项名简化为「独立 / A / B / C / D」；常驻
+                // 描述行移除，改为标题右侧 i 按钮点击弹窗（§issue-6 省高度）。
                 Row(
                     modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    verticalAlignment = Alignment.CenterVertically
                 ) {
-                    OutlinedButton(
-                        onClick = { selectedGroup = null },
-                        modifier = Modifier.weight(1f),
-                        colors = ButtonDefaults.outlinedButtonColors(
-                            containerColor = if (selectedGroup == null) MaterialTheme.colorScheme.secondaryContainer else Color.Transparent
+                    Text(
+                        stringResource(R.string.host_group_label),
+                        style = MaterialTheme.typography.labelMedium,
+                        modifier = Modifier.weight(1f)
+                    )
+                    IconButton(onClick = { showGroupInfo = true }) {
+                        Icon(
+                            Icons.Outlined.Info,
+                            contentDescription = stringResource(R.string.host_group_info),
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant
                         )
-                    ) { Text(stringResource(R.string.host_group_none), maxLines = 1) }
-                    groupLabels.forEach { label ->
-                        OutlinedButton(
-                            onClick = { selectedGroup = label },
-                            modifier = Modifier.weight(1f),
-                            colors = ButtonDefaults.outlinedButtonColors(
-                                containerColor = if (selectedGroup == label) MaterialTheme.colorScheme.secondaryContainer else Color.Transparent
-                            )
-                        ) { Text(label) }
                     }
                 }
-                if (selectedGroup != null) {
-                    Text(
-                        stringResource(R.string.host_group_warning),
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        modifier = Modifier.padding(top = 4.dp)
+                SingleChoiceSegmentedButtonRow(modifier = Modifier.fillMaxWidth()) {
+                    val groupOptions = listOf<Pair<String?, String>>(
+                        null to stringResource(R.string.host_group_none),
+                        "A" to "A",
+                        "B" to "B",
+                        "C" to "C",
+                        "D" to "D"
                     )
+                    groupOptions.forEachIndexed { index, (value, label) ->
+                        SegmentedButton(
+                            selected = selectedGroup == value,
+                            onClick = { selectedGroup = value },
+                            shape = SegmentedButtonDefaults.itemShape(index = index, count = groupOptions.size),
+                            icon = {}
+                        ) {
+                            Text(label, maxLines = 1)
+                        }
+                    }
                 }
                 Spacer(modifier = Modifier.height(12.dp))
                 // R-01: per-host insecure-connections toggle. Off by default
@@ -451,43 +496,9 @@ internal fun HostProfileEditorDialog(
                     Switch(checked = allowInsecure, onCheckedChange = { allowInsecure = it })
                 }
                 Spacer(modifier = Modifier.height(12.dp))
-                // §user-req: 一次性"测试连接"按钮。用 onTestConnection 回调
-                // 探测当前表单值（不保存、不切换 host）。结果以彩色小字回显在
-                // 按钮下方；测试进行中按钮禁用并显示进度圈。
-                var testStatus by remember(initial.id) { mutableStateOf<Pair<Boolean, String>?>(null) }
-                var isTesting by remember(initial.id) { mutableStateOf(false) }
-                OutlinedButton(
-                    onClick = {
-                        isTesting = true
-                        testStatus = null
-                        onTestConnection(
-                            serverUrl,
-                            authUsername.ifBlank { null },
-                            authPassword.ifBlank { null },
-                            allowInsecure,
-                            // §fix-401: 编辑已有 profile 且未改密码时，表单密码为空——
-                            // 传 profileId 让 VM 回退查已保存密码（write-only 字段不回填）。
-                            initial.id.takeIf { initial.basicAuth != null },
-                            // §fix-401-credential (gpter 🔴): 区分"未碰密码框"与"主动清空"——
-                            // 仅未碰时回退已保存密码；主动清空则按无 auth 测试（不发旧凭据）。
-                            passwordEdited
-                        ) { success, msg ->
-                            isTesting = false
-                            testStatus = success to msg
-                        }
-                    },
-                    enabled = !isTesting && serverUrl.isNotBlank(),
-                    modifier = Modifier.fillMaxWidth()
-                ) {
-                    if (isTesting) {
-                        CircularProgressIndicator(
-                            modifier = Modifier.size(16.dp),
-                            strokeWidth = 2.dp
-                        )
-                        Spacer(modifier = Modifier.width(8.dp))
-                    }
-                    Text(stringResource(R.string.host_profile_test_connection))
-                }
+                // §issue-5: 全宽"测试连接"按钮已移除——触发器移入底部 action 行的
+                // test icon（见 confirmButton）。此处仅保留结果回显（成功/失败小字），
+                // 测试进行中由 icon 内的进度圈表达。
                 testStatus?.let { (success, msg) ->
                     Text(
                         text = msg,
@@ -500,30 +511,43 @@ internal fun HostProfileEditorDialog(
                 // 现在 VM 会在未编辑密码时自动回退已保存密码，无需用户重输。
             }
         },
-        // Bottom action row: [Delete(red)] ... [Cancel] [Save].
-        // Delete is only shown when editing an existing, deletable profile and
-        // is tinted with the error color to make the destructive action stand
-        // out. The confirmButton Row carries all three actions so they share a
-        // single baseline and the delete button can sit on the far left.
+        // Bottom action row: [Test][Delete] ... [Cancel] [Save].
+        // §issue-5: 测试连接从表单全宽按钮迁来此处的 test icon（NetworkCheck；
+        // 测试中换进度圈、URL 空或测试中禁用）。删除键改为 icon-only（去文字标签），
+        // 保留 error 着色 + contentDescription 供无障碍。两 icon 组成左簇。
         confirmButton = {
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                if (canDelete) {
-                    TextButton(
-                        onClick = { showDeleteConfirm = true },
-                        colors = ButtonDefaults.textButtonColors(
-                            contentColor = MaterialTheme.colorScheme.error
-                        )
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    IconButton(
+                        onClick = { triggerTestConnection() },
+                        enabled = !isTesting && serverUrl.isNotBlank()
                     ) {
-                        Icon(Icons.Default.Delete, contentDescription = null)
-                        Spacer(modifier = Modifier.width(4.dp))
-                        Text(stringResource(R.string.common_delete))
+                        if (isTesting) {
+                            CircularProgressIndicator(
+                                modifier = Modifier.size(18.dp),
+                                strokeWidth = 2.dp
+                            )
+                        } else {
+                            Icon(
+                                Icons.Default.NetworkCheck,
+                                contentDescription = stringResource(R.string.host_profile_test_connection),
+                                tint = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
                     }
-                } else {
-                    Spacer(Modifier)
+                    if (canDelete) {
+                        IconButton(onClick = { showDeleteConfirm = true }) {
+                            Icon(
+                                Icons.Default.Delete,
+                                contentDescription = stringResource(R.string.common_delete),
+                                tint = MaterialTheme.colorScheme.error
+                            )
+                        }
+                    }
                 }
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     TextButton(onClick = onDismiss) { Text(stringResource(R.string.common_cancel)) }
@@ -590,6 +614,20 @@ internal fun HostProfileEditorDialog(
             },
             dismissButton = {
                 TextButton(onClick = { showDeleteConfirm = false }) { Text(stringResource(R.string.common_cancel)) }
+            }
+        )
+    }
+
+    // §issue-4: 分组说明气泡（i 按钮触发）。原常驻描述行移除此弹窗，省表单高度。
+    if (showGroupInfo) {
+        AlertDialog(
+            onDismissRequest = { showGroupInfo = false },
+            title = { Text(stringResource(R.string.host_group_label)) },
+            text = { Text(stringResource(R.string.host_group_warning)) },
+            confirmButton = {
+                TextButton(onClick = { showGroupInfo = false }) {
+                    Text(stringResource(R.string.common_ok))
+                }
             }
         )
     }

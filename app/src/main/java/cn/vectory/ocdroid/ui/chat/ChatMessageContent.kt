@@ -145,6 +145,14 @@ internal fun ChatMessageList(
 
     // sessionId 在 remember key 里需要——提前取（下面 savedPositions 等也用）。
     val sessionId = chatState.currentSessionId
+    // §issue-1(1): 当前会话的文件变更快照（来自 SessionListState.sessionDiffs），
+    // 驱动聊天内 SessionDiffCard。非空时在 timeline 底部渲染一张可展开卡片。
+    val sessionDiff = sessionId?.let { sessionListState.sessionDiffs[it] }
+    // §issue-1(1): 打开会话时按需拉取 diff（视图层数据，解耦消息加载路径）。
+    // LaunchedEffect(sessionId) 仅在切换会话时运行一次；SSE session.diff 负责后续增量。
+    LaunchedEffect(sessionId) {
+        if (!sessionId.isNullOrBlank()) sessionVM.loadSessionDiff(sessionId)
+    }
 
     // §flicker-fix (Issue 1): key the LazyListState by sessionId so a fresh
     // state is created on session change. Without the key, the pager reusing
@@ -508,6 +516,19 @@ internal fun ChatMessageList(
                         modifier = Modifier.widthIn(max = cardMax)
                     )
                 }
+            }
+        }
+        // §issue-1(1): 会话文件变更卡片。reverseLayout 下 item 顺序靠前 = 视觉靠下，
+        // 故放在消息块之前 → 渲染在对话底部（最新内容之后）。仅当本会话有 diff 时出现。
+        // sessionId 传入用于 rememberSaveable key 维度（防跨会话串读，maxer B1）。
+        if (!sessionDiff.isNullOrEmpty() && sessionId != null) {
+            val diffSessionId = sessionId
+            item(key = "session-diff") {
+                SessionDiffCard(
+                    sessionId = diffSessionId,
+                    diffs = sessionDiff,
+                    onFileClick = onFileClick
+                )
             }
         }
         // §Phase8-nav: reversedEntries（Message + GapMarker）已提到 LazyColumn 外

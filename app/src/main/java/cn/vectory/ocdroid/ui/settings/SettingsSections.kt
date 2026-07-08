@@ -105,13 +105,6 @@ internal fun ConnectionProfileSection(
                         style = MaterialTheme.typography.labelMedium,
                         color = MaterialTheme.colorScheme.primary
                     )
-                    connectionState.serverVersion?.let { version ->
-                        Text(
-                            " (v$version)",
-                            style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.outline
-                        )
-                    }
                 }
                 IconButton(onClick = onManageProfiles) {
                     Icon(

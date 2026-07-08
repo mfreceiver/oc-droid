@@ -209,6 +209,12 @@
     <string name="chat_question_stale_hint">该问题已中断，不再有效</string>
     <string name="chat_error_details">错误详情</string>
     <string name="host_profile_test_connection">测试连接</string>
+    <string name="session_diff_card_title">会话变更</string>
+    <string name="session_diff_files_count">%1$d 个文件</string>
+    <string name="session_diff_truncated">…（共 %1$d 行，已截断）</string>
+    <string name="session_diff_open_file">打开文件</string>
+    <string name="common_expand">展开</string>
+    <string name="common_collapse">折叠</string>
     <string name="common_optional">（可选）</string>
     <string name="host_profile_url_placeholder">http://localhost:4096</string>
     <string name="host_profile_password_masked_placeholder">••••••••</string>
@@ -308,7 +314,8 @@
 
     <!-- §分组重写 2026-07-07：人工服务器分组（项1/2/3/4/5）。 -->
     <string name="host_group_label">服务器分组</string>
-    <string name="host_group_none">不分组</string>
+    <string name="host_group_none">独立</string>
+    <string name="host_group_info">分组说明</string>
     <string name="host_group_warning">同组 profile 共享：聊天历史、草稿、模型偏好、最近目录。选错组会导致这些数据串台或搁浅，仅可用「清除全部数据」恢复。</string>
     <string name="group_stats_named">%1$s · %2$d 个连接 · %3$d 条缓存会话</string>
     <string name="group_stats_solo">独立 · 1 个连接 · %1$d 条缓存会话</string>

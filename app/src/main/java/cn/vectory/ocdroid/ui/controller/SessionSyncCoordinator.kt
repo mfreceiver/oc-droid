@@ -923,6 +923,40 @@ class SessionSyncCoordinator(
                     }
                 }
             }
+            "sync" -> {
+                // §issue-1(3): 全局事件流的同步标记。服务端发布每个 durable 事件时
+                // 附带一个 type=sync 的回放封装（event-v2-bridge），上游 web 客户端
+                // 直接跳过（server-sdk.tsx:195）。ocdroid 不做多端回放，同样不消费；
+                // 显式 case 替代落入 else 的告警——已知且刻意忽略。
+            }
+            "session.idle" -> {
+                // §issue-1(2): 已废弃事件（schema/session-status-event.ts:43 标注
+                // deprecated）。服务端在 session.status{type:idle} 之后总是再发一次
+                // session.idle，二者时序等价。ocdroid 的会话状态（busy/idle、流式
+                // 收尾、未读清理）已由上方 "session.status" 分支完整驱动，此处不再
+                // 派发。若将来要做"回复就绪"主动通知，应挂在 session.status{idle}
+                // （非废弃源）而非本事件——此处仅显式识别以消除 else 告警。
+            }
+            "session.diff" -> {
+                // §issue-1(1): 会话文件变更快照。payload { sessionID, diff[] }，
+                // 每条 = SnapshotFileDiff（file/patch/additions/deletions/status）。
+                // 解析后写入 SessionListState.sessionDiffs，驱动聊天内 SessionDiffCard。
+                // 解析模式镜像 todo.updated（JsonArray → List<@Serializable>）。
+                val sessionId = event.payload.getString("sessionID") ?: return
+                val diffArray = event.payload.properties?.get("diff") as? kotlinx.serialization.json.JsonArray ?: return
+                // §gpter-B：用 lenientJson（ignoreUnknownKeys=true）与 REST getSessionDiff
+                // 路径（OpenCodeRepository.json）对齐——默认 Json 严格模式会在上游
+                // SnapshotFileDiff 多带字段时整条丢弃，导致 SSE/REST 行为不一致。
+                val diffs = try {
+                    lenientJson.decodeFromJsonElement<List<cn.vectory.ocdroid.data.model.FileDiff>>(diffArray)
+                } catch (e: kotlinx.coroutines.CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    applySseSideEffects(listOf(SseSideEffect.ReportNonFatal("Ignoring invalid session.diff payload: ${e.message}")))
+                    return
+                }
+                slices.mutateSessionList { it.applySessionDiff(sessionId, diffs).first }
+            }
             else -> {
                 // §R18 Phase 3 Wave 1 (P0-7): surface unrecognized SSE event
                 // types instead of silently dropping them. NOISY_SSE_LOG_EVENTS
@@ -1418,6 +1452,29 @@ internal fun SessionListState.applyTodoUpdated(
     todos: List<TodoItem>
 ): Pair<SessionListState, List<SseSideEffect>> =
     copy(sessionTodos = sessionTodos + (sessionId to todos)) to emptyList()
+
+/**
+ * §issue-1(1): session.diff → 替换 [sessionId] 的文件变更快照。服务端每次发布的是
+ * 该会话当前的完整 diff 列表（非增量），故整体替换。Pure。
+ */
+internal fun SessionListState.applySessionDiff(
+    sessionId: String,
+    diffs: List<cn.vectory.ocdroid.data.model.FileDiff>
+): Pair<SessionListState, List<SseSideEffect>> =
+    copy(sessionDiffs = sessionDiffs + (sessionId to diffs)) to emptyList()
+
+/**
+ * §issue-1(1) REST 预取专用：仅当 [sessionId] 尚无 diff 条目时写入（stale-overwrite
+ * 守卫，glmer-S1）。SSE [applySessionDiff] 是权威源、无条件覆盖；REST 仅乐观预取，若
+ * SSE 已推过更新则跳过，避免在途 REST 旧结果覆盖更新的 SSE 快照。抽成纯函数以便单测
+ * （maxer 复审：覆盖维度）。镜像上游 web client `diff()` 的 `if defined && !force return`。
+ */
+internal fun SessionListState.applySessionDiffIfAbsent(
+    sessionId: String,
+    diffs: List<cn.vectory.ocdroid.data.model.FileDiff>
+): Pair<SessionListState, List<SseSideEffect>> =
+    (if (sessionDiffs[sessionId] != null) this
+    else copy(sessionDiffs = sessionDiffs + (sessionId to diffs))) to emptyList()
 
 /**
  * message.created (out-of-band) → mark [sessionId] unread IF it is not the

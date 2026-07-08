@@ -184,7 +184,7 @@ fun SessionsScreen(
                 .fillMaxSize()
                 .padding(padding),
             contentPadding = PaddingValues(vertical = 8.dp),
-            verticalArrangement = Arrangement.spacedBy(12.dp)
+            verticalArrangement = Arrangement.spacedBy(2.dp)
         ) {
             // --- Recent Sessions Section ---
             item(key = "recent_header") {
@@ -553,7 +553,7 @@ private fun SessionCard(
     Surface(
         modifier = Modifier
             .fillMaxWidth()
-            .padding(horizontal = 8.dp, vertical = 4.dp)
+            .padding(horizontal = 8.dp, vertical = 2.dp)
             .combinedClickable(
                 onClick = onClick,
                 onLongClick = onLongClick

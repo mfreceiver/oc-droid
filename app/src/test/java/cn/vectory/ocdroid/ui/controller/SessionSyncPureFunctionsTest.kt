@@ -1,5 +1,6 @@
 package cn.vectory.ocdroid.ui.controller
 
+import cn.vectory.ocdroid.data.model.FileDiff
 import cn.vectory.ocdroid.data.model.Message
 import cn.vectory.ocdroid.data.model.Part
 import cn.vectory.ocdroid.data.model.QuestionInfo
@@ -310,6 +311,68 @@ class SessionSyncPureFunctionsTest {
 
         assertNotNull(next.sessionTodos["s1"])
         assertNotNull(next.sessionTodos["s2"])
+    }
+
+    // ── §issue-1(1) applySessionDiff: session file diffs ==================
+
+    @Test
+    fun `applySessionDiff overwrites the entry for the same session`() {
+        val state = SessionListState(
+            sessionDiffs = mapOf("s1" to listOf(FileDiff(filePath = "old.kt", additions = 1)))
+        )
+        val diffs = listOf(
+            FileDiff(filePath = "a.kt", additions = 3, deletions = 1, status = "modified"),
+            FileDiff(filePath = "b.kt", additions = 0, deletions = 2, status = "deleted")
+        )
+
+        val (next, _) = state.applySessionDiff("s1", diffs)
+
+        assertEquals(2, next.sessionDiffs["s1"]?.size)
+        assertEquals("a.kt", next.sessionDiffs["s1"]!![0].file)
+    }
+
+    @Test
+    fun `applySessionDiff adds a new session entry without disturbing others`() {
+        val state = SessionListState(
+            sessionDiffs = mapOf("s1" to listOf(FileDiff(filePath = "x.kt", additions = 1)))
+        )
+
+        val (next, _) = state.applySessionDiff("s2", listOf(FileDiff(filePath = "y.kt", additions = 2)))
+
+        assertNotNull(next.sessionDiffs["s1"])
+        assertNotNull(next.sessionDiffs["s2"])
+    }
+
+    @Test
+    fun `applySessionDiff with an empty diff list stores an empty list`() {
+        val (next, _) = SessionListState().applySessionDiff("s1", emptyList())
+
+        assertNotNull(next.sessionDiffs["s1"])
+        assertTrue(next.sessionDiffs["s1"]!!.isEmpty())
+    }
+
+    // ── §issue-1(1) applySessionDiffIfAbsent: REST stale-overwrite 守卫 ────
+
+    @Test
+    fun `applySessionDiffIfAbsent writes when no prior entry exists`() {
+        val (next, _) = SessionListState()
+            .applySessionDiffIfAbsent("s1", listOf(FileDiff(filePath = "a.kt", additions = 1)))
+
+        assertEquals(1, next.sessionDiffs["s1"]?.size)
+    }
+
+    @Test
+    fun `applySessionDiffIfAbsent skips when an entry already exists`() {
+        // 模拟 REST 在途期间 SSE 已推送：SSE 写入的新快照不得被旧 REST 结果覆盖。
+        val state = SessionListState(
+            sessionDiffs = mapOf("s1" to listOf(FileDiff(filePath = "fresh-from-sse.kt", additions = 9)))
+        )
+
+        val (next, _) = state.applySessionDiffIfAbsent("s1", listOf(FileDiff(filePath = "stale-from-rest.kt", additions = 1)))
+
+        // 仍是 SSE 的值——REST 的旧结果被守卫丢弃。
+        assertEquals(1, next.sessionDiffs["s1"]?.size)
+        assertEquals("fresh-from-sse.kt", next.sessionDiffs["s1"]!![0].file)
     }
 
     // ── part.updated placeholder / leading-edge writes ─────────────────────

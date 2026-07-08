@@ -263,7 +263,11 @@ data class SessionListState(
     val childSessions: Map<String, List<Session>> = emptyMap(),
     val directorySessions: Map<String, List<Session>> = emptyMap(),
     val openSessionIds: List<String> = emptyList(),
-    val sessionTodos: Map<String, List<TodoItem>> = emptyMap()
+    val sessionTodos: Map<String, List<TodoItem>> = emptyMap(),
+    /** §issue-1(1): per-session 文件变更快照（session.diff SSE / GET /session/{id}/diff）。
+     *  key = sessionId，value = 该会话累计的 FileDiff 列表。仅在打开会话时拉取 +
+     *  SSE 增量更新；驱动聊天内 SessionDiffCard。 */
+    val sessionDiffs: Map<String, List<cn.vectory.ocdroid.data.model.FileDiff>> = emptyMap()
 )
 
 /**

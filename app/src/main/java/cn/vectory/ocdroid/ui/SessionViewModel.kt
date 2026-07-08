@@ -372,19 +372,28 @@ class SessionViewModel @Inject constructor(
                      .onFailure { DebugLog.e(TAG, "cache write failed for fp=$fp sid=$sid", it) }
              }
          }
-        launchLoadMessages(
-            scope = appScope,
-            repository = repository,
-            slices = store.slices,
-            sessionId = sessionId,
-            resetLimit = true,
-            settingsManager = settingsManager,
-            onCacheWindow = cacheHook,
-            emit = EventEmitter { event -> effectBus.tryEmitUiEvent(event) },
-            // gpter 复审 final-fix: compound-key guard.
-            expectedServerGroupFp = fp,
-            currentServerGroupFp = { hostProfileStore.currentProfile().serverGroupFp.ifBlank { hostProfileStore.currentProfile().id } },
-        )
+         launchLoadMessages(
+             scope = appScope,
+             repository = repository,
+             slices = store.slices,
+             sessionId = sessionId,
+             resetLimit = true,
+             settingsManager = settingsManager,
+             onCacheWindow = cacheHook,
+             emit = EventEmitter { event -> effectBus.tryEmitUiEvent(event) },
+             // gpter 复审 final-fix: compound-key guard.
+             expectedServerGroupFp = fp,
+             currentServerGroupFp = { hostProfileStore.currentProfile().serverGroupFp.ifBlank { hostProfileStore.currentProfile().id } },
+         )
+     }
+
+    /**
+     * §issue-1(1): 拉取指定会话的文件变更快照（GET /session/{id}/diff）。由聊天视图
+     * 打开会话时按需触发（见 ChatMessageList 的 LaunchedEffect），刻意解耦消息加载
+     * 路径——diff 是视图层数据，不必随每次 message reload 触发。SSE session.diff 会
+     * 随后增量覆盖，故此处仅做乐观预取。 */
+    fun loadSessionDiff(sessionId: String) {
+        launchLoadSessionDiff(appScope, repository, store.slices, sessionId)
     }
 
     /** §R-17 batch3e: loadInitialData lives on [ConnectionViewModel] for

@@ -209,6 +209,12 @@
     <string name="chat_question_stale_hint">This question was interrupted and is no longer active</string>
     <string name="chat_error_details">Error Details</string>
     <string name="host_profile_test_connection">Test Connection</string>
+    <string name="session_diff_card_title">Session changes</string>
+    <string name="session_diff_files_count">%1$d files</string>
+    <string name="session_diff_truncated">…(%1$d lines total, truncated)</string>
+    <string name="session_diff_open_file">Open file</string>
+    <string name="common_expand">Expand</string>
+    <string name="common_collapse">Collapse</string>
     <string name="common_optional">(optional)</string>
     <string name="host_profile_url_placeholder">http://localhost:4096</string>
     <string name="host_profile_password_masked_placeholder">••••••••</string>
@@ -313,7 +319,8 @@
 
     <!-- §Grouping rewrite 2026-07-07: manual server grouping (item 1/2/3/4/5). -->
     <string name="host_group_label">Server group</string>
-    <string name="host_group_none">No group</string>
+    <string name="host_group_none">Standalone</string>
+    <string name="host_group_info">Group description</string>
     <string name="host_group_warning">Profiles in the same group share cached chat history, drafts, model preferences, and recent directories. Choosing the wrong group will mix or strand this data; only \"Clear all local data\" can recover it.</string>
     <string name="group_stats_named">%1$s · %2$d connection(s) · %3$d cached session(s)</string>
     <string name="group_stats_solo">Standalone · 1 connection · %1$d cached session(s)</string>

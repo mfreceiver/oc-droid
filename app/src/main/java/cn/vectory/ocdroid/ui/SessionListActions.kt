@@ -11,6 +11,7 @@ package cn.vectory.ocdroid.ui
 import cn.vectory.ocdroid.R
 import cn.vectory.ocdroid.data.cache.CacheRepository
 import cn.vectory.ocdroid.data.cache.FingerprintResult
+import cn.vectory.ocdroid.ui.controller.applySessionDiffIfAbsent
 import cn.vectory.ocdroid.data.model.Session
 import cn.vectory.ocdroid.data.model.toCacheEntry
 import cn.vectory.ocdroid.data.repository.OpenCodeRepository
@@ -323,6 +324,32 @@ internal fun launchLoadSessionStatus(
             }
             .onFailure { error ->
                 reportNonFatalIssue("MainViewModel", "Failed to load session status", error)
+            }
+    }
+}
+
+/**
+ * §issue-1(1): 打开会话时拉取该会话的文件变更快照（GET /session/{id}/diff，
+ * 已带 X-Opencode-Skip-Dir，无需 directory）。结果写入 SessionListState.sessionDiffs，
+ * 驱动聊天内 SessionDiffCard。SSE session.diff 会随后增量覆盖，故失败仅记录不报错。
+ * 与 [launchLoadSessionStatus] 同构（per-call scope + slice mutation）。 */
+internal fun launchLoadSessionDiff(
+    scope: CoroutineScope,
+    repository: OpenCodeRepository,
+    slices: SliceFlows,
+    sessionId: String
+) {
+    scope.launch {
+        repository.getSessionDiff(sessionId)
+            .onSuccess { diffs ->
+                // §glmer-S1 / §maxer-复审：REST 仅在 SSE 尚未覆盖时写入——避免 REST 在途
+                //  期间 SSE 推送了更新快照后被旧的 REST 结果覆盖（stale-overwrite）。SSE
+                //  session.diff 是权威源；REST 只是乐观预取。抽成 applySessionDiffIfAbsent
+                //  纯函数以便单测，镜像上游 web client 的 diff() 守卫。
+                slices.mutateSessionList { it.applySessionDiffIfAbsent(sessionId, diffs).first }
+            }
+            .onFailure { error ->
+                reportNonFatalIssue("MainViewModel", "Failed to load session diff", error)
             }
     }
 }

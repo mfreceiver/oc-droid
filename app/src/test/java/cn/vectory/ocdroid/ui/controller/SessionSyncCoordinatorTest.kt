@@ -1110,6 +1110,54 @@ class SessionSyncCoordinatorTest {
         assertNull(slices.sessionList.value.sessionTodos["session-1"])
     }
 
+    // ── §issue-1(1)(2)(3): session.diff dispatch + sync/session.idle 识别 ─
+
+    @Test
+    fun `session diff writes the parsed diffs keyed by sessionID`() {
+        coordinator.handleEvent(event("session.diff") {
+            put("sessionID", JsonPrimitive("session-1"))
+            put("diff", buildJsonArray {
+                add(buildJsonObject {
+                    put("file", JsonPrimitive("src/Main.kt"))
+                    put("additions", JsonPrimitive(5))
+                    put("deletions", JsonPrimitive(2))
+                    put("status", JsonPrimitive("modified"))
+                    put("patch", JsonPrimitive("@@ -1,2 +1,3 @@\n ctx\n+added"))
+                    // lenientJson（ignoreUnknownKeys=true）必须容忍未知字段而不丢弃整条。
+                    put("unexpectedFutureField", JsonPrimitive("ignored"))
+                })
+            })
+        })
+
+        val diffs = slices.sessionList.value.sessionDiffs["session-1"]
+        assertNotNull(diffs)
+        assertEquals(1, diffs!!.size)
+        assertEquals("src/Main.kt", diffs[0].file)
+        assertEquals(5, diffs[0].additions)
+        assertEquals("modified", diffs[0].status)
+        assertNotNull(diffs[0].patch)
+    }
+
+    @Test
+    fun `session diff with a malformed diff array is a no-op`() {
+        coordinator.handleEvent(event("session.diff") {
+            put("sessionID", JsonPrimitive("session-1"))
+            put("diff", JsonPrimitive("not-an-array"))
+        })
+
+        assertNull(slices.sessionList.value.sessionDiffs["session-1"])
+    }
+
+    @Test
+    fun `sync and session idle are recognized without warning or unknown-counter bump`() {
+        // §issue-1(2)(3): 显式 case 不落入 else——无 DebugLog.w 告警、unknownEventCounters 不增。
+        coordinator.handleEvent(event("sync") {})
+        coordinator.handleEvent(event("session.idle") { put("sessionID", JsonPrimitive("s1")) })
+
+        verify(exactly = 0) { Log.w(any<String>(), any<String>()) }
+        assertTrue(coordinator.unknownEventCountsSnapshot().isEmpty())
+    }
+
     @Test
     fun `an unknown event type is silently ignored`() {
         coordinator.handleEvent(event("plugin.added") { put("sessionID", JsonPrimitive("session-1")) })

@@ -38,6 +38,7 @@ data class FileDiff(
     @SerialName("path") val pathAlt: String? = null,
     val before: String? = null,
     val after: String? = null,
+    val patch: String? = null,
     val additions: Int? = null,
     val deletions: Int? = null,
     val status: String? = null
