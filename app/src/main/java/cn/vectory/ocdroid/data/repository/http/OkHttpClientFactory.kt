@@ -67,7 +67,14 @@ class OkHttpClientFactory @Inject constructor(
     private val httpCache: Cache? by lazy {
         val baseDir = System.getProperty("java.io.tmpdir")?.let(::File) ?: return@lazy null
         if (!baseDir.exists() && !baseDir.mkdirs()) return@lazy null
-        runCatching { Cache(File(baseDir, "okhttp"), HTTP_CACHE_SIZE_BYTES) }
+        val cacheDir = File(baseDir, "okhttp")
+        // §key-leak-purge (P1 1A'): one-time, fail-safe purge — see
+        // [applyCachePurgeIfNeeded]. Best-effort here; the marker is written
+        // only when the cache dir is verified gone, so a failed delete retries
+        // on the next launch rather than permanently skipping the purge while
+        // key-bearing residue remains.
+        applyCachePurgeIfNeeded(File(baseDir, "okhttp-cache-purged-v1"), cacheDir)
+        runCatching { Cache(cacheDir, HTTP_CACHE_SIZE_BYTES) }
             .getOrNull()
     }
 
@@ -180,3 +187,43 @@ class OkHttpClientFactory @Inject constructor(
         private const val HTTP_CACHE_SIZE_BYTES = 50L * 1024 * 1024
     }
 }
+
+/**
+ * §key-leak-purge (P1 1A'): one-time, **fail-safe** purge of the OkHttp disk
+ * cache. Releases ≤ v0.5.4 cached `GET /config/providers`, whose raw body
+ * carried provider API keys (dropped at deserialization but written verbatim
+ * to the on-device DiskLruCache). The path is no longer in
+ * [HttpHeaders.CACHEABLE_PATHS], so future writes are blocked; this clears
+ * any pre-existing on-disk entries for existing users.
+ *
+ * **Fail-safe contract**: the marker is written ONLY when the cache dir is
+ * verified gone (`!exists() || deleteRecursively()`). `File.deleteRecursively()`
+ * returns `false` (does NOT throw) when a file is held, so a naive `runCatching`
+ * would miss that semantic failure and write the marker anyway — permanently
+ * skipping the purge while residue remains. Returning `false` (and NOT writing
+ * the marker) when the dir persists makes the next launch retry instead.
+ *
+ * The marker lives in the PARENT dir (not cacheDir, which OkHttp owns) so it
+ * survives the delete and is checked exactly once per install. Bump the marker
+ * suffix (e.g. `v1` → `v2`) to re-purge if a future sensitive path is removed
+ * from the whitelist.
+ *
+ * Returns `true` iff the purge is considered complete (marker already present,
+ * or successfully written this call).
+ */
+internal fun applyCachePurgeIfNeeded(marker: File, cacheDir: File): Boolean {
+    if (marker.exists()) return true
+    val cacheDirGone = !cacheDir.exists() || cacheDir.deleteRecursively()
+    if (!shouldCommitPurge(markerAlreadyPresent = false, cacheDirGone = cacheDirGone)) return false
+    marker.parentFile?.mkdirs()
+    return runCatching { marker.createNewFile() }.getOrDefault(false)
+}
+
+/**
+ * Pure decision (extracted for unit testing): commit the purge — i.e. write
+ * the marker — iff the marker is NOT already present AND the cache dir is
+ * gone. Pins the fail-safe contract that the marker is never written while
+ * key-bearing residue may remain.
+ */
+internal fun shouldCommitPurge(markerAlreadyPresent: Boolean, cacheDirGone: Boolean): Boolean =
+    !markerAlreadyPresent && cacheDirGone

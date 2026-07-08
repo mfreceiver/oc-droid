@@ -4,6 +4,10 @@ import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.expandVertically
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.shrinkVertically
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxScope
@@ -741,13 +745,28 @@ fun ChatScreen(
                             showAbort = false
                         )
                     } else {
+                        // §session-retry: suppress the generic "running"/
+                        // "Retrying" capsule during retry — the dedicated
+                        // SessionRetryCard below carries the countdown +
+                        // message, so the plain capsule would just duplicate
+                        // the same status text without the backoff context.
                         ThinkingCapsuleOverlay(
-                            visible = currentSessionIsRunning && currentActivity != null,
+                            visible = currentSessionIsRunning && currentActivity != null &&
+                                curSessionStatus?.isRetry != true,
                             text = currentActivity?.text ?: "",
                             startedAtMillis = currentActivity?.startedAtMillis,
                             onAbort = chatVM::abortSession
                         )
                     }
+
+                    // §session-retry: floating retry card with live countdown.
+                    // Always-composed BoxScope overlay (mirrors ThinkingCapsuleOverlay);
+                    // SessionRetryCard owns its AnimatedVisibility + TopCenter align and
+                    // toggles visible on isRetry so enter/exit animate cleanly.
+                    // §compact-priority: suppress the retry card while compacting — the
+                    // compacting capsule above is the foreground op and a retry during
+                    // compaction is incidental; avoids two top-center overlays stacking.
+                    SessionRetryCard(status = curSessionStatus?.takeIf { !chat.isCompacting })
 
                     // §user-req: 手动刷新/连接期间显示胶囊提示
                     ThinkingCapsuleOverlay(

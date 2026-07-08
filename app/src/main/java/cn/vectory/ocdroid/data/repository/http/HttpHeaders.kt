@@ -26,7 +26,7 @@ object HttpHeaders {
 
     /**
      * §16.1(b) / §Stage D (gpter 阻塞 #2): relative request paths whose GET
-     * responses are eligible for OkHttp caching. These 4 endpoints are
+     * responses are eligible for OkHttp caching. These 3 endpoints are
      * global / read-only / independent of user identity and workdir, so
      * caching them cannot leak data across users or directories. All other
      * endpoints (session, file, message, etc.) default to
@@ -43,8 +43,16 @@ object HttpHeaders {
      */
     val CACHEABLE_PATHS: Set<String> = setOf(
         "/global/health",
-        "/config/providers",
         "/agent",
         "/command",
     )
+    // Note: `/config/providers` is intentionally NOT cached — its raw response
+    // body carries provider API keys (`key` field) which would be written to
+    // the on-device OkHttp cache. The key is dropped at deserialization (no
+    // `key` field on ConfigProvider/ProviderModel + ignoreUnknownKeys), so the
+    // disk-cache residue was the only leak surface; excluding it closes it.
+    // §purge-linkage: if a path carrying sensitive data is ever removed from
+    // this set in future, ALSO bump the marker suffix in
+    // OkHttpClientFactory.applyCachePurgeIfNeeded (`okhttp-cache-purged-vN`)
+    // so existing users' on-disk residue is purged once on upgrade.
 }

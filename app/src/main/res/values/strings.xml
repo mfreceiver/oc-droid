@@ -238,6 +238,14 @@
     <string name="chat_generating">Generating…</string>
     <string name="chat_compacting">Compacting…</string>
     <string name="chat_connecting_status">Connecting…</string>
+    <!-- §session-retry: floating retry card (SessionRetryCard) shown while the
+         current session is in SessionStatus.isRetry. chat_retrying is the
+         plain label (also the fallback message); chat_retry_in_seconds is the
+         live countdown to the next backoff attempt; chat_retry_attempt is the
+         1-based attempt index, appended after the countdown/label. -->
+    <string name="chat_retrying">Retrying</string>
+    <string name="chat_retry_in_seconds">%1$ds until retry</string>
+    <string name="chat_retry_attempt">Attempt %1$d</string>
     <string name="chat_exit_confirm">Swipe back again to exit</string>
     <string name="chat_error_occurred">Error occurred</string>
     <string name="chat_view">View</string>

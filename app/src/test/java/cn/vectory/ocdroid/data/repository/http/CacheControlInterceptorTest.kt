@@ -114,8 +114,8 @@ class CacheControlInterceptorTest {
     }
 
     @Test
-    fun `all four whitelist entries are cacheable when no auth`() {
-        for (path in listOf("/config/providers", "/agent", "/command")) {
+    fun `all CACHEABLE_PATHS entries are cacheable when no auth`() {
+        for (path in HttpHeaders.CACHEABLE_PATHS) {
             server.enqueue(MockResponse().setBody("ok"))
 
             client.newCall(Request.Builder().url(server.url(path)).build())
@@ -200,8 +200,10 @@ class CacheControlInterceptorTest {
 
     @Test
     fun `global health whitelist entry is cacheable when no auth`() {
-        // Covers the "/global/health" entry separately from the loop above
-        // (which only iterates 3 of the 4 entries).
+        // Explicit pin for /global/health: the loop above now iterates ALL
+        // CACHEABLE_PATHS entries (including this one), so this is
+        // belt-and-braces coverage guarding against accidental removal of
+        // /global/health from the whitelist.
         server.enqueue(MockResponse().setBody("ok"))
 
         client.newCall(Request.Builder().url(server.url("/global/health")).build())
@@ -222,6 +224,29 @@ class CacheControlInterceptorTest {
 
         val request = server.takeRequest()
         assertEquals("no-store", request.getHeader("Cache-Control"))
+    }
+
+    @Test
+    fun `config providers forces no-store to keep API keys off disk`() {
+        // SECURITY (P1 1A'): `/config/providers` MUST NOT be cacheable — its
+        // response body carries provider API keys (`key` field), which were
+        // dropped at deserialization but written verbatim to the on-device
+        // DiskLruCache in releases ≤ v0.5.4. This pins the contract so that
+        // re-adding the path to CACHEABLE_PATHS fails this test rather than
+        // silently re-opening the leak. The `all CACHEABLE_PATHS entries are
+        // cacheable` loop above CANNOT catch this regression — it only
+        // asserts whitelisted paths ARE cacheable.
+        server.enqueue(MockResponse().setBody("ok"))
+
+        client.newCall(Request.Builder().url(server.url("/config/providers")).build())
+            .execute().use { /* drain */ }
+
+        val request = server.takeRequest()
+        assertEquals(
+            "/config/providers must force no-store (provider API keys must never hit the disk cache)",
+            "no-store",
+            request.getHeader("Cache-Control")
+        )
     }
 
     @Test

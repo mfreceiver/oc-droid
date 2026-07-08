@@ -236,6 +236,13 @@
     <string name="chat_generating">生成中…</string>
     <string name="chat_compacting">压缩中…</string>
     <string name="chat_connecting_status">连接中…</string>
+    <!-- §session-retry: 聊天浮层重试卡片（SessionRetryCard），当前会话处于
+         SessionStatus.isRetry 时显示。chat_retrying 为纯文案（兼作消息缺省回退）；
+         chat_retry_in_seconds 为到下次重试的实时倒计时；chat_retry_attempt 为
+         第几次尝试（1-based），追加在倒计时/文案之后。 -->
+    <string name="chat_retrying">重试中</string>
+    <string name="chat_retry_in_seconds">%1$ds 后重试</string>
+    <string name="chat_retry_attempt">第 %1$d 次</string>
     <string name="chat_exit_confirm">退出请再次滑动</string>
     <string name="chat_error_occurred">发生错误</string>
     <string name="chat_view">查看</string>
