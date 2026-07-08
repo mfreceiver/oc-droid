@@ -421,14 +421,57 @@ class OpenCodeRepository @Inject constructor(
         }
     }
 
-    suspend fun getProviders(): Result<ProvidersResponse> = runSuspendCatching { api.getProviders() }
+    /**
+     * §v2-catalog (P2 2B): builds the model catalog from the v2
+     * `GET /api/model` + `GET /api/provider` endpoints. The legacy
+     * `GET /config/providers` is no longer fetched — its response carried
+     * provider API keys in the raw body.
+     *
+     * Returns the SAME [ProvidersResponse] shape downstream consumes (model
+     * picker + context-limit index), so callers are unchanged:
+     *  - [ConfigProvider.id] = v2 provider id; `name` = v2 provider name;
+     *  - [ProviderModel.id]/`name`/`providerId` from the v2 model
+     *    (`resolvedProviderId` falls through to `providerId`);
+     *  - [ProviderModelLimit] merged from the v2 model's `limit`;
+     *  - `defaultByProvider` empty (v2 has no default-provider concept; the
+     *    app attaches the model per-prompt anyway).
+     *
+     * Models whose provider has no `/api/provider` entry still render (name
+     * falls back to null → picker shows the provider id). Providers with no
+     * models are absent (groupBy drops them).
+     */
+    suspend fun getProviders(): Result<ProvidersResponse> = runSuspendCatching {
+        // §enabled-filter: drop server-disabled models (enabled == false) so the
+        // picker only offers models the server considers usable. `enabled`
+        // defaults to true when absent (see ModelInfoV2), so this excludes only
+        // an explicit server-side disable — not a regression vs the legacy
+        // /config/providers path, which had no such field and showed everything.
+        val models = apiV2.getModels().data.filter { it.enabled }
+        val providerNameById = apiV2.getProviders().data.associate { it.id to it.name }
+        val configProviders = models.groupBy { it.providerId }.map { (providerId, ms) ->
+            ConfigProvider(
+                id = providerId,
+                name = providerNameById[providerId],
+                models = ms.associateBy { it.id }.mapValues { (_, m) ->
+                    ProviderModel(
+                        id = m.id,
+                        name = m.name,
+                        providerId = m.providerId,
+                        limit = m.limit?.let { ProviderModelLimit(it.context, it.input, it.output) }
+                    )
+                }
+            )
+        }
+        ProvidersResponse(providers = configProviders)
+    }
 
     /**
      * §model-selection: lists the server's available models via the v2
      * `GET /api/model` endpoint. Returns the `data` array (each entry carries
-     * `id`, `providerID`, `name`, `enabled`). The legacy [getProviders]
-     * (config/providers) is kept untouched and remains the source of truth
-     * for the context-limit index.
+     * `id`, `providerID`, `name`, `enabled`, `limit`). NOTE: [getProviders]
+     * above now builds the full catalog (incl. context-limit) from this
+     * endpoint + `/api/provider`; this standalone [getModels] is retained for
+     * debug/console use and has no production caller.
      */
     suspend fun getModels(): Result<List<ModelInfoV2>> = runSuspendCatching { apiV2.getModels().data }
 

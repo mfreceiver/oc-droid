@@ -157,3 +157,36 @@ object ToolCardClassifier {
     fun toolCallsCount(parts: List<Part>): Int =
         parts.count { !isFileOperation(it) }
 }
+
+// ── Per-message tool count summary categories ────────────────────────────
+
+/**
+ * User-facing category for a classified tool run, used by [ToolCountSummary]
+ * to render a per-message tally. [categoryCounts] returns empty for items
+ * excluded from the summary (e.g. sub-agent tasks, which render as their own
+ * bordered card and would double-count the run).
+ */
+internal enum class ToolCategory { EDITS, READS, SHELL, WEB, OTHER }
+
+/**
+ * Per-category counts contributed by one classified tool run. A [ToolRenderItem.ContextGroup]
+ * contributes one READS per part it contains (a group of read+grep+list = 3 reads); other
+ * items contribute 1 to their category. [ToolRenderItem.SubAgent] contributes nothing (it
+ * renders as its own bordered card and would double-count the run).
+ */
+internal fun ToolRenderItem.categoryCounts(): Map<ToolCategory, Int> = when (this) {
+    is ToolRenderItem.WritePatch -> mapOf(ToolCategory.EDITS to 1)
+    is ToolRenderItem.ContextGroup -> mapOf(ToolCategory.READS to parts.size)
+    is ToolRenderItem.SubAgent -> emptyMap()
+    is ToolRenderItem.Basic -> {
+        val t = part.tool?.lowercase() ?: ""
+        val cat = when {
+            t.startsWith("bash") || t.startsWith("terminal") ||
+                t.startsWith("cmd") || t.startsWith("shell") -> ToolCategory.SHELL
+            t.startsWith("webfetch") || t.startsWith("web_fetch") ||
+                t.startsWith("websearch") || t.startsWith("web_search") -> ToolCategory.WEB
+            else -> ToolCategory.OTHER
+        }
+        mapOf(cat to 1)
+    }
+}

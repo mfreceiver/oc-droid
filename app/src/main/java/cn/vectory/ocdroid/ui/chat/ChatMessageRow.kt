@@ -156,6 +156,19 @@ internal fun MessageRow(
                 }
                 closeContext()
 
+                // §tool-count: quiet one-line tally of the classified tool runs
+                // (e.g. "3 edits · 2 reads · 1 shell"). Placed where `items`
+                // is finalized (after closeContext) and above the detailed
+                // cards so the reader gets the summary first. The composable
+                // no-ops on empty, so pure-text messages (which never enter
+                // this branch) and all-hidden runs render nothing.
+                if (items.isNotEmpty()) {
+                    ToolCountSummary(
+                        items = items,
+                        modifier = Modifier.widthIn(max = cardMax)
+                    )
+                }
+
                 // Phase 2: emit each item in @Composable context.
                 items.forEach { item ->
                     when (item) {

@@ -13,6 +13,10 @@ import cn.vectory.ocdroid.data.model.PermissionRequest
 import cn.vectory.ocdroid.data.model.PermissionResponse
 import cn.vectory.ocdroid.data.model.ProviderModel
 import cn.vectory.ocdroid.data.model.ProvidersResponse
+import cn.vectory.ocdroid.data.api.v2.ModelInfoV2
+import cn.vectory.ocdroid.data.api.v2.ModelLimitV2
+import cn.vectory.ocdroid.data.api.v2.ProviderInfoV2
+import cn.vectory.ocdroid.data.api.v2.V2Response
 import cn.vectory.ocdroid.data.model.QuestionInfo
 import cn.vectory.ocdroid.data.model.QuestionOption
 import cn.vectory.ocdroid.data.model.QuestionRequest
@@ -676,15 +680,33 @@ class OpenCodeRepositoryTest {
     }
 
     @Test
-    fun `getProviders parses default provider mapping`() = runBlocking {
-        val providers = ProvidersResponse(
-            providers = listOf(
-                ConfigProvider(
-                    id = "openai",
-                    models = mapOf("gpt-4" to ProviderModel(id = "gpt-4", name = "GPT-4"))
+    fun `getProviders builds catalog from v2 model + provider endpoints`() = runBlocking {
+        // §v2-catalog (P2 2B): repository.getProviders() now fetches /api/model
+        // then /api/provider and merges them. Enqueue in call order (FIFO).
+        val models = V2Response(
+            data = listOf(
+                ModelInfoV2(
+                    id = "gpt-4",
+                    providerId = "openai",
+                    name = "GPT-4",
+                    limit = ModelLimitV2(context = 128000, output = 16000)
+                ),
+                // §enabled-filter: server-disabled models must be dropped from the catalog.
+                ModelInfoV2(
+                    id = "gpt-4-disabled",
+                    providerId = "openai",
+                    name = "GPT-4 (disabled)",
+                    enabled = false
                 )
-            ),
-            defaultByProvider = mapOf("openai" to "gpt-4")
+            )
+        )
+        val providers = V2Response(
+            data = listOf(ProviderInfoV2(id = "openai", name = "OpenAI"))
+        )
+        server.enqueue(
+            MockResponse()
+                .setBody(json.encodeToString(models))
+                .setHeader("Content-Type", "application/json")
         )
         server.enqueue(
             MockResponse()
@@ -695,8 +717,20 @@ class OpenCodeRepositoryTest {
         val result = repository.getProviders()
 
         assertTrue(result.isSuccess)
-        assertEquals("openai", result.getOrThrow().default?.providerId)
-        assertEquals("gpt-4", result.getOrThrow().default?.modelId)
+        val catalog = result.getOrThrow()
+        assertEquals(1, catalog.providers.size)
+        val provider = catalog.providers[0]
+        assertEquals("openai", provider.id)
+        assertEquals("OpenAI", provider.name) // merged from /api/provider
+        assertEquals(1, provider.models.size) // §enabled-filter: gpt-4-disabled dropped
+        assertEquals(null, provider.models["gpt-4-disabled"])
+        val model = provider.models["gpt-4"]
+        assertEquals("gpt-4", model?.id)
+        assertEquals("GPT-4", model?.name)
+        assertEquals("openai", model?.resolvedProviderId)
+        assertEquals(128000, model?.limit?.context) // merged from /api/model
+        assertEquals(16000, model?.limit?.output)
+        assertEquals(null, catalog.default) // v2 has no default-provider concept
     }
 
     @Test

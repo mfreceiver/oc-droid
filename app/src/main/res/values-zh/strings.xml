@@ -209,6 +209,23 @@
     <string name="chat_marker_collapse">折叠</string>
     <string name="chat_question_stale">已中断</string>
     <string name="chat_question_stale_hint">该问题已中断，不再有效</string>
+    <!-- §tool-count: 每条消息工具计数汇总的单位（数量由 plural 自带，
+         如「3 处编辑 · 2 次读取 · 1 条命令」）。中文无复数形式，仅用 other。 -->
+    <plurals name="tool_count_edits">
+        <item quantity="other">%1$d 处编辑</item>
+    </plurals>
+    <plurals name="tool_count_reads">
+        <item quantity="other">%1$d 次读取</item>
+    </plurals>
+    <plurals name="tool_count_shell">
+        <item quantity="other">%1$d 条命令</item>
+    </plurals>
+    <plurals name="tool_count_web">
+        <item quantity="other">%1$d 次网络</item>
+    </plurals>
+    <plurals name="tool_count_other">
+        <item quantity="other">%1$d 个工具</item>
+    </plurals>
     <string name="chat_error_details">错误详情</string>
     <string name="host_profile_test_connection">测试连接</string>
     <string name="session_diff_card_title">会话变更</string>

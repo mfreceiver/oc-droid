@@ -211,6 +211,29 @@
     <string name="chat_marker_collapse">Collapse</string>
     <string name="chat_question_stale">Interrupted</string>
     <string name="chat_question_stale_hint">This question was interrupted and is no longer active</string>
+    <!-- §tool-count: per-message tool count summary units. Each plural string
+         embeds its own count (e.g. "3 edits"), joined in code as
+         "3 edits · 2 reads · 1 shell". -->
+    <plurals name="tool_count_edits">
+        <item quantity="one">%1$d edit</item>
+        <item quantity="other">%1$d edits</item>
+    </plurals>
+    <plurals name="tool_count_reads">
+        <item quantity="one">%1$d read</item>
+        <item quantity="other">%1$d reads</item>
+    </plurals>
+    <plurals name="tool_count_shell">
+        <item quantity="one">%1$d shell</item>
+        <item quantity="other">%1$d shells</item>
+    </plurals>
+    <plurals name="tool_count_web">
+        <item quantity="one">%1$d web request</item>
+        <item quantity="other">%1$d web requests</item>
+    </plurals>
+    <plurals name="tool_count_other">
+        <item quantity="one">%1$d tool</item>
+        <item quantity="other">%1$d tools</item>
+    </plurals>
     <string name="chat_error_details">Error Details</string>
     <string name="host_profile_test_connection">Test Connection</string>
     <string name="session_diff_card_title">Session changes</string>

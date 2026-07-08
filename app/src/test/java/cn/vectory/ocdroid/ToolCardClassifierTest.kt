@@ -3,6 +3,9 @@ package cn.vectory.ocdroid
 import cn.vectory.ocdroid.data.model.MessageWithParts
 import cn.vectory.ocdroid.data.model.Part
 import cn.vectory.ocdroid.ui.chat.ToolCardClassifier
+import cn.vectory.ocdroid.ui.chat.ToolCategory
+import cn.vectory.ocdroid.ui.chat.ToolRenderItem
+import cn.vectory.ocdroid.ui.chat.categoryCounts
 import kotlinx.serialization.json.Json
 import org.junit.Assert.*
 import org.junit.Test
@@ -160,6 +163,74 @@ class ToolCardClassifierTest {
         assertTrue(fileParts.isEmpty())
         assertEquals(3, otherParts.size)
         assertEquals(3, ToolCardClassifier.toolCallsCount(parts))
+    }
+
+    // MARK: - categoryCounts
+
+    @Test
+    fun `WritePatch contributes one edit`() {
+        assertEquals(
+            mapOf(ToolCategory.EDITS to 1),
+            ToolRenderItem.WritePatch(patchPart()).categoryCounts()
+        )
+    }
+
+    @Test
+    fun `ContextGroup contributes one read per part`() {
+        // Regression pin: a group of read+grep+list must count as 3 reads, not 1.
+        val parts = listOf(
+            toolPart(id = "1", tool = "read"),
+            toolPart(id = "2", tool = "grep"),
+            toolPart(id = "3", tool = "list"),
+        )
+        assertEquals(
+            mapOf(ToolCategory.READS to 3),
+            ToolRenderItem.ContextGroup(parts).categoryCounts()
+        )
+    }
+
+    @Test
+    fun `ContextGroup with one part counts as one read`() {
+        assertEquals(
+            mapOf(ToolCategory.READS to 1),
+            ToolRenderItem.ContextGroup(listOf(toolPart(id = "1", tool = "read"))).categoryCounts()
+        )
+    }
+
+    @Test
+    fun `SubAgent contributes nothing`() {
+        // Sub-agents render as their own bordered card; counting them here
+        // would double-count the run.
+        assertTrue(
+            ToolRenderItem.SubAgent(toolPart(tool = "task")).categoryCounts().isEmpty()
+        )
+    }
+
+    @Test
+    fun `Basic bash contributes one shell`() {
+        assertEquals(
+            mapOf(ToolCategory.SHELL to 1),
+            ToolRenderItem.Basic(toolPart(tool = "bash")).categoryCounts()
+        )
+    }
+
+    @Test
+    fun `Basic webfetch contributes one web`() {
+        assertEquals(
+            mapOf(ToolCategory.WEB to 1),
+            ToolRenderItem.Basic(toolPart(tool = "webfetch")).categoryCounts()
+        )
+    }
+
+    @Test
+    fun `Basic read falls through to other`() {
+        // A `read` rendered as a Basic (the un-grouped fallback, i.e. not
+        // absorbed into a ContextGroup) tallies as OTHER, not READS — only
+        // ContextGroup contributes READS.
+        assertEquals(
+            mapOf(ToolCategory.OTHER to 1),
+            ToolRenderItem.Basic(toolPart(tool = "read")).categoryCounts()
+        )
     }
 
     // MARK: - Directory read detection + entries parsing
