@@ -26,6 +26,16 @@
     <string name="settings_connection_profile">连接配置</string>
     <string name="settings_section_connections">连接管理</string>
     <string name="settings_section_debug">调试</string>
+    <!-- §vcs-section: 设置中的 工作目录 / Git 分组 -->
+    <string name="settings_section_working_directory">工作目录</string>
+    <string name="settings_vcs_branch">分支</string>
+    <string name="settings_vcs_default_branch_suffix">（默认 %1$s）</string>
+    <string name="settings_vcs_changed_files">已更改文件</string>
+    <string name="settings_vcs_no_working_directory">无工作目录</string>
+    <string name="settings_vcs_not_a_git_repo">非 Git 仓库</string>
+    <string name="settings_vcs_no_changes">无更改</string>
+    <string name="settings_vcs_more_files">还有 %1$d 个</string>
+    <string name="settings_vcs_load_error">加载失败：%1$s</string>
     <string name="settings_server_connection">服务器连接</string>
     <string name="settings_server_url">服务器 URL</string>
     <string name="settings_username_optional">用户名（可选）</string>
@@ -230,7 +240,7 @@
     <string name="host_profile_test_connection">测试连接</string>
     <string name="session_diff_card_title">会话变更</string>
     <string name="session_diff_files_count">%1$d 个文件</string>
-    <string name="session_diff_truncated">…（共 %1$d 行，已截断）</string>
+    <string name="session_diff_truncated">显示前 %1$d 行，共 %2$d 行</string>
     <string name="session_diff_open_file">打开文件</string>
     <string name="common_expand">展开</string>
     <string name="common_collapse">折叠</string>

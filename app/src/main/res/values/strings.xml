@@ -27,6 +27,16 @@
     <string name="settings_connection_profile">Connection Profile</string>
     <string name="settings_section_connections">Connections</string>
     <string name="settings_section_debug">Debug</string>
+    <!-- §vcs-section: Working directory / Git group in Settings -->
+    <string name="settings_section_working_directory">Working directory</string>
+    <string name="settings_vcs_branch">Branch</string>
+    <string name="settings_vcs_default_branch_suffix">(default %1$s)</string>
+    <string name="settings_vcs_changed_files">Changed files</string>
+    <string name="settings_vcs_no_working_directory">No working directory</string>
+    <string name="settings_vcs_not_a_git_repo">Not a git repository</string>
+    <string name="settings_vcs_no_changes">No changes</string>
+    <string name="settings_vcs_more_files">+%1$d more</string>
+    <string name="settings_vcs_load_error">Failed to load: %1$s</string>
     <string name="settings_server_connection">Server Connection</string>
     <string name="settings_server_url">Server URL</string>
     <string name="settings_username_optional">Username (optional)</string>
@@ -238,7 +248,7 @@
     <string name="host_profile_test_connection">Test Connection</string>
     <string name="session_diff_card_title">Session changes</string>
     <string name="session_diff_files_count">%1$d files</string>
-    <string name="session_diff_truncated">…(%1$d lines total, truncated)</string>
+    <string name="session_diff_truncated">Showing first %1$d of %2$d lines</string>
     <string name="session_diff_open_file">Open file</string>
     <string name="common_expand">Expand</string>
     <string name="common_collapse">Collapse</string>

@@ -46,3 +46,27 @@ data class FileDiff(
     val file: String get() = filePath ?: pathAlt ?: ""
     val id: String get() = file
 }
+
+/**
+ * `GET /vcs` — repository metadata for the workdir. Both fields are null when
+ * the workdir is not a git repo (the server still returns 200 with nulls).
+ */
+@Serializable
+data class VcsInfo(
+    val branch: String? = null,
+    @SerialName("default_branch") val defaultBranch: String? = null
+)
+
+/**
+ * `GET /vcs/status` entry — one changed file. [additions]/[deletions] default
+ * to 0 (server may omit them). [status] is one of "added" / "deleted" /
+ * "modified" / "renamed" / … (open-ended, matched case-insensitively by the
+ * UI for color-coding).
+ */
+@Serializable
+data class VcsStatusEntry(
+    val file: String,
+    val additions: Int = 0,
+    val deletions: Int = 0,
+    val status: String
+)

@@ -371,11 +371,17 @@ private fun PhoneLayout(viewModel: OrchestratorViewModel, initialPage: Int = 0) 
                         val composerVM: ComposerViewModel = hiltViewModel()
                         val connectionVM: ConnectionViewModel = hiltViewModel()
                         val settingsVM: SettingsViewModel = hiltViewModel()
+                        // §vcs-section: source the OpenCodeRepository the
+                        // same way SessionsScreen does (FilesViewModel exposes
+                        // it publicly). hiltViewModel() returns the same
+                        // @Singleton-scoped instance every screen uses.
+                        val filesVM: FilesViewModel = hiltViewModel()
                         SettingsScreen(
                             viewModel = hostViewModel,
                             composerVM = composerVM,
                             connectionVM = connectionVM,
                             settingsVM = settingsVM,
+                            repository = filesVM.repository,
                             onBack = { switchToPage(screens.indexOf(Screen.Chat)) }
                         )
                     }

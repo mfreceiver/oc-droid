@@ -551,6 +551,23 @@ class OpenCodeRepository @Inject constructor(
         api.getFileStatus(directory)
     }
 
+    // §vcs-section: read-only VCS façade for the Settings → Working directory
+    // section. Thin wrappers mirroring the file* directory-scoped pattern
+    // (§R-17 batch4): the directory is supplied EXPLICITLY by the caller; no
+    // global workdir state. VcsInfo / VcsStatusEntry live in data.model; the
+    // diff endpoint reuses the existing FileDiff shape (same as /session/{id}/diff).
+    suspend fun getVcs(directory: String?): Result<VcsInfo> = runSuspendCatching {
+        api.getVcs(directory)
+    }
+
+    suspend fun getVcsStatus(directory: String?): Result<List<VcsStatusEntry>> = runSuspendCatching {
+        api.getVcsStatus(directory)
+    }
+
+    suspend fun getVcsDiff(mode: String, directory: String?): Result<List<FileDiff>> = runSuspendCatching {
+        api.getVcsDiff(mode, directory)
+    }
+
     /** §R-17 batch4: see [getFileTree] for the explicit-directory rationale. */
     suspend fun findFile(directory: String, query: String, limit: Int = 50): Result<List<String>> = runSuspendCatching {
         api.findFile(query, limit, directory)

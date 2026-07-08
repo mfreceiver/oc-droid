@@ -230,6 +230,25 @@ interface OpenCodeApi {
     @GET("file/status")
     suspend fun getFileStatus(@Query("directory") directory: String? = null): List<FileStatusEntry>
 
+    // §vcs-section: v1 /vcs* endpoints mirror the file* directory-scoped GET
+    // style — explicit `?directory` query + the X-Opencode-Skip-Dir marker so
+    // DirectoryHeaderInterceptor skips its workdir injection (the directory is
+    // supplied by the caller, no global state involved). Read-only.
+    @Headers("X-Opencode-Skip-Dir: 1")
+    @GET("vcs")
+    suspend fun getVcs(@Query("directory") directory: String?): VcsInfo
+
+    @Headers("X-Opencode-Skip-Dir: 1")
+    @GET("vcs/status")
+    suspend fun getVcsStatus(@Query("directory") directory: String?): List<VcsStatusEntry>
+
+    @Headers("X-Opencode-Skip-Dir: 1")
+    @GET("vcs/diff")
+    suspend fun getVcsDiff(
+        @Query("mode") mode: String,
+        @Query("directory") directory: String?
+    ): List<FileDiff>
+
     @Headers("X-Opencode-Skip-Dir: 1")
     @GET("find/file")
     suspend fun findFile(

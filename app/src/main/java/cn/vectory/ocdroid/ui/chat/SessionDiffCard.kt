@@ -283,8 +283,12 @@ private fun DiffFileRow(sessionId: String, indexInGroup: Int, fd: FileDiff, onFi
  * 背景色用前景色的低 alpha（maxer-B2）：避免 [SemanticColors.addedLine]/[deletedLine]
  * 固定浅色在暗色主题下刺眼；跟随主题前景色派生，明暗皆柔和。
  *
- * 为控制单条消息体量，最多渲染 [MAX_LINES] 行（lineSequence 边读边截，避免超大 patch
- * 一次性 split 全量分配——gpter/kimo）；超出则尾部显示带总行数的截断提示。
+ * §P3-3A: renders the patch (up to a generous MAX_LINES cap that bounds the
+ * one-time AnnotatedString + layout cost — Compose Text virtualises DRAWING by
+ * visible region but lays out the whole string to compute scroll extent) into a
+ * colourised AnnotatedString, bounded by heightIn + verticalScroll so large
+ * diffs scroll. Real session diffs stay untruncated; only pathological patches
+ * hit the cap, with a trailing note.
  */
 @Composable
 private fun DiffPatchView(patch: String, modifier: Modifier = Modifier) {
@@ -297,11 +301,11 @@ private fun DiffPatchView(patch: String, modifier: Modifier = Modifier) {
     val addBg = addFg.copy(alpha = 0.16f)
     val delBg = delFg.copy(alpha = 0.16f)
 
-    val totalLines = remember(patch) { patch.count { it == '\n' } + 1 }
+    val totalLines = remember(patch) { patch.lineSequence().count() }
     // §gpter-复审：截断提示走 i18n（避免 dangling 的 session_diff_truncated 资源）。
-    val truncationSuffix = stringResource(R.string.session_diff_truncated, totalLines)
+    val truncationSuffix = stringResource(R.string.session_diff_truncated, MAX_LINES, totalLines)
     val annotated = remember(patch, addFg, delFg, hunkFg, metaFg, ctxFg, addBg, delBg, truncationSuffix) {
-        buildAnnotatedDiff(patch, addFg, delFg, hunkFg, metaFg, ctxFg, addBg, delBg, truncationSuffix)
+        buildAnnotatedDiff(patch, addFg, delFg, hunkFg, metaFg, ctxFg, addBg, delBg, totalLines, truncationSuffix)
     }
 
     Surface(
@@ -309,9 +313,11 @@ private fun DiffPatchView(patch: String, modifier: Modifier = Modifier) {
         shape = MaterialTheme.shapes.small,
         color = MaterialTheme.colorScheme.surfaceContainer
     ) {
-        // heightIn 限高 + verticalScroll：patch 可内部滚动，避免 260dp 只见前 ~20 行而
-        // 中段被静默裁切（DiffPatchView 位于 LazyColumn item 内的 Column 中，限高后内层
-        // verticalScroll 的手势由 Compose 嵌套滚动正常承载）。
+        // heightIn 限高 + verticalScroll：渲染不超过 MAX_LINES 行（§P3-3A：慷慨上限，
+        // 真实 diff 不会被截断；仅病态大 patch 触顶并附尾注），patch 可内部滚动；
+        // DiffPatchView 位于 LazyColumn item 内的 Column 中，限高后内层 verticalScroll
+        // 的手势由 Compose 嵌套滚动正常承载。Compose Text 只对绘制按可见区域虚拟化
+        // （布局仍对整个 AnnotatedString 一次性测量），故用 MAX_LINES 限制该一次性成本。
         Text(
             text = annotated,
             style = MaterialTheme.typography.labelSmall.copy(
@@ -320,14 +326,14 @@ private fun DiffPatchView(patch: String, modifier: Modifier = Modifier) {
             ),
             modifier = Modifier
                 .fillMaxWidth()
-                .heightIn(max = 260.dp)
+                .heightIn(max = 400.dp)
                 .verticalScroll(rememberScrollState())
                 .padding(8.dp)
         )
     }
 }
 
-private const val MAX_LINES = 400
+private const val MAX_LINES = 2000
 
 private fun buildAnnotatedDiff(
     patch: String,
@@ -338,13 +344,20 @@ private fun buildAnnotatedDiff(
     ctxFg: Color,
     addBg: Color,
     delBg: Color,
+    totalLines: Int,
     truncationSuffix: String
 ): AnnotatedString = buildAnnotatedString {
-    // lineSequence().take 边读边截，避免对超大 patch 一次性 split 全量分配（gpter/kimo）。
-    val lines = patch.lineSequence().take(MAX_LINES + 1).toList()
-    val limit = minOf(lines.size, MAX_LINES)
-    for (i in 0 until limit) {
-        val line = lines[i]
+    // §P3-3A: render up to MAX_LINES lines. Compose Text virtualises DRAWING by
+    // visible region (the scroll only rasterises visible glyphs), but it still
+    // LAYS OUT the whole AnnotatedString once to compute the scroll extent — so
+    // an unbounded patch would allocate/jank on huge diffs. MAX_LINES=2000 is a
+    // generous safety bound (real session diffs are far smaller): it bounds the
+    // one-time AnnotatedString + layout cost while never truncating a realistic
+    // patch; a trailing note explains the rare cap. `take()` streams without
+    // materialising the full line list.
+    val renderCount = minOf(totalLines, MAX_LINES)
+    patch.lineSequence().take(renderCount).forEachIndexed { i, line ->
+        if (i > 0) append("\n")
         val color: Color
         val bg: Color
         when {
@@ -358,11 +371,10 @@ private fun buildAnnotatedDiff(
         pushStyle(SpanStyle(color = color, background = bg))
         append(line)
         pop()
-        if (i < limit - 1) append("\n")
     }
-    if (lines.size > MAX_LINES) {
+    if (totalLines > MAX_LINES) {
         pushStyle(SpanStyle(color = metaFg))
-        if (limit > 0) append("\n")
+        if (renderCount > 0) append("\n")
         append(truncationSuffix)
         pop()
     }

@@ -734,6 +734,38 @@ class OpenCodeRepositoryTest {
     }
 
     @Test
+    fun `getVcs parses branch info and changed-files status from v1 vcs endpoints`() = runBlocking {
+        // §glm-P3/max-P3: hardcode the snake_case wire payload so the
+        // `default_branch` -> defaultBranch @SerialName is genuinely pinned (an
+        // encodeToString round-trip would share the annotation and pass even if
+        // it were removed), and assert the request paths hit /vcs + /vcs/status.
+        server.enqueue(
+            MockResponse()
+                .setBody("""{"branch":"main","default_branch":"master"}""")
+                .setHeader("Content-Type", "application/json")
+        )
+        val infoResult = repository.getVcs(directory = "/workdir")
+        assertTrue(infoResult.isSuccess)
+        assertEquals("main", infoResult.getOrThrow().branch)
+        assertEquals("master", infoResult.getOrThrow().defaultBranch)
+        assertEquals("/vcs?directory=%2Fworkdir", server.takeRequest().path)
+
+        server.enqueue(
+            MockResponse()
+                .setBody("""[{"file":"src/App.kt","additions":3,"deletions":1,"status":"modified"}]""")
+                .setHeader("Content-Type", "application/json")
+        )
+        val statusResult = repository.getVcsStatus(directory = "/workdir")
+        assertTrue(statusResult.isSuccess)
+        val rows = statusResult.getOrThrow()
+        assertEquals(1, rows.size)
+        assertEquals("src/App.kt", rows[0].file)
+        assertEquals(3, rows[0].additions)
+        assertEquals("modified", rows[0].status)
+        assertEquals("/vcs/status?directory=%2Fworkdir", server.takeRequest().path)
+    }
+
+    @Test
     fun `configure rebuilds clients for new base url and credentials`() = runBlocking {
         val replacementServer = MockWebServer()
         replacementServer.start()

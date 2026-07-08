@@ -119,6 +119,18 @@ class SettingsViewModel @Inject constructor(
     val settingsFlow get() = store.settingsFlow
 
     /**
+     * §vcs-section: read-only accessor for the current workdir (the absolute
+     * path the active session is bound to). This is a plain read of the
+     * existing [settingsManager.currentWorkdir] field — it is NOT routing VCS
+     * data through this VM (the VCS fetch + state lives entirely inside the
+     * [cn.vectory.ocdroid.ui.settings.VcsSection] composable's local state).
+     * Surfaced here purely so SettingsScreen has a way to read the workdir
+     * input without reaching into another domain; mirrors how every controller
+     * reads `settingsManager.currentWorkdir` directly.
+     */
+    val currentWorkdir: String? get() = settingsManager.currentWorkdir
+
+    /**
      * §grouping-rewrite Round-2 C1: disconnect reactivity trigger.
      * [disconnectWorkdir] mutates [settingsManager] (removeRecentWorkdir) +
      * [cacheRepository] (evictWorkdirInGroup), neither of which emits on
