@@ -164,6 +164,8 @@
     <string name="chat_parent_session">Parent session</string>
     <string name="chat_back_to_parent_session">Back to parent session</string>
     <string name="chat_switch_agent">Switch agent</string>
+    <!-- §agent-default: agent 选择器顶部"用服务端默认 agent"选项；selectedAgentName 为 null 时显示 -->
+    <string name="agent_default_label">Default</string>
     <string name="chat_thinking">Thinking</string>
     <string name="chat_sub_agent">Sub-agent</string>
     <string name="chat_sub_agent_done">Sub-agent done</string>

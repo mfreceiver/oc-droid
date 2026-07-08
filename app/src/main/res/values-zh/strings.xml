@@ -163,6 +163,7 @@
     <string name="chat_parent_session">父会话</string>
     <string name="chat_back_to_parent_session">返回父会话</string>
     <string name="chat_switch_agent">切换智能体</string>
+    <string name="agent_default_label">默认</string>
     <string name="chat_thinking">思考</string>
     <string name="chat_sub_agent">子任务</string>
     <string name="chat_sub_agent_done">子任务完成</string>

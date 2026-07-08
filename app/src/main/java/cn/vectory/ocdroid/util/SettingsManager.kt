@@ -436,6 +436,21 @@ class SettingsManager @Inject constructor(
     }
 
     /**
+     * §agent-default: 清除某会话的 per-session agent 覆盖，使其回退到服务端默认 agent。
+     * 用于 agent 选择器的"默认"项。
+     */
+    fun clearAgentForSession(serverGroupFp: String, sessionId: String) {
+        val json = encryptedPrefs.getString(KEY_SESSION_AGENTS, null) ?: return
+        val map: MutableMap<String, String> = try {
+            Json.decodeFromString<Map<String, String>>(json).toMutableMap()
+        } catch (e: Exception) {
+            return
+        }
+        map.remove(compositeSessionKey(serverGroupFp, sessionId))
+        encryptedPrefs.edit().putString(KEY_SESSION_AGENTS, Json.encodeToString(map)).apply()
+    }
+
+    /**
      * §model-selection: per-(serverGroupFp, sessionId) intended-next-model
      * override, persisted across cold starts. Stored as a JSON map keyed by
      * the composite `"<fp>\u0000<sessionId>"` (R-20 Phase 5) mirroring the

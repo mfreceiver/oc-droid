@@ -135,7 +135,8 @@ data class FileState(
 data class SettingsState(
     val themeMode: ThemeMode = ThemeMode.SYSTEM,
     val markdownFontSizes: MarkdownFontSizes = MarkdownFontSizes(),
-    val selectedAgentName: String = "build",
+    // §agent-default: null = 用服务端默认 agent（编排+glm-5.2 等），不强制 build。
+    val selectedAgentName: String? = null,
     val agents: List<AgentInfo> = emptyList(),
     val providers: ProvidersResponse? = null,
     val availableCommands: List<CommandInfo> = emptyList(),

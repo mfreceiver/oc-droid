@@ -320,7 +320,7 @@ class OpenCodeRepository @Inject constructor(
     suspend fun sendMessage(
         sessionId: String,
         text: String,
-        agent: String = "build",
+        agent: String? = null,
         model: Message.ModelInfo? = null,
         attachments: List<ComposerImageAttachment> = emptyList()
     ): Result<Unit> = runSuspendCatching {

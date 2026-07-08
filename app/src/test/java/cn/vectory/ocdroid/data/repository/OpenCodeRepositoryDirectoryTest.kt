@@ -156,6 +156,26 @@ class OpenCodeRepositoryDirectoryTest {
     }
 
     @Test
+    fun `sendMessage omits null agent and null model from prompt body (server default)`() = runBlocking {
+        // §agent-default: 钉死核心契约——agent=null 时 PromptRequest 经 repo 的
+        // Json{explicitNulls=false} 省略 agent 字段，让服务端用其默认 agent。
+        server.enqueue(MockResponse().setResponseCode(202))
+
+        val result = repository.sendMessage(
+            sessionId = "session-1", text = "hi", agent = null, model = null
+        )
+
+        assertTrue(result.isSuccess)
+        val request = server.takeRequest()
+        assertEquals("POST", request.method)
+        assertEquals("/session/session-1/prompt_async", request.path)
+        val body = request.body.readUtf8()
+        assertTrue(body.contains("\"text\":\"hi\""))
+        assertFalse("null agent must be omitted (server default)", body.contains("\"agent\""))
+        assertFalse("null model must be omitted", body.contains("\"model\""))
+    }
+
+    @Test
     fun `executeCommand with null directory omits header`() = runBlocking {
         server.enqueue(MockResponse().setResponseCode(204))
 

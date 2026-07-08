@@ -412,7 +412,7 @@ private fun SessionTab(
 internal fun ContextMenuButton(
     usage: ContextUsage?,
     todos: List<TodoItem>,
-    selectedAgentName: String,
+    selectedAgentName: String?,
     currentModelName: String,
     expanded: Boolean,
     onToggleExpand: () -> Unit,
@@ -484,7 +484,7 @@ internal fun ContextMenuButton(
             )
             // 3. Agent — selected agent name; opens the standalone picker dialog.
             DropdownMenuItem(
-                text = { Text(selectedAgentName) },
+                text = { Text(selectedAgentName ?: stringResource(R.string.agent_default_label)) },
                 leadingIcon = {
                     Icon(
                         Icons.Default.SmartToy,

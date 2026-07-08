@@ -435,8 +435,9 @@ internal fun launchLoadPendingPermissions(
 /**
  * §R-17 batch3d: free-function extraction of the former AppCore.loadAgents body.
  * Reconciles the current selectedAgentName against the freshly-fetched list
- * (falls back to "build" if the selected agent is no longer offered). Called
- * by AppCore's effect-dispatch handler.
+ * (§agent-default: falls back to null = server default if the selected agent
+ * is no longer offered, or when the user never chose one). Called by AppCore's
+ * effect-dispatch handler.
  */
 internal fun launchLoadAgents(
     scope: CoroutineScope,
@@ -449,7 +450,9 @@ internal fun launchLoadAgents(
         repository.getAgents()
             .onSuccess { agents ->
                 val currentAgent = slices.settings.value.selectedAgentName
-                val validAgent = if (agents.none { it.name == currentAgent }) "build" else currentAgent
+                // §agent-default: 仅当用户显式选过且该 agent 仍在服务端列表中才保留；
+                // 否则置 null（让服务端用其默认 agent），不再强制回退 "build"。
+                val validAgent = if (currentAgent != null && agents.any { it.name == currentAgent }) currentAgent else null
                 slices.mutateSettings { it.copy(agents = agents, selectedAgentName = validAgent) }
                 if (validAgent != currentAgent) settingsManager.selectedAgentName = validAgent
             }

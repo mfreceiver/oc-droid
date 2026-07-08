@@ -196,7 +196,7 @@ class ChatTopBarStateTest {
     fun `ChatTopBarActions callbacks invoke the supplied lambdas`() {
         var selectSessionCalls = mutableListOf<String>()
         var closeSessionCalls = mutableListOf<String>()
-        var selectAgentCalls = mutableListOf<String>()
+        var selectAgentCalls = mutableListOf<String?>()
         var navSettings = 0
         var selectHost = ""
         var activateTunnel = 0

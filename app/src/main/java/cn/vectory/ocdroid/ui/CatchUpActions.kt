@@ -157,7 +157,7 @@ internal fun launchCatchUp(
                                 staleNotice = false
                             )
                         }
-                        syncAgentFromPage(slices, currentServerGroupFp(), sessionId, page, settingsManager)
+                        syncAgentFromPage(slices, currentServerGroupFp(), sessionId, settingsManager)
                         onCacheWindow(
                             sessionId,
                             snapshotCurrentWindow(slices, sessionId)
@@ -172,7 +172,7 @@ internal fun launchCatchUp(
                             // clear the catch-up loading flag here (the gap's
                             // own Filling state is the per-marker indicator).
                             slices.mutateChat { c -> c.copy(isLoadingMessages = false, staleNotice = false) }
-                            syncAgentFromPage(slices, currentServerGroupFp(), sessionId, page, settingsManager)
+                            syncAgentFromPage(slices, currentServerGroupFp(), sessionId, settingsManager)
                             // openAndFill is suspend; launch it fire-and-forget
                             // so the catch-up coroutine returns immediately. The
                             // session-level Mutex inside the coordinator keeps
@@ -204,7 +204,7 @@ internal fun launchCatchUp(
                                     staleNotice = false
                                 )
                             }
-                            syncAgentFromPage(slices, currentServerGroupFp(), sessionId, page, settingsManager)
+                            syncAgentFromPage(slices, currentServerGroupFp(), sessionId, settingsManager)
                             onCacheWindow(
                                 sessionId,
                                 snapshotCurrentWindow(slices, sessionId)
@@ -247,18 +247,23 @@ private fun mergeProbeIntoSlice(
     return mergedMessages to mergedParts
 }
 
-/** Mirror of the legacy agent-name sync from the last assistant in the page. */
+/**
+ * Sync the global selectedAgentName from a catch-up/gap page.
+ *
+ * §agent-default (gpter/kimo 阻断): 不再从历史 assistant 消息推断 agent 写回全局——
+ * 否则用户选了"默认"（null）后，一次 catch-up 会把全局默认污染成历史里的 agent
+ * （如 "build"），导致新会话又强制发该 agent。与 MessageActions.launchLoadMessages
+ * 的 §bug3-defensive 一致：仅当存在显式 per-session 覆盖时才同步全局，否则保留用户
+ * 的全局选择（含 null=服务端默认）。历史 info.agent 不再参与回填。
+ */
 private fun syncAgentFromPage(
     slices: SliceFlows,
     serverGroupFp: String,
-    @Suppress("UNUSED_PARAMETER") sessionId: String,
-    page: cn.vectory.ocdroid.data.repository.MessagesPage,
+    sessionId: String,
     settingsManager: SettingsManager?,
 ) {
-    val lastAssistant = page.items.lastOrNull { it.info.isAssistant }
-    val inferredAgentName = lastAssistant?.info?.agent
-    val agentName = settingsManager?.getAgentForSession(serverGroupFp, sessionId) ?: inferredAgentName
-    slices.mutateSettings { it.copy(selectedAgentName = agentName ?: it.selectedAgentName) }
+    val perSessionAgent = settingsManager?.getAgentForSession(serverGroupFp, sessionId) ?: return
+    slices.mutateSettings { it.copy(selectedAgentName = perSessionAgent) }
 }
 
 /** Snapshot the current chat slice into a cache window (for onCacheWindow). */

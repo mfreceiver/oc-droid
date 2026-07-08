@@ -176,7 +176,7 @@ class ConnectionActionsTest {
     }
 
     @Test
-    fun `applySavedSettings defaults selectedAgentName to build when no pref`() {
+    fun `applySavedSettings leaves selectedAgentName null when no pref (server default)`() {
         val profile = HostProfile.defaultDirect(serverUrl = "http://x")
         every { hostProfileStore.currentProfile() } returns profile
         every { hostProfileStore.profiles() } returns listOf(profile)
@@ -189,7 +189,8 @@ class ConnectionActionsTest {
 
         applySavedSettings(repository, settingsManager, hostProfileStore, slices)
 
-        assertEquals("build", slices.settings.value.selectedAgentName)
+        // §agent-default: 无显式选择时保持 null（让服务端用其默认 agent），不再回退 build。
+        assertEquals(null, slices.settings.value.selectedAgentName)
     }
 
     @Test

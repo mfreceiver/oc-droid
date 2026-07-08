@@ -249,7 +249,7 @@ internal fun launchSendMessage(
     sessionId: String,
     text: String,
     attachments: List<ComposerImageAttachment> = emptyList(),
-    agent: String,
+    agent: String?,
     model: Message.ModelInfo?,
     onRefreshMessages: (String, Boolean) -> Unit,
     onRefreshSessions: () -> Unit,

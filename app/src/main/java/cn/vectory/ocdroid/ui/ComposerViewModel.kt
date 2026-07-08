@@ -67,14 +67,22 @@ class ComposerViewModel @Inject constructor(
         composerController.clearDraftIfActive()
     }
 
-    fun selectAgent(agentName: String) {
-        // §R-17 batch3d: body moved verbatim from AppCore.
+    fun selectAgent(agentName: String?) {
+        // §agent-default: agentName=null 表示清除显式选择，回退服务端默认 agent。
+        // R-20 Phase 5: per-(fp, sessionId) composite key —— 同时更新全局默认 +
+        // 当前会话覆盖，保证新会话与当前会话都按"默认"处理（prompt 时 agent=null
+        // 由 explicitNulls=false 省略，服务端用其默认）。
         settingsManager.selectedAgentName = agentName
         store.mutateSettings { it.copy(selectedAgentName = agentName) }
-        // R-20 Phase 5: per-(fp, sessionId) composite key — the agent override
-        // is scoped to the current host group + the active session.
         val fp = hostProfileStore.currentProfile().serverGroupFp.ifBlank { hostProfileStore.currentProfile().id }
-        store.chatFlow.value.currentSessionId?.let { settingsManager.setAgentForSession(fp, it, agentName) }
+        val sid = store.chatFlow.value.currentSessionId
+        if (sid != null) {
+            if (agentName != null) {
+                settingsManager.setAgentForSession(fp, sid, agentName)
+            } else {
+                settingsManager.clearAgentForSession(fp, sid)
+            }
+        }
     }
 
     fun toggleModelDisabled(providerId: String, modelId: String) {

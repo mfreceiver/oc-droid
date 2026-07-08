@@ -67,7 +67,7 @@ internal data class ChatTopBarState(
     val isRefreshingSessions: Boolean = false,
     val expandedSessionIds: Set<String> = emptySet(),
     val agents: List<AgentInfo>,
-    val selectedAgentName: String,
+    val selectedAgentName: String?,
     val contextUsage: ContextUsage?,
     val sessionTodos: List<TodoItem> = emptyList(),
     val hostName: String = "",
@@ -133,7 +133,7 @@ internal data class ChatTopBarState(
 internal data class ChatTopBarActions(
     val onSelectSession: (String) -> Unit,
     val onCloseSession: (String) -> Unit,
-    val onSelectAgent: (String) -> Unit,
+    val onSelectAgent: (String?) -> Unit,
     val onNavigateToSettings: () -> Unit = {},
     val onSelectHost: (String) -> Unit = {},
     val onActivateTunnel: () -> Unit = {},
@@ -508,6 +508,28 @@ internal fun ChatTopBar(
                         .heightIn(max = 400.dp)
                         .verticalScroll(rememberScrollState())
                 ) {
+                    // §agent-default: 顶部"默认"项——清除显式选择，让服务端用其默认 agent。
+                    val defaultLabel = stringResource(R.string.agent_default_label)
+                    val defaultSelected = state.selectedAgentName == null
+                    Surface(
+                        onClick = {
+                            actions.onSelectAgent(null)
+                            showAgentDialog = false
+                        },
+                        shape = RectangleShape,
+                        color = if (defaultSelected) MaterialTheme.colorScheme.surfaceVariant
+                        else Color.Transparent,
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Text(
+                            text = defaultLabel,
+                            style = MaterialTheme.typography.bodyMedium,
+                            fontWeight = if (defaultSelected) FontWeight.Bold else FontWeight.Normal,
+                            color = if (defaultSelected) MaterialTheme.colorScheme.onPrimaryContainer
+                            else MaterialTheme.colorScheme.onSurface,
+                            modifier = Modifier.padding(horizontal = 12.dp, vertical = 12.dp)
+                        )
+                    }
                     state.agents.forEach { agent ->
                         val isSelected = agent.name == state.selectedAgentName
                         Surface(

@@ -613,7 +613,7 @@ class SessionListActionsTest {
     // ── launchLoadAgents ──────────────────────────────────────────────────────
 
     @Test
-    fun `launchLoadAgents reconciles invalid selectedAgentName to build`() = runTest {
+    fun `launchLoadAgents reconciles invalid selectedAgentName to null (server default)`() = runTest {
         val agents = listOf(AgentInfo(name = "build"), AgentInfo(name = "code"))
         coEvery { repository.getAgents() } returns Result.success(agents)
         store.mutateSettings { it.copy(selectedAgentName = "ghost") }
@@ -621,8 +621,23 @@ class SessionListActionsTest {
         launchLoadAgents(scope, repository, slices, settingsManager, "Tag")
         advanceUntilIdle()
 
-        assertEquals("build", slices.settings.value.selectedAgentName)
-        verify { settingsManager.selectedAgentName = "build" }
+        // §agent-default: 选过的 agent 已不在服务端列表 → 回退 null（服务端默认），不再强制 build。
+        assertEquals(null, slices.settings.value.selectedAgentName)
+        verify { settingsManager.selectedAgentName = null }
+    }
+
+    @Test
+    fun `launchLoadAgents keeps a still-valid selectedAgentName`() = runTest {
+        // §agent-default: 选过的 agent 仍在列表 → 保留（不回退）。
+        val agents = listOf(AgentInfo(name = "build"), AgentInfo(name = "code"))
+        coEvery { repository.getAgents() } returns Result.success(agents)
+        store.mutateSettings { it.copy(selectedAgentName = "code") }
+
+        launchLoadAgents(scope, repository, slices, settingsManager, "Tag")
+        advanceUntilIdle()
+
+        assertEquals("code", slices.settings.value.selectedAgentName)
+        verify(exactly = 0) { settingsManager.selectedAgentName = any() }
     }
 
     @Test

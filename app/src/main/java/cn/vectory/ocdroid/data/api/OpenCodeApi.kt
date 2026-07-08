@@ -259,7 +259,9 @@ data class UpdateSessionTimeRequest(
 @kotlinx.serialization.Serializable
 data class PromptRequest(
     val parts: List<PartInput>,
-    val agent: String = "build",
+    // §agent-default: null = 不指定，让服务端用其配置的默认 agent（如编排+glm-5.2）。
+    // explicitNulls=false（OpenCodeRepository.json）会省略该字段，服务端按默认处理。
+    val agent: String? = null,
     val model: ModelInput? = null
 ) {
     @kotlinx.serialization.Serializable
