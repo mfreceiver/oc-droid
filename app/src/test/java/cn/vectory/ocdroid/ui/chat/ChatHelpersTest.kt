@@ -531,10 +531,12 @@ class ChatHelpersTest {
 
     private var sentMessage = false
     private var executedCommand: Pair<String, String>? = null
+    private var compacted = false
 
     private fun reset() {
         sentMessage = false
         executedCommand = null
+        compacted = false
     }
 
     private fun runSend(text: String, commands: List<CommandInfo>, allowCommand: Boolean) {
@@ -544,7 +546,8 @@ class ChatHelpersTest {
             availableCommands = commands,
             allowCommand = allowCommand,
             onSendMessage = { sentMessage = true },
-            onExecuteCommand = { cmd, args -> executedCommand = cmd to args }
+            onExecuteCommand = { cmd, args -> executedCommand = cmd to args },
+            onCompact = { compacted = true }
         )
     }
 
@@ -609,6 +612,38 @@ class ChatHelpersTest {
         runSend("/say hi", emptyList(), allowCommand = true)
         assertEquals(true, sentMessage)
         assertNull(executedCommand)
+    }
+
+    @Test
+    fun `handleComposerSend compact routes to onCompact not server command`() {
+        // §compact-fix: /compact is a client-side built-in (opencode 1.17.x no
+        // longer recognizes it as a prompt/command — compaction runs via the
+        // summarize API). It IS in availableCommands for autocomplete but must
+        // be intercepted → onCompact (summarize), NOT forwarded to /command
+        // (which the server rejects with "Command not found: compact").
+        runSend("/compact", listOf(CommandInfo(name = "compact")), allowCommand = true)
+        assertEquals(true, compacted)
+        assertNull(executedCommand)
+        assertEquals(false, sentMessage)
+    }
+
+    @Test
+    fun `handleComposerSend compact ignores trailing args`() {
+        // compact takes no args; "/compact foo" still routes to onCompact.
+        runSend("/compact foo", listOf(CommandInfo(name = "compact")), allowCommand = true)
+        assertEquals(true, compacted)
+        assertNull(executedCommand)
+        assertEquals(false, sentMessage)
+    }
+
+    @Test
+    fun `handleComposerSend compact not intercepted when disallowed (busy)`() {
+        // allowCommand=false (agent busy) → /compact falls through to a prompt,
+        // mirroring all other commands (compaction mid-run is also gated
+        // downstream by compactSession's isCompacting guard).
+        runSend("/compact", listOf(CommandInfo(name = "compact")), allowCommand = false)
+        assertEquals(false, compacted)
+        assertEquals(true, sentMessage)
     }
 
     // ── formatCount ───────────────────────────────────────────────────────

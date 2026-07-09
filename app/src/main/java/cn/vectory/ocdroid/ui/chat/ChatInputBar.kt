@@ -260,7 +260,8 @@ internal fun ChatInputBar(
                                 availableCommands = availableCommands,
                                 allowCommand = !isBusy,
                                 onSendMessage = onSend,
-                                onExecuteCommand = onExecuteCommand
+                                onExecuteCommand = onExecuteCommand,
+                                onCompact = chatVM::compactSession
                             )
                         }
                     },

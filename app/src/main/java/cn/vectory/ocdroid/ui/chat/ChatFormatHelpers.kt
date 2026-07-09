@@ -38,12 +38,25 @@ internal fun handleComposerSend(
     availableCommands: List<CommandInfo>,
     allowCommand: Boolean,
     onSendMessage: () -> Unit,
-    onExecuteCommand: (command: String, arguments: String) -> Unit
+    onExecuteCommand: (command: String, arguments: String) -> Unit,
+    onCompact: () -> Unit
 ) {
     val trimmed = text.trim()
     if (allowCommand && trimmed.startsWith("/")) {
         val withoutSlash = trimmed.removePrefix("/")
         val cmdName = withoutSlash.substringBefore(' ').lowercase()
+        // §compact-fix: /compact is a client-side built-in. opencode 1.17.x no
+        // longer recognizes it as a prompt / custom command — compaction runs
+        // via POST /session/{id}/summarize (ChatViewModel.compactSession →
+        // summarizeSession). "compact" IS in availableCommands (for autocomplete
+        // via ConnectionCoordinator.localCommands), so without this interception
+        // it routes to onExecuteCommand → POST /command → the server rejects it
+        // ("Command not found: compact"). Intercept BEFORE the custom-command
+        // lookup. (compact takes no args; any trailing text is ignored.)
+        if (cmdName == "compact") {
+            onCompact()
+            return
+        }
         val args = withoutSlash.substringAfter(' ', "").trim()
         val known = availableCommands.any { it.name.equals(cmdName, ignoreCase = true) }
         if (known) {
