@@ -5,7 +5,6 @@ import cn.vectory.ocdroid.data.api.SSEClient
 import cn.vectory.ocdroid.data.api.*
 import cn.vectory.ocdroid.data.api.v2.OpenCodeApiV2
 import cn.vectory.ocdroid.data.api.v2.ModelInfoV2
-import cn.vectory.ocdroid.data.api.v2.ProviderInfoV2
 import cn.vectory.ocdroid.data.model.*
 import cn.vectory.ocdroid.data.repository.http.AuthInterceptor
 import cn.vectory.ocdroid.data.repository.http.CacheControlInterceptor
@@ -426,148 +425,88 @@ class OpenCodeRepository @Inject constructor(
     }
 
     /**
-     * §v2-catalog (P2 2B): builds the model catalog from the v2
-     * `GET /api/model` + `GET /api/provider` endpoints. The legacy
-     * `GET /config/providers` is no longer fetched — its response carried
-     * provider API keys in the raw body.
+     * §catalog-source: builds the model catalog from `GET /config/providers` —
+     * the SAME endpoint the opencode web model picker uses (verified by
+     * inspecting the web bundle served by opencode 1.17.x). Returns the
+     * [ProvidersResponse] downstream consumes (model picker + Model Management
+     * + context-limit index + per-prompt model attachment), unchanged.
      *
-     * Returns the SAME [ProvidersResponse] shape downstream consumes (model
-     * picker + context-limit index), so callers are unchanged:
-     *  - [ConfigProvider.id] = v2 provider id; `name` = v2 provider name;
-     *  - [ProviderModel.id]/`name`/`providerId` from the v2 model
-     *    (`resolvedProviderId` falls through to `providerId`);
-     *  - [ProviderModelLimit] merged from the v2 model's `limit`;
-     *  - `defaultByProvider` empty (v2 has no default-provider concept; the
-     *    app attaches the model per-prompt anyway).
+     * §catalog-source-revert (from the V2 /api/model + /api/provider pair): on
+     * opencode ≤1.17.x the V2 pair returns a STRICT SUBSET — only providers
+     * with an explicit `options.apiKey` in config plus the free `opencode`
+     * (Zen) provider — omitting most configured providers. On one 1.17.15
+     * server /api/model returned 3 providers / 31 models while
+     * /config/providers returned 10 providers / 61 models, so the app showed
+     * far fewer models than the web. /config/providers returns the full
+     * catalog the web shows.
      *
-     * Models whose provider has no `/api/provider` entry still render (name
-     * falls back to null → picker shows the provider id). Providers with no
-     * models are absent (groupBy drops them).
+     * §forward-compat: opencode HEAD is moving the web to `/api/provider`
+     * (whose `Provider` type gains a `models` map). On ≤1.17.x `/api/provider`
+     * returns NO `models` field, so it cannot source the picker there; if a
+     * future opencode drops /config/providers or stops populating it, revisit.
      *
-     * §v2-tolerant-catalog (0.6.1 round-1 fix, four-reviewer consensus):
-     * decode is PER-ENTRY via `decodeFromJsonElement` + `runCatching` so a
-     * single WRONG-TYPE entry (e.g. `limit.context = "abc"` string→Int,
-     * `limit.context = {}` object→Int, or an out-of-Int-range number —
-     * values `coerceInputValues` does NOT absorb) is SKIPPED + counted
-     * instead of throwing and nuking the ENTIRE catalog. This was the 0.6.1
-     * round-1 root cause: one such bad entry made the atomic
-     * `List<ModelInfoV2>` decode throw → /api/model surfaced as failure →
-     * providers=null → "服务器没有可用模型". ModelInfoV2/ProviderInfoV2
-     * fields stay nullable as defense-in-depth (missing id/providerID still
-     * absorbed as null + filtered below).
+     * §key-leak safety (the original reason for the V2 migration — and why it
+     * is safe to revert here): /config/providers' raw body carries provider
+     * `apiKey` values, BUT
+     *   (a) [ConfigProvider] / [ProviderModel] have NO `options`/`apiKey`/`key`
+     *       field + `ignoreUnknownKeys = true` → keys are dropped at
+     *       deserialization, never held in memory or logged;
+     *   (b) [cn.vectory.ocdroid.data.repository.http.HttpHeaders.CACHEABLE_PATHS]
+     *       intentionally EXCLUDES `/config/providers` → no on-disk OkHttp
+     *       cache residue;
+     *   (c) this is a personal client ↔ personal server, so transit is to the
+     *       device owner only.
      *
-     * §v2-catalog last-mile defense (kimo🟡-6, 0.6.1 round-1): if `/api/model`
-     * or `/api/provider` returns a STRUCTURALLY corrupt payload (non-array
-     * `data`, missing `data` key, etc.) — a failure even per-entry decode
-     * cannot recover from — getProviders does NOT propagate failure (which
-     * would surface as "没有可用模型" in the picker). It logs + returns an
-     * EMPTY catalog (Result.success) so the picker shows an empty list
-     * instead of an error state; the next refresh retries cleanly.
+     * §last-mile defense: a structural failure (HTTP error / non-decodable
+     * body) does NOT propagate as Result.failure (which would surface as
+     * "服务器没有可用模型"); it logs + returns an EMPTY catalog
+     * (Result.success) so the picker shows an empty list and the next refresh
+     * retries. CancellationException is rethrown (structured concurrency).
+     * Providers whose `models` map is empty are dropped (parity with the
+     * former V2 builder's groupBy).
      */
     suspend fun getProviders(): Result<ProvidersResponse> {
-        // §v2-catalog last-mile defense: catch structural envelope failures
-        // (non-array data / HTTP/retrofit errors) and degrade to an empty
-        // catalog instead of Result.failure. CancellationException MUST be
-        // rethrown (structured concurrency — see runSuspendCatching).
-        val rawModelElements: List<JsonElement> = try {
-            apiV2.getModels().data
+        // §catalog-source-revert: fetch GET /config/providers — the SAME endpoint
+        // the opencode web model picker uses (verified on the web bundle served
+        // by opencode 1.17.x). The former V2 /api/model + /api/provider pair
+        // returns a STRICT SUBSET on ≤1.17.x (only providers with an explicit
+        // options.apiKey in config + the free `opencode`/Zen provider), omitting
+        // most configured providers → the app showed far fewer models than the
+        // web. /config/providers returns the full catalog. See the method kdoc
+        // for the key-leak safety analysis that makes this revert safe.
+        val response: ProvidersResponse = try {
+            api.getProviders()
         } catch (e: kotlinx.coroutines.CancellationException) {
             throw e
         } catch (e: Exception) {
-            DebugLog.e("OpenCodeRepository", "v2 catalog: /api/model structural decode failure, returning empty catalog", e)
+            // §last-mile defense: do NOT propagate failure (would surface as
+            // "服务器没有可用模型"); degrade to an empty catalog so the picker
+            // shows an empty list and the next refresh retries. Cancellation is
+            // rethrown for structured concurrency.
+            DebugLog.e("OpenCodeRepository", "catalog: /config/providers fetch failed, returning empty catalog", e)
             return Result.success(ProvidersResponse(providers = emptyList()))
         }
-        // §v2-tolerant-catalog: per-entry decode so a wrong-type entry is
-        // skipped + counted (logged with a 200-char preview for diagnosis)
-        // rather than nuking the whole list. coerceInputValues + nullable
-        // fields still absorb missing/null id/providerID/null-limit values
-        // inside each successfully-decoded entry; the runCatching here only
-        // catches entries that throw despite those (i.e. type mismatches).
-        val decodedModels = rawModelElements.mapNotNull { elem ->
-            runCatching { json.decodeFromJsonElement<ModelInfoV2>(elem) }
-                .onFailure {
-                    DebugLog.w(
-                        "OpenCodeRepository",
-                        "v2 catalog: skipping unparseable model entry: ${elem.toString().take(200)}"
-                    )
-                }
-                .getOrNull()
-        }
-        val unparseableModels = rawModelElements.size - decodedModels.size
-        // enabled-filter is unchanged: legacy /config/providers had no such
-        // field and showed everything; this only excludes an explicit server-
-        // side disable. Combined with the missing-id/providerID blank-guard
-        // (entries that can't render) into one filter pass.
-        val models = decodedModels
-            .filter { it.enabled && !it.id.isNullOrBlank() && !it.providerId.isNullOrBlank() }
-        val droppedDisabledOrMissingId = decodedModels.size - models.size
-        if (unparseableModels > 0 || droppedDisabledOrMissingId > 0) {
-            DebugLog.w(
-                "OpenCodeRepository",
-                "v2 catalog: dropped $unparseableModels unparseable + $droppedDisabledOrMissingId disabled/missing-id of ${rawModelElements.size} model entries"
-            )
-        }
-
-        val rawProviderElements: List<JsonElement> = try {
-            apiV2.getProviders().data
-        } catch (e: kotlinx.coroutines.CancellationException) {
-            throw e
-        } catch (e: Exception) {
-            // §v2-tolerant-catalog round-2 (glm-2 🟠): /api/provider structural
-            // failure must NOT discard the already-decoded /api/model list.
-            // Degrade to an empty provider-name map (models keep rendering,
-            // name=null → picker shows provider id, the existing fallback)
-            // instead of returning an empty catalog. (The /api/model catch
-            // above DOES return empty — there a structural failure means no
-            // model data exists at all.)
-            DebugLog.e("OpenCodeRepository", "v2 catalog: /api/provider structural decode failure; continuing with empty provider-name map", e)
-            emptyList()
-        }
-        // §v2-tolerant-catalog: provider entries decoded per-entry as well,
-        // for the same wrong-type-tolerance reason as models. A provider entry
-        // with a non-array field where an array is expected would otherwise
-        // throw and nuke the provider name map.
-        val providerNameById = rawProviderElements.mapNotNull { elem ->
-            runCatching { json.decodeFromJsonElement<ProviderInfoV2>(elem) }
-                .onFailure {
-                    DebugLog.w(
-                        "OpenCodeRepository",
-                        "v2 catalog: skipping unparseable provider entry: ${elem.toString().take(200)}"
-                    )
-                }
-                .getOrNull()
-        }
-            .filter { !it.id.isNullOrBlank() }
-            .associate { it.id!! to it.name }
-
-        val configProviders = models.groupBy { it.providerId!! }.map { (providerId, ms) ->
-            ConfigProvider(
-                id = providerId,
-                name = providerNameById[providerId],
-                models = ms.associateBy { it.id!! }.mapValues { (_, m) ->
-                    ProviderModel(
-                        id = m.id!!,
-                        name = m.name,
-                        providerId = m.providerId!!,
-                        limit = m.limit?.let { ProviderModelLimit(it.context, it.input, it.output) }
-                    )
-                }
-            )
-        }
-        DebugLog.i("OpenCodeRepository", "v2 catalog: ${models.size} enabled model(s), ${providerNameById.size} provider(s)")
-        return Result.success(ProvidersResponse(providers = configProviders))
+        // Drop providers with no models (parity with the former V2 builder's
+        // groupBy: a provider whose models map is empty renders no picker rows).
+        val providers = response.providers.filter { it.models.isNotEmpty() }
+        val totalModels = providers.sumOf { it.models.size }
+        DebugLog.i("OpenCodeRepository", "catalog: ${providers.size} provider(s), $totalModels model(s) from /config/providers")
+        return Result.success(
+            ProvidersResponse(providers = providers, defaultByProvider = response.defaultByProvider)
+        )
     }
 
     /**
      * §model-selection: lists the server's available models via the v2
      * `GET /api/model` endpoint. Returns the `data` array (each entry carries
      * `id`, `providerID`, `name`, `enabled`, `limit`). NOTE: [getProviders]
-     * above now builds the full catalog (incl. context-limit) from this
-     * endpoint + `/api/provider`; this standalone [getModels] is retained for
-     * debug/console use and has no production caller.
+     * above no longer uses this endpoint — it fetches `/config/providers`,
+     * which returns the full model catalog the opencode web picker shows;
+     * this standalone [getModels] is retained for debug/console use and has
+     * no production caller.
      *
-     * §v2-tolerant-catalog (0.6.1 round-1): per-entry decode (same as
-     * [getProviders]) so a wrong-type entry is skipped + logged instead of
+     * §v2-tolerant-catalog (0.6.1 round-1): per-entry decode so a wrong-type
+     * entry is skipped + logged instead of
      * nuking the whole list. Structural failures (non-array `data`) still
      * surface as Result.failure here (this is a debug-only path; no last-mile
      * empty-catalog fallback is needed — callers are human-facing console).

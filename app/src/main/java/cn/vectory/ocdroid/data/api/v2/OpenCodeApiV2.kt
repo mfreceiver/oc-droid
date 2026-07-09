@@ -23,11 +23,13 @@ import retrofit2.http.Headers
  *  - `GET /api/provider` → `{location, data:[{id, name, ...}]}`.
  *
  * Unlike the legacy `GET /config/providers`, these v2 responses do NOT carry
- * provider API keys. [cn.vectory.ocdroid.data.repository.OpenCodeRepository.getProviders]
- * now builds the catalog from these two v2 calls (merging `limit` from
- * /api/model + the provider `name` from /api/provider into the existing
- * `ProvidersResponse` shape), so the key-bearing legacy endpoint is no longer
- * fetched. The `location` echo is dropped silently by the converter factory's
+ * provider API keys. NOTE: [cn.vectory.ocdroid.data.repository.OpenCodeRepository.getProviders]
+ * no longer uses these endpoints — it fetches `/config/providers` (the same
+ * source the opencode web model picker uses) because on opencode ≤1.17.x the
+ * V2 pair returns a strict subset of the catalog (fewer providers/models than
+ * the web shows). These V2 endpoints are now used only by the debug-only
+ * [cn.vectory.ocdroid.data.repository.OpenCodeRepository.getModels]. The
+ * `location` echo is dropped silently by the converter factory's
  * `Json { ignoreUnknownKeys = true }`.
  */
 interface OpenCodeApiV2 {

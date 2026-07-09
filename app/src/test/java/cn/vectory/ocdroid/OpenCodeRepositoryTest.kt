@@ -13,10 +13,6 @@ import cn.vectory.ocdroid.data.model.PermissionRequest
 import cn.vectory.ocdroid.data.model.PermissionResponse
 import cn.vectory.ocdroid.data.model.ProviderModel
 import cn.vectory.ocdroid.data.model.ProvidersResponse
-import cn.vectory.ocdroid.data.api.v2.ModelInfoV2
-import cn.vectory.ocdroid.data.api.v2.ModelLimitV2
-import cn.vectory.ocdroid.data.api.v2.ProviderInfoV2
-import cn.vectory.ocdroid.data.api.v2.V2Response
 import cn.vectory.ocdroid.data.model.QuestionInfo
 import cn.vectory.ocdroid.data.model.QuestionOption
 import cn.vectory.ocdroid.data.model.QuestionRequest
@@ -680,183 +676,109 @@ class OpenCodeRepositoryTest {
     }
 
     @Test
-    fun `getProviders builds catalog from v2 model + provider endpoints`() = runBlocking {
-        // §v2-catalog (P2 2B): repository.getProviders() now fetches /api/model
-        // then /api/provider and merges them. Enqueue in call order (FIFO).
-        val models = V2Response(
-            data = listOf(
-                ModelInfoV2(
-                    id = "gpt-4",
-                    providerId = "openai",
-                    name = "GPT-4",
-                    limit = ModelLimitV2(context = 128000, output = 16000)
-                ),
-                // §enabled-filter: server-disabled models must be dropped from the catalog.
-                ModelInfoV2(
-                    id = "gpt-4-disabled",
-                    providerId = "openai",
-                    name = "GPT-4 (disabled)",
-                    enabled = false
-                )
-            )
-        )
-        val providers = V2Response(
-            data = listOf(ProviderInfoV2(id = "openai", name = "OpenAI"))
-        )
-        server.enqueue(
-            MockResponse()
-                .setBody(json.encodeToString(models))
-                .setHeader("Content-Type", "application/json")
-        )
-        server.enqueue(
-            MockResponse()
-                .setBody(json.encodeToString(providers))
-                .setHeader("Content-Type", "application/json")
-        )
+    fun `getProviders builds catalog from the config providers endpoint`() = runBlocking {
+        // §catalog-source: getProviders() fetches GET /config/providers (the same
+        // endpoint the opencode web model picker uses) and returns the parsed
+        // ProvidersResponse. The `default` map is preserved (the former V2 path
+        // left it empty). Provider `options.apiKey` / model `key` fields are
+        // dropped by ignoreUnknownKeys (DTO has no such fields) — verified in a
+        // dedicated test below.
+        val body = """
+            {"providers":[
+              {"id":"openai","name":"OpenAI","options":{"apiKey":"sk-leak"},
+               "models":{"gpt-4":{"id":"gpt-4","name":"GPT-4","providerID":"openai","limit":{"context":128000,"output":16000}}}},
+              {"id":"mistral","name":"Mistral","models":{"m1":{"id":"m1","name":"M1","providerID":"mistral"}}}
+            ],"default":{"openai":"gpt-4"}}
+        """.trimIndent()
+        server.enqueue(jsonResponse(body))
 
         val result = repository.getProviders()
 
         assertTrue(result.isSuccess)
         val catalog = result.getOrThrow()
-        assertEquals(1, catalog.providers.size)
-        val provider = catalog.providers[0]
-        assertEquals("openai", provider.id)
-        assertEquals("OpenAI", provider.name) // merged from /api/provider
-        assertEquals(1, provider.models.size) // §enabled-filter: gpt-4-disabled dropped
-        assertEquals(null, provider.models["gpt-4-disabled"])
-        val model = provider.models["gpt-4"]
+        assertEquals(2, catalog.providers.size)
+        val openai = catalog.providers[0]
+        assertEquals("openai", openai.id)
+        assertEquals("OpenAI", openai.name)
+        assertEquals(1, openai.models.size)
+        val model = openai.models["gpt-4"]
         assertEquals("gpt-4", model?.id)
         assertEquals("GPT-4", model?.name)
         assertEquals("openai", model?.resolvedProviderId)
-        assertEquals(128000, model?.limit?.context) // merged from /api/model
+        assertEquals(128000, model?.limit?.context)
         assertEquals(16000, model?.limit?.output)
-        assertEquals(null, catalog.default) // v2 has no default-provider concept
+        // §catalog-source: default restored (the V2 path left it null).
+        assertNotNull(catalog.default)
+        assertEquals("openai", catalog.default?.providerId)
+        assertEquals("gpt-4", catalog.default?.modelId)
+        // request hit /config/providers (the web picker's source).
+        assertEquals("/config/providers", server.takeRequest().path)
     }
 
     @Test
-    fun `getProviders tolerates malformed entries without nuking the catalog`() = runBlocking {
-        // §v2-tolerant-catalog: a single malformed entry (missing id / providerID)
-        // must be SKIPPED — not throw and nuke the entire list (the 0.6.0 "服务器
-        // 没有可用模型" regression: atomic list decode threw on the first bad
-        // entry → providers stayed null). Here null-id / null-providerID /
-        // disabled entries are all dropped while the one valid model survives,
-        // exercising the tolerant nullable-field filter + the drop-count path.
-        val models = V2Response(
-            data = listOf(
-                ModelInfoV2(id = "good", providerId = "openai", name = "Good"),
-                ModelInfoV2(id = null, providerId = "openai", name = "NoId"),
-                ModelInfoV2(id = "noprovider", providerId = null, name = "NoProvider"),
-                ModelInfoV2(id = "disabled", providerId = "openai", name = "Disabled", enabled = false)
-            )
-        )
-        val providers = V2Response(data = listOf(ProviderInfoV2(id = "openai", name = "OpenAI")))
-        server.enqueue(
-            MockResponse()
-                .setBody(json.encodeToString(models))
-                .setHeader("Content-Type", "application/json")
-        )
-        server.enqueue(
-            MockResponse()
-                .setBody(json.encodeToString(providers))
-                .setHeader("Content-Type", "application/json")
-        )
+    fun `getProviders drops providers with no models`() = runBlocking {
+        // parity with the former V2 builder's groupBy: a provider whose models
+        // map is empty is absent from the catalog (no empty section header in
+        // the picker).
+        val body = """
+            {"providers":[
+              {"id":"empty","name":"Empty","models":{}},
+              {"id":"openai","name":"OpenAI","models":{"gpt-4":{"id":"gpt-4","name":"GPT-4","providerID":"openai"}}}
+            ]}
+        """.trimIndent()
+        server.enqueue(jsonResponse(body))
 
         val result = repository.getProviders()
+
+        assertTrue(result.isSuccess)
+        val catalog = result.getOrThrow()
+        assertEquals(1, catalog.providers.size)
+        assertEquals("openai", catalog.providers[0].id)
+    }
+
+    @Test
+    fun `getProviders ignores provider apiKey fields without capturing them`() = runBlocking {
+        // §key-leak safety: /config/providers' raw body carries provider apiKey
+        // values (the original reason the V2 migration happened). ConfigProvider
+        // / ProviderModel have NO options/apiKey/key field + ignoreUnknownKeys,
+        // so they are dropped at deserialization — the catalog parses fine and
+        // holds no key material. This is what makes the revert from the V2 pair
+        // safe (together with /config/providers being excluded from the OkHttp
+        // disk cache — see CacheControlInterceptorTest).
+        val body = """
+            {"providers":[
+              {"id":"openai","name":"OpenAI","options":{"apiKey":"sk-secret-123"},
+               "models":{"gpt-4":{"id":"gpt-4","name":"GPT-4","providerID":"openai","key":"sk-secret-123"}}}
+            ]}
+        """.trimIndent()
+        server.enqueue(jsonResponse(body))
+
+        val result = repository.getProviders()
+
         assertTrue(result.isSuccess)
         val catalog = result.getOrThrow()
         assertEquals(1, catalog.providers.size)
         val provider = catalog.providers[0]
         assertEquals("openai", provider.id)
-        // only "good" survives the tolerant filter; the rest are dropped silently
-        assertEquals(1, provider.models.size)
-        assertTrue(provider.models["good"] != null)
-        assertTrue(provider.models["noid"] == null)
-        assertTrue(provider.models["noprovider"] == null)
-        assertTrue(provider.models["disabled"] == null)
+        assertEquals("gpt-4", provider.models["gpt-4"]?.id)
+        // No field on ConfigProvider/ProviderModel can hold a key — the unknown
+        // options/key fields were silently dropped at deserialization, not stored.
+        assertEquals("GPT-4", provider.models["gpt-4"]?.name)
     }
 
     @Test
-    fun `getProviders tolerates wrong-type JSON entries without nuking the catalog`() = runBlocking {
-        // §v2-tolerant-catalog (0.6.1 round-1 fix, four-reviewer consensus):
-        // coerceInputValues only absorbs null/unknown-enum — NOT type
-        // mismatches. A `limit.context` that is a STRING ("notanumber") or an
-        // OBJECT ({}) makes decodeFromJsonElement<ModelInfoV2> THROW per entry.
-        // Pre-fix: the atomic List<ModelInfoV2> decode threw on the first such
-        // bad entry → /api/model surfaced as failure → providers=null →
-        // "服务器没有可用模型". Post-fix: per-entry runCatching skips + counts
-        // each bad entry, so the one VALID model ("good") survives.
-        //
-        // CRITICAL: the bad payloads below are RAW JSON strings (not built via
-        // json.encodeToString(ModelInfoV2(...))) so the wrong types are
-        // genuine — a DTO round-trip would never produce them. The V2Response
-        // wrapper is also hand-rolled as a raw string for the same reason.
-        val modelsBody = """
-            {"data":[
-              {"id":"bad","providerID":"p1","name":"Bad","limit":{"context":"notanumber","output":1}},
-              {"id":"bad2","providerID":"p1","name":"Bad2","limit":{"context":{}}},
-              {"id":"good","providerID":"p1","name":"Good"}
-            ]}
-        """.trimIndent()
-        val providersBody = """{"data":[{"id":"p1","name":"P1"}]}"""
-        server.enqueue(
-            MockResponse()
-                .setBody(modelsBody)
-                .setHeader("Content-Type", "application/json")
-        )
-        server.enqueue(
-            MockResponse()
-                .setBody(providersBody)
-                .setHeader("Content-Type", "application/json")
-        )
+    fun `getProviders returns empty catalog instead of failure when config providers fails`() = runBlocking {
+        // §last-mile defense: an HTTP failure (or non-decodable body) from
+        // /config/providers must NOT propagate as Result.failure (which would
+        // surface as "服务器没有可用模型" in the picker). It degrades to
+        // Result.success(empty catalog) so the picker shows an empty list and
+        // the next refresh retries.
+        server.enqueue(MockResponse().setResponseCode(500))
 
         val result = repository.getProviders()
 
-        // §last-mile: success (NOT failure) — the two wrong-type entries were
-        // skipped per-entry, leaving the one valid model in the catalog.
-        assertTrue("expected success (bad entries skipped), got $result", result.isSuccess)
-        val catalog = result.getOrThrow()
-        assertEquals(1, catalog.providers.size)
-        val provider = catalog.providers[0]
-        assertEquals("p1", provider.id)
-        assertEquals("P1", provider.name) // merged from /api/provider
-        assertEquals("exactly the one valid model survives", 1, provider.models.size)
-        // "good" is present; "bad"/"bad2" were skipped (not nuked into the catalog
-        // as half-decoded entries, nor propagated as failure).
-        assertNotNull(provider.models["good"])
-        assertNull(provider.models["bad"])
-        assertNull(provider.models["bad2"])
-        assertEquals("Good", provider.models["good"]?.name)
-        // "good" had no limit field → null limit (not a wrong-type casualty).
-        assertNull(provider.models["good"]?.limit)
-    }
-
-    @Test
-    fun `getProviders returns empty catalog instead of failure when api model payload is structurally corrupt`() = runBlocking {
-        // §v2-catalog last-mile defense (kimo🟡-6, 0.6.1 round-1): if /api/model
-        // returns a payload whose envelope itself is corrupt (e.g. `data` is a
-        // STRING instead of an array — retrofit cannot even decode
-        // V2Response<List<JsonElement>>), per-entry recovery is impossible.
-        // getProviders must NOT propagate failure (would surface as "没有可用
-        // 模型"); it degrades to Result.success(empty catalog) + Log so the
-        // picker shows an empty list and the next refresh retries.
-        val corruptModelsBody = """{"data":"not-an-array"}"""
-        val providersBody = """{"data":[{"id":"p1","name":"P1"}]}"""
-        server.enqueue(
-            MockResponse()
-                .setBody(corruptModelsBody)
-                .setHeader("Content-Type", "application/json")
-        )
-        server.enqueue(
-            MockResponse()
-                .setBody(providersBody)
-                .setHeader("Content-Type", "application/json")
-        )
-
-        val result = repository.getProviders()
-
-        assertTrue("structural corruption must degrade to success(empty), got $result", result.isSuccess)
-        val catalog = result.getOrThrow()
-        assertEquals(0, catalog.providers.size)
+        assertTrue("HTTP failure must degrade to success(empty), got $result", result.isSuccess)
+        assertEquals(0, result.getOrThrow().providers.size)
     }
 
     @Test
