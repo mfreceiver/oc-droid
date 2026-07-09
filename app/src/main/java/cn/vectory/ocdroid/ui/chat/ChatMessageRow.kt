@@ -330,7 +330,11 @@ internal fun PartView(
                     modifier = modifier,
                     repository = repository,
                     workspaceDirectory = workspaceDirectory,
-                    isStreaming = streamingTextOverride != null
+                    isStreaming = streamingTextOverride != null,
+                    // §0.6.2 ora-2: stable identity shared between TextPart's
+                    // streaming and completed branches so HeightAnchorRegistry
+                    // carries the maxHeight across finalization → seamless.
+                    stableKey = "$messageId|${part.id}"
                 )
             }
         }

@@ -184,6 +184,13 @@ kover {
                     "cn.vectory.ocdroid.ui.chat.ChatScreenKt",
                     "cn.vectory.ocdroid.ui.chat.ChatMessageContentKt",
                     "cn.vectory.ocdroid.ui.chat.ChatTextPartsKt",
+                    // §0.6.2 ora-2: StreamingMarkdownRender.kt is a @Composable-
+                    // heavy file (HeightAnchor SubcomposeLayout / Markdown composable
+                    // calls). Its PURE helpers (buildStreamingRenderUnits /
+                    // HeightShrinkCounter / HeightAnchorRegistry) live in
+                    // StreamingMarkdownHelpers.kt (same package, NOT excluded) and
+                    // ARE covered by JVM unit tests + feed the 0-shrink androidTest.
+                    "cn.vectory.ocdroid.ui.chat.StreamingMarkdownRenderKt",
                     // ChatTopBarKt: visiblePickerProviders 已提取到 PickerProviderFilter.kt
                     // （独立文件，保留计入覆盖）；ChatTopBarKt 剩余为纯 @Composable，排除。
                     "cn.vectory.ocdroid.ui.chat.ChatTopBarKt",

@@ -125,27 +125,14 @@ internal fun rememberPacedStreamingText(
 // codeFenceLanguage extensions) renders fenced code with soft-wrap instead of
 // mikepenz's horizontal scroll, surfacing the language as a badge.
 
-// ── Code/prose split for flicker-free streaming with code formatting ─────
-// Splits a growing streaming markdown string into ordered segments of PROSE
-// and CODE. PROSE renders as plain Text; CODE renders as a formatted code
-// block (CodeBlockSurface, the same renderer WrappedCodeBlock uses). Both are
-// height-monotonic while growing:
-//   - plain Text on a growing string only ever adds lines (never shrinks);
-//   - a code block is monospace Text with softWrap — adding lines only ever
-//     adds height (never shrinks), EVEN while the fence is still open.
-// So the Column of segments has a monotonically-growing total height → 0
-// height-shrinks → 0 flicker, while completed (and in-progress) code keeps its
-// code-block formatting. Prose loses inline markdown (**bold**, lists, links)
-// during streaming and snaps to full markdown on completion — an acceptable
-// trade-off since code formatting is the high-value part.
-//
-// Why not render prose as markdown too: the mikepenz Markdown renderer produces
-// pathologically unstable height when re-parsing ANY growing text during rapid
-// recomposition (measured: 151 height-shrinks/turn, peak 8213px for ~3500
-// chars; boundary-aware "complete-blocks-as-markdown" still gave 57 shrinks /
-// 11624px). Code blocks escape this because they render as plain monospace
-// Text (no markdown block-structure reflow). This hybrid keeps the valuable
-// formatting (code) and drops the unstable part (prose markdown) during stream.
+// ── Code/prose split (LEGACY — superseded by ora-2 in 0.6.2) ──────────────
+// §0.6.2: the streaming branch in [TextPart] now uses ora-2 (block-level
+// decomposition + tail-as-Markdown + HeightAnchor, see
+// StreamingMarkdownHelpers.kt / StreamingMarkdownRender.kt). This split +
+// [StreamSegment] / [splitCodeAndProse] are RETAINED because they are covered
+// by existing JVM unit tests (ChatHelpersTest.kt) and still used by nothing in
+// production — they document the prior "code-formatted, prose-as-plain-Text"
+// hybrid that ora-2 replaced. Do not call from new code.
 internal sealed class StreamSegment {
     data class Prose(val raw: String) : StreamSegment()
     data class Code(val code: String, val language: String) : StreamSegment()
@@ -166,7 +153,12 @@ internal fun TextPart(
     modifier: Modifier = Modifier.fillMaxWidth(),
     repository: OpenCodeRepository? = null,
     workspaceDirectory: String? = null,
-    isStreaming: Boolean = false
+    isStreaming: Boolean = false,
+    // §0.6.2 ora-2: stable identity ("$messageId|$partId") shared between the
+    // streaming and completed branches so HeightAnchorRegistry carries the
+    // maxHeight across the streaming→completed transition → seamless
+    // finalization (no height drop). See StreamingMarkdownRender.kt.
+    stableKey: Any? = null
 ) {
     // §empty-msg defensive: a Part whose final text is blank renders nothing.
     // Covers (1) a placeholder text Part carried into a persisted session with
@@ -205,80 +197,72 @@ internal fun TextPart(
             }
         }
     } else {
-        // §body-flicker-fix (v0.2.12): boundary-aware streaming. See
-        // splitStableTail(). The mikepenz Markdown renderer produces
-        // pathologically unstable height when re-parsing a GROWING incomplete
-        // streaming prefix (measured: 151 height-shrinks/turn, peak 8213px for
-        // ~3500 chars — same root cause as the reasoning card's 5000px). The
-        // render-layer pacer only reduces re-parse FREQUENCY, not the per-parse
-        // instability. Fix: during streaming, render COMPLETE leading blocks
-        // (paragraphs closed, fences balanced) as markdown — whose height only
-        // grows when a new block closes — plus the trailing INCOMPLETE block as
-        // plain text — whose height grows monotonically without reflow. Total
-        // height never shrinks → 0 flicker, while ~all completed content keeps
-        // formatting. On completion, snap to full markdown (with image
-        // resolution when a repository is available). Bypassing
-        // ResolvedMarkdownText during streaming also eliminates the per-step
-        // resolveImages churn (measured 164 redundant runs/turn).
+        // §0.6.2 ora-2 (streaming markdown rewrite): the body prose now renders
+        // markdown formatting (bold / list / link / table / code) DURING
+        // streaming, with 0 visible height-shrink flicker, via three mechanisms
+        // (see StreamingMarkdownHelpers.kt / StreamingMarkdownRender.kt):
+        //   (i)   block-level decomposition — only the growing tail re-parses;
+        //         completed blocks keep a globally-stable key (cache reuse).
+        //   (ii)  the tail ALSO renders as Markdown (not plain Text) → inline
+        //         formatting visible mid-stream, no plain-Text→Markdown boundary
+        //         shrink.
+        //   (iii) HeightAnchor pins visible height to max(H_natural(t),
+        //         H_anchor(t-1)) → non-decreasing → 0 shrink.
+        // The streaming branch calls StreamingMarkdownRender (HeightAnchor +
+        // StreamingMarkdownContent); the completed branch wraps its render in a
+        // bare HeightAnchor. Both share `stableKey` so HeightAnchorRegistry
+        // carries the maxHeight across the streaming→completed fork (different
+        // composition positions) → the finalization snap inherits the streaming
+        // maxHeight → seamless (ora-2 (iii)).
+        //
+        // This supersedes the 0.6.x "code-formatted, prose-as-plain-Text" hybrid
+        // (splitCodeAndProse). The mikepenz 151-shrink/turn pathology is killed
+        // by (i) + (iii); the boundary-aware 57-shrink pathology is killed by
+        // (ii) + (iii).
         val renderText = rememberPacedStreamingText(text, isStreaming)
         val fontSizes = LocalMarkdownFontSizes.current
         val innerModifier = modifier.padding(12.dp)
         Box(modifier = Modifier.fillMaxWidth()) {
             if (isStreaming) {
-                // §body-flicker-fix hybrid: split into prose + code segments.
-                // Prose → plain Text, code → CodeBlockSurface. Both are
-                // height-monotonic while growing → 0 flicker, code keeps
-                // formatting. See splitCodeAndProse().
-                val segments = remember(renderText) { splitCodeAndProse(renderText) }
-                SelectionContainer {
-                    CompositionLocalProvider(LocalContentColor provides MaterialTheme.colorScheme.onSurface) {
-                        Column(modifier = innerModifier) {
-                            segments.forEach { seg ->
-                                when (seg) {
-                                    is StreamSegment.Prose -> Text(
-                                        text = seg.raw,
-                                        // Reuse the markdown body TextStyle (fontFamily +
-                                        // fontSize + lineHeight) so the completion snap to
-                                        // formatted markdown is height-neutral — avoids the
-                                        // bodyMedium-vs-markdown lineHeight mismatch
-                                        // (21sp vs body*1.4) that caused a small snap-shrink
-                                        // at finalization (maxer 🟡-2).
-                                        style = markdownTypography(fontSizes).text,
-                                        color = MaterialTheme.colorScheme.onSurface
-                                    )
-                                    is StreamSegment.Code -> CodeBlockSurface(
-                                        code = seg.code,
-                                        language = seg.language
-                                    )
-                                }
-                            }
-                        }
-                    }
-                }
+                // ora-2 (i)+(ii)+(iii): block decomposition + tail-as-Markdown +
+                // HeightAnchor 0-shrink. stableKey carries messageId|partId.
+                StreamingMarkdownRender(
+                    text = renderText,
+                    stableKey = stableKey,
+                    modifier = innerModifier
+                )
             } else {
-                // Completed: full markdown with image resolution (one-shot).
-                if (repository != null) {
-                    ResolvedMarkdownText(
-                        text = renderText,
-                        repository = repository,
-                        workspaceDirectory = workspaceDirectory,
-                        modifier = innerModifier
-                    )
-                } else {
-                    val normalizedText = remember(renderText) { MarkdownImageResolver.normalizeStandaloneImageBlocks(renderText) }
-                    SelectionContainer {
-                        CompositionLocalProvider(LocalContentColor provides MaterialTheme.colorScheme.onSurface) {
-                            Markdown(
-                                content = normalizedText,
-                                typography = markdownTypography(fontSizes),
-                                components = markdownComponents(
-                                    codeBlock = { WrappedCodeBlock(it) },
-                                    codeFence = { WrappedCodeBlock(it) },
-                                    table = { WrappedTable(it) }
-                                ),
-                                modifier = innerModifier,
-                                imageTransformer = DataUriImageTransformer
-                            )
+                // Completed: full markdown with image resolution (one-shot),
+                // wrapped in HeightAnchor(stableKey) so the visible height
+                // inherits the streaming anchor's max via HeightAnchorRegistry
+                // → seamless streaming→completed transition (ora-2 (iii)).
+                HeightAnchor(
+                    stableKey = stableKey,
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    if (repository != null) {
+                        ResolvedMarkdownText(
+                            text = renderText,
+                            repository = repository,
+                            workspaceDirectory = workspaceDirectory,
+                            modifier = innerModifier
+                        )
+                    } else {
+                        val normalizedText = remember(renderText) { MarkdownImageResolver.normalizeStandaloneImageBlocks(renderText) }
+                        SelectionContainer {
+                            CompositionLocalProvider(LocalContentColor provides MaterialTheme.colorScheme.onSurface) {
+                                Markdown(
+                                    content = normalizedText,
+                                    typography = markdownTypography(fontSizes),
+                                    components = markdownComponents(
+                                        codeBlock = { WrappedCodeBlock(it) },
+                                        codeFence = { WrappedCodeBlock(it) },
+                                        table = { WrappedTable(it) }
+                                    ),
+                                    modifier = innerModifier,
+                                    imageTransformer = DataUriImageTransformer
+                                )
+                            }
                         }
                     }
                 }

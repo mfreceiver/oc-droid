@@ -8,6 +8,18 @@
 - 行为/UI 变更建议观察类 agent（observer）介入；纯逻辑/重构建议代码质量类 agent。
 - 是否强制阻断发版由用户在发版前自行把控；`scripts/release.sh` 不强制拦截。
 
+## 特定改动的测试门控（必做）
+
+`./scripts/check.sh --full` 不含插桩测试（connectedDebugAndroidTest 需模拟器，是本机共享资源，见 `docs/emulator-debug.md` 纪律）。但以下改动**必须**在发版前用模拟器跑一次对应 connectedDebugAndroidTest 类作为门控（`./scripts/emulator.sh status` 确认空闲 → `start` → 跑 → `stop`）：
+
+| 改动范围 | 必跑门控类 | 理由 |
+|---|---|---|
+| 流式 Markdown（`StreamingMarkdown*` / `ChatTextParts.TextPart` / HeightAnchor） | `cn.vectory.ocdroid.ui.chat.StreamingMarkdownZeroShrinkTest` | 0-shrink 是 SubcomposeLayout 行为，check.sh 的 JVM 单测覆盖不到 Compose 布局回归 |
+| 设置/连接 UI（`Settings*` / `ConnectionProfileSection`） | `cn.vectory.ocdroid.SettingsSectionsInstrumentedTest` | 编译依赖（参数签名）+ UI 断言 |
+| 其它集成行为 | 全量 `connectedDebugAndroidTest`（需 `.env`） | 端到端 |
+
+跑法：`./gradlew :app:connectedDebugAndroidTest -Pandroid.testInstrumentationRunnerArguments.class=<全限定类名>`（仅跑指定类，避免无 `.env` 时集成测试失败）。
+
 ## 评审报告产物
 
 每次评审必须产出一个结构化 JSON 文件，集中存放到 `.opencode/runs/reviews/`。
