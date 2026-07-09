@@ -11,6 +11,7 @@ package cn.vectory.ocdroid.ui
 import cn.vectory.ocdroid.data.model.toSession
 import cn.vectory.ocdroid.data.repository.OpenCodeRepository
 import cn.vectory.ocdroid.data.repository.HostProfileStore
+import cn.vectory.ocdroid.ui.settings.resolveMtlsDegradationMessage
 import cn.vectory.ocdroid.ui.util.HttpImageHolder
 import cn.vectory.ocdroid.util.SettingsManager
 
@@ -49,12 +50,13 @@ internal fun applySavedSettings(
     // 但 ESP 材料缺失 / 损坏 → 写 ConnectionState.mtlsDegradedError 供 UI 红色 banner
     // （本 free-function 无 effects 总线，toast 由 controller 路径覆盖；冷启至少 slice
     // 可观测，避免用户只看泛化「连接失败」）。
-    val mtlsDegradedError: String? = when {
-        currentProfile.mtlsEnabled && clientCert == null -> "mTLS 已开启但客户端证书缺失"
-        repository.lastClientCertError != null ->
-            "mTLS 客户端证书加载失败：${repository.lastClientCertError}"
-        else -> null
-    }
+    // §mtls-followup (glm-2 DRY): 消息映射抽到共享 resolveMtlsDegradationMessage，
+    // 与 HostProfileController.reportMtlsDegradationIfAny 同源，消除漂移。
+    val mtlsDegradedError: String? = resolveMtlsDegradationMessage(
+        mtlsEnabled = currentProfile.mtlsEnabled,
+        clientCert = clientCert,
+        lastClientCertError = repository.lastClientCertError,
+    )
     // Restore the last connected workdir so the app re-scopes to the same
     // project on cold start. §R18 Phase 2-E step 2: the repository's global
     // currentDirectory was removed; the workdir is persisted in

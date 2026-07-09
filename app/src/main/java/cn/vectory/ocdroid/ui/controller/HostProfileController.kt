@@ -26,6 +26,7 @@ import cn.vectory.ocdroid.ui.errorMessageOrFallback
 import cn.vectory.ocdroid.ui.settings.CaStage
 import cn.vectory.ocdroid.ui.settings.ClientCertEditIntent
 import cn.vectory.ocdroid.ui.settings.resolveClientCert
+import cn.vectory.ocdroid.ui.settings.resolveMtlsDegradationMessage
 import cn.vectory.ocdroid.ui.settings.toMaterial
 import cn.vectory.ocdroid.ui.util.HttpImageHolder
 import cn.vectory.ocdroid.util.DebugLog
@@ -668,18 +669,35 @@ class HostProfileController(
      *   null：ESP 缺 p12/pw key）。
      * - damaged: [OpenCodeRepository.lastClientCertError] 非空（configureClientCert 试构建
      *   失败，已降级 mutualTlsConfig=null）。
+     *
+     * §mtls-followup (glm-2 DRY): 消息映射改用共享
+     * [resolveMtlsDegradationMessage]，与 [cn.vectory.ocdroid.ui.applySavedSettings]
+     * 冷启动路径同源，消除文案/触发条件漂移。
+     *
+     * §mtls-followup (max-1 S2): toast 去重——[lastEmittedMtlsDegradation] 缓存上次 emit
+     * 的降级消息文本。同一降级态重复 configure（select/save/configure 循环、URL 未变的
+     * configureServer 重入）不再重复弹 toast；slice 仍每次刷新（banner 永远反映最新态）。
+     * 健康态（error==null）复位缓存，确保下次降级再现时重新提示。指纹直接用 error 文本
+     * 本身（比 mtlsEnabled+lastClientCertError hash 更精确：还覆盖 clientCert 是否为 null
+     * 维度），且仍是单字段单比较的 trivial 改动。
      */
+    private var lastEmittedMtlsDegradation: String? = null
+
     private fun reportMtlsDegradationIfAny(profile: HostProfile, clientCert: ClientCertMaterial?) {
-        val missing = profile.mtlsEnabled && clientCert == null
-        val damaged = repository.lastClientCertError
-        val error: String? = when {
-            missing -> "mTLS 已开启但客户端证书缺失"
-            damaged != null -> "mTLS 客户端证书加载失败：$damaged"
-            else -> null
-        }
+        val error: String? = resolveMtlsDegradationMessage(
+            mtlsEnabled = profile.mtlsEnabled,
+            clientCert = clientCert,
+            lastClientCertError = repository.lastClientCertError,
+        )
         slices.mutateConnection { it.copy(mtlsDegradedError = error) }
         if (error != null) {
-            effects.tryEmitUiEvent(UiEvent.Error(R.string.host_mtls_missing_cert, listOf(error)))
+            if (error != lastEmittedMtlsDegradation) {
+                lastEmittedMtlsDegradation = error
+                effects.tryEmitUiEvent(UiEvent.Error(R.string.host_mtls_missing_cert, listOf(error)))
+            }
+        } else {
+            // 健康态：复位指纹，下次降级再现时重新 emit。
+            lastEmittedMtlsDegradation = null
         }
     }
 

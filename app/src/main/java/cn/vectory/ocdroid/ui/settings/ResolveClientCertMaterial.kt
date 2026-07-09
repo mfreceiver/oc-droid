@@ -102,3 +102,30 @@ internal fun resolveClientCert(
 /** §2.7: 把生效材料转成握手用 [ClientCertMaterial]（密码 toCharArray）。 */
 internal fun ResolvedClientCert.toMaterial(): ClientCertMaterial =
     ClientCertMaterial(p12Bytes = p12, p12Password = password.toCharArray(), caBytes = ca)
+
+/**
+ * §mtls-followup (glm-2 DRY): 统一 mTLS 降级用户消息映射。
+ *
+ * 此前 [cn.vectory.ocdroid.ui.applySavedSettings]（冷启动）与
+ * [cn.vectory.ocdroid.ui.controller.HostProfileController.reportMtlsDegradationIfAny]
+ * （configure 路径）各维护一份「missing→缺证书 / damaged→加载失败」when 映射，
+ * 文案/触发条件漂移风险高。抽到这里共享，**行为零变更**（消息文案、触发条件与
+ * 原两处逐字一致）：
+ *  - missing: [mtlsEnabled] 但 [clientCert]==null（loadClientCertMaterial 返回 null
+ *    或 clientCertId 缺失）→ "mTLS 已开启但客户端证书缺失"。
+ *  - damaged: [lastClientCertError] 非空（configureClientCert 试构建失败，已降级）→
+ *    "mTLS 客户端证书加载失败：<error>"。missing 优先于 damaged（材料都没有谈不上损坏）。
+ *  - 否则返回 null（健康）。
+ *
+ * 仅做消息文本解析；是否 emit toast / 写 slice 由调用方决定（冷启动 free-function
+ * 无 effects 总线，只写 slice；controller 路径两者都做 + 去重）。
+ */
+internal fun resolveMtlsDegradationMessage(
+    mtlsEnabled: Boolean,
+    clientCert: ClientCertMaterial?,
+    lastClientCertError: String?,
+): String? = when {
+    mtlsEnabled && clientCert == null -> "mTLS 已开启但客户端证书缺失"
+    lastClientCertError != null -> "mTLS 客户端证书加载失败：$lastClientCertError"
+    else -> null
+}

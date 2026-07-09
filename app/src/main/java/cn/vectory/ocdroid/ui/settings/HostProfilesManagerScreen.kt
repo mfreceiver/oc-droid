@@ -117,14 +117,20 @@ internal fun HostProfilesManagerScreen(
 
     editingProfile?.let { profile ->
         // §fix-3: 把当前 host 的 mTLS 降级错误注入 Dialog banner（connectionFlow 反应式）。
-        val mtlsDegradedError by connectionVM.connectionFlow.collectAsState()
+        val connectionState by connectionVM.connectionFlow.collectAsState()
+        // §mtls-followup (gpt-2): connectionFlow.mtlsDegradedError 反映的是「当前 active
+        // host」的降级态。仅当编辑的就是当前主机（profile.id == currentProfileId）时才把
+        // 该 hint 传入对话框；否则传 null——避免在编辑非当前 host 时误显示别的主机的
+        // 降级 banner（那不是用户正在编辑的这个 host 的状态）。
+        val mtlsErrorHint =
+            if (profile.id == currentProfileId) connectionState.mtlsDegradedError else null
         HostProfileEditorDialog(
             initial = profile,
             // The "+" action creates a fresh profile that isn't persisted yet,
             // so it must not expose the destructive delete affordance.
             canDelete = profiles.any { it.id == profile.id } && profiles.size > 1,
             onDismiss = { editingProfile = null },
-            mtlsErrorHint = mtlsDegradedError.mtlsDegradedError,
+            mtlsErrorHint = mtlsErrorHint,
             // §2.7 fix-3: onSave 透传 mTLS 编辑意图给 VM（Dialog 纯 UI，不碰 ESP）。VM
             // 据此试构建 + 原子写 ESP；失败（无 p12 / 试构建失败）抛异常 → 保留
             // 对话框并回显错误，不关闭。Dialog 据 mTLS 开关构造 Update / Disable intent。
