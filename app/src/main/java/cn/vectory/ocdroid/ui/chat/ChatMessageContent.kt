@@ -106,6 +106,14 @@ internal fun ChatMessageList(
     val streamingPartTexts: Map<String, String> = chatState.streamingPartTexts
     val streamingReasoningPart: Part? = chatState.streamingReasoningPart
     val isLoading: Boolean = chatState.isLoadingMessages
+    // §history-load-fix: the load-more button's spinner binds to THIS flag (the
+    // user-initiated loadMore indicator), NOT [isLoading] (the background reload
+    // / catch-up indicator). A background reload in flight must NOT flip the
+    // load-more button to a spinner — the user can still click it (loadMore now
+    // uses its own flag + a session mutex), and only a user-triggered loadMore
+    // shows the spinner. Fixes the 0.6.0 "加载历史对话需要多次点击" symptom where the
+    // button was untappable during a background reload.
+    val isLoadingMore: Boolean = chatState.isLoadingMoreMessages
     // §flicker-fix: whether the current session is actively generating. The
     // server creates the assistant message (message.updated insert) BEFORE its
     // first part arrives, so for ~1s partsByMessage[assistantId] is empty and
@@ -603,7 +611,7 @@ internal fun ChatMessageList(
                     modifier = Modifier.fillMaxWidth().padding(16.dp),
                     contentAlignment = Alignment.Center
                 ) {
-                    if (isLoading) {
+                    if (isLoadingMore) {
                         CircularProgressIndicator(modifier = Modifier.size(24.dp))
                     } else {
                         Text(

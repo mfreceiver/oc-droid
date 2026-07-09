@@ -391,7 +391,14 @@ class HostProfileController(
                     messages = emptyList(),
                     partsByMessage = emptyMap(),
                     streamingPartTexts = emptyMap(),
-                    streamingReasoningPart = null
+                    streamingReasoningPart = null,
+                    // §history-load-fix: drop the previous host's load flags so
+                    // their spinner state cannot leak into the new host's chat
+                    // (round-4 gpt-2 🔴: isLoadingMessages too — the session-
+                    // guarded finally won't clear it for a non-current session,
+                    // so the host switch must, same as SessionSwitcher.switchTo).
+                    isLoadingMessages = false,
+                    isLoadingMoreMessages = false
                 )
             }
             slices.mutateSessionList {
@@ -679,6 +686,9 @@ class HostProfileController(
                 // §F3-load-more: reset 时 hasMore 与 cursor 保持一致（均"无更多"）。
                 hasMoreMessages = false,
                 isLoadingMessages = false,
+                // §history-load-fix: reset the loadMore flag alongside the
+                // background-reload flag (parallel reset point).
+                isLoadingMoreMessages = false,
                 gapMarkers = emptyList(),
                 staleNotice = false,
                 currentModel = null

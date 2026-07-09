@@ -220,10 +220,13 @@ class ChatViewModel @Inject constructor(
 
     fun refreshCurrentSession() {
         val sessionId = core.store.chatFlow.value.currentSessionId ?: return
-        if (core.store.chatFlow.value.isLoadingMessages) return
+        // §history-load-fix: guard against both load flags (see
+        // performGlobalColdStartRefresh). A user loadMore in flight must also
+        // block a manual refresh.
+        if (core.store.chatFlow.value.isLoadingMessages || core.store.chatFlow.value.isLoadingMoreMessages) return
         core.performGlobalColdStartRefresh(currentId = sessionId)
         core.connectionCoordinator.testConnection(force = true, onSettled = { ok ->
-            if (ok && !core.store.chatFlow.value.isLoadingMessages) {
+            if (ok && !core.store.chatFlow.value.isLoadingMessages && !core.store.chatFlow.value.isLoadingMoreMessages) {
                 core.effectBus.tryEmitUiEvent(UiEvent.Success(R.string.success_refreshed))
             }
         })

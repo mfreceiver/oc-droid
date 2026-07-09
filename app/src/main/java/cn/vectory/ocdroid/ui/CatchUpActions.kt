@@ -111,6 +111,11 @@ internal fun launchCatchUp(
 
     slices.mutateChat { c -> c.copy(isLoadingMessages = true) }
     scope.launch {
+        // §history-load-fix round-1: try/catch/finally so a non-cancellation
+        // exception inside the lock/merge can't escape and cancel the scope
+        // (opuser 🟠-2 / kimo 🟡-5); the finally clears isLoadingMessages on any
+        // exit (session-guarded — gpter 🟠).
+        try {
         // §R-17 batch2 step e final: slice-only read.
         // Order-independent newest message (messages is oldest-first per ora-2).
         val anchor = slices.chat.value.messages.maxByOrNull { it.time?.created ?: -1L }
@@ -119,97 +124,114 @@ internal fun launchCatchUp(
         // No newer message on the server → skip the probe-page reload entirely.
         // Preserve any already-open gaps (still unresolved).
         if (anchor != null && serverNewestId != null && anchor.id == serverNewestId) {
-            slices.mutateChat { c -> c.copy(isLoadingMessages = false) }
-            onColdSnapshot(sessionId)
+            // §history-load-fix round-2 (gpter 🟠): flag clear deferred to the
+            // session-guarded finally (return@launch runs it). probeLatestMessageId
+            // suspended — the session may have switched under us — so only mark
+            // the cold-snapshot baseline when this is still the current session.
+            if (sessionId == slices.chat.value.currentSessionId) {
+                onColdSnapshot(sessionId)
+            }
             return@launch
         }
 
         repository.getMessagesPaged(sessionId, MainViewModelTimings.gapProbeMessagePageSize, before = null)
             .onSuccess { page ->
-                // §fix-#3 (gpter #3): compound-key guard (fp + sessionId).
-                // The probe REST call suspends; the user may switch session OR
-                // host group during it. A cross-group same-sessionId collision
-                // (plan §0 N1) would otherwise let the stale probe write into
-                // the new group's chat slice. Both legs must match — fp first,
-                // sessionId second.
-                if (sessionId != slices.chat.value.currentSessionId ||
-                    currentServerGroupFp() != expectedServerGroupFp
-                ) {
-                    slices.mutateChat { c -> c.copy(isLoadingMessages = false) }
-                    return@onSuccess
-                }
-                val fetched = page.items.map { it.info }
-                val fetchedParts = page.items.associate { it.info.id to it.parts }
-                val detection = BackfillAlgorithm.detectGap(anchor, fetched, page.nextCursor)
+                // §history-load-fix: serialize the slice mutation per-session so a
+                // concurrent launchLoadMessages full-window replace or a
+                // launchLoadMoreMessages prepend cannot tear the list / lose the
+                // merge (the three load paths now share one session mutex via
+                // MessageLoadCoordinator). The probe + page fetch ran OUTSIDE the
+                // lock; only the read-compute-write of the chat slice is
+                // serialized. Re-validates the compound key INSIDE the lock.
+                slices.messageLoadCoordinator.withSessionLock(sessionId) {
+                    // §fix-#3 (gpter #3): compound-key guard (fp + sessionId).
+                    // The probe REST call suspends; the user may switch session OR
+                    // host group during it. A cross-group same-sessionId collision
+                    // (plan §0 N1) would otherwise let the stale probe write into
+                    // the new group's chat slice. Both legs must match — fp first,
+                    // sessionId second.
+                    if (sessionId != slices.chat.value.currentSessionId ||
+                        currentServerGroupFp() != expectedServerGroupFp
+                    ) {
+                        // §history-load-fix round-2 (gpter 🟠): stale probe
+                        // (compound-key mismatch) — NO-OP. The session-guarded
+                        // finally clears isLoadingMessages; clearing here would
+                        // clobber a new session's flag.
+                    } else {
+                        val fetched = page.items.map { it.info }
+                        val fetchedParts = page.items.associate { it.info.id to it.parts }
+                        val detection = BackfillAlgorithm.detectGap(anchor, fetched, page.nextCursor)
 
-                when (detection) {
-                    is GapDetection.NoGap -> {
-                        // Contiguous (anchor in the probe window) OR the probe
-                        // short-paged (history exhausted within 5) → merge the
-                        // fetched window directly, clear any stale markers.
-                        val merged = mergeProbeIntoSlice(slices, fetched, fetchedParts)
-                        slices.mutateChat { c ->
-                            c.copy(
-                                messages = merged.first,
-                                partsByMessage = merged.second,
-                                isLoadingMessages = false,
-                                gapMarkers = emptyList(),
-                                staleNotice = false
-                            )
-                        }
-                        syncAgentFromPage(slices, currentServerGroupFp(), sessionId, settingsManager)
-                        onCacheWindow(
-                            sessionId,
-                            snapshotCurrentWindow(slices, sessionId)
-                        )
-                        onColdSnapshot(sessionId)
-                    }
-                    is GapDetection.GapExists -> {
-                        val coordinator = gapFillCoordinator
-                        if (coordinator != null) {
-                            // Delegate open + 50-step fill. The coordinator
-                            // merges the fetched newest-5 itself, so we only
-                            // clear the catch-up loading flag here (the gap's
-                            // own Filling state is the per-marker indicator).
-                            slices.mutateChat { c -> c.copy(isLoadingMessages = false, staleNotice = false) }
-                            syncAgentFromPage(slices, currentServerGroupFp(), sessionId, settingsManager)
-                            // openAndFill is suspend; launch it fire-and-forget
-                            // so the catch-up coroutine returns immediately. The
-                            // session-level Mutex inside the coordinator keeps
-                            // this session's fills serial.
-                            scope.launch {
-                                runCatching {
-                                    coordinator.openAndFill(
-                                        slices = slices,
-                                        serverGroupFp = currentServerGroupFp(),
-                                        sessionId = sessionId,
-                                        detection = detection,
-                                        fetched5 = fetched,
-                                        fetched5Parts = fetchedParts,
-                                        onCacheWindow = onCacheWindow,
-                                        onColdSnapshot = onColdSnapshot,
+                        when (detection) {
+                            is GapDetection.NoGap -> {
+                                // Contiguous (anchor in the probe window) OR the probe
+                                // short-paged (history exhausted within 5) → merge the
+                                // fetched window directly, clear any stale markers.
+                                val merged = mergeProbeIntoSlice(slices, fetched, fetchedParts)
+                                slices.mutateChat { c ->
+                                    c.copy(
+                                        messages = merged.first,
+                                        partsByMessage = merged.second,
+                                        isLoadingMessages = false,
+                                        gapMarkers = emptyList(),
+                                        staleNotice = false
                                     )
                                 }
-                            }
-                        } else {
-                            // No coordinator wired (legacy/test path): merge the
-                            // fetched window; the gap is not tracked.
-                            val merged = mergeProbeIntoSlice(slices, fetched, fetchedParts)
-                            slices.mutateChat { c ->
-                                c.copy(
-                                    messages = merged.first,
-                                    partsByMessage = merged.second,
-                                    isLoadingMessages = false,
-                                    gapMarkers = emptyList(),
-                                    staleNotice = false
+                                syncAgentFromPage(slices, currentServerGroupFp(), sessionId, settingsManager)
+                                onCacheWindow(
+                                    sessionId,
+                                    snapshotCurrentWindow(slices, sessionId)
                                 )
+                                onColdSnapshot(sessionId)
                             }
-                            syncAgentFromPage(slices, currentServerGroupFp(), sessionId, settingsManager)
-                            onCacheWindow(
-                                sessionId,
-                                snapshotCurrentWindow(slices, sessionId)
-                            )
-                            onColdSnapshot(sessionId)
+                            is GapDetection.GapExists -> {
+                                val coordinator = gapFillCoordinator
+                                if (coordinator != null) {
+                                    // Delegate open + 50-step fill. The coordinator
+                                    // merges the fetched newest-5 itself, so we only
+                                    // clear the catch-up loading flag here (the gap's
+                                    // own Filling state is the per-marker indicator).
+                                    slices.mutateChat { c -> c.copy(isLoadingMessages = false, staleNotice = false) }
+                                    syncAgentFromPage(slices, currentServerGroupFp(), sessionId, settingsManager)
+                                    // openAndFill is suspend; launch it fire-and-forget
+                                    // so the catch-up coroutine returns immediately. The
+                                    // session-level Mutex inside the coordinator keeps
+                                    // this session's fills serial.
+                                    scope.launch {
+                                        runCatching {
+                                            coordinator.openAndFill(
+                                                slices = slices,
+                                                serverGroupFp = currentServerGroupFp(),
+                                                sessionId = sessionId,
+                                                detection = detection,
+                                                fetched5 = fetched,
+                                                fetched5Parts = fetchedParts,
+                                                onCacheWindow = onCacheWindow,
+                                                onColdSnapshot = onColdSnapshot,
+                                            )
+                                        }
+                                    }
+                                } else {
+                                    // No coordinator wired (legacy/test path): merge the
+                                    // fetched window; the gap is not tracked.
+                                    val merged = mergeProbeIntoSlice(slices, fetched, fetchedParts)
+                                    slices.mutateChat { c ->
+                                        c.copy(
+                                            messages = merged.first,
+                                            partsByMessage = merged.second,
+                                            isLoadingMessages = false,
+                                            gapMarkers = emptyList(),
+                                            staleNotice = false
+                                        )
+                                    }
+                                    syncAgentFromPage(slices, currentServerGroupFp(), sessionId, settingsManager)
+                                    onCacheWindow(
+                                        sessionId,
+                                        snapshotCurrentWindow(slices, sessionId)
+                                    )
+                                    onColdSnapshot(sessionId)
+                                }
+                            }
                         }
                     }
                 }
@@ -219,8 +241,26 @@ internal fun launchCatchUp(
                 if (sessionId == slices.chat.value.currentSessionId) {
                     reportNonFatalIssue("MainViewModel", "Catch-up tail reload failed")
                 }
+                // §history-load-fix round-2 (gpter 🟠): flag clear deferred to
+                // the session-guarded finally.
+            }
+        } catch (e: kotlin.coroutines.cancellation.CancellationException) {
+            throw e
+        } catch (e: Throwable) {
+            DebugLog.e("Sync", "catch-up unexpected error", e)
+        } finally {
+            // §history-load-fix round-1 backstop (opuser 🟠-2 / kimo 🟡-5):
+            // guarantee isLoadingMessages cleared on ANY exit (an exception
+            // inside the lock/merge can't leave it stuck and block all future
+            // loads), session-guarded so a stale response doesn't clobber a new
+            // session's flag. Idempotent — the branches above already clear it
+            // on the normal paths.
+            if (sessionId == slices.chat.value.currentSessionId &&
+                slices.chat.value.isLoadingMessages
+            ) {
                 slices.mutateChat { c -> c.copy(isLoadingMessages = false) }
             }
+        }
     }
 }
 

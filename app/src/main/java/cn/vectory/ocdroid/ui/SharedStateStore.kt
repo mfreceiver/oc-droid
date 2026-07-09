@@ -80,6 +80,14 @@ class SharedStateStore @Inject constructor() {
     val navFlow: StateFlow<NavState> = _navFlow.asStateFlow()
     fun mutateNav(transform: (NavState) -> NavState) = _navFlow.update(transform)
 
+    /** §history-load-fix: per-session message-list mutation lock shared by the
+     *  three load paths (launchLoadMessages / launchLoadMoreMessages /
+     *  launchCatchUp) via [SliceFlows.messageLoadCoordinator]. Owned here (the
+     *  store is @Singleton) so all callers share one lock map without extra DI
+     *  plumbing and without changing this class's no-arg constructor (existing
+     *  `SharedStateStore()` test constructions keep working). */
+    val messageLoadCoordinator: MessageLoadCoordinator = MessageLoadCoordinator()
+
     /** Bundle view (preserves the [SliceFlows] data class for controller ctors). */
     val slices: SliceFlows = SliceFlows(this)
 }

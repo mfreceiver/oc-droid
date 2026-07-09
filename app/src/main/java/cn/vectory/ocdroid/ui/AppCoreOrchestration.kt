@@ -365,7 +365,11 @@ private fun AppCore.loadMessagesWithRetry(sessionId: String, resetLimit: Boolean
 // ════════════════════════════════════════════════════════════════════════════
 
 internal fun AppCore.performGlobalColdStartRefresh(currentId: String) {
-    if (store.chatFlow.value.isLoadingMessages) return
+    // §history-load-fix: guard against BOTH load flags — a user loadMore in
+    // flight (isLoadingMoreMessages) must also block a cold-start reset (which
+    // would wipe the list mid-prepend). Previously only isLoadingMessages was
+    // checked, so a cold-start refresh could clobber an in-flight loadMore.
+    if (store.chatFlow.value.isLoadingMessages || store.chatFlow.value.isLoadingMoreMessages) return
     sessionSwitcher.clearSessionWindowCache()
     writeChat { it.copy(refreshNonce = it.refreshNonce + 1) }
     writeChat {
@@ -379,6 +383,9 @@ internal fun AppCore.performGlobalColdStartRefresh(currentId: String) {
             olderMessagesCursor = null,
             // §F3-load-more: cold-start reset 时 hasMore 与 cursor 一致。
             hasMoreMessages = false,
+            // §history-load-fix: cold-start reset also clears the user loadMore
+            // flag (parallel to the guard above + the list/cursor wipe).
+            isLoadingMoreMessages = false,
         )
     }
     loadMessagesForEffect(currentId, resetLimit = true)

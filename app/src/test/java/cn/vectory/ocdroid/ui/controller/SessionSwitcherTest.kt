@@ -268,6 +268,33 @@ class SessionSwitcherTest {
     }
 
     @Test
+    fun `switchTo resets both load flags on switch (round-4 gpt-2 regression)`() {
+        // §history-load-fix round-4 (gpt-2 🔴): a switch-during-load must reset
+        // BOTH isLoadingMessages and isLoadingMoreMessages. The session-guarded
+        // finally in launchLoadMessages/catchUp/launchLoadMoreMessages declines
+        // to clear on a session mismatch, so without this reset a stale in-flight
+        // load would leave isLoadingMessages stuck true and coalesce away the
+        // newly-selected session's loads (permanent stuck until process restart).
+        seed {
+            it.copy(
+                currentSessionId = "session-A",
+                sessions = listOf(
+                    Session(id = "session-A", directory = "/tmp/a"),
+                    Session(id = "session-B", directory = "/tmp/b")
+                )
+            )
+        }
+        // SeedFixture doesn't carry the load flags — set them directly on the
+        // chat slice to simulate an in-flight load for the outgoing session.
+        slices.mutateChat { it.copy(isLoadingMessages = true, isLoadingMoreMessages = true) }
+
+        switcher.switchTo("session-B")
+
+        assertFalse("isLoadingMessages must reset on switch (else new session's loads are coalesced away)", slices.chat.value.isLoadingMessages)
+        assertFalse("isLoadingMoreMessages must reset on switch", slices.chat.value.isLoadingMoreMessages)
+    }
+
+    @Test
     fun `switchTo does NOT clear delta buffers when switching to same session`() {
         seed {
             it.copy(

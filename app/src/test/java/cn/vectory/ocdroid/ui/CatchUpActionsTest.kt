@@ -184,7 +184,12 @@ class CatchUpActionsTest {
 
         // session mismatch → no merge.
         assertTrue(slices.chat.value.messages.isEmpty())
-        assertFalse(slices.chat.value.isLoadingMessages)
+        // §history-load-fix round-2 (gpter 🟠): stale (non-current session)
+        // catchUp does NOT clear isLoadingMessages — deferred to the
+        // session-guarded finally + SessionSwitcher (a switch resets chat
+        // state). This test isolates the load without the switch, so the flag
+        // the stale catchUp set remains true.
+        assertTrue(slices.chat.value.isLoadingMessages)
     }
 
     @Test

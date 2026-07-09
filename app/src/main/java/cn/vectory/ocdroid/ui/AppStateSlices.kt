@@ -178,6 +178,20 @@ data class ChatState(
     val hasMoreMessages: Boolean = false,
     val isLoadingMessages: Boolean = false,
     /**
+     * §history-load-fix: independent loading flag for USER-initiated "load more
+     * history" ([launchLoadMoreMessages]). Decoupled from [isLoadingMessages]
+     * (background reloads / catch-up) so a background load in flight NO LONGER
+     * silently drops the user's "load more" click — the 0.6.0 "加载历史对话需要
+     * 多次点击" regression (all three load paths shared [isLoadingMessages] as
+     * a guard, so a catch-up holding it ~500ms swallowed the click). The actual
+     * list mutation is serialized per-session via [MessageLoadCoordinator], so
+     * a concurrent loadMore-prepend and loadMessages-replace cannot tear the
+     * list. The load-more spinner binds to THIS flag (not [isLoadingMessages]),
+     * so a background reload shows the clickable text while only a user
+     * loadMore shows the spinner.
+     */
+    val isLoadingMoreMessages: Boolean = false,
+    /**
      * R-20 Phase 2: the session's open gap markers (non-contiguous message
      * model — plan §3 N5 / glmer B1). **Replaces** the legacy single
      * `gapInfo: GapInfo?`; a session may now carry ≥1 independent gap, each
@@ -367,6 +381,10 @@ class SliceFlows internal constructor(internal val store: SharedStateStore) {
     val file: StateFlow<FileState> get() = store.fileFlow
     val settings: StateFlow<SettingsState> get() = store.settingsFlow
     val chat: StateFlow<ChatState> get() = store.chatFlow
+
+    /** §history-load-fix: per-session message-mutation lock (see
+     *  [SharedStateStore.messageLoadCoordinator]). */
+    val messageLoadCoordinator: MessageLoadCoordinator get() = store.messageLoadCoordinator
     val sessionList: StateFlow<SessionListState> get() = store.sessionListFlow
     val unread: StateFlow<UnreadState> get() = store.unreadFlow
     val host: StateFlow<HostState> get() = store.hostFlow

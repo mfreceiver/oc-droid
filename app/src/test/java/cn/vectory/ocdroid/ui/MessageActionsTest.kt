@@ -169,7 +169,13 @@ class MessageActionsTest {
         advanceUntilIdle()
 
         assertTrue(slices.chat.value.messages.isEmpty())
-        assertFalse(slices.chat.value.isLoadingMessages)
+        // §history-load-fix round-2 (gpter 🟠): the stale (non-current session)
+        // load does NOT clear isLoadingMessages — the session-guarded finally
+        // only clears for the current session so it can't clobber a new
+        // session's flag. In production a session switch (SessionSwitcher)
+        // resets chat state including this flag; this test isolates the load
+        // without the switch, so the flag the stale load set remains true.
+        assertTrue(slices.chat.value.isLoadingMessages)
     }
 
     @Test
@@ -344,15 +350,55 @@ class MessageActionsTest {
     }
 
     @Test
-    fun `launchLoadMoreMessages no-ops when isLoadingMessages already true`() = runTest {
+    fun `launchLoadMoreMessages no-ops when isLoadingMoreMessages already true`() = runTest {
         store.mutateChat {
-            it.copy(currentSessionId = "s1", hasMoreMessages = true, olderMessagesCursor = "c1", isLoadingMessages = true)
+            it.copy(currentSessionId = "s1", hasMoreMessages = true, olderMessagesCursor = "c1", isLoadingMoreMessages = true)
         }
 
         launchLoadMoreMessages(scope, repository, slices, "s1")
         advanceUntilIdle()
 
+        // §history-load-fix: self-reentry (rapid double-click / fast scroll)
+        // coalesces on the OWN flag (isLoadingMoreMessages), not the background
+        // reload flag.
         coVerify(exactly = 0) { repository.getMessagesPaged(any(), any(), any()) }
+    }
+
+    @Test
+    fun `launchLoadMoreMessages proceeds when background isLoadingMessages is true (history-load-fix regression)`() = runTest {
+        // §history-load-fix: the 0.6.0 "加载历史对话需要多次点击" regression — a
+        // background reload holding isLoadingMessages used to silently swallow
+        // the user's "load more" click (the three load paths shared one guard).
+        // loadMore now uses its own isLoadingMoreMessages flag + a session
+        // mutex, so the click proceeds even while isLoadingMessages=true.
+        val existing = Message(id = "cur1", role = "user", time = Message.TimeInfo(created = 500L))
+        val olderPage = listOf(
+            MessageWithParts(info = Message(id = "old1", role = "user", time = Message.TimeInfo(created = 100L))),
+        )
+        coEvery { repository.getMessagesPaged("s1", any(), eq("c1")) } returns Result.success(MessagesPage(olderPage, nextCursor = "c2"))
+        store.mutateChat {
+            it.copy(
+                currentSessionId = "s1",
+                messages = listOf(existing),
+                olderMessagesCursor = "c1",
+                hasMoreMessages = true,
+                // A background reload is in flight — the OLD shared-flag guard
+                // would have dropped the click here.
+                isLoadingMessages = true,
+            )
+        }
+
+        launchLoadMoreMessages(scope, repository, slices, "s1")
+        advanceUntilIdle()
+
+        // The click was NOT swallowed: a fetch was issued...
+        coVerify(exactly = 1) { repository.getMessagesPaged("s1", any(), eq("c1")) }
+        // ...the older page was prepended...
+        assertEquals(listOf("old1", "cur1"), slices.chat.value.messages.map { it.id })
+        // ...loadMore's own flag cleared on completion...
+        assertFalse(slices.chat.value.isLoadingMoreMessages)
+        // ...and the background reload flag was left untouched by loadMore.
+        assertTrue("background isLoadingMessages must be left untouched by loadMore", slices.chat.value.isLoadingMessages)
     }
 
     @Test
@@ -372,7 +418,7 @@ class MessageActionsTest {
 
         assertEquals(listOf("old1", "cur1"), slices.chat.value.messages.map { it.id })
         assertEquals("cursor-2", slices.chat.value.olderMessagesCursor)
-        assertFalse(slices.chat.value.isLoadingMessages)
+        assertFalse(slices.chat.value.isLoadingMoreMessages)
         assertNotNull(cached)
         assertEquals(listOf("old1", "cur1"), cached!!.messages.map { it.id })
     }
@@ -408,7 +454,7 @@ class MessageActionsTest {
         launchLoadMoreMessages(scope, repository, slices, "s1")
         advanceUntilIdle()
 
-        assertFalse(slices.chat.value.isLoadingMessages)
+        assertFalse(slices.chat.value.isLoadingMoreMessages)
         // Manual paging: hasMore kept so the user can retry.
         assertTrue(slices.chat.value.hasMoreMessages)
     }
@@ -576,7 +622,7 @@ class MessageActionsTest {
             listOf("cur1"),
             slices.chat.value.messages.map { it.id },
         )
-        assertFalse(slices.chat.value.isLoadingMessages)
+        assertFalse(slices.chat.value.isLoadingMoreMessages)
     }
 
     @Test

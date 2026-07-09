@@ -266,6 +266,16 @@ class SessionSwitcher(
                 // launchLoadMessages(resetLimit=true) 用服务端 X-Next-Cursor 重建。
                 olderMessagesCursor = null,
                 hasMoreMessages = false,
+                // §history-load-fix: drop the outgoing session's load flags so a
+                // stale in-flight loadMessages/catchUp/loadMore (if any) does not
+                // leak its spinner state into the newly-selected session.
+                // (round-4 gpt-2 🔴: isLoadingMessages MUST reset here too — the
+                // session-guarded finally in launchLoadMessages/catchUp declines
+                // to clear on a session mismatch, so without this reset a
+                // switch-during-load would leave isLoadingMessages stuck true and
+                // coalesce away the new session's loads — a permanent stuck.)
+                isLoadingMessages = false,
+                isLoadingMoreMessages = false,
                 // §model-selection (V1-per-prompt): drop the outgoing session's
                 // currentModel so dispatchSendMessage (which reads
                 // _chatFlow.value.currentModel synchronously) can't leak it
