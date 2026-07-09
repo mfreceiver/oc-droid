@@ -7,6 +7,7 @@ import cn.vectory.ocdroid.data.model.Session
 import cn.vectory.ocdroid.data.model.SessionCacheEntry
 import cn.vectory.ocdroid.data.repository.HostProfileStore
 import cn.vectory.ocdroid.data.repository.OpenCodeRepository
+import cn.vectory.ocdroid.data.repository.http.SslConfig
 import cn.vectory.ocdroid.util.MarkdownFontSizes
 import cn.vectory.ocdroid.util.SettingsManager
 import cn.vectory.ocdroid.util.ThemeMode
@@ -51,6 +52,10 @@ class ConnectionActionsTest {
         store = SharedStateStore()
         slices = store.slices
         repository = mockk(relaxed = true)
+        // §2.5(c): applySavedSettings 现调 repository.currentSslConfig() →
+        // HttpImageHolder.updateSsl(...)。relaxed mock 无法为 sealed SslConfig 自动
+        // 造实例，显式 stub 成 SystemDefault（与冷启动默认信任策略一致）。
+        every { repository.currentSslConfig() } returns SslConfig.SystemDefault
         settingsManager = mockk(relaxed = true)
         hostProfileStore = mockk(relaxed = true)
     }

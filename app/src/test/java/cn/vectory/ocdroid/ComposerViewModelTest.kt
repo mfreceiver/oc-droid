@@ -2,6 +2,7 @@ package cn.vectory.ocdroid
 
 import android.util.Log
 import cn.vectory.ocdroid.data.model.BasicAuthConfig
+import cn.vectory.ocdroid.data.model.ConfigProvider
 import cn.vectory.ocdroid.data.model.HealthResponse
 import cn.vectory.ocdroid.data.model.HostProfile
 import cn.vectory.ocdroid.data.model.Message
@@ -9,6 +10,7 @@ import cn.vectory.ocdroid.data.model.MessageWithParts
 import cn.vectory.ocdroid.data.model.Part
 import cn.vectory.ocdroid.data.model.PermissionRequest
 import cn.vectory.ocdroid.data.model.PermissionResponse
+import cn.vectory.ocdroid.data.model.ProviderModel
 import cn.vectory.ocdroid.data.model.QuestionRequest
 import cn.vectory.ocdroid.data.model.ProvidersResponse
 import cn.vectory.ocdroid.data.model.Session
@@ -219,4 +221,91 @@ class ComposerViewModelTest : MainViewModelTestBase() {
         verify { settingsManager.setAgentForSession(any(), "s1", "oracle") }
     }
 
+    // ── §provider-bulk-toggle: setProviderModelsEnabled ──
+    // Mirrors the existing createCore() + ComposerViewModel(core) setup used
+    // throughout this file. The providers catalog is seeded into the settings
+    // slice via core.writeSettings (same path the connect-time hydrator uses).
+
+    private fun providersFixture(): ProvidersResponse = ProvidersResponse(
+        providers = listOf(
+            ConfigProvider(
+                id = "p1",
+                name = "P1",
+                models = mapOf(
+                    "m1" to ProviderModel(id = "m1", name = "M1"),
+                    "m2" to ProviderModel(id = "m2", name = "M2")
+                )
+            ),
+            ConfigProvider(
+                id = "p2",
+                name = "P2",
+                models = mapOf(
+                    "m1" to ProviderModel(id = "m1", name = "M1")
+                )
+            )
+        )
+    )
+
+    @Test
+    fun `setProviderModelsEnabled false disables all of the provider's models`() = runTest {
+        val core = createCore()
+        val composerVM = cn.vectory.ocdroid.ui.ComposerViewModel(core)
+        core.writeSettings { it.copy(providers = providersFixture()) }
+
+        composerVM.setProviderModelsEnabled(providerId = "p1", enabled = false)
+
+        // Both p1 model keys are now disabled; p2 is untouched.
+        assertEquals(
+            setOf("p1/m1", "p1/m2"),
+            core.settingsFlow.value.disabledModels
+        )
+        // One batched persist call covering the whole set.
+        verify { settingsManager.setDisabledModels(any(), setOf("p1/m1", "p1/m2")) }
+    }
+
+    @Test
+    fun `setProviderModelsEnabled true re-enables all of the provider's models`() = runTest {
+        val core = createCore()
+        val composerVM = cn.vectory.ocdroid.ui.ComposerViewModel(core)
+        // Pre-disable both of p1's models.
+        core.writeSettings {
+            it.copy(
+                providers = providersFixture(),
+                disabledModels = setOf("p1/m1", "p1/m2")
+            )
+        }
+
+        composerVM.setProviderModelsEnabled(providerId = "p1", enabled = true)
+
+        assertEquals(emptySet<String>(), core.settingsFlow.value.disabledModels)
+        verify { settingsManager.setDisabledModels(any(), emptySet()) }
+    }
+
+    @Test
+    fun `setProviderModelsEnabled does not touch other providers' model keys`() = runTest {
+        val core = createCore()
+        val composerVM = cn.vectory.ocdroid.ui.ComposerViewModel(core)
+        // Pre-existing disabled state spanning p1, p2, and a stale entry.
+        core.writeSettings {
+            it.copy(
+                providers = providersFixture(),
+                disabledModels = setOf("p2/m1", "stale/x")
+            )
+        }
+
+        composerVM.setProviderModelsEnabled(providerId = "p1", enabled = false)
+
+        // p1 fully disabled; p2/m1 and the stale entry preserved untouched.
+        assertEquals(
+            setOf("p1/m1", "p1/m2", "p2/m1", "stale/x"),
+            core.settingsFlow.value.disabledModels
+        )
+        verify {
+            settingsManager.setDisabledModels(
+                any(),
+                setOf("p1/m1", "p1/m2", "p2/m1", "stale/x")
+            )
+        }
+    }
 }
+

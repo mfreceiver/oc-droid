@@ -7,7 +7,7 @@ import androidx.annotation.VisibleForTesting
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.mutableIntStateOf
 import com.mikepenz.markdown.model.ImageData
-import cn.vectory.ocdroid.data.repository.http.SslConfigFactory
+import cn.vectory.ocdroid.data.repository.http.SslConfig
 import cn.vectory.ocdroid.data.repository.http.applySsl
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -86,12 +86,30 @@ object HttpImageHolder {
      * with no SSL wiring and failed the TLS handshake on self-signed image
      * hosts even with the toggle ON.
      *
-     * Defaults to system trust (allowInsecure=false) to preserve the
-     * pre-fix behaviour when no host has been configured / the toggle is
-     * OFF. Rebuilt in place by [updateSsl], which is invoked from
+     * §2.6: SSL-aware image HTTP client. Built via [newImageHttpClient] which
+     * routes through [applySsl] so that, when the active host opts into
+     * `allowInsecureConnections` OR presents an mTLS client cert, self-signed
+     * HTTPS markdown images are fetched with the matching trust / client-cert
+     * config — previously this client was a bare `OkHttpClient.Builder()`
+     * with no SSL wiring and failed the TLS handshake on self-signed image
+     * hosts even with the toggle ON.
+     *
+     * Defaults to system trust ([SslConfig.SystemDefault]) to preserve the
+     * pre-fix behaviour when no host has been configured. Rebuilt in place by
+     * [updateSsl], which is invoked from
      * `HostProfileController.configureRepositoryForProfile` /
-     * `configureServer` alongside the repository reconfigure so the image
-     * client tracks the same trust policy as REST / SSE.
+     * `configureServer` / `ConnectionActions.applySavedSettings` alongside the
+     * repository reconfigure so the image client tracks the same trust policy
+     * as REST / SSE (now including mTLS — v3: cold-start images must also
+     * present the client cert, gpter#4).
+     *
+     * §2.6: the SSL config (and resulting client) is supplied by the caller —
+     * this object no longer owns a [cn.vectory.ocdroid.data.repository.http.SslConfigFactory];
+     * it receives the fully-resolved [SslConfig] (mTLS / TrustAll /
+     * SystemDefault) from [OpenCodeRepository.currentSslConfig], which reads
+     * the shared factory the repository holds. Keeps the SSL decision in one
+     * place and lets the image client reuse the exact live material (same
+     * client cert, same private CA) without a second factory diverging.
      *
      * Thread safety: the reference is `@Volatile` (read by prefetch
      * coroutines on [Dispatchers.IO], written under `@Synchronized` in
@@ -99,72 +117,80 @@ object HttpImageHolder {
      * in-flight call may finish on the previous client instance but no
      * read/write race is possible.
      */
-    private val sslConfigFactory = SslConfigFactory()
+    @Volatile
+    private var imageSslConfig: SslConfig = SslConfig.SystemDefault
 
     @Volatile
-    private var imageAllowInsecure: Boolean = false
-
-    @Volatile
-    private var imageHttpClient: OkHttpClient = newImageHttpClient(allowInsecure = false)
+    private var imageHttpClient: OkHttpClient = newImageHttpClient(SslConfig.SystemDefault)
 
     /**
-     * #12 测试钩子（@VisibleForTesting）：记录最近一次 [updateSsl] 调用传入的
-     * allowInsecure 值——无论该次调用是否实际触发 client 重建（no-op 也记录）。
-     * 仅供 [cn.vectory.ocdroid.ui.controller.HostProfileControllerTest]
-     * 断言 "controller 确实把信任策略同步到了 image client"；生产行为从不读取
-     * 此字段。通过 [resetTestState] 重置。
+     * #12 / §2.6 测试钩子（@VisibleForTesting）：记录最近一次 [updateSsl] 调用解析到
+     * 的 SSL 模式——无论该次调用是否实际触发 client 重建（no-op 也记录）。值域
+     * `{"SYSTEM", "TRUST_ALL", "MUTUAL_TLS"}`，null 表进程启动后尚未调用过
+     * [updateSsl]。仅供
+     * [cn.vectory.ocdroid.ui.controller.HostProfileControllerTest] 断言
+     * "controller 确实把信任策略同步到了 image client"；生产行为从不读取此字段。
+     * 通过 [resetTestState] 重置。
      *
-     * S-2: `@Volatile` 与同类字段（[imageAllowInsecure] / [imageHttpClient]）
-     * 保持一致——该字段由 [updateSsl] 在 `@Synchronized` 块内写入，但测试线程
-     * 可能从任意上下文读取，缺少 happens-before 边界时存在理论 stale read 风险。
+     * 取代旧的 `lastUpdateSslAllowInsecure: Boolean?`（v3：mTLS 引入后布尔已不足
+     * 区分三态信任模式）。`@Volatile` 与同类字段保持一致——该字段由 [updateSsl]
+     * 在 `@Synchronized` 块内写入，但测试线程可能从任意上下文读取。
      */
     @VisibleForTesting
     @Volatile
-    internal var lastUpdateSslAllowInsecure: Boolean? = null
+    internal var lastUpdateSslMode: String? = null
 
-    private fun newImageHttpClient(allowInsecure: Boolean): OkHttpClient =
+    private fun newImageHttpClient(cfg: SslConfig): OkHttpClient =
         OkHttpClient.Builder()
-            .apply { applySsl(sslConfigFactory.sslConfigFor(allowInsecure)) }
+            .apply { applySsl(cfg) }
             .connectTimeout(10, TimeUnit.SECONDS)
             .readTimeout(15, TimeUnit.SECONDS)
             .build()
 
     /**
-     * #12: rebuilds the image HTTP client so its TLS trust policy matches the
-     * active host's [allowInsecure] flag. No-op when the flag is unchanged
-     * (avoids needless SSLContext churn on unrelated reconfigures). Called
-     * from the host profile controller on every repository reconfigure.
+     * #12 / §2.6: rebuilds the image HTTP client so its TLS trust policy
+     * matches the resolved [cfg] supplied by the caller
+     * ([OpenCodeRepository.currentSslConfig]). Called from the host profile
+     * controller on every repository reconfigure and from cold-start
+     * [ConnectionActions.applySavedSettings].
      *
-     * Thread-safe: synchronized write + volatile field. The default
-     * (allowInsecure=false) is the system trust store, so this is a pure
-     * no-op until a trust-all host is configured — zero behaviour
-     * regression for the OFF case.
+     * No-op when [cfg] is unchanged (avoids needless SSLContext churn on
+     * unrelated reconfigures). 注：mTLS 下 [SslConfig.MutualTLS] 每次 configure
+     * 都由 buildMutualTlsConfig 新建实例（身份相等），故 mTLS host 每次 configure
+     * 都会重建 image client——可接受（configure 罕见）。no-op 守卫仅对
+     * SYSTEM/TRUST_ALL 稳定单例有效（§2.6 / glmer I2）。
+     *
+     * Thread-safe: synchronized write + volatile field.
      */
     @Synchronized
-    fun updateSsl(allowInsecure: Boolean) {
-        // #12 测试钩子：记录每次调用（含 no-op），供单测断言 controller→image
+    fun updateSsl(cfg: SslConfig) {
+        // 测试钩子：记录每次调用（含 no-op）的解析模式，供单测断言 controller→image
         // client 的信任策略同步。赋值开销可忽略，不影响生产行为。
-        lastUpdateSslAllowInsecure = allowInsecure
-        if (allowInsecure == imageAllowInsecure) return
-        imageAllowInsecure = allowInsecure
-        imageHttpClient = newImageHttpClient(allowInsecure)
+        lastUpdateSslMode = when (cfg) {
+            SslConfig.SystemDefault -> "SYSTEM"
+            is SslConfig.TrustAll -> "TRUST_ALL"
+            is SslConfig.MutualTLS -> "MUTUAL_TLS"
+        }
+        if (cfg == imageSslConfig) return
+        imageSslConfig = cfg
+        imageHttpClient = newImageHttpClient(cfg)
     }
 
     /**
-     * #12 测试钩子（@VisibleForTesting）：把单例的可变 SSL 状态
-     * （[imageAllowInsecure] / [imageHttpClient] / [lastUpdateSslAllowInsecure]）
-     * 重置为进程启动初值（allowInsecure=false），避免 object 单例在跨单测间
-     * 残留状态污染——例如前一个用例把 toggle 置 true 后，本用例的
-     * `updateSsl(true)` 会变成 no-op 而无法验证"调用事实"。仅供
+     * #12 / §2.6 测试钩子（@VisibleForTesting）：把单例的可变 SSL 状态
+     * （[imageSslConfig] / [imageHttpClient] / [lastUpdateSslMode]）重置为进程
+     * 启动初值（[SslConfig.SystemDefault]），避免 object 单例在跨单测间残留状态
+     * 污染——例如前一个用例切到 TrustAll / mTLS 后，本用例的 `updateSsl(...)`
+     * 会变成 no-op 而无法验证"调用事实"。仅供
      * [cn.vectory.ocdroid.ui.controller.HostProfileControllerTest] 的
      * @Before/@After 调用。
      */
     @VisibleForTesting
     @Synchronized
     fun resetTestState() {
-        imageAllowInsecure = false
-        imageHttpClient = newImageHttpClient(allowInsecure = false)
-        lastUpdateSslAllowInsecure = null
+        imageSslConfig = SslConfig.SystemDefault
+        imageHttpClient = newImageHttpClient(SslConfig.SystemDefault)
+        lastUpdateSslMode = null
     }
 
     private val diskCacheDir: File? by lazy {

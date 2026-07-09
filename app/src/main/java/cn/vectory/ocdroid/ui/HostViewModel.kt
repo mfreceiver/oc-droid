@@ -3,6 +3,7 @@ package cn.vectory.ocdroid.ui
 import androidx.lifecycle.ViewModel
 import cn.vectory.ocdroid.data.model.HostProfile
 import cn.vectory.ocdroid.ui.controller.HostProfileController
+import cn.vectory.ocdroid.ui.settings.ClientCertEditIntent
 import dagger.hilt.android.lifecycle.HiltViewModel
 import javax.inject.Inject
 
@@ -50,8 +51,14 @@ class HostViewModel @Inject constructor(
         basicAuthEdited: Boolean = false,
         tunnelPassword: String = "",
         tunnelEdited: Boolean = false,
+        // §2.7 fix-3 (gpt-2#3): 显式 mTLS 编辑意图，默认 Unchanged（不动既有证书）。
+        // Dialog 路径构造 Update / Disable；其它调用方默认 Unchanged 不破坏。
+        clientCertEdit: ClientCertEditIntent = ClientCertEditIntent.Unchanged,
     ) {
-        hostProfileController.saveHostProfile(profile, basicAuthPassword, basicAuthEdited, tunnelPassword, tunnelEdited)
+        hostProfileController.saveHostProfile(
+            profile, basicAuthPassword, basicAuthEdited, tunnelPassword, tunnelEdited,
+            clientCertEdit = clientCertEdit,
+        )
     }
 
     fun selectHostProfile(profileId: String) {

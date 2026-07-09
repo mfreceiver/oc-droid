@@ -172,15 +172,34 @@ class OkHttpClientFactory @Inject constructor(
      * directory / auth / cache interceptors (which all read the live
      * `HostConfig`) would be misleading here. The probe caller supplies
      * credentials inline as needed.
+     *
+     * §2.4: delegates to the [healthClient] overload that takes an explicit
+     * [SslConfig]. The [allowInsecure]-boolean variant resolves via the
+     * held [sslConfigFactory] (live host state); the test-connection path
+     * MUST use the [SslConfig] overload with a `resolveProbe`-resolved cfg
+     * so probing an unrelated profile does NOT reuse the current mTLS cache
+     * (v3-gpter R2#1 阻断).
      */
-    fun healthClient(allowInsecure: Boolean): OkHttpClient = bareClient(allowInsecure)
+    fun healthClient(allowInsecure: Boolean): OkHttpClient =
+        healthClient(sslConfigFactory.sslConfigFor(allowInsecure))
 
-    private fun bareClient(allowInsecure: Boolean): OkHttpClient =
+    /**
+     * §2.4: non-mutating health-probe client built from an explicit [cfg]
+     * (typically produced by [SslConfigFactory.resolveProbe]). Same timeouts
+     * + no base interceptors as the [allowInsecure] variant; the difference
+     * is that the SSL config is caller-supplied, so a one-shot mTLS probe
+     * against an UNRELATED host does not consult this factory's held live
+     * mTLS state.
+     */
+    fun healthClient(cfg: SslConfig): OkHttpClient =
         OkHttpClient.Builder()
-            .apply { applySsl(sslConfigFactory.sslConfigFor(allowInsecure)) }
+            .apply { applySsl(cfg) }
             .connectTimeout(10, TimeUnit.SECONDS)
             .readTimeout(10, TimeUnit.SECONDS)
             .build()
+
+    private fun bareClient(allowInsecure: Boolean): OkHttpClient =
+        healthClient(allowInsecure)
 
     companion object {
         /** §16.1(a): HTTP cache size cap (50 MB) per the redesign plan. */

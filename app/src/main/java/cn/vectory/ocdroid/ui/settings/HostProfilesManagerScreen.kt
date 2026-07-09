@@ -1,5 +1,7 @@
 package cn.vectory.ocdroid.ui.settings
 
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
@@ -34,12 +36,14 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.input.PasswordVisualTransformation
@@ -112,33 +116,55 @@ internal fun HostProfilesManagerScreen(
     }
 
     editingProfile?.let { profile ->
+        // §fix-3: 把当前 host 的 mTLS 降级错误注入 Dialog banner（connectionFlow 反应式）。
+        val mtlsDegradedError by connectionVM.connectionFlow.collectAsState()
         HostProfileEditorDialog(
             initial = profile,
             // The "+" action creates a fresh profile that isn't persisted yet,
             // so it must not expose the destructive delete affordance.
             canDelete = profiles.any { it.id == profile.id } && profiles.size > 1,
             onDismiss = { editingProfile = null },
-            onSave = { saved, basicAuthPassword, basicAuthEdited, tunnelPassword, tunnelEdited ->
-                viewModel.saveHostProfile(
-                    saved,
-                    basicAuthPassword = basicAuthPassword,
-                    basicAuthEdited = basicAuthEdited,
-                    tunnelPassword = tunnelPassword,
-                    tunnelEdited = tunnelEdited
-                )
-                editingProfile = null
+            mtlsErrorHint = mtlsDegradedError.mtlsDegradedError,
+            // §2.7 fix-3: onSave 透传 mTLS 编辑意图给 VM（Dialog 纯 UI，不碰 ESP）。VM
+            // 据此试构建 + 原子写 ESP；失败（无 p12 / 试构建失败）抛异常 → 保留
+            // 对话框并回显错误，不关闭。Dialog 据 mTLS 开关构造 Update / Disable intent。
+            onSave = { saved, basicAuthPassword, basicAuthEdited, tunnelPassword, tunnelEdited,
+                       mtlsEnabled, stagedP12, caStage, p12Password, p12PasswordEdited, hasImportedP12 ->
+                val clientCertEdit = if (mtlsEnabled) {
+                    ClientCertEditIntent.Update(stagedP12, caStage, p12Password, p12PasswordEdited, hasImportedP12)
+                } else {
+                    ClientCertEditIntent.Disable
+                }
+                runCatching {
+                    viewModel.saveHostProfile(
+                        saved,
+                        basicAuthPassword = basicAuthPassword,
+                        basicAuthEdited = basicAuthEdited,
+                        tunnelPassword = tunnelPassword,
+                        tunnelEdited = tunnelEdited,
+                        clientCertEdit = clientCertEdit,
+                    )
+                }.onSuccess { editingProfile = null }
+                    .onFailure { error = it.message ?: deleteFailedText }
             },
             onDelete = {
                 runCatching { viewModel.deleteHostProfile(profile.id) }
                     .onFailure { error = it.message ?: deleteFailedText }
                 editingProfile = null
             },
-            // §user-req + §fix-401: 表单"测试连接"按钮直连 ConnectionViewModel.testConnectionForm。
+            // §user-req + §fix-401 + §2.7: 表单"测试连接"按钮直连 ConnectionViewModel.testConnectionForm。
             // 密码 write-only 不回填表单；编辑已有 host 且未碰密码框时 VM 据 profileId
             // 回退查已保存密码。用户主动清空/改密码（passwordEdited=true）则按表单值测，
-            // 不回退旧凭据（安全）。
-            onTestConnection = { url, user, pass, insecure, profileId, passwordEdited, callback ->
-                connectionVM.testConnectionForm(url, user, pass, insecure, profileId, passwordEdited, callback)
+            // 不回退旧凭据（安全）。§2.7: mTLS 字段透传给 VM，由 VM 构造 ClientCertMaterial
+            // （Dialog 无 settingsManager）→ checkHealthFor(..., clientCert)。
+            onTestConnection = { url, user, pass, insecure, profileId, passwordEdited,
+                                 mtlsEnabled, stagedP12, hasImportedP12, caStage, p12Password, p12PasswordEdited,
+                                 clientCertId, callback ->
+                connectionVM.testConnectionForm(
+                    url, user, pass, insecure, profileId, passwordEdited,
+                    mtlsEnabled, stagedP12, hasImportedP12, caStage, p12Password, p12PasswordEdited,
+                    clientCertId, callback
+                )
             }
         )
     }
@@ -267,14 +293,24 @@ internal fun HostProfileEditorDialog(
         basicAuthPassword: String,
         basicAuthEdited: Boolean,
         tunnelPassword: String,
-        tunnelEdited: Boolean
+        tunnelEdited: Boolean,
+        // §2.7 mTLS 编辑意图（VM 据此写 ESP，原子提交；Dialog 不碰 ESP）：
+        mtlsEnabled: Boolean,
+        stagedP12: ByteArray?,
+        caStage: CaStage,
+        p12Password: String?,
+        p12PasswordEdited: Boolean,
+        hasImportedP12: Boolean
     ) -> Unit,
     canDelete: Boolean = false,
     onDelete: () -> Unit = {},
     // §user-req: 一次性"测试连接"回调。调用方（HostProfilesManagerScreen）
-    // 把 MainViewModel.testConnectionForm 注入进来；Dialog 不持有 ViewModel
+    // 把 ConnectionViewModel.testConnectionForm 注入进来；Dialog 不持有 ViewModel
     // 引用，保持纯 UI 组件可测试性。默认 no-op 以兼容不关心此能力的调用方
     // （如 SettingsSectionsInstrumentedTest）。
+    // §2.7: 加透传 mTLS 字段——由回调接收方 VM 构造 ClientCertMaterial（Dialog 无
+    // settingsManager，不在此构造）。含 clientCertId（initial.clientCertId）——编辑既有
+    // mTLS profile 且未重导 p12 时，VM 据此回 ESP 读已存 p12/密码/CA。
     onTestConnection: (
         baseUrl: String,
         username: String?,
@@ -282,8 +318,20 @@ internal fun HostProfileEditorDialog(
         allowInsecure: Boolean,
         profileId: String?,
         passwordEdited: Boolean,
+        // §2.7 mTLS 透传字段：
+        mtlsEnabled: Boolean,
+        stagedP12: ByteArray?,
+        hasImportedP12: Boolean,
+        caStage: CaStage,
+        p12Password: String?,
+        p12PasswordEdited: Boolean,
+        clientCertId: String?,
         onResult: (Boolean, String) -> Unit
-    ) -> Unit = { _, _, _, _, _, _, _ -> }
+    ) -> Unit = { _, _, _, _, _, _, _, _, _, _, _, _, _, _ -> },
+    // §fix-3 (gro-1#2/gpt-2#2/max-1 M1): 当前 host 的 mTLS 降级错误（缺失/损坏），
+    // 由调用方从 ConnectionState.mtlsDegradedError 注入；非 null 时在 mTLS 区块顶部
+    // 显示红色 banner，让用户看到「证书加载失败」而非泛化连接失败。
+    mtlsErrorHint: String? = null,
 ) {
     val groupLabels = NamedGroupLabels // §grouping-rewrite Round-2 #4: was a local listOf("A","B","C","D") — centralised in SettingsSections.kt so the editor + ConnectionProfileSection stats line stay in lockstep.
     var name by remember(initial.id) { mutableStateOf(initial.name) }
@@ -303,6 +351,45 @@ internal fun HostProfileEditorDialog(
     // R-01: per-host "接受不安全连接"开关（自签证书/内网 TLS 用户需要显式启用，
     // 否则全局 strict 校验会直接拒绝连接）。种子取自当前 HostProfile。
     var allowInsecure by remember(initial.id) { mutableStateOf(initial.allowInsecureConnections) }
+    // §2.7: mTLS 编辑意图（纯 UI 暂存，不碰 ESP/不碰 settingsManager）。
+    //  - mtlsEnabled：开关，种子取自 initial。
+    //  - stagedP12：本次新导入的 p12 字节；null=未导入（编辑既有 mTLS profile 时
+    //    保持 null，由 VM 据初始 clientCertId 回 ESP 取已存）。
+    //  - caStage：CA 编辑意图三态（v3-gpter R2#3）。
+    //  - p12Password / p12PasswordEdited：p12 导出密码 write-only 字段（不回填）。
+    //  - hasImportedP12：是否存在 p12（initial.clientCertId != null 或本次导入过）。
+    //  - showP12Password：密码可见性切换。
+    var mtlsEnabled by remember(initial.id) { mutableStateOf(initial.mtlsEnabled) }
+    var stagedP12: ByteArray? by remember(initial.id) { mutableStateOf(null) }
+    var caStage: CaStage by remember(initial.id) { mutableStateOf(CaStage.Unchanged) }
+    var p12Password by remember(initial.id) { mutableStateOf("") }
+    var p12PasswordEdited by remember(initial.id) { mutableStateOf(false) }
+    var hasImportedP12 by remember(initial.id) { mutableStateOf(initial.clientCertId != null) }
+    var showP12Password by remember(initial.id) { mutableStateOf(false) }
+    // §fix-3 (gpt-2#1次): SAF 导入错误（超限 / 读流失败）局部回显。
+    var mtlsImportError by remember(initial.id) { mutableStateOf<String?>(null) }
+    val context = LocalContext.current
+    // §2.7 SAF：p12 / CA 都二进制读（readBytes）——CA readText() 对 DER 会坏（glmer I10）。
+    // §fix-3 (gpt-2#1次): openInputStream 加 .use{} 防句柄泄漏；5MB 上限防 OOM/异常大文件。
+    val p12Launcher = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        uri?.let {
+            mtlsImportError = null
+            val bytes = readCapped(it, context, MAX_CERT_BYTES) { msg -> mtlsImportError = msg }
+            if (bytes != null) {
+                stagedP12 = bytes
+                hasImportedP12 = true
+            }
+        }
+    }
+    val caLauncher = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        uri?.let {
+            mtlsImportError = null
+            val bytes = readCapped(it, context, MAX_CERT_BYTES) { msg -> mtlsImportError = msg }
+            if (bytes != null) {
+                caStage = CaStage.Replace(bytes)
+            }
+        }
+    }
     // §issue-5: 测试连接状态上提——触发器移入 confirmButton 的 test icon，结果
     // 回显仍在 text 列；两者共享状态，故从 Column 内部上提到 dialog 作用域。
     var testStatus by remember(initial.id) { mutableStateOf<Pair<Boolean, String>?>(null) }
@@ -318,13 +405,22 @@ internal fun HostProfileEditorDialog(
         if (isTesting || serverUrl.isBlank()) return
         isTesting = true
         testStatus = null
+        // §2.7: 透传 mTLS 编辑意图（不在此构造 ClientCertMaterial——Dialog 无
+        // settingsManager；由回调接收方 VM 构造）。
         onTestConnection(
             serverUrl,
             authUsername.ifBlank { null },
             authPassword.ifBlank { null },
             allowInsecure,
             initial.id.takeIf { initial.basicAuth != null },
-            passwordEdited
+            passwordEdited,
+            mtlsEnabled,
+            stagedP12,
+            hasImportedP12,
+            caStage,
+            p12Password.ifBlank { null },
+            p12PasswordEdited,
+            initial.clientCertId
         ) { success, msg ->
             isTesting = false
             testStatus = success to msg
@@ -480,6 +576,8 @@ internal fun HostProfileEditorDialog(
                 // health/tunnel clients to trust-all so self-signed or internal
                 // TLS servers can connect. The warning makes the MITM risk
                 // explicit at the point of enablement.
+                // §2.7 (glmer I7): 与 mTLS 互斥——开启 mTLS 时禁用本开关，防日后
+                // 关 mTLS 时静默降级 trust-all（mTLS 优先级也由 SslConfigFactory 保证）。
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     verticalAlignment = Alignment.CenterVertically
@@ -493,9 +591,128 @@ internal fun HostProfileEditorDialog(
                         )
                     }
                     Spacer(modifier = Modifier.width(8.dp))
-                    Switch(checked = allowInsecure, onCheckedChange = { allowInsecure = it })
+                    Switch(
+                        checked = allowInsecure,
+                        onCheckedChange = { allowInsecure = it },
+                        enabled = !mtlsEnabled
+                    )
                 }
                 Spacer(modifier = Modifier.height(12.dp))
+                // §2.7: mTLS 区块——客户端证书（PKCS12 + 密码）+ 可选私有 CA。
+                // 互斥：开启 mTLS 强制重置 allowInsecure=false（onCheckedChange 内）。
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(stringResource(R.string.host_mtls_title))
+                        Text(
+                            stringResource(R.string.host_mtls_summary),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Switch(
+                        checked = mtlsEnabled,
+                        onCheckedChange = {
+                            mtlsEnabled = it
+                            // §2.7 / glmer I7：开启 mTLS 强制重置 allowInsecure，
+                            // 防关闭 mTLS 时静默降级 trust-all。
+                            if (it) allowInsecure = false
+                        }
+                    )
+                }
+                if (mtlsEnabled) {
+                    // §fix-3 (gro-1#2/gpt-2#2/max-1 M1): mTLS 降级 banner —— 缺失/损坏
+                    // 证书（mtlsErrorHint）或 SAF 导入错误（mtlsImportError）。
+                    val mtlsBanner = mtlsErrorHint ?: mtlsImportError
+                    if (mtlsBanner != null) {
+                        Text(
+                            mtlsBanner,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.error,
+                            modifier = Modifier.padding(bottom = 6.dp)
+                        )
+                    }
+                    // p12 导入按钮：✓ 有证书（hasImportedP12）/ 无证书状态。
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            if (hasImportedP12) stringResource(R.string.host_mtls_import_p12_replace)
+                            else stringResource(R.string.host_mtls_import_p12),
+                            style = MaterialTheme.typography.bodyMedium,
+                            modifier = Modifier.weight(1f)
+                        )
+                        Spacer(modifier = Modifier.width(8.dp))
+                        TextButton(onClick = { p12Launcher.launch(arrayOf("*/*")) }) {
+                            Text(stringResource(R.string.host_mtls_import_p12))
+                        }
+                    }
+                    if (!hasImportedP12) {
+                        Text(
+                            stringResource(R.string.host_mtls_no_cert),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.error
+                        )
+                    }
+                    Spacer(modifier = Modifier.height(6.dp))
+                    // p12 密码（masked，write-only 不回填）。
+                    OutlinedTextField(
+                        value = p12Password,
+                        onValueChange = {
+                            p12PasswordEdited = true
+                            p12Password = it
+                        },
+                        label = { Text(stringResource(R.string.host_mtls_p12_password)) },
+                        placeholder = {
+                            Text(
+                                if (hasImportedP12 && !p12PasswordEdited) stringResource(R.string.host_profile_password_masked_placeholder)
+                                else stringResource(R.string.common_optional)
+                            )
+                        },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth(),
+                        visualTransformation = if (showP12Password) VisualTransformation.None else PasswordVisualTransformation(),
+                        trailingIcon = {
+                            IconButton(onClick = { showP12Password = !showP12Password }) {
+                                Icon(
+                                    if (showP12Password) Icons.Default.VisibilityOff else Icons.Default.Visibility,
+                                    contentDescription = if (showP12Password) stringResource(R.string.settings_hide_password) else stringResource(R.string.settings_show_password)
+                                )
+                            }
+                        }
+                    )
+                    Spacer(modifier = Modifier.height(6.dp))
+                    // CA（可选）：导入 / 移除按钮。
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            stringResource(R.string.host_mtls_ca_optional),
+                            style = MaterialTheme.typography.bodyMedium,
+                            modifier = Modifier.weight(1f)
+                        )
+                        Spacer(modifier = Modifier.width(8.dp))
+                        TextButton(onClick = { caLauncher.launch(arrayOf("*/*")) }) {
+                            Text(stringResource(R.string.host_mtls_import_ca))
+                        }
+                        if (caStage is CaStage.Unchanged && initial.clientCertId != null || caStage is CaStage.Replace) {
+                            TextButton(
+                                onClick = { caStage = CaStage.Clear },
+                                colors = ButtonDefaults.textButtonColors(
+                                    contentColor = MaterialTheme.colorScheme.error
+                                )
+                            ) {
+                                Text(stringResource(R.string.host_mtls_remove_ca))
+                            }
+                        }
+                    }
+                    Spacer(modifier = Modifier.height(12.dp))
+                }
                 // §issue-5: 全宽"测试连接"按钮已移除——触发器移入底部 action 行的
                 // test icon（见 confirmButton）。此处仅保留结果回显（成功/失败小字），
                 // 测试进行中由 icon 内的进度圈表达。
@@ -583,12 +800,19 @@ internal fun HostProfileEditorDialog(
                         // Positional call: onSave is a function-type parameter,
                         // so Kotlin prohibits named arguments here. Names are
                         // documented by the lambda signature instead.
+                        // §2.7: 尾部透传 mTLS 编辑意图（VM 据此试构建 + 原子写 ESP）。
                         onSave(
                             saved,
                             authPassword,
                             effectivePasswordEdited,
                             tunnelPassword,
-                            tunnelEdited
+                            tunnelEdited,
+                            mtlsEnabled,
+                            stagedP12,
+                            caStage,
+                            p12Password.ifBlank { null },
+                            p12PasswordEdited,
+                            hasImportedP12
                         )
                     }) { Text(stringResource(R.string.settings_save)) }
                 }
@@ -634,3 +858,53 @@ internal fun HostProfileEditorDialog(
 }
 
 private fun newDirectProfile(): HostProfile = HostProfile.defaultDirect()
+
+/** §fix-3 (gpt-2#1次): p12 / CA 导入字节上限——防 OOM 与异常大文件。 */
+private const val MAX_CERT_BYTES = 5L * 1024 * 1024
+
+/**
+ * §fix-3 (gpt-2#1次): SAF 安全读取——openInputStream 包 `.use{}`（防句柄泄漏）+
+ * 大小上限（防 OOM）。超限 / 读失败 → 调 [onError] 回显，返回 null（不 stage）。
+ */
+private fun readCapped(
+    uri: android.net.Uri,
+    context: android.content.Context,
+    maxBytes: Long,
+    onError: (String) -> Unit,
+): ByteArray? = runCatching {
+    context.contentResolver.openInputStream(uri)?.use { stream ->
+        val out = java.io.ByteArrayOutputStream()
+        val buf = ByteArray(8 * 1024)
+        var total = 0L
+        while (true) {
+            val n = stream.read(buf)
+            if (n < 0) break
+            total += n
+            if (total > maxBytes) {
+                onError("文件过大（>${maxBytes / 1024 / 1024}MB），已放弃导入")
+                return@use null
+            }
+            out.write(buf, 0, n)
+        }
+        out.toByteArray()
+    }
+}.onFailure { onError("读取失败：${it.message}") }.getOrNull()
+
+/**
+ * §2.7: mTLS 编辑对话框中"CA 编辑意图"的三态显式表达（v3-gpter R2#3）。
+ *
+ * `ByteArray?` 的 null 无法区分"未改 / 清除 / 无 CA"三种语义 → 可静默从私有 CA
+ * 降级平台 CA。本 sealed interface 把意图钉死，由 VM 据此解析生效 CA：
+ *  - [Unchanged]：保持已存 CA（编辑既有 mTLS profile 的默认）。
+ *  - [Replace]：本次导入了新 CA 字节。
+ *  - [Clear]：显式移除 CA → 转平台 CA 模式。
+ *
+ * Dialog 仅暂存此状态（纯 UI，不碰 ESP/不碰 settingsManager）；[resolveClientCert]
+ * 据其 + 已存材料归一为生效 CA。`public` 因被 public VM 函数（saveHostProfile /
+ * testConnectionForm）签名引用。
+ */
+sealed interface CaStage {
+    data object Unchanged : CaStage
+    data class Replace(val bytes: ByteArray) : CaStage
+    data object Clear : CaStage
+}

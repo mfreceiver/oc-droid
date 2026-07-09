@@ -7,6 +7,8 @@ import cn.vectory.ocdroid.data.cache.CacheRepository
 import cn.vectory.ocdroid.data.model.HostProfile
 import cn.vectory.ocdroid.data.repository.HostProfileStore
 import cn.vectory.ocdroid.data.repository.OpenCodeRepository
+import cn.vectory.ocdroid.data.repository.http.ClientCertMaterial
+import cn.vectory.ocdroid.data.repository.http.buildMutualTlsConfig
 import cn.vectory.ocdroid.ui.ComposerState
 import cn.vectory.ocdroid.ui.ConnectionFormSettings
 import cn.vectory.ocdroid.ui.ConnectionPhase
@@ -21,6 +23,10 @@ import cn.vectory.ocdroid.ui.TunnelActivationState
 import cn.vectory.ocdroid.ui.UiEvent
 import cn.vectory.ocdroid.ui.UnreadState
 import cn.vectory.ocdroid.ui.errorMessageOrFallback
+import cn.vectory.ocdroid.ui.settings.CaStage
+import cn.vectory.ocdroid.ui.settings.ClientCertEditIntent
+import cn.vectory.ocdroid.ui.settings.resolveClientCert
+import cn.vectory.ocdroid.ui.settings.toMaterial
 import cn.vectory.ocdroid.ui.util.HttpImageHolder
 import cn.vectory.ocdroid.util.DebugLog
 import cn.vectory.ocdroid.util.SettingsManager
@@ -30,6 +36,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import java.util.UUID
 
 /**
  * R-16 M3 → R-17 batch3b: owns Host Profile CRUD + repository reconfiguration
@@ -128,9 +135,13 @@ class HostProfileController(
         basicAuthPassword: String = "",
         basicAuthEdited: Boolean = false,
         tunnelPassword: String = "",
-        tunnelEdited: Boolean = false
+        tunnelEdited: Boolean = false,
+        // §2.7 fix-3（gpt-2#3 阻断）: 显式 mTLS 编辑意图，默认 [ClientCertEditIntent.Unchanged]
+        // ——「未提供」≠「禁用」。非 Dialog 调用方（含 test pass-through）默认不动 ESP /
+        // 不改 profile 的 mTLS 字段，避免误清既有证书。
+        clientCertEdit: ClientCertEditIntent = ClientCertEditIntent.Unchanged,
     ) {
-        val normalized = if (profile.basicAuth != null) {
+        var normalized = if (profile.basicAuth != null) {
             profile.copy(basicAuth = profile.basicAuth.copy(passwordId = profile.id))
         } else {
             profile
@@ -160,21 +171,39 @@ class HostProfileController(
         if (normalized.basicAuth == null) {
             settingsManager.setBasicAuthPassword(normalized.id, "")
         }
+        // §2.7: mTLS 客户端证书持久化（在 hostProfileStore.save 之前，使 normalized
+        // 带上最终 clientCertId/mtlsEnabled）。Dialog 纯 UI 把编辑意图透传至此；
+        // 本处据此试构建 + 原子写 ESP。
+        normalized = applyClientCertSave(normalized, clientCertEdit)
         hostProfileStore.save(normalized)
         refreshHostProfileState()
 
-        // #12 / S-1: if the saved profile is the currently active host AND
-        // either its allowInsecureConnections flag OR its serverUrl actually
-        // changed, reconfigure the live repository clients (REST / SSE /
-        // image) and force a reconnect so the new TLS trust policy / endpoint
-        // takes effect immediately. Mirrors the reconfigure+reconnect path
-        // used by selectHostProfile / deleteHostProfile(wasCurrent). Non-
-        // current hosts and edits that touch neither field are left untouched
-        // (zero regression — the toggle-OFF / unchanged-URL case behaves
-        // exactly as before).
+        // #12 / S-1 / §fix-3 gro-1/gpt-2/glm-2: if the saved profile is the
+        // currently active host AND either its allowInsecureConnections flag,
+        // its serverUrl, OR its mTLS configuration actually changed,
+        // reconfigure the live repository clients (REST / SSE / image) and
+        // force a reconnect so the new TLS trust policy / endpoint / client
+        // cert takes effect immediately. Mirrors the reconfigure+reconnect
+        // path used by selectHostProfile / deleteHostProfile(wasCurrent).
+        //
+        // §fix-3 gro-1/gpt-2/glm-2 阻断: 旧条件不含 mTLS → 当前 host 开/关/换 mTLS
+        // 证书后 live client 不重建。新增 mtlsChanged 维度。关键（glm-2/max-1 S1）：
+        // applyClientCertSave 在 oldId!=null 时复用 oldId，故「保持启用换证书」(重导
+        // p12 / 换 CA / 改密码) 时 clientCertId 不变——仅比 id 不够，必须用显式材料
+        // 编辑信号 [mtlsMaterialEdited]。
         val isActiveHost = normalized.id == slices.host.value.currentHostProfileId
         val toggleChanged = previous?.allowInsecureConnections != normalized.allowInsecureConnections
         val urlChanged = previous?.serverUrl != normalized.serverUrl
+        val mtlsMaterialEdited = when (clientCertEdit) {
+            is ClientCertEditIntent.Update ->
+                clientCertEdit.stagedP12 != null ||
+                    clientCertEdit.caStage !is CaStage.Unchanged ||
+                    clientCertEdit.p12PasswordEdited
+            else -> false
+        }
+        val mtlsChanged = previous?.mtlsEnabled != normalized.mtlsEnabled ||
+            previous?.clientCertId != normalized.clientCertId ||
+            mtlsMaterialEdited
         if (isActiveHost && urlChanged) {
             // §bug5 / R-20 Phase 5: URL changed → drop model data so stale
             // disable config does not leak / orphan. Was clearModelDataForUrl
@@ -184,16 +213,66 @@ class HostProfileController(
             // (now-empty) set.
             settingsManager.clearModelDataForGroup(normalized.serverGroupFp.ifBlank { normalized.id })
         }
-        if (isActiveHost && (toggleChanged || urlChanged)) {
+        if (isActiveHost && (toggleChanged || urlChanged || mtlsChanged)) {
             configureRepositoryForProfile(normalized)
             // §R18 Phase 3 Wave 1 (P1-3 C 类): saveHostProfile 多发顺序敏感 → 保持同步 tryEmitEffect。
             // wrapping in scope.launch would race the synchronous purge above; FIFO via the
             // SUSPEND buffer (256) makes a synchronous multi-emit reliable in practice.
             effects.tryEmitEffect(ControllerEffect.ForceReconnect)
-            // §disabled-models-consistency: disabled-models 等按 baseUrl 存储的 per-host
-            // 状态在新 URL 生效后必须重新装载（与 selectHostProfile 路径对齐）。否则
-            // 改 URL 后旧 baseUrl 的禁用集仍然显示，状态不一致。
-            effects.tryEmitEffect(ControllerEffect.HostProfileSwitched)
+            // §disabled-models-consistency: per-url/group 状态只在 urlChanged 时重载
+            // （纯 TLS / mTLS 变化无需重载模型数据，只需 reconnect——gro-1/gpt-2/glm-2）。
+            if (urlChanged) {
+                effects.tryEmitEffect(ControllerEffect.HostProfileSwitched)
+            }
+        }
+    }
+
+    /**
+     * §2.7 fix-3: 把 mTLS 编辑意图 [ClientCertEditIntent] 归一为生效材料并原子写 ESP，
+     * 返回带最终 clientCertId/mtlsEnabled 的 [normalized] 副本。失败（无 p12 / 试构建
+     * 失败）抛 [IllegalArgumentException] 阻止保存（调用方 runCatching 回显错误、保留对话框）。
+     *
+     * - [ClientCertEditIntent.Unchanged] → 不动 ESP、不改 profile 的 mTLS 字段（默认）。
+     * - [ClientCertEditIntent.Update] → 试构建 [buildMutualTlsConfig]；`saveClientCert`
+     *   原子写；profile 置 `clientCertId=id, mtlsEnabled=true`。无 p12 → 抛「需先导入证书」。
+     * - [ClientCertEditIntent.Disable] → `clearClientCert(oldId)`；profile 置无 mTLS。
+     */
+    private fun applyClientCertSave(
+        normalized: HostProfile,
+        edit: ClientCertEditIntent,
+    ): HostProfile = when (edit) {
+        ClientCertEditIntent.Unchanged -> normalized
+        ClientCertEditIntent.Disable -> {
+            val oldId = normalized.clientCertId
+            oldId?.let { settingsManager.clearClientCert(it) }
+            normalized.copy(clientCertId = null, mtlsEnabled = false)
+        }
+        is ClientCertEditIntent.Update -> {
+            val oldId = normalized.clientCertId
+            val resolved = resolveClientCert(
+                mtlsEnabled = true,
+                stagedP12 = edit.stagedP12,
+                hasImportedP12 = edit.hasImportedP12,
+                caStage = edit.caStage,
+                p12Password = edit.p12Password,
+                p12PasswordEdited = edit.p12PasswordEdited,
+                oldId = oldId,
+                loadP12 = { settingsManager.getClientCertP12(it) },
+                loadPassword = { settingsManager.getClientCertPassword(it) },
+                loadCa = { settingsManager.getClientCertCa(it) },
+            ) ?: throw IllegalArgumentException("开启 mTLS 需先导入客户端证书")
+            // §2.7: 保存前试构建——防落坏材料（与运行时 configureClientCert 的
+            // runCatching 降级 + lastClientCertError 双保险）。
+            runCatching { buildMutualTlsConfig(resolved.toMaterial()) }
+                .onFailure {
+                    throw IllegalArgumentException("客户端证书无效: ${it.message}", it)
+                }
+            val newId = oldId ?: UUID.randomUUID().toString()
+            // fix-3 max-1 S1: 原地覆盖语义。newId = oldId ?: UUID()，故 oldId!=null 时
+            // newId==oldId（saveClientCert 已覆盖同一 id 的 p12/pw/ca 三 key，无需再
+            // clearClientCert）。旧 `if(newId!=oldId&&oldId!=null)` 分支恒不执行，已删。
+            settingsManager.saveClientCert(newId, resolved.p12, resolved.password, resolved.ca)
+            normalized.copy(clientCertId = newId, mtlsEnabled = true)
         }
     }
 
@@ -230,6 +309,9 @@ class HostProfileController(
             hostProfileStore.profilesInGroup(fp).filter { it.id != profileId }
         } ?: emptyList()
         hostProfileStore.delete(profileId)
+        // §2.7: 清理被删 profile 的 mTLS 客户端证书材料（clientCertId 是 per-profile
+        // 私有 UUID，无其它 profile 引用 → 安全 clear，防 ESP 悬空残留）。
+        deletedProfile?.clientCertId?.let { settingsManager.clearClientCert(it) }
         val current = hostProfileStore.currentProfile()
         configureRepositoryForProfile(current)
         refreshHostProfileState()
@@ -519,14 +601,21 @@ class HostProfileController(
         settingsManager.serverUrl = url
         settingsManager.username = username
         settingsManager.password = password
-        val allowInsecure = currentHostProfile().allowInsecureConnections
+        val profile = currentHostProfile()
+        // §2.5(b): 注入 mTLS 客户端证书材料（profile.mtlsEnabled 时从 ESP 载入）。
+        // 手动输新 URL（未存为 profile）会沿用当前 profile 的证书——与现有
+        // allowInsecure 同一对称局限；客户端证书为带外公开件、风险低（glmer S9）。
+        val clientCert = if (profile.mtlsEnabled) profile.clientCertId?.let { settingsManager.loadClientCertMaterial(it) } else null
         repository.configure(
             url, username, password,
-            allowInsecureConnections = allowInsecure
+            allowInsecureConnections = profile.allowInsecureConnections,
+            clientCert = clientCert
         )
-        // #12: mirror the host's TLS trust policy into the markdown image
-        // client (same as configureRepositoryForProfile).
-        HttpImageHolder.updateSsl(allowInsecure)
+        // #12 / §2.5(b): mirror the host's TLS trust policy (incl. mTLS) into
+        // the markdown image client (same as configureRepositoryForProfile).
+        HttpImageHolder.updateSsl(repository.currentSslConfig())
+        // §fix-3 (gro-1#2/gpt-2#2): mTLS 期望但材料缺失/损坏 → fail-loud，不静默降级。
+        reportMtlsDegradationIfAny(profile, clientCert)
         if (urlChanging) {
             // §R18 Phase 3 Wave 1 (P1-3 C 类): configureServer 多发顺序敏感 (CancelSse 在前，HostProfileSwitched 在后) → 保持同步 tryEmitEffect。
             effects.tryEmitEffect(ControllerEffect.HostProfileSwitched)
@@ -551,14 +640,47 @@ class HostProfileController(
         // §R18 Phase 3 Wave 1 (P1-3 B 类): 单发非 suspend (configureRepositoryForProfile 可能被 C 类路径调用，但本处只是一次 emit) → tryEmitEffect。
         effects.tryEmitEffect(ControllerEffect.CancelSseForReconfigure)
         val password = profile.basicAuth?.passwordId?.let { settingsManager.basicAuthPassword(it) }
+        // §2.5(a): 注入 mTLS 客户端证书材料（profile.mtlsEnabled 时从 ESP 载入）。
+        // configure(null) 会 clear 已持材料，所以切到非 mTLS profile 时停止出示证书。
+        val clientCert = if (profile.mtlsEnabled) profile.clientCertId?.let { settingsManager.loadClientCertMaterial(it) } else null
         repository.configure(
             profile.serverUrl, profile.basicAuth?.username, password,
-            allowInsecureConnections = profile.allowInsecureConnections
+            allowInsecureConnections = profile.allowInsecureConnections,
+            clientCert = clientCert
         )
-        // #12: keep the markdown image HTTP client's TLS trust policy in sync
-        // with the active host so self-signed HTTPS images load under the
-        // trust-all toggle (same entry point as REST / SSE).
-        HttpImageHolder.updateSsl(profile.allowInsecureConnections)
+        // #12 / §2.5(a): keep the markdown image HTTP client's TLS trust policy
+        // in sync with the active host (now incl. mTLS) so self-signed HTTPS
+        // images load AND present the client cert where required (same entry
+        // point as REST / SSE).
+        HttpImageHolder.updateSsl(repository.currentSslConfig())
+        // §fix-3 (gro-1#2/gpt-2#2): mTLS 期望但材料缺失/损坏 → fail-loud，不静默降级。
+        reportMtlsDegradationIfAny(profile, clientCert)
+    }
+
+    /**
+     * §fix-3 (gro-1#2/gpt-2#2/max-1 M1): 检测当前 host 的 mTLS 是否处于「期望但材料
+     * 缺失/损坏」的降级态，若是则：① 写 [ConnectionState.mtlsDegradedError]（UI 红色
+     * banner 观测）；② emit [UiEvent.Error]（toast）。两者均由本 host controller 的
+     * configure 路径调用——configRepositoryForProfile / configureServer。无降级时清空
+     * 字段（修复后 banner 消失）。
+     *
+     * - missing: [profile.mtlsEnabled] 但 [clientCert]==null（loadClientCertMaterial 返回
+     *   null：ESP 缺 p12/pw key）。
+     * - damaged: [OpenCodeRepository.lastClientCertError] 非空（configureClientCert 试构建
+     *   失败，已降级 mutualTlsConfig=null）。
+     */
+    private fun reportMtlsDegradationIfAny(profile: HostProfile, clientCert: ClientCertMaterial?) {
+        val missing = profile.mtlsEnabled && clientCert == null
+        val damaged = repository.lastClientCertError
+        val error: String? = when {
+            missing -> "mTLS 已开启但客户端证书缺失"
+            damaged != null -> "mTLS 客户端证书加载失败：$damaged"
+            else -> null
+        }
+        slices.mutateConnection { it.copy(mtlsDegradedError = error) }
+        if (error != null) {
+            effects.tryEmitUiEvent(UiEvent.Error(R.string.host_mtls_missing_cert, listOf(error)))
+        }
     }
 
     // ── Tunnel activation ──────────────────────────────────────────────────

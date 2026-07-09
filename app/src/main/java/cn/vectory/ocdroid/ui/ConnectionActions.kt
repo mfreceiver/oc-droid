@@ -11,6 +11,7 @@ package cn.vectory.ocdroid.ui
 import cn.vectory.ocdroid.data.model.toSession
 import cn.vectory.ocdroid.data.repository.OpenCodeRepository
 import cn.vectory.ocdroid.data.repository.HostProfileStore
+import cn.vectory.ocdroid.ui.util.HttpImageHolder
 import cn.vectory.ocdroid.util.SettingsManager
 
 internal fun applySavedSettings(
@@ -32,12 +33,28 @@ internal fun applySavedSettings(
     settingsManager.migrateLegacyKeysToFp(currentFp, currentProfile.serverUrl)
 
     val password = currentProfile.basicAuth?.passwordId?.let { settingsManager.basicAuthPassword(it) }
+    // §2.5(c): 注入 mTLS 客户端证书材料（冷启动从 ESP 载入）。
+    val clientCert = if (currentProfile.mtlsEnabled) currentProfile.clientCertId?.let { settingsManager.loadClientCertMaterial(it) } else null
     repository.configure(
         baseUrl = currentProfile.serverUrl,
         username = currentProfile.basicAuth?.username,
         password = password,
-        allowInsecureConnections = currentProfile.allowInsecureConnections
+        allowInsecureConnections = currentProfile.allowInsecureConnections,
+        clientCert = clientCert
     )
+    // #12 / §2.5(c) (gpter#4): 冷启动也要把 mTLS 信任策略同步给 image client，
+    // 否则冷启图片无客户端证书 / 不信私有 CA（与 REST/SSE 对称）。
+    HttpImageHolder.updateSsl(repository.currentSslConfig())
+    // §fix-3 (gro-1#2/gpt-2#2): 冷启动 mTLS fail-open 检测——profile 宣告 mtlsEnabled
+    // 但 ESP 材料缺失 / 损坏 → 写 ConnectionState.mtlsDegradedError 供 UI 红色 banner
+    // （本 free-function 无 effects 总线，toast 由 controller 路径覆盖；冷启至少 slice
+    // 可观测，避免用户只看泛化「连接失败」）。
+    val mtlsDegradedError: String? = when {
+        currentProfile.mtlsEnabled && clientCert == null -> "mTLS 已开启但客户端证书缺失"
+        repository.lastClientCertError != null ->
+            "mTLS 客户端证书加载失败：${repository.lastClientCertError}"
+        else -> null
+    }
     // Restore the last connected workdir so the app re-scopes to the same
     // project on cold start. §R18 Phase 2-E step 2: the repository's global
     // currentDirectory was removed; the workdir is persisted in
@@ -129,7 +146,9 @@ internal fun applySavedSettings(
     // leaves isConnecting at the ConnectionState default of false.
     val connectionPhase = if (profiles.isNotEmpty()) ConnectionPhase.Reconnecting else ConnectionPhase.Idle
     val isConnecting = connectionPhase is ConnectionPhase.Reconnecting
-    slices.mutateConnection { it.copy(connectionPhase = connectionPhase, isConnecting = isConnecting) }
+    slices.mutateConnection {
+        it.copy(connectionPhase = connectionPhase, isConnecting = isConnecting, mtlsDegradedError = mtlsDegradedError)
+    }
 }
 
 /**

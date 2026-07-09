@@ -4,6 +4,8 @@ import cn.vectory.ocdroid.data.model.ConfigProvider
 import cn.vectory.ocdroid.data.model.ProviderModel
 import cn.vectory.ocdroid.data.model.ProvidersResponse
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
@@ -137,5 +139,42 @@ class ModelCatalogCountsTest {
         )
         assertEquals(1, disabled)
         assertEquals(2, total)
+    }
+
+    // ── providerAllModelsEnabled (§provider-bulk-toggle) ──
+    // Locks the Switch's checked-state semantics: true ⟺ every one of the
+    // provider's `"${provider.id}/$modelId"` keys is absent from
+    // disabledModels. Mirrors the same key-format invariant as the
+    // modelCatalogCounts tests above.
+
+    @Test
+    fun `providerAllModelsEnabled returns true when all models enabled`() {
+        val p = provider("p1", "m1" to "M1", "m2" to "M2")
+        assertTrue(providerAllModelsEnabled(p, disabledModels = emptySet()))
+    }
+
+    @Test
+    fun `providerAllModelsEnabled returns false when all models disabled`() {
+        val p = provider("p1", "m1" to "M1", "m2" to "M2")
+        assertFalse(
+            providerAllModelsEnabled(p, disabledModels = setOf("p1/m1", "p1/m2"))
+        )
+    }
+
+    @Test
+    fun `providerAllModelsEnabled returns false when only some models disabled`() {
+        val p = provider("p1", "m1" to "M1", "m2" to "M2", "m3" to "M3")
+        // Partial disable (m2 disabled, m1/m3 enabled) → not "all enabled".
+        assertFalse(providerAllModelsEnabled(p, disabledModels = setOf("p1/m2")))
+    }
+
+    @Test
+    fun `providerAllModelsEnabled returns true for provider with no models`() {
+        // Boundary: a provider with zero models trivially satisfies "all
+        // enabled" (vacuous truth) → Switch shows checked. Matches the
+        // ProviderBlock contract (though ProviderBlock is only rendered for
+        // providers with non-empty models, the pure function is total).
+        val p = ConfigProvider(id = "empty", name = "empty", models = emptyMap())
+        assertTrue(providerAllModelsEnabled(p, disabledModels = emptySet()))
     }
 }

@@ -6,6 +6,9 @@ import cn.vectory.ocdroid.data.model.BasicAuthConfig
 import cn.vectory.ocdroid.data.model.HostProfile
 import cn.vectory.ocdroid.data.repository.HostProfileStore
 import cn.vectory.ocdroid.data.repository.OpenCodeRepository
+import cn.vectory.ocdroid.data.repository.http.ClientCertMaterial
+import cn.vectory.ocdroid.data.repository.http.SslConfig
+import cn.vectory.ocdroid.data.repository.http.SslConfigFactory
 import cn.vectory.ocdroid.ui.ChatState
 import cn.vectory.ocdroid.ui.ComposerState
 import cn.vectory.ocdroid.ui.ConnectionPhase
@@ -20,6 +23,8 @@ import cn.vectory.ocdroid.ui.TrafficState
 import cn.vectory.ocdroid.ui.TunnelActivationState
 import cn.vectory.ocdroid.ui.UiEvent
 import cn.vectory.ocdroid.ui.UnreadState
+import cn.vectory.ocdroid.ui.settings.CaStage
+import cn.vectory.ocdroid.ui.settings.ClientCertEditIntent
 import cn.vectory.ocdroid.ui.util.HttpImageHolder
 import cn.vectory.ocdroid.util.SettingsManager
 import cn.vectory.ocdroid.util.TrafficTracker
@@ -34,14 +39,18 @@ import kotlinx.coroutines.flow.toList
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.TestScope
 import kotlinx.coroutines.test.UnconfinedTestDispatcher
+import okhttp3.tls.HeldCertificate
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
+import java.io.ByteArrayOutputStream
+import java.security.KeyStore
 
 /**
  * R-16 M3 → R-17 batch3b: independent unit test for [HostProfileController].
@@ -105,6 +114,13 @@ class HostProfileControllerTest {
         serverGroupFp = "g-B"
     )
 
+    /**
+     * §2.6: 用来在 trust-all host 场景下 stub `repository.currentSslConfig()` →
+     * `SslConfigFactory.sslConfigFor(true)`，使 HttpImageHolder.updateSsl 收到 TrustAll
+     * （生产里 currentSslConfig 反映 host 的 allowInsecure；mock 里需显式给）。
+     */
+    private val sslConfigFactory = SslConfigFactory()
+
     @Before
     fun setUp() {
         // HostProfileController.activateTunnelForCurrentHost calls Log.d/Log.e.
@@ -116,6 +132,10 @@ class HostProfileControllerTest {
         slices = stateStore.slices
         store = mockk(relaxed = true)
         repository = mockk(relaxed = true)
+        // §2.5(a/b): configureRepositoryForProfile / configureServer 现调
+        // repository.currentSslConfig() → HttpImageHolder.updateSsl(...)。relaxed
+        // mock 无法为 sealed SslConfig 自动造实例，显式 stub 成 SystemDefault。
+        every { repository.currentSslConfig() } returns SslConfig.SystemDefault
         settingsManager = mockk(relaxed = true)
         trafficTracker = mockk(relaxed = true)
         effects = SharedEffectBus()
@@ -385,6 +405,9 @@ class HostProfileControllerTest {
         // without needing a host switch or app restart.
         seed { it.copy(currentHostProfileId = "p-A") }
         val toggled = profileA.copy(allowInsecureConnections = true)
+        // §2.6: 生产里 currentSslConfig() 会随 host allowInsecure=true 返回 TrustAll；
+        // mock 需显式 stub（覆盖 setUp 的 SystemDefault 默认）。
+        every { repository.currentSslConfig() } returns sslConfigFactory.sslConfigFor(true)
 
         controller.saveHostProfile(toggled, basicAuthEdited = false)
 
@@ -395,7 +418,8 @@ class HostProfileControllerTest {
         // configureRepositoryForProfile cancels SSE once.
         assertEquals(1, collectedEffects.filterIsInstance<ControllerEffect.CancelSseForReconfigure>().size)
         // #12: image client 的 TLS 信任策略也同步切到 trust-all（与 REST/SSE 对称）。
-        assertEquals(true, HttpImageHolder.lastUpdateSslAllowInsecure)
+        // §2.6: 钩子字段由 lastUpdateSslAllowInsecure(Boolean?) 改为 lastUpdateSslMode(String?)。
+        assertEquals("TRUST_ALL", HttpImageHolder.lastUpdateSslMode)
     }
 
     @Test
@@ -447,7 +471,7 @@ class HostProfileControllerTest {
         assertEquals(1, collectedEffects.filterIsInstance<ControllerEffect.ForceReconnect>().size)
         assertEquals(1, collectedEffects.filterIsInstance<ControllerEffect.CancelSseForReconfigure>().size)
         // #12: image client 信任策略同步切回 system trust。
-        assertEquals(false, HttpImageHolder.lastUpdateSslAllowInsecure)
+        assertEquals("SYSTEM", HttpImageHolder.lastUpdateSslMode)
     }
 
     @Test
@@ -465,7 +489,7 @@ class HostProfileControllerTest {
         assertTrue(collectedEffects.filterIsInstance<ControllerEffect.ForceReconnect>().isEmpty())
         assertTrue(collectedEffects.filterIsInstance<ControllerEffect.CancelSseForReconfigure>().isEmpty())
         // 未走 configureRepositoryForProfile → updateSsl 不应被调用（钩子保持 null）。
-        assertNull(HttpImageHolder.lastUpdateSslAllowInsecure)
+        assertNull(HttpImageHolder.lastUpdateSslMode)
     }
 
     // ── #12: HttpImageHolder.updateSsl sync verification ───────────────────
@@ -477,11 +501,13 @@ class HostProfileControllerTest {
         // 保证自签名 HTTPS markdown 图片在 trust-all toggle ON 时可加载。
         every { store.select("p-B") } returns profileB
         every { settingsManager.basicAuthPassword("p-B") } returns "secret-b"
+        // §2.6: profileB allowInsecure=true → currentSslConfig() 返回 TrustAll。
+        every { repository.currentSslConfig() } returns sslConfigFactory.sslConfigFor(true)
 
         controller.selectHostProfile("p-B")
         runPending()
 
-        assertEquals(true, HttpImageHolder.lastUpdateSslAllowInsecure)
+        assertEquals("TRUST_ALL", HttpImageHolder.lastUpdateSslMode)
     }
 
     // ── duplicateHostProfile ───────────────────────────────────────────────
@@ -722,6 +748,8 @@ class HostProfileControllerTest {
     fun `configureServer cancels SSE, writes settings, and configures repository with current profile allowInsecure`() {
         // currentHostProfile() returns profileB (allowInsecure=true).
         every { store.currentProfile() } returns profileB
+        // §2.6: profileB allowInsecure=true → currentSslConfig() 返回 TrustAll。
+        every { repository.currentSslConfig() } returns sslConfigFactory.sslConfigFor(true)
 
         controller.configureServer("http://manual:4096", "mu", "mp")
 
@@ -731,7 +759,7 @@ class HostProfileControllerTest {
         verify { settingsManager.password = "mp" }
         verify { repository.configure("http://manual:4096", "mu", "mp", profileB.allowInsecureConnections) }
         // #12: configureServer 也把信任策略同步给 image client（与 REST/SSE 对称）。
-        assertEquals(true, HttpImageHolder.lastUpdateSslAllowInsecure)
+        assertEquals("TRUST_ALL", HttpImageHolder.lastUpdateSslMode)
     }
 
     @Test
@@ -1060,7 +1088,7 @@ class HostProfileControllerTest {
         assertTrue("HostProfileSwitched must NOT fire on unchanged URL",
             collectedEffects.filterIsInstance<ControllerEffect.HostProfileSwitched>().isEmpty())
         // #12: image client trust policy still synced (mirrors REST/SSE).
-        assertEquals(false, HttpImageHolder.lastUpdateSslAllowInsecure)
+        assertEquals("SYSTEM", HttpImageHolder.lastUpdateSslMode)
     }
 
     // ── RecordingHostProfileCallbacks (removed in batch 3b) ───────────────
@@ -1136,5 +1164,190 @@ class HostProfileControllerTest {
             collectedEffects.filterIsInstance<ControllerEffect.EvictGroup>().size,
         )
         assertEquals("g-A", collectedEffects.filterIsInstance<ControllerEffect.EvictGroup>().single().serverGroupFp)
+    }
+
+    // ── §fix-3 gro-1/gpt-2/glm-2: saveHostProfile mTLS live-reconfigure ──────
+
+    /**
+     * §fix-3: 构造一个有效的 PKCS12 字节（HeldCertificate 自签 CA + 签发的 client key
+     * + 证书链）。用于 mTLS save 用例的真实 stagedP12（applyClientCertSave 会试构建
+     * buildMutualTlsConfig，需有效 p12 才不抛）。
+     */
+    private fun buildValidP12(password: String = "p12pw"): ByteArray {
+        val ca = HeldCertificate.Builder().commonName("test-ca").build()
+        val client = HeldCertificate.Builder().commonName("test-client").signedBy(ca).build()
+        val ks = KeyStore.getInstance("PKCS12").apply { load(null, null) }
+        ks.setKeyEntry(
+            "client", client.keyPair.private, password.toCharArray(),
+            arrayOf(client.certificate, ca.certificate),
+        )
+        val baos = ByteArrayOutputStream()
+        ks.store(baos, password.toCharArray())
+        return baos.toByteArray()
+    }
+
+    @Test
+    fun `saveHostProfile active host enabling mTLS reconfigures and force-reconnects`() {
+        // ① active host 开 mTLS（save，带有效 stagedP12）→ reconfigure + ForceReconnect。
+        seed { it.copy(currentHostProfileId = "p-A") }
+        val p12 = buildValidP12()
+
+        controller.saveHostProfile(
+            profileA,
+            basicAuthEdited = false,
+            clientCertEdit = ClientCertEditIntent.Update(
+                stagedP12 = p12, caStage = CaStage.Unchanged,
+                p12Password = "p12pw", p12PasswordEdited = true, hasImportedP12 = true,
+            ),
+        )
+        scope.testScheduler.advanceUntilIdle()
+
+        // 试构建通过 → saveClientCert 被调；mtlsEnabled false→true → mtlsChanged → reconfigure。
+        verify { settingsManager.saveClientCert(any(), p12, any(), any()) }
+        assertEquals(1, collectedEffects.filterIsInstance<ControllerEffect.ForceReconnect>().size)
+        // 纯 mTLS 变化（无 urlChanged）→ HostProfileSwitched 不发。
+        assertTrue(collectedEffects.filterIsInstance<ControllerEffect.HostProfileSwitched>().isEmpty())
+    }
+
+    @Test
+    fun `saveHostProfile active host disabling mTLS reconfigures and clears ESP cert`() {
+        // ② 关 mTLS → reconfigure + 清 ESP（clearClientCert）。incoming profile 携带旧
+        // clientCertId（与生产 Dialog 一致：saved = initial.copy(...) 保留该字段），供
+        // Disable 分支清理。
+        val mtlsProfile = profileA.copy(mtlsEnabled = true, clientCertId = "cert-old")
+        seedStore(listOf(mtlsProfile, profileB), currentId = "p-A")
+        seed { it.copy(currentHostProfileId = "p-A") }
+
+        controller.saveHostProfile(
+            mtlsProfile,  // 携带 cert-old（Disable 据此清理）
+            basicAuthEdited = false,
+            clientCertEdit = ClientCertEditIntent.Disable,
+        )
+        scope.testScheduler.advanceUntilIdle()
+
+        verify { settingsManager.clearClientCert("cert-old") }
+        assertEquals(1, collectedEffects.filterIsInstance<ControllerEffect.ForceReconnect>().size)
+    }
+
+    @Test
+    fun `saveHostProfile active host keeping mTLS but re-importing p12 reconfigures via material edit signal`() {
+        // ③ 保持启用换 p12（stagedP12!=null）→ reconfigure（mtlsMaterialEdited 触发，
+        // **非靠 clientCertId**——oldId 复用，id 不变）。glm-2/max-1 S1 关键用例。
+        val mtlsProfile = profileA.copy(mtlsEnabled = true, clientCertId = "cert-stable")
+        seedStore(listOf(mtlsProfile, profileB), currentId = "p-A")
+        seed { it.copy(currentHostProfileId = "p-A") }
+        val newP12 = buildValidP12()
+
+        controller.saveHostProfile(
+            mtlsProfile,
+            basicAuthEdited = false,
+            clientCertEdit = ClientCertEditIntent.Update(
+                stagedP12 = newP12, caStage = CaStage.Unchanged,
+                p12Password = "p12pw", p12PasswordEdited = true, hasImportedP12 = true,
+            ),
+        )
+        scope.testScheduler.advanceUntilIdle()
+
+        // id 不变（原地覆盖），但材料变了 → reconfigure 必发。
+        verify { settingsManager.saveClientCert("cert-stable", newP12, any(), any()) }
+        assertEquals(
+            "material edit (re-import) triggers reconfigure even though clientCertId unchanged",
+            1, collectedEffects.filterIsInstance<ControllerEffect.ForceReconnect>().size,
+        )
+    }
+
+    @Test
+    fun `saveHostProfile mTLS enabled without p12 is rejected with IllegalArgumentException`() {
+        // ④ mTLS=true 无 p12 → 保存拒绝。
+        seed { it.copy(currentHostProfileId = "p-A") }
+
+        assertThrows(IllegalArgumentException::class.java) {
+            controller.saveHostProfile(
+                profileA, basicAuthEdited = false,
+                clientCertEdit = ClientCertEditIntent.Update(
+                    stagedP12 = null, caStage = CaStage.Unchanged,
+                    p12Password = null, p12PasswordEdited = false, hasImportedP12 = false,
+                ),
+            )
+        }
+    }
+
+    @Test
+    fun `saveHostProfile mTLS enabled with corrupt p12 is rejected`() {
+        // ⑤ mTLS=true p12 损坏 → 试构建失败 → 保存拒绝。
+        seed { it.copy(currentHostProfileId = "p-A") }
+
+        assertThrows(IllegalArgumentException::class.java) {
+            controller.saveHostProfile(
+                profileA, basicAuthEdited = false,
+                clientCertEdit = ClientCertEditIntent.Update(
+                    stagedP12 = ByteArray(32) { it.toByte() }, caStage = CaStage.Unchanged,
+                    p12Password = null, p12PasswordEdited = false, hasImportedP12 = true,
+                ),
+            )
+        }
+    }
+
+    @Test
+    fun `saveHostProfile non-active host mTLS change does NOT reconfigure live client`() {
+        // ⑥ 非 active host 改 mTLS → 不 reconfigure（仅持久化，切到时才生效）。
+        seed { it.copy(currentHostProfileId = "p-A") }  // p-B 非 active
+        val p12 = buildValidP12()
+
+        controller.saveHostProfile(
+            profileB,
+            basicAuthEdited = false,
+            clientCertEdit = ClientCertEditIntent.Update(
+                stagedP12 = p12, caStage = CaStage.Unchanged,
+                p12Password = "p12pw", p12PasswordEdited = true, hasImportedP12 = true,
+            ),
+        )
+        scope.testScheduler.advanceUntilIdle()
+
+        assertTrue(collectedEffects.filterIsInstance<ControllerEffect.ForceReconnect>().isEmpty())
+    }
+
+    @Test
+    fun `saveHostProfile default clientCertEdit Unchanged does NOT clear existing ESP cert`() {
+        // §fix-3 (gpt-2#3 阻断): 默认 Unchanged 不动 ESP——既有证书不被误清。
+        val mtlsProfile = profileA.copy(mtlsEnabled = true, clientCertId = "cert-keep")
+        seedStore(listOf(mtlsProfile, profileB), currentId = "p-A")
+        seed { it.copy(currentHostProfileId = "p-A") }
+
+        controller.saveHostProfile(mtlsProfile, basicAuthEdited = false)  // 默认 Unchanged
+        scope.testScheduler.advanceUntilIdle()
+
+        verify(exactly = 0) { settingsManager.clearClientCert(any()) }
+        // mTLS 字段未变 → 不 reconfigure。
+        assertTrue(collectedEffects.filterIsInstance<ControllerEffect.ForceReconnect>().isEmpty())
+    }
+
+    @Test
+    fun `configureRepositoryForProfile mtlsEnabled with missing cert emits degradation UiEvent`() {
+        // §fix-3 (gro-1#2/gpt-2#2): mTLS 开但 loadClientCertMaterial 返回 null → fail-loud。
+        val mtlsProfile = profileA.copy(mtlsEnabled = true, clientCertId = "cert-gone")
+        every { settingsManager.loadClientCertMaterial("cert-gone") } returns null
+        every { repository.lastClientCertError } returns null
+
+        controller.configureRepositoryForProfile(mtlsProfile)
+
+        // 降级 banner 写入 connection slice + UiEvent.Error 发出。
+        assertEquals("mTLS 已开启但客户端证书缺失", slices.connection.value.mtlsDegradedError)
+        assertEquals(1, recordedEvents.filterIsInstance<UiEvent.Error>().size)
+        assertEquals(R.string.host_mtls_missing_cert, recordedEvents.filterIsInstance<UiEvent.Error>().single().resId)
+    }
+
+    @Test
+    fun `configureRepositoryForProfile healthy mTLS clears degradation error`() {
+        // §fix-3: 材料 OK → mtlsDegradedError 被清空（null），不 emit。
+        val mtlsProfile = profileA.copy(mtlsEnabled = true, clientCertId = "cert-ok")
+        every { settingsManager.loadClientCertMaterial("cert-ok") } returns
+            ClientCertMaterial(buildValidP12(), "p12pw".toCharArray(), null)
+        every { repository.lastClientCertError } returns null
+
+        controller.configureRepositoryForProfile(mtlsProfile)
+
+        assertNull(slices.connection.value.mtlsDegradedError)
+        assertTrue(recordedEvents.filterIsInstance<UiEvent.Error>().isEmpty())
     }
 }

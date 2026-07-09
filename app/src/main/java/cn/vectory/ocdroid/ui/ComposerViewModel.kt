@@ -99,6 +99,23 @@ class ComposerViewModel @Inject constructor(
         }
     }
 
+    fun setProviderModelsEnabled(providerId: String, enabled: Boolean) {
+        // §provider-bulk-toggle: 一键启用/禁用某 provider 下全部 model。
+        // 复用 setDisabledModels 批量写入（一次 IO），避免 N 次增量写。
+        // 语义：enabled=true → 移除该 provider 所有 model 的 disabled 条目（全启用）；
+        //       enabled=false → 添加该 provider 所有 model 的 disabled 条目（全禁用）。
+        val fp = hostProfileStore.currentProfile().serverGroupFp.ifBlank { hostProfileStore.currentProfile().id }
+        val providers = store.settingsFlow.value.providers?.providers.orEmpty()
+        val provider = providers.firstOrNull { it.id == providerId } ?: return
+        val current = store.settingsFlow.value.disabledModels.toMutableSet()
+        provider.models.keys.forEach { mid ->
+            val key = "$providerId/$mid"
+            if (enabled) current.remove(key) else current.add(key)
+        }
+        settingsManager.setDisabledModels(fp, current)
+        store.mutateSettings { it.copy(disabledModels = current) }
+    }
+
     fun switchSessionModel(providerId: String, modelId: String) {
         // §R-17 batch3d: body moved verbatim from AppCore.
         // R-20 Phase 5: per-(fp, sessionId) composite key.

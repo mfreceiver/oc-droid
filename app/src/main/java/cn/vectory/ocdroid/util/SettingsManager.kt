@@ -7,12 +7,14 @@ import androidx.security.crypto.EncryptedSharedPreferences
 import androidx.security.crypto.MasterKey
 import cn.vectory.ocdroid.data.model.Message
 import cn.vectory.ocdroid.data.model.SessionCacheEntry
+import cn.vectory.ocdroid.data.repository.http.ClientCertMaterial
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
+import java.util.Base64
 import javax.inject.Inject
 import javax.inject.Singleton
 
@@ -84,6 +86,81 @@ class SettingsManager @Inject constructor(
 
     fun clearTunnelPassword(id: String) {
         encryptedPrefs.edit().remove(tunnelPasswordKey(id)).apply()
+    }
+
+    // ── §2.3: mTLS 客户端证书（PKCS12 / 密码 / CA）存取 ─────────────────────
+    //
+    // 三个分项 key（`client_cert_p12_<id>` / `client_cert_pw_<id>` /
+    // `client_cert_ca_<id>`）+ 一个原子批量写 [saveClientCert]。p12 / CA 走
+    // ByteArray + java.util.Base64（与 OpenCodeRepository 一致；JVM 可单测）。
+    // 密码用 `== null` 判清除（非 isNullOrBlank）——允许空串密码
+    // （openssl `-password pass:` 合法）。CA 用 ByteArray（PEM / DER 都二进制
+    // 安全；CertificateFactory 都吃）——readText() 对 DER 会坏。
+
+    fun getClientCertP12(id: String): ByteArray? =
+        encryptedPrefs.getString(clientCertP12Key(id), null)?.let { Base64.getDecoder().decode(it) }
+
+    fun setClientCertP12(id: String, bytes: ByteArray?) {
+        encryptedPrefs.edit().apply {
+            if (bytes == null) remove(clientCertP12Key(id))
+            else putString(clientCertP12Key(id), Base64.getEncoder().encodeToString(bytes))
+        }.apply()
+    }
+
+    /** 用 `== null` 判清除，允许空字符串密码（openssl `-password pass:` 合法）。 */
+    fun getClientCertPassword(id: String): String? =
+        encryptedPrefs.getString(clientCertPasswordKey(id), null)
+
+    fun setClientCertPassword(id: String, value: String?) {
+        encryptedPrefs.edit().apply {
+            if (value == null) remove(clientCertPasswordKey(id))
+            else putString(clientCertPasswordKey(id), value)
+        }.apply()
+    }
+
+    /** CA 用 ByteArray（PEM 或 DER 都二进制安全；CertificateFactory 都吃）。 */
+    fun getClientCertCa(id: String): ByteArray? =
+        encryptedPrefs.getString(clientCertCaKey(id), null)?.let { Base64.getDecoder().decode(it) }
+
+    fun setClientCertCa(id: String, bytes: ByteArray?) {
+        encryptedPrefs.edit().apply {
+            if (bytes == null) remove(clientCertCaKey(id))
+            else putString(clientCertCaKey(id), Base64.getEncoder().encodeToString(bytes))
+        }.apply()
+    }
+
+    fun clearClientCert(id: String) {
+        encryptedPrefs.edit()
+            .remove(clientCertP12Key(id))
+            .remove(clientCertPasswordKey(id))
+            .remove(clientCertCaKey(id))
+            .apply()
+    }
+
+    /**
+     * §2.3 / v3-gpter R2#2: 单次原子提交 p12 + 密码 + CA（三个独立 apply() 非原子，
+     * 崩溃 / 并发可半写 → 悬空引用）。null 表清除该项。
+     */
+    fun saveClientCert(id: String, p12: ByteArray?, password: String?, ca: ByteArray?) {
+        encryptedPrefs.edit().apply {
+            if (p12 == null) remove(clientCertP12Key(id))
+            else putString(clientCertP12Key(id), Base64.getEncoder().encodeToString(p12))
+            if (password == null) remove(clientCertPasswordKey(id))
+            else putString(clientCertPasswordKey(id), password)
+            if (ca == null) remove(clientCertCaKey(id))
+            else putString(clientCertCaKey(id), Base64.getEncoder().encodeToString(ca))
+        }.apply()
+    }
+
+    /**
+     * §2.3: 载入 [clientCertId] 对应的完整 [ClientCertMaterial]。p12 或 密码
+     * 缺失（null）→ 返回 null（空字符串密码 != null，能通过）。CA 缺失 →
+     * [ClientCertMaterial.caBytes] = null（平台 CA 模式）。
+     */
+    fun loadClientCertMaterial(clientCertId: String): ClientCertMaterial? {
+        val p12 = getClientCertP12(clientCertId) ?: return null
+        val pw = getClientCertPassword(clientCertId) ?: return null
+        return ClientCertMaterial(p12, pw.toCharArray(), getClientCertCa(clientCertId))
     }
 
     var currentSessionId: String?
@@ -725,6 +802,12 @@ class SettingsManager @Inject constructor(
      *    [HostProfile.basicAuth.passwordId]; wiping them would silently break
      *    every saved host's authentication on reconnect.
      *  - per-host tunnel passwords (`tunnel_password_*`)
+     *  - §2.3: per-host mTLS client certificates (`client_cert_p12_*` /
+     *    `client_cert_pw_*` / `client_cert_ca_*`) — same semantics as the
+     *    connection credentials: wiping them while `KEY_HOST_PROFILES` keeps
+     *    `mtlsEnabled=true/clientCertId=<id>` would leave a dangling reference
+     *    and mTLS would silently fail to present the cert (glmer I5 /
+     *    gpter 重要#6).
      *
      * WIPED: open tabs, session metadata cache, drafts, per-session agents,
      * per-session models, current session/workdir, nav page, theme + font
@@ -733,7 +816,8 @@ class SettingsManager @Inject constructor(
      * Implementation iterates the live key set and `.remove()`s each non-
      * preserved key in a single batched edit. This deliberately avoids
      * `.clear()` (which would also nuke the connection keys) and never touches
-     * the `basic_auth_password_*` / `tunnel_password_*` prefixes.
+     * the `basic_auth_password_*` / `tunnel_password_*` / `client_cert_*`
+     * prefixes.
      */
     fun clearAllLocalData() {
         val connectionKeys = setOf(
@@ -753,7 +837,10 @@ class SettingsManager @Inject constructor(
         for (k in encryptedPrefs.all.keys) {
             val preserved = k in preservedKeys ||
                 k.startsWith("basic_auth_password_") ||
-                k.startsWith("tunnel_password_")
+                k.startsWith("tunnel_password_") ||
+                k.startsWith("client_cert_p12_") ||
+                k.startsWith("client_cert_pw_") ||
+                k.startsWith("client_cert_ca_")
             if (!preserved) e.remove(k)
         }
         e.apply()
@@ -823,6 +910,11 @@ class SettingsManager @Inject constructor(
 
         private fun basicAuthPasswordKey(passwordId: String): String = "basic_auth_password_$passwordId"
         private fun tunnelPasswordKey(id: String): String = "tunnel_password_$id"
+
+        // §2.3: mTLS 客户端证书 key 后缀（与 basic_auth_password_ / tunnel_password_ 同构）。
+        private fun clientCertP12Key(id: String): String = "client_cert_p12_$id"
+        private fun clientCertPasswordKey(id: String): String = "client_cert_pw_$id"
+        private fun clientCertCaKey(id: String): String = "client_cert_ca_$id"
 
         /**
          * R-20 Phase 3: storage key for [getLastSweepEpochDay] /

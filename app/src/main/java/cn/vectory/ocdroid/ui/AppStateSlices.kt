@@ -73,7 +73,16 @@ data class ConnectionState(
     val isConnecting: Boolean = false,
     val serverVersion: String? = null,
     val connectionPhase: ConnectionPhase = ConnectionPhase.Idle,
-    val tunnelActivationState: TunnelActivationState = TunnelActivationState.Idle
+    val tunnelActivationState: TunnelActivationState = TunnelActivationState.Idle,
+    /**
+     * §fix-3 (gro-1#2/gpt-2#2/max-1 M1): 非 null = 当前 host 的 mTLS 已开启但客户端
+     * 证书材料缺失（ESP 无 p12/pw key）或损坏（试构建失败，见
+     * [cn.vectory.ocdroid.data.repository.OpenCodeRepository.lastClientCertError]）。
+     * 此时 SSL 已降级回 SystemDefault → stunnel 会拒连。显示本字段为红色 banner，让
+     * 用户看到「证书加载失败」而非泛化「连接失败」。null = 无 mTLS 降级。每次
+     * configure（切 host / 冷启 / 保存）重置。
+     */
+    val mtlsDegradedError: String? = null
 )
 
 /**

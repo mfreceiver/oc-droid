@@ -237,6 +237,9 @@ fun SettingsScreen(
                 disabledModels = disabledModels,
                 onToggleModelDisabled = { providerId, modelId ->
                     composerVM.toggleModelDisabled(providerId, modelId)
+                },
+                onSetProviderModelsEnabled = { providerId, enabled ->
+                    composerVM.setProviderModelsEnabled(providerId, enabled)
                 }
             )
 

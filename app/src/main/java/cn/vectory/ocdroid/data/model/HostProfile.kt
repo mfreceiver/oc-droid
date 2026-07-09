@@ -56,6 +56,26 @@ data class HostProfile(
      */
     @SerialName("allowInsecureConnections")
     val allowInsecureConnections: Boolean = false,
+    /**
+     * §2.2: 开启后所有客户端 TLS 握手出示 [clientCertId] 对应的 PKCS12。
+     * 与 [allowInsecureConnections] 效果互斥（mTLS 优先；UI 开 mTLS 时强制
+     * 重置 allowInsecure=false，防日后关 mTLS 时静默降级 trust-all）。
+     *
+     * 向后兼容：旧 JSON 无此字段 → false（默认值）。
+     */
+    @SerialName("mtlsEnabled")
+    val mtlsEnabled: Boolean = false,
+    /**
+     * §2.2: 客户端 PKCS12（+密码+可选 CA）在 EncryptedSharedPreferences 的
+     * key 后缀（`client_cert_p12_<id>` / `client_cert_pw_<id>` /
+     * `client_cert_ca_<id>`）。null ⇒ 无材料。
+     *
+     * **绝不随导出 payload 离开设备**（[HostProfileExportPayload.from] /
+     * [HostProfileImportPayload] 均不复制本字段 + [mtlsEnabled]）。
+     * 向后兼容：旧 JSON 无此字段 → null（默认值）。
+     */
+    @SerialName("clientCertId")
+    val clientCertId: String? = null,
     val lastUsedAt: Long? = null
 ) {
     val displayName: String

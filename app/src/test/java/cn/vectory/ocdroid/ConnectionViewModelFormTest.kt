@@ -1,6 +1,7 @@
 package cn.vectory.ocdroid
 
 import cn.vectory.ocdroid.data.model.HealthResponse
+import cn.vectory.ocdroid.data.repository.http.ClientCertMaterial
 import cn.vectory.ocdroid.ui.ConnectionViewModel
 import io.mockk.coEvery
 import io.mockk.coVerify
@@ -8,10 +9,14 @@ import io.mockk.every
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.test.advanceUntilIdle
 import kotlinx.coroutines.test.runTest
+import okhttp3.tls.HeldCertificate
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import java.io.ByteArrayOutputStream
+import java.security.KeyStore
 
 /**
  * R18 Phase 5++ coverage: [ConnectionViewModel.testConnectionForm] — the
@@ -186,6 +191,70 @@ class ConnectionViewModelFormTest : MainViewModelTestBase() {
         assertEquals(true, result!!.first)
         // The repository MUST have been called with the stored-pw, not null.
         coVerify { repository.checkHealthFor(any(), any(), eq("stored-pw"), any()) }
+    }
+
+    // ── §fix-3 mTLS test-connection path ──────────────────────────────────────
+
+    private fun buildValidP12(password: String = "p12pw"): ByteArray {
+        val ca = HeldCertificate.Builder().commonName("test-ca").build()
+        val client = HeldCertificate.Builder().commonName("test-client").signedBy(ca).build()
+        val ks = KeyStore.getInstance("PKCS12").apply { load(null, null) }
+        ks.setKeyEntry(
+            "client", client.keyPair.private, password.toCharArray(),
+            arrayOf(client.certificate, ca.certificate),
+        )
+        val baos = ByteArrayOutputStream()
+        ks.store(baos, password.toCharArray())
+        return baos.toByteArray()
+    }
+
+    @Test
+    fun `testConnectionForm mTLS enabled with stagedP12 probes with a client cert`() = runTest {
+        // §fix-3: mTLS 开 + 有效 stagedP12 → resolveClientCert 构造 ClientCertMaterial →
+        // checkHealthFor 5-arg 带 clientCert（走 resolveProbe，不污染 held mTLS）。
+        val p12 = buildValidP12()
+        // 5-arg stub（仅此 mTLS 用例用 5-arg；既有 4-arg stub 不动）。
+        coEvery {
+            repository.checkHealthFor(any(), any(), any(), any(), any<ClientCertMaterial>())
+        } returns Result.success(HealthResponse(healthy = true, version = "1.0"))
+
+        val core = createCore()
+        val vm = ConnectionViewModel(core)
+        var result: Pair<Boolean, String>? = null
+
+        vm.testConnectionForm(
+            baseUrl = "http://x", username = null, password = null, allowInsecure = false,
+            profileId = null, passwordEdited = false,
+            mtlsEnabled = true, stagedP12 = p12, hasImportedP12 = true,
+            caStage = cn.vectory.ocdroid.ui.settings.CaStage.Unchanged,
+            p12Password = "p12pw", p12PasswordEdited = true, clientCertId = null,
+        ) { ok, msg -> result = ok to msg }
+        advanceUntilIdle()
+
+        assertEquals(true, result!!.first)
+        coVerify { repository.checkHealthFor(any(), any(), any(), any(), any<ClientCertMaterial>()) }
+    }
+
+    @Test
+    fun `testConnectionForm mTLS enabled without cert fail-fasts without probing`() = runTest {
+        // §fix-3 (gpt-2#1): mTLS 开但无证 → onResult(false) 立即返回，不调 checkHealthFor。
+        val core = createCore()
+        val vm = ConnectionViewModel(core)
+        var result: Pair<Boolean, String>? = null
+
+        vm.testConnectionForm(
+            baseUrl = "http://x", username = null, password = null, allowInsecure = false,
+            profileId = null, passwordEdited = false,
+            mtlsEnabled = true, stagedP12 = null, hasImportedP12 = false,
+            caStage = cn.vectory.ocdroid.ui.settings.CaStage.Unchanged,
+            p12Password = null, p12PasswordEdited = false, clientCertId = null,
+        ) { ok, msg -> result = ok to msg }
+        advanceUntilIdle()
+
+        assertNotNull(result)
+        assertEquals(false, result!!.first)
+        assertTrue(result!!.second.contains("mTLS"))
+        coVerify(exactly = 0) { repository.checkHealthFor(any(), any(), any(), any(), any()) }
     }
 
     // ── Traffic helpers ──────────────────────────────────────────────────────

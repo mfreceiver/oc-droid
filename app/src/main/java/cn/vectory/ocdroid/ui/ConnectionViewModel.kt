@@ -3,7 +3,12 @@ package cn.vectory.ocdroid.ui
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import cn.vectory.ocdroid.data.repository.OpenCodeRepository
+import cn.vectory.ocdroid.data.repository.http.ClientCertMaterial
+import cn.vectory.ocdroid.data.repository.http.buildMutualTlsConfig
 import cn.vectory.ocdroid.ui.controller.ConnectionCoordinator
+import cn.vectory.ocdroid.ui.settings.CaStage
+import cn.vectory.ocdroid.ui.settings.resolveClientCert
+import cn.vectory.ocdroid.ui.settings.toMaterial
 import cn.vectory.ocdroid.util.SettingsManager
 import cn.vectory.ocdroid.util.TrafficTracker
 import dagger.hilt.android.lifecycle.HiltViewModel
@@ -78,18 +83,78 @@ class ConnectionViewModel @Inject constructor(
         profileId: String?,
         passwordEdited: Boolean,
         onResult: (success: Boolean, message: String) -> Unit,
+    ) = testConnectionForm(
+        baseUrl, username, password, allowInsecure, profileId, passwordEdited,
+        // §2.7 默认无 mTLS（兼容既有 7-arg 调用方 / 旧测试）：
+        mtlsEnabled = false, stagedP12 = null, hasImportedP12 = false,
+        caStage = CaStage.Unchanged, p12Password = null, p12PasswordEdited = false,
+        clientCertId = null, onResult = onResult,
+    )
+
+    /**
+     * §R-17 batch3d: body moved verbatim from AppCore.
+     * §R18 Phase 3 Wave 2 (drift #6 / P1-7): user-triggered "test
+     * connection" → viewModelScope. The closure captures the onResult
+     * callback (caller-supplied, never a VM `::ref`), so binding to
+     * viewModelScope cancels the health probe cleanly if the user
+     * navigates away mid-check.
+     *
+     * §2.7: mTLS 测试连接——由 [resolveClientCert] 把 Dialog 透传字段归一为生效
+     * 材料（mtlsEnabled 时），构造 [ClientCertMaterial] 传入 [checkHealthFor]。
+     * 走 [OpenCodeRepository.checkHealthFor] 的 `resolveProbe` 纯参数解析（不污染
+     * 当前 host 的 held mTLS 状态），否则 mTLS host 测试必被 stunnel 拒（gpter#3/
+     * glmer I6）。
+     */
+    fun testConnectionForm(
+        baseUrl: String,
+        username: String?,
+        password: String?,
+        allowInsecure: Boolean,
+        profileId: String?,
+        passwordEdited: Boolean,
+        mtlsEnabled: Boolean,
+        stagedP12: ByteArray?,
+        hasImportedP12: Boolean,
+        caStage: CaStage,
+        p12Password: String?,
+        p12PasswordEdited: Boolean,
+        clientCertId: String?,
+        onResult: (success: Boolean, message: String) -> Unit,
     ) {
-        // §R-17 batch3d: body moved verbatim from AppCore.
-        // §R18 Phase 3 Wave 2 (drift #6 / P1-7): user-triggered "test
-        // connection" → viewModelScope. The closure captures the onResult
-        // callback (caller-supplied, never a VM `::ref`), so binding to
-        // viewModelScope cancels the health probe cleanly if the user
-        // navigates away mid-check.
         viewModelScope.launch {
             val effectivePassword = resolveTestConnectionPassword(
                 password, passwordEdited, profileId,
             ) { settingsManager.basicAuthPassword(it) }
-            val result = repository.checkHealthFor(baseUrl, username, effectivePassword, allowInsecure)
+            // §2.7: 解析 mTLS 客户端证书材料（mtlsEnabled && 有 p12 时）。
+            val resolved = resolveClientCert(
+                mtlsEnabled = mtlsEnabled,
+                stagedP12 = stagedP12,
+                hasImportedP12 = hasImportedP12,
+                caStage = caStage,
+                p12Password = p12Password,
+                p12PasswordEdited = p12PasswordEdited,
+                oldId = clientCertId,
+                loadP12 = { settingsManager.getClientCertP12(it) },
+                loadPassword = { settingsManager.getClientCertPassword(it) },
+                loadCa = { settingsManager.getClientCertCa(it) },
+            )
+            // §fix-3 (gpt-2#1): mTLS 开但无证 → fail-fast，不发静默无证探测。
+            if (mtlsEnabled && resolved == null) {
+                onResult(false, "开启 mTLS 需先导入客户端证书")
+                return@launch
+            }
+            // §fix-3 (max-1 S3): CA Replace 空字节（读流失败/空文件）→ 试构建守卫。
+            val clientCert: ClientCertMaterial? = resolved?.toMaterial()
+            if (clientCert != null) {
+                val buildError = runCatching { buildMutualTlsConfig(clientCert) }.exceptionOrNull()
+                if (buildError != null) {
+                    onResult(false, "客户端证书无效：${buildError.message}")
+                    return@launch
+                }
+            }
+            val result = repository.checkHealthFor(
+                baseUrl, username, effectivePassword, allowInsecure, clientCert
+            )
             result
                 .onSuccess { health ->
                     if (health.healthy) {

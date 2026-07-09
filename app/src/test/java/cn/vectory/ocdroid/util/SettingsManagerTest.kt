@@ -3,6 +3,7 @@ package cn.vectory.ocdroid.util
 import android.app.Application
 import android.content.Context
 import androidx.test.core.app.ApplicationProvider
+import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
@@ -413,6 +414,10 @@ class SettingsManagerTest {
         settings.setBasicAuthPassword("h1", "ba-keep")
         settings.setBasicAuthPassword("h2", "ba-keep-2")
         settings.setTunnelPassword("t1", "tun-keep")
+        // §fix-3 (max-1 S4): mTLS 客户端证书材料（p12/pw/ca）也走保留白名单——
+        // 否则 clearAllLocalData 会删证书但 host_profiles_json 仍带 mtlsEnabled=true/
+        // clientCertId → 悬空引用、mTLS 静默失效。
+        settings.saveClientCert("c1", byteArrayOf(1, 2, 3), "cert-pw", byteArrayOf(7, 8))
 
         // ── 安置"应擦除"的数据 ──
         settings.currentSessionId = "sess-wipe"
@@ -441,6 +446,10 @@ class SettingsManagerTest {
         assertEquals("ba-keep", settings.basicAuthPassword("h1"))
         assertEquals("ba-keep-2", settings.basicAuthPassword("h2"))
         assertEquals("tun-keep", settings.getTunnelPassword("t1"))
+        // §fix-3 (max-1 S4): client_cert_* 三 key 保留（host_profiles_json 字段仍在）。
+        assertArrayEquals(byteArrayOf(1, 2, 3), settings.getClientCertP12("c1"))
+        assertEquals("cert-pw", settings.getClientCertPassword("c1"))
+        assertArrayEquals(byteArrayOf(7, 8), settings.getClientCertCa("c1"))
 
         // ── 断言"应擦除"已消失（回到默认值）──
         assertNull(settings.currentSessionId)

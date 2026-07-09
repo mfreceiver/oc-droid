@@ -11,9 +11,12 @@ import cn.vectory.ocdroid.data.repository.http.CacheControlInterceptor
 import cn.vectory.ocdroid.data.repository.http.CachePathSanitizer
 import cn.vectory.ocdroid.data.repository.http.DirectoryHeaderInterceptor
 import cn.vectory.ocdroid.data.repository.http.HttpHeaders
+import cn.vectory.ocdroid.data.repository.http.ClientCertMaterial
 import cn.vectory.ocdroid.data.repository.http.OkHttpClientFactory
 import cn.vectory.ocdroid.data.repository.http.ResponseSizeGuardInterceptor
+import cn.vectory.ocdroid.data.repository.http.SslConfig
 import cn.vectory.ocdroid.data.repository.http.SslConfigFactory
+import cn.vectory.ocdroid.data.repository.http.buildMutualTlsConfig
 import cn.vectory.ocdroid.data.repository.http.TrafficCountingInterceptor
 import cn.vectory.ocdroid.util.DebugLog
 import cn.vectory.ocdroid.util.TrafficLogger
@@ -89,8 +92,15 @@ class OpenCodeRepository @Inject constructor(
     private val cacheControlInterceptor = CacheControlInterceptor(hostConfig, cachePathSanitizer)
     private val trafficCountingInterceptor = TrafficCountingInterceptor(trafficTracker, trafficLogger)
     private val responseSizeGuardInterceptor = ResponseSizeGuardInterceptor()
+    // §2.4: 持有同一个 [SslConfigFactory] 实例——既给 clientFactory 构建 OkHttp client
+    // （live REST/SSE/command/tunnel），也供本类的 [configure]/[checkHealthFor]/
+    // [currentSslConfig] 解析 mTLS / allowInsecure。原先 inline `OkHttpClientFactory(
+    // SslConfigFactory(), ...)` 每次构造一个独立 factory，configure 时注入的客户端
+    // 证书无法被 healthClient(allowInsecure) 旧重载读到，也无法集中观测
+    // [SslConfigFactory.lastClientCertError]。
+    private val sslConfigFactory = SslConfigFactory()
     private val clientFactory = OkHttpClientFactory(
-        SslConfigFactory(),
+        sslConfigFactory,
         directoryHeaderInterceptor,
         authInterceptor,
         cacheControlInterceptor,
@@ -179,17 +189,53 @@ class OpenCodeRepository @Inject constructor(
      * downgraded to trust-all. Pass from the calling profile's
      * [HostProfile.allowInsecureConnections]; default false (system trust
      * store only).
+     *
+     * §2.4: [clientCert] is the optional mTLS client certificate material
+     * (PKCS12 + password + optional private CA). Loaded by the caller from
+     * EncryptedSharedPreferences via
+     * [cn.vectory.ocdroid.util.SettingsManager.loadClientCertMaterial] when
+     * the active profile has `mtlsEnabled=true`. Default null → no client
+     * cert (preserves source compatibility for pre-mTLS callers).
+     * `configureClientCert(null)` clears any previously-held material so
+     * switching from an mTLS profile to a plain profile stops presenting
+     * the cert (no residue). MUST run before [rebuildClients] so the rebuilt
+     * OkHttp clients pick up the new SSL config.
      */
     @Synchronized
     fun configure(
         baseUrl: String,
         username: String? = null,
         password: String? = null,
-        allowInsecureConnections: Boolean = false
+        allowInsecureConnections: Boolean = false,
+        clientCert: ClientCertMaterial? = null
     ) {
+        // §2.4: MUST precede hostConfig.configure / rebuildClients so the
+        // shared sslConfigFactory holds the new mTLS material when the live
+        // REST/SSE/command clients are rebuilt (they read sslConfigFor(...)).
+        sslConfigFactory.configureClientCert(clientCert)
         hostConfig.configure(baseUrl, username, password, allowInsecureConnections)
         rebuildClients()
     }
+
+    /**
+     * §2.4: the current effective [SslConfig] for the live host (mTLS priority
+     * over allowInsecure, SystemDefault safe fallback). Callers
+     * ([HttpImageHolder] / cold-start image sync) use this to mirror the same
+     * trust policy onto the markdown image client. `@Synchronized` because it
+     * reads the mutable [sslConfigFactory] state that [configure] writes under
+     * the same monitor (v3-glmer R2).
+     */
+    @Synchronized
+    fun currentSslConfig(): SslConfig = sslConfigFactory.sslConfigFor(hostConfig.allowInsecure)
+
+    /**
+     * §fix-3 (gro-1#2/gpt-2#2/max-1 M1): 转发 [SslConfigFactory.lastClientCertError]。
+     * 非空 = 最近一次 [configure] 注入的客户端证书材料试构建失败（p12 损坏 / CA 无法
+     * 解析）→ mTLS 已降级回 SystemDefault，profile 仍宣称 mtlsEnabled。controller/UI
+     * 据此显示「证书加载失败」而非泛化连接失败（防 fail-open 静默降级）。null = ok 或
+     * 未配置 mTLS。
+     */
+    val lastClientCertError: String? get() = sslConfigFactory.lastClientCertError
 
     // §R18 Phase 2-E step 2: the deprecated setCurrentDirectory /
     // getCurrentDirectory forwarding helpers were removed. Non-file routes
@@ -216,10 +262,16 @@ class OpenCodeRepository @Inject constructor(
         baseUrl: String,
         username: String? = null,
         password: String? = null,
-        allowInsecure: Boolean = false
+        allowInsecure: Boolean = false,
+        clientCert: ClientCertMaterial? = null
     ): Result<HealthResponse> = withContext(Dispatchers.IO) {
         runSuspendCatching {
-            val client = clientFactory.healthClient(allowInsecure)
+            // v3-gpter R2#1 阻断修复：用 [SslConfigFactory.resolveProbe] 纯参数解析
+            // （allowInsecure + clientCert），**禁止**用 sslConfigFor——后者会读 held
+            // mTLS 状态，于是测他 profile（clientCert=null）时会复用当前 mTLS profile
+            // 的缓存，误出示其客户端证书 / 只信其私有 CA，甚至泄漏客户端身份给无关 host。
+            val cfg: SslConfig = sslConfigFactory.resolveProbe(allowInsecure, clientCert)
+            val client = clientFactory.healthClient(cfg)
         val normalizedUrl = (if (baseUrl.startsWith("http")) baseUrl else "http://$baseUrl")
             .trimEnd('/') + "/global/health"
         val requestBuilder = Request.Builder()

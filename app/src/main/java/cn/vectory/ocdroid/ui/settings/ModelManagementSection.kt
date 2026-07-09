@@ -57,7 +57,8 @@ import cn.vectory.ocdroid.data.model.ProvidersResponse
 internal fun ModelManagementSection(
     providers: ProvidersResponse?,
     disabledModels: Set<String>,
-    onToggleModelDisabled: (providerId: String, modelId: String) -> Unit
+    onToggleModelDisabled: (providerId: String, modelId: String) -> Unit,
+    onSetProviderModelsEnabled: (providerId: String, enabled: Boolean) -> Unit
 ) {
     SectionHeader(title = stringResource(R.string.settings_model_management))
 
@@ -119,6 +120,7 @@ internal fun ModelManagementSection(
             providers = providers,
             disabledModels = disabledModels,
             onToggleModelDisabled = onToggleModelDisabled,
+            onSetProviderModelsEnabled = onSetProviderModelsEnabled,
             onDismiss = { showDialog = false }
         )
     }
@@ -129,6 +131,7 @@ private fun ModelManagementDialog(
     providers: ProvidersResponse?,
     disabledModels: Set<String>,
     onToggleModelDisabled: (providerId: String, modelId: String) -> Unit,
+    onSetProviderModelsEnabled: (providerId: String, enabled: Boolean) -> Unit,
     onDismiss: () -> Unit
 ) {
     val catalog = providers?.providers.orEmpty().filter { it.models.isNotEmpty() }
@@ -160,7 +163,8 @@ private fun ModelManagementDialog(
                     ProviderBlock(
                         provider = provider,
                         disabledModels = disabledModels,
-                        onToggleModelDisabled = onToggleModelDisabled
+                        onToggleModelDisabled = onToggleModelDisabled,
+                        onSetProviderModelsEnabled = onSetProviderModelsEnabled
                     )
                 }
             }
@@ -177,15 +181,29 @@ private fun ModelManagementDialog(
 private fun ProviderBlock(
     provider: ConfigProvider,
     disabledModels: Set<String>,
-    onToggleModelDisabled: (providerId: String, modelId: String) -> Unit
+    onToggleModelDisabled: (providerId: String, modelId: String) -> Unit,
+    onSetProviderModelsEnabled: (providerId: String, enabled: Boolean) -> Unit
 ) {
     Column {
-        Text(
-            provider.name?.takeIf { it.isNotEmpty() } ?: provider.id,
-            style = MaterialTheme.typography.titleSmall,
-            fontWeight = FontWeight.SemiBold,
-            color = MaterialTheme.colorScheme.onSurface
-        )
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(vertical = 4.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
+            Text(
+                provider.name?.takeIf { it.isNotEmpty() } ?: provider.id,
+                style = MaterialTheme.typography.titleSmall,
+                fontWeight = FontWeight.SemiBold,
+                color = MaterialTheme.colorScheme.onSurface,
+                modifier = Modifier.weight(1f)
+            )
+            Switch(
+                checked = providerAllModelsEnabled(provider, disabledModels),
+                onCheckedChange = { onSetProviderModelsEnabled(provider.id, it) }
+            )
+        }
         Spacer(modifier = Modifier.height(8.dp))
         provider.models.forEach { (modelId, model) ->
             ModelRow(
@@ -266,4 +284,20 @@ internal fun modelCatalogCounts(
         provider.models.count { (modelId, _) -> "${provider.id}/$modelId" in disabledModels }
     }
     return disabled to total
+}
+
+/**
+ * §provider-bulk-toggle: 该 provider 下是否"所有 model 都启用"。供
+ * [ProviderBlock] 标题行的 Switch 计算 checked 态。语义：当且仅当
+ * 该 provider 的每个 `"$providerId/$modelId"` 都不在 [disabledModels]
+ * 中时返回 true（全启用）。部分启用或全禁用均返回 false。
+ *
+ * 纯函数；可在无 Compose 的 JVM 单测中测试（与 [modelCatalogCounts] 同）。
+ * 保持了与 disabledModels 相同的 `"${provider.id}/$modelId"` key 格式不变式。
+ */
+internal fun providerAllModelsEnabled(
+    provider: ConfigProvider,
+    disabledModels: Set<String>
+): Boolean {
+    return provider.models.keys.all { modelId -> "${provider.id}/$modelId" !in disabledModels }
 }

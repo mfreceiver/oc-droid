@@ -110,7 +110,14 @@ class HostProfileStore @Inject constructor(
             id = newId,
             name = "${source.displayName} Copy",
             lastUsedAt = null,
-            serverGroupFp = newId
+            serverGroupFp = newId,
+            // §2.2/§2.7: 绝不继承源 profile 的 mTLS 客户端证书引用——clientCertId 是
+            // 源 profile 私有的 ESP key 后缀，复制后两个 profile 共享同一证书 id 会在
+            // 删除其一时 clearClientCert 把另一个也孤儿化。证书材料是设备本地敏感数据，
+            // 复制配置 ≠ 复制证书；用户需在新 profile 上重新导入 p12（与导出不带 mTLS
+            // 字段同语义）。
+            mtlsEnabled = false,
+            clientCertId = null
         )
         save(copy)
         return copy
