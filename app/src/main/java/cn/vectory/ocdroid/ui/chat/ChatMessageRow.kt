@@ -9,6 +9,8 @@ import androidx.compose.foundation.layout.widthIn
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.key
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.Dp
@@ -35,6 +37,10 @@ internal sealed class ToolRenderItem {
     data class SubAgent(val part: Part) : ToolRenderItem()
     data class WritePatch(val part: Part) : ToolRenderItem()
     data class Basic(val part: Part) : ToolRenderItem()
+    /** A reasoning part folded into the tool run (carries its streaming text, if any). */
+    data class ThinkingPart(val part: Part, val streamingText: String?) : ToolRenderItem()
+    /** A folded group of contiguous tool/patch/reasoning items (total parts ≥ 2). */
+    data class FoldedToolRun(val items: List<ToolRenderItem>) : ToolRenderItem()
 }
 
 @Composable
@@ -97,125 +103,99 @@ internal fun MessageRow(
             // §kimo-B4: isToolLike 入口不再要求 patch 带可导航路径——无路径/无扩展名
             // (Makefile 等) 或服务端未填路径的 patch 也要进入 run，由 PatchCard 的
             // 内容回退兜底（避免展开为空）。与 ToolCardClassifier.isWriteFileOperation 放宽一致。
-            val isToolLike = part.isTool || part.isPatch
+            val isToolLike = part.isTool || part.isPatch || part.isReasoning
             if (isToolLike) {
-                // Buffer a contiguous run of tool/patch parts, then classify and
-                // render each according to the opencode-web paradigm:
-                //  - todowrite → hidden (todos live in the toolbar panel)
-                //  - task → SubAgentCard (the only bordered card)
-                //  - context tools (read/glob/grep/list) → ContextToolGroup
-                //  - write file ops → PatchCard / MultiFilePatchAccordion
-                //  - everything else → BasicTool (borderless single line)
-                val run = mutableListOf<Part>()
-                var j = i
-                while (j < parts.size) {
-                    val p = parts[j]
-                    if (p.isTool || p.isPatch) {
-                        run.add(p)
-                        j++
-                    } else break
+                // §tool-fold refactor: run collection (F1 guard) and Phase 1
+                // classification are now pure functions in ToolCallFoldGrouper.kt
+                // (collectToolRun / classifyToolRun) so they are JVM-testable.
+                // The outer streaming-reasoning guard (L96-101) stays in
+                // MessageRow; collectToolRun handles parts inside the run.
+                val (run, nextIndex) = collectToolRun(parts, i, streamingReasoningPartId)
+                val items = classifyToolRun(run, streamingPartTexts, staleQuestionPartKeys)
+
+                // §tool-fold F12: group contiguous items into FoldedToolRuns
+                // (part-based threshold ≥ 2, SubAgent切段). Memoized on items
+                // content + streamingReasoningPartId so a recomposition that
+                // rebuilds the identical items list doesn't recompute grouping.
+                val groupedItems = remember(items, streamingReasoningPartId) {
+                    groupItemsIntoFoldedRuns(items)
                 }
 
-                // Phase 1: classify the run into ordered render items, buffering
-                // consecutive context tools (read/glob/grep/list) into a single
-                // ContextGroup. Pure data ops only — no @Composable calls — so a
-                // local helper fun is legal (a @Composable local fun is not).
-                val items = mutableListOf<ToolRenderItem>()
-                var ctxBuffer = mutableListOf<Part>()
-                fun closeContext() {
-                    if (ctxBuffer.isNotEmpty()) {
-                        items.add(ToolRenderItem.ContextGroup(ctxBuffer.toList()))
-                        ctxBuffer = mutableListOf()
-                    }
-                }
-                for (p in run) {
-                    when {
-                        // §P1 (question UI parity with web): hide running/pending
-                        // question tool parts — the interactive QuestionCardView
-                        // popup is the canonical UI for an active question,
-                        // matching opencode-web (message-part.tsx hideQuestion
-                        // filters pending/running question parts out of the
-                        // stream). STALE question parts (running with no live
-                        // pending match) are NOT hidden here — they fall through
-                        // to BasicTool's "Interrupted" rendering so the user
-                        // sees that the question genuinely failed/expired.
-                        p.isTool && p.tool?.lowercase() == "question" &&
-                            (p.stateDisplay == "running" || p.stateDisplay == "pending") &&
-                            p.id !in staleQuestionPartKeys -> { /* no-op: hidden */ }
-                        // Rule 1: todowrite → hidden (todos live in the toolbar panel)
-                        ToolCardClassifier.isTodoWriteTool(p) -> { /* no-op */ }
-                        // Rule 2: task (sub-agent) → SubAgentCard
-                        p.isSubAgentTask -> { closeContext(); items.add(ToolRenderItem.SubAgent(p)) }
-                        // Rule 3: context tools → buffer for grouping
-                        ToolCardClassifier.isContextTool(p) -> ctxBuffer.add(p)
-                        // Rule 6: write file ops → PatchCard / MultiFilePatchAccordion
-                        ToolCardClassifier.isWriteFileOperation(p) -> { closeContext(); items.add(ToolRenderItem.WritePatch(p)) }
-                        // Rules 4,5,7: bash/webfetch/websearch/other → BasicTool
-                        else -> { closeContext(); items.add(ToolRenderItem.Basic(p)) }
-                    }
-                }
-                closeContext()
-
-                // §tool-count: quiet one-line tally of the classified tool runs
-                // (e.g. "3 edits · 2 reads · 1 shell"). Placed where `items`
-                // is finalized (after closeContext) and above the detailed
-                // cards so the reader gets the summary first. The composable
-                // no-ops on empty, so pure-text messages (which never enter
-                // this branch) and all-hidden runs render nothing.
-                if (items.isNotEmpty()) {
+                // §tool-fold F4/F11: hide the ToolCountSummary while any fold
+                // segment is collapsed (avoids double-counting with the
+                // FoldBar). shouldShowToolSummary also suppresses a lone single
+                // ThinkingPart (keeps baseline — pure single-reasoning messages
+                // show no tally).
+                val hasActiveFold = computeHasActiveFold(groupedItems, expandedParts, message.id)
+                if (items.isNotEmpty() && !hasActiveFold && shouldShowToolSummary(items)) {
                     ToolCountSummary(
                         items = items,
                         modifier = Modifier.widthIn(max = cardMax)
                     )
                 }
 
-                // Phase 2: emit each item in @Composable context.
-                items.forEach { item ->
-                    when (item) {
-                        is ToolRenderItem.ContextGroup -> ContextToolGroup(
-                            parts = item.parts,
-                            expandedParts = expandedParts,
-                            onToggleExpand = onToggleExpand,
-                            messageId = message.id,
-                            modifier = Modifier.widthIn(max = cardMax)
-                        )
-                        is ToolRenderItem.SubAgent -> SubAgentCard(
-                            part = item.part,
-                            onOpenSubAgent = onOpenSubAgent,
-                            modifier = Modifier.widthIn(max = cardMax)
-                        )
-                        is ToolRenderItem.WritePatch -> {
-                            val writeFiles = item.part.files ?: emptyList()
-                            if (writeFiles.size > 1) {
-                                MultiFilePatchAccordion(
-                                    parts = listOf(item.part),
-                                    onFileClick = onFileClick,
-                                    modifier = Modifier.widthIn(max = cardMax)
-                                )
-                            } else {
-                                PatchCard(
-                                    part = item.part,
-                                    onFileClick = onFileClick,
-                                    expandedParts = expandedParts,
-                                    onToggleExpand = onToggleExpand,
-                                    expandedKey = "${message.id}|${item.part.id}",
-                                    modifier = Modifier.widthIn(max = cardMax)
-                                )
+                // Phase 2: emit each (possibly grouped) item in @Composable
+                // context. §tool-fold F2/F9.
+                groupedItems.forEach { item ->
+                    // §tool-fold F9: stable key prevents sub-item reshuffle
+                    // jitter when a fold expands/collapses.
+                    key(stableItemId(item, message.id)) {
+                        when (item) {
+                            is ToolRenderItem.FoldedToolRun -> {
+                                val foldKey = "${message.id}|fold|${firstPartId(item)}"
+                                if (expandedParts[foldKey] == true) {
+                                    // Expanded: render each sub-item natively
+                                    // (each with its own stable key).
+                                    item.items.forEach { sub ->
+                                        key(stableItemId(sub, message.id)) {
+                                            renderToolItem(
+                                                item = sub,
+                                                message = message,
+                                                expandedParts = expandedParts,
+                                                onToggleExpand = onToggleExpand,
+                                                onFileClick = onFileClick,
+                                                onOpenSubAgent = onOpenSubAgent,
+                                                staleQuestionPartKeys = staleQuestionPartKeys,
+                                                cardMax = cardMax
+                                            )
+                                        }
+                                    }
+                                } else {
+                                    ToolCallFoldBar(
+                                        counts = item.foldCounts(),
+                                        isRunning = foldIsRunning(item),
+                                        onToggleExpand = { onToggleExpand(foldKey, false) },
+                                        modifier = Modifier.widthIn(max = cardMax)
+                                    )
+                                }
                             }
+                            is ToolRenderItem.ThinkingPart -> ReasoningCard(
+                                text = item.streamingText ?: item.part.text ?: "",
+                                title = item.part.toolReason,
+                                isStreaming = false,
+                                expandedParts = expandedParts,
+                                onToggleExpand = onToggleExpand,
+                                expandedKey = "${message.id}|${item.part.id}",
+                                modifier = Modifier.widthIn(max = cardMax)
+                            )
+                            is ToolRenderItem.ContextGroup,
+                            is ToolRenderItem.SubAgent,
+                            is ToolRenderItem.WritePatch,
+                            is ToolRenderItem.Basic -> renderToolItem(
+                                item = item,
+                                message = message,
+                                expandedParts = expandedParts,
+                                onToggleExpand = onToggleExpand,
+                                onFileClick = onFileClick,
+                                onOpenSubAgent = onOpenSubAgent,
+                                staleQuestionPartKeys = staleQuestionPartKeys,
+                                cardMax = cardMax
+                            )
                         }
-                        is ToolRenderItem.Basic -> BasicTool(
-                            part = item.part,
-                            onFileClick = onFileClick,
-                            expandedParts = expandedParts,
-                            onToggleExpand = onToggleExpand,
-                            expandedKey = "${message.id}|${item.part.id}",
-                            isStale = item.part.id in staleQuestionPartKeys,
-                            modifier = Modifier.widthIn(max = cardMax)
-                        )
                     }
                 }
 
-                i = j
+                i = nextIndex
             } else {
                 PartView(
                     part = part,
@@ -338,15 +318,12 @@ internal fun PartView(
                 )
             }
         }
-        part.isReasoning -> ReasoningCard(
-            text = streamingTextOverride ?: part.text ?: "",
-            title = part.toolReason,
-            isStreaming = false,
-            expandedParts = expandedParts,
-            onToggleExpand = onToggleExpand,
-            expandedKey = expandKey,
-            modifier = Modifier.widthIn(max = cardMax)
-        )
+        // §tool-fold F7: the `part.isReasoning -> ReasoningCard(...)` branch
+        // that lived here is dead code — MessageRow's `isToolLike` now includes
+        // `isReasoning`, so every reasoning part (except the streaming one
+        // guarded at L92-95) is routed into the buffered tool run and rendered
+        // as a ThinkingPart. Removed to avoid silently resurrecting the old
+        // PartView path if a future reclassification lands here.
         part.isImageAttachment -> ImageFilePart(part, modifier)
         part.isFile -> FileAttachmentPart(part, modifier)
         part.isSubAgentTask -> SubAgentCard(
@@ -371,4 +348,92 @@ internal fun PartView(
         // future reclassification straight into the single-file PatchCard and
         // dropping the MultiFilePatchAccordion path for multi-file patches.
     }
+}
+
+// ── §tool-fold helpers ────────────────────────────────────────────────────
+
+/**
+ * §tool-fold 轻微项④: Renders a single non-fold [ToolRenderItem] (ContextGroup /
+ * SubAgent / WritePatch / Basic / ThinkingPart) with the enclosing message's
+ * context. Extracted from the old inline Phase 2 `when` body so a
+ * [ToolRenderItem.FoldedToolRun]'s expanded sub-items can reuse the exact same
+ * render path without duplicating the card wiring. [FoldedToolRun] itself is a
+ * defensive no-op (it is handled by the caller, never passed here in practice).
+ */
+@Composable
+private fun renderToolItem(
+    item: ToolRenderItem,
+    message: Message,
+    expandedParts: Map<String, Boolean>,
+    onToggleExpand: (String, Boolean) -> Unit,
+    onFileClick: (String) -> Unit,
+    onOpenSubAgent: (String) -> Unit,
+    staleQuestionPartKeys: Set<String>,
+    cardMax: Dp
+) {
+    when (item) {
+        is ToolRenderItem.ContextGroup -> ContextToolGroup(
+            parts = item.parts,
+            expandedParts = expandedParts,
+            onToggleExpand = onToggleExpand,
+            messageId = message.id,
+            modifier = Modifier.widthIn(max = cardMax)
+        )
+        is ToolRenderItem.SubAgent -> SubAgentCard(
+            part = item.part,
+            onOpenSubAgent = onOpenSubAgent,
+            modifier = Modifier.widthIn(max = cardMax)
+        )
+        is ToolRenderItem.WritePatch -> {
+            val writeFiles = item.part.files ?: emptyList()
+            if (writeFiles.size > 1) {
+                MultiFilePatchAccordion(
+                    parts = listOf(item.part),
+                    onFileClick = onFileClick,
+                    modifier = Modifier.widthIn(max = cardMax)
+                )
+            } else {
+                PatchCard(
+                    part = item.part,
+                    onFileClick = onFileClick,
+                    expandedParts = expandedParts,
+                    onToggleExpand = onToggleExpand,
+                    expandedKey = "${message.id}|${item.part.id}",
+                    modifier = Modifier.widthIn(max = cardMax)
+                )
+            }
+        }
+        is ToolRenderItem.Basic -> BasicTool(
+            part = item.part,
+            onFileClick = onFileClick,
+            expandedParts = expandedParts,
+            onToggleExpand = onToggleExpand,
+            expandedKey = "${message.id}|${item.part.id}",
+            isStale = item.part.id in staleQuestionPartKeys,
+            modifier = Modifier.widthIn(max = cardMax)
+        )
+        is ToolRenderItem.ThinkingPart -> ReasoningCard(
+            text = item.streamingText ?: item.part.text ?: "",
+            title = item.part.toolReason,
+            isStreaming = false,
+            expandedParts = expandedParts,
+            onToggleExpand = onToggleExpand,
+            expandedKey = "${message.id}|${item.part.id}",
+            modifier = Modifier.widthIn(max = cardMax)
+        )
+        is ToolRenderItem.FoldedToolRun -> { /* defensive no-op — handled by caller */ }
+    }
+}
+
+/**
+ * §tool-fold 轻微项②: Whether the per-message [ToolCountSummary] should show.
+ * Suppresses the tally for a lone single reasoning part (keeps baseline
+ * behavior — a pure single-thinking message renders no count line). Shows the
+ * tally when there is any non-THINKING category, or when there are ≥ 2
+ * thinking parts.
+ */
+internal fun shouldShowToolSummary(items: List<ToolRenderItem>): Boolean {
+    val entries = items.flatMap { it.categoryCounts().entries }
+    return entries.any { it.key != ToolCategory.THINKING } ||
+        entries.count { it.key == ToolCategory.THINKING } >= 2
 }

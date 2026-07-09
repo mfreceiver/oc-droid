@@ -233,6 +233,9 @@
     <plurals name="tool_count_web">
         <item quantity="other">%1$d 次网络</item>
     </plurals>
+    <plurals name="tool_count_thinking">
+        <item quantity="other">%1$d 次思考</item>
+    </plurals>
     <plurals name="tool_count_other">
         <item quantity="other">%1$d 个工具</item>
     </plurals>

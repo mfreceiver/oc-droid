@@ -162,22 +162,48 @@ object ToolCardClassifier {
 
 /**
  * User-facing category for a classified tool run, used by [ToolCountSummary]
- * to render a per-message tally. [categoryCounts] returns empty for items
- * excluded from the summary (e.g. sub-agent tasks, which render as their own
- * bordered card and would double-count the run).
+ * and [ToolCallFoldBar] to render a per-message tally / fold bar. The
+ * declaration order IS the display order (READS·EDITS·SHELL·WEB·THINKING·OTHER);
+ * use [TOOL_CATEGORY_DISPLAY_ORDER] for an explicit ordered list that does not
+ * depend on [Enum.values] (so the FoldBar and ToolCountSummary share one
+ * canonical sequence even if the enum is reordered).
+ *
+ * [categoryCounts] returns empty for items excluded from the summary (e.g.
+ * sub-agent tasks, which render as their own bordered card and would
+ * double-count the run).
  */
-internal enum class ToolCategory { EDITS, READS, SHELL, WEB, OTHER }
+internal enum class ToolCategory { READS, EDITS, SHELL, WEB, THINKING, OTHER }
+
+/**
+ * Explicit, ordered display sequence for [ToolCategory], shared by
+ * [ToolCallFoldBar] and [ToolCountSummaryText] so both render categories in the
+ * same stable order (READS·EDITS·SHELL·WEB·THINKING·OTHER). Decoupled from
+ * [ToolCategory.values] to keep the order robust against accidental enum
+ * reordering.
+ */
+internal val TOOL_CATEGORY_DISPLAY_ORDER: List<ToolCategory> = listOf(
+    ToolCategory.READS,
+    ToolCategory.EDITS,
+    ToolCategory.SHELL,
+    ToolCategory.WEB,
+    ToolCategory.THINKING,
+    ToolCategory.OTHER
+)
 
 /**
  * Per-category counts contributed by one classified tool run. A [ToolRenderItem.ContextGroup]
  * contributes one READS per part it contains (a group of read+grep+list = 3 reads); other
  * items contribute 1 to their category. [ToolRenderItem.SubAgent] contributes nothing (it
  * renders as its own bordered card and would double-count the run).
+ * [ToolRenderItem.ThinkingPart] contributes one THINKING; [ToolRenderItem.FoldedToolRun]
+ * contributes nothing (its counts are aggregated via [foldCounts] at the fold level).
  */
 internal fun ToolRenderItem.categoryCounts(): Map<ToolCategory, Int> = when (this) {
     is ToolRenderItem.WritePatch -> mapOf(ToolCategory.EDITS to 1)
     is ToolRenderItem.ContextGroup -> mapOf(ToolCategory.READS to parts.size)
     is ToolRenderItem.SubAgent -> emptyMap()
+    is ToolRenderItem.ThinkingPart -> mapOf(ToolCategory.THINKING to 1)
+    is ToolRenderItem.FoldedToolRun -> emptyMap()
     is ToolRenderItem.Basic -> {
         val t = part.tool?.lowercase() ?: ""
         val cat = when {

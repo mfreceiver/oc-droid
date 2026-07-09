@@ -240,6 +240,10 @@
         <item quantity="one">%1$d web request</item>
         <item quantity="other">%1$d web requests</item>
     </plurals>
+    <plurals name="tool_count_thinking">
+        <item quantity="one">%1$d thought</item>
+        <item quantity="other">%1$d thoughts</item>
+    </plurals>
     <plurals name="tool_count_other">
         <item quantity="one">%1$d tool</item>
         <item quantity="other">%1$d tools</item>
