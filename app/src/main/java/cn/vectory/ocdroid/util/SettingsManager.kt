@@ -8,6 +8,9 @@ import androidx.security.crypto.MasterKey
 import cn.vectory.ocdroid.data.model.Message
 import cn.vectory.ocdroid.data.model.SessionCacheEntry
 import dagger.hilt.android.qualifiers.ApplicationContext
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 import javax.inject.Inject
@@ -28,6 +31,15 @@ class SettingsManager @Inject constructor(
         EncryptedSharedPreferences.PrefKeyEncryptionScheme.AES256_SIV,
         EncryptedSharedPreferences.PrefValueEncryptionScheme.AES256_GCM
     )
+
+    // §reactive-workdir: hot, observable mirror of [currentWorkdir]. Seeded from
+    // ESP at construction so cold-start collectors see the persisted value
+    // immediately (not null). Every setter write updates it; the only bypass is
+    // [clearAllLocalData] (batched direct removes), which re-syncs at its tail.
+    private val _currentWorkdirFlow = MutableStateFlow<String?>(
+        encryptedPrefs.getString(KEY_CURRENT_WORKDIR, null)
+    )
+    val currentWorkdirFlow: StateFlow<String?> = _currentWorkdirFlow.asStateFlow()
 
     var serverUrl: String
         get() = encryptedPrefs.getString(KEY_SERVER_URL, DEFAULT_SERVER) ?: DEFAULT_SERVER
@@ -95,7 +107,12 @@ class SettingsManager @Inject constructor(
      */
     var currentWorkdir: String?
         get() = encryptedPrefs.getString(KEY_CURRENT_WORKDIR, null)
-        set(value) = encryptedPrefs.edit().putString(KEY_CURRENT_WORKDIR, value).apply()
+        set(value) {
+            encryptedPrefs.edit().putString(KEY_CURRENT_WORKDIR, value).apply()
+            // §reactive-workdir: keep the flow mirror in sync so VcsSection (and
+            // any other collector) reacts to workdir changes without manual refresh.
+            _currentWorkdirFlow.value = value
+        }
 
     /**
      * R-20 Phase 5: the set of workdirs the user has recently connected to
@@ -740,6 +757,15 @@ class SettingsManager @Inject constructor(
             if (!preserved) e.remove(k)
         }
         e.apply()
+        // §reactive-workdir: clearAllLocalData bypasses the currentWorkdir setter
+        // (batched direct .remove()s), so re-sync the flow mirror. Assign null
+        // DIRECTLY (opuser🟠-3 / kimo 0.6.1 round-1): clearAllLocalData just
+        // .remove()d KEY_CURRENT_WORKDIR above (it is not in preservedKeys), so
+        // the post-wipe ESP value is GUARANTEED null by construction. Reading
+        // it back via ESP would re-introduce a theoretical race (a concurrent
+        // setter between the remove() above and the read here) for no benefit;
+        // the direct null assignment eliminates that window.
+        _currentWorkdirFlow.value = null
     }
 
     companion object {

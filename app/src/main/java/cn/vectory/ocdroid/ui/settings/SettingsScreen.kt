@@ -128,11 +128,13 @@ fun SettingsScreen(
         .collectAsStateWithLifecycle(initialValue = 1f)
     val traffic by connectionVM.trafficFlow.collectAsStateWithLifecycle()
     val connection by connectionVM.connectionFlow.collectAsStateWithLifecycle()
-    // §vcs-section: the active workdir (absolute path) for the read-only
-    // Working-directory / Git section. A plain read of the existing
-    // settingsManager.currentWorkdir field via the Settings VM — NOT routing
-    // VCS data through the VM (the fetch + state is fully local to VcsSection).
-    val workdir = settingsVM.currentWorkdir
+    // §reactive-workdir: the active workdir (absolute path) for the read-only
+    // Working-directory / Git section. Collected as State so VcsSection reacts
+    // to workdir changes (session switch / profile switch / disconnect) and its
+    // LaunchedEffect(workdir) re-fetches /vcs/status automatically — previously
+    // a plain snapshot read never recomposed, so the VCS panel went stale on
+    // workdir change. VCS fetch + state still lives entirely in VcsSection.
+    val workdir by settingsVM.currentWorkdirFlow.collectAsStateWithLifecycle()
     // §grouping-rewrite 项 2: group-stats counts for the connection-profile
     // stats line (drives the popup entry point).
     val groupProfileCount by settingsVM.activeGroupProfileCount.collectAsStateWithLifecycle()

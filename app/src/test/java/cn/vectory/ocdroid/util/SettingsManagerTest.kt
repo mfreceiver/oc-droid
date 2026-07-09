@@ -602,4 +602,48 @@ class SettingsManagerTest {
         settings.setLastSweepEpochDay("", 19_000L)
         assertNull("blank-fp write is a no-op", settings.getLastSweepEpochDay(""))
     }
+
+    // ───── §reactive-workdir: currentWorkdirFlow mirror (opuser🟠-5 / kimo 0.6.1 round-1) ─
+    // The StateFlow mirror of currentWorkdir backs VcsSection (and any future
+    // collector) so they react to workdir changes without a manual refresh.
+    // Contract: (1) seeded from ESP at construction (cold-start collectors see
+    // the persisted value, not null); (2) setter emits synchronously; (3)
+    // clearAllLocalData flips to null (Fix B: direct null assignment, not an
+    // ESP re-read — eliminates the theoretical race between the batched
+    // .remove() and a re-read). Direct .value assertions suffice (StateFlow is
+    // hot; no Turbine needed).
+
+    @Test
+    fun `currentWorkdirFlow seeds from ESP at construction`() {
+        // Start from a clean baseline so prior tests' ESP writes don't leak.
+        settings.clearAllLocalData()
+        settings.currentWorkdir = "/seeded"
+        // Reconstruct against the SAME ESP file (simulating cold start: a fresh
+        // SettingsManager must seed its flow from the persisted value).
+        val cold = SettingsManager(ApplicationProvider.getApplicationContext<Context>())
+        assertEquals("/seeded", cold.currentWorkdirFlow.value)
+        // Cleanup so this write does not leak into sibling tests.
+        cold.clearAllLocalData()
+    }
+
+    @Test
+    fun `currentWorkdirFlow emits synchronously on setter write`() {
+        settings.clearAllLocalData()
+        assertNull(settings.currentWorkdirFlow.value)
+        settings.currentWorkdir = "/w"
+        assertEquals("setter must emit synchronously to the flow mirror", "/w", settings.currentWorkdirFlow.value)
+        settings.clearAllLocalData()
+    }
+
+    @Test
+    fun `currentWorkdirFlow goes null after clearAllLocalData`() {
+        // §Fix B (0.6.1 round-1): clearAllLocalData assigns null DIRECTLY to
+        // the flow (was an ESP re-read, which had a theoretical race window
+        // between the batched .remove() and the re-read). The flow MUST be
+        // null after clearAll — not whatever ESP happens to return.
+        settings.currentWorkdir = "/before-clear"
+        assertEquals("/before-clear", settings.currentWorkdirFlow.value)
+        settings.clearAllLocalData()
+        assertNull("flow must be null after clearAllLocalData (direct assign)", settings.currentWorkdirFlow.value)
+    }
 }

@@ -131,6 +131,14 @@ class SettingsViewModel @Inject constructor(
     val currentWorkdir: String? get() = settingsManager.currentWorkdir
 
     /**
+     * §reactive-workdir: observable workdir so SettingsScreen / VcsSection react
+     * to workdir changes (session switch, profile switch, disconnect) without a
+     * manual refresh. The plain [currentWorkdir] getter is kept for existing
+     * snapshot reads (zero blast radius); new reactive consumers collect this.
+     */
+    val currentWorkdirFlow: StateFlow<String?> = settingsManager.currentWorkdirFlow
+
+    /**
      * §grouping-rewrite Round-2 C1: disconnect reactivity trigger.
      * [disconnectWorkdir] mutates [settingsManager] (removeRecentWorkdir) +
      * [cacheRepository] (evictWorkdirInGroup), neither of which emits on
