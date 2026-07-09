@@ -58,12 +58,12 @@ class MtlsPkcs12CompatInstrumentedTest {
 
         val keyAliases = ks.aliases().toList().filter { ks.isKeyEntry(it) }
         assertTrue(
-            "legacy p12 must expose at least one key entry on Android BC (found ${keyAliases.size})",
-            keyAliases.isNotEmpty()
+            "legacy p12 must expose exactly one key entry on Android BC (aligns with buildMutualTlsConfig require; found ${keyAliases.size})",
+            keyAliases.size == 1
         )
 
         val cert = ks.getCertificate(keyAliases.first())
-        assertNotNull("key entry must carry a certificate")
+        assertNotNull("key entry must carry a certificate", cert)
         assertTrue(
             "key entry cert must be an X509Certificate (was ${cert?.javaClass?.name})",
             cert is X509Certificate
