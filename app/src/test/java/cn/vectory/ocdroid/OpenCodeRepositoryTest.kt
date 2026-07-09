@@ -734,6 +734,132 @@ class OpenCodeRepositoryTest {
     }
 
     @Test
+    fun `getProviders tolerates malformed entries without nuking the catalog`() = runBlocking {
+        // §v2-tolerant-catalog: a single malformed entry (missing id / providerID)
+        // must be SKIPPED — not throw and nuke the entire list (the 0.6.0 "服务器
+        // 没有可用模型" regression: atomic list decode threw on the first bad
+        // entry → providers stayed null). Here null-id / null-providerID /
+        // disabled entries are all dropped while the one valid model survives,
+        // exercising the tolerant nullable-field filter + the drop-count path.
+        val models = V2Response(
+            data = listOf(
+                ModelInfoV2(id = "good", providerId = "openai", name = "Good"),
+                ModelInfoV2(id = null, providerId = "openai", name = "NoId"),
+                ModelInfoV2(id = "noprovider", providerId = null, name = "NoProvider"),
+                ModelInfoV2(id = "disabled", providerId = "openai", name = "Disabled", enabled = false)
+            )
+        )
+        val providers = V2Response(data = listOf(ProviderInfoV2(id = "openai", name = "OpenAI")))
+        server.enqueue(
+            MockResponse()
+                .setBody(json.encodeToString(models))
+                .setHeader("Content-Type", "application/json")
+        )
+        server.enqueue(
+            MockResponse()
+                .setBody(json.encodeToString(providers))
+                .setHeader("Content-Type", "application/json")
+        )
+
+        val result = repository.getProviders()
+        assertTrue(result.isSuccess)
+        val catalog = result.getOrThrow()
+        assertEquals(1, catalog.providers.size)
+        val provider = catalog.providers[0]
+        assertEquals("openai", provider.id)
+        // only "good" survives the tolerant filter; the rest are dropped silently
+        assertEquals(1, provider.models.size)
+        assertTrue(provider.models["good"] != null)
+        assertTrue(provider.models["noid"] == null)
+        assertTrue(provider.models["noprovider"] == null)
+        assertTrue(provider.models["disabled"] == null)
+    }
+
+    @Test
+    fun `getProviders tolerates wrong-type JSON entries without nuking the catalog`() = runBlocking {
+        // §v2-tolerant-catalog (0.6.1 round-1 fix, four-reviewer consensus):
+        // coerceInputValues only absorbs null/unknown-enum — NOT type
+        // mismatches. A `limit.context` that is a STRING ("notanumber") or an
+        // OBJECT ({}) makes decodeFromJsonElement<ModelInfoV2> THROW per entry.
+        // Pre-fix: the atomic List<ModelInfoV2> decode threw on the first such
+        // bad entry → /api/model surfaced as failure → providers=null →
+        // "服务器没有可用模型". Post-fix: per-entry runCatching skips + counts
+        // each bad entry, so the one VALID model ("good") survives.
+        //
+        // CRITICAL: the bad payloads below are RAW JSON strings (not built via
+        // json.encodeToString(ModelInfoV2(...))) so the wrong types are
+        // genuine — a DTO round-trip would never produce them. The V2Response
+        // wrapper is also hand-rolled as a raw string for the same reason.
+        val modelsBody = """
+            {"data":[
+              {"id":"bad","providerID":"p1","name":"Bad","limit":{"context":"notanumber","output":1}},
+              {"id":"bad2","providerID":"p1","name":"Bad2","limit":{"context":{}}},
+              {"id":"good","providerID":"p1","name":"Good"}
+            ]}
+        """.trimIndent()
+        val providersBody = """{"data":[{"id":"p1","name":"P1"}]}"""
+        server.enqueue(
+            MockResponse()
+                .setBody(modelsBody)
+                .setHeader("Content-Type", "application/json")
+        )
+        server.enqueue(
+            MockResponse()
+                .setBody(providersBody)
+                .setHeader("Content-Type", "application/json")
+        )
+
+        val result = repository.getProviders()
+
+        // §last-mile: success (NOT failure) — the two wrong-type entries were
+        // skipped per-entry, leaving the one valid model in the catalog.
+        assertTrue("expected success (bad entries skipped), got $result", result.isSuccess)
+        val catalog = result.getOrThrow()
+        assertEquals(1, catalog.providers.size)
+        val provider = catalog.providers[0]
+        assertEquals("p1", provider.id)
+        assertEquals("P1", provider.name) // merged from /api/provider
+        assertEquals("exactly the one valid model survives", 1, provider.models.size)
+        // "good" is present; "bad"/"bad2" were skipped (not nuked into the catalog
+        // as half-decoded entries, nor propagated as failure).
+        assertNotNull(provider.models["good"])
+        assertNull(provider.models["bad"])
+        assertNull(provider.models["bad2"])
+        assertEquals("Good", provider.models["good"]?.name)
+        // "good" had no limit field → null limit (not a wrong-type casualty).
+        assertNull(provider.models["good"]?.limit)
+    }
+
+    @Test
+    fun `getProviders returns empty catalog instead of failure when api model payload is structurally corrupt`() = runBlocking {
+        // §v2-catalog last-mile defense (kimo🟡-6, 0.6.1 round-1): if /api/model
+        // returns a payload whose envelope itself is corrupt (e.g. `data` is a
+        // STRING instead of an array — retrofit cannot even decode
+        // V2Response<List<JsonElement>>), per-entry recovery is impossible.
+        // getProviders must NOT propagate failure (would surface as "没有可用
+        // 模型"); it degrades to Result.success(empty catalog) + Log so the
+        // picker shows an empty list and the next refresh retries.
+        val corruptModelsBody = """{"data":"not-an-array"}"""
+        val providersBody = """{"data":[{"id":"p1","name":"P1"}]}"""
+        server.enqueue(
+            MockResponse()
+                .setBody(corruptModelsBody)
+                .setHeader("Content-Type", "application/json")
+        )
+        server.enqueue(
+            MockResponse()
+                .setBody(providersBody)
+                .setHeader("Content-Type", "application/json")
+        )
+
+        val result = repository.getProviders()
+
+        assertTrue("structural corruption must degrade to success(empty), got $result", result.isSuccess)
+        val catalog = result.getOrThrow()
+        assertEquals(0, catalog.providers.size)
+    }
+
+    @Test
     fun `getVcs parses branch info and changed-files status from v1 vcs endpoints`() = runBlocking {
         // §glm-P3/max-P3: hardcode the snake_case wire payload so the
         // `default_branch` -> defaultBranch @SerialName is genuinely pinned (an
