@@ -144,6 +144,18 @@
     <!-- §2.7 mTLS client certificate (stunnel + shared PKCS12) -->
     <string name="host_mtls_title">Mutual TLS (client cert)</string>
     <string name="host_mtls_summary">Present a client certificate during the TLS handshake (stunnel verifyPeer). Strict hostname check stays on; mutually exclusive with insecure HTTPS.</string>
+    <!-- §mtls-clipboard: clipboard-paste cert import + collapsible sections -->
+    <string name="host_cert_paste_client">Paste client certificate (PKCS12)</string>
+    <string name="host_cert_paste_ca">Paste CA certificate</string>
+    <string name="host_cert_paste_generic">Paste from clipboard</string>
+    <string name="host_cert_remove">Remove</string>
+    <string name="host_cert_err_base64">无法解析为 base64</string>
+    <string name="host_cert_err_p12">PKCS12 无效或口令错误</string>
+    <string name="host_cert_err_ca">CA 证书无效</string>
+    <string name="host_section_basic_auth_title">Basic 认证</string>
+    <string name="host_section_basic_auth_sub">用户名 / 密码</string>
+    <string name="host_section_tunnel_title">隧道口令</string>
+    <string name="host_section_tunnel_sub">内网穿透</string>
     <string name="host_mtls_no_cert">No client certificate imported — mTLS hosts will be rejected until one is provided.</string>
     <string name="host_mtls_client_pem_label">Client cert + key (PEM)</string>
     <string name="host_mtls_client_pem_hint">Paste client-cert.pem and client-key.pem (can be combined, cert before key; for a chain put leaf first), no passphrase</string>

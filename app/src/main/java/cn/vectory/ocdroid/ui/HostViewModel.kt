@@ -5,6 +5,9 @@ import cn.vectory.ocdroid.data.model.HostProfile
 import cn.vectory.ocdroid.ui.controller.HostProfileController
 import cn.vectory.ocdroid.ui.settings.ClientCertEditIntent
 import cn.vectory.ocdroid.util.SettingsManager
+import cn.vectory.ocdroid.util.certSubjectOrNull
+import cn.vectory.ocdroid.util.loadClientP12OrNull
+import cn.vectory.ocdroid.util.parseCaCertOrNull
 import dagger.hilt.android.lifecycle.HiltViewModel
 import javax.inject.Inject
 
@@ -98,6 +101,39 @@ class HostViewModel @Inject constructor(
      */
     fun hasStoredCa(clientCertId: String?): Boolean =
         clientCertId?.let { settingsManager.getClientCertCa(it) != null } ?: false
+
+    /**
+     * §mtls-clipboard: 重入时已存 CA 的 (subject, sizeBytes) 摘要，供编辑对话框的
+     * CA 导入槽渲染 Imported 态（修「write-only 字段重入显示空」）。读 ESP 的 CA 槽
+     * → parseCaCertOrNull 取 subject；解析失败回退 "CA"。纯展示，null ⇒ 槽位 Empty。
+     */
+    fun caSummary(clientCertId: String?): Pair<String, Int>? =
+        clientCertId?.let { id ->
+            settingsManager.getClientCertCa(id)?.let { bytes ->
+                parseCaCertOrNull(bytes)?.let { cert ->
+                    (certSubjectOrNull(cert) ?: "CA") to bytes.size
+                }
+            }
+        }
+
+    /**
+     * §mtls-clipboard: 重入时已存客户端 p12 的 (leaf-subject, sizeBytes) 摘要，供编辑
+     * 对话框的客户端证书导入槽渲染 Imported 态。读 ESP 的 p12 + 口令 →
+     * loadClientP12OrNull 取首个 key-entry 的叶子证书 subject；口令缺失时按空口令试
+     * （新模型为无口令 p12）。解析失败 → null（槽位 Empty）。纯展示。
+     */
+    fun clientCertSummary(clientCertId: String?): Pair<String, Int>? =
+        clientCertId?.let { id ->
+            settingsManager.getClientCertP12(id)?.let { p12 ->
+                val pw = settingsManager.getClientCertPassword(id) ?: ""
+                loadClientP12OrNull(p12, pw.toCharArray())?.let { ks ->
+                    val leaf = ks.aliases().asSequence()
+                        .firstOrNull { ks.isKeyEntry(it) }
+                        ?.let { a -> ks.getCertificate(a) as? java.security.cert.X509Certificate }
+                    (leaf?.let { certSubjectOrNull(it) } ?: "client") to p12.size
+                }
+            }
+        }
 
     fun configureServer(url: String, username: String? = null, password: String? = null) {
         hostProfileController.configureServer(url, username, password)

@@ -3,6 +3,7 @@ package cn.vectory.ocdroid
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.junit4.createComposeRule
+import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithText
 import cn.vectory.ocdroid.data.model.HostProfile
 import cn.vectory.ocdroid.ui.ConnectionState
@@ -49,7 +50,10 @@ class SettingsSectionsInstrumentedTest {
 
         composeRule.onNodeWithText("OpenCode Server").assertIsDisplayed()
         composeRule.onNodeWithText("https://opencode.example.com").assertIsDisplayed()
-        composeRule.onNodeWithText("Manage Connections").assertIsDisplayed()
+        // §mtls-clipboard: the manage-profiles affordance is an icon-only
+        // IconButton (KeyboardArrowRight) whose label lives in contentDescription,
+        // not visible Text — assert on the contentDescription, not text.
+        composeRule.onNodeWithContentDescription("Manage Connections").assertIsDisplayed()
     }
 
     @Test
