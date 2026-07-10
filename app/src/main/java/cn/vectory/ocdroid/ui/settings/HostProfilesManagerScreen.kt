@@ -53,14 +53,9 @@ import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import cn.vectory.ocdroid.R
-import cn.vectory.ocdroid.data.model.BasicAuthConfig
 import cn.vectory.ocdroid.data.model.HostProfile
 import cn.vectory.ocdroid.ui.ConnectionViewModel
 import cn.vectory.ocdroid.ui.HostViewModel
-import cn.vectory.ocdroid.util.certSubjectOrNull
-import cn.vectory.ocdroid.util.decodeBase64OrNull
-import cn.vectory.ocdroid.util.loadClientP12OrNull
-import cn.vectory.ocdroid.util.parseCaCertOrNull
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -138,11 +133,17 @@ internal fun HostProfilesManagerScreen(
         // Dispatchers.Default; the dialog receives null initially and its slot
         // status seeds reactively (LaunchedEffect) once the value arrives. The
         // HostViewModel funcs stay as-is — the Default context makes them main-safe.
+        // §coverage-r4: withContext body hoisted into the pure
+        // [summarizeClientCertOnDefault] / [summarizeCaOnDefault] helpers —
+        // the produceState bodies are now thin one-liners, shrinking the
+        // `initialClientSummary$2$1$1` / `initialCaSummary$2$1$1` inner
+        // classes (currently the only `ui/.../settings` denominator that
+        // does not benefit from any JVM unit-test coverage).
         val initialClientSummary by produceState<Pair<String, Int>?>(initialValue = null, profile.clientCertId) {
-            value = withContext(Dispatchers.Default) { viewModel.clientCertSummary(profile.clientCertId) }
+            value = summarizeClientCertOnDefault(viewModel, profile.clientCertId)
         }
         val initialCaSummary by produceState<Pair<String, Int>?>(initialValue = null, profile.clientCertId) {
-            value = withContext(Dispatchers.Default) { viewModel.caSummary(profile.clientCertId) }
+            value = summarizeCaOnDefault(viewModel, profile.clientCertId)
         }
         HostProfileEditorDialog(
             initial = profile,
@@ -428,24 +429,35 @@ internal fun HostProfileEditorDialog(
     var clientCleared by remember(initial.id) { mutableStateOf(false) }
     var caEdited by remember(initial.id) { mutableStateOf(false) }
     LaunchedEffect(initialClientSummary) {
-        val summary = initialClientSummary ?: return@LaunchedEffect
-        if (!clientEdited && clientSlotStatus is CertSlotStatus.Empty) {
-            clientSlotStatus = CertSlotStatus.Imported(summary.first, summary.second)
-        }
+        // §coverage-r4: decision logic hoisted into the pure
+        // [seedClientCertSlotStatus] helper. The LaunchedEffect body now
+        // just maps the result to a state write — the branching (null
+        // check, !clientEdited gate, Empty-slot guard) lives in the pure
+        // helper, covered by [MtlsDialogCallBuildersTest].
+        seedClientCertSlotStatus(initialClientSummary, clientEdited, clientSlotStatus)
+            ?.let { clientSlotStatus = it }
     }
     LaunchedEffect(initialCaSummary) {
-        val summary = initialCaSummary ?: return@LaunchedEffect
-        if (!caEdited && caSlotStatus is CertSlotStatus.Empty && initialHasCa) {
-            caSlotStatus = CertSlotStatus.Imported(summary.first, summary.second)
-        }
+        // §coverage-r4: same split as the client summary LaunchedEffect —
+        // decision logic in [seedCaSlotStatus] (pure), LaunchedEffect body
+        // is a thin map-to-state-write.
+        seedCaSlotStatus(initialCaSummary, caEdited, caSlotStatus, initialHasCa)
+            ?.let { caSlotStatus = it }
     }
     // §review-2: 任一槽处于 Error 意味着暂存意图已过期（如失败的粘贴残留了旧的
     // caStage=Clear）。Save 和 Test 一并禁用，强迫用户先解决错误（重新粘贴成功 →
     // Imported，或显式移除 → Empty）后才能提交。
     // §review-3: 仅在 mTLS 开启时门控——关闭 mTLS 后证书槽已不相关，残留 Error
     // （如失败的粘贴）不应继续阻断提交（gpter R2 non-block #2）。
-    val hasCertError =
-        mtlsEnabled && (clientSlotStatus is CertSlotStatus.Error || caSlotStatus is CertSlotStatus.Error)
+    // §coverage-r4: decision hoisted into the pure [dialogHasCertError] helper.
+    // The dialog's Composable body becomes a one-liner; the branching
+    // (mtlsEnabled gate + OR of the two slot statuses) is unit-testable
+    // without Compose (see [MtlsDialogCallBuildersTest]).
+    val hasCertError = dialogHasCertError(
+        mtlsEnabled = mtlsEnabled,
+        clientSlotStatus = clientSlotStatus,
+        caSlotStatus = caSlotStatus,
+    )
     // §review-r4 (gpter R4 #1/#2): dialog-level mTLS material check — the pure
     // [mtlsHasMaterial] predicate hoisted out of the Save onClick /
     // triggerTestConnection inline copies. Drives (a) the Save-button disable
@@ -486,6 +498,11 @@ internal fun HostProfileEditorDialog(
     // §mtls-clipboard: 客户端证书粘贴——剪贴板→decode→loadClientP12OrNull 验证（后台
     // 线程）→成功取叶子证书 subject + size 写 stagedP12；失败置 Error。
     // 重活在 Dispatchers.Default 跑，状态写回在 Main（rememberCoroutineScope 默认 Main）。
+    // §coverage-r4: withContext body + post-import state-write rules hoisted into
+    // the pure [decodeClientP12Import] helper + the [applyClientP12ImportResult]
+    // helper. The local `fun` only handles the clipboard read + scope.launch
+    // scaffold; the import-result → state mapping lives in the pure helpers
+    // (covered by [MtlsDialogCallBuildersTest]).
     fun triggerClientPaste() {
         if (isConverting) return
         clientEdited = true
@@ -497,26 +514,17 @@ internal fun HostProfileEditorDialog(
         isConverting = true
         scope.launch {
             try {
-                val result = withContext(Dispatchers.Default) {
-                    val bytes = decodeBase64OrNull(raw)
-                        ?: return@withContext CertSlotStatus.Error(errBase64) to null
-                    val ks = loadClientP12OrNull(bytes)
-                        ?: return@withContext CertSlotStatus.Error(errP12) to null
-                    val leafAlias = ks.aliases().asSequence().firstOrNull { ks.isKeyEntry(it) }
-                    val leafCert = leafAlias
-                        ?.let { a -> ks.getCertificateChain(a)?.firstOrNull() }
-                        as? java.security.cert.X509Certificate
-                    val subject = leafCert?.let { certSubjectOrNull(it) } ?: "client"
-                    CertSlotStatus.Imported(subject, bytes.size) to bytes
+                val (status, bytes) = withContext(Dispatchers.Default) {
+                    decodeClientP12Import(raw, errBase64, errP12)
                 }
-                val (status, bytes) = result
-                clientSlotStatus = status
-                if (status is CertSlotStatus.Imported && bytes != null) {
-                    stagedP12 = bytes
-                    // §review-3: 粘贴成功复位 Clear-signal——用户重新提供了材料。
-                    clientCleared = false
-                    mtlsImportError = null
-                }
+                applyClientP12ImportResult(
+                    status = status,
+                    bytes = bytes,
+                    setClientSlotStatus = { clientSlotStatus = it },
+                    setStagedP12 = { stagedP12 = it },
+                    setClientCleared = { clientCleared = it },
+                    setMtlsImportError = { mtlsImportError = it },
+                )
             } finally {
                 isConverting = false
             }
@@ -525,6 +533,9 @@ internal fun HostProfileEditorDialog(
 
     // §mtls-clipboard: CA 证书粘贴——剪贴板→decode→parseCaCertOrNull 验证（后台
     // 线程）→成功写 caStage=Replace(bytes)；失败置 Error。
+    // §coverage-r4: withContext body + post-import state-write rules hoisted
+    // into [decodeCaImport] + [applyCaImportResult] (same split as
+    // triggerClientPaste).
     fun triggerCaPaste() {
         if (isConverting) return
         caEdited = true
@@ -536,19 +547,15 @@ internal fun HostProfileEditorDialog(
         isConverting = true
         scope.launch {
             try {
-                val result = withContext(Dispatchers.Default) {
-                    val bytes = decodeBase64OrNull(raw)
-                        ?: return@withContext CertSlotStatus.Error(errBase64) to CaStage.Unchanged
-                    val cert = parseCaCertOrNull(bytes)
-                        ?: return@withContext CertSlotStatus.Error(errCa) to CaStage.Unchanged
-                    val subject = certSubjectOrNull(cert) ?: "CA"
-                    CertSlotStatus.Imported(subject, bytes.size) to CaStage.Replace(bytes)
+                val (status, stage) = withContext(Dispatchers.Default) {
+                    decodeCaImport(raw, errBase64, errCa)
                 }
-                val (status, stage) = result
-                caSlotStatus = status
-                if (status is CertSlotStatus.Imported) {
-                    caStage = stage
-                }
+                applyCaImportResult(
+                    status = status,
+                    stage = stage,
+                    setCaSlotStatus = { caSlotStatus = it },
+                    setCaStage = { caStage = it },
+                )
             } finally {
                 isConverting = false
             }
@@ -563,56 +570,43 @@ internal fun HostProfileEditorDialog(
     // §cgpt-reval 🟠: Main 同步快照全部表单状态，保证「一次测试 = 点击时刻的完整表单」。
     fun triggerTestConnection() {
         if (isTesting || isConverting || serverUrl.isBlank() || hasCertError) return
-        val urlSnap = serverUrl
-        val insecureSnap = allowInsecure
-        val mtlsOn = mtlsEnabled
-        val p12Snap = stagedP12
-        val caSnap = caStage
-        // §review-3: clientCleared 屏蔽 ESP 里残留的旧 p12——「移除→重开 mTLS→不粘贴」
-        // 时 hasMaterial 为 false，resolveClientCert 返回 null，保存被拒（不再静默重载）。
-        // §review-r4 (gpter R4 #2): hoisted into the pure [mtlsHasMaterial] predicate.
-        val hasMaterial = mtlsHasMaterial(clientCleared, initial.clientCertId, p12Snap)
-        val oldCertId = initial.clientCertId
-        // §review-4: honor the Basic Auth toggle. When the section is OFF, probe with
-        // NO credentials and suppress the stored-password fallback (profileId=null +
-        // passwordEdited=true mirrors the Save path's section-off clearing), so we
-        // don't test with creds the user believes disabled. When ON, behavior is
-        // unchanged (username/password snapshotted, stored-password fallback per
-        // passwordEdited).
-        val userSnap: String?
-        val authPwSnap: String?
-        val profileIdSnap: String?
-        val pwEditedSnap: Boolean
-        if (basicAuthEnabled) {
-            userSnap = authUsername.ifBlank { null }
-            authPwSnap = authPassword.ifBlank { null }
-            profileIdSnap = initial.id.takeIf { initial.basicAuth != null }
-            pwEditedSnap = passwordEdited
-        } else {
-            userSnap = null
-            authPwSnap = null
-            // profileId=null + passwordEdited=true ⇒ VM 跳过已存 basic-auth 密码回退。
-            profileIdSnap = null
-            pwEditedSnap = true
-        }
+        // §review-r4 (gpter R4 #3): hoisted into the pure [buildTestCall] snapshot
+        // helper. Mirrors [buildSaveCall]'s split: the local `fun` only forwards the
+        // [TestCallResult] to the dialog's onTestConnection callback; the
+        // basicAuthEnabled / hasMaterial / hasImportedP12 / caStage passthrough rules
+        // live in the pure builder (see [MtlsDialogCallBuildersTest]).
+        val testResult = buildTestCall(
+            initial = initial,
+            serverUrl = serverUrl,
+            allowInsecure = allowInsecure,
+            basicAuthEnabled = basicAuthEnabled,
+            authUsername = authUsername,
+            authPassword = authPassword,
+            passwordEdited = passwordEdited,
+            mtlsEnabled = mtlsEnabled,
+            clientCleared = clientCleared,
+            initialClientCertId = initial.clientCertId,
+            stagedP12 = stagedP12,
+            caStage = caStage,
+        )
         isTesting = true
         testStatus = null
         // §2.7: 透传 mTLS 编辑意图（不在此构造 ClientCertMaterial——Dialog 无
         // settingsManager；由回调接收方 VM 构造）。onTestConnection 内部走 viewModelScope。
         onTestConnection(
-            urlSnap,
-            userSnap,
-            authPwSnap,
-            insecureSnap,
-            profileIdSnap,
-            pwEditedSnap,
-            mtlsOn,
-            p12Snap,
-            hasMaterial,
-            caSnap,
-            null,
-            false,
-            oldCertId
+            testResult.url,
+            testResult.userSnap,
+            testResult.authPwSnap,
+            testResult.insecureSnap,
+            testResult.profileIdSnap,
+            testResult.pwEditedSnap,
+            testResult.mtlsOn,
+            testResult.p12Snap,
+            testResult.hasMaterial,
+            testResult.caSnap,
+            testResult.p12Password,
+            testResult.p12PasswordEdited,
+            testResult.oldCertId,
         ) { success, msg ->
             isTesting = false
             testStatus = success to msg
@@ -949,68 +943,46 @@ internal fun HostProfileEditorDialog(
                         enabled = !isConverting && !isTesting && !hasCertError && !(mtlsEnabled && !hasMaterial),
                         onClick = {
                             if (isConverting || isTesting || hasCertError || (mtlsEnabled && !hasMaterial)) return@Button
-                            // §mtls-clipboard: 凭据区折叠门控——区关时清空对应凭据。
-                            //   Basic Auth 区关：用户名/密码置空，passwordEdited 强制
-                            //   true（若原 profile 有 basicAuth）使 saveHostProfile 清
-                            //   掉 ESP 里的遗留密码。
-                            val effectiveUsername = if (basicAuthEnabled) authUsername else ""
-                            val effectiveAuthPw = if (basicAuthEnabled) authPassword else ""
-                            val basicAuth = effectiveUsername.ifBlank { null }
-                                ?.let { BasicAuthConfig(username = it, passwordId = initial.id) }
-                            val effectivePasswordEdited = when {
-                                !basicAuthEnabled -> initial.basicAuth != null
-                                authUsername.isBlank() && initial.basicAuth != null -> true
-                                else -> passwordEdited
-                            }
-                            //   隧道区关：清 tunnelId，且若原 profile 有隧道口令则强制
-                            //   tunnelEdited=true + 空密码使 ESP 清掉遗留口令（saveHostProfile
-                            //   无「无 id 即清口令」的兜底，须显式发清指令）。
-                            val effectiveTunnelPw: String
-                            val effectiveTunnelEd: Boolean
-                            val tunnelId = if (tunnelEnabled) {
-                                effectiveTunnelPw = tunnelPassword
-                                effectiveTunnelEd = tunnelEdited
-                                if (tunnelEdited) tunnelPassword.ifBlank { null }?.let { initial.id }
-                                else initial.tunnelPasswordId
-                            } else {
-                                effectiveTunnelPw = ""
-                                effectiveTunnelEd = initial.tunnelPasswordId != null
-                                null
-                            }
-                            val saved = initial.copy(
-                                name = name.ifBlank { "Untitled" },
+                            // §review-r4 (gpter R4 #3): Save / Test snapshot/branching
+                            // logic hoisted into pure top-level [buildSaveCall] /
+                            // [buildTestCall]. The onClick body now just assembles
+                            // inputs and forwards the [SaveCallResult] / [TestCallResult]
+                            // to the dialog's onSave / onTestConnection callbacks. The
+                            // pure builders are unit-testable without spinning up
+                            // Compose (see [MtlsDialogCallBuildersTest]).
+                            val saveResult = buildSaveCall(
+                                initial = initial,
+                                name = name,
                                 serverUrl = serverUrl,
-                                basicAuth = basicAuth,
-                                tunnelPasswordId = tunnelId,
-                                allowInsecureConnections = allowInsecure,
-                                serverGroupFp = if (selectedGroup != initialGroup) {
-                                    selectedGroup ?: initial.id
-                                } else {
-                                    initial.serverGroupFp
-                                }
+                                allowInsecure = allowInsecure,
+                                selectedGroup = selectedGroup,
+                                initialGroup = initialGroup,
+                                basicAuthEnabled = basicAuthEnabled,
+                                authUsername = authUsername,
+                                authPassword = authPassword,
+                                passwordEdited = passwordEdited,
+                                tunnelEnabled = tunnelEnabled,
+                                tunnelPassword = tunnelPassword,
+                                tunnelEdited = tunnelEdited,
+                                mtlsEnabled = mtlsEnabled,
+                                clientCleared = clientCleared,
+                                stagedP12 = stagedP12,
+                                caStage = caStage,
                             )
-                            // §mtls-clipboard: stagedP12 已是粘贴时校验过的 ByteArray，
-                            // 直接同步透传——无 PEM 转换、无后台协程、无 MTLS_DBG 日志。
-                            // onSave 是函数类型参数，Kotlin 禁具名实参（位置见 lambda 签名）。
-                            val mtlsOn = mtlsEnabled
-                            // §review-3: 同 triggerTestConnection——clientCleared 屏蔽 ESP
-                            // 残留旧 p12，使「移除→重开 mTLS→不粘贴→保存」hasMaterial=false
-                            // → resolveClientCert 返回 null → 保存被拒「需先导入客户端证书」。
-                            // 直接「移除→保存（mTLS 关）」仍走 Disable 清空 ESP（mtlsOn=false）。
-                            // §review-r4 (gpter R4 #2): hoisted into the pure [mtlsHasMaterial] predicate.
-                            val hasMaterial = mtlsHasMaterial(clientCleared, initial.clientCertId, stagedP12)
+                            // onSave is a function-type parameter, Kotlin 禁止具名实参
+                            // (position order matches the lambda signature).
                             onSave(
-                                saved,
-                                effectiveAuthPw,
-                                effectivePasswordEdited,
-                                effectiveTunnelPw,
-                                effectiveTunnelEd,
-                                mtlsOn,
-                                stagedP12,
-                                caStage,
-                                null,
-                                false,
-                                hasMaterial
+                                saveResult.saved,
+                                saveResult.authPw,
+                                saveResult.effectivePasswordEdited,
+                                saveResult.tunnelPw,
+                                saveResult.tunnelEd,
+                                saveResult.mtlsOn,
+                                saveResult.stagedP12,
+                                saveResult.caStage,
+                                saveResult.p12Password,
+                                saveResult.p12PasswordEdited,
+                                saveResult.hasMaterial,
                             )
                         }
                     ) {
@@ -1066,25 +1038,6 @@ internal fun HostProfileEditorDialog(
 }
 
 private fun newDirectProfile(): HostProfile = HostProfile.defaultDirect()
-
-/**
- * §review-r4 (gpter R4 #2): pure — does this edit have usable mTLS client-cert
- * material?
- *
- * `(!clientCleared && clientCertId != null) || stagedP12 != null`. The
- * [clientCleared] signal is what distinguishes "UI slot empty but ESP still
- * holds the old p12" (an existing cert the user just removed → must NOT
- * count) from "existing cert untouched" (counts). Without it, the
- * "remove → re-enable mTLS → don't paste → save" sequence silently reloads
- * the old p12 from ESP.
- *
- * Extracted from the inline expression that was duplicated in
- * `triggerTestConnection` and the Save `onClick` so the rule is unit-testable
- * without Compose (see [MtlsHasMaterialTest]) and reusable for the dialog-level
- * Save-disable (gpter R4 #1).
- */
-internal fun mtlsHasMaterial(clientCleared: Boolean, clientCertId: String?, stagedP12: ByteArray?): Boolean =
-    (!clientCleared && clientCertId != null) || stagedP12 != null
 
 /**
  * §2.7: mTLS 编辑对话框中"CA 编辑意图"的三态显式表达（v3-gpter R2#3）。
