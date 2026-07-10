@@ -1,0 +1,14 @@
+{
+  "agent": "cgpt",
+  "scope": "feature-profile-dialog-r1",
+  "date": "2026-07-11",
+  "reviewed_commit": "87d79d1",
+  "version_target": "0.6.9",
+  "verdict": "pass",
+  "score": 9.6,
+  "blocking_issues": [],
+  "non_blocking_issues": [
+    "values/strings.xml + values-zh/strings.xml — host_cert_paste_generic orphaned after PasteButton deletion; remove both to complete dead-resource cleanup. (Resolved in follow-up commit 5718791.)"
+  ],
+  "notes": "round-2. R1 findings addressed: Error branch visibly renders the validation message and preserves retry (HostProfilesManagerScreen.kt:1177-1192); imported state has localized role-specific a11y text (1154-1165, host_cert_status_imported); old role locals/resources and host_cert_remove gone; Advanced is a 48dp button semantic with state description (713-732). Fresh review found no behavioral regression in group mapping, tunnel save wiring, mTLS disable/clear semantics, or TLS/trust handling. M3 experimental opt-in and ExposedDropdownMenuBox scope usage remain correct. Instrumented coverage updated for compact imported/missing slot rendering (6/6 emulator green)."
+}

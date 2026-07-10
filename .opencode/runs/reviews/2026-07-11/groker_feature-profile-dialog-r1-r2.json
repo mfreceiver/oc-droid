@@ -1,0 +1,17 @@
+{
+  "agent": "groker",
+  "scope": "feature-profile-dialog-r1",
+  "date": "2026-07-11",
+  "reviewed_commit": "87d79d1",
+  "version_target": "0.6.9",
+  "verdict": "pass",
+  "score": 9.5,
+  "blocking_issues": [],
+  "non_blocking_issues": [
+    "host_cert_paste_generic orphan in values/values-zh after PasteButton removal — safe to drop. (Resolved in follow-up commit 5718791.)",
+    "CompactCertIndicator Error branch (HostProfilesManagerScreen.kt:1185-1191) uses maxLines=2 + half-row weight; long host_cert_err_p12 may ellipsize on narrow dialogs — still visible/retryable, not silent; optional full-width error line under the row.",
+    "Merged-trash contentDescription still common_delete rather than cert-specific; acceptable with disabled-when-empty.",
+    "var advancedExpanded / groupExpanded declared mid-Column vs other dialog state hoisted at top — style only."
+  ],
+  "notes": "round-2. R1 blocker fixed: CompactCertIndicator has dedicated CertSlotStatus.Error branch (1177-1193) with retry paste + status.message in error color; PKCS12/CA failures (incl. OpenSSL-3+ AES guidance) surface again; dialogHasCertError still gates Save/Test. Non-blockers addressed: dead roleClientLabel/roleCaLabel gone; host_cert_role_*/host_cert_remove removed both locales; trash gated by hasAnythingToClear; Advanced expander has heightIn(48) + Role.Button + mergeDescendants + stateDescription. Intent intact (tunnel under Advanced w/ tunnelPasswordId seed + save wiring; dropdown same 5 options + selectedGroup→buildSaveCall; onClearAll clears client+CA + mtlsEnabled=false, no confirm by design, reversible until Save). CertImportSlot/PasteButton deleted; CertSlotStatus/CollapsibleSection retained; i18n host_advanced/host_cert_compact_*/host_cert_status_imported both locales; instrumented tests updated, 6/6. Subject/size omission by-spec (R1 ④). No transport/ESP trust-path changes. No new blockers."
+}

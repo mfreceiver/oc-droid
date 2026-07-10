@@ -1,0 +1,17 @@
+{
+  "agent": "cgpt",
+  "scope": "feature-profile-dialog-r1",
+  "date": "2026-07-11",
+  "reviewed_commit": "c199f92",
+  "version_target": "0.6.9",
+  "verdict": "pass-with-fixes",
+  "score": 8.7,
+  "blocking_issues": [],
+  "non_blocking_issues": [
+    "[important] HostProfilesManagerScreen.kt:1165 — CertSlotStatus.Error rendered identically to Empty (paste icon + role label only); old CertImportSlot showed Error.message. Failed import still sets hasCertError (disables Save/Test ~457-470,951,987) but user sees no explanation. Restore visible+accessible error feedback.",
+    "[important] HostProfilesManagerScreen.kt:1148 — imported cert Check icon contentDescription=null; adjacent Text is only role ('Client'/'CA'). TalkBack cannot distinguish imported/empty/error — material for security-sensitive trust config.",
+    "[suggestion] HostProfilesManagerScreen.kt:502 — roleClientLabel/roleCaLabel unused after CertImportSlot removal; host_cert_role_client/ca strings orphaned in both locales. Complete dead-code cleanup.",
+    "[suggestion] HostProfilesManagerScreen.kt:711 — Advanced expander is a generic clickable Row, no semantic role/state, no minimum touch target."
+  ],
+  "notes": "Core behavior matches intent: dropdown preserves selectedGroup/buildSaveCall mapping; M3 @OptIn present; ExposedDropdownMenu as box scope-member + menuAnchor; merged trash sets clear-state + disables mTLS (routes Save to Disable); tunnel save wiring preserved under Advanced; CertSlotStatus+CollapsibleSection retained. No transport/trust-resolution logic changed."
+}

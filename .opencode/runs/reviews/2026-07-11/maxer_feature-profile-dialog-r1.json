@@ -1,0 +1,21 @@
+{
+  "agent": "maxer",
+  "scope": "feature-profile-dialog-r1",
+  "date": "2026-07-11",
+  "reviewed_commit": "c199f92",
+  "version_target": "0.6.9",
+  "verdict": "block",
+  "score": 7.5,
+  "blocking_issues": [
+    "SettingsSectionsInstrumentedTest.kt:139,140,166,167 — R1 swaps cert slot UI from text+subject+size to icon+label compact row, but the two §review-r5 (Bug B regression) tests still assert OLD text patterns. Both fail under connectedDebugAndroidTest: 'Client certificate: CN=client · 1234 B', 'CA certificate: CN=opencode CA · 5678 B', 'Paste client certificate (PKCS12)' no longer match the rendered tree. New CompactCertIndicator Imported branch renders only Text('Client')/Text('CA'); paste IconButton label is in contentDescription not text. R1 must update these tests in lockstep; leaving the canonical bug-B regression suite silently broken defeats §review-r5."
+  ],
+  "non_blocking_issues": [
+    "HostProfilesManagerScreen.kt:502-503 — roleClientLabel/roleCaLabel (+ backing strings host_cert_role_client/host_cert_role_ca) computed but never used; cleanup that deleted CertImportSlot/PasteButton missed these. Remove locals + delete string resources from both values/ and values-zh/.",
+    "HostProfilesManagerScreen.kt:1089-1184 — security-app UX: CompactCertStatusRow drops cert subject+sizeBytes from Imported indicator. Two profiles with different client certs now look identical. Intent says drop, but at minimum surface subject in tooltip/test-connection output so user can verify which cert is loaded.",
+    "HostProfilesManagerScreen.kt:909-919 — destructive single-click: merged trash unconditionally resets mtlsEnabled/stagedP12/caStage/clientCleared. Old per-slot trash was local undo; new merged trash is global reset — a mistaken paste + trash loses stored CA too. Intent says 'merged'; confirmation dialog or disabled-when-both-empty + hold-to-clear would be safer for trust material.",
+    "HostProfilesManagerScreen.kt:711-727 — Advanced expander Row tap target ~26dp (< M3 48dp min). Add Modifier.heightIn(min=48.dp).",
+    "HostProfilesManagerScreen.kt:1148-1162 — a11y: Check icon contentDescription=null + Text is just 'Client'/'CA'; screen readers won't announce imported state. Add Modifier.semantics{contentDescription=...} (status-aware) so slot announces e.g. 'Client certificate, imported'.",
+    "HostProfilesManagerScreen.kt:1084-1088 — CompactCertStatusRow kdoc is the only new docstring and lacks @param doc for 9+ params, inconsistent with file style (e.g. CollapsibleSection). Minor."
+  ],
+  "notes": "Implementation matches stated intent cleanly. Verified: (1) Advanced expander seeds from initial.tunnelPasswordId!=null (710); two-level collapse works; tunnel save wiring fully preserved (buildSaveCall untouched, tunnelEnabled/Password/Edited feed it); name.ifBlank/section-off credential-clearing rules still fire. (2) Dropdown preserves mapping byte-identical (selectedGroup/initialGroup + buildSaveCall serverGroupFp = if(selectedGroup!=initialGroup) selectedGroup ?: initial.id else initial.serverGroupFp); legacy serverGroupFp preserved when untouched; ExposedDropdownMenuBox correct M3 idiom. (3) Merged trash covers every stale signal in one shot, no state leak. (4) @OptIn(ExperimentalMaterial3Api) on dialog sufficient. (5) i18n symmetric values/+values-zh/ with §tags; common_collapse/expand pre-existed. (6) Dead-code cleanup complete (no refs in main/test/androidTest; orphan imports removed; CertSlotStatus+CollapsibleSection preserved). (7) Pure-builder tests unaffected. Single blocker = broken §review-r5 bug-B regression suite. Score 7.5 = high impl quality docked for broken regression suite + minor a11y/UX gaps."
+}

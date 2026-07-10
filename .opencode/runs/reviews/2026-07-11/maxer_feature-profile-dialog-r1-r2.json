@@ -1,0 +1,14 @@
+{
+  "agent": "maxer",
+  "scope": "feature-profile-dialog-r1",
+  "date": "2026-07-11",
+  "reviewed_commit": "87d79d1",
+  "version_target": "0.6.9",
+  "verdict": "pass",
+  "score": 9.5,
+  "blocking_issues": [],
+  "non_blocking_issues": [
+    "values/strings.xml:150 + values-zh/strings.xml:149 — host_cert_paste_generic (default pasteLabel of the deleted PasteButton) now dead. (Resolved in follow-up commit 5718791.)"
+  ],
+  "notes": "round-2. All round-1 issues resolved cleanly. [blocker] SettingsSectionsInstrumentedTest's two §review-r5 Bug-B tests rewritten to assert the new compact UI (onNodeWithText role labels + onNodeWithContentDescription imported checkmark + assertDoesNotExist for absent paste icons); 6/6 connectedDebugAndroidTest green on emulator — test↔UI binding correct end-to-end. [non-blockers] roleClientLabel/roleCaLabel locals + host_cert_role_client/ca resources removed both locales; Advanced expander heightIn(48) + clickable(role=Role.Button) + semantics(mergeDescendants){stateDescription} (M3 min tap target met, screen reader reads 'Advanced, button, Expanded/Collapsed'); ✓ Check contentDescription = host_cert_status_imported (role-substituted); merged-trash enabled = enabled && hasAnythingToClear (Imported only). [bonus] Error branch renders status.message inline (bodySmall + error color, maxLines=2) — UX improvement over round-1. [no regression] tunnel save wiring, dropdown group mapping, M3 @OptIn coverage, i18n symmetry, dead-string cleanup (host_cert_remove + host_cert_role_*), pure-builder tests — all unchanged. Subject/size omission by-spec (R1 ④). Verdict pass, 9.5."
+}

@@ -1,0 +1,21 @@
+{
+  "agent": "groker",
+  "scope": "feature-profile-dialog-r1",
+  "date": "2026-07-11",
+  "reviewed_commit": "c199f92",
+  "version_target": "0.6.9",
+  "verdict": "block",
+  "score": 7.8,
+  "blocking_issues": [
+    "HostProfilesManagerScreen.kt:1165-1181 CompactCertIndicator collapses CertSlotStatus.Error into the Empty branch (paste icon + label only). Old CertImportSlot rendered s.message in error color + retry paste. Paste failures still set Error via triggerClientPaste/triggerCaPaste + decodeClientP12Import/decodeCaImport (MtlsDialogCallBuilders.kt:284-316) and dialogHasCertError disables Save/Test when mtlsEnabled, but the user never sees host_cert_err_base64/p12/ca. mtlsImportError is only cleared on success (applyClientP12ImportResult:347), never set on failure, so the mtlsBanner (875) does not compensate. Security-sensitive mTLS path: invalid PKCS12 (incl. OpenSSL-3+ AES guidance) becomes a silent 'Save disabled'. Must surface Error.message (inline under row / error-tinted indicator / mtlsImportError) before merge."
+  ],
+  "non_blocking_issues": [
+    "HostProfilesManagerScreen.kt:502-503 roleClientLabel/roleCaLabel now unused after CertImportSlot removal — dead locals; drop or reuse in a11y.",
+    "CompactCertStatusRow trash contentDescription uses common_delete (1127) vs old host_cert_remove; less specific for screen readers; host_cert_remove may be orphaned.",
+    "Imported branch (1148-1162) has no re-import affordance — only path is merged trash (clears both + mtlsEnabled=false). Matches R1 intent but UX regression vs per-slot remove; document or allow re-paste while Imported.",
+    "Advanced expander Row clickable (711-726) with contentDescription only on the chevron Icon; prefer semantics merge / single labeled control for a11y.",
+    "Trash IconButton remains enabled when both slots Empty (1124); harmless state churn (clientCleared/mtlsEnabled) but no empty-state disable.",
+    "var advancedExpanded/groupExpanded declared mid-Column body (710,775) — works with remember(initial.id) but inconsistent with dialog state hoisted at top; style only."
+  ],
+  "notes": "Intent coverage otherwise solid: tunnel CollapsibleSection+password preserved under Advanced (advancedExpanded seeds from tunnelPasswordId; buildSaveCall still gets tunnelEnabled/tunnelPassword/tunnelEdited). Dropdown same 5 options, selectedGroup mapping unchanged, @OptIn(ExperimentalMaterial3Api) on dialog, ExposedDropdownMenu as scope-member + menuAnchor OK. onClearAll = clientCleared=true, caStage=Clear, both Empty, mtlsEnabled=false — stricter/safer than old client-remove. Dead-code cleanup correct (CertImportSlot+PasteButton gone; CertSlotStatus+CollapsibleSection retained+referenced). i18n host_advanced/host_cert_compact_* present in values+values-zh. No trust/store/ESP path changes. Gate fails solely on lost cert Error UX."
+}
