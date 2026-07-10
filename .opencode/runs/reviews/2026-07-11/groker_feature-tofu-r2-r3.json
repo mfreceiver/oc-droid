@@ -1,0 +1,14 @@
+{
+  "agent": "groker",
+  "scope": "feature-tofu-r2",
+  "date": "2026-07-11",
+  "reviewed_commit": "8184a52",
+  "version_target": "0.7.0",
+  "verdict": "pass",
+  "score": 9.7,
+  "blocking_issues": [],
+  "non_blocking_issues": [
+    "Cosmetic indent on the Accept/Trust branch only."
+  ],
+  "notes": "round-3. Delta improvements-only; no regression vs round-2 (9.6). Freeze completeness now covers entry + while-top + pre-terminal Disconnected — already-enqueued concurrent jobs cannot probe/burn retries/write terminal while pendingTofuHostPort set; closes the residual single-flight hole. applyTofuDecision → HttpImageHolder.updateSsl(currentSslConfig()) closes the image-client staleness non-blocker. KDoc accurately documents TofuPinned superseding TrustAll; dead host_insecure_warning removed cleanly. Deferred jobs correctly hit onSettled(false) via finally. Holds ≥9.5; check.sh --full + instrumented 10/10 accepted."
+}

@@ -1,0 +1,17 @@
+{
+  "agent": "opuser",
+  "scope": "feature-tofu-r2",
+  "date": "2026-07-11",
+  "reviewed_commit": "8184a52",
+  "version_target": "0.7.0",
+  "verdict": "pass",
+  "score": 9.7,
+  "blocking_issues": [],
+  "non_blocking_issues": [
+    "Cosmetic: Accept/Trust arm dedented inconsistently vs the when-arm (compiles; formatter pass).",
+    "A deferring job (return@launch) still fires onSettled(false) via the outer finally while the pending job may yet succeed; benign (refresh-path callers no-op on false) but semantically inaccurate.",
+    "Single-flight of the pending-set is atomic only under the documented main-dispatcher contract; a background-dispatcher caller would reintroduce a TOCTOU. Assumption is load-bearing but documented.",
+    "Editor Test-Connection TOFU bypass accepted for 0.7.0 as usability; recommend a one-line confirmation it merely fails (no trust-all) rather than offering trust."
+  ],
+  "notes": "round-3 (terminal). Traced concurrency end-to-end in the live file. Round-2 non-blocking concurrency note fully closed: loop-top (241) + pre-terminal (394) guards mean a 2nd testConnection launched before pending was set now defers instead of probing + writing Disconnected under the open dialog. Only the pending job can write Disconnected (Cancel); atomic pending-set on main (no suspension between check 322 and set 328) prevents double-capture/orphaned-deferred. HttpImageHolder.updateSsl is a strict tightening (SystemDefault→TofuPinned), no bypass. No silent-trust / client-cert-leak / pin-bypass. clearTofuPin-no-UI + editor-Test bypass remain acceptable usability gaps for 0.7.0 (SSH-analogous). Terminal review: pass."
+}
