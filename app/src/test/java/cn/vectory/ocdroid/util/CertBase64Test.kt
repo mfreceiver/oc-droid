@@ -169,6 +169,34 @@ class CertBase64Test {
         assertNull(loadClientP12OrNull(baos.toByteArray()))
     }
 
+    @Test
+    fun `a p12 with one private-key entry plus one secret-key entry is rejected`() {
+        // Round-2 review (gpter): the previous count logic only counted key
+        // entries that ALREADY had a non-empty chain, so a bundle with one
+        // private-key entry (chain-bearing) + one secret-key entry
+        // (isKeyEntry=true, chain-less) counted as "1" here but as "2" in
+        // buildMutualTlsConfig (which counts every isKeyEntry alias) — so it
+        // showed Imported at import but was rejected at Test/Save. The fix
+        // aligns the count: count ALL isKeyEntry aliases. This fixture (one
+        // private-key-with-chain + one AES SecretKeyEntry) must therefore now
+        // return null. Built with pure JDK javax.crypto.KeyGenerator +
+        // KeyStore.SecretKeyEntry, no BouncyCastle.
+        val (cert, kp) = makeSelfSignedCert("ocdroid-test-client")
+        val aesKey = javax.crypto.KeyGenerator.getInstance("AES").apply { init(128) }.generateKey()
+        val ks = KeyStore.getInstance("PKCS12").apply {
+            load(null, CharArray(0))
+            setKeyEntry("client", kp.private, CharArray(0), arrayOf(cert))
+            setEntry(
+                "secret",
+                KeyStore.SecretKeyEntry(aesKey),
+                KeyStore.PasswordProtection(CharArray(0)),
+            )
+        }
+        val baos = ByteArrayOutputStream()
+        ks.store(baos, CharArray(0))
+        assertNull(loadClientP12OrNull(baos.toByteArray()))
+    }
+
     // --------------------------------------------------------- certSubjectOrNull
 
     @Test

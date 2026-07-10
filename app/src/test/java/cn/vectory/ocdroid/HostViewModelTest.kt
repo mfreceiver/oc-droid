@@ -50,6 +50,18 @@ import kotlinx.coroutines.test.runTest
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.buildJsonObject
+import java.io.ByteArrayInputStream
+import java.io.ByteArrayOutputStream
+import java.math.BigInteger
+import java.security.KeyPair
+import java.security.KeyPairGenerator
+import java.security.KeyStore
+import java.security.Signature
+import java.security.cert.CertificateFactory
+import java.security.cert.X509Certificate
+import java.util.Calendar
+import java.util.GregorianCalendar
+import java.util.TimeZone
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
@@ -470,6 +482,262 @@ class HostViewModelTest : MainViewModelTestBase() {
             1,
             core.sessionWindowCacheSize()
         )
+    }
+
+    // --------------------------------------------- caSummary / clientCertSummary
+    // §mtls-clipboard coverage: the new pure-read summary helpers in
+    // HostViewModel have nested `?.let` branches (null-id / no-stored /
+    // parse-fail / success). These tests stub settingsManager's ESP reads
+    // (getClientCertCa / getClientCertP12 / getClientCertPassword) and feed
+    // real programmatically-minted cert/p12 bytes (pure JDK, no BouncyCastle)
+    // to cover each branch. Each test only needs `val core = createCore();
+    // val viewModel = HostViewModel(core)` — these are pure read methods.
+
+    @Test
+    fun `caSummary returns null when clientCertId is null`() = runTest {
+        val core = createCore()
+        val viewModel = HostViewModel(core)
+
+        assertNull(viewModel.caSummary(null))
+        verify(exactly = 0) { settingsManager.getClientCertCa(any()) }
+    }
+
+    @Test
+    fun `caSummary returns null when no CA is stored for the id`() = runTest {
+        every { settingsManager.getClientCertCa("id") } returns null
+        val core = createCore()
+        val viewModel = HostViewModel(core)
+
+        assertNull(viewModel.caSummary("id"))
+    }
+
+    @Test
+    fun `caSummary returns null when stored CA bytes fail to parse`() = runTest {
+        every { settingsManager.getClientCertCa("id") } returns byteArrayOf(1, 2, 3)
+        val core = createCore()
+        val viewModel = HostViewModel(core)
+
+        assertNull(viewModel.caSummary("id"))
+    }
+
+    @Test
+    fun `caSummary returns subject and size for a valid CA cert DER`() = runTest {
+        val der = mintSelfSignedCertDer("ca-fixture")
+        every { settingsManager.getClientCertCa("id") } returns der
+        val core = createCore()
+        val viewModel = HostViewModel(core)
+
+        val summary = viewModel.caSummary("id")
+        assertNotNull(summary)
+        assertEquals("CN=ca-fixture", summary!!.first)
+        assertEquals(der.size, summary.second)
+    }
+
+    @Test
+    fun `clientCertSummary returns null when clientCertId is null`() = runTest {
+        val core = createCore()
+        val viewModel = HostViewModel(core)
+
+        assertNull(viewModel.clientCertSummary(null))
+        verify(exactly = 0) { settingsManager.getClientCertP12(any()) }
+    }
+
+    @Test
+    fun `clientCertSummary returns null when no p12 is stored for the id`() = runTest {
+        every { settingsManager.getClientCertP12("id") } returns null
+        val core = createCore()
+        val viewModel = HostViewModel(core)
+
+        assertNull(viewModel.clientCertSummary("id"))
+    }
+
+    @Test
+    fun `clientCertSummary returns null when password is missing and p12 cannot load`() = runTest {
+        // Covers the `getClientCertPassword(id) ?: ""` Elvis branch: password
+        // is null → "". The garbage p12 bytes then fail to load with the empty
+        // password, so the whole summary collapses to null.
+        every { settingsManager.getClientCertP12("id") } returns byteArrayOf(1, 2, 3)
+        every { settingsManager.getClientCertPassword("id") } returns null
+        val core = createCore()
+        val viewModel = HostViewModel(core)
+
+        assertNull(viewModel.clientCertSummary("id"))
+    }
+
+    @Test
+    fun `clientCertSummary returns null for garbage p12 bytes even with a password`() = runTest {
+        every { settingsManager.getClientCertP12("id") } returns byteArrayOf(9, 9, 9)
+        every { settingsManager.getClientCertPassword("id") } returns "some-pw"
+        val core = createCore()
+        val viewModel = HostViewModel(core)
+
+        assertNull(viewModel.clientCertSummary("id"))
+    }
+
+    @Test
+    fun `clientCertSummary returns subject and size for a valid passwordless p12`() = runTest {
+        val p12 = mintPasswordlessP12("client-fixture")
+        every { settingsManager.getClientCertP12("id") } returns p12
+        every { settingsManager.getClientCertPassword("id") } returns ""
+        val core = createCore()
+        val viewModel = HostViewModel(core)
+
+        val summary = viewModel.clientCertSummary("id")
+        assertNotNull(summary)
+        assertEquals("CN=client-fixture", summary!!.first)
+        assertEquals(p12.size, summary.second)
+    }
+
+    // ------------------------------------------------- cert/p12 minting (pure JDK)
+    // Mirrors CertBase64Test's programmatic-fixture approach: a hand-rolled
+    // minimal DER encoder mints a self-signed X.509 cert, reused both as a CA
+    // fixture and as the leaf inside a passwordless PKCS12. No BouncyCastle,
+    // no sun.security.x509 (module-restricted on the JDK 21 host).
+
+    private companion object {
+        private fun mintSelfSignedCertDer(cn: String): ByteArray = mintSelfSignedCert(cn).first
+
+        private fun mintSelfSignedCert(cn: String): Pair<ByteArray, KeyPair> {
+            val kpg = KeyPairGenerator.getInstance("RSA").apply { initialize(2048) }
+            val keyPair = kpg.generateKeyPair()
+            val spki = keyPair.public.encoded
+
+            val name = Der.seq(
+                listOf(
+                    Der.set(
+                        listOf(Der.seq(listOf(Der.oid(2, 5, 4, 3), Der.utf8String(cn))))
+                    )
+                )
+            )
+            val sigAlgId = Der.seq(listOf(Der.oid(1, 2, 840, 113549, 1, 1, 11), Der.nullVal()))
+            val now = System.currentTimeMillis()
+            val validity = Der.seq(
+                listOf(
+                    Der.utcTime(utcTimeString(now)),
+                    Der.utcTime(utcTimeString(now + 365L * 24 * 3600 * 1000)),
+                )
+            )
+            val tbs = Der.seq(
+                listOf(
+                    Der.tlv(0xA0, Der.integer(2)), // [0] EXPLICIT version = v3
+                    Der.integer(BigInteger.valueOf(now)), // serialNumber
+                    sigAlgId, // signature algorithm
+                    name, // issuer
+                    validity,
+                    name, // subject
+                    spki, // subjectPublicKeyInfo
+                )
+            )
+            val sig = Signature.getInstance("SHA256withRSA").apply {
+                initSign(keyPair.private)
+                update(tbs)
+            }
+            val der = Der.seq(listOf(tbs, sigAlgId, Der.bitString(sig.sign())))
+            // Round-trip through the real parser to validate our DER.
+            CertificateFactory.getInstance("X.509")
+                .generateCertificate(ByteArrayInputStream(der))
+            return der to keyPair
+        }
+
+        private fun mintPasswordlessP12(cn: String): ByteArray {
+            val (certDer, keyPair) = mintSelfSignedCert(cn)
+            val cert = CertificateFactory.getInstance("X.509")
+                .generateCertificate(ByteArrayInputStream(certDer)) as X509Certificate
+            val ks = KeyStore.getInstance("PKCS12").apply {
+                load(null, CharArray(0))
+                setKeyEntry("client", keyPair.private, CharArray(0), arrayOf(cert))
+            }
+            val baos = ByteArrayOutputStream()
+            ks.store(baos, CharArray(0))
+            return baos.toByteArray()
+        }
+
+        private fun utcTimeString(epochMs: Long): String {
+            val cal = GregorianCalendar(TimeZone.getTimeZone("UTC"))
+            cal.timeInMillis = epochMs
+            fun two(v: Int) = v.toString().padStart(2, '0')
+            val yy = two(cal.get(Calendar.YEAR) % 100)
+            val mm = two(cal.get(Calendar.MONTH) + 1)
+            val dd = two(cal.get(Calendar.DAY_OF_MONTH))
+            val hh = two(cal.get(Calendar.HOUR_OF_DAY))
+            val mi = two(cal.get(Calendar.MINUTE))
+            val ss = two(cal.get(Calendar.SECOND))
+            return "$yy$mm$dd$hh$mi${ss}Z"
+        }
+
+        // Minimal DER (ITU-T X.690) TLV encoder — pure java.io.ByteArrayOutputStream.
+        private object Der {
+            fun tlv(tag: Int, content: ByteArray): ByteArray {
+                val out = ByteArrayOutputStream()
+                out.write(tag)
+                writeLength(out, content.size)
+                out.write(content)
+                return out.toByteArray()
+            }
+
+            private fun writeLength(out: ByteArrayOutputStream, len: Int) {
+                when {
+                    len < 0x80 -> out.write(len)
+                    len <= 0xFF -> { out.write(0x81); out.write(len) }
+                    len <= 0xFFFF -> {
+                        out.write(0x82)
+                        out.write((len ushr 8) and 0xFF)
+                        out.write(len and 0xFF)
+                    }
+                    else -> {
+                        out.write(0x83)
+                        out.write((len ushr 16) and 0xFF)
+                        out.write((len ushr 8) and 0xFF)
+                        out.write(len and 0xFF)
+                    }
+                }
+            }
+
+            private fun concat(parts: List<ByteArray>): ByteArray {
+                val out = ByteArrayOutputStream()
+                for (p in parts) out.write(p)
+                return out.toByteArray()
+            }
+
+            fun seq(parts: List<ByteArray>) = tlv(0x30, concat(parts))
+            fun set(parts: List<ByteArray>) = tlv(0x31, concat(parts))
+            fun integer(value: Int) = integer(BigInteger.valueOf(value.toLong()))
+            fun integer(value: BigInteger) = tlv(0x02, value.toByteArray())
+            fun nullVal() = byteArrayOf(0x05, 0x00)
+            fun utf8String(s: String) = tlv(0x0C, s.toByteArray(Charsets.UTF_8))
+            fun utcTime(s: String) = tlv(0x17, s.toByteArray(Charsets.US_ASCII))
+            fun bitString(content: ByteArray): ByteArray {
+                val c = ByteArray(content.size + 1).also {
+                    System.arraycopy(content, 0, it, 1, content.size)
+                }
+                return tlv(0x03, c) // leading 0x00 = zero unused bits
+            }
+
+            fun oid(vararg arcs: Int): ByteArray = tlv(0x06, oidContent(arcs))
+
+            private fun oidContent(arcs: IntArray): ByteArray {
+                require(arcs.size >= 2)
+                val out = ByteArrayOutputStream()
+                out.write(40 * arcs[0] + arcs[1])
+                for (i in 2 until arcs.size) out.write(encodeBase128(arcs[i]))
+                return out.toByteArray()
+            }
+
+            private fun encodeBase128(v: Int): ByteArray {
+                if (v == 0) return byteArrayOf(0)
+                val tmp = ArrayList<Int>()
+                var x = v
+                while (x > 0) {
+                    tmp.add(x and 0x7F)
+                    x = x ushr 7
+                }
+                tmp.reverse()
+                return ByteArray(tmp.size) { i ->
+                    val b = tmp[i]
+                    (if (i == tmp.lastIndex) b else (b or 0x80)).toByte()
+                }
+            }
+        }
     }
 
 }

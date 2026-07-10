@@ -74,12 +74,20 @@ fun parseCaCertOrNull(bytes: ByteArray): X509Certificate? = try {
 }
 
 /**
- * Loads [bytes] as a PKCS12 keystore and verifies it contains EXACTLY one key
- * entry (an alias that `isKeyEntry` AND owns a non-empty certificate chain) —
- * matching `buildMutualTlsConfig`'s exactly-one-key requirement, so a bundle
- * that imports here is actually usable at Test/Save. Returns the loaded
- * [KeyStore], or `null` on any failure or when the key-entry count is not
- * exactly 1. Normal parse/load failures return `null` (it catches [Exception]).
+ * Loads [bytes] as a PKCS12 keystore and verifies it is usable as an mTLS
+ * client bundle, mirroring `SslConfig.buildMutualTlsConfig`'s contract so a
+ * bundle that "imports" here is actually usable at Test/Save:
+ *
+ * 1. EXACTLY one key entry (every alias for which `ks.isKeyEntry` holds —
+ *    both private-key entries and secret-key entries count; this matches
+ *    buildMutualTlsConfig, which counts all `isKeyEntry` aliases and rejects
+ *    when the count is not 1). A bundle with e.g. a private-key entry AND a
+ *    secret-key entry has two key entries and is rejected here too.
+ * 2. That single key entry owns a non-empty certificate chain — a client cert
+ *    needs a cert, so a lone secret-key entry (chain-less) is rejected.
+ *
+ * Returns the loaded [KeyStore], or `null` on any failure or when either check
+ * fails. Normal parse/load failures return `null` (it catches [Exception]).
  *
  * NOTE: PKCS12 key-derivation (KDF) is CPU-heavy. This function is synchronous
  * and blocking; callers must run it off the main thread.
@@ -90,10 +98,12 @@ fun loadClientP12OrNull(
 ): KeyStore? = try {
     val ks = KeyStore.getInstance("PKCS12")
     ks.load(ByteArrayInputStream(bytes), password)
-    val keyEntryCount = ks.aliases().toList().count { alias ->
-        ks.isKeyEntry(alias) && ((ks.getCertificateChain(alias)?.size ?: 0) > 0)
+    val keyAliases = ks.aliases().toList().filter { ks.isKeyEntry(it) }
+    if (keyAliases.size != 1) null
+    else {
+        val chain = ks.getCertificateChain(keyAliases.first())
+        if (chain != null && chain.isNotEmpty()) ks else null
     }
-    if (keyEntryCount == 1) ks else null
 } catch (_: Exception) {
     null
 }

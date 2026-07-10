@@ -574,14 +574,19 @@ internal fun ChatMessageList(
         // §issue-1(1): 会话文件变更卡片。reverseLayout 下 item 顺序靠前 = 视觉靠下，
         // 故放在消息块之前 → 渲染在对话底部（最新内容之后）。仅当本会话有 diff 时出现。
         // sessionId 传入用于 rememberSaveable key 维度（防跨会话串读，maxer B1）。
-        if (!sessionDiff.isNullOrEmpty() && sessionId != null) {
-            val diffSessionId = sessionId
-            item(key = "session-diff") {
-                SessionDiffCard(
-                    sessionId = diffSessionId,
-                    diffs = sessionDiff,
-                    onFileClick = onFileClick
-                )
+        // §review-3: sessionDiff 派生自 sessionId?.let{...}（见上声明），故其非空时
+        // sessionId 必非空——原 && sessionId != null 恒真（编译器告警）。去掉后
+        // sessionId: String? 无法仅凭 sessionDiff 非空 smart-cast，故用 ?.let 把非空
+        // 性线程化（行为不变，不用 !!）。
+        if (!sessionDiff.isNullOrEmpty()) {
+            sessionId?.let { diffSessionId ->
+                item(key = "session-diff") {
+                    SessionDiffCard(
+                        sessionId = diffSessionId,
+                        diffs = sessionDiff,
+                        onFileClick = onFileClick
+                    )
+                }
             }
         }
         // §Phase8-nav: reversedEntries（Message + GapMarker）已提到 LazyColumn 外

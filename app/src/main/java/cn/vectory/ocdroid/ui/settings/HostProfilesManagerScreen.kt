@@ -421,6 +421,11 @@ internal fun HostProfileEditorDialog(
     // 两个布尔追踪「用户是否已动手编辑该槽」，仅当未编辑时才让晚到的摘要反应式
     // 种 Imported 态——已粘贴/已移除则尊重用户意图，不覆盖。
     var clientEdited by remember(initial.id) { mutableStateOf(false) }
+    // §review-3: Clear-signal——用户「移除」一个已存客户端证书（initial.clientCertId
+    // != null）时置 true；粘贴成功复位 false。hasMaterial 据此区分「UI 槽为空但 ESP
+    // 里仍有旧 p12」与「真无材料」，阻止「移除→重开 mTLS→不粘贴→保存」静默重载旧
+    // p12（gpter R2 BLOCK）。最小修复：无新增 onSave 形参、无 resolve 层改动。
+    var clientCleared by remember(initial.id) { mutableStateOf(false) }
     var caEdited by remember(initial.id) { mutableStateOf(false) }
     LaunchedEffect(initialClientSummary) {
         val summary = initialClientSummary ?: return@LaunchedEffect
@@ -437,8 +442,10 @@ internal fun HostProfileEditorDialog(
     // §review-2: 任一槽处于 Error 意味着暂存意图已过期（如失败的粘贴残留了旧的
     // caStage=Clear）。Save 和 Test 一并禁用，强迫用户先解决错误（重新粘贴成功 →
     // Imported，或显式移除 → Empty）后才能提交。
+    // §review-3: 仅在 mTLS 开启时门控——关闭 mTLS 后证书槽已不相关，残留 Error
+    // （如失败的粘贴）不应继续阻断提交（gpter R2 non-block #2）。
     val hasCertError =
-        clientSlotStatus is CertSlotStatus.Error || caSlotStatus is CertSlotStatus.Error
+        mtlsEnabled && (clientSlotStatus is CertSlotStatus.Error || caSlotStatus is CertSlotStatus.Error)
     // §fix-3: 导入错误（解析失败等）局部回显，mTLS 区块顶部 banner。
     var mtlsImportError by remember(initial.id) { mutableStateOf<String?>(null) }
     // §issue-5: 测试连接状态上提——触发器移入 confirmButton 的 test icon，结果
@@ -500,6 +507,8 @@ internal fun HostProfileEditorDialog(
                 clientSlotStatus = status
                 if (status is CertSlotStatus.Imported && bytes != null) {
                     stagedP12 = bytes
+                    // §review-3: 粘贴成功复位 Clear-signal——用户重新提供了材料。
+                    clientCleared = false
                     mtlsImportError = null
                 }
             } finally {
@@ -553,7 +562,9 @@ internal fun HostProfileEditorDialog(
         val mtlsOn = mtlsEnabled
         val p12Snap = stagedP12
         val caSnap = caStage
-        val hasMaterial = initial.clientCertId != null || p12Snap != null
+        // §review-3: clientCleared 屏蔽 ESP 里残留的旧 p12——「移除→重开 mTLS→不粘贴」
+        // 时 hasMaterial 为 false，resolveClientCert 返回 null，保存被拒（不再静默重载）。
+        val hasMaterial = (!clientCleared && initial.clientCertId != null) || p12Snap != null
         val oldCertId = initial.clientCertId
         // §review-4: honor the Basic Auth toggle. When the section is OFF, probe with
         // NO credentials and suppress the stored-password fallback (profileId=null +
@@ -826,6 +837,9 @@ internal fun HostProfileEditorDialog(
                             clientEdited = true
                             if (initial.clientCertId != null) {
                                 mtlsEnabled = false
+                                // §review-3: 置 Clear-signal——后续 hasMaterial 不再认 ESP
+                                // 里的旧 p12，阻止「重开 mTLS→不粘贴→保存」静默重载它。
+                                clientCleared = true
                             }
                             stagedP12 = null
                             clientSlotStatus = CertSlotStatus.Empty
@@ -955,7 +969,11 @@ internal fun HostProfileEditorDialog(
                             // 直接同步透传——无 PEM 转换、无后台协程、无 MTLS_DBG 日志。
                             // onSave 是函数类型参数，Kotlin 禁具名实参（位置见 lambda 签名）。
                             val mtlsOn = mtlsEnabled
-                            val hasMaterial = initial.clientCertId != null || stagedP12 != null
+                            // §review-3: 同 triggerTestConnection——clientCleared 屏蔽 ESP
+                            // 残留旧 p12，使「移除→重开 mTLS→不粘贴→保存」hasMaterial=false
+                            // → resolveClientCert 返回 null → 保存被拒「需先导入客户端证书」。
+                            // 直接「移除→保存（mTLS 关）」仍走 Disable 清空 ESP（mtlsOn=false）。
+                            val hasMaterial = (!clientCleared && initial.clientCertId != null) || stagedP12 != null
                             onSave(
                                 saved,
                                 effectiveAuthPw,
