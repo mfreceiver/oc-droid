@@ -148,7 +148,10 @@ internal fun CertImportSlot(
                     maxLines = 2,
                     overflow = TextOverflow.Ellipsis,
                 )
-                IconButton(onClick = onRemove) {
+                // §review-5: respect [enabled] so a paste-validation coroutine in
+                // flight can't race with a remove (the paste button is already gated
+                // by the same flag via PasteButton).
+                IconButton(onClick = onRemove, enabled = enabled) {
                     Icon(
                         Icons.Default.Delete,
                         contentDescription = stringResource(R.string.host_cert_remove),

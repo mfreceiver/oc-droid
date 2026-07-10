@@ -151,6 +151,9 @@
     <string name="host_cert_err_base64">无法解析为 base64</string>
     <string name="host_cert_err_p12">PKCS12 无效或口令错误</string>
     <string name="host_cert_err_ca">CA 证书无效</string>
+    <!-- §mtls-clipboard-i18n: 证书导入槽角色标签（原为硬编码） -->
+    <string name="host_cert_role_client">客户端证书</string>
+    <string name="host_cert_role_ca">CA 证书</string>
     <string name="host_section_basic_auth_title">Basic 认证</string>
     <string name="host_section_basic_auth_sub">用户名 / 密码</string>
     <string name="host_section_tunnel_title">隧道口令</string>

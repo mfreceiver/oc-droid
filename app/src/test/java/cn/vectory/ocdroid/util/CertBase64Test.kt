@@ -51,16 +51,15 @@ class CertBase64Test {
     }
 
     @Test
-    fun `PEM dashes newlines and spaces are stripped, base64 alphabet kept`() {
-        // Per spec sanitizeBase64 keeps [A-Za-z0-9+/=]: the `-----` markers,
-        // newlines and spaces are dropped, but the header WORDS (BEGIN/END/...)
-        // are base64-alphabet letters and survive. The real import pipeline
-        // pastes pure base64 of the DER (design §Confirmed Decisions), so header
-        // words do not occur in practice; a header-laden blob would surface the
-        // spec's error UI at decode→parse. Here we lock the deterministic
-        // char-filter behaviour.
-        val pem = "-----BEGIN CERTIFICATE-----\nU29tZUNlcnQ=\n-----END CERTIFICATE-----"
-        assertEquals("BEGINCERTIFICATEU29tZUNlcnQ=ENDCERTIFICATE", sanitizeBase64(pem))
+    fun `PEM armor headers and footers are stripped, leaving the pure base64 body`() {
+        // sanitizeBase64 strips the `-----BEGIN/END …-----` armor tokens
+        // (including the label WORDS — BEGIN/END/CERTIFICATE — which are
+        // base64-alphabet letters) BEFORE the char-filter runs, so a pasted PEM
+        // reduces to just its decodable base64 body. Pure-base64 input carries
+        // no armor tokens and is unaffected (covered by the test above).
+        val body = "U29tZUNlcnQ="
+        val pem = "-----BEGIN CERTIFICATE-----\n$body\n-----END CERTIFICATE-----"
+        assertEquals(body, sanitizeBase64(pem))
     }
 
     @Test
@@ -105,6 +104,20 @@ class CertBase64Test {
         assertArrayEquals(payload, decoded)
     }
 
+    @Test
+    fun `a full pasted PEM decodes back to the original DER bytes`() {
+        // Realistic pasted-PEM input: the programmatically-minted cert's base64
+        // body, wrapped at 64 chars/line, between `-----BEGIN/END CERTIFICATE-----`
+        // armor. sanitizeBase64 drops the armor + newlines leaving a decodable
+        // body; decodeBase64OrNull then yields the original DER.
+        val body = Base64.getEncoder().encodeToString(fixtures.certDer)
+        val wrapped = body.chunked(64).joinToString("\n")
+        val pem = "-----BEGIN CERTIFICATE-----\n$wrapped\n-----END CERTIFICATE-----"
+        val decoded = decodeBase64OrNull(pem)
+        assertNotNull(decoded)
+        assertArrayEquals(fixtures.certDer, decoded)
+    }
+
     // ---------------------------------------------------------- parseCaCertOrNull
 
     @Test
@@ -135,6 +148,25 @@ class CertBase64Test {
     @Test
     fun `garbage is not a p12 and returns null`() {
         assertNull(loadClientP12OrNull(ByteArray(64) { it.toByte() }))
+    }
+
+    @Test
+    fun `a p12 with two key entries is rejected (exactly-one-key contract)`() {
+        // buildMutualTlsConfig requires EXACTLY one key entry; loadClientP12OrNull
+        // must mirror that so a bundle that "imports" is actually usable at
+        // Test/Save. Build a PKCS12 carrying two distinct key entries → must
+        // return null. The single-key fixture (fixtures.p12Bytes) is covered by
+        // the test above and is asserted to stay non-null (not weakened).
+        val (cert1, kp1) = makeSelfSignedCert("ocdroid-test-client")
+        val (cert2, kp2) = makeSelfSignedCert("ocdroid-test-second")
+        val ks = KeyStore.getInstance("PKCS12").apply {
+            load(null, CharArray(0))
+            setKeyEntry("client", kp1.private, CharArray(0), arrayOf(cert1))
+            setKeyEntry("second", kp2.private, CharArray(0), arrayOf(cert2))
+        }
+        val baos = ByteArrayOutputStream()
+        ks.store(baos, CharArray(0))
+        assertNull(loadClientP12OrNull(baos.toByteArray()))
     }
 
     // --------------------------------------------------------- certSubjectOrNull

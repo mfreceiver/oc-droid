@@ -35,9 +35,11 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
@@ -131,6 +133,17 @@ internal fun HostProfilesManagerScreen(
         // 降级 banner（那不是用户正在编辑的这个 host 的状态）。
         val mtlsErrorHint =
             if (profile.id == currentProfileId) connectionState.mtlsDegradedError else null
+        // §review-3: clientCertSummary() runs PKCS12 KDF — must NOT run on the Compose
+        // main thread. Compute both summaries off-main via produceState on
+        // Dispatchers.Default; the dialog receives null initially and its slot
+        // status seeds reactively (LaunchedEffect) once the value arrives. The
+        // HostViewModel funcs stay as-is — the Default context makes them main-safe.
+        val initialClientSummary by produceState<Pair<String, Int>?>(initialValue = null, profile.clientCertId) {
+            value = withContext(Dispatchers.Default) { viewModel.clientCertSummary(profile.clientCertId) }
+        }
+        val initialCaSummary by produceState<Pair<String, Int>?>(initialValue = null, profile.clientCertId) {
+            value = withContext(Dispatchers.Default) { viewModel.caSummary(profile.clientCertId) }
+        }
         HostProfileEditorDialog(
             initial = profile,
             // §item8 (cgpt#6 + grok#2): 注入「是否已存私有 CA」——clientCertId != null
@@ -138,8 +151,10 @@ internal fun HostProfilesManagerScreen(
             initialHasCa = viewModel.hasStoredCa(profile.clientCertId),
             // §mtls-clipboard: 重入时把已存 p12/CA 的 subject+size 注入，使槽位
             // 渲染 Imported 态而非空白（修「write-only 字段重入显示空」）。
-            initialClientSummary = viewModel.clientCertSummary(profile.clientCertId),
-            initialCaSummary = viewModel.caSummary(profile.clientCertId),
+            // §review-3: 现在异步注入（produceState）——初值为 null，到达后由
+            // Dialog 内的 LaunchedEffect 反应式种槽。
+            initialClientSummary = initialClientSummary,
+            initialCaSummary = initialCaSummary,
             // The "+" action creates a fresh profile that isn't persisted yet,
             // so it must not expose the destructive delete affordance.
             canDelete = profiles.any { it.id == profile.id } && profiles.size > 1,
@@ -402,6 +417,28 @@ internal fun HostProfileEditorDialog(
             else CertSlotStatus.Empty
         )
     }
+    // §review-3: 摘要现在异步注入（produceState，见 HostProfilesManagerScreen）。用
+    // 两个布尔追踪「用户是否已动手编辑该槽」，仅当未编辑时才让晚到的摘要反应式
+    // 种 Imported 态——已粘贴/已移除则尊重用户意图，不覆盖。
+    var clientEdited by remember(initial.id) { mutableStateOf(false) }
+    var caEdited by remember(initial.id) { mutableStateOf(false) }
+    LaunchedEffect(initialClientSummary) {
+        val summary = initialClientSummary ?: return@LaunchedEffect
+        if (!clientEdited && clientSlotStatus is CertSlotStatus.Empty) {
+            clientSlotStatus = CertSlotStatus.Imported(summary.first, summary.second)
+        }
+    }
+    LaunchedEffect(initialCaSummary) {
+        val summary = initialCaSummary ?: return@LaunchedEffect
+        if (!caEdited && caSlotStatus is CertSlotStatus.Empty && initialHasCa) {
+            caSlotStatus = CertSlotStatus.Imported(summary.first, summary.second)
+        }
+    }
+    // §review-2: 任一槽处于 Error 意味着暂存意图已过期（如失败的粘贴残留了旧的
+    // caStage=Clear）。Save 和 Test 一并禁用，强迫用户先解决错误（重新粘贴成功 →
+    // Imported，或显式移除 → Empty）后才能提交。
+    val hasCertError =
+        clientSlotStatus is CertSlotStatus.Error || caSlotStatus is CertSlotStatus.Error
     // §fix-3: 导入错误（解析失败等）局部回显，mTLS 区块顶部 banner。
     var mtlsImportError by remember(initial.id) { mutableStateOf<String?>(null) }
     // §issue-5: 测试连接状态上提——触发器移入 confirmButton 的 test icon，结果
@@ -426,6 +463,9 @@ internal fun HostProfileEditorDialog(
     val errCa = stringResource(R.string.host_cert_err_ca)
     val pasteClientLabel = stringResource(R.string.host_cert_paste_client)
     val pasteCaLabel = stringResource(R.string.host_cert_paste_ca)
+    // §review-6: role labels via string resources (were hardcoded "客户端证书" / "CA 证书").
+    val roleClientLabel = stringResource(R.string.host_cert_role_client)
+    val roleCaLabel = stringResource(R.string.host_cert_role_ca)
 
     fun readClip(): String? =
         clipboard?.primaryClip?.getItemAt(0)?.coerceToText(ctx)?.toString()
@@ -435,6 +475,7 @@ internal fun HostProfileEditorDialog(
     // 重活在 Dispatchers.Default 跑，状态写回在 Main（rememberCoroutineScope 默认 Main）。
     fun triggerClientPaste() {
         if (isConverting) return
+        clientEdited = true
         val raw = readClip()
         if (raw.isNullOrBlank()) {
             clientSlotStatus = CertSlotStatus.Error(errBase64)
@@ -471,6 +512,7 @@ internal fun HostProfileEditorDialog(
     // 线程）→成功写 caStage=Replace(bytes)；失败置 Error。
     fun triggerCaPaste() {
         if (isConverting) return
+        caEdited = true
         val raw = readClip()
         if (raw.isNullOrBlank()) {
             caSlotStatus = CertSlotStatus.Error(errBase64)
@@ -505,17 +547,36 @@ internal fun HostProfileEditorDialog(
     // §mtls-clipboard: stagedP12 已是粘贴时校验过的 ByteArray，直接透传，无需转换。
     // §cgpt-reval 🟠: Main 同步快照全部表单状态，保证「一次测试 = 点击时刻的完整表单」。
     fun triggerTestConnection() {
-        if (isTesting || isConverting || serverUrl.isBlank()) return
+        if (isTesting || isConverting || serverUrl.isBlank() || hasCertError) return
         val urlSnap = serverUrl
-        val userSnap = authUsername.ifBlank { null }
-        val authPwSnap = authPassword.ifBlank { null }
         val insecureSnap = allowInsecure
-        val pwEditedSnap = passwordEdited
         val mtlsOn = mtlsEnabled
         val p12Snap = stagedP12
         val caSnap = caStage
         val hasMaterial = initial.clientCertId != null || p12Snap != null
         val oldCertId = initial.clientCertId
+        // §review-4: honor the Basic Auth toggle. When the section is OFF, probe with
+        // NO credentials and suppress the stored-password fallback (profileId=null +
+        // passwordEdited=true mirrors the Save path's section-off clearing), so we
+        // don't test with creds the user believes disabled. When ON, behavior is
+        // unchanged (username/password snapshotted, stored-password fallback per
+        // passwordEdited).
+        val userSnap: String?
+        val authPwSnap: String?
+        val profileIdSnap: String?
+        val pwEditedSnap: Boolean
+        if (basicAuthEnabled) {
+            userSnap = authUsername.ifBlank { null }
+            authPwSnap = authPassword.ifBlank { null }
+            profileIdSnap = initial.id.takeIf { initial.basicAuth != null }
+            pwEditedSnap = passwordEdited
+        } else {
+            userSnap = null
+            authPwSnap = null
+            // profileId=null + passwordEdited=true ⇒ VM 跳过已存 basic-auth 密码回退。
+            profileIdSnap = null
+            pwEditedSnap = true
+        }
         isTesting = true
         testStatus = null
         // §2.7: 透传 mTLS 编辑意图（不在此构造 ClientCertMaterial——Dialog 无
@@ -525,7 +586,7 @@ internal fun HostProfileEditorDialog(
             userSnap,
             authPwSnap,
             insecureSnap,
-            initial.id.takeIf { initial.basicAuth != null },
+            profileIdSnap,
             pwEditedSnap,
             mtlsOn,
             p12Snap,
@@ -752,22 +813,34 @@ internal fun HostProfileEditorDialog(
                         )
                     }
                     CertImportSlot(
-                        roleLabel = "客户端证书",
+                        roleLabel = roleClientLabel,
                         status = clientSlotStatus,
                         onPaste = { triggerClientPaste() },
                         onRemove = {
+                            // §review-1: 对已有客户端证书的 profile（initial.clientCertId
+                            // != null），仅清 stagedP12 + status 是假删除——hasMaterial 仍
+                            // 为 true，Save 会从 ESP 重载旧 p12。「移除已存客户端证书」的
+                            // 唯一合理含义是「关闭 mTLS」→ mtlsEnabled=false 折叠区块，
+                            // Save 产 ClientCertEditIntent.Disable，ESP 里的证书被清。对新
+                            // 粘贴（clientCertId == null）只需清暂存粘贴。
+                            clientEdited = true
+                            if (initial.clientCertId != null) {
+                                mtlsEnabled = false
+                            }
                             stagedP12 = null
                             clientSlotStatus = CertSlotStatus.Empty
+                            mtlsImportError = null
                         },
                         pasteLabel = pasteClientLabel,
                         enabled = !isConverting,
                     )
                     Spacer(modifier = Modifier.height(8.dp))
                     CertImportSlot(
-                        roleLabel = "CA 证书",
+                        roleLabel = roleCaLabel,
                         status = caSlotStatus,
                         onPaste = { triggerCaPaste() },
                         onRemove = {
+                            caEdited = true
                             caStage = CaStage.Clear
                             caSlotStatus = CertSlotStatus.Empty
                         },
@@ -803,7 +876,7 @@ internal fun HostProfileEditorDialog(
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     IconButton(
                         onClick = { triggerTestConnection() },
-                        enabled = !isTesting && !isConverting && serverUrl.isNotBlank()
+                        enabled = !isTesting && !isConverting && serverUrl.isNotBlank() && !hasCertError
                     ) {
                         if (isTesting || isConverting) {
                             CircularProgressIndicator(
@@ -832,10 +905,12 @@ internal fun HostProfileEditorDialog(
                     TextButton(onClick = onDismiss) { Text(stringResource(R.string.common_cancel)) }
                     // §item7 (glm#4): Save 同时受 isTesting 门控——防测试进行中点 Save
                     //   取消在飞的测试协程。
+                    // §review-2: 另受 hasCertError 门控——任一证书槽处于 Error 时
+                    //   暂存意图已过期，禁止提交。
                     Button(
-                        enabled = !isConverting && !isTesting,
+                        enabled = !isConverting && !isTesting && !hasCertError,
                         onClick = {
-                            if (isConverting || isTesting) return@Button
+                            if (isConverting || isTesting || hasCertError) return@Button
                             // §mtls-clipboard: 凭据区折叠门控——区关时清空对应凭据。
                             //   Basic Auth 区关：用户名/密码置空，passwordEdited 强制
                             //   true（若原 profile 有 basicAuth）使 saveHostProfile 清

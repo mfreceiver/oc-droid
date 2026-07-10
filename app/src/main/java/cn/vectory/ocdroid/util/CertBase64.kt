@@ -12,10 +12,12 @@ import java.util.Base64
  * `docs/superpowers/specs/2026-07-10-mtls-clipboard-import-design.md`, §A).
  *
  * Pure JDK only — no BouncyCastle (the main classpath has none). Every function
- * is total: it returns `null` on any failure and **never throws**, so callers
- * can invoke them directly off the main thread (PKCS12 KDF is CPU-heavy — the
- * caller is responsible for staying off the UI thread) without a surrounding
- * `try/catch`.
+ * is total over normal failure modes: it returns `null` on any normal
+ * parse/load failure (the helpers catch [Exception], not [Throwable]), so
+ * callers can invoke them directly off the main thread (PKCS12 KDF is
+ * CPU-heavy — the caller is responsible for staying off the UI thread) without
+ * a surrounding `try/catch`. Errors that escape [Exception] (e.g.
+ * [OutOfMemoryError]) are not suppressed.
  *
  * Why MIME base64: a pasted PEM (`-----BEGIN CERTIFICATE-----` … headers,
  * newlines, spaces) is first reduced to its base64 payload by [sanitizeBase64],
@@ -25,12 +27,20 @@ import java.util.Base64
  */
 
 /**
- * Strips everything that is not a base64 alphabet character (`[A-Za-z0-9+/=]`):
- * PEM `-----BEGIN…-----` headers, newlines, carriage returns, spaces, tabs and
- * any other junk. Works for both pure-base64 and pasted-PEM inputs.
+ * Reduces a base64-or-PEM string to its pure base64 payload.
+ *
+ * First strips PEM armor tokens (`-----BEGIN …-----` / `-----END …-----`,
+ * case-insensitive, including the label words between the dashes), then drops
+ * every remaining non-alphabet character (`[A-Za-z0-9+/=]`): newlines,
+ * carriage returns, spaces, tabs and any other junk. A pasted PEM therefore
+ * reduces to just its base64 body (decodable), while pure-base64 input is
+ * unaffected (it carries no armor tokens).
  */
 fun sanitizeBase64(s: String): String =
-    s.filter { it.isBase64Alphabet() }
+    s.replace(PEM_ARMOR_REGEX, "").filter { it.isBase64Alphabet() }
+
+/** Matches PEM armor lines, e.g. `-----BEGIN CERTIFICATE-----` (case-insensitive). */
+private val PEM_ARMOR_REGEX = Regex("-----[A-Z0-9 ]+-----", RegexOption.IGNORE_CASE)
 
 private fun Char.isBase64Alphabet(): Boolean =
     this in 'A'..'Z' || this in 'a'..'z' || this in '0'..'9' || this == '+' || this == '/' || this == '='
@@ -38,7 +48,8 @@ private fun Char.isBase64Alphabet(): Boolean =
 /**
  * Sanitizes [s] then decodes it. Uses [Base64.getMimeDecoder] (lenient: ignores
  * non-base64 chars and tolerates missing/extra padding). Empty/blank input
- * yields `null`. Returns `null` on any [IllegalArgumentException]; never throws.
+ * yields `null`. Returns `null` on any normal decode failure (it catches
+ * [Exception]).
  */
 fun decodeBase64OrNull(s: String): ByteArray? {
     val sanitized = sanitizeBase64(s)
@@ -52,8 +63,8 @@ fun decodeBase64OrNull(s: String): ByteArray? {
 
 /**
  * Parses [bytes] as a DER-encoded X.509 certificate. Returns the certificate,
- * or `null` if the bytes are not a valid X.509 cert (or on any parse error).
- * Never throws.
+ * or `null` if the bytes are not a valid X.509 cert or on any normal parse
+ * failure (it catches [Exception]).
  */
 fun parseCaCertOrNull(bytes: ByteArray): X509Certificate? = try {
     CertificateFactory.getInstance("X.509")
@@ -63,9 +74,12 @@ fun parseCaCertOrNull(bytes: ByteArray): X509Certificate? = try {
 }
 
 /**
- * Loads [bytes] as a PKCS12 keystore and verifies it contains at least one key
- * entry (an alias that `isKeyEntry` AND owns a non-empty certificate chain).
- * Returns the loaded [KeyStore], or `null` on any failure. Never throws.
+ * Loads [bytes] as a PKCS12 keystore and verifies it contains EXACTLY one key
+ * entry (an alias that `isKeyEntry` AND owns a non-empty certificate chain) —
+ * matching `buildMutualTlsConfig`'s exactly-one-key requirement, so a bundle
+ * that imports here is actually usable at Test/Save. Returns the loaded
+ * [KeyStore], or `null` on any failure or when the key-entry count is not
+ * exactly 1. Normal parse/load failures return `null` (it catches [Exception]).
  *
  * NOTE: PKCS12 key-derivation (KDF) is CPU-heavy. This function is synchronous
  * and blocking; callers must run it off the main thread.
@@ -76,10 +90,10 @@ fun loadClientP12OrNull(
 ): KeyStore? = try {
     val ks = KeyStore.getInstance("PKCS12")
     ks.load(ByteArrayInputStream(bytes), password)
-    val hasKeyEntry = ks.aliases().toList().any { alias ->
+    val keyEntryCount = ks.aliases().toList().count { alias ->
         ks.isKeyEntry(alias) && ((ks.getCertificateChain(alias)?.size ?: 0) > 0)
     }
-    if (hasKeyEntry) ks else null
+    if (keyEntryCount == 1) ks else null
 } catch (_: Exception) {
     null
 }
