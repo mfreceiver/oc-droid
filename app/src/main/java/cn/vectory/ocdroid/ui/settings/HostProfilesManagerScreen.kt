@@ -1,6 +1,11 @@
 package cn.vectory.ocdroid.ui.settings
 
 import android.content.Context
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.expandVertically
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.shrinkVertically
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
@@ -8,9 +13,13 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.Check
+import androidx.compose.material.icons.filled.ContentPaste
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Dns
 import androidx.compose.material.icons.filled.Edit
+import androidx.compose.material.icons.filled.ExpandLess
+import androidx.compose.material.icons.filled.ExpandMore
 import androidx.compose.material.icons.filled.NetworkCheck
 import androidx.compose.material.icons.filled.Visibility
 import androidx.compose.material.icons.filled.VisibilityOff
@@ -19,7 +28,10 @@ import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.ExposedDropdownMenuBox
+import androidx.compose.material3.ExposedDropdownMenuDefaults
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.ListItem
@@ -27,9 +39,6 @@ import androidx.compose.material3.ListItemDefaults
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.RadioButton
-import androidx.compose.material3.SegmentedButton
-import androidx.compose.material3.SegmentedButtonDefaults
-import androidx.compose.material3.SingleChoiceSegmentedButtonRow
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -320,6 +329,7 @@ internal fun HostProfileDetailDialog(
     )
 }
 
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 internal fun HostProfileEditorDialog(
     initial: HostProfile,
@@ -694,48 +704,84 @@ internal fun HostProfileEditorDialog(
                     )
                 }
                 Spacer(modifier = Modifier.height(8.dp))
-                CollapsibleSection(
-                    title = stringResource(R.string.host_section_tunnel_title),
-                    subtitle = stringResource(R.string.host_section_tunnel_sub),
-                    checked = tunnelEnabled,
-                    onCheckedChange = { tunnelEnabled = it },
+                // §profile-cleanup R1: hide Tunnel password behind an Advanced expander.
+                // Default expanded when an existing tunnel is configured so the
+                // credential stays discoverable; collapsed for new profiles.
+                var advancedExpanded by remember(initial.id) { mutableStateOf(initial.tunnelPasswordId != null) }
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable { advancedExpanded = !advancedExpanded }
+                        .padding(vertical = 4.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween
                 ) {
-                    // Tunnel auth (optional, masked) — label 槽（§issue-6）
-                    OutlinedTextField(
-                        value = tunnelPassword,
-                        onValueChange = {
-                            tunnelEdited = true
-                            tunnelPassword = it
-                        },
-                        label = { Text(stringResource(R.string.host_profile_tunnel_password_label)) },
-                        placeholder = {
-                            // When a tunnel password is already stored for this host
-                            // (and the user hasn't started editing), show masked dots
-                            // so reopening the editor doesn't look like the credential
-                            // vanished. The field stays write-only (the actual password
-                            // is never echoed back), but the dots signal "data present".
-                            Text(
-                                if (initial.tunnelPasswordId != null && !tunnelEdited) stringResource(R.string.host_profile_password_masked_placeholder)
-                                else stringResource(R.string.common_optional)
-                            )
-                        },
-                        singleLine = true,
-                        modifier = Modifier.fillMaxWidth(),
-                        visualTransformation = if (showTunnelPassword) VisualTransformation.None else PasswordVisualTransformation(),
-                        trailingIcon = {
-                            IconButton(onClick = { showTunnelPassword = !showTunnelPassword }) {
-                                Icon(
-                                    if (showTunnelPassword) Icons.Default.VisibilityOff else Icons.Default.Visibility,
-                                    contentDescription = if (showTunnelPassword) stringResource(R.string.settings_hide_password) else stringResource(R.string.settings_show_password)
-                                )
-                            }
-                        }
+                    Text(
+                        stringResource(R.string.host_advanced),
+                        style = MaterialTheme.typography.titleSmall
+                    )
+                    Icon(
+                        imageVector = if (advancedExpanded) Icons.Default.ExpandLess else Icons.Default.ExpandMore,
+                        contentDescription = if (advancedExpanded) stringResource(R.string.common_collapse) else stringResource(R.string.common_expand)
                     )
                 }
+                AnimatedVisibility(
+                    visible = advancedExpanded,
+                    enter = expandVertically() + fadeIn(),
+                    exit = shrinkVertically() + fadeOut()
+                ) {
+                    CollapsibleSection(
+                        title = stringResource(R.string.host_section_tunnel_title),
+                        subtitle = stringResource(R.string.host_section_tunnel_sub),
+                        checked = tunnelEnabled,
+                        onCheckedChange = { tunnelEnabled = it },
+                    ) {
+                        // Tunnel auth (optional, masked) — label 槽（§issue-6）
+                        OutlinedTextField(
+                            value = tunnelPassword,
+                            onValueChange = {
+                                tunnelEdited = true
+                                tunnelPassword = it
+                            },
+                            label = { Text(stringResource(R.string.host_profile_tunnel_password_label)) },
+                            placeholder = {
+                                // When a tunnel password is already stored for this host
+                                // (and the user hasn't started editing), show masked dots
+                                // so reopening the editor doesn't look like the credential
+                                // vanished. The field stays write-only (the actual password
+                                // is never echoed back), but the dots signal "data present".
+                                Text(
+                                    if (initial.tunnelPasswordId != null && !tunnelEdited) stringResource(R.string.host_profile_password_masked_placeholder)
+                                    else stringResource(R.string.common_optional)
+                                )
+                            },
+                            singleLine = true,
+                            modifier = Modifier.fillMaxWidth(),
+                            visualTransformation = if (showTunnelPassword) VisualTransformation.None else PasswordVisualTransformation(),
+                            trailingIcon = {
+                                IconButton(onClick = { showTunnelPassword = !showTunnelPassword }) {
+                                    Icon(
+                                        if (showTunnelPassword) Icons.Default.VisibilityOff else Icons.Default.Visibility,
+                                        contentDescription = if (showTunnelPassword) stringResource(R.string.settings_hide_password) else stringResource(R.string.settings_show_password)
+                                    )
+                                }
+                            }
+                        )
+                    }
+                }
                 Spacer(modifier = Modifier.height(12.dp))
-                // §issue-4: 分组选择改用 M3 SingleChoiceSegmentedButtonRow（替代 5 个
-                // OutlinedButton 平铺），选项名简化为「独立 / A / B / C / D」；常驻
-                // 描述行移除，改为标题右侧 i 按钮点击弹窗（§issue-6 省高度）。
+                // §profile-cleanup R1: group selector as an M3 dropdown on the same
+                // row as the title + info icon (replaces the 5-segment bar).
+                var groupExpanded by remember(initial.id) { mutableStateOf(false) }
+                val groupOptions = listOf<Pair<String?, String>>(
+                    null to stringResource(R.string.host_group_none),
+                    "A" to "A",
+                    "B" to "B",
+                    "C" to "C",
+                    "D" to "D"
+                )
+                val selectedGroupLabel = groupOptions.find { it.first == selectedGroup }?.second
+                    ?: stringResource(R.string.host_group_none)
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     verticalAlignment = Alignment.CenterVertically
@@ -743,7 +789,6 @@ internal fun HostProfileEditorDialog(
                     Text(
                         stringResource(R.string.host_group_label),
                         style = MaterialTheme.typography.labelMedium,
-                        modifier = Modifier.weight(1f)
                     )
                     IconButton(onClick = { showGroupInfo = true }) {
                         Icon(
@@ -752,23 +797,35 @@ internal fun HostProfileEditorDialog(
                             tint = MaterialTheme.colorScheme.onSurfaceVariant
                         )
                     }
-                }
-                SingleChoiceSegmentedButtonRow(modifier = Modifier.fillMaxWidth()) {
-                    val groupOptions = listOf<Pair<String?, String>>(
-                        null to stringResource(R.string.host_group_none),
-                        "A" to "A",
-                        "B" to "B",
-                        "C" to "C",
-                        "D" to "D"
-                    )
-                    groupOptions.forEachIndexed { index, (value, label) ->
-                        SegmentedButton(
-                            selected = selectedGroup == value,
-                            onClick = { selectedGroup = value },
-                            shape = SegmentedButtonDefaults.itemShape(index = index, count = groupOptions.size),
-                            icon = {}
+                    Spacer(modifier = Modifier.width(8.dp))
+                    ExposedDropdownMenuBox(
+                        expanded = groupExpanded,
+                        onExpandedChange = { groupExpanded = it },
+                        modifier = Modifier.weight(1f)
+                    ) {
+                        OutlinedTextField(
+                            value = selectedGroupLabel,
+                            onValueChange = {},
+                            readOnly = true,
+                            singleLine = true,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .menuAnchor(),
+                            trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = groupExpanded) }
+                        )
+                        ExposedDropdownMenu(
+                            expanded = groupExpanded,
+                            onDismissRequest = { groupExpanded = false }
                         ) {
-                            Text(label, maxLines = 1)
+                            groupOptions.forEach { (value, label) ->
+                                DropdownMenuItem(
+                                    text = { Text(label) },
+                                    onClick = {
+                                        selectedGroup = value
+                                        groupExpanded = false
+                                    }
+                                )
+                            }
                         }
                     }
                 }
@@ -837,42 +894,29 @@ internal fun HostProfileEditorDialog(
                             modifier = Modifier.padding(bottom = 6.dp)
                         )
                     }
-                    CertImportSlot(
-                        roleLabel = roleClientLabel,
-                        status = clientSlotStatus,
-                        onPaste = { triggerClientPaste() },
-                        onRemove = {
-                            // §review-1: 对已有客户端证书的 profile（initial.clientCertId
-                            // != null），仅清 stagedP12 + status 是假删除——hasMaterial 仍
-                            // 为 true，Save 会从 ESP 重载旧 p12。「移除已存客户端证书」的
-                            // 唯一合理含义是「关闭 mTLS」→ mtlsEnabled=false 折叠区块，
-                            // Save 产 ClientCertEditIntent.Disable，ESP 里的证书被清。对新
-                            // 粘贴（clientCertId == null）只需清暂存粘贴。
+                    // §profile-cleanup R1: compact mTLS cert status row.
+                    // Shows icon-only status for client + CA and a single trash
+                    // affordance that clears both and disables mTLS.
+                    CompactCertStatusRow(
+                        clientStatus = clientSlotStatus,
+                        caStatus = caSlotStatus,
+                        clientLabel = stringResource(R.string.host_cert_compact_client),
+                        caLabel = stringResource(R.string.host_cert_compact_ca),
+                        clientPasteLabel = pasteClientLabel,
+                        caPasteLabel = pasteCaLabel,
+                        onImportClient = { triggerClientPaste() },
+                        onImportCa = { triggerCaPaste() },
+                        onClearAll = {
                             clientEdited = true
-                            if (initial.clientCertId != null) {
-                                mtlsEnabled = false
-                                // §review-3: 置 Clear-signal——后续 hasMaterial 不再认 ESP
-                                // 里的旧 p12，阻止「重开 mTLS→不粘贴→保存」静默重载它。
-                                clientCleared = true
-                            }
+                            caEdited = true
+                            clientCleared = true
+                            mtlsEnabled = false
                             stagedP12 = null
                             clientSlotStatus = CertSlotStatus.Empty
-                            mtlsImportError = null
-                        },
-                        pasteLabel = pasteClientLabel,
-                        enabled = !isConverting,
-                    )
-                    Spacer(modifier = Modifier.height(8.dp))
-                    CertImportSlot(
-                        roleLabel = roleCaLabel,
-                        status = caSlotStatus,
-                        onPaste = { triggerCaPaste() },
-                        onRemove = {
-                            caEdited = true
                             caStage = CaStage.Clear
                             caSlotStatus = CertSlotStatus.Empty
+                            mtlsImportError = null
                         },
-                        pasteLabel = pasteCaLabel,
                         enabled = !isConverting,
                     )
                 }
@@ -1034,6 +1078,108 @@ internal fun HostProfileEditorDialog(
                 }
             }
         )
+    }
+}
+
+/**
+ * §profile-cleanup R1: compact two-slot mTLS certificate status row.
+ * Shows icon-only status for the client and CA certificates and a single
+ * trash affordance that clears both and disables mTLS.
+ */
+@Composable
+private fun CompactCertStatusRow(
+    clientStatus: CertSlotStatus,
+    caStatus: CertSlotStatus,
+    clientLabel: String,
+    caLabel: String,
+    clientPasteLabel: String,
+    caPasteLabel: String,
+    onImportClient: () -> Unit,
+    onImportCa: () -> Unit,
+    onClearAll: () -> Unit,
+    modifier: Modifier = Modifier,
+    enabled: Boolean = true,
+) {
+    Row(
+        modifier = modifier.fillMaxWidth(),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(8.dp)
+    ) {
+        CompactCertIndicator(
+            label = clientLabel,
+            pasteLabel = clientPasteLabel,
+            status = clientStatus,
+            onImport = onImportClient,
+            enabled = enabled,
+            modifier = Modifier.weight(1f)
+        )
+        CompactCertIndicator(
+            label = caLabel,
+            pasteLabel = caPasteLabel,
+            status = caStatus,
+            onImport = onImportCa,
+            enabled = enabled,
+            modifier = Modifier.weight(1f)
+        )
+        IconButton(onClick = onClearAll, enabled = enabled) {
+            Icon(
+                Icons.Default.Delete,
+                contentDescription = stringResource(R.string.common_delete),
+                tint = MaterialTheme.colorScheme.error
+            )
+        }
+    }
+}
+
+@Composable
+private fun CompactCertIndicator(
+    label: String,
+    pasteLabel: String,
+    status: CertSlotStatus,
+    onImport: () -> Unit,
+    enabled: Boolean,
+    modifier: Modifier = Modifier,
+) {
+    Row(
+        modifier = modifier,
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        when (status) {
+            is CertSlotStatus.Imported -> {
+                Icon(
+                    Icons.Default.Check,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.primary,
+                    modifier = Modifier.size(20.dp)
+                )
+                Spacer(modifier = Modifier.width(6.dp))
+                Text(
+                    label,
+                    style = MaterialTheme.typography.bodyMedium,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f)
+                )
+            }
+
+            is CertSlotStatus.Error, CertSlotStatus.Empty -> {
+                IconButton(onClick = onImport, enabled = enabled) {
+                    Icon(
+                        Icons.Default.ContentPaste,
+                        contentDescription = pasteLabel,
+                        modifier = Modifier.size(20.dp)
+                    )
+                }
+                Text(
+                    label,
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f)
+                )
+            }
+        }
     }
 }
 

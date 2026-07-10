@@ -158,6 +158,11 @@
     <string name="host_section_basic_auth_sub">用户名 / 密码</string>
     <string name="host_section_tunnel_title">隧道口令</string>
     <string name="host_section_tunnel_sub">内网穿透</string>
+    <!-- §profile-cleanup R1: 主机配置编辑器中的“高级”展开器标签。 -->
+    <string name="host_advanced">高级</string>
+    <!-- §profile-cleanup R1: 紧凑 mTLS 证书行标签。 -->
+    <string name="host_cert_compact_client">客户端</string>
+    <string name="host_cert_compact_ca">CA</string>
     <string name="host_mtls_no_cert">尚未导入客户端证书——在导入前 mTLS 主机会被拒绝连接。</string>
     <string name="host_mtls_client_pem_label">客户端证书+私钥 (PEM)</string>
     <string name="host_mtls_client_pem_hint">粘贴 client-cert.pem 与 client-key.pem（可合并粘贴，先证书后私钥；多证书请 leaf 在前），无口令</string>

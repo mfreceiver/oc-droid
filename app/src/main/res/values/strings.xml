@@ -160,6 +160,11 @@
     <string name="host_section_basic_auth_sub">Username / password</string>
     <string name="host_section_tunnel_title">Tunnel password</string>
     <string name="host_section_tunnel_sub">Private network access</string>
+    <!-- §profile-cleanup R1: Advanced expander label in the host profile editor. -->
+    <string name="host_advanced">Advanced</string>
+    <!-- §profile-cleanup R1: compact mTLS cert row labels. -->
+    <string name="host_cert_compact_client">Client</string>
+    <string name="host_cert_compact_ca">CA</string>
     <string name="host_mtls_no_cert">No client certificate imported — mTLS hosts will be rejected until one is provided.</string>
     <string name="host_mtls_client_pem_label">Client cert + key (PEM)</string>
     <string name="host_mtls_client_pem_hint">Paste client-cert.pem and client-key.pem (can be combined, cert before key; for a chain put leaf first), no passphrase</string>
