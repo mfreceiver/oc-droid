@@ -89,13 +89,13 @@ key  = /etc/stunnel/server-key.pem
 
 ; ── mTLS：强制客户端出示由本 CA 签发的证书 ──
 CAfile      = /etc/stunnel/ca-cert.pem
-verifyPeer  = yes
+verifyChain = yes
 requireCert = yes
 ; 可选收紧：sslVersion = TLSv1.2   （TLSv1.3 兼容性较窄，按 stunnel 版本酌定）
 ```
-- `verifyPeer=yes` + `requireCert=yes` 是 stunnel 5.x 语法；旧版用 `verify = 3`（按你的版本确认）。
+- ⚠️ **用 `verifyChain = yes`（验证书链：客户端证书由 CA 签发即接受），不要用 `verifyPeer = yes`**。`verifyPeer` 要求客户端证书本身出现在 CAfile 里（"Certificate not found in local repository" → 全部握手被拒），与本方案「信 CA、接受任何 CA 签的客户端证书」的模型不符。stunnel 5.x 三者：`verifyChain`（验链）、`verifyPeer`（证书须在本地仓）、`verify = 0..3`（旧式级别，3 等价 verifyPeer 的严格态）。
 - `chmod 600` 所有 `*-key.pem`，stunnel 用户可读 `server-key.pem`。
-- 启动：`sudo systemctl restart stunnel`（或 `stunnel /etc/stunnel/stunnel.conf`）。
+- 启动：`sudo systemctl restart stunnel`（或 `stunnel /etc/stunnel/stunnel.conf`）。可用 `openssl s_client -connect <HOST>:<PORT> -cert client-cert.pem -key client-key.pem -CAfile ca-cert.pem` 验证（stunnel 日志应出现 `Certificate accepted at depth=0`）。
 
 ---
 
