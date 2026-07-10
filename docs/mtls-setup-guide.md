@@ -19,6 +19,10 @@ stunnel（公网端口，强制 mTLS）── 明文转发 ──▶ opencode se
 - 客户端证书**仅存于 App 内**（EncryptedSharedPreferences，AndroidKeyStore 加密），**不进系统证书库**。
 - App 以**剪贴板粘贴 base64**方式导入客户端证书（无口令 PKCS12）+ CA（DER base64）；无文件、无口令（§6.1 给出从本节 PEM 文件产出 base64 的命令）。
 
+> ⚠️ **两个最易踩的坑**（都实测过，详见 §3 / §6.1 / §8）：
+> 1. **客户端证书导出必须 `-legacy -descert`**：Android 内置 PKCS12 提供者读不了 OpenSSL 3+ 默认的 AES 加密 p12（报「PKCS12 无效」）。
+> 2. **stunnel 必须用 `verifyChain = yes`（不是 `verifyPeer`）**：`verifyPeer` 会要求客户端证书出现在 CAfile 里，导致所有握手被拒（mTLS 形同没开）。
+
 ---
 
 ## 1. 前置
@@ -177,12 +181,23 @@ openssl s_client -connect <HOST>:<PORT> -CAfile ca-cert.pem </dev/null 2>&1 | ta
 
 | 现象 | 原因 | 处理 |
 |---|---|---|
-| App 连接失败、TLS 握手错 | 服务端证书 SAN 与 `serverUrl` 主机不匹配 | 重签服务端证书，SAN 用 `DNS:<HOST>`（IP 连接用 `IP:`）|
+| App 槽位报「无法解析为 base64」 | 粘贴通道把 base64 URL 编码了（`+`→`%2B` 等） | App 0.6.7+ 已自动还原 `%XX`；旧版升级，或从原生终端/文件复制 |
+| App 槽位报「PKCS12 无效：…-legacy -descert」 | OpenSSL 3+ 默认产出 AES/PBES2 p12，Android 内置 PKCS12 提供者（旧 BouncyCastle）读不了 | 客户端命令务必 `-legacy -descert`（产出 3DES/SHA1，Android 可读）|
+| App 连接报 `SSLV3_ALERT_BAD_CERTIFICATE`；stunnel 日志 `Certificate not found in local repository` / `certificate verify failed` | stunnel 配成 `verifyPeer=yes`（要求客户端证书本身在 CAfile 里）——**全部握手被拒，mTLS 形同没开** | 改 `verifyChain=yes`（验链：CA 签的客户端证书即接受），重启 stunnel（§3）|
+| App 连接失败、TLS 握手错（其他） | 服务端证书 SAN 与 `serverUrl` 主机不匹配 | 重签服务端证书，SAN 用 `DNS:<HOST>`（IP 连接用 `IP:`）|
 | App 提示不信任服务端证书 | 未导入 CA，或导入了错误的 CA | 导入签发服务端证书的那个 `ca-cert.pem` |
-| App「证书文本无效：…」 | 粘贴的 PEM 缺证书/缺私钥/私钥非无口令 PKCS8（加密或传统格式）/ 多份私钥 | 用 openssl 生成无口令 PKCS8（`openssl ... -nodes`），核对含 `BEGIN CERTIFICATE` 与 `BEGIN PRIVATE KEY` 各一块；横幅会显示具体原因 |
-| 有证书但仍被 stunnel 拒 | 客户端证书非本 CA 签发 / 已过期 | 用 `ca-cert.pem` 重签客户端证书；检查 `days` |
-| stunnel 启动失败 | `verifyPeer`/`requireCert` 语法（旧版 `verify=3`）/ 文件权限 | 按 stunnel 版本调整指令；`chmod 600` keys |
-| 切换/重导证书后旧连接未更新 | App 在主机切换/冷启/手动改 URL 时才 reconfigure | 保存后稍候或重启 App（已修复 live reconfigure，但极端情况重启兜底）|
+| 有证书但仍被 stunnel 拒（`certificate verify failed` 且非 verifyPeer 问题） | 客户端证书非本 CA 签发 / 已过期 | 用 `ca-cert.pem` 重签客户端证书；检查 `-days` |
+| stunnel 启动报 `Address already in use` | 旧进程未退净 / 端口被占 | 确认无残留 `stunnel4` 进程后再 `systemctl --user restart`；`chmod 600` keys |
+| 切换/重导证书后旧连接未更新 | App 在主机切换/冷启/手动改 URL 时才 reconfigure | 保存后稍候或重启 App（已修 live reconfigure，极端情况重启兜底）|
+
+**服务端快速验证**（在服务器上跑，应握手成功）：
+```bash
+openssl s_client -connect <HOST>:<PORT> \
+  -cert /etc/stunnel/client-cert.pem -key /etc/stunnel/client-key.pem \
+  -CAfile /etc/stunnel/ca-cert.pem </dev/null 2>&1 | grep "Verify return code"
+# 同步看 stunnel 日志：journalctl --user -u stunnel-opencode -n 3
+# 成功标志：stunnel 记 "Certificate accepted at depth=0" + "connected 127.0.0.1:4096"
+```
 
 ---
 
