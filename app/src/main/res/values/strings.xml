@@ -148,14 +148,12 @@
     <string name="host_cert_paste_client">Paste client certificate (PKCS12)</string>
     <string name="host_cert_paste_ca">Paste CA certificate</string>
     <string name="host_cert_paste_generic">Paste from clipboard</string>
-    <string name="host_cert_remove">Remove</string>
+    <!-- §profile-cleanup R1: compact mTLS row contentDescription for the imported-state checkmark. %1$s is the role label (Client/CA). -->
+    <string name="host_cert_status_imported">%1$s certificate imported</string>
     <!-- §review-3: default locale (fallback) must be English; Chinese lives in values-zh. -->
     <string name="host_cert_err_base64">Could not parse as base64</string>
     <string name="host_cert_err_p12">Invalid PKCS12 (Android can\'t read OpenSSL-3+ AES p12 — regenerate with -legacy -descert)</string>
     <string name="host_cert_err_ca">Invalid CA certificate</string>
-    <!-- §mtls-clipboard-i18n: cert-import slot role labels (were hardcoded) -->
-    <string name="host_cert_role_client">Client certificate</string>
-    <string name="host_cert_role_ca">CA certificate</string>
     <string name="host_section_basic_auth_title">Basic Auth</string>
     <string name="host_section_basic_auth_sub">Username / password</string>
     <string name="host_section_tunnel_title">Tunnel password</string>

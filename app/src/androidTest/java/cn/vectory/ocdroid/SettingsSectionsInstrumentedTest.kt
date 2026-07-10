@@ -112,9 +112,9 @@ class SettingsSectionsInstrumentedTest {
         composeRule.onNodeWithText("OC Droid").assertIsDisplayed()
     }
 
-    // §review-r5 (Bug B regression): re-entering an mTLS profile must render the
-    // cert slots from the stored-byte summaries — NOT inverted, NOT showing a
-    // paste button for an imported cert. Both slots present here → both Imported.
+    // §review-r5 / §profile-cleanup R1: re-entering an mTLS profile must render
+    // the compact cert status row from the stored-byte summaries — NOT inverted,
+    // NOT showing a paste icon for an imported cert. Both stored → both Imported.
     @Test
     fun mtlsEditorSlots_renderImportedStatusWhenBothStored() {
         val profile = HostProfile(
@@ -134,14 +134,18 @@ class SettingsSectionsInstrumentedTest {
             }
         }
         composeRule.waitForIdle()
-        // Both slots show the Imported status line (subject · size); neither shows
-        // its paste button.
-        composeRule.onNodeWithText("Client certificate: CN=client · 1234 B").assertExists()
-        composeRule.onNodeWithText("CA certificate: CN=opencode CA · 5678 B").assertExists()
+        // Compact row shows role labels + imported checkmark contentDescriptions.
+        composeRule.onNodeWithText("Client").assertIsDisplayed()
+        composeRule.onNodeWithText("CA").assertIsDisplayed()
+        composeRule.onNodeWithContentDescription("Client certificate imported").assertExists()
+        composeRule.onNodeWithContentDescription("CA certificate imported").assertExists()
+        // Neither slot should show its paste icon.
+        composeRule.onNodeWithContentDescription("Paste client certificate (PKCS12)").assertDoesNotExist()
+        composeRule.onNodeWithContentDescription("Paste CA certificate").assertDoesNotExist()
     }
 
-    // §review-r5 (Bug B regression): the user's reported shape — client NOT
-    // stored, CA stored. Must render client slot = paste button, CA slot =
+    // §review-r5 / §profile-cleanup R1: the user's reported shape — client NOT
+    // stored, CA stored. Must render client slot = paste icon, CA slot =
     // Imported status (the user saw this inverted). Verifies no inversion.
     @Test
     fun mtlsEditorSlots_clientMissingCaPresent_notInverted() {
@@ -162,8 +166,11 @@ class SettingsSectionsInstrumentedTest {
             }
         }
         composeRule.waitForIdle()
-        // Client (not stored) → its paste button; CA (stored) → Imported status.
-        composeRule.onNodeWithText("Paste client certificate (PKCS12)").assertExists()
-        composeRule.onNodeWithText("CA certificate: CN=opencode CA · 5678 B").assertExists()
+        // Client (not stored) → its paste icon; CA (stored) → Imported status.
+        composeRule.onNodeWithContentDescription("Paste client certificate (PKCS12)").assertExists()
+        composeRule.onNodeWithContentDescription("CA certificate imported").assertExists()
+        composeRule.onNodeWithText("CA").assertIsDisplayed()
+        // Client must NOT show an imported checkmark.
+        composeRule.onNodeWithContentDescription("Client certificate imported").assertDoesNotExist()
     }
 }

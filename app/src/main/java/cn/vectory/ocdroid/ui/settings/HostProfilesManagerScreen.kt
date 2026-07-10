@@ -57,6 +57,9 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.text.style.TextOverflow
@@ -498,9 +501,6 @@ internal fun HostProfileEditorDialog(
     val errCa = stringResource(R.string.host_cert_err_ca)
     val pasteClientLabel = stringResource(R.string.host_cert_paste_client)
     val pasteCaLabel = stringResource(R.string.host_cert_paste_ca)
-    // §review-6: role labels via string resources (were hardcoded "客户端证书" / "CA 证书").
-    val roleClientLabel = stringResource(R.string.host_cert_role_client)
-    val roleCaLabel = stringResource(R.string.host_cert_role_ca)
 
     fun readClip(): String? =
         clipboard?.primaryClip?.getItemAt(0)?.coerceToText(ctx)?.toString()
@@ -708,10 +708,16 @@ internal fun HostProfileEditorDialog(
                 // Default expanded when an existing tunnel is configured so the
                 // credential stays discoverable; collapsed for new profiles.
                 var advancedExpanded by remember(initial.id) { mutableStateOf(initial.tunnelPasswordId != null) }
+                val advancedExpandedDesc = stringResource(R.string.common_collapse)
+                val advancedCollapsedDesc = stringResource(R.string.common_expand)
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .clickable { advancedExpanded = !advancedExpanded }
+                        .heightIn(min = 48.dp)
+                        .clickable(role = Role.Button) { advancedExpanded = !advancedExpanded }
+                        .semantics(mergeDescendants = true) {
+                            stateDescription = if (advancedExpanded) advancedExpandedDesc else advancedCollapsedDesc
+                        }
                         .padding(vertical = 4.dp),
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.SpaceBetween
@@ -722,7 +728,7 @@ internal fun HostProfileEditorDialog(
                     )
                     Icon(
                         imageVector = if (advancedExpanded) Icons.Default.ExpandLess else Icons.Default.ExpandMore,
-                        contentDescription = if (advancedExpanded) stringResource(R.string.common_collapse) else stringResource(R.string.common_expand)
+                        contentDescription = null
                     )
                 }
                 AnimatedVisibility(
@@ -1100,6 +1106,8 @@ private fun CompactCertStatusRow(
     modifier: Modifier = Modifier,
     enabled: Boolean = true,
 ) {
+    val hasAnythingToClear =
+        clientStatus is CertSlotStatus.Imported || caStatus is CertSlotStatus.Imported
     Row(
         modifier = modifier.fillMaxWidth(),
         verticalAlignment = Alignment.CenterVertically,
@@ -1121,7 +1129,10 @@ private fun CompactCertStatusRow(
             enabled = enabled,
             modifier = Modifier.weight(1f)
         )
-        IconButton(onClick = onClearAll, enabled = enabled) {
+        IconButton(
+            onClick = onClearAll,
+            enabled = enabled && hasAnythingToClear
+        ) {
             Icon(
                 Icons.Default.Delete,
                 contentDescription = stringResource(R.string.common_delete),
@@ -1140,6 +1151,7 @@ private fun CompactCertIndicator(
     enabled: Boolean,
     modifier: Modifier = Modifier,
 ) {
+    val importedDescription = stringResource(R.string.host_cert_status_imported, label)
     Row(
         modifier = modifier,
         verticalAlignment = Alignment.CenterVertically
@@ -1148,7 +1160,7 @@ private fun CompactCertIndicator(
             is CertSlotStatus.Imported -> {
                 Icon(
                     Icons.Default.Check,
-                    contentDescription = null,
+                    contentDescription = importedDescription,
                     tint = MaterialTheme.colorScheme.primary,
                     modifier = Modifier.size(20.dp)
                 )
@@ -1162,7 +1174,25 @@ private fun CompactCertIndicator(
                 )
             }
 
-            is CertSlotStatus.Error, CertSlotStatus.Empty -> {
+            is CertSlotStatus.Error -> {
+                IconButton(onClick = onImport, enabled = enabled) {
+                    Icon(
+                        Icons.Default.ContentPaste,
+                        contentDescription = pasteLabel,
+                        modifier = Modifier.size(20.dp)
+                    )
+                }
+                Text(
+                    status.message,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.error,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f)
+                )
+            }
+
+            CertSlotStatus.Empty -> {
                 IconButton(onClick = onImport, enabled = enabled) {
                     Icon(
                         Icons.Default.ContentPaste,

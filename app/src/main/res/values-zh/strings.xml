@@ -147,13 +147,11 @@
     <string name="host_cert_paste_client">粘贴客户端证书 (PKCS12)</string>
     <string name="host_cert_paste_ca">粘贴 CA 证书</string>
     <string name="host_cert_paste_generic">从剪贴板粘贴</string>
-    <string name="host_cert_remove">移除</string>
+    <!-- §profile-cleanup R1: 紧凑 mTLS 行已导入状态对勾的 contentDescription。%1$s 为角色标签（客户端/CA）。 -->
+    <string name="host_cert_status_imported">%1$s 证书已导入</string>
     <string name="host_cert_err_base64">无法解析为 base64</string>
     <string name="host_cert_err_p12">PKCS12 无效：Android 不支持 OpenSSL 3+ 的 AES 加密，请用 -legacy -descert 重新导出</string>
     <string name="host_cert_err_ca">CA 证书无效</string>
-    <!-- §mtls-clipboard-i18n: 证书导入槽角色标签（原为硬编码） -->
-    <string name="host_cert_role_client">客户端证书</string>
-    <string name="host_cert_role_ca">CA 证书</string>
     <string name="host_section_basic_auth_title">Basic 认证</string>
     <string name="host_section_basic_auth_sub">用户名 / 密码</string>
     <string name="host_section_tunnel_title">隧道口令</string>
