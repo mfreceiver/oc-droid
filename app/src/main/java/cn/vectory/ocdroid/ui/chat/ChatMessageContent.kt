@@ -1,5 +1,6 @@
 package cn.vectory.ocdroid.ui.chat
 
+import android.util.Log
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.clickable
@@ -53,6 +54,9 @@ import cn.vectory.ocdroid.ui.METADATA_MARKER_ROLES
 import cn.vectory.ocdroid.ui.filterBeforeRevert
 import cn.vectory.ocdroid.ui.injectMetadataMarkers
 import cn.vectory.ocdroid.ui.isStaleQuestionPart
+import cn.vectory.ocdroid.util.FLICKER_TAG
+import cn.vectory.ocdroid.util.STREAMING_FLICKER_DEBUG
+import cn.vectory.ocdroid.util.flickerFilterOutCount
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.flow.drop
@@ -439,8 +443,19 @@ internal fun ChatMessageList(
             // 非流式（新消息到达、初始加载，streamingPartTexts 为空且无 reasoning part）
             // 保留 animateScrollToItem 平滑跟随，体验不受影响。
             if (streamingReasoningPart != null || streamingPartTexts.isNotEmpty()) {
+                // §streaming-flicker-diagnosis (Top2): log every programmatic
+                // scrollToItem(0) restart driven by contentVersion (which embeds
+                // streamingPartTexts.hashCode() → changes ~every 100ms flush). If
+                // this line fires at ~10Hz during streaming it implicates the
+                // scroll-interrupts-layout candidate (Top2).
+                if (STREAMING_FLICKER_DEBUG) {
+                    Log.w(FLICKER_TAG, "contentVersion changed → scrollToItem(0) t=${System.nanoTime()}")
+                }
                 listState.scrollToItem(0)
             } else {
+                if (STREAMING_FLICKER_DEBUG) {
+                    Log.w(FLICKER_TAG, "contentVersion changed → animateScrollToItem(0) t=${System.nanoTime()}")
+                }
                 listState.animateScrollToItem(0)
             }
         }
@@ -473,15 +488,42 @@ internal fun ChatMessageList(
             (entry is Entry.Message) && run {
                 val msg = entry.message
                 val msgParts = partsByMessage[msg.id].orEmpty()
+                // §streaming-flicker-diagnosis §3.1 confirm experiment: when the
+                // debug gate is on, ALSO treat a session-running message that
+                // carries a text Part as streaming — this covers the placeholder
+                // window (text=null Part in partsByMessage but partId not yet in
+                // streamingPartTexts). If flicker vanishes with this on, Top1 is
+                // confirmed. sessionIsRunning + isText are both in scope here.
+                // Disabled (no-op) when STREAMING_FLICKER_DEBUG=false.
                 val isStreamingMsg = msgParts.any { it.id in streamingPartTexts } ||
                     streamingReasoningPart?.messageId == msg.id ||
-                    (!msg.isUser && msgParts.isEmpty() && sessionIsRunning)
+                    (!msg.isUser && msgParts.isEmpty() && sessionIsRunning) ||
+                    (STREAMING_FLICKER_DEBUG && sessionIsRunning && msgParts.any { it.isText })
                 // §empty-msg / §error-feedback: same filter as the legacy
                 // reversedMessages (kept verbatim so rendering is byte-identical
                 // for the non-gap path).
-                !msg.isUser && !isStreamingMsg &&
+                val renderableEmpty = isEffectivelyRenderableEmpty(msgParts)
+                val filteredOut = !msg.isUser && !isStreamingMsg &&
                     msg.error?.message.isNullOrBlank() &&
-                    isEffectivelyRenderableEmpty(msgParts)
+                    renderableEmpty
+                // §streaming-flicker-diagnosis (Top1): a non-user, non-streaming
+                // message dropped here is the exact blank-frame path — the
+                // placeholder intermediate state makes isStreamingMsg=false AND
+                // renderableEmpty=true. If this fires ~1Hz during streaming, the
+                // Top1 root cause is confirmed. filterOutCount is the cumulative
+                // tally (AtomicLong); pair with the SessionSyncCoordinator
+                // "placeholder created" / "first delta staged" logs to time the
+                // two-phase window.
+                if (filteredOut && STREAMING_FLICKER_DEBUG) {
+                    val count = flickerFilterOutCount.incrementAndGet()
+                    Log.w(
+                        FLICKER_TAG,
+                        "FILTERED OUT msgId=${msg.id} isStreamingMsg=$isStreamingMsg " +
+                            "renderableEmpty=$renderableEmpty " +
+                            "hasError=${!msg.error?.message.isNullOrBlank()} filterOutCount=$count"
+                    )
+                }
+                filteredOut
             }
         }
     }

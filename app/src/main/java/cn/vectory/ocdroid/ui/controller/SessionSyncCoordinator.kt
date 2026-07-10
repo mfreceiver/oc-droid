@@ -1,5 +1,6 @@
 package cn.vectory.ocdroid.ui.controller
 
+import android.util.Log
 import cn.vectory.ocdroid.BuildConfig
 import cn.vectory.ocdroid.R
 import cn.vectory.ocdroid.data.api.NOISY_SSE_LOG_EVENTS
@@ -29,7 +30,9 @@ import cn.vectory.ocdroid.ui.reportNonFatalIssue
 import cn.vectory.ocdroid.ui.isStreamablePartType
 import cn.vectory.ocdroid.ui.upsertSession
 import cn.vectory.ocdroid.util.DebugLog
+import cn.vectory.ocdroid.util.FLICKER_TAG
 import cn.vectory.ocdroid.util.SettingsManager
+import cn.vectory.ocdroid.util.STREAMING_FLICKER_DEBUG
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
@@ -697,6 +700,21 @@ class SessionSyncCoordinator(
                                 slices.mutateChat { c ->
                                     c.applyPartCreatedPlaceholder(pType, pId, msgId, deltaEvent.sessionId).first
                                 }
+                                // §streaming-flicker-diagnosis (Top1): the placeholder
+                                // Part (text=null) is now in partsByMessage but the first
+                                // delta/fullText has NOT yet been staged into
+                                // streamingPartTexts — this is the two-phase-mutation
+                                // intermediate state. inStreamingTexts is expected to be
+                                // false here; if Compose snapshots between this mutation
+                                // and the leading-edge write below, the ChatMessageContent
+                                // filter (Top1) drops the whole message → blank frame.
+                                if (STREAMING_FLICKER_DEBUG) {
+                                    val inStreamingTexts = key in slices.chat.value.streamingPartTexts
+                                    Log.w(
+                                        FLICKER_TAG,
+                                        "placeholder created partId=$key msgId=$msgId inStreamingTexts=$inStreamingTexts"
+                                    )
+                                }
                             }
                         }
                         if (!fullText.isNullOrBlank()) {
@@ -725,6 +743,13 @@ class SessionSyncCoordinator(
                                     ).first.markFlushPending(key).first
                                 }
                                 scheduleDeltaFlush(key)
+                                // §streaming-flicker-diagnosis (Top1): first frame
+                                // (fullText) staged into streamingPartTexts — closes
+                                // the intermediate-state window opened by the
+                                // placeholder mutation above.
+                                if (STREAMING_FLICKER_DEBUG) {
+                                    Log.w(FLICKER_TAG, "first fullText staged partId=$key msgId=$msgId")
+                                }
                             } else {
                                 // Trailing coalesce: buffer the latest fullText
                                 // (REPLACE). The pending DELTA_COALESCE_MS flush
@@ -757,6 +782,13 @@ class SessionSyncCoordinator(
                                     ).first.markFlushPending(key).first
                                 }
                                 scheduleDeltaFlush(key)
+                                // §streaming-flicker-diagnosis (Top1): first frame
+                                // (delta) staged into streamingPartTexts — closes
+                                // the intermediate-state window opened by the
+                                // placeholder mutation above.
+                                if (STREAMING_FLICKER_DEBUG) {
+                                    Log.w(FLICKER_TAG, "first delta staged partId=$key msgId=$msgId")
+                                }
                             } else {
                                 // Trailing coalesce: buffer; the pending
                                 // DELTA_COALESCE_MS flush appends the batch in
