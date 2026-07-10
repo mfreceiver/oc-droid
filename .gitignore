@@ -79,3 +79,7 @@ opencode-src/
 
 # transient local media (flicker-debug video/frames, etc.)
 /tmp/
+
+# mTLS client PKCS12 (contains private key — never commit)
+client-cert.b64
+*.b64
