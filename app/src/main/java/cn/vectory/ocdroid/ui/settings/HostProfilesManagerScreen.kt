@@ -1,7 +1,5 @@
 package cn.vectory.ocdroid.ui.settings
 
-import androidx.activity.compose.rememberLauncherForActivityResult
-import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
@@ -40,10 +38,10 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.input.PasswordVisualTransformation
@@ -53,8 +51,12 @@ import androidx.compose.ui.unit.dp
 import cn.vectory.ocdroid.R
 import cn.vectory.ocdroid.data.model.BasicAuthConfig
 import cn.vectory.ocdroid.data.model.HostProfile
+import cn.vectory.ocdroid.data.repository.http.pemMaterialToP12
 import cn.vectory.ocdroid.ui.ConnectionViewModel
 import cn.vectory.ocdroid.ui.HostViewModel
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 /**
  * HostProfile management sub-screen and its supporting composables: the
@@ -126,6 +128,9 @@ internal fun HostProfilesManagerScreen(
             if (profile.id == currentProfileId) connectionState.mtlsDegradedError else null
         HostProfileEditorDialog(
             initial = profile,
+            // §item8 (cgpt#6 + grok#2): 注入「是否已存私有 CA」——clientCertId != null
+            // 不等于有 CA（CA 是独立槽）。VM 直接读 ESP 的 CA 槽。
+            initialHasCa = viewModel.hasStoredCa(profile.clientCertId),
             // The "+" action creates a fresh profile that isn't persisted yet,
             // so it must not expose the destructive delete affordance.
             canDelete = profiles.any { it.id == profile.id } && profiles.size > 1,
@@ -308,6 +313,9 @@ internal fun HostProfileEditorDialog(
         p12PasswordEdited: Boolean,
         hasImportedP12: Boolean
     ) -> Unit,
+    // §item8 (cgpt#6 + grok#2): 是否已存私有 CA——由调用方从 ESP 的 CA 槽注入。
+    // 比 `initial.clientCertId != null` 准确（clientCertId 只证明有客户端证书）。
+    initialHasCa: Boolean = false,
     canDelete: Boolean = false,
     onDelete: () -> Unit = {},
     // §user-req: 一次性"测试连接"回调。调用方（HostProfilesManagerScreen）
@@ -358,78 +366,106 @@ internal fun HostProfileEditorDialog(
     // 否则全局 strict 校验会直接拒绝连接）。种子取自当前 HostProfile。
     var allowInsecure by remember(initial.id) { mutableStateOf(initial.allowInsecureConnections) }
     // §2.7: mTLS 编辑意图（纯 UI 暂存，不碰 ESP/不碰 settingsManager）。
+    // §mtls-paste: 粘贴 PEM 文本（客户端证书+私钥），保存时转内部空口令 p12；
+    //   下游 PKCS12 路径零改动。
     //  - mtlsEnabled：开关，种子取自 initial。
-    //  - stagedP12：本次新导入的 p12 字节；null=未导入（编辑既有 mTLS profile 时
-    //    保持 null，由 VM 据初始 clientCertId 回 ESP 取已存）。
-    //  - caStage：CA 编辑意图三态（v3-gpter R2#3）。
-    //  - p12Password / p12PasswordEdited：p12 导出密码 write-only 字段（不回填）。
-    //  - hasImportedP12：是否存在 p12（initial.clientCertId != null 或本次导入过）。
-    //  - showP12Password：密码可见性切换。
+    //  - stagedClientPem：本次粘贴的客户端 PEM 文本；保存/测试时转 p12。
+    //  - caStage：CA 编辑意图三态（v3-gpter R2#3）；CA 也改为粘贴 PEM 文本。
+    //  - hasClientCertMaterial：派生（initial.clientCertId != null 或本次粘贴了
+    //    客户端 PEM）。§item9 (cgpt#7): 重命名自 hasImportedP12——在 PEM 模型下
+    //    更清晰。映射到 onSave/onTestConnection 的 hasImportedP12 位置参数（签名不变）。
     var mtlsEnabled by remember(initial.id) { mutableStateOf(initial.mtlsEnabled) }
-    var stagedP12: ByteArray? by remember(initial.id) { mutableStateOf(null) }
+    // §mtls-paste: 粘贴 PEM 文本（客户端证书+私钥），保存时转内部空口令 p12。
+    var stagedClientPem by remember(initial.id) { mutableStateOf("") }
     var caStage: CaStage by remember(initial.id) { mutableStateOf(CaStage.Unchanged) }
-    var p12Password by remember(initial.id) { mutableStateOf("") }
-    var p12PasswordEdited by remember(initial.id) { mutableStateOf(false) }
-    var hasImportedP12 by remember(initial.id) { mutableStateOf(initial.clientCertId != null) }
-    var showP12Password by remember(initial.id) { mutableStateOf(false) }
-    // §fix-3 (gpt-2#1次): SAF 导入错误（超限 / 读流失败）局部回显。
+    // §item9: hasClientCertMaterial 派生——既有 clientCertId 或本次粘贴了客户端 PEM。
+    val hasClientCertMaterial = initial.clientCertId != null || stagedClientPem.isNotBlank()
+    // §fix-3: 导入错误（PEM 解析失败等）局部回显。
     var mtlsImportError by remember(initial.id) { mutableStateOf<String?>(null) }
-    val context = LocalContext.current
-    // §2.7 SAF：p12 / CA 都二进制读（readBytes）——CA readText() 对 DER 会坏（glmer I10）。
-    // §fix-3 (gpt-2#1次): openInputStream 加 .use{} 防句柄泄漏；5MB 上限防 OOM/异常大文件。
-    val p12Launcher = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
-        uri?.let {
-            mtlsImportError = null
-            val bytes = readCapped(it, context, MAX_CERT_BYTES) { msg -> mtlsImportError = msg }
-            if (bytes != null) {
-                stagedP12 = bytes
-                hasImportedP12 = true
-            }
-        }
-    }
-    val caLauncher = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
-        uri?.let {
-            mtlsImportError = null
-            val bytes = readCapped(it, context, MAX_CERT_BYTES) { msg -> mtlsImportError = msg }
-            if (bytes != null) {
-                caStage = CaStage.Replace(bytes)
-            }
-        }
-    }
+    // §mtls-paste: CA 文本框展示值（Replace 字节→UTF-8 文本；Unchanged/Clear→空）。
+    val caPemText = (caStage as? CaStage.Replace)?.bytes?.toString(Charsets.UTF_8) ?: ""
     // §issue-5: 测试连接状态上提——触发器移入 confirmButton 的 test icon，结果
     // 回显仍在 text 列；两者共享状态，故从 Column 内部上提到 dialog 作用域。
     var testStatus by remember(initial.id) { mutableStateOf<Pair<Boolean, String>?>(null) }
     var isTesting by remember(initial.id) { mutableStateOf(false) }
+    // §C8 (ANR/perf): PKCS12 KDF 不能在主线程跑——保存/测试时把 pemMaterialToP12
+    // 切到 Dispatchers.Default；isConverting 期间禁用 Save/Test 并显示进度圈。
+    val scope = rememberCoroutineScope()
+    var isConverting by remember(initial.id) { mutableStateOf(false) }
+    // §C5 (security UX): 客户端 PEM 文本含私钥——默认以密码圆点遮蔽，eye 切换显隐。
+    var showClientPem by remember(initial.id) { mutableStateOf(false) }
     // §issue-4: 分组说明改为 i 按钮点击弹窗（替代常驻描述行，省高度）。
     var showGroupInfo by remember(initial.id) { mutableStateOf(false) }
+
+    // §item5 (cgpt#8 + grok#8): save/test 共享的 PEM→p12 转换 helper。
+    // §cgpt-reval 🔴+🟠: 取快照参数 + mtlsEnabled gate。
+    //   - 🔴 enabled=false（mTLS 关）时直接 null/null，不转换残留 PEM——否则用户
+    //     粘了无效 PEM 后想关 mTLS 会被卡住无法保存 Disable（错误回显挡住 onSave）。
+    //   - 🟠 调用方在 Main 同步取 `pemSnap = stagedClientPem` 传入；不在后台线程
+    //     读 snapshot state，保证「一次保存/测试 = 点击时刻的完整表单」不撕裂。
+    suspend fun convertClientPemOrError(enabled: Boolean, pem: String): Pair<ByteArray?, String?> =
+        withContext(Dispatchers.Default) {
+            if (!enabled || pem.isBlank()) null to null
+            else runCatching { pemMaterialToP12(pem) }
+                .fold({ it to null }, { null to "证书文本无效：${it.message}" })
+        }
 
     // §issue-5: 测试连接触发逻辑抽成局部函数——原表单内全宽按钮移除，触发器改为
     // confirmButton 里的 test icon；结果回显仍在表单内。两者共享此函数。
     // §fix-401 / §fix-401-credential 语义不变：编辑已有 profile 且未改密码时回退
     // 已保存密码（write-only 字段不回填）；主动清空则按无 auth 测试。
+    // §C8 (perf/ANR): PEM→p12 转换（PKCS12 KDF）切到 Dispatchers.Default；
+    // §C7: 解析失败统一写到 mtlsImportError（与保存路径一致），不再走 testStatus。
+    // §item6 (cgpt#9 + grok#4): try/finally 保证 isConverting 在取消/异常时也复位。
+    // §cgpt-reval 🟠: Main 同步快照全部表单状态——coroutine 期间表单仍可编辑，
+    //   用快照值保证「一次测试 = 点击时刻的完整表单」，不撕裂。
     fun triggerTestConnection() {
-        if (isTesting || serverUrl.isBlank()) return
-        isTesting = true
-        testStatus = null
-        // §2.7: 透传 mTLS 编辑意图（不在此构造 ClientCertMaterial——Dialog 无
-        // settingsManager；由回调接收方 VM 构造）。
-        onTestConnection(
-            serverUrl,
-            authUsername.ifBlank { null },
-            authPassword.ifBlank { null },
-            allowInsecure,
-            initial.id.takeIf { initial.basicAuth != null },
-            passwordEdited,
-            mtlsEnabled,
-            stagedP12,
-            hasImportedP12,
-            caStage,
-            p12Password.ifBlank { null },
-            p12PasswordEdited,
-            initial.clientCertId
-        ) { success, msg ->
-            isTesting = false
-            testStatus = success to msg
+        if (isTesting || isConverting || serverUrl.isBlank()) return
+        val urlSnap = serverUrl
+        val userSnap = authUsername.ifBlank { null }
+        val authPwSnap = authPassword.ifBlank { null }
+        val insecureSnap = allowInsecure
+        val pwEditedSnap = passwordEdited
+        val mtlsOn = mtlsEnabled
+        val pemSnap = stagedClientPem
+        val caSnap = caStage
+        val hasMaterial = initial.clientCertId != null || pemSnap.isNotBlank()
+        val oldCertId = initial.clientCertId
+        isConverting = true
+        scope.launch {
+            try {
+                val (convertedP12, pemError) = convertClientPemOrError(mtlsOn, pemSnap)
+                if (pemError != null) {
+                    // §C7: 在 mTLS banner 回显（与 save 路径一致），不占用 testStatus。
+                    mtlsImportError = pemError
+                    return@launch
+                }
+                mtlsImportError = null
+                isTesting = true
+                testStatus = null
+                // §2.7: 透传 mTLS 编辑意图（不在此构造 ClientCertMaterial——Dialog 无
+                // settingsManager；由回调接收方 VM 构造）。
+                onTestConnection(
+                    urlSnap,
+                    userSnap,
+                    authPwSnap,
+                    insecureSnap,
+                    initial.id.takeIf { initial.basicAuth != null },
+                    pwEditedSnap,
+                    mtlsOn,
+                    convertedP12,
+                    hasMaterial,
+                    caSnap,
+                    null,
+                    false,
+                    oldCertId
+                ) { success, msg ->
+                    isTesting = false
+                    testStatus = success to msg
+                }
+            } finally {
+                isConverting = false
+            }
         }
     }
 
@@ -604,7 +640,8 @@ internal fun HostProfileEditorDialog(
                     )
                 }
                 Spacer(modifier = Modifier.height(12.dp))
-                // §2.7: mTLS 区块——客户端证书（PKCS12 + 密码）+ 可选私有 CA。
+                // §2.7: mTLS 区块——客户端证书（粘贴 PEM）+ 可选私有 CA。
+                // §item10 (grok#10): 旧注释「PKCS12 + 密码」已改为反映 PEM 粘贴模型。
                 // 互斥：开启 mTLS 强制重置 allowInsecure=false（onCheckedChange 内）。
                 Row(
                     modifier = Modifier.fillMaxWidth(),
@@ -630,8 +667,7 @@ internal fun HostProfileEditorDialog(
                     )
                 }
                 if (mtlsEnabled) {
-                    // §fix-3 (gro-1#2/gpt-2#2/max-1 M1): mTLS 降级 banner —— 缺失/损坏
-                    // 证书（mtlsErrorHint）或 SAF 导入错误（mtlsImportError）。
+                    // §mtls-paste: 降级 banner（缺失/损坏 或 PEM 解析错误）。
                     val mtlsBanner = mtlsErrorHint ?: mtlsImportError
                     if (mtlsBanner != null) {
                         Text(
@@ -641,23 +677,32 @@ internal fun HostProfileEditorDialog(
                             modifier = Modifier.padding(bottom = 6.dp)
                         )
                     }
-                    // p12 导入按钮：✓ 有证书（hasImportedP12）/ 无证书状态。
-                    Row(
+                    // §mtls-paste: 客户端证书+私钥 PEM 文本框（无口令）。
+                    // §C5 (security UX): 该字段含私钥——默认 PasswordVisualTransformation
+                    //   遮蔽，eye 切换显隐（与 basic-auth / tunnel 密码字段同模式）。
+                    //   minLines=3 时遮蔽显示为每行圆点（可接受，秘密不外泄）。
+                    OutlinedTextField(
+                        value = stagedClientPem,
+                        onValueChange = {
+                            stagedClientPem = it
+                            mtlsImportError = null
+                        },
+                        label = { Text(stringResource(R.string.host_mtls_client_pem_label)) },
+                        placeholder = { Text(stringResource(R.string.host_mtls_client_pem_hint)) },
+                        minLines = 3,
+                        maxLines = 6,
                         modifier = Modifier.fillMaxWidth(),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Text(
-                            if (hasImportedP12) stringResource(R.string.host_mtls_import_p12_replace)
-                            else stringResource(R.string.host_mtls_import_p12),
-                            style = MaterialTheme.typography.bodyMedium,
-                            modifier = Modifier.weight(1f)
-                        )
-                        Spacer(modifier = Modifier.width(8.dp))
-                        TextButton(onClick = { p12Launcher.launch(arrayOf("*/*")) }) {
-                            Text(stringResource(R.string.host_mtls_import_p12))
+                        visualTransformation = if (showClientPem) VisualTransformation.None else PasswordVisualTransformation(),
+                        trailingIcon = {
+                            IconButton(onClick = { showClientPem = !showClientPem }) {
+                                Icon(
+                                    if (showClientPem) Icons.Default.VisibilityOff else Icons.Default.Visibility,
+                                    contentDescription = if (showClientPem) stringResource(R.string.settings_hide_password) else stringResource(R.string.settings_show_password)
+                                )
+                            }
                         }
-                    }
-                    if (!hasImportedP12) {
+                    )
+                    if (!hasClientCertMaterial) {
                         Text(
                             stringResource(R.string.host_mtls_no_cert),
                             style = MaterialTheme.typography.bodySmall,
@@ -665,56 +710,38 @@ internal fun HostProfileEditorDialog(
                         )
                     }
                     Spacer(modifier = Modifier.height(6.dp))
-                    // p12 密码（masked，write-only 不回填）。
+                    // §mtls-paste: CA 证书 PEM 文本框（可选）。
+                    // §item8 (cgpt#6 + grok#2): placeholder 用注入的 initialHasCa
+                    //   （读 ESP 的 CA 槽），而非 initial.clientCertId != null
+                    //   （后者只证明有客户端证书，不等于有 CA）。
                     OutlinedTextField(
-                        value = p12Password,
-                        onValueChange = {
-                            p12PasswordEdited = true
-                            p12Password = it
+                        value = caPemText,
+                        onValueChange = { text ->
+                            caStage = if (text.isBlank()) CaStage.Clear
+                                      else CaStage.Replace(text.toByteArray(Charsets.UTF_8))
                         },
-                        label = { Text(stringResource(R.string.host_mtls_p12_password)) },
+                        label = { Text(stringResource(R.string.host_mtls_ca_pem_label)) },
                         placeholder = {
                             Text(
-                                if (hasImportedP12 && !p12PasswordEdited) stringResource(R.string.host_profile_password_masked_placeholder)
-                                else stringResource(R.string.common_optional)
+                                if (caStage is CaStage.Unchanged && initialHasCa)
+                                    stringResource(R.string.host_mtls_ca_pem_existing_hint)
+                                else
+                                    stringResource(R.string.host_mtls_ca_pem_hint)
                             )
                         },
-                        singleLine = true,
-                        modifier = Modifier.fillMaxWidth(),
-                        visualTransformation = if (showP12Password) VisualTransformation.None else PasswordVisualTransformation(),
-                        trailingIcon = {
-                            IconButton(onClick = { showP12Password = !showP12Password }) {
-                                Icon(
-                                    if (showP12Password) Icons.Default.VisibilityOff else Icons.Default.Visibility,
-                                    contentDescription = if (showP12Password) stringResource(R.string.settings_hide_password) else stringResource(R.string.settings_show_password)
-                                )
-                            }
-                        }
+                        minLines = 3,
+                        maxLines = 6,
+                        modifier = Modifier.fillMaxWidth()
                     )
-                    Spacer(modifier = Modifier.height(6.dp))
-                    // CA（可选）：导入 / 移除按钮。
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Text(
-                            stringResource(R.string.host_mtls_ca_optional),
-                            style = MaterialTheme.typography.bodyMedium,
-                            modifier = Modifier.weight(1f)
-                        )
-                        Spacer(modifier = Modifier.width(8.dp))
-                        TextButton(onClick = { caLauncher.launch(arrayOf("*/*")) }) {
-                            Text(stringResource(R.string.host_mtls_import_ca))
-                        }
-                        if (caStage is CaStage.Unchanged && initial.clientCertId != null || caStage is CaStage.Replace) {
-                            TextButton(
-                                onClick = { caStage = CaStage.Clear },
-                                colors = ButtonDefaults.textButtonColors(
-                                    contentColor = MaterialTheme.colorScheme.error
-                                )
-                            ) {
-                                Text(stringResource(R.string.host_mtls_remove_ca))
-                            }
+                    // §item8: 移除 CA 按钮也用 initialHasCa（同 placeholder 判据）。
+                    if (caStage is CaStage.Unchanged && initialHasCa || caStage is CaStage.Replace) {
+                        TextButton(
+                            onClick = { caStage = CaStage.Clear },
+                            colors = ButtonDefaults.textButtonColors(
+                                contentColor = MaterialTheme.colorScheme.error
+                            )
+                        ) {
+                            Text(stringResource(R.string.host_mtls_remove_ca))
                         }
                     }
                     Spacer(modifier = Modifier.height(12.dp))
@@ -747,9 +774,9 @@ internal fun HostProfileEditorDialog(
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     IconButton(
                         onClick = { triggerTestConnection() },
-                        enabled = !isTesting && serverUrl.isNotBlank()
+                        enabled = !isTesting && !isConverting && serverUrl.isNotBlank()
                     ) {
-                        if (isTesting) {
+                        if (isTesting || isConverting) {
                             CircularProgressIndicator(
                                 modifier = Modifier.size(18.dp),
                                 strokeWidth = 2.dp
@@ -774,53 +801,97 @@ internal fun HostProfileEditorDialog(
                 }
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     TextButton(onClick = onDismiss) { Text(stringResource(R.string.common_cancel)) }
-                    Button(onClick = {
-                        val basicAuth = authUsername.ifBlank { null }?.let { BasicAuthConfig(username = it, passwordId = initial.id) }
-                        // #5: respect tunnelEdited so an untouched (blank)
-                        // password field does NOT clear the stored
-                        // tunnelPasswordId. The editor field is always seeded
-                        // blank (passwords are write-only), so without this
-                        // guard every save wiped the tunnel credential.
-                        val tunnelId = if (tunnelEdited) {
-                            tunnelPassword.ifBlank { null }?.let { initial.id }
-                        } else {
-                            initial.tunnelPasswordId
-                        }
-                        val saved = initial.copy(
-                            name = name.ifBlank { "Untitled" },
-                            serverUrl = serverUrl,
-                            basicAuth = basicAuth,
-                            tunnelPasswordId = tunnelId,
-                            allowInsecureConnections = allowInsecure,
-                            serverGroupFp = if (selectedGroup != initialGroup) {
-                                selectedGroup ?: initial.id
+                    // §item7 (glm#4): Save 同时受 isTesting 门控——防测试进行中点 Save
+                    //   取消在飞的测试协程。
+                    Button(
+                        enabled = !isConverting && !isTesting,
+                        onClick = {
+                            if (isConverting || isTesting) return@Button
+                            val basicAuth = authUsername.ifBlank { null }?.let { BasicAuthConfig(username = it, passwordId = initial.id) }
+                            // #5: respect tunnelEdited so an untouched (blank)
+                            // password field does NOT clear the stored
+                            // tunnelPasswordId. The editor field is always seeded
+                            // blank (passwords are write-only), so without this
+                            // guard every save wiped the tunnel credential.
+                            val tunnelId = if (tunnelEdited) {
+                                tunnelPassword.ifBlank { null }?.let { initial.id }
                             } else {
-                                initial.serverGroupFp
+                                initial.tunnelPasswordId
                             }
-                        )
-                        // If the user blanks the username on a profile that
-                        // previously had basic auth, force passwordEdited so
-                        // saveHostProfile removes any leftover stored password.
-                        val effectivePasswordEdited = passwordEdited ||
-                            (authUsername.isBlank() && initial.basicAuth != null)
-                        // Positional call: onSave is a function-type parameter,
-                        // so Kotlin prohibits named arguments here. Names are
-                        // documented by the lambda signature instead.
-                        // §2.7: 尾部透传 mTLS 编辑意图（VM 据此试构建 + 原子写 ESP）。
-                        onSave(
-                            saved,
-                            authPassword,
-                            effectivePasswordEdited,
-                            tunnelPassword,
-                            tunnelEdited,
-                            mtlsEnabled,
-                            stagedP12,
-                            caStage,
-                            p12Password.ifBlank { null },
-                            p12PasswordEdited,
-                            hasImportedP12
-                        )
-                    }) { Text(stringResource(R.string.settings_save)) }
+                            val saved = initial.copy(
+                                name = name.ifBlank { "Untitled" },
+                                serverUrl = serverUrl,
+                                basicAuth = basicAuth,
+                                tunnelPasswordId = tunnelId,
+                                allowInsecureConnections = allowInsecure,
+                                serverGroupFp = if (selectedGroup != initialGroup) {
+                                    selectedGroup ?: initial.id
+                                } else {
+                                    initial.serverGroupFp
+                                }
+                            )
+                            // If the user blanks the username on a profile that
+                            // previously had basic auth, force passwordEdited so
+                            // saveHostProfile removes any leftover stored password.
+                            val effectivePasswordEdited = passwordEdited ||
+                                (authUsername.isBlank() && initial.basicAuth != null)
+                            // Positional call: onSave is a function-type parameter,
+                            // so Kotlin prohibits named arguments here. Names are
+                            // documented by the lambda signature instead.
+                            // §2.7: 尾部透传 mTLS 编辑意图（VM 据此试构建 + 原子写 ESP）。
+                            // §mtls-paste: 粘贴的客户端 PEM → 内部空口令 p12。
+                            // §C8 (perf/ANR): PEM→p12 转换（PKCS12 KDF）切到
+                            //   Dispatchers.Default；解析失败回显 + 中止保存。
+                            // §item6 (cgpt#9 + grok#4): try/finally 保证 isConverting
+                            //   在取消/异常时也复位。isConverting 在 launch 前同步置位
+                            //   （按钮立即禁用）。
+                            // §cgpt-reval 🟠: Main 同步快照全部可变状态——coroutine 期间
+                            //   表单仍可编辑，用快照值保证「一次保存 = 点击时刻的完整表单」。
+                            // §cgpt-reval 🔴: mtlsOn gate——关 mTLS 时不转换残留 PEM。
+                            val mtlsOn = mtlsEnabled
+                            val pemSnap = stagedClientPem
+                            val caSnap = caStage
+                            val hasMaterial = initial.clientCertId != null || pemSnap.isNotBlank()
+                            val authPw = authPassword
+                            val tunnelPw = tunnelPassword
+                            val tunnelEd = tunnelEdited
+                            isConverting = true
+                            scope.launch {
+                                try {
+                                    val (convertedP12, pemError) = convertClientPemOrError(mtlsOn, pemSnap)
+                                    if (pemError != null) {
+                                        mtlsImportError = pemError
+                                    } else {
+                                        mtlsImportError = null
+                                        onSave(
+                                            saved,
+                                            authPw,
+                                            effectivePasswordEdited,
+                                            tunnelPw,
+                                            tunnelEd,
+                                            mtlsOn,
+                                            convertedP12,
+                                            caSnap,
+                                            null,
+                                            false,
+                                            hasMaterial
+                                        )
+                                    }
+                                } finally {
+                                    isConverting = false
+                                }
+                            }
+                        }
+                    ) {
+                        if (isConverting) {
+                            CircularProgressIndicator(
+                                modifier = Modifier.size(18.dp),
+                                strokeWidth = 2.dp
+                            )
+                        } else {
+                            Text(stringResource(R.string.settings_save))
+                        }
+                    }
                 }
             }
         }
@@ -864,37 +935,6 @@ internal fun HostProfileEditorDialog(
 }
 
 private fun newDirectProfile(): HostProfile = HostProfile.defaultDirect()
-
-/** §fix-3 (gpt-2#1次): p12 / CA 导入字节上限——防 OOM 与异常大文件。 */
-private const val MAX_CERT_BYTES = 5L * 1024 * 1024
-
-/**
- * §fix-3 (gpt-2#1次): SAF 安全读取——openInputStream 包 `.use{}`（防句柄泄漏）+
- * 大小上限（防 OOM）。超限 / 读失败 → 调 [onError] 回显，返回 null（不 stage）。
- */
-private fun readCapped(
-    uri: android.net.Uri,
-    context: android.content.Context,
-    maxBytes: Long,
-    onError: (String) -> Unit,
-): ByteArray? = runCatching {
-    context.contentResolver.openInputStream(uri)?.use { stream ->
-        val out = java.io.ByteArrayOutputStream()
-        val buf = ByteArray(8 * 1024)
-        var total = 0L
-        while (true) {
-            val n = stream.read(buf)
-            if (n < 0) break
-            total += n
-            if (total > maxBytes) {
-                onError("文件过大（>${maxBytes / 1024 / 1024}MB），已放弃导入")
-                return@use null
-            }
-            out.write(buf, 0, n)
-        }
-        out.toByteArray()
-    }
-}.onFailure { onError("读取失败：${it.message}") }.getOrNull()
 
 /**
  * §2.7: mTLS 编辑对话框中"CA 编辑意图"的三态显式表达（v3-gpter R2#3）。

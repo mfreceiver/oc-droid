@@ -142,13 +142,13 @@
     <string name="host_insecure_warning">警告：关闭证书校验。仅用于受信任的自签名/内网服务器，存在中间人攻击风险。</string>
     <!-- §2.7 mTLS 客户端证书（stunnel + 共享 PKCS12） -->
     <string name="host_mtls_title">双向 TLS（客户端证书）</string>
-    <string name="host_mtls_summary">TLS 握手时出示客户端 PKCS12（stunnel verifyPeer）。严格主机名校验保持开启；与「不安全HTTPS连接」互斥。</string>
+    <string name="host_mtls_summary">TLS 握手时出示客户端证书（stunnel verifyPeer）。严格主机名校验保持开启；与「不安全HTTPS连接」互斥。</string>
     <string name="host_mtls_no_cert">尚未导入客户端证书——在导入前 mTLS 主机会被拒绝连接。</string>
-    <string name="host_mtls_import_p12">导入客户端证书（PKCS12）</string>
-    <string name="host_mtls_import_p12_replace">已导入客户端证书——再次导入可替换</string>
-    <string name="host_mtls_p12_password">PKCS12 密码（可选）</string>
-    <string name="host_mtls_ca_optional">私有 CA（可选）</string>
-    <string name="host_mtls_import_ca">导入 CA</string>
+    <string name="host_mtls_client_pem_label">客户端证书+私钥 (PEM)</string>
+    <string name="host_mtls_client_pem_hint">粘贴 client-cert.pem 与 client-key.pem（可合并粘贴，先证书后私钥；多证书请 leaf 在前），无口令</string>
+    <string name="host_mtls_ca_pem_label">CA 证书 (PEM)</string>
+    <string name="host_mtls_ca_pem_hint">粘贴 ca-cert.pem；留空用系统 CA</string>
+    <string name="host_mtls_ca_pem_existing_hint">已配置私有 CA（粘贴替换 / 清空移除）</string>
     <string name="host_mtls_remove_ca">移除 CA</string>
     <string name="host_mtls_missing_cert">mTLS 已开启但客户端证书缺失或无效：%1$s</string>
     <string name="host_profile_untitled">未命名</string>

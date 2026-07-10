@@ -4,6 +4,7 @@ import androidx.lifecycle.ViewModel
 import cn.vectory.ocdroid.data.model.HostProfile
 import cn.vectory.ocdroid.ui.controller.HostProfileController
 import cn.vectory.ocdroid.ui.settings.ClientCertEditIntent
+import cn.vectory.ocdroid.util.SettingsManager
 import dagger.hilt.android.lifecycle.HiltViewModel
 import javax.inject.Inject
 
@@ -32,6 +33,7 @@ import javax.inject.Inject
 class HostViewModel @Inject constructor(
     private val store: SharedStateStore,
     private val hostProfileController: HostProfileController,
+    private val settingsManager: SettingsManager,
 ) : ViewModel() {
 
     /**
@@ -39,7 +41,7 @@ class HostViewModel @Inject constructor(
      * [SettingsViewModel.secondary constructor] rationale. Forwards the same
      * deps the production Hilt binding uses.
      */
-    internal constructor(core: AppCore) : this(core.store, core.hostProfileController)
+    internal constructor(core: AppCore) : this(core.store, core.hostProfileController, core.settingsManager)
 
     val hostFlow get() = store.hostFlow
     val connectionFlow get() = store.connectionFlow
@@ -86,6 +88,16 @@ class HostViewModel @Inject constructor(
     fun getHostProfiles(): List<HostProfile> = hostProfileController.getHostProfiles()
 
     fun currentHostProfile(): HostProfile = hostProfileController.currentHostProfile()
+
+    /**
+     * §item8 (cgpt#6 + grok#2): 编辑对话框据此判断「是否已存私有 CA」——
+     * `initial.clientCertId != null` 只能证明有客户端证书，不等于有 CA
+     * （CA 是 client_cert_ca_<id> 独立槽）。本查询直接读 ESP 的 CA 槽，
+     * 供 Dialog 的 CA placeholder 提示 + 「移除 CA」按钮可见性使用。
+     * 读 ESP 是内存 Map 查询（首次加载后缓存），Dialog 打开时同步调用安全。
+     */
+    fun hasStoredCa(clientCertId: String?): Boolean =
+        clientCertId?.let { settingsManager.getClientCertCa(it) != null } ?: false
 
     fun configureServer(url: String, username: String? = null, password: String? = null) {
         hostProfileController.configureServer(url, username, password)
