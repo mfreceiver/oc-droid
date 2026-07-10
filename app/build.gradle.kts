@@ -27,7 +27,7 @@ android {
 
     defaultConfig {
         applicationId = "cn.vectory.ocdroid"
-        minSdk = 26
+        minSdk = 34
         targetSdk = 34
         versionCode = 50
         versionName = "0.6.3"
