@@ -1,0 +1,3014 @@
+diff --git a/app/src/main/java/cn/vectory/ocdroid/MainActivity.kt b/app/src/main/java/cn/vectory/ocdroid/MainActivity.kt
+index 2602e05..82f6619 100644
+--- a/app/src/main/java/cn/vectory/ocdroid/MainActivity.kt
++++ b/app/src/main/java/cn/vectory/ocdroid/MainActivity.kt
+@@ -307,11 +307,13 @@ private fun PhoneLayout(viewModel: OrchestratorViewModel, initialPage: Int = 0)
+                                     val sessionViewModel: SessionViewModel = hiltViewModel()
+                                     val composerVM: ComposerViewModel = hiltViewModel()
+                                     val orchestratorVM: OrchestratorViewModel = hiltViewModel()
++                                    val settingsVM: SettingsViewModel = hiltViewModel()
+                                     val filesVM: FilesViewModel = hiltViewModel()
+                                     SessionsScreen(
+                                         viewModel = sessionViewModel,
+                                         composerVM = composerVM,
+                                         orchestratorVM = orchestratorVM,
++                                        settingsVM = settingsVM,
+                                         repository = filesVM.repository,
+                                         // Q4: panel 选中会话保持打开；chat pane 永远在右，
+                                         // onSwitchToChat 在面板内 no-op。
+@@ -353,11 +355,13 @@ private fun PhoneLayout(viewModel: OrchestratorViewModel, initialPage: Int = 0)
+                         val sessionViewModel: SessionViewModel = hiltViewModel()
+                         val composerVM: ComposerViewModel = hiltViewModel()
+                         val orchestratorVM: OrchestratorViewModel = hiltViewModel()
++                        val settingsVM: SettingsViewModel = hiltViewModel()
+                         val filesVM: FilesViewModel = hiltViewModel()
+                         SessionsScreen(
+                             viewModel = sessionViewModel,
+                             composerVM = composerVM,
+                             orchestratorVM = orchestratorVM,
++                            settingsVM = settingsVM,
+                             repository = filesVM.repository,
+                             onSwitchToChat = { switchToPage(screens.indexOf(Screen.Chat)) }
+                         )
+@@ -406,4 +410,3 @@ private fun PhoneLayout(viewModel: OrchestratorViewModel, initialPage: Int = 0)
+     }
+ }
+ 
+-
+diff --git a/app/src/main/java/cn/vectory/ocdroid/data/cache/CacheMaintenanceCoordinator.kt b/app/src/main/java/cn/vectory/ocdroid/data/cache/CacheMaintenanceCoordinator.kt
+index 27ebd33..a909d83 100644
+--- a/app/src/main/java/cn/vectory/ocdroid/data/cache/CacheMaintenanceCoordinator.kt
++++ b/app/src/main/java/cn/vectory/ocdroid/data/cache/CacheMaintenanceCoordinator.kt
+@@ -61,8 +61,21 @@ class CacheMaintenanceCoordinator @Inject constructor(
+      * sweep returns an Incomplete report with zero counts (the caller does
+      * not need to distinguish "skipped" from "incomplete enumeration" — both
+      * mean "no eviction this round").
++     *
++     * §grouping-rewrite Round-2 C2: [force] bypasses the 24h epoch-day dedup.
++     * The auto connect-sweep (ConnectionCoordinator) keeps the default
++     * `force=false` so a reconnect within 24h does not re-enumerate. The
++     * manual sweep buttons (`SettingsViewModel.sweepNow` / `sweepAllGroups`)
++     * pass `force=true` because the user explicitly asked for a sweep — the
++     * dedup would otherwise make both manual buttons no-ops for the rest of
++     * the calendar day after the auto connect-sweep ran. After a forced run
++     * the epoch is still stamped (Step 3 below), so the NEXT auto connect-
++     * sweep within the same day still dedups correctly.
+      */
+-    suspend fun dailySweepIfNeeded(serverGroupFp: String): DailySweepReport {
++    suspend fun dailySweepIfNeeded(
++        serverGroupFp: String,
++        force: Boolean = false
++    ): DailySweepReport {
+         if (serverGroupFp.isBlank()) {
+             // Defensive: an empty fp should never reach here (the
+             // currentServerGroupFp provider normalizes blank → id), but a
+@@ -77,9 +90,12 @@ class CacheMaintenanceCoordinator @Inject constructor(
+         }
+ 
+         // ── 24h dedup ───────────────────────────────────────────────────────
++        // Skipped when [force] is true (manual sweep buttons). The epoch
++        // stamp below (Step 3) is still written so subsequent non-forced
++        // calls dedup normally.
+         val todayEpochDay = System.currentTimeMillis() / MILLIS_PER_DAY
+         val lastSweepDay = settings.getLastSweepEpochDay(serverGroupFp)
+-        if (lastSweepDay == todayEpochDay) {
++        if (!force && lastSweepDay == todayEpochDay) {
+             // Already swept today — skip. The daily sweep is idempotent; a
+             // reconnect within 24h must not re-enumerate + re-evict.
+             return DailySweepReport(
+diff --git a/app/src/main/java/cn/vectory/ocdroid/data/cache/CacheRepository.kt b/app/src/main/java/cn/vectory/ocdroid/data/cache/CacheRepository.kt
+index 471836f..7b968fa 100644
+--- a/app/src/main/java/cn/vectory/ocdroid/data/cache/CacheRepository.kt
++++ b/app/src/main/java/cn/vectory/ocdroid/data/cache/CacheRepository.kt
+@@ -106,9 +106,6 @@ interface CacheRepository {
+     /** Nuke everything (manual 全清 button + reset). */
+     suspend fun clearAll()
+ 
+-    /** Rekey cached sessions/messages/gaps when two server groups are merged. */
+-    suspend fun mergeCacheGroup(fromFp: String, intoFp: String)
+-
+     /**
+      * Phase 1 helper (maxer I11): a `message.updated` SSE event for a
+      * currently-cached session appended a NEW message — persist it so the
+@@ -874,21 +871,6 @@ class CacheRepositoryImpl @Inject constructor(
+ 
+     override suspend fun allServerGroupFps(): List<String> = dao.allGroups()
+ 
+-    override suspend fun mergeCacheGroup(fromFp: String, intoFp: String) {
+-        if (fromFp.isBlank() || intoFp.isBlank() || fromFp == intoFp) return
+-        db.withTransaction {
+-            // Prefer the source group's rows during a merge. If the target
+-            // group already has the same sessionId, delete the target copy
+-            // first so rekeying the source cannot violate compound PKs.
+-            dao.deleteIntoMessagesConflictingWithFrom(fromFp, intoFp)
+-            gapDao.deleteIntoGapsConflictingWithFrom(fromFp, intoFp)
+-            dao.deleteIntoSessionsConflictingWithFrom(fromFp, intoFp)
+-            dao.rekeySessions(fromFp, intoFp)
+-            dao.rekeyMessages(fromFp, intoFp)
+-            gapDao.rekeyGaps(fromFp, intoFp)
+-        }
+-    }
+-
+     override suspend fun evictWorkdirInGroup(serverGroupFp: String, workdir: String) {
+         if (serverGroupFp.isBlank() || workdir.isBlank()) return
+         db.withTransaction {
+diff --git a/app/src/main/java/cn/vectory/ocdroid/data/model/HostProfile.kt b/app/src/main/java/cn/vectory/ocdroid/data/model/HostProfile.kt
+index a179b6b..2dd7bfb 100644
+--- a/app/src/main/java/cn/vectory/ocdroid/data/model/HostProfile.kt
++++ b/app/src/main/java/cn/vectory/ocdroid/data/model/HostProfile.kt
+@@ -33,31 +33,19 @@ data class HostProfile(
+     val basicAuth: BasicAuthConfig? = null,
+     val tunnelPasswordId: String? = null,
+     /**
+-     * R-20 Phase 0: fingerprint of the "server group" this profile is part of.
++     * User-maintained server-group key.
+      *
+-     * A group = the set of接入点 (entry-point profiles) that point at the
+-     * **same logical server** and therefore should share cached chat content /
+-     * workdir config / model-disabled set. Two profiles with the same
+-     * serverGroupFp are treated as one server for cache keying; switching
+-     * between them does NOT clear the cache (plan §0 "缓存复合键控", §1).
++     * Supported values are exactly one of the four named shared slots
++     * `"A"` / `"B"` / `"C"` / `"D"`, or this profile's own [id] for
++     * "not grouped". Profiles with the same named slot intentionally share
++     * chat-history cache, draft/model/agent preferences, recent workdirs and
++     * sweep epoch. A profile whose value is blank or any legacy non-slot value
++     * is interpreted by the editor as "not grouped"; saving without actively
++     * changing the selector preserves that legacy value for soft migration.
+      *
+      * **Nonblank invariant**: this field is `""` ONLY as a deserialization
+-     * fallback for legacy JSON that predates Phase 0.
+-     * [cn.vectory.ocdroid.data.repository.HostProfileStore.decodeProfiles]
+-     * normalizes any blank value to `id` immediately after decode (so each
+-     * legacy profile becomes its own single-member group), and `save()` /
+-     * `saveProfiles()` guarantee nonblank before persistence — a blank value
+-     * never reaches EncryptedSharedPreferences.
+-     *
+-     * New profiles ([defaultDirect] / [HostProfileImportPayload.makeProfile] /
+-     * [cn.vectory.ocdroid.data.repository.HostProfileStore.duplicate]) set
+-     * `serverGroupFp = <new UUID>` at construction time, so they form a fresh
+-     * independent group rather than collapsing into a shared-blank group.
+-     *
+-     * Manual grouping: [cn.vectory.ocdroid.data.repository.HostProfileStore.mergeServerGroup]
+-     * (merge two profiles' groups into one) /
+-     * [cn.vectory.ocdroid.data.repository.HostProfileStore.splitProfileToOwnGroup]
+-     * (split a profile into its own group).
++     * fallback for legacy JSON. The store normalizes blank values to [id] at
++     * the read/write boundary; no batch rewrite or schema migration is used.
+      */
+     @SerialName("serverGroupFp")
+     val serverGroupFp: String = "",
+@@ -87,10 +75,7 @@ data class HostProfile(
+             } else {
+                 null
+             }
+-            // R-20 Phase 0: new profiles start as their own single-member group
+-            // (serverGroupFp == id). The user can later merge via
+-            // HostProfileStore.mergeServerGroup if multiple entry points reach
+-            // the same server.
++            // New profiles default to "not grouped" (serverGroupFp == id).
+             val id = UUID.randomUUID().toString()
+             return HostProfile(
+                 id = id,
+@@ -118,10 +103,7 @@ data class HostProfileImportPayload(
+         require(url.isNotEmpty()) {
+             "Host profile requires serverURL (legacy SSH-only profiles are no longer supported)"
+         }
+-        // R-20 Phase 0: imported profiles start as their own independent group
+-        // (plan §1: "import/export 默认不导出内部 group，导入新建独立组"). If the
+-        // user wants the imported profile to share a cache with an existing
+-        // one, they merge via HostProfileStore.mergeServerGroup afterwards.
++        // Imported profiles start as "not grouped" (serverGroupFp == id).
+         val id = UUID.randomUUID().toString()
+         return HostProfile(
+             id = id,
+diff --git a/app/src/main/java/cn/vectory/ocdroid/data/repository/HostProfileStore.kt b/app/src/main/java/cn/vectory/ocdroid/data/repository/HostProfileStore.kt
+index 0ba1ad0..6ac448a 100644
+--- a/app/src/main/java/cn/vectory/ocdroid/data/repository/HostProfileStore.kt
++++ b/app/src/main/java/cn/vectory/ocdroid/data/repository/HostProfileStore.kt
+@@ -101,10 +101,10 @@ class HostProfileStore @Inject constructor(
+         // R-20 Phase 0: duplicate is "clone configuration into an independent
+         // connection point" — by plan §1's "import 默认新建独立组" logic, a
+         // duplicate starts as its own single-member group rather than
+-        // inheriting the source's group. Two entry points that legitimately
+-        // reach the same server can later be merged via [mergeServerGroup];
+-        // defaulting to a fresh group avoids accidental cross-contamination
+-        // of the cache when the duplicate points at a different server.
++        // inheriting the source's group. Defaulting to a fresh group avoids
++        // accidental cross-contamination of the cache when the duplicate
++        // points at a different server; the user may later pick A/B/C/D in
++        // the editor to share intentionally.
+         val newId = java.util.UUID.randomUUID().toString()
+         val copy = source.copy(
+             id = newId,
+@@ -236,51 +236,6 @@ class HostProfileStore @Inject constructor(
+         settingsManager.currentHostProfileId = currentId ?: safe.firstOrNull()?.id
+     }
+ 
+-    /**
+-     * R-20 Phase 0: merge all profiles in group [from] into group [into]
+-     * (one-directional). After the call, no profile has `serverGroupFp == from`;
+-     * every previously-`from` profile now carries `into`. Persists the change.
+-     *
+-     * Use case: the user has two profiles pointing at the same server (e.g. a
+-     * LAN entry and a tunnel entry) and wants them to share cached chat
+-     * content. Idempotent: if [from] is already empty / does not exist, this
+-     * is a no-op.
+-     */
+-    @Synchronized
+-    fun mergeServerGroup(from: String, into: String) {
+-        if (from.isBlank() || from == into) return
+-        val all = profiles()
+-        val changed = all.any { it.serverGroupFp == from }
+-        if (!changed) return
+-        val updated = all.map { p ->
+-            if (p.serverGroupFp == from) p.copy(serverGroupFp = into) else p
+-        }
+-        val currentId = settingsManager.currentHostProfileId
+-        saveProfiles(updated, currentId)
+-    }
+-
+-    /**
+-     * R-20 Phase 0: split [profileId] into its own independent single-member
+-     * group (sets its `serverGroupFp = profileId`). Persists the change.
+-     *
+-     * Use case (plan §4 G1 "copy-on-split" escape hatch, surfaced in Phase 4
+-     * management UI): the user accidentally merged two unrelated profiles and
+-     * wants to undo the cache sharing without losing either side's config.
+-     * Idempotent: if the profile is already its own group, this is a no-op.
+-     */
+-    @Synchronized
+-    fun splitProfileToOwnGroup(profileId: String) {
+-        if (profileId.isBlank()) return
+-        val all = profiles()
+-        val target = all.firstOrNull { it.id == profileId } ?: return
+-        if (target.serverGroupFp == profileId) return
+-        val updated = all.map { p ->
+-            if (p.id == profileId) p.copy(serverGroupFp = profileId) else p
+-        }
+-        val currentId = settingsManager.currentHostProfileId
+-        saveProfiles(updated, currentId)
+-    }
+-
+     /**
+      * R-20 Phase 0: returns all profiles whose `serverGroupFp` equals [fp].
+      * Empty list if [fp] matches no profile (including when [fp] is blank —
+diff --git a/app/src/main/java/cn/vectory/ocdroid/data/repository/OpenCodeRepository.kt b/app/src/main/java/cn/vectory/ocdroid/data/repository/OpenCodeRepository.kt
+index c5d75ad..587e4e6 100644
+--- a/app/src/main/java/cn/vectory/ocdroid/data/repository/OpenCodeRepository.kt
++++ b/app/src/main/java/cn/vectory/ocdroid/data/repository/OpenCodeRepository.kt
+@@ -101,6 +101,21 @@ class OpenCodeRepository @Inject constructor(
+     private var api: OpenCodeApi = retrofit.create(OpenCodeApi::class.java)
+     private var sseClient: SSEClient = SSEClient(sseHttp)
+ 
++    /**
++     * §grouping-rewrite item 4: dedicated OkHttp client + Retrofit instance
++     * for `executeCommand` (POST /session/{id}/command). Built on
++     * [OkHttpClientFactory.commandClient] (read timeout 300 s vs [restHttp]'s
++     * 30 s) so a slow synchronous server-side command step does not blow past
++     * the read timeout and surface as a false-negative command-failed error
++     * (SSE still carries the results). The [commandApi] reuses the SAME
++     * [OpenCodeApi] interface, baseUrl, JSON converter and interceptor chain
++     * (auth / directory / cache / traffic) as [api]; only the OkHttp client
++     * differs. All other API methods stay on [api].
++     */
++    private var commandHttp: OkHttpClient = clientFactory.commandClient(hostConfig.allowInsecure)
++    private var commandRetrofit: Retrofit = buildRetrofit(commandHttp, hostConfig.baseUrl)
++    private var commandApi: OpenCodeApi = commandRetrofit.create(OpenCodeApi::class.java)
++
+     /**
+      * §model-selection: a SECOND Retrofit instance rooted at
+      * `<baseUrl>/api/` for the v2 model list endpoint (GET /api/model). Built
+@@ -146,6 +161,11 @@ class OpenCodeRepository @Inject constructor(
+         sseHttp = clientFactory.sseClient(hostConfig.allowInsecure)
+         retrofit = buildRetrofit(restHttp, hostConfig.baseUrl)
+         api = retrofit.create(OpenCodeApi::class.java)
++        // §grouping-rewrite item 4: rebuild the command-side client + Retrofit
++        // so a host switch (configure) refreshes baseUrl / auth on it too.
++        commandHttp = clientFactory.commandClient(hostConfig.allowInsecure)
++        commandRetrofit = buildRetrofit(commandHttp, hostConfig.baseUrl)
++        commandApi = commandRetrofit.create(OpenCodeApi::class.java)
+         v2Retrofit = buildV2Retrofit(restHttp, hostConfig.baseUrl)
+         apiV2 = v2Retrofit.create(OpenCodeApiV2::class.java)
+         sseClient = SSEClient(sseHttp)
+@@ -424,6 +444,12 @@ class OpenCodeRepository @Inject constructor(
+      * the directory context is supplied EXPLICITLY by the caller (the
+      * session's workdir); the OkHttp interceptor no longer injects the
+      * global workdir fallback over it.
++     *
++     * §grouping-rewrite item 4: routes through [commandApi] (own OkHttp
++     * client with a 300 s read timeout) instead of [api] (30 s) so a slow
++     * synchronous server-side command step does not trip a false-negative
++     * command-failed timeout — SSE still delivers the results on its own
++     * 0-timeout client. See [OkHttpClientFactory.commandClient].
+      */
+     suspend fun executeCommand(
+         sessionId: String,
+@@ -432,7 +458,7 @@ class OpenCodeRepository @Inject constructor(
+         agent: String? = null,
+         directory: String?
+     ): Result<Unit> = runSuspendCatching {
+-        val response = api.executeCommand(
++        val response = commandApi.executeCommand(
+             sessionId,
+             CommandRequest(command = command, arguments = arguments, agent = agent),
+             directory
+diff --git a/app/src/main/java/cn/vectory/ocdroid/data/repository/http/OkHttpClientFactory.kt b/app/src/main/java/cn/vectory/ocdroid/data/repository/http/OkHttpClientFactory.kt
+index fb599ef..5a47f15 100644
+--- a/app/src/main/java/cn/vectory/ocdroid/data/repository/http/OkHttpClientFactory.kt
++++ b/app/src/main/java/cn/vectory/ocdroid/data/repository/http/OkHttpClientFactory.kt
+@@ -114,6 +114,30 @@ class OkHttpClientFactory @Inject constructor(
+             .readTimeout(0, TimeUnit.SECONDS)
+             .build()
+ 
++    /**
++     * §grouping-rewrite item 4: dedicated client for `executeCommand`
++     * (POST /session/{id}/command). The REST [restClient] caps read at 30 s,
++     * but a slash command may force the server to do heavy synchronous work
++     * BEFORE it ACKs the POST (compaction, slow skill load, ...) — a >30 s
++     * wait then surfaces as [java.net.SocketTimeoutException] and gets shown
++     * to the user as a false-negative `error_command_failed`, even though the
++     * SSE client (read timeout 0) is still delivering the command's results
++     * fine. This client bumps the read timeout to 300 s on the SAME base
++     * chain (so connectTimeout 10 s + every interceptor / Basic Auth /
++     * directory header / cache / traffic / logging still apply), making the
++     * ACK wait effectively unbounded for the practical server-side processing
++     * window. The non-fatal `SocketTimeoutException` → `UiEvent.Info` branch
++     * in `AppCoreOrchestration.executeCommand` is the second line of defence
++     * for the (now rare) >300 s case.
++     *
++     * NB: deliberately omits the [responseSizeGuardInterceptor] — command
++     * responses are tiny JSON acks, not bulk payloads.
++     */
++    fun commandClient(allowInsecure: Boolean): OkHttpClient =
++        baseBuilder(allowInsecure)
++            .readTimeout(300, TimeUnit.SECONDS)
++            .build()
++
+     /**
+      * Tunnel activation client: SSL via the shared entry point + 15 s/15 s
+      * timeouts, NO base interceptors — tunnel auth uses a form-encoded POST
+diff --git a/app/src/main/java/cn/vectory/ocdroid/ui/AppCoreOrchestration.kt b/app/src/main/java/cn/vectory/ocdroid/ui/AppCoreOrchestration.kt
+index 98cb3fa..a966919 100644
+--- a/app/src/main/java/cn/vectory/ocdroid/ui/AppCoreOrchestration.kt
++++ b/app/src/main/java/cn/vectory/ocdroid/ui/AppCoreOrchestration.kt
+@@ -114,7 +114,25 @@ internal fun AppCore.executeCommand(command: String, arguments: String) {
+                 appScope.launch {
+                     repository.executeCommand(existing, cmd, arguments, directory = commandDirectory)
+                         .onFailure { error ->
+-                            effectBus.tryEmitUiEvent(UiEvent.Error(R.string.error_command_failed, listOf(cmd, errorMessageOrFallback(error, "unknown error"))))
++                            // §grouping-rewrite item 4: command POST runs on
++                            // a 300 s-read-timeout client (OkHttpClientFactory.
++                            // commandClient). A read-side SocketTimeoutException
++                            // means even that window expired waiting for the
++                            // server's ACK — but SSE (its own client, read
++                            // timeout 0) is still delivering results, so that
++                            // case is non-fatal: emit a neutral Info snackbar
++                            // and let SSE update the UI.
++                            //
++                            // §grouping-rewrite Round-2 D2: but a CONNECT-side
++                            // SocketTimeoutException (server unreachable / DNS /
++                            // TLS handshake) means the POST never reached the
++                            // server → SSE will not deliver → must surface as a
++                            // real Error. OkHttp's exception message distinguishes
++                            // the two ("connect timeout" / "failed to connect" vs
++                            // "timeout" / "read timeout"); we case-insensitively
++                            // sniff for "connect". All non-timeout failures stay
++                            // Error.
++                            effectBus.tryEmitUiEvent(classifyCommandPostError(error, cmd))
+                         }
+                 }
+             } else if (store.composerFlow.value.draftWorkdir != null) {
+@@ -123,7 +141,10 @@ internal fun AppCore.executeCommand(command: String, arguments: String) {
+                     appScope.launch {
+                         repository.executeCommand(sessionId, cmd, arguments, directory = commandDirectory)
+                             .onFailure { error ->
+-                                effectBus.tryEmitUiEvent(UiEvent.Error(R.string.error_command_failed, listOf(cmd, errorMessageOrFallback(error, "unknown error"))))
++                                // §grouping-rewrite item 4 + Round-2 D2: see
++                                // comment in the non-draft branch above — same
++                                // connect-vs-read timeout classification.
++                                effectBus.tryEmitUiEvent(classifyCommandPostError(error, cmd))
+                             }
+                     }
+                 }
+@@ -212,6 +233,44 @@ internal fun AppCore.materializeDraftSession(onSessionReady: (String) -> Unit) {
+ /** Full-stack local reset (host → connection → session purge → chat clear). */
+ internal fun AppCore.resetLocalDataAndResync() { hostProfileController.resetLocalDataAndResync() }
+ 
++/**
++ * §grouping-rewrite Round-2 D2 (+ Round-3 N1): classify a `/command` POST
++ * failure for the UI. Two flavours of [java.net.SocketTimeoutException] come
++ * out of OkHttp, and only ONE is non-fatal:
++ *
++ *  - **read-side timeout** (POST accepted, server slow to ACK within the
++ *    commandClient's 300 s read-timeout) → SSE (its own client, read timeout
++ *    0) is still delivering results → emit [UiEvent.Info] with
++ *    `command_submitted_processing` and let SSE update the UI.
++ *  - **connect-side timeout** (server unreachable / DNS / TLS handshake did
++ *    not complete within the connect-timeout) → the POST never reached the
++ *    server → SSE cannot deliver → must surface as [UiEvent.Error] with
++ *    `error_command_failed`.
++ *
++ * OkHttp's exception message distinguishes the two (typical phrases: "connect
++ * timeout", "failed to connect"). We case-insensitively sniff for "connect"
++ * (which also covers "failed to connect"). All non-SocketTimeoutException
++ * failures (HTTP 4xx/5xx, IOException, etc.) stay [UiEvent.Error].
++ *
++ * §grouping-rewrite Round-3 N1: visibility changed `private` → `internal` so
++ * [cn.vectory.ocdroid.AppCoreOrchestrationTest] can pin the three branches
++ * (read-timeout → Info; connect-timeout → Error; non-timeout → Error).
++ */
++internal fun classifyCommandPostError(error: Throwable, cmd: String): UiEvent {
++    if (error is java.net.SocketTimeoutException) {
++        val msg = error.message?.lowercase().orEmpty()
++        val isConnectSide = "connect" in msg || "failed to connect" in msg
++        if (!isConnectSide) {
++            // read-timeout → non-fatal, SSE will carry the result.
++            return UiEvent.Info(R.string.command_submitted_processing)
++        }
++    }
++    return UiEvent.Error(
++        R.string.error_command_failed,
++        listOf(cmd, errorMessageOrFallback(error, "unknown error"))
++    )
++}
++
+ // ── sendMessage helpers (private to this file) ─────────────────────────────
+ 
+ private fun AppCore.scheduleTitleRefreshAfterFirstMessage(sessionId: String) {
+@@ -435,11 +494,10 @@ internal fun AppCore.loadSessionsForEffect() {
+         cacheRepository = cacheRepository,
+         expectedServerGroupFp = currentServerGroupFp(),
+         currentServerGroupFp = currentServerGroupFp,
+-        // R-20 Phase 5 (plan §3 G1 三条件): wire hostProfileStore so
+-        // launchLoadSessions can merge cross-group profiles that reach the
+-        // same server (LAN + tunnel, etc.) on first (id + createdAt + dir +
+-        // non-empty) match.
+-        hostProfileStore = hostProfileStore,
++        // §grouping-rewrite Round-2 #5: the hostProfileStore arg that R-20
++        // Phase 5 wired here (for cross-group merge of LAN + tunnel same-server
++        // profiles) is removed — attemptCrossGroupMerge was deleted by item 1
++        // of this rewrite.
+     )
+ }
+ 
+diff --git a/app/src/main/java/cn/vectory/ocdroid/ui/SessionListActions.kt b/app/src/main/java/cn/vectory/ocdroid/ui/SessionListActions.kt
+index f8449be..a6488e4 100644
+--- a/app/src/main/java/cn/vectory/ocdroid/ui/SessionListActions.kt
++++ b/app/src/main/java/cn/vectory/ocdroid/ui/SessionListActions.kt
+@@ -13,7 +13,6 @@ import cn.vectory.ocdroid.data.cache.CacheRepository
+ import cn.vectory.ocdroid.data.cache.FingerprintResult
+ import cn.vectory.ocdroid.data.model.Session
+ import cn.vectory.ocdroid.data.model.toCacheEntry
+-import cn.vectory.ocdroid.data.repository.HostProfileStore
+ import cn.vectory.ocdroid.data.repository.OpenCodeRepository
+ import cn.vectory.ocdroid.util.DebugLog
+ import cn.vectory.ocdroid.util.SettingsManager
+@@ -82,17 +81,11 @@ internal fun launchLoadSessions(
+      * to key the verifyFingerprint call. Null = caller has not been migrated.
+      */
+     currentServerGroupFp: (() -> String)? = null,
+-    /**
+-     * R-20 Phase 5 (plan §3 G1 三条件): the host-profile store, used by the
+-     * cross-connection merge step. When non-null AND [cacheRepository] /
+-     * [currentServerGroupFp] are also wired, the freshly-fetched session
+-     * list is matched against cached sessions under OTHER server-group fps;
+-     * a (id + createdAt + directory + non-empty) match triggers
+-     * [HostProfileStore.mergeServerGroup] (one-directional: otherFp →
+-     * currentFp). Null = legacy caller; merge is skipped (preserves prior
+-     * behavior).
+-     */
+-    hostProfileStore: HostProfileStore? = null,
++    // §grouping-rewrite Round-2 #5: hostProfileStore parameter removed — it
++    // was wired in by R-20 Phase 5 for the cross-group merge that item 1 of
++    // this rewrite deleted (attemptCrossGroupMerge was the sole consumer
++    // inside this function body). Both call sites (SessionViewModel,
++    // AppCoreOrchestration) and one test updated to drop the now-unused arg.
+ ) {
+ 
+     scope.launch {
+@@ -133,36 +126,9 @@ internal fun launchLoadSessions(
+                     currentOpenIds.toSet()
+                 )
+                 val newHasMore = mergedSessions.size >= limit
+-                // R-20 Phase 5 (plan §3 G1 三条件 + dser: 归并靠 loadSessions
+-                // 非 SSE — SSE 单 workdir 看不到跨接入点). Before the auto-
+-                // select / verify cluster, check if any freshly-fetched session
+-                // ALSO exists under a DIFFERENT server-group fp with matching
+-                // (id + createdAt) + intersecting/identical workdir + non-empty
+-                // messages. If so, this is two profiles pointing at the same
+-                // server (LAN + tunnel, etc.) — merge the other fp INTO the
+-                // current fp (one-directional, plan §3 G1). All three
+-                // conditions must hold; an empty session or a divergent
+-                // directory is NOT a merge signal (plan §3 G1).
+-                //
+-                // runCatching wraps the cache + store IO so a failure never
+-                // blocks the load-sessions fan-out. The merge is best-effort:
+-                // if it fails, the next loadSessions retries (idempotent —
+-                // mergeServerGroup is a no-op once the groups already match).
+                 if (staleHostAfterSuspend()) {
+                     return@onSuccess
+                 }
+-                if (cacheRepository != null && currentServerGroupFp != null && hostProfileStore != null) {
+-                    runCatching {
+-                        attemptCrossGroupMerge(
+-                            cacheRepository = cacheRepository,
+-                            hostProfileStore = hostProfileStore,
+-                            currentServerGroupFp = currentServerGroupFp,
+-                            fetchedSessions = mergedSessions,
+-                        )
+-                    }.onFailure { e ->
+-                        DebugLog.w("SessionListActions", "cross-group merge attempt failed: ${e.message}")
+-                    }
+-                }
+                 if (staleHostAfterSuspend()) return@onSuccess
+                 val refreshedSessions = mergedSessions
+                 var currentSessionVerifyResult: FingerprintResult? = null
+@@ -464,97 +430,6 @@ internal fun launchLoadAgents(
+     }
+ }
+ 
+-// ───────────────── R-20 Phase 5: cross-group merge (plan §3 G1 三条件) ──────
+-
+-/**
+- * R-20 Phase 5 (plan §3 G1): inspects every OTHER server-group fp's cached
+- * sessions for a (id + createdAt) match against [fetchedSessions], and if the
+- * directory also matches/intersects AND the cached session has at least one
+- * cached message, merges the other fp INTO [currentServerGroupFp]
+- * (one-directional — the user can undo via Phase 4 copy-on-split).
+- *
+- * The three conditions (plan §3):
+- *  (a) sessionId + createdAt both equal.
+- *  (b) directory same OR intersecting (one is a prefix of the other — handles
+- *      "/repo" vs "/repo/sub" edge cases where the same logical session was
+- *      opened from a slightly different path).
+- *  (c) cached session non-empty (messageCount > 0). An empty cached row is
+- *      just a metadata stub from an empty window / fingerprint verify — it
+- *      does NOT prove the same logical session.
+- *
+- * All three must hold. The first matching (otherFp, cachedSession) triggers
+- * the merge and returns; later candidates are skipped (one merge per
+- * loadSessions call — the next call re-evaluates with the merged fp set).
+- *
+- * Idempotent: [HostProfileStore.mergeServerGroup] is a no-op when the groups
+- * already match, so a redundant call after a prior merge is safe.
+- *
+- * Best-effort: callers wrap in runCatching so a cache/DB failure never blocks
+- * the load-sessions fan-out.
+- */
+-internal suspend fun attemptCrossGroupMerge(
+-    cacheRepository: CacheRepository,
+-    hostProfileStore: HostProfileStore,
+-    currentServerGroupFp: () -> String,
+-    fetchedSessions: List<Session>,
+-) {
+-    val capturedFp = currentServerGroupFp()
+-    val targetFp = capturedFp
+-    if (targetFp.isBlank() || fetchedSessions.isEmpty()) return
+-    val allFps = runCatching { cacheRepository.allServerGroupFps() }.getOrNull() ?: return
+-    for (otherFp in allFps) {
+-        if (capturedFp != currentServerGroupFp()) return
+-        if (otherFp == targetFp) continue
+-        val otherSessions = runCatching { cacheRepository.listGroupSessions(otherFp) }
+-            .getOrNull()
+-            ?: continue
+-        if (capturedFp != currentServerGroupFp()) return
+-        // Find the first cached row under otherFp that satisfies all 3 merge
+-        // conditions against some freshly-fetched session.
+-        val matched = otherSessions.firstOrNull { cached ->
+-            val fetched = fetchedSessions.firstOrNull { it.id == cached.sessionId }
+-                ?: return@firstOrNull false
+-            // (a) id + createdAt match (both non-null + equal).
+-            val createdAt = fetched.time?.created
+-            if (createdAt == null || cached.createdAt == null || createdAt != cached.createdAt) {
+-                return@firstOrNull false
+-            }
+-            // (b) directory same/intersect.
+-            if (!directoriesMatchOrIntersect(fetched.directory, cached.workdir)) {
+-                return@firstOrNull false
+-            }
+-            // (c) session non-empty (at least one message was cached).
+-            cached.messageCount > 0
+-        }
+-        if (matched != null) {
+-            DebugLog.i(
+-                "SessionListActions",
+-                "cross-group merge: fp=$otherFp → fp=$targetFp " +
+-                    "(matched session=${matched.sessionId} createdAt=${matched.createdAt} workdir=${matched.workdir})"
+-            )
+-            if (capturedFp != currentServerGroupFp()) return
+-            cacheRepository.mergeCacheGroup(fromFp = otherFp, intoFp = targetFp)
+-            if (capturedFp != currentServerGroupFp()) return
+-            hostProfileStore.mergeServerGroup(from = otherFp, into = targetFp)
+-            return
+-        }
+-    }
+-}
+-
+-/**
+- * Phase 5 (plan §3 G1 condition b): two workdirs are considered matching if
+- * they're equal OR one is a parent directory of the other (prefix on path
+- * separator). Blank workdir matches nothing (a session with no directory
+- * cannot prove it's the same project as a directory-bearing one).
+- */
+-internal fun directoriesMatchOrIntersect(a: String?, b: String): Boolean {
+-    if (a.isNullOrBlank() || b.isBlank()) return false
+-    if (a == b) return true
+-    // Normalize trailing separators so "/repo" vs "/repo/" match.
+-    val na = a.trimEnd('/')
+-    val nb = b.trimEnd('/')
+-    if (na == nb) return true
+-    // Parent-child relationship (one is a path prefix of the other on a path
+-    // separator boundary — guards against "/repo" matching "/repo-other").
+-    return na.startsWith("$nb/") || nb.startsWith("$na/")
+-}
++// §grouping-rewrite Round-2 #5: `directoriesMatchOrIntersect(...)` was here
++// (Phase 5 G1 condition b helper) — sole caller was `attemptCrossGroupMerge`,
++// which item 1 of this rewrite deleted. Removed as dead code.
+diff --git a/app/src/main/java/cn/vectory/ocdroid/ui/SessionViewModel.kt b/app/src/main/java/cn/vectory/ocdroid/ui/SessionViewModel.kt
+index 7fa4d8f..39b0f9e 100644
+--- a/app/src/main/java/cn/vectory/ocdroid/ui/SessionViewModel.kt
++++ b/app/src/main/java/cn/vectory/ocdroid/ui/SessionViewModel.kt
+@@ -333,9 +333,10 @@ class SessionViewModel @Inject constructor(
+             cacheRepository = cacheRepository,
+             expectedServerGroupFp = expectedFp,
+             currentServerGroupFp = { hostProfileStore.currentProfile().serverGroupFp.ifBlank { hostProfileStore.currentProfile().id } },
+-            // R-20 Phase 5 (plan §3 G1): wire hostProfileStore for the
+-            // cross-group merge step (LAN + tunnel same-server detection).
+-            hostProfileStore = hostProfileStore,
++            // §grouping-rewrite Round-2 #5: the hostProfileStore arg that R-20
++            // Phase 5 wired here is removed — its sole consumer inside
++            // launchLoadSessions (attemptCrossGroupMerge) was deleted by item 1
++            // of this rewrite.
+         )
+     }
+ 
+diff --git a/app/src/main/java/cn/vectory/ocdroid/ui/SettingsViewModel.kt b/app/src/main/java/cn/vectory/ocdroid/ui/SettingsViewModel.kt
+index ae9e02f..cb4beb7 100644
+--- a/app/src/main/java/cn/vectory/ocdroid/ui/SettingsViewModel.kt
++++ b/app/src/main/java/cn/vectory/ocdroid/ui/SettingsViewModel.kt
+@@ -16,6 +16,10 @@ import kotlinx.coroutines.CoroutineScope
+ import kotlinx.coroutines.flow.MutableStateFlow
+ import kotlinx.coroutines.flow.StateFlow
+ import kotlinx.coroutines.flow.asStateFlow
++import kotlinx.coroutines.flow.combine
++import kotlinx.coroutines.flow.SharingStarted
++import kotlinx.coroutines.flow.stateIn
++import kotlinx.coroutines.flow.update
+ import kotlinx.coroutines.launch
+ import javax.inject.Inject
+ import javax.inject.Named
+@@ -38,7 +42,7 @@ import javax.inject.Named
+  * [OrchestratorViewModel] — pure relocation, zero behaviour change.
+  *
+  * R-20 Phase 4 (plan §3): gains the cache-management action surface — the
+- * manual evict / sweep / copy-on-split handlers used by
++ * manual evict / sweep handlers used by
+  * [cn.vectory.ocdroid.ui.settings.CacheManagementSection]. The cache deps
+  * ([cacheRepository] + [cacheMaintenanceCoordinator] + [hostProfileStore])
+  * are precise-injected here so the VM stays testable without dragging in
+@@ -64,9 +68,8 @@ class SettingsViewModel @Inject constructor(
+      */
+     private val cacheMaintenanceCoordinator: CacheMaintenanceCoordinator,
+     /**
+-     * R-20 Phase 4: profile store — for the copy-on-split escape hatch
+-     * ([HostProfileStore.splitProfileToOwnGroup]). Precise-injected so the
+-     * VM never reaches into AppCore for it.
++     * R-20 Phase 4: profile store — for cache-listing member counts.
++     * Precise-injected so the VM never reaches into AppCore for it.
+      */
+     private val hostProfileStore: HostProfileStore,
+     /**
+@@ -115,6 +118,68 @@ class SettingsViewModel @Inject constructor(
+      *  reaching into another domain. */
+     val settingsFlow get() = store.settingsFlow
+ 
++    /**
++     * §grouping-rewrite Round-2 C1: disconnect reactivity trigger.
++     * [disconnectWorkdir] mutates [settingsManager] (removeRecentWorkdir) +
++     * [cacheRepository] (evictWorkdirInGroup), neither of which emits on
++     * [store.hostFlow] or [store.sessionListFlow] — so without an explicit
++     * poke the derived [recentWorkdirs] flow would not re-derive and the
++     * disconnected workdir would stay visible until an unrelated flow ticked.
++     *
++     * Implemented as a monotonic counter (rather than a SharedFlow<Unit>)
++     * because `combine` waits for ALL sources to emit at least once before
++     * producing; a non-replaying SharedFlow would therefore delay the initial
++     * recentWorkdirs value until the first disconnect, breaking cold-start
++     * rendering. A StateFlow<Long> starting at 0 emits immediately and on
++     * every bump.
++     */
++    private val recentWorkdirsTick = MutableStateFlow(0L)
++
++    val recentWorkdirs: StateFlow<List<String>> = combine(
++        store.hostFlow,
++        store.sessionListFlow,
++        recentWorkdirsTick,
++    ) { host, _, _ ->
++        // host (HostState) only re-triggers this flow on host changes; the fp
++        // is read from the store the same way every other call site does
++        // (ComposerController/ConnectionActions/SessionViewModel…).
++        // The tick re-triggers on disconnectWorkdir (C1 fix).
++        val profile = hostProfileStore.currentProfile()
++        val fp = profile.serverGroupFp.ifBlank { profile.id }
++        settingsManager.getRecentWorkdirs(fp)
++    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
++
++    /**
++     * §grouping-rewrite 项 2: profile count + cached-session count for the
++     * active fp, surfaced so [ConnectionProfileSection]'s stats line can
++     * render without a synchronous store read on every recomposition. Built
++     * off the same `store.hostFlow` + `store.sessionListFlow` triggers as
++     * [recentWorkdirs] so an fp switch / session-list change re-derives the
++     * counts. The fp is derived the standard way
++     * (`serverGroupFp.ifBlank { id }`).
++     *
++     * `profilesInGroup(fp)` is synchronous (HostProfileStore is in-memory +
++     * ESP-backed); `listGroupSessions(fp)` is suspend (Room read), so the
++     * cached-session derivation runs in the combine's suspend context.
++     */
++    val activeGroupProfileCount: StateFlow<Int> = combine(
++        store.hostFlow,
++        store.sessionListFlow,
++    ) { host, _ ->
++        val profile = hostProfileStore.currentProfile()
++        val fp = profile.serverGroupFp.ifBlank { profile.id }
++        hostProfileStore.profilesInGroup(fp).size
++    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), 0)
++
++    val activeGroupCachedSessionCount: StateFlow<Int> = combine(
++        store.hostFlow,
++        store.sessionListFlow,
++    ) { host, _ ->
++        val profile = hostProfileStore.currentProfile()
++        val fp = profile.serverGroupFp.ifBlank { profile.id }
++        cacheRepository.listGroupSessions(fp).size
++    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), 0)
++
+     fun setThemeMode(mode: ThemeMode) {
+         settingsManager.themeMode = mode
+         store.mutateSettings { it.copy(themeMode = mode) }
+@@ -250,9 +315,15 @@ class SettingsViewModel @Inject constructor(
+     /**
+      * Trigger the daily orphan sweep right now (plan §3 Phase 4 "sweepNow"
+      * action). Routes to [CacheMaintenanceCoordinator.dailySweepIfNeeded];
+-     * the 24h dedup + alive-completeness degradation live inside the
+-     * coordinator. Surfaces the resulting [DailySweepReport] via [lastSweep]
+-     * so the UI can show what got evicted / marked.
++     * the alive-completeness degradation lives inside the coordinator.
++     * Surfaces the resulting [DailySweepReport] via [lastSweep] so the UI can
++     * show what got evicted / marked.
++     *
++     * §grouping-rewrite Round-2 C2: passes `force=true` so the manual button
++     * bypasses the 24h epoch-day dedup — the auto connect-sweep would
++     * otherwise make this button a no-op for the rest of the day. The
++     * coordinator still stamps the epoch after a forced run, so the next
++     * auto connect-sweep within the same day dedups normally.
+      *
+      * **Offline guard**: the caller (CacheManagementSection) MUST disable
+      * the button when `isOnline == false`; this method does NOT re-check
+@@ -262,7 +333,7 @@ class SettingsViewModel @Inject constructor(
+     fun sweepNow(serverGroupFp: String) {
+         appScope.launch {
+             val report = runCatching {
+-                cacheMaintenanceCoordinator.dailySweepIfNeeded(serverGroupFp)
++                cacheMaintenanceCoordinator.dailySweepIfNeeded(serverGroupFp, force = true)
+             }.onFailure { DebugLog.e(TAG, "sweepNow failed fp=$serverGroupFp", it) }.getOrNull()
+             if (report != null) _lastSweep.value = report
+             refreshCacheListing()
+@@ -270,26 +341,68 @@ class SettingsViewModel @Inject constructor(
+     }
+ 
+     /**
+-     * Copy-on-split escape hatch (plan §4 G1, plan §3 Phase 4): split
+-     * [profileId] into its own independent server-group so its cache stops
+-     * being shared with the other profiles it was previously merged with.
++     * §grouping-rewrite 项 3: "Sweep all groups" — fan out a [sweepNow] across
++     * every distinct fp currently in use. Derived from the UNION of:
++     *  - profile-derived fps ([hostProfileStore.profiles] → distinct
++     *    `serverGroupFp`), so an fp with profiles but no cached sessions still
++     *    gets its LRU/age pass; AND
++     *  - cache-derived fps ([cacheRepository.allServerGroupFps]), so an fp
++     *    with cached sessions but no live profile (e.g. all profiles for that
++     *    group were just deleted, leaving orphan cache rows) is not missed.
+      *
+-     * Plan §5 note (gpter B2): the full configuration copy (recentWorkdirs
+-     * / disabled_models / agent / model / draft) depends on Phase 5's
+-     * fp-keyed storage migration. Phase 4 implements only the profile split
+-     * + the UI hint that "complete config copy lands after Phase 5".
++     * §grouping-rewrite Round-2 C2: passes `force=true` per fp (manual button
++     * bypasses 24h dedup). The last completed report (whichever group finishes
++     * last) is surfaced via [lastSweep] for the inline result line; intermediate
++     * reports are collapsed to avoid popup jitter.
++     *
++     * §grouping-rewrite Round-3 #4: the union fixes a gap where the popup
++     * listing (cache-derived via [refreshCacheListing] → [cacheRepository.
++     * allServerGroupFps]) showed a group that this sweep would have skipped
++     * (because its profile had been deleted but its cache rows remained).
+      */
+-    fun splitProfile(profileId: String) {
++    fun sweepAllGroups() {
+         appScope.launch {
+-            runCatching {
+-                val oldFp = hostProfileStore.profiles()
+-                    .firstOrNull { it.id == profileId }
+-                    ?.serverGroupFp
+-                    ?.ifBlank { profileId }
+-                hostProfileStore.splitProfileToOwnGroup(profileId)
+-                oldFp?.let { settingsManager.copyPerFpConfig(fromFp = it, toFp = profileId) }
++            val profileFps = hostProfileStore.profiles()
++                .map { it.serverGroupFp.ifBlank { it.id } }
++                .toSet()
++            val cacheFps = runCatching { cacheRepository.allServerGroupFps() }
++                .onFailure { DebugLog.e(TAG, "sweepAllGroups: allServerGroupFps failed", it) }
++                .getOrDefault(emptyList())
++                .toSet()
++            val fps = (profileFps + cacheFps).distinct()
++            var lastReport: DailySweepReport? = null
++            for (fp in fps) {
++                val report = runCatching {
++                    cacheMaintenanceCoordinator.dailySweepIfNeeded(fp, force = true)
++                }.onFailure { DebugLog.e(TAG, "sweepAllGroups failed fp=$fp", it) }.getOrNull()
++                if (report != null) lastReport = report
+             }
+-                .onFailure { DebugLog.e(TAG, "splitProfile failed id=$profileId", it) }
++            if (lastReport != null) _lastSweep.value = lastReport
++            refreshCacheListing()
++        }
++    }
++
++    fun disconnectWorkdir(workdir: String) {
++        val wd = workdir.trim()
++        if (wd.isEmpty()) return
++        val profile = hostProfileStore.currentProfile()
++        val fp = profile.serverGroupFp.ifBlank { profile.id }
++        appScope.launch {
++            settingsManager.removeRecentWorkdir(fp, wd)
++            runCatching { cacheRepository.evictWorkdirInGroup(fp, wd) }
++                .onFailure { DebugLog.e(TAG, "disconnectWorkdir failed fp=$fp workdir=$wd", it) }
++            // §grouping-rewrite Round-2 C1 (+ Round-3 N2): neither
++            // removeRecentWorkdir nor evictWorkdirInGroup pokes hostFlow/
++            // sessionListFlow, so we bump the tick to force recentWorkdirs
++            // (and any other derivation tied to it) to re-derive immediately.
++            // SessionsScreen's workdirGroups drops the disconnected workdir
++            // on the next frame instead of waiting for an unrelated emit.
++            //
++            // §grouping-rewrite Round-3 N2: `update { it + 1L }` is atomic
++            // (CAS loop) vs the read-modify-write of `value = value + 1L` —
++            // defensive against a future caller that fans disconnects out to
++            // parallel coroutines.
++            recentWorkdirsTick.update { it + 1L }
+             refreshCacheListing()
+         }
+     }
+diff --git a/app/src/main/java/cn/vectory/ocdroid/ui/UiEvent.kt b/app/src/main/java/cn/vectory/ocdroid/ui/UiEvent.kt
+index 46fd1c0..b0f835b 100644
+--- a/app/src/main/java/cn/vectory/ocdroid/ui/UiEvent.kt
++++ b/app/src/main/java/cn/vectory/ocdroid/ui/UiEvent.kt
+@@ -20,6 +20,19 @@ import androidx.annotation.StringRes
+ sealed class UiEvent {
+     data class Error(@StringRes val resId: Int, val args: List<Any> = emptyList()) : UiEvent()
+     data class Success(@StringRes val resId: Int, val args: List<Any> = emptyList()) : UiEvent()
++    /**
++     * §grouping-rewrite item 4: neutral, NON-FATAL informational event.
++     * Same shape as [Error] / [Success] (so collectors resolve it through
++     * the same `@StringRes resId` + format-args path). Used by
++     * `AppCoreOrchestration.executeCommand` when the command POST raises a
++     * `java.net.SocketTimeoutException` waiting for the server's ACK: the
++     * command may legitimately still be running server-side, and SSE
++     * (separate client, read timeout 0) will deliver the results — the user
++     * sees a neutral "command submitted, processing…" snackbar instead of a
++     * red "command failed" one. True HTTP 4xx/5xx failures still go through
++     * [Error].
++     */
++    data class Info(@StringRes val resId: Int, val args: List<Any> = emptyList()) : UiEvent()
+     /** Developer-facing debug event; message stays a raw String (not user-visible). */
+     data class Debug(val message: String) : UiEvent()
+ }
+@@ -40,6 +53,7 @@ sealed class UiEvent {
+ fun UiEvent.resolveMessage(context: android.content.Context): String = when (this) {
+     is UiEvent.Error -> context.getString(resId, *args.toTypedArray())
+     is UiEvent.Success -> context.getString(resId, *args.toTypedArray())
++    is UiEvent.Info -> context.getString(resId, *args.toTypedArray())
+     is UiEvent.Debug -> message
+ }
+ 
+diff --git a/app/src/main/java/cn/vectory/ocdroid/ui/chat/ChatScreen.kt b/app/src/main/java/cn/vectory/ocdroid/ui/chat/ChatScreen.kt
+index 379f2a3..7f7e2f9 100644
+--- a/app/src/main/java/cn/vectory/ocdroid/ui/chat/ChatScreen.kt
++++ b/app/src/main/java/cn/vectory/ocdroid/ui/chat/ChatScreen.kt
+@@ -476,6 +476,16 @@ fun ChatScreen(
+                         durationMillis = 2_500L
+                     )
+                 }
++                is UiEvent.Info -> {
++                    // §grouping-rewrite item 4: neutral, non-fatal snackbar
++                    // (e.g. command POST timed out on its ACK but SSE carries
++                    // the results). Same short duration as Success; no action,
++                    // no error styling — distinct from the red 10 s Error path.
++                    snackbarHostState.showTimed(
++                        message = message,
++                        durationMillis = 2_500L
++                    )
++                }
+                 is UiEvent.Debug -> Unit
+             }
+         }
+diff --git a/app/src/main/java/cn/vectory/ocdroid/ui/controller/SessionSyncCoordinator.kt b/app/src/main/java/cn/vectory/ocdroid/ui/controller/SessionSyncCoordinator.kt
+index 2765d65..82c1785 100644
+--- a/app/src/main/java/cn/vectory/ocdroid/ui/controller/SessionSyncCoordinator.kt
++++ b/app/src/main/java/cn/vectory/ocdroid/ui/controller/SessionSyncCoordinator.kt
+@@ -1135,6 +1135,9 @@ internal fun SessionListState.applyArchiveEviction(
+     newOpenIds: List<String>
+ ): Pair<SessionListState, List<SseSideEffect>> = copy(
+     sessions = upsertSession(sessions, updated),
++    directorySessions = directorySessions.mapValues { (_, list) ->
++        list.map { session -> if (session.id == updated.id) updated else session }
++    },
+     openSessionIds = newOpenIds
+ ) to emptyList()
+ 
+diff --git a/app/src/main/java/cn/vectory/ocdroid/ui/sessions/SessionsScreen.kt b/app/src/main/java/cn/vectory/ocdroid/ui/sessions/SessionsScreen.kt
+index 07900d8..47d146c 100644
+--- a/app/src/main/java/cn/vectory/ocdroid/ui/sessions/SessionsScreen.kt
++++ b/app/src/main/java/cn/vectory/ocdroid/ui/sessions/SessionsScreen.kt
+@@ -3,6 +3,7 @@ package cn.vectory.ocdroid.ui.sessions
+ import androidx.compose.animation.AnimatedVisibility
+ import androidx.compose.foundation.ExperimentalFoundationApi
+ import androidx.compose.foundation.background
++import androidx.compose.foundation.clickable
+ import androidx.compose.foundation.combinedClickable
+ import androidx.compose.foundation.layout.*
+ import androidx.compose.foundation.lazy.LazyColumn
+@@ -37,6 +38,7 @@ import cn.vectory.ocdroid.data.repository.OpenCodeRepository
+ import cn.vectory.ocdroid.ui.ComposerViewModel
+ import cn.vectory.ocdroid.ui.OrchestratorViewModel
+ import cn.vectory.ocdroid.ui.SessionViewModel
++import cn.vectory.ocdroid.ui.SettingsViewModel
+ import cn.vectory.ocdroid.ui.chat.workdirTone
+ import cn.vectory.ocdroid.util.DebugLog
+ import kotlinx.coroutines.flow.distinctUntilChanged
+@@ -51,6 +53,7 @@ fun SessionsScreen(
+     viewModel: SessionViewModel,
+     composerVM: ComposerViewModel,
+     orchestratorVM: OrchestratorViewModel,
++    settingsVM: SettingsViewModel,
+     /** §R-17 batch3e: repository for the DirectoryPickerSheet (was
+      *  `viewModel.core.repository`). Injected via the activity-scoped
+      *  [FilesViewModel] at the call site; passed in directly here so this
+@@ -85,10 +88,9 @@ fun SessionsScreen(
+         .collectAsStateWithLifecycle(initialValue = null)
+     val unreadSessions by remember { viewModel.unreadFlow.map { it.unreadSessions }.distinctUntilChanged() }
+         .collectAsStateWithLifecycle(initialValue = emptySet())
++    val recentWorkdirs by settingsVM.recentWorkdirs.collectAsStateWithLifecycle()
+     var showNewWorkdirDialog by remember { mutableStateOf(false) }
+     var expandedWorkdirs by remember { mutableStateOf(setOf<String>()) }
+-    // Locally-hidden workdirs (long-press → disconnect). UI-only; reset on refresh/re-enter tab.
+-    var hiddenWorkdirs by remember { mutableStateOf(setOf<String>()) }
+     var pendingDisconnectWorkdir by remember { mutableStateOf<String?>(null) }
+     // M7: long-press a session card → archive confirmation dialog. Null = hidden.
+     var pendingArchiveSession by remember { mutableStateOf<Session?>(null) }
+@@ -113,74 +115,33 @@ fun SessionsScreen(
+         }
+     }
+ 
+-    // Derive workdir groups, excluding locally-hidden workdirs and sub-agents
+-    // (parentId != null). Sub-agents are only reachable from within a parent
+-    // conversation via SubAgentCard, never from this workdir list.
++    // Derive workdir groups for the "Connected projects" list, sub-agents
++    // (parentId != null) excluded. Sub-agents are only reachable from within
++    // a parent conversation via SubAgentCard, never from this workdir list.
+     //
+-    // The draft workdir (when the user has invoked createSessionInWorkdir but
+-    // no session has been POSTed yet) is appended with an empty session list
+-    // so the in-progress "connect" is visible alongside connected projects.
++    // §grouping-rewrite Round-3 C3: derivation is now GATED by recent_workdirs
++    // membership — a workdir is visible iff it is in recentWorkdirs OR it is
++    // the active draftWorkdir. This makes the persistent recent_workdirs list
++    // the single source of truth for "connected" so disconnecting a workdir
++    // (which removes it from recent_workdirs + evicts its cache) hides it
++    // from this list EVEN WHEN its live sessions are still in sessionListFlow
++    // (the common case during the window between disconnect and the server
++    // list refresh). The disconnect dialog promises "removed from the list"
++    // unconditionally — the pre-C3 logic broke that promise for any workdir
++    // with at least one live (non-archived, parentId==null) session.
+     //
+-    // Source merges sessionListState.sessions with sessionListState.directory
+-    // Sessions (#10) so a workdir that has only been discovered via the
+-    // directory-scoped fetch (and not yet promoted into the global list by a
+-    // periodic refresh) still shows its sessions here. Deduplicated by id to
+-    // avoid double-rendering.
++    // The derivation lives in [buildWorkdirGroups] (top-level, pure, testable);
++    // this derivedStateOf just feeds it the live slice values + caches the
++    // structurally-equal result so SSE chat deltas / typing (which do not
++    // touch any of the input slices) do not recompose the workdir LazyColumn.
+     val workdirGroups by remember {
+-        // R-17 Stage 3: derivedStateOf auto-tracks every State read inside the
+-        // block (sessionListState.sessions / sessionListState.directorySessions
+-        // / draftWorkdir / hiddenWorkdirs) and only notifies downstream when
+-        // the resulting list changes structurally. SSE chat deltas / typing
+-        // no longer touch any of these (draftWorkdir is a field-level Flow),
+-        // so the equal result is suppressed and the workdir LazyColumn is not
+-        // recomposed.
+         derivedStateOf {
+-        val allSessions = (sessionListState.sessions + sessionListState.directorySessions.values.flatten())
+-            .distinctBy { it.id }
+-        // Fix #6b: normalize directory keys (trim + strip surrounding slashes)
+-        // so a web-created session whose directory differs only by a trailing
+-        // or leading slash groups under the EXISTING project instead of
+-        // spawning a hidden duplicate group. Normalization is applied
+-        // consistently to the hiddenWorkdirs filter, the groupBy key, and the
+-        // draft check. The representative ORIGINAL directory
+-        // (keyToDisplayDir) is preserved for display and for VM calls
+-        // (browseFilesInWorkdir / createSessionInWorkdir) which expect the
+-        // un-normalized path.
+-        val normalizedHidden = hiddenWorkdirs.mapTo(mutableSetOf()) { normalizeDirectory(it) }
+-        val groupsByKey = LinkedHashMap<String, MutableList<Session>>()
+-        val keyToDisplayDir = LinkedHashMap<String, String>()
+-        for (s in allSessions) {
+-            if (s.parentId != null) continue
+-            // Hide archived sessions from the connected-projects list too (the
+-            // "recent sessions" list already filters them at line 99). Without
+-            // this, the 归档 button in this list would hide nothing.
+-            if (s.isArchived) continue
+-            val key = normalizeDirectory(s.directory)
+-            if (key in normalizedHidden) continue
+-            groupsByKey.getOrPut(key) { mutableListOf() }.add(s)
+-            // Prefer an absolute-style (leading "/") representative for
+-            // display; otherwise keep the first seen. Two sessions that
+-            // normalize together usually differ only by surrounding slashes,
+-            // so any pick is functionally equivalent for the VM's
+-            // directory-scoped APIs.
+-            val current = keyToDisplayDir[key]
+-            if (current == null || (s.directory.startsWith('/') && !current.startsWith('/'))) {
+-                keyToDisplayDir[key] = s.directory
+-            }
+-        }
+-        draftWorkdir?.let { draft ->
+-            val key = normalizeDirectory(draft)
+-            if (key !in groupsByKey && key !in normalizedHidden) {
+-                groupsByKey[key] = mutableListOf()
+-                keyToDisplayDir.putIfAbsent(key, draft)
+-            }
+-        }
+-        // (displayDir, sessions), sorted by normalized key for stable ordering.
+-        groupsByKey.entries
+-            .map { (key, sessList) ->
+-                (keyToDisplayDir[key] ?: key) to sessList.sortedByDescending { it.time?.updated ?: 0L }
+-            }
+-            .sortedBy { normalizeDirectory(it.first) }
++            buildWorkdirGroups(
++                allSessions = (sessionListState.sessions + sessionListState.directorySessions.values.flatten())
++                    .distinctBy { it.id },
++                recentWorkdirs = recentWorkdirs,
++                draftWorkdir = draftWorkdir,
++            )
+         }
+     }
+ 
+@@ -401,12 +362,20 @@ fun SessionsScreen(
+                         // inset (was start=40dp) so session cards use the full
+                         // screen width instead of being squeezed into a narrow
+                         // column; SessionCard itself adds 8dp horizontal padding.
+-                        AnimatedVisibility(visible = isExpanded && sessionsInWorkdir.isNotEmpty()) {
++                        AnimatedVisibility(visible = isExpanded) {
+                             Column(
+                                 modifier = Modifier
+                                     .fillMaxWidth()
+                                     .padding(horizontal = 8.dp)
+                             ) {
++                                if (sessionsInWorkdir.isEmpty()) {
++                                    EmptyWorkdirPlaceholder(
++                                        onClick = {
++                                            viewModel.createSessionInWorkdir(workdir)
++                                            onSwitchToChat()
++                                        }
++                                    )
++                                }
+                                 sessionsInWorkdir.forEach { session ->
+                                     SessionCard(
+                                         session = session,
+@@ -426,24 +395,24 @@ fun SessionsScreen(
+         }
+     }
+ 
+-    // --- Disconnect workdir confirmation dialog (UI-only filter) ---
++    // --- Disconnect workdir confirmation dialog (persistent disconnect) ---
+     pendingDisconnectWorkdir?.let { workdir ->
+         AlertDialog(
+             onDismissRequest = { pendingDisconnectWorkdir = null },
+-            title = { Text(stringResource(R.string.sessions_disconnect_workdir)) },
++            title = { Text(stringResource(R.string.workdir_disconnect_title)) },
+             text = {
+                 val name = workdir.split("/").filter { it.isNotEmpty() }.lastOrNull() ?: workdir
+-                Text(stringResource(R.string.sessions_disconnect_confirm) + "\n\n" + name + "\n" + workdir)
++                Text(stringResource(R.string.workdir_disconnect_message) + "\n\n" + name + "\n" + workdir)
+             },
+             confirmButton = {
+                 TextButton(
+                     onClick = {
+-                        hiddenWorkdirs = hiddenWorkdirs + workdir
++                        settingsVM.disconnectWorkdir(workdir)
+                         expandedWorkdirs = expandedWorkdirs - workdir
+                         pendingDisconnectWorkdir = null
+                     }
+                 ) {
+-                    Text(stringResource(R.string.sessions_disconnect_workdir))
++                    Text(stringResource(R.string.workdir_disconnect_confirm))
+                 }
+             },
+             dismissButton = {
+@@ -656,6 +625,31 @@ private fun EmptyRow(text: String) {
+     )
+ }
+ 
++@Composable
++private fun EmptyWorkdirPlaceholder(onClick: () -> Unit) {
++    ListItem(
++        modifier = Modifier
++            .fillMaxWidth()
++            .padding(vertical = 2.dp)
++            .clickable { onClick() },
++        headlineContent = {
++            Text(
++                text = stringResource(R.string.workdir_empty_placeholder),
++                style = MaterialTheme.typography.bodySmall,
++                color = MaterialTheme.colorScheme.onSurfaceVariant
++            )
++        },
++        leadingContent = {
++            Icon(
++                Icons.Default.AddComment,
++                contentDescription = null,
++                modifier = Modifier.size(18.dp),
++                tint = MaterialTheme.colorScheme.onSurfaceVariant
++            )
++        }
++    )
++}
++
+ /**
+  * M6: Small (~8dp) status indicator rendered on the right edge of a session
+  * card's title row, just before the unread dot. Mapping:
+@@ -696,3 +690,111 @@ private fun formatTime(epochMs: Long): String {
+  * display and VM calls.
+  */
+ private fun normalizeDirectory(dir: String): String = dir.trim().trim('/')
++
++/**
++ * §grouping-rewrite Round-3 C3: pure derivation of the "Connected projects"
++ * workdir groups for [SessionsScreen]. Extracted from the composable so the
++ * gating logic can be unit-tested (see SessionsScreenTest).
++ *
++ * **GATING (C3 fix)**: a workdir is visible iff it is in [recentWorkdirs] OR
++ * it is the active [draftWorkdir] (the in-progress "connect new project" the
++ * user typed but has not yet POSTed). This makes the persistent
++ * `recent_workdirs_<fp>` list the single source of truth for "connected" — a
++ * disconnect (which removes the workdir from recent_workdirs + evicts its
++ * cache) hides the workdir from the list EVEN WHEN its live sessions are
++ * still in [allSessions] (the common case during the window between disconnect
++ * and the server list refresh). The disconnect dialog promises "removed from
++ * the list" unconditionally; the pre-C3 derivation broke that promise for any
++ * workdir with at least one live (parentId==null, non-archived) session.
++ *
++ * **Preserved behaviour** (verified against the pre-C3 inline derivation):
++ *  - Directory keys are normalised (trim + strip surrounding slashes) so
++ *    phone- and web-created sessions that differ only by leading/trailing "/"
++ *    group together.
++ *  - The representative ORIGINAL directory (preferring absolute / leading-"/"
++ *    form) is preserved in the output's `first` for display + VM calls
++ *    (browseFilesInWorkdir / createSessionInWorkdir).
++ *  - The active `draftWorkdir` is included even when absent from
++ *    recentWorkdirs (the "Connect new project" draft must stay visible while
++ *    the user is mid-typing).
++ *  - Visible workdirs with zero live sessions are still emitted (the
++ *    `workdir_empty_placeholder` row in the UI handles them) — this
++ *    preserves the pre-C3 0-live fallback for workdirs the user just
++ *    connected but has not yet started a conversation in.
++ *  - Output sorted by normalized key for stable ordering.
++ *
++ * @param allSessions every session the UI currently knows about (typically
++ *   `sessionListState.sessions + sessionListState.directorySessions.values.flatten()`,
++ *   deduplicated by id by the caller — this function does NOT dedupe; passing
++ *   already-deduped input keeps the grouping keys stable).
++ * @param recentWorkdirs the persistent `recent_workdirs_<fp>` list — the
++ *   source of truth for "connected".
++ * @param draftWorkdir the in-progress "connect new project" workdir, or null.
++ * @return list of (displayDirectory, liveSessionsSortedByUpdatedDesc) pairs,
++ *   one per visible workdir, sorted by normalized directory.
++ */
++internal fun buildWorkdirGroups(
++    allSessions: List<Session>,
++    recentWorkdirs: List<String>,
++    draftWorkdir: String?,
++): List<Pair<String, List<Session>>> {
++    // ── Step 1: visible set (the GATE). Insertion-ordered (recent first, then
++    // draft) so the output ordering matches the user's mental model: recent
++    // connections appear before the in-progress draft. Keyed by normalized
++    // directory; we also remember the first-seen ORIGINAL dir string per key
++    // so 0-session visible workdirs get a sensible displayDir fallback.
++    val keyToVisibleDir = LinkedHashMap<String, String>()
++    fun addVisible(dir: String) {
++        val key = normalizeDirectory(dir)
++        if (key.isBlank()) return
++        keyToVisibleDir.putIfAbsent(key, dir)
++    }
++    recentWorkdirs.forEach(::addVisible)
++    if (draftWorkdir != null) addVisible(draftWorkdir)
++    val visibleKeys = keyToVisibleDir.keys // LinkedHashSet view; ordered
++
++    // ── Step 2: attach live sessions to their group — IF AND ONLY IF the
++    // group is in the visible set. Sessions whose workdir is NOT visible
++    // (e.g. just-disconnected but still in the live list, OR a workdir that
++    // was never connected and only surfaced via a directory-fetch) are
++    // dropped here. This is the load-bearing change vs the pre-C3 logic.
++    val groupsByKey = LinkedHashMap<String, MutableList<Session>>()
++    val keyToDisplayDir = LinkedHashMap<String, String>()
++    for (s in allSessions) {
++        if (s.parentId != null) continue
++        // Hide archived sessions from the connected-projects list too. The
++        // top "recent sessions" list filters them separately.
++        if (s.isArchived) continue
++        val key = normalizeDirectory(s.directory)
++        if (key.isBlank()) continue
++        // C3 gate: sessions for INVISIBLE workdirs do not re-introduce the
++        // workdir into the output.
++        if (key !in visibleKeys) continue
++        groupsByKey.getOrPut(key) { mutableListOf() }.add(s)
++        // Prefer an absolute-style (leading "/") representative for display;
++        // otherwise keep the first seen. Two sessions that normalize together
++        // usually differ only by surrounding slashes, so any pick is
++        // functionally equivalent for the VM's directory-scoped APIs.
++        val current = keyToDisplayDir[key]
++        if (current == null || (s.directory.startsWith('/') && !current.startsWith('/'))) {
++            keyToDisplayDir[key] = s.directory
++        }
++    }
++
++    // ── Step 3: ensure every visible key has an entry (0-live placeholder)
++    // and a displayDir (fall back to the visible-set's original dir string).
++    for (key in visibleKeys) {
++        groupsByKey.getOrPut(key) { mutableListOf() }
++        if (key !in keyToDisplayDir) {
++            keyToDisplayDir[key] = keyToVisibleDir.getValue(key)
++        }
++    }
++
++    // ── Step 4: output (displayDir, sessions sorted by updated desc), sorted
++    // by normalized key for stable ordering — matches the pre-C3 ordering.
++    return groupsByKey.entries
++        .map { (key, sessList) ->
++            (keyToDisplayDir[key] ?: key) to sessList.sortedByDescending { it.time?.updated ?: 0L }
++        }
++        .sortedBy { normalizeDirectory(it.first) }
++}
+diff --git a/app/src/main/java/cn/vectory/ocdroid/ui/settings/CacheManagementSection.kt b/app/src/main/java/cn/vectory/ocdroid/ui/settings/CacheManagementSection.kt
+index 9e6a0f4..78227ec 100644
+--- a/app/src/main/java/cn/vectory/ocdroid/ui/settings/CacheManagementSection.kt
++++ b/app/src/main/java/cn/vectory/ocdroid/ui/settings/CacheManagementSection.kt
+@@ -25,7 +25,6 @@ import androidx.compose.foundation.layout.width
+ import androidx.compose.foundation.lazy.LazyColumn
+ import androidx.compose.foundation.lazy.items
+ import androidx.compose.material.icons.Icons
+-import androidx.compose.material.icons.automirrored.filled.CallSplit
+ import androidx.compose.material.icons.filled.CleaningServices
+ import androidx.compose.material.icons.filled.Delete
+ import androidx.compose.material.icons.filled.DeleteSweep
+@@ -130,6 +129,32 @@ internal fun CacheManagementSection(
+         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
+     ) {
+         Column(modifier = Modifier.padding(16.dp)) {
++            // ── §grouping-rewrite 项 3: "Sweep all groups" — the popup's
++            // primary action. Fanned out across every distinct fp via
++            // [SettingsViewModel.sweepAllGroups]; disabled offline for the
++            // same reason the per-group sweep button is (a sweep without a
++            // live connection cannot enumerate the alive set).
++            Button(
++                onClick = { vm.sweepAllGroups() },
++                enabled = isOnline,
++                modifier = Modifier.fillMaxWidth()
++            ) {
++                Icon(Icons.Default.CleaningServices, contentDescription = null, modifier = Modifier.size(16.dp))
++                Spacer(modifier = Modifier.width(4.dp))
++                Text(stringResource(R.string.cache_management_sweep_all))
++            }
++
++            if (!isOnline) {
++                Spacer(modifier = Modifier.height(4.dp))
++                Text(
++                    stringResource(R.string.cache_management_offline_hint),
++                    style = MaterialTheme.typography.labelSmall,
++                    color = MaterialTheme.colorScheme.onSurfaceVariant
++                )
++            }
++
++            Spacer(modifier = Modifier.height(12.dp))
++
+             Row(
+                 modifier = Modifier.fillMaxWidth(),
+                 horizontalArrangement = Arrangement.SpaceBetween,
+@@ -200,8 +225,7 @@ internal fun CacheManagementSection(
+                                     onClearProject = { workdir ->
+                                         vm.clearProject(group.serverGroupFp, workdir)
+                                     },
+-                                    onSweep = { vm.sweepNow(group.serverGroupFp) },
+-                                    onSplit = { profileId -> vm.splitProfile(profileId) }
++                                    onSweep = { vm.sweepNow(group.serverGroupFp) }
+                                 )
+                                 HorizontalDivider()
+                             }
+@@ -251,7 +275,7 @@ internal fun CacheManagementSection(
+ // ─────────── Per-group card ─────────────────────────────────────────────
+ 
+ /**
+- * One server-group's section: header (fp + member counts) + sweep/split
++ * One server-group's section: header (fp + member counts) + sweep
+  * row actions + the cached-session list. Each row carries its own clear-
+  * session + clear-project buttons.
+  */
+@@ -262,7 +286,6 @@ private fun CacheGroupCard(
+     onClearSession: (String) -> Unit,
+     onClearProject: (String) -> Unit,
+     onSweep: () -> Unit,
+-    onSplit: (String) -> Unit,
+ ) {
+     Column(modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp)) {
+         Text(
+@@ -283,10 +306,7 @@ private fun CacheGroupCard(
+ 
+         Spacer(modifier = Modifier.height(8.dp))
+ 
+-        // ── Group-level actions: sweep now (offline-disabled) + per-profile
+-        // copy-on-split escape hatch (only surfaced when more than one
+-        // profile is in the group — splitting a single-member group is a
+-        // no-op).
++        // ── Group-level action: sweep now (offline-disabled).
+         Row(
+             modifier = Modifier.fillMaxWidth(),
+             horizontalArrangement = Arrangement.spacedBy(8.dp)
+@@ -311,31 +331,6 @@ private fun CacheGroupCard(
+             )
+         }
+ 
+-        if (group.profiles.size > 1) {
+-            Spacer(modifier = Modifier.height(8.dp))
+-            Text(
+-                stringResource(R.string.cache_management_action_split_hint),
+-                style = MaterialTheme.typography.labelSmall,
+-                color = MaterialTheme.colorScheme.onSurfaceVariant
+-            )
+-            Spacer(modifier = Modifier.height(4.dp))
+-            Row(
+-                modifier = Modifier.fillMaxWidth(),
+-                horizontalArrangement = Arrangement.spacedBy(8.dp)
+-            ) {
+-                group.profiles.forEach { profile ->
+-                    OutlinedButton(
+-                        onClick = { onSplit(profile.id) },
+-                        modifier = Modifier.weight(1f)
+-                    ) {
+-                        Icon(Icons.AutoMirrored.Filled.CallSplit, contentDescription = null, modifier = Modifier.size(16.dp))
+-                        Spacer(modifier = Modifier.width(4.dp))
+-                        Text(profile.displayName, maxLines = 1)
+-                    }
+-                }
+-            }
+-        }
+-
+         Spacer(modifier = Modifier.height(8.dp))
+ 
+         // ── Per-session rows.
+@@ -736,6 +731,18 @@ private fun CacheManagementSectionPreviewHost(
+         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
+     ) {
+         Column(modifier = Modifier.padding(16.dp)) {
++            // §grouping-rewrite 项 3: primary "Sweep all groups" action
++            // (disabled in the preview host — the host has no VM to invoke).
++            Button(
++                onClick = {},
++                enabled = isOnline,
++                modifier = Modifier.fillMaxWidth()
++            ) {
++                Icon(Icons.Default.CleaningServices, contentDescription = null, modifier = Modifier.size(16.dp))
++                Spacer(modifier = Modifier.width(4.dp))
++                Text("Sweep all groups")
++            }
++            Spacer(modifier = Modifier.height(12.dp))
+             Row(
+                 modifier = Modifier.fillMaxWidth(),
+                 horizontalArrangement = Arrangement.SpaceBetween,
+@@ -792,8 +799,7 @@ private fun CacheManagementSectionPreviewHost(
+                                     isOnline = isOnline,
+                                     onClearSession = {},
+                                     onClearProject = {},
+-                                    onSweep = {},
+-                                    onSplit = {}
++                                    onSweep = {}
+                                 )
+                                 HorizontalDivider()
+                             }
+diff --git a/app/src/main/java/cn/vectory/ocdroid/ui/settings/DebugLogSection.kt b/app/src/main/java/cn/vectory/ocdroid/ui/settings/DebugLogSection.kt
+index 97c393f..53a2113 100644
+--- a/app/src/main/java/cn/vectory/ocdroid/ui/settings/DebugLogSection.kt
++++ b/app/src/main/java/cn/vectory/ocdroid/ui/settings/DebugLogSection.kt
+@@ -1,8 +1,12 @@
+ // DebugLogSection.kt — the in-Settings debug-log viewer (level filter, pause,
+ // copy, clear, virtualized LazyColumn) plus its private LevelChip helper.
+-// Pure relocation from SettingsSections.kt with no behaviour change; kept in
+-// the same package (ui.settings) so the existing internal visibility is
+-// sufficient and no public-API churn is needed.
++//
++// §grouping-rewrite 项 2: the two R-19 Sprint 1 Lane D diagnostic panels
++// (EffectBusDroppedPanel + SseUnknownEventsPanel) and their Hilt @EntryPoint
++// plumbing have been removed — the stats they surfaced migrated to the
++// Connections section (ConnectionProfileSection's group-stats line). Only the
++// log viewer body remains, kept in the same package (ui.settings) so the
++// existing internal visibility is sufficient.
+ 
+ package cn.vectory.ocdroid.ui.settings
+ 
+@@ -50,14 +54,7 @@ import cn.vectory.ocdroid.R
+ import cn.vectory.ocdroid.ui.theme.BundledMonoFamily
+ import androidx.compose.ui.unit.dp
+ import androidx.lifecycle.compose.collectAsStateWithLifecycle
+-import cn.vectory.ocdroid.ui.AppCore
+-import cn.vectory.ocdroid.ui.SharedEffectBus
+-import cn.vectory.ocdroid.ui.controller.SessionSyncCoordinator
+ import cn.vectory.ocdroid.util.DebugLog
+-import dagger.hilt.EntryPoint
+-import dagger.hilt.InstallIn
+-import dagger.hilt.android.EntryPointAccessors
+-import dagger.hilt.components.SingletonComponent
+ import kotlinx.coroutines.delay
+ import java.text.SimpleDateFormat
+ import java.util.Locale
+@@ -90,40 +87,10 @@ internal fun DebugLogSection(hideHeader: Boolean = false) {
+         }
+     }
+ 
+-    // ── Diagnostic panels (R-19 Sprint 1 Lane D): observability for the
+-    // Effect Bus drop counter + SSE unknown-event counters. Read-only.
+-    //
+-    // §dependency-injection: this Composable lives outside any
+-    // @HiltViewModel scope (DebugLogSection takes no VM). Rather than
+-    // threading new params through SettingsScreen + every caller, we resolve
+-    // the app singletons via a Hilt @EntryPoint — the same pattern Theme.kt
+-    // uses for SettingsManager. SharedEffectBus + AppCore are both
+-    // @Singleton @Inject, so Hilt auto-provides them.
+-    val diagnostics = rememberDebugDiagnostics()
+-
+-    // §polling: the underlying classes expose imperative snapshot getters
+-    // (AtomicLong / ConcurrentHashMap), not Flows. A 1 s poll keeps the UI
+-    // fresh without per-event recompositions (these counters move slowly —
+-    // a drop or unknown event is an anomaly, not per-token noise).
+-    var droppedEffectCount by remember { mutableStateOf(0L) }
+-    var unknownEventCounts by remember { mutableStateOf(emptyMap<String, Int>()) }
+-    LaunchedEffect(diagnostics) {
+-        while (true) {
+-            droppedEffectCount = diagnostics.effectBus.droppedEffectCount()
+-            unknownEventCounts = diagnostics.coordinator.unknownEventCountsSnapshot()
+-            delay(1000)
+-        }
+-    }
+-
+     if (!hideHeader) {
+         SectionHeader(title = stringResource(R.string.debug_log_title))
+     }
+ 
+-    EffectBusDroppedPanel(droppedEffectCount)
+-    Spacer(modifier = Modifier.height(12.dp))
+-    SseUnknownEventsPanel(unknownEventCounts)
+-    Spacer(modifier = Modifier.height(12.dp))
+-
+     Card(
+         modifier = Modifier.fillMaxWidth(),
+         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
+@@ -299,144 +266,3 @@ private fun LevelChip(
+         )
+     )
+ }
+-
+-// ── R-19 Sprint 1 Lane D: diagnostic panels (read-only observability) ────
+-
+-/**
+- * Holds the two diagnostic sources the panels read. Resolved once per Activity
+- * via [rememberDebugDiagnostics] (the underlying singletons outlive any single
+- * Composition).
+- */
+-private data class DebugDiagnostics(
+-    val effectBus: SharedEffectBus,
+-    val coordinator: SessionSyncCoordinator
+-)
+-
+-/**
+- * R-19: Hilt EntryPoint that exposes the app singletons needed by the
+- * diagnostic panels. [SharedEffectBus] is `@Singleton @Inject constructor()`,
+- * and [AppCore] (which owns the [SessionSyncCoordinator] as an `internal val`)
+- * is also `@Singleton @Inject`. This mirrors the [SettingsManagerEntryPoint]
+- * pattern in Theme.kt for Composables that live outside any @HiltViewModel
+- * scope.
+- */
+-@EntryPoint
+-@InstallIn(SingletonComponent::class)
+-interface DebugDiagnosticsEntryPoint {
+-    fun effectBus(): SharedEffectBus
+-    fun appCore(): AppCore
+-}
+-
+-/**
+- * Resolves the diagnostic singletons from the Hilt-attached Application.
+- * Cached with `remember(context)` so the entry-point lookup runs once per
+- * Activity (the Application context is stable across recompositions).
+- */
+-@Composable
+-private fun rememberDebugDiagnostics(): DebugDiagnostics {
+-    val context = LocalContext.current
+-    return remember(context) {
+-        val ep = EntryPointAccessors.fromApplication(
+-            context.applicationContext,
+-            DebugDiagnosticsEntryPoint::class.java
+-        )
+-        DebugDiagnostics(
+-            effectBus = ep.effectBus(),
+-            // sessionSyncCoordinator is internal on AppCore; accessible here
+-            // because DebugLogSection lives in the same Gradle module.
+-            coordinator = ep.appCore().sessionSyncCoordinator
+-        )
+-    }
+-}
+-
+-/**
+- * R-19 Lane D: shows the total count of [ControllerEffect]s dropped by
+- * [SharedEffectBus.tryEmitEffect] since process start. A non-zero value means
+- * the SUSPEND buffer (256) filled under burst — should never happen in normal
+- * operation, so any non-zero count is rendered in [error] colour.
+- */
+-@Composable
+-private fun EffectBusDroppedPanel(droppedCount: Long) {
+-    Card(
+-        modifier = Modifier.fillMaxWidth(),
+-        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
+-    ) {
+-        Row(
+-            modifier = Modifier
+-                .fillMaxWidth()
+-                .padding(16.dp),
+-            horizontalArrangement = Arrangement.SpaceBetween,
+-            verticalAlignment = Alignment.CenterVertically
+-        ) {
+-            Text(
+-                stringResource(R.string.debug_effect_bus_dropped_title),
+-                style = MaterialTheme.typography.titleMedium
+-            )
+-            Text(
+-                droppedCount.toString(),
+-                style = MaterialTheme.typography.titleMedium,
+-                color = if (droppedCount > 0L) MaterialTheme.colorScheme.error
+-                        else MaterialTheme.colorScheme.onSurfaceVariant
+-            )
+-        }
+-    }
+-}
+-
+-/**
+- * R-19 Lane D: shows the per-type counts of SSE events that fell through
+- * [SessionSyncCoordinator.dispatchSseEvent]'s else branch (unrecognized types,
+- * excluding the known-intentional NOISY_SSE_LOG_EVENTS skips). The header row
+- * shows the running total; the body lists each type → count (sorted by count
+- * descending) in monospace so the columns align. Empty → "无" / "None" in a
+- * muted style. A non-zero total is rendered in [error] colour.
+- */
+-@Composable
+-private fun SseUnknownEventsPanel(counts: Map<String, Int>) {
+-    val total = counts.values.sum()
+-    Card(
+-        modifier = Modifier.fillMaxWidth(),
+-        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
+-    ) {
+-        Column(modifier = Modifier.padding(16.dp)) {
+-            Row(
+-                modifier = Modifier.fillMaxWidth(),
+-                horizontalArrangement = Arrangement.SpaceBetween,
+-                verticalAlignment = Alignment.CenterVertically
+-            ) {
+-                Text(
+-                    stringResource(R.string.debug_sse_unknown_events_title),
+-                    style = MaterialTheme.typography.titleMedium
+-                )
+-                Text(
+-                    total.toString(),
+-                    style = MaterialTheme.typography.labelSmall,
+-                    color = if (total > 0) MaterialTheme.colorScheme.error
+-                            else MaterialTheme.colorScheme.onSurfaceVariant
+-                )
+-            }
+-
+-            if (counts.isEmpty()) {
+-                Spacer(modifier = Modifier.height(4.dp))
+-                Text(
+-                    stringResource(R.string.debug_diagnostics_none),
+-                    style = MaterialTheme.typography.bodySmall,
+-                    color = MaterialTheme.colorScheme.onSurfaceVariant
+-                )
+-            } else {
+-                Spacer(modifier = Modifier.height(8.dp))
+-                // Sort by count desc so the most frequent unknown type surfaces
+-                // first (a recurring unknown type is a higher-priority signal
+-                // than a one-off).
+-                val sorted = counts.entries.sortedByDescending { it.value }
+-                sorted.forEach { (type, count) ->
+-                    Text(
+-                        text = "$type  ·  $count",
+-                        style = MaterialTheme.typography.labelSmall,
+-                        fontFamily = BundledMonoFamily,
+-                        color = MaterialTheme.colorScheme.onSurfaceVariant
+-                    )
+-                }
+-            }
+-        }
+-    }
+-}
+diff --git a/app/src/main/java/cn/vectory/ocdroid/ui/settings/HostProfilesManagerScreen.kt b/app/src/main/java/cn/vectory/ocdroid/ui/settings/HostProfilesManagerScreen.kt
+index 8ac8d75..4383c66 100644
+--- a/app/src/main/java/cn/vectory/ocdroid/ui/settings/HostProfilesManagerScreen.kt
++++ b/app/src/main/java/cn/vectory/ocdroid/ui/settings/HostProfilesManagerScreen.kt
+@@ -36,6 +36,7 @@ import androidx.compose.runtime.remember
+ import androidx.compose.runtime.setValue
+ import androidx.compose.ui.Alignment
+ import androidx.compose.ui.Modifier
++import androidx.compose.ui.graphics.Color
+ import androidx.compose.ui.platform.testTag
+ import androidx.compose.ui.res.stringResource
+ import androidx.compose.ui.text.input.PasswordVisualTransformation
+@@ -281,6 +282,7 @@ internal fun HostProfileEditorDialog(
+         onResult: (Boolean, String) -> Unit
+     ) -> Unit = { _, _, _, _, _, _, _ -> }
+ ) {
++    val groupLabels = NamedGroupLabels // §grouping-rewrite Round-2 #4: was a local listOf("A","B","C","D") — centralised in SettingsSections.kt so the editor + ConnectionProfileSection stats line stay in lockstep.
+     var name by remember(initial.id) { mutableStateOf(initial.name) }
+     var serverUrl by remember(initial.id) { mutableStateOf(initial.serverUrl) }
+     var authUsername by remember(initial.id) { mutableStateOf(initial.basicAuth?.username.orEmpty()) }
+@@ -291,6 +293,10 @@ internal fun HostProfileEditorDialog(
+     var showBasicPassword by remember(initial.id) { mutableStateOf(false) }
+     var showTunnelPassword by remember(initial.id) { mutableStateOf(false) }
+     var showDeleteConfirm by remember(initial.id) { mutableStateOf(false) }
++    val initialGroup = remember(initial.id, initial.serverGroupFp) {
++        initial.serverGroupFp.takeIf { it in groupLabels }
++    }
++    var selectedGroup by remember(initial.id, initial.serverGroupFp) { mutableStateOf(initialGroup) }
+     // R-01: per-host "接受不安全连接"开关（自签证书/内网 TLS 用户需要显式启用，
+     // 否则全局 strict 校验会直接拒绝连接）。种子取自当前 HostProfile。
+     var allowInsecure by remember(initial.id) { mutableStateOf(initial.allowInsecureConnections) }
+@@ -393,6 +399,37 @@ internal fun HostProfileEditorDialog(
+                     }
+                 )
+                 Spacer(modifier = Modifier.height(12.dp))
++                Text(stringResource(R.string.host_group_label), style = MaterialTheme.typography.labelMedium)
++                Row(
++                    modifier = Modifier.fillMaxWidth(),
++                    horizontalArrangement = Arrangement.spacedBy(6.dp)
++                ) {
++                    OutlinedButton(
++                        onClick = { selectedGroup = null },
++                        modifier = Modifier.weight(1f),
++                        colors = ButtonDefaults.outlinedButtonColors(
++                            containerColor = if (selectedGroup == null) MaterialTheme.colorScheme.secondaryContainer else Color.Transparent
++                        )
++                    ) { Text(stringResource(R.string.host_group_none), maxLines = 1) }
++                    groupLabels.forEach { label ->
++                        OutlinedButton(
++                            onClick = { selectedGroup = label },
++                            modifier = Modifier.weight(1f),
++                            colors = ButtonDefaults.outlinedButtonColors(
++                                containerColor = if (selectedGroup == label) MaterialTheme.colorScheme.secondaryContainer else Color.Transparent
++                            )
++                        ) { Text(label) }
++                    }
++                }
++                if (selectedGroup != null) {
++                    Text(
++                        stringResource(R.string.host_group_warning),
++                        style = MaterialTheme.typography.bodySmall,
++                        color = MaterialTheme.colorScheme.onSurfaceVariant,
++                        modifier = Modifier.padding(top = 4.dp)
++                    )
++                }
++                Spacer(modifier = Modifier.height(12.dp))
+                 // R-01: per-host insecure-connections toggle. Off by default
+                 // (strict TLS); enabling it downgrades this host's REST/SSE/
+                 // health/tunnel clients to trust-all so self-signed or internal
+@@ -507,7 +544,12 @@ internal fun HostProfileEditorDialog(
+                             serverUrl = serverUrl,
+                             basicAuth = basicAuth,
+                             tunnelPasswordId = tunnelId,
+-                            allowInsecureConnections = allowInsecure
++                            allowInsecureConnections = allowInsecure,
++                            serverGroupFp = if (selectedGroup != initialGroup) {
++                                selectedGroup ?: initial.id
++                            } else {
++                                initial.serverGroupFp
++                            }
+                         )
+                         // If the user blanks the username on a profile that
+                         // previously had basic auth, force passwordEdited so
+diff --git a/app/src/main/java/cn/vectory/ocdroid/ui/settings/SettingsScreen.kt b/app/src/main/java/cn/vectory/ocdroid/ui/settings/SettingsScreen.kt
+index fb614e3..eada4ad 100644
+--- a/app/src/main/java/cn/vectory/ocdroid/ui/settings/SettingsScreen.kt
++++ b/app/src/main/java/cn/vectory/ocdroid/ui/settings/SettingsScreen.kt
+@@ -1,13 +1,26 @@
+ package cn.vectory.ocdroid.ui.settings
+ 
+-import androidx.compose.foundation.layout.*
++import androidx.compose.foundation.layout.Arrangement
++import androidx.compose.foundation.layout.Column
++import androidx.compose.foundation.layout.Row
++import androidx.compose.foundation.layout.Spacer
++import androidx.compose.foundation.layout.fillMaxSize
++import androidx.compose.foundation.layout.fillMaxWidth
++import androidx.compose.foundation.layout.height
++import androidx.compose.foundation.layout.padding
++import androidx.compose.foundation.layout.statusBarsPadding
++import androidx.compose.foundation.layout.width
+ import androidx.compose.foundation.rememberScrollState
+ import androidx.compose.foundation.verticalScroll
+ import androidx.compose.material.icons.Icons
+ import androidx.compose.material.icons.automirrored.filled.ArrowBack
++import androidx.compose.material.icons.filled.Close
++import androidx.compose.material3.Card
++import androidx.compose.material3.CardDefaults
+ import androidx.compose.material3.ExperimentalMaterial3Api
+ import androidx.compose.material3.Icon
+ import androidx.compose.material3.IconButton
++import androidx.compose.material3.MaterialTheme
+ import androidx.compose.material3.Text
+ import androidx.compose.material3.TopAppBar
+ import androidx.compose.runtime.Composable
+@@ -16,9 +29,11 @@ import androidx.compose.runtime.getValue
+ import androidx.compose.runtime.mutableStateOf
+ import androidx.compose.runtime.remember
+ import androidx.compose.runtime.setValue
++import androidx.compose.ui.Alignment
+ import androidx.compose.ui.Modifier
+ import androidx.compose.ui.res.stringResource
+ import androidx.compose.ui.unit.dp
++import androidx.compose.ui.window.Dialog
+ import androidx.lifecycle.compose.collectAsStateWithLifecycle
+ import cn.vectory.ocdroid.R
+ import cn.vectory.ocdroid.ui.ComposerViewModel
+@@ -34,6 +49,11 @@ import kotlinx.coroutines.flow.map
+  * sections: connection profile, traffic, appearance, debug, about). The
+  * HostProfile management sub-flow lives in [HostProfilesManagerScreen] and is
+  * reached from here via the "manage profiles" action.
++ *
++ * §grouping-rewrite 项 3: cache management used to live inline under the
++ * Debug section; it now opens as a modal popup triggered by the stats line
++ * under the connection profile (the popup title is `cache_management_popup_title`).
++ * The Debug section keeps DebugLogSection + DangerZone in place.
+  */
+ @OptIn(ExperimentalMaterial3Api::class)
+ @Composable
+@@ -85,6 +105,10 @@ fun SettingsScreen(
+         .collectAsStateWithLifecycle(initialValue = 1f)
+     val traffic by connectionVM.trafficFlow.collectAsStateWithLifecycle()
+     val connection by connectionVM.connectionFlow.collectAsStateWithLifecycle()
++    // §grouping-rewrite 项 2: group-stats counts for the connection-profile
++    // stats line (drives the popup entry point).
++    val groupProfileCount by settingsVM.activeGroupProfileCount.collectAsStateWithLifecycle()
++    val cachedSessionCount by settingsVM.activeGroupCachedSessionCount.collectAsStateWithLifecycle()
+ 
+     // Refresh traffic counters once when the Settings screen enters
+     // composition so the displayed totals reflect the latest background
+@@ -95,6 +119,10 @@ fun SettingsScreen(
+     }
+ 
+     var showHostProfiles by remember { mutableStateOf(false) }
++    // §grouping-rewrite 项 3: cache-management popup state. Opened from the
++    // ConnectionProfileSection stats line; the popup hosts the (formerly
++    // inline) CacheManagementSection under the `cache_management_popup_title`.
++    var showCacheDialog by remember { mutableStateOf(false) }
+ 
+     if (showHostProfiles) {
+         HostProfilesManagerScreen(
+@@ -136,6 +164,9 @@ fun SettingsScreen(
+             ConnectionProfileSection(
+                 profile = host.hostProfiles.firstOrNull { it.id == host.currentHostProfileId } ?: viewModel.currentHostProfile(),
+                 connectionState = connection,
++                groupProfileCount = groupProfileCount,
++                cachedSessionCount = cachedSessionCount,
++                onStatsClick = { showCacheDialog = true },
+                 onManageProfiles = { showHostProfiles = true },
+                 hideHeader = true
+             )
+@@ -173,15 +204,13 @@ fun SettingsScreen(
+ 
+             Spacer(modifier = Modifier.height(24.dp))
+ 
+-            // ── 调试 (Debug): debug log + cache management + danger zone under
+-            // one header. Cache management groups under the same "Debug" header
+-            // because it is a power-user / diagnostic surface — most users do
+-            // not need to manually evict cached sessions. ──
++            // ── 调试 (Debug): debug log + danger zone under one header.
++            // §grouping-rewrite 项 3: cache management has moved into a modal
++            // popup (opened from the Connections section stats line) and is
++            // no longer rendered inline here. ──
+             SectionHeader(title = stringResource(R.string.settings_section_debug))
+             DebugLogSection(hideHeader = true)
+             Spacer(modifier = Modifier.height(12.dp))
+-            CacheManagementSection(vm = settingsVM, hideHeader = true)
+-            Spacer(modifier = Modifier.height(12.dp))
+             DangerZoneSection(
+                 onClearLocalData = viewModel::resetLocalDataAndResync,
+                 hideHeader = true
+@@ -192,4 +221,40 @@ fun SettingsScreen(
+             AboutSection()
+         }
+     }
++
++    // §grouping-rewrite 项 3: cache-management popup. The Dialog wraps a Card
++    // that carries the popup title (with a close affordance) above the section
++    // body. CacheManagementSection already renders its own inner card; the
++    // outer card provides the popup chrome (title bar + dismissal).
++    if (showCacheDialog) {
++        Dialog(onDismissRequest = { showCacheDialog = false }) {
++            Card(
++                modifier = Modifier.fillMaxWidth(),
++                shape = MaterialTheme.shapes.large,
++                colors = CardDefaults.cardColors(
++                    containerColor = MaterialTheme.colorScheme.surface
++                )
++            ) {
++                Column(modifier = Modifier.padding(bottom = 16.dp)) {
++                    Row(
++                        modifier = Modifier.fillMaxWidth().padding(16.dp),
++                        horizontalArrangement = Arrangement.SpaceBetween,
++                        verticalAlignment = Alignment.CenterVertically
++                    ) {
++                        Text(
++                            stringResource(R.string.cache_management_popup_title),
++                            style = MaterialTheme.typography.titleLarge
++                        )
++                        IconButton(onClick = { showCacheDialog = false }) {
++                            Icon(
++                                Icons.Default.Close,
++                                contentDescription = stringResource(R.string.common_close)
++                            )
++                        }
++                    }
++                    CacheManagementSection(vm = settingsVM, hideHeader = true)
++                }
++            }
++        }
++    }
+ }
+diff --git a/app/src/main/java/cn/vectory/ocdroid/ui/settings/SettingsSections.kt b/app/src/main/java/cn/vectory/ocdroid/ui/settings/SettingsSections.kt
+index 54fd729..92bd11d 100644
+--- a/app/src/main/java/cn/vectory/ocdroid/ui/settings/SettingsSections.kt
++++ b/app/src/main/java/cn/vectory/ocdroid/ui/settings/SettingsSections.kt
+@@ -1,5 +1,6 @@
+ package cn.vectory.ocdroid.ui.settings
+ 
++import androidx.compose.foundation.clickable
+ import androidx.compose.foundation.layout.Column
+ import androidx.compose.foundation.layout.Row
+ import androidx.compose.foundation.layout.Spacer
+@@ -50,6 +51,16 @@ import cn.vectory.ocdroid.util.ThemeMode
+ internal fun ConnectionProfileSection(
+     profile: HostProfile,
+     connectionState: ConnectionState,
++    /**
++     * §grouping-rewrite 项 2: stats for the active fp rendered as a clickable
++     * line under the URL row. `groupProfileCount` is the number of profiles
++     * sharing the active fp (1 when solo / soft-migrated UUID fp);
++     * `cachedSessionCount` is the number of cached chat sessions under that
++     * fp. The line opens the cache-management popup (项 3).
++     */
++    groupProfileCount: Int,
++    cachedSessionCount: Int,
++    onStatsClick: () -> Unit,
+     onManageProfiles: () -> Unit,
+     hideHeader: Boolean = false
+ ) {
+@@ -112,8 +123,50 @@ internal fun ConnectionProfileSection(
+             }
+         }
+     )
++
++    // ── §grouping-rewrite 项 2: group-stats line. The active fp is a "named
++    // group" only when it is one of the 4 fixed labels (A/B/C/D); any other
++    // value (including the soft-migrated UUID form `fp == id`) reads as
++    // "standalone". The line is the entry point to the cache-management
++    // popup (项 3), so it carries a trailing chevron + is fully clickable.
++    // This replaces the diagnostic panels that used to live in DebugLogSection.
++    val groupName = profile.serverGroupFp.takeIf { it in NamedGroupLabels }
++    val statsText = if (groupName != null) {
++        stringResource(R.string.group_stats_named, groupName, groupProfileCount, cachedSessionCount)
++    } else {
++        stringResource(R.string.group_stats_solo, cachedSessionCount)
++    }
++    Row(
++        modifier = Modifier
++            .fillMaxWidth()
++            .clickable(onClick = onStatsClick)
++            .padding(horizontal = 16.dp, vertical = 12.dp),
++        verticalAlignment = Alignment.CenterVertically
++    ) {
++        Text(
++            statsText,
++            style = MaterialTheme.typography.bodySmall,
++            color = MaterialTheme.colorScheme.onSurfaceVariant,
++            modifier = Modifier.weight(1f)
++        )
++        Icon(
++            Icons.AutoMirrored.Filled.KeyboardArrowRight,
++            contentDescription = stringResource(R.string.cache_management_popup_title),
++            tint = MaterialTheme.colorScheme.onSurfaceVariant,
++            modifier = Modifier.size(20.dp)
++        )
++    }
+ }
+ 
++/**
++ * §grouping-rewrite 项 1 (spec decision): the only valid named-group labels.
++ * Any `serverGroupFp` outside this set reads as "standalone" (不分组),
++ * including the soft-migrated UUID form (`fp == profile.id`). Centralised
++ * here so [ConnectionProfileSection] and the editor stay in lockstep with
++ * [HostProfilesManagerScreen]'s selector.
++ */
++internal val NamedGroupLabels: List<String> = listOf("A", "B", "C", "D")
++
+ @OptIn(ExperimentalMaterial3Api::class)
+ @Composable
+ internal fun AppearanceSection(
+diff --git a/app/src/main/java/cn/vectory/ocdroid/util/SettingsManager.kt b/app/src/main/java/cn/vectory/ocdroid/util/SettingsManager.kt
+index ee7d3f3..86a80af 100644
+--- a/app/src/main/java/cn/vectory/ocdroid/util/SettingsManager.kt
++++ b/app/src/main/java/cn/vectory/ocdroid/util/SettingsManager.kt
+@@ -165,6 +165,16 @@ class SettingsManager @Inject constructor(
+         }
+     }
+ 
++    fun removeRecentWorkdir(serverGroupFp: String, workdir: String) {
++        if (serverGroupFp.isBlank()) return
++        val normalized = workdir.trim()
++        if (normalized.isEmpty()) return
++        synchronized(this) {
++            val updated = getRecentWorkdirs(serverGroupFp).filter { it != normalized }
++            setRecentWorkdirs(serverGroupFp, updated)
++        }
++    }
++
+     /**
+      * R-20 Phase 5: clears the [serverGroupFp]'s recent-workdirs list. Used
+      * by [cn.vectory.ocdroid.ui.controller.HostProfileController.purgePerHostState]
+@@ -477,33 +487,6 @@ class SettingsManager @Inject constructor(
+             .apply()
+     }
+ 
+-    /**
+-     * R-20 Phase 5 copy-on-split escape hatch (plan §0 G1): copies all
+-     * per-serverGroupFp configuration from [fromFp] to [toFp] without deleting
+-     * or mutating the source group. Used when a profile is split out of a
+-     * merged group so the newly-independent group starts with the same local
+-     * user configuration instead of losing drafts/model choices/recent dirs.
+-     */
+-    fun copyPerFpConfig(fromFp: String, toFp: String) {
+-        if (fromFp.isBlank() || toFp.isBlank() || fromFp == toFp) return
+-        val e = encryptedPrefs.edit()
+-
+-        encryptedPrefs.getString(recentWorkdirsKey(fromFp), null)?.let {
+-            e.putString(recentWorkdirsKey(toFp), it)
+-        }
+-        encryptedPrefs.getStringSet(disabledModelsKey(fromFp), null)?.let {
+-            e.putStringSet(disabledModelsKey(toFp), it)
+-        }
+-        encryptedPrefs.getStringSet(modelAvailabilityKey(fromFp), null)?.let {
+-            e.putStringSet(modelAvailabilityKey(toFp), it)
+-        }
+-        copyCompositeSessionMapPrefix(KEY_SESSION_DRAFTS, fromFp, toFp, e)
+-        copyCompositeSessionMapPrefix(KEY_SESSION_AGENTS, fromFp, toFp, e)
+-        copyCompositeSessionMapPrefix(KEY_SESSION_MODELS, fromFp, toFp, e)
+-
+-        e.apply()
+-    }
+-
+     // ───────────── R-20 Phase 3: per-serverGroup daily-sweep dedup ─────────
+ 
+     /**
+@@ -646,32 +629,9 @@ class SettingsManager @Inject constructor(
+         }
+     }
+ 
+-    private fun copyCompositeSessionMapPrefix(
+-        key: String,
+-        fromFp: String,
+-        toFp: String,
+-        editor: SharedPreferences.Editor
+-    ) {
+-        val json = encryptedPrefs.getString(key, null) ?: return
+-        val map: MutableMap<String, String> = try {
+-            Json.decodeFromString<Map<String, String>>(json).toMutableMap()
+-        } catch (e: Exception) {
+-            return
+-        }
+-        val fromPrefix = fromFp + COMPOSITE_KEY_SEPARATOR
+-        val toPrefix = toFp + COMPOSITE_KEY_SEPARATOR
+-        var changed = false
+-        for ((k, v) in map.toList()) {
+-            if (k.startsWith(fromPrefix)) {
+-                val copiedKey = toPrefix + k.removePrefix(fromPrefix)
+-                if (map[copiedKey] != v) {
+-                    map[copiedKey] = v
+-                    changed = true
+-                }
+-            }
+-        }
+-        if (changed) editor.putString(key, Json.encodeToString(map))
+-    }
++    // §grouping-rewrite Round-2 #5: `copyCompositeSessionMapPrefix(...)` was
++    // here — sole caller was `copyPerFpConfig(...)`, which item 1 of this
++    // rewrite deleted. Removed as dead code.
+ 
+     /**
+      * Hard reset: wipes EVERY persisted key EXCEPT the connection-credential
+@@ -743,8 +703,16 @@ class SettingsManager @Inject constructor(
+         private const val KEY_LAST_NAV_PAGE = "last_nav_page"
+         private const val KEY_CURRENT_WORKDIR = "current_workdir"
+         private const val KEY_RECENT_WORKDIRS = "recent_workdirs"
+-        /** Cap for [recentWorkdirs] — bounds cold-start directory-fetch fan-out. */
+-        private const val MAX_RECENT_WORKDIRS = 8
++        /**
++         * Cap for [recentWorkdirs] — bounds cold-start directory-fetch fan-out.
++         *
++         * §grouping-rewrite 项 5 (spec decision): 30 — the recent-workdir list
++         * doubles as the persistent "Connected projects" surface (0-live wds
++         * are retained as placeholders so the user can re-enter / disconnect
++         * them), so the cap is sized for navigation memory rather than fetch
++         * fan-out alone.
++         */
++        private const val MAX_RECENT_WORKDIRS = 30
+         private const val KEY_AGENT_NAME = "agent_name"
+         private const val KEY_THEME = "theme"
+         private const val KEY_UI_FONT_SCALE = "ui_font_scale"
+diff --git a/app/src/main/res/values-zh/strings.xml b/app/src/main/res/values-zh/strings.xml
+index d7a82a6..b445755 100644
+--- a/app/src/main/res/values-zh/strings.xml
++++ b/app/src/main/res/values-zh/strings.xml
+@@ -310,4 +310,18 @@
+     <string name="cache_management_sweep_result_incomplete">扫描降级（实时会话集不完整）：已校验 %1$d 个，未清除任何会话。</string>
+     <string name="cache_management_never_verified">（从未校验）</string>
+     <string name="cache_management_unknown_time">（未知）</string>
++
++    <!-- §分组重写 2026-07-07：人工服务器分组（项1/2/3/4/5）。 -->
++    <string name="host_group_label">服务器分组</string>
++    <string name="host_group_none">不分组</string>
++    <string name="host_group_warning">同组 profile 共享：聊天历史、草稿、模型偏好、最近目录。选错组会导致这些数据串台或搁浅，仅可用「清除全部数据」恢复。</string>
++    <string name="group_stats_named">%1$s · %2$d 个连接 · %3$d 条缓存会话</string>
++    <string name="group_stats_solo">独立 · 1 个连接 · %1$d 条缓存会话</string>
++    <string name="cache_management_popup_title">缓存与维护</string>
++    <string name="cache_management_sweep_all">扫所有分组</string>
++    <string name="command_submitted_processing">命令已提交，处理中…</string>
++    <string name="workdir_disconnect_title">断开此项目？</string>
++    <string name="workdir_disconnect_message">将从列表移除并清除该项目的本地缓存，无法恢复。</string>
++    <string name="workdir_disconnect_confirm">断开</string>
++    <string name="workdir_empty_placeholder">无活跃会话，点此新建</string>
+ </resources>
+diff --git a/app/src/main/res/values/strings.xml b/app/src/main/res/values/strings.xml
+index 122e62e..f07eddc 100644
+--- a/app/src/main/res/values/strings.xml
++++ b/app/src/main/res/values/strings.xml
+@@ -315,4 +315,18 @@
+     <string name="cache_management_sweep_result_incomplete">Sweep degraded (alive set incomplete): verified %1$d, nothing evicted.</string>
+     <string name="cache_management_never_verified">(never verified)</string>
+     <string name="cache_management_unknown_time">(unknown)</string>
++
++    <!-- §Grouping rewrite 2026-07-07: manual server grouping (item 1/2/3/4/5). -->
++    <string name="host_group_label">Server group</string>
++    <string name="host_group_none">No group</string>
++    <string name="host_group_warning">Profiles in the same group share cached chat history, drafts, model preferences, and recent directories. Choosing the wrong group will mix or strand this data; only \"Clear all local data\" can recover it.</string>
++    <string name="group_stats_named">%1$s · %2$d connection(s) · %3$d cached session(s)</string>
++    <string name="group_stats_solo">Standalone · 1 connection · %1$d cached session(s)</string>
++    <string name="cache_management_popup_title">Cache &amp; maintenance</string>
++    <string name="cache_management_sweep_all">Sweep all groups</string>
++    <string name="command_submitted_processing">Command submitted, processing…</string>
++    <string name="workdir_disconnect_title">Disconnect this project?</string>
++    <string name="workdir_disconnect_message">It will be removed from the list and this project\'s local cache will be cleared. This cannot be undone.</string>
++    <string name="workdir_disconnect_confirm">Disconnect</string>
++    <string name="workdir_empty_placeholder">No active sessions — tap to create one</string>
+ </resources>
+diff --git a/app/src/test/java/cn/vectory/ocdroid/AppCoreOrchestrationTest.kt b/app/src/test/java/cn/vectory/ocdroid/AppCoreOrchestrationTest.kt
+index bd3e48e..f0d3e51 100644
+--- a/app/src/test/java/cn/vectory/ocdroid/AppCoreOrchestrationTest.kt
++++ b/app/src/test/java/cn/vectory/ocdroid/AppCoreOrchestrationTest.kt
+@@ -17,6 +17,7 @@ import cn.vectory.ocdroid.ui.SessionViewModel
+ import cn.vectory.ocdroid.ui.SharedEffectBus
+ import cn.vectory.ocdroid.ui.UiEvent
+ import cn.vectory.ocdroid.ui.catchUpAfterDisconnectOrForeground
++import cn.vectory.ocdroid.ui.classifyCommandPostError
+ import cn.vectory.ocdroid.ui.executeCommand
+ import cn.vectory.ocdroid.ui.loadMessagesForEffect
+ import cn.vectory.ocdroid.ui.materializeDraftSession
+@@ -669,4 +670,62 @@ class AppCoreOrchestrationTest : MainViewModelTestBase() {
+         // Loading flag cleared on the early return.
+         assertFalse(core.chatFlow.value.isLoadingMessages)
+     }
++
++    // ─────────── §grouping-rewrite Round-3 N1: classifyCommandPostError ────
++
++    @Test
++    fun `classifyCommandPostError — read-timeout SocketTimeoutException is non-fatal Info`() {
++        // §grouping-rewrite Round-2 D2 + Round-3 N1: a READ-side timeout
++        // (POST accepted, slow ACK) is non-fatal — SSE carries the result.
++        // OkHttp's exception message for this branch is "Read timed out" (or
++        // similar) — NO "connect" / "failed to connect" phrase.
++        val error = java.net.SocketTimeoutException("Read timed out")
++
++        val event = classifyCommandPostError(error, cmd = "compact")
++
++        assertTrue("read-timeout should yield UiEvent.Info, got $event", event is UiEvent.Info)
++        assertEquals(
++            R.string.command_submitted_processing,
++            (event as UiEvent.Info).resId,
++        )
++    }
++
++    @Test
++    fun `classifyCommandPostError — connect-side SocketTimeoutException is fatal Error`() {
++        // §grouping-rewrite Round-2 D2 + Round-3 N1: a CONNECT-side timeout
++        // (server unreachable / DNS / TLS) means the POST never reached the
++        // server → SSE cannot deliver → must surface as a real Error.
++        // OkHttp's exception message for this branch contains "failed to
++        // connect" (the case-insensitive "connect" sniff catches it).
++        val error = java.net.SocketTimeoutException("failed to connect to /1.2.3.4:443")
++
++        val event = classifyCommandPostError(error, cmd = "compact")
++
++        assertTrue("connect-timeout should yield UiEvent.Error, got $event", event is UiEvent.Error)
++        val err = event as UiEvent.Error
++        assertEquals(R.string.error_command_failed, err.resId)
++        // Format args: [cmd, fallbackMessage]. cmd is first.
++        assertEquals("compact", err.args.first())
++    }
++
++    @Test
++    fun `classifyCommandPostError — plain IOException (non-timeout) is fatal Error`() {
++        // §grouping-rewrite Round-2 D2 + Round-3 N1: anything that is NOT a
++        // SocketTimeoutException (HTTP 4xx/5xx, IOException, etc.) stays a
++        // real Error — the read-vs-connect distinction only applies to
++        // SocketTimeoutException.
++        val error = java.io.IOException("boom")
++
++        val event = classifyCommandPostError(error, cmd = "compact")
++
++        assertTrue("non-timeout IOException should yield UiEvent.Error, got $event", event is UiEvent.Error)
++        val err = event as UiEvent.Error
++        assertEquals(R.string.error_command_failed, err.resId)
++        assertEquals("compact", err.args.first())
++        // The fallback message propagates as the 2nd format arg.
++        assertTrue(
++            "error message should propagate via the fallback, got args=${err.args}",
++            err.args.any { it.toString().contains("boom") },
++        )
++    }
+ }
+diff --git a/app/src/test/java/cn/vectory/ocdroid/HostProfileStoreTest.kt b/app/src/test/java/cn/vectory/ocdroid/HostProfileStoreTest.kt
+index e284ea8..f1de026 100644
+--- a/app/src/test/java/cn/vectory/ocdroid/HostProfileStoreTest.kt
++++ b/app/src/test/java/cn/vectory/ocdroid/HostProfileStoreTest.kt
+@@ -247,81 +247,7 @@ class HostProfileStoreTest {
+         assertEquals(p.id, p.serverGroupFp)
+     }
+ 
+-    // ───────────── R-20 Phase 0: mergeServerGroup / split / profilesInGroup ─
+-
+-    @Test
+-    fun `mergeServerGroup collapses two groups into one and persists`() {
+-        // Two profiles, two groups → merge them.
+-        hostProfilesJson = """
+-            [
+-              {"id":"a","name":"A","serverURL":"https://a.example.com","serverGroupFp":"gA"},
+-              {"id":"b","name":"B","serverURL":"https://b.example.com","serverGroupFp":"gB"}
+-            ]
+-        """.trimIndent()
+-
+-        store.mergeServerGroup(from = "gB", into = "gA")
+-
+-        val after = store.profiles()
+-        assertTrue(after.all { it.serverGroupFp == "gA" })
+-        // Persisted (re-read sees the merge).
+-        assertEquals(2, store.profilesInGroup("gA").size)
+-    }
+-
+-    @Test
+-    fun `mergeServerGroup is a no-op when from equals into`() {
+-        hostProfilesJson = """
+-            [{"id":"a","name":"A","serverURL":"https://a.example.com","serverGroupFp":"gA"}]
+-        """.trimIndent()
+-
+-        store.mergeServerGroup(from = "gA", into = "gA")
+-
+-        val after = store.profiles()
+-        assertEquals(1, after.size)
+-        assertEquals("gA", after.first().serverGroupFp)
+-    }
+-
+-    @Test
+-    fun `mergeServerGroup is a no-op when from group does not exist`() {
+-        hostProfilesJson = """
+-            [{"id":"a","name":"A","serverURL":"https://a.example.com","serverGroupFp":"gA"}]
+-        """.trimIndent()
+-
+-        store.mergeServerGroup(from = "ghost", into = "gA")
+-
+-        val after = store.profiles()
+-        assertEquals("gA", after.first().serverGroupFp)
+-    }
+-
+-    @Test
+-    fun `splitProfileToOwnGroup gives the profile its own group`() {
+-        hostProfilesJson = """
+-            [
+-              {"id":"a","name":"A","serverURL":"https://a.example.com","serverGroupFp":"shared"},
+-              {"id":"b","name":"B","serverURL":"https://b.example.com","serverGroupFp":"shared"}
+-            ]
+-        """.trimIndent()
+-
+-        store.splitProfileToOwnGroup("b")
+-
+-        val after = store.profiles()
+-        val b = after.first { it.id == "b" }
+-        assertEquals("b", b.serverGroupFp)
+-        // The other profile stays in the original group.
+-        val a = after.first { it.id == "a" }
+-        assertEquals("shared", a.serverGroupFp)
+-    }
+-
+-    @Test
+-    fun `splitProfileToOwnGroup is a no-op when already its own group`() {
+-        hostProfilesJson = """
+-            [{"id":"a","name":"A","serverURL":"https://a.example.com","serverGroupFp":"a"}]
+-        """.trimIndent()
+-
+-        store.splitProfileToOwnGroup("a")
+-
+-        val after = store.profiles()
+-        assertEquals("a", after.first().serverGroupFp)
+-    }
++    // ───────────── R-20 grouping: manual A-D slots / profilesInGroup ─
+ 
+     @Test
+     fun `profilesInGroup returns matching profiles and ignores others`() {
+diff --git a/app/src/test/java/cn/vectory/ocdroid/SettingsViewModelTest.kt b/app/src/test/java/cn/vectory/ocdroid/SettingsViewModelTest.kt
+index 51366d3..126e9fa 100644
+--- a/app/src/test/java/cn/vectory/ocdroid/SettingsViewModelTest.kt
++++ b/app/src/test/java/cn/vectory/ocdroid/SettingsViewModelTest.kt
+@@ -13,6 +13,7 @@ import io.mockk.coVerify
+ import io.mockk.every
+ import io.mockk.verify
+ import kotlinx.coroutines.ExperimentalCoroutinesApi
++import kotlinx.coroutines.launch
+ import kotlinx.coroutines.test.advanceUntilIdle
+ import kotlinx.coroutines.test.runTest
+ import org.junit.Assert.assertEquals
+@@ -32,7 +33,7 @@ import org.junit.Test
+  *
+  * R-20 Phase 4 (plan §3): extended to cover the cache-management action
+  * surface — clearSession / clearProject / clearAll / sweepNow /
+- * splitProfile / refreshCacheListing. Each test verifies the action reaches
++ * refreshCacheListing. Each test verifies the action reaches
+  * the underlying Repository / Coordinator / HostProfileStore (the relaxed
+  * mock on `core.cacheRepository` lets us coVerify the suspend calls).
+  */
+@@ -210,18 +211,40 @@ class SettingsViewModelTest : MainViewModelTestBase() {
+     }
+ 
+     @Test
+-    fun `splitProfile copies old group config to new profile fp after split`() = runTest {
++    fun `sweepAllGroups sweeps the UNION of profile-derived + cache-derived fps`() = runTest {
++        // §grouping-rewrite Round-3 #4: the popup listing is cache-derived
++        // (refreshCacheListing → allServerGroupFps), but sweepAllGroups used
++        // to sweep profile-derived fps only — so a group with cached sessions
++        // but no live profile (e.g. all profiles for that group were deleted)
++        // would show in the popup but be skipped by "Sweep all groups". The
++        // union closes that gap.
+         val core = createCore()
+         val vm = SettingsViewModel(core)
+-        every {
+-            hostProfileStore.profiles()
+-        } returns listOf(HostProfile(id = "profile-1", name = "Profile", serverUrl = "http://h", serverGroupFp = "old-fp"))
+ 
+-        vm.splitProfile("profile-1")
++        // Arrange: profile-derived fp = "fp-profile-only"; cache-derived fps
++        // include "fp-profile-only" (overlap, should not duplicate sweep) AND
++        // "fp-cache-only" (the gap case).
++        val profileFpProfile = HostProfile(
++            id = "p1",
++            name = "p1",
++            serverUrl = "http://x",
++            serverGroupFp = "fp-profile-only",
++        )
++        every { hostProfileStore.profiles() } returns listOf(profileFpProfile)
++        coEvery { core.cacheRepository.allServerGroupFps() } returns listOf("fp-profile-only", "fp-cache-only")
++        // Stub the per-fp coordinator deps so the sweep completes cleanly
++        // under the test dispatcher (applyEvictionPolicy + cachedWorkdirsInGroup
++        // are invoked by the real coordinator built in the test-only ctor).
++        io.mockk.coEvery { core.cacheRepository.cachedWorkdirsInGroup(any()) } returns emptyList()
++
++        vm.sweepAllGroups()
+         advanceUntilIdle()
+ 
+-        verify { hostProfileStore.splitProfileToOwnGroup("profile-1") }
+-        verify { settingsManager.copyPerFpConfig(fromFp = "old-fp", toFp = "profile-1") }
++        // Both distinct fps were swept (the union, not just the profile set).
++        // applyEvictionPolicy is the first thing dailySweepIfNeeded runs per
++        // fp; verifying it ran for both proves both fps entered the pipeline.
++        io.mockk.coVerify(atLeast = 1) { core.cacheRepository.applyEvictionPolicy("fp-profile-only") }
++        io.mockk.coVerify(atLeast = 1) { core.cacheRepository.applyEvictionPolicy("fp-cache-only") }
+     }
+ 
+     @Test
+@@ -300,4 +323,49 @@ class SettingsViewModelTest : MainViewModelTestBase() {
+         val vm = SettingsViewModel(createCore())
+         assertFalse(vm.isCacheDegraded)
+     }
++
++    // ─────────── §grouping-rewrite Round-2 C1: disconnect reactivity ──────
++
++    @Test
++    fun `disconnectWorkdir re-derives recentWorkdirs even when hostFlow + sessionListFlow are quiet`() = runTest {
++        // C1: disconnectWorkdir mutates SettingsManager + cacheRepository,
++        // neither of which pokes hostFlow / sessionListFlow. Without the
++        // explicit re-derivation trigger the disconnected workdir would stay
++        // in recentWorkdirs (regression of the old hiddenWorkdirs behaviour).
++        val core = createCore()
++        val vm = SettingsViewModel(core)
++
++        // Simulate removeRecentWorkdir by flipping a flag the getRecentWorkdirs
++        // stub reads — this mirrors how the real ESP-backed store would drop
++        // /a after the removal call lands.
++        var removed = false
++        every { settingsManager.removeRecentWorkdir(any(), eq("/a")) } answers { removed = true }
++        every { settingsManager.getRecentWorkdirs(any()) } answers {
++            if (removed) listOf("/b") else listOf("/a", "/b")
++        }
++
++        // recentWorkdirs is WhileSubscribed(5_000); keep a long-lived
++        // collector alive so the upstream combine is active for the whole
++        // test (otherwise .value would be stale by the time we re-read it).
++        val collected = mutableListOf<List<String>>()
++        val job = launch { vm.recentWorkdirs.collect { collected.add(it) } }
++        advanceUntilIdle()
++
++        // Initial derivation: both workdirs visible.
++        assertEquals(listOf("/a", "/b"), collected.last())
++
++        vm.disconnectWorkdir("/a")
++        advanceUntilIdle()
++
++        // Tick bumped → combine re-derived → /a dropped from the new snapshot.
++        // Without the C1 fix this would still be listOf("/a", "/b") (the
++        // settingsManager mutation is invisible to hostFlow/sessionListFlow).
++        assertEquals(listOf("/b"), collected.last())
++
++        // Side-effect sanity: the removal + eviction both fired.
++        verify { settingsManager.removeRecentWorkdir(any(), "/a") }
++        coVerify { core.cacheRepository.evictWorkdirInGroup(any(), "/a") }
++
++        job.cancel()
++    }
+ }
+diff --git a/app/src/test/java/cn/vectory/ocdroid/TestUiEventCollector.kt b/app/src/test/java/cn/vectory/ocdroid/TestUiEventCollector.kt
+index cb76148..d4aa155 100644
+--- a/app/src/test/java/cn/vectory/ocdroid/TestUiEventCollector.kt
++++ b/app/src/test/java/cn/vectory/ocdroid/TestUiEventCollector.kt
+@@ -102,6 +102,13 @@ internal fun AppCore.installTestUiEventCollector(
+                         appCoreSuccessEventBuffer.getOrPut(this@installTestUiEventCollector) { mutableListOf() }.add(event)
+                     }
+                 }
++                // §grouping-rewrite item 4: neutral Info events (e.g. command
++                // POST timed out on ACK; SSE carries results). Test ring
++                // buffers only care about Error/Success for historical
++                // assertions — Info is a no-op here. Branch exists so the
++                // sealed-class `when` stays exhaustive after adding the
++                // UiEvent.Info variant.
++                is UiEvent.Info -> Unit
+                 is UiEvent.Debug -> Unit
+             }
+         }
+@@ -143,6 +150,7 @@ private val TEST_UI_EVENT_STRING_TABLE: Map<Int, String> = mapOf(
+     R.string.error_load_sessions_failed to "Failed to load sessions: %1\$s",
+     R.string.error_load_more_sessions_failed to "Failed to load more sessions: %1\$s",
+     R.string.error_command_failed to "Command /%1\$s failed: %2\$s",
++    R.string.command_submitted_processing to "Command submitted, processing…",
+     R.string.chat_command_no_session to "Open or create a session before running /%1\$s",
+     R.string.error_create_session_in_workdir_failed to "Failed to create session in %1\$s: %2\$s",
+     R.string.error_restore_session_failed to "Failed to restore session: %1\$s",
+diff --git a/app/src/test/java/cn/vectory/ocdroid/data/cache/CacheMaintenanceCoordinatorTest.kt b/app/src/test/java/cn/vectory/ocdroid/data/cache/CacheMaintenanceCoordinatorTest.kt
+index be15503..f1ca022 100644
+--- a/app/src/test/java/cn/vectory/ocdroid/data/cache/CacheMaintenanceCoordinatorTest.kt
++++ b/app/src/test/java/cn/vectory/ocdroid/data/cache/CacheMaintenanceCoordinatorTest.kt
+@@ -107,6 +107,33 @@ class CacheMaintenanceCoordinatorTest {
+         verify(exactly = 0) { settings.setLastSweepEpochDay(any(), any()) }
+     }
+ 
++    @Test
++    fun `dailySweepIfNeeded force=true bypasses 24h dedup and runs the full pipeline`() = runTest {
++        // §grouping-rewrite Round-2 C2: the manual sweep buttons pass force=true
++        // to bypass the same-day dedup. Verify that even when the epoch is
++        // already stamped today (which would otherwise short-circuit), the
++        // forced call (a) runs the orphan sweep and (b) re-stamps the epoch.
++        val today = System.currentTimeMillis() / (24L * 60L * 60L * 1000L)
++        every { settings.getLastSweepEpochDay("g1") } returns today
++        // Seed an orphan: cached but not in any alive source (defaults return
++        // empty) → evicted iff the pipeline actually runs.
++        seedCachedSession("g1", "would-be-orphan")
++
++        val report = coordinator.dailySweepIfNeeded("g1", force = true)
++
++        // force bypassed the dedup → full pipeline ran → orphan evicted.
++        assertNull(
++            "force=true bypassed the dedup and the orphan sweep ran",
++            db.cacheDao().session("g1", "would-be-orphan"),
++        )
++        // Epoch re-stamped (so the next non-forced call within the same day
++        // still dedups correctly).
++        verify(exactly = 1) { settings.setLastSweepEpochDay("g1", today) }
++        // Sanity: AliveCompleteness reflects the actual run (not the
++        // dedup-skipped Incomplete placeholder).
++        assertEquals(AliveCompleteness.Complete, report.completeness)
++    }
++
+     @Test
+     fun `dailySweepIfNeeded proceeds when last sweep was a previous day`() = runTest {
+         val today = System.currentTimeMillis() / (24L * 60L * 60L * 1000L)
+diff --git a/app/src/test/java/cn/vectory/ocdroid/data/cache/CacheRepositoryTest.kt b/app/src/test/java/cn/vectory/ocdroid/data/cache/CacheRepositoryTest.kt
+index 1efd596..0303ea2 100644
+--- a/app/src/test/java/cn/vectory/ocdroid/data/cache/CacheRepositoryTest.kt
++++ b/app/src/test/java/cn/vectory/ocdroid/data/cache/CacheRepositoryTest.kt
+@@ -479,47 +479,6 @@ class CacheRepositoryTest {
+         assertTrue(repo.gapsOf("g1", "s1").isEmpty())
+     }
+ 
+-    @Test
+-    fun `mergeCacheGroup rekeys sessions messages and gaps in one group`() = runTest {
+-        seedWindowWithIds("gB", "sB", listOf("m1" to 100L, "m2" to 200L))
+-        repo.openGap("gB", "sB", "m1", "m2", "cursor")
+-
+-        repo.mergeCacheGroup(fromFp = "gB", intoFp = "gA")
+-
+-        assertEquals(listOf("sB"), repo.listGroupSessions("gA").map { it.sessionId })
+-        assertTrue(repo.listGroupSessions("gB").isEmpty())
+-        assertEquals(listOf("m1", "m2"), db.cacheDao().messages("gA", "sB").map { it.messageId })
+-        assertTrue(db.cacheDao().messages("gB", "sB").isEmpty())
+-        assertEquals(1, repo.gapsOf("gA", "sB").size)
+-        assertTrue(repo.gapsOf("gB", "sB").isEmpty())
+-        assertFalse(repo.allServerGroupFps().contains("gB"))
+-    }
+-
+-    @Test
+-    fun `mergeCacheGroup blank and same-fp are no-ops`() = runTest {
+-        seedWindowWithIds("gA", "sA", listOf("m1" to 100L))
+-
+-        repo.mergeCacheGroup(fromFp = "", intoFp = "gA")
+-        repo.mergeCacheGroup(fromFp = "gA", intoFp = "gA")
+-
+-        assertEquals(listOf("sA"), repo.listGroupSessions("gA").map { it.sessionId })
+-    }
+-
+-    @Test
+-    fun `mergeCacheGroup resolves target PK conflicts by letting source overwrite`() = runTest {
+-        seedWindowWithIds("gA", "same", listOf("into-old" to 100L))
+-        seedWindowWithIds("gB", "same", listOf("from-new" to 200L))
+-        repo.openGap("gA", "same", "into-old", "into-next", "old-cursor")
+-        repo.openGap("gB", "same", "from-new", "from-next", "new-cursor")
+-
+-        repo.mergeCacheGroup(fromFp = "gB", intoFp = "gA")
+-
+-        assertEquals(listOf("same"), repo.listGroupSessions("gA").map { it.sessionId })
+-        assertEquals(listOf("from-new"), db.cacheDao().messages("gA", "same").map { it.messageId })
+-        assertEquals("from-new", repo.gapsOf("gA", "same").single().lowerAnchorMessageId)
+-        assertTrue(repo.listGroupSessions("gB").isEmpty())
+-    }
+-
+     @Test
+     fun `listGroupSessions reports real messageCount for empty and non-empty rows`() = runTest {
+         seedWindowWithIds("g1", "empty", emptyList())
+diff --git a/app/src/test/java/cn/vectory/ocdroid/ui/SessionListActionsTest.kt b/app/src/test/java/cn/vectory/ocdroid/ui/SessionListActionsTest.kt
+index dd86436..03a6a19 100644
+--- a/app/src/test/java/cn/vectory/ocdroid/ui/SessionListActionsTest.kt
++++ b/app/src/test/java/cn/vectory/ocdroid/ui/SessionListActionsTest.kt
+@@ -7,7 +7,6 @@ import cn.vectory.ocdroid.data.model.PermissionRequest
+ import cn.vectory.ocdroid.data.model.QuestionRequest
+ import cn.vectory.ocdroid.data.model.Session
+ import cn.vectory.ocdroid.data.model.SessionCacheEntry
+-import cn.vectory.ocdroid.data.repository.HostProfileStore
+ import cn.vectory.ocdroid.data.repository.OpenCodeRepository
+ import cn.vectory.ocdroid.util.SettingsManager
+ import io.mockk.coEvery
+@@ -232,7 +231,6 @@ class SessionListActionsTest {
+     @Test
+     fun `launchLoadSessions drops stale REST success after live fp changes`() = runTest {
+         var currentFp = "g1"
+-        val hostProfileStore = mockk<HostProfileStore>(relaxed = true)
+         coEvery { repository.getSessions(any()) } answers {
+             currentFp = "g2"
+             Result.success(listOf(Session(id = "stale", directory = "/x")))
+@@ -250,7 +248,7 @@ class SessionListActionsTest {
+             cacheRepository = cacheRepository,
+             expectedServerGroupFp = "g1",
+             currentServerGroupFp = { currentFp },
+-            hostProfileStore = hostProfileStore,
++            // §grouping-rewrite Round-2 #5: hostProfileStore arg removed.
+         )
+         advanceUntilIdle()
+ 
+@@ -259,48 +257,6 @@ class SessionListActionsTest {
+         coVerify(exactly = 0) { cacheRepository.allServerGroupFps() }
+     }
+ 
+-    @Test
+-    fun `launchLoadSessions drops result when fp changes during merge suspend before slice write`() = runTest {
+-        var currentFp = "g1"
+-        val hostProfileStore = mockk<HostProfileStore>(relaxed = true)
+-        val sessions = listOf(Session(id = "s1", directory = "/repo", time = Session.TimeInfo(created = 1L)))
+-        val cached = cn.vectory.ocdroid.data.cache.CacheRepository.CachedSessionRow(
+-            serverGroupFp = "other-fp",
+-            sessionId = "s1",
+-            workdir = "/repo",
+-            createdAt = 1L,
+-            newestCachedAt = 10L,
+-            lastVerifiedAt = 0L,
+-            messageCount = 1,
+-            hasExhaustedGap = false,
+-        )
+-        coEvery { repository.getSessions(any()) } returns Result.success(sessions)
+-        coEvery { cacheRepository.allServerGroupFps() } returns listOf("other-fp")
+-        coEvery { cacheRepository.listGroupSessions("other-fp") } answers {
+-            currentFp = "g2"
+-            listOf(cached)
+-        }
+-
+-        launchLoadSessions(
+-            scope = scope,
+-            repository = repository,
+-            slices = slices,
+-            settingsManager = settingsManager,
+-            onSelectSession = {},
+-            onLoadSessionStatus = {},
+-            onLoadMessages = {},
+-            emit = emit,
+-            cacheRepository = cacheRepository,
+-            expectedServerGroupFp = "g1",
+-            currentServerGroupFp = { currentFp },
+-            hostProfileStore = hostProfileStore,
+-        )
+-        advanceUntilIdle()
+-
+-        assertTrue(slices.sessionList.value.sessions.isEmpty())
+-        coVerify(exactly = 0) { hostProfileStore.mergeServerGroup(any(), any()) }
+-    }
+-
+     @Test
+     fun `launchLoadSessions drops result when fp changes during verify suspend before callbacks`() = runTest {
+         var currentFp = "g1"
+diff --git a/app/src/test/java/cn/vectory/ocdroid/ui/SessionListMergeTest.kt b/app/src/test/java/cn/vectory/ocdroid/ui/SessionListMergeTest.kt
+deleted file mode 100644
+index 3c1bb79..0000000
+--- a/app/src/test/java/cn/vectory/ocdroid/ui/SessionListMergeTest.kt
++++ /dev/null
+@@ -1,378 +0,0 @@
+-package cn.vectory.ocdroid.ui
+-
+-import android.util.Log
+-import cn.vectory.ocdroid.data.cache.CacheRepository
+-import cn.vectory.ocdroid.data.model.Session
+-import cn.vectory.ocdroid.data.repository.HostProfileStore
+-import cn.vectory.ocdroid.data.repository.OpenCodeRepository
+-import cn.vectory.ocdroid.util.SettingsManager
+-import io.mockk.coEvery
+-import io.mockk.coVerify
+-import io.mockk.every
+-import io.mockk.mockk
+-import io.mockk.mockkStatic
+-import io.mockk.unmockkAll
+-import kotlinx.coroutines.ExperimentalCoroutinesApi
+-import kotlinx.coroutines.test.TestScope
+-import kotlinx.coroutines.test.UnconfinedTestDispatcher
+-import kotlinx.coroutines.test.advanceUntilIdle
+-import kotlinx.coroutines.test.runTest
+-import org.junit.After
+-import org.junit.Assert.assertEquals
+-import org.junit.Assert.assertFalse
+-import org.junit.Assert.assertTrue
+-import org.junit.Before
+-import org.junit.Test
+-
+-/**
+- * R-20 Phase 5 — [attemptCrossGroupMerge] / [directoriesMatchOrIntersect]
+- * coverage + the loadSessions → merge wiring.
+- *
+- * Plan §3 G1 三条件 (id + createdAt + directory + non-empty). The merge is
+- * one-directional (otherFp → currentFp); a mismatch on any single condition
+- * is NOT a merge signal. Idempotent via [HostProfileStore.mergeServerGroup].
+- */
+-@OptIn(ExperimentalCoroutinesApi::class)
+-class SessionListMergeTest {
+-
+-    private lateinit var cacheRepository: CacheRepository
+-    private lateinit var hostProfileStore: HostProfileStore
+-
+-    @Before
+-    fun setUp() {
+-        mockkStatic(Log::class)
+-        every { Log.d(any<String>(), any<String>()) } returns 0
+-        every { Log.w(any<String>(), any<String>()) } returns 0
+-        every { Log.i(any<String>(), any<String>()) } returns 0
+-        every { Log.e(any<String>(), any<String>()) } returns 0
+-        every { Log.e(any<String>(), any<String>(), any<Throwable>()) } returns 0
+-        cacheRepository = mockk(relaxed = true)
+-        hostProfileStore = mockk(relaxed = true)
+-    }
+-
+-    @After
+-    fun tearDown() {
+-        unmockkAll()
+-    }
+-
+-    // ───────────────── directoriesMatchOrIntersect ─────────────────
+-
+-    @Test
+-    fun `directoriesMatchOrIntersect returns true for equal paths`() {
+-        assertTrue(directoriesMatchOrIntersect("/repo", "/repo"))
+-    }
+-
+-    @Test
+-    fun `directoriesMatchOrIntersect returns true when trailing slash differs`() {
+-        assertTrue(directoriesMatchOrIntersect("/repo", "/repo/"))
+-        assertTrue(directoriesMatchOrIntersect("/repo/", "/repo"))
+-    }
+-
+-    @Test
+-    fun `directoriesMatchOrIntersect returns true for parent-child`() {
+-        assertTrue(directoriesMatchOrIntersect("/repo/sub", "/repo"))
+-        assertTrue(directoriesMatchOrIntersect("/repo", "/repo/sub"))
+-    }
+-
+-    @Test
+-    fun `directoriesMatchOrIntersect returns false for sibling dirs`() {
+-        // /repo vs /repo-other must NOT match (prefix-only would false-positive).
+-        assertFalse(directoriesMatchOrIntersect("/repo", "/repo-other"))
+-        assertFalse(directoriesMatchOrIntersect("/repo-other", "/repo"))
+-    }
+-
+-    @Test
+-    fun `directoriesMatchOrIntersect returns false when either side is blank`() {
+-        assertFalse(directoriesMatchOrIntersect(null, "/repo"))
+-        assertFalse(directoriesMatchOrIntersect("", "/repo"))
+-        assertFalse(directoriesMatchOrIntersect("/repo", ""))
+-    }
+-
+-    // ───────────────── attemptCrossGroupMerge — three-condition contract ─────────────────
+-
+-    @Test
+-    fun `merge triggers when id + createdAt + dir + non-empty all match`() = runTest {
+-        val fetched = listOf(
+-            Session(id = "ses_x", directory = "/repo", title = "t", time = Session.TimeInfo(created = 1000L)),
+-        )
+-        val cached = CacheRepository.CachedSessionRow(
+-            serverGroupFp = "other-fp",
+-            sessionId = "ses_x",
+-            workdir = "/repo",
+-            createdAt = 1000L,
+-            newestCachedAt = 5000L, // non-empty
+-            lastVerifiedAt = 0L,
+-            messageCount = 1,
+-            hasExhaustedGap = false,
+-        )
+-        coEvery { cacheRepository.allServerGroupFps() } returns listOf("other-fp")
+-        coEvery { cacheRepository.listGroupSessions("other-fp") } returns listOf(cached)
+-
+-        attemptCrossGroupMerge(cacheRepository, hostProfileStore, { "current-fp" }, fetched)
+-
+-        coVerify(exactly = 1) { hostProfileStore.mergeServerGroup(from = "other-fp", into = "current-fp") }
+-        coVerify(exactly = 1) { cacheRepository.mergeCacheGroup(fromFp = "other-fp", intoFp = "current-fp") }
+-    }
+-
+-    @Test
+-    fun `merge aborts before profile merge when live fp changes after cache work`() = runTest {
+-        var currentFp = "current-fp"
+-        val fetched = listOf(
+-            Session(id = "ses_x", directory = "/repo", title = "t", time = Session.TimeInfo(created = 1000L)),
+-        )
+-        val cached = CacheRepository.CachedSessionRow(
+-            serverGroupFp = "other-fp",
+-            sessionId = "ses_x",
+-            workdir = "/repo",
+-            createdAt = 1000L,
+-            newestCachedAt = 5000L,
+-            lastVerifiedAt = 0L,
+-            messageCount = 1,
+-            hasExhaustedGap = false,
+-        )
+-        coEvery { cacheRepository.allServerGroupFps() } returns listOf("other-fp")
+-        coEvery { cacheRepository.listGroupSessions("other-fp") } returns listOf(cached)
+-        coEvery { cacheRepository.mergeCacheGroup(any(), any()) } answers { currentFp = "new-fp" }
+-
+-        attemptCrossGroupMerge(cacheRepository, hostProfileStore, { currentFp }, fetched)
+-
+-        coVerify(exactly = 1) { cacheRepository.mergeCacheGroup(fromFp = "other-fp", intoFp = "current-fp") }
+-        coVerify(exactly = 0) { hostProfileStore.mergeServerGroup(any(), any()) }
+-    }
+-
+-    @Test
+-    fun `merge cache failure aborts profile merge`() = runTest {
+-        val fetched = listOf(
+-            Session(id = "ses_x", directory = "/repo", title = "t", time = Session.TimeInfo(created = 1000L)),
+-        )
+-        val cached = CacheRepository.CachedSessionRow(
+-            serverGroupFp = "other-fp",
+-            sessionId = "ses_x",
+-            workdir = "/repo",
+-            createdAt = 1000L,
+-            newestCachedAt = 5000L,
+-            lastVerifiedAt = 0L,
+-            messageCount = 1,
+-            hasExhaustedGap = false,
+-        )
+-        coEvery { cacheRepository.allServerGroupFps() } returns listOf("other-fp")
+-        coEvery { cacheRepository.listGroupSessions("other-fp") } returns listOf(cached)
+-        coEvery { cacheRepository.mergeCacheGroup(any(), any()) } throws java.io.IOException("disk")
+-
+-        try {
+-            attemptCrossGroupMerge(cacheRepository, hostProfileStore, { "current-fp" }, fetched)
+-        } catch (_: java.io.IOException) {
+-            // launchLoadSessions wraps this helper in runCatching; direct unit
+-            // test only verifies profile merge was not persisted after failure.
+-        }
+-
+-        coVerify(exactly = 0) { hostProfileStore.mergeServerGroup(any(), any()) }
+-    }
+-
+-    @Test
+-    fun `merge does NOT trigger when createdAt differs`() = runTest {
+-        val fetched = listOf(
+-            Session(id = "ses_x", directory = "/repo", title = "t", time = Session.TimeInfo(created = 1000L)),
+-        )
+-        val cached = CacheRepository.CachedSessionRow(
+-            serverGroupFp = "other-fp",
+-            sessionId = "ses_x",
+-            workdir = "/repo",
+-            createdAt = 9999L, // different createdAt
+-            newestCachedAt = 5000L,
+-            lastVerifiedAt = 0L,
+-            messageCount = 1,
+-            hasExhaustedGap = false,
+-        )
+-        coEvery { cacheRepository.allServerGroupFps() } returns listOf("other-fp")
+-        coEvery { cacheRepository.listGroupSessions("other-fp") } returns listOf(cached)
+-
+-        attemptCrossGroupMerge(cacheRepository, hostProfileStore, { "current-fp" }, fetched)
+-
+-        coVerify(exactly = 0) { hostProfileStore.mergeServerGroup(any(), any()) }
+-    }
+-
+-    @Test
+-    fun `merge does NOT trigger when cached session is empty`() = runTest {
+-        val fetched = listOf(
+-            Session(id = "ses_x", directory = "/repo", title = "t", time = Session.TimeInfo(created = 1000L)),
+-        )
+-        val cached = CacheRepository.CachedSessionRow(
+-            serverGroupFp = "other-fp",
+-            sessionId = "ses_x",
+-            workdir = "/repo",
+-            createdAt = 1000L,
+-            newestCachedAt = 5000L, // metadata can look fresh even when empty
+-            lastVerifiedAt = 0L,
+-            messageCount = 0, // EMPTY — never had a message cached
+-            hasExhaustedGap = false,
+-        )
+-        coEvery { cacheRepository.allServerGroupFps() } returns listOf("other-fp")
+-        coEvery { cacheRepository.listGroupSessions("other-fp") } returns listOf(cached)
+-
+-        attemptCrossGroupMerge(cacheRepository, hostProfileStore, { "current-fp" }, fetched)
+-
+-        coVerify(exactly = 0) { hostProfileStore.mergeServerGroup(any(), any()) }
+-    }
+-
+-    @Test
+-    fun `merge does NOT trigger when directories do not intersect`() = runTest {
+-        val fetched = listOf(
+-            Session(id = "ses_x", directory = "/repo-a", title = "t", time = Session.TimeInfo(created = 1000L)),
+-        )
+-        val cached = CacheRepository.CachedSessionRow(
+-            serverGroupFp = "other-fp",
+-            sessionId = "ses_x",
+-            workdir = "/repo-b", // sibling, not parent-child
+-            createdAt = 1000L,
+-            newestCachedAt = 5000L,
+-            lastVerifiedAt = 0L,
+-            messageCount = 1,
+-            hasExhaustedGap = false,
+-        )
+-        coEvery { cacheRepository.allServerGroupFps() } returns listOf("other-fp")
+-        coEvery { cacheRepository.listGroupSessions("other-fp") } returns listOf(cached)
+-
+-        attemptCrossGroupMerge(cacheRepository, hostProfileStore, { "current-fp" }, fetched)
+-
+-        coVerify(exactly = 0) { hostProfileStore.mergeServerGroup(any(), any()) }
+-    }
+-
+-    @Test
+-    fun `merge does NOT trigger when fetched session has null createdAt`() = runTest {
+-        val fetched = listOf(
+-            Session(id = "ses_x", directory = "/repo", title = "t", time = Session.TimeInfo(created = null)),
+-        )
+-        val cached = CacheRepository.CachedSessionRow(
+-            serverGroupFp = "other-fp",
+-            sessionId = "ses_x",
+-            workdir = "/repo",
+-            createdAt = 1000L,
+-            newestCachedAt = 5000L,
+-            lastVerifiedAt = 0L,
+-            messageCount = 1,
+-            hasExhaustedGap = false,
+-        )
+-        coEvery { cacheRepository.allServerGroupFps() } returns listOf("other-fp")
+-        coEvery { cacheRepository.listGroupSessions("other-fp") } returns listOf(cached)
+-
+-        attemptCrossGroupMerge(cacheRepository, hostProfileStore, { "current-fp" }, fetched)
+-
+-        coVerify(exactly = 0) { hostProfileStore.mergeServerGroup(any(), any()) }
+-    }
+-
+-    // ───────────────── scope / iteration semantics ─────────────────
+-
+-    @Test
+-    fun `merge skips the current fp itself`() = runTest {
+-        // allServerGroupFps includes "current-fp"; the loop must skip it
+-        // (a profile merging into itself is a degenerate no-op even though
+-        // mergeServerGroup guards it too).
+-        val fetched = listOf(
+-            Session(id = "ses_x", directory = "/repo", title = "t", time = Session.TimeInfo(created = 1000L)),
+-        )
+-        coEvery { cacheRepository.allServerGroupFps() } returns listOf("current-fp")
+-
+-        attemptCrossGroupMerge(cacheRepository, hostProfileStore, { "current-fp" }, fetched)
+-
+-        coVerify(exactly = 0) { cacheRepository.listGroupSessions("current-fp") }
+-        coVerify(exactly = 0) { hostProfileStore.mergeServerGroup(any(), any()) }
+-    }
+-
+-    @Test
+-    fun `merge fires exactly once - first match wins, later candidates skipped`() = runTest {
+-        val fetched = listOf(
+-            Session(id = "ses_x", directory = "/repo", title = "t", time = Session.TimeInfo(created = 1000L)),
+-        )
+-        val cached1 = CacheRepository.CachedSessionRow(
+-            serverGroupFp = "other-fp-1",
+-            sessionId = "ses_x",
+-            workdir = "/repo",
+-            createdAt = 1000L,
+-            newestCachedAt = 5000L,
+-            lastVerifiedAt = 0L,
+-            messageCount = 1,
+-            hasExhaustedGap = false,
+-        )
+-        val cached2 = CacheRepository.CachedSessionRow(
+-            serverGroupFp = "other-fp-2",
+-            sessionId = "ses_x",
+-            workdir = "/repo",
+-            createdAt = 1000L,
+-            newestCachedAt = 5000L,
+-            lastVerifiedAt = 0L,
+-            messageCount = 1,
+-            hasExhaustedGap = false,
+-        )
+-        coEvery { cacheRepository.allServerGroupFps() } returns listOf("other-fp-1", "other-fp-2")
+-        coEvery { cacheRepository.listGroupSessions("other-fp-1") } returns listOf(cached1)
+-        coEvery { cacheRepository.listGroupSessions("other-fp-2") } returns listOf(cached2)
+-
+-        attemptCrossGroupMerge(cacheRepository, hostProfileStore, { "current-fp" }, fetched)
+-
+-        // Exactly one merge (the first matching fp wins; the second is not even
+-        // queried because the loop returns after the first match).
+-        coVerify(exactly = 1) { hostProfileStore.mergeServerGroup(any(), any()) }
+-        coVerify(exactly = 1) { hostProfileStore.mergeServerGroup(from = "other-fp-1", into = "current-fp") }
+-    }
+-
+-    @Test
+-    fun `merge is a no-op when allServerGroupFps is empty`() = runTest {
+-        coEvery { cacheRepository.allServerGroupFps() } returns emptyList()
+-
+-        attemptCrossGroupMerge(
+-            cacheRepository,
+-            hostProfileStore,
+-            { "current-fp" },
+-            listOf(Session(id = "ses_x", directory = "/repo", title = "t")),
+-        )
+-
+-        coVerify(exactly = 0) { hostProfileStore.mergeServerGroup(any(), any()) }
+-    }
+-
+-    @Test
+-    fun `merge is a no-op when fetched sessions is empty`() = runTest {
+-        coEvery { cacheRepository.allServerGroupFps() } returns listOf("other-fp")
+-
+-        attemptCrossGroupMerge(cacheRepository, hostProfileStore, { "current-fp" }, emptyList())
+-
+-        coVerify(exactly = 0) { hostProfileStore.mergeServerGroup(any(), any()) }
+-    }
+-
+-    @Test
+-    fun `merge swallows listGroupSessions failure and continues to next fp`() = runTest {
+-        val fetched = listOf(
+-            Session(id = "ses_x", directory = "/repo", title = "t", time = Session.TimeInfo(created = 1000L)),
+-        )
+-        val cachedGood = CacheRepository.CachedSessionRow(
+-            serverGroupFp = "good-fp",
+-            sessionId = "ses_x",
+-            workdir = "/repo",
+-            createdAt = 1000L,
+-            newestCachedAt = 5000L,
+-            lastVerifiedAt = 0L,
+-            messageCount = 1,
+-            hasExhaustedGap = false,
+-        )
+-        coEvery { cacheRepository.allServerGroupFps() } returns listOf("broken-fp", "good-fp")
+-        coEvery { cacheRepository.listGroupSessions("broken-fp") } throws java.io.IOException("disk error")
+-        coEvery { cacheRepository.listGroupSessions("good-fp") } returns listOf(cachedGood)
+-
+-        attemptCrossGroupMerge(cacheRepository, hostProfileStore, { "current-fp" }, fetched)
+-
+-        // Did not bail on the broken-fp exception; carried on to good-fp.
+-        coVerify(exactly = 1) { hostProfileStore.mergeServerGroup(from = "good-fp", into = "current-fp") }
+-    }
+-
+-    @Test
+-    fun `merge is a no-op when currentServerGroupFp is blank`() = runTest {
+-        attemptCrossGroupMerge(
+-            cacheRepository,
+-            hostProfileStore,
+-            { "" },
+-            listOf(Session(id = "ses_x", directory = "/repo", title = "t")),
+-        )
+-        // Defensive guard: a blank fp would corrupt the merge direction.
+-        coVerify(exactly = 0) { cacheRepository.allServerGroupFps() }
+-    }
+-}
+diff --git a/app/src/test/java/cn/vectory/ocdroid/util/SettingsManagerModelKeysTest.kt b/app/src/test/java/cn/vectory/ocdroid/util/SettingsManagerModelKeysTest.kt
+index bdc2aab..d334a4a 100644
+--- a/app/src/test/java/cn/vectory/ocdroid/util/SettingsManagerModelKeysTest.kt
++++ b/app/src/test/java/cn/vectory/ocdroid/util/SettingsManagerModelKeysTest.kt
+@@ -149,28 +149,6 @@ class SettingsManagerModelKeysTest {
+         assertTrue(settings.getDisabledModels("g2").contains("p/m"))
+     }
+ 
+-    @Test
+-    fun `copyPerFpConfig copies per-fp config to new fp and keeps source intact`() {
+-        settings.setRecentWorkdirs("old-fp", listOf("/repo-a", "/repo-b"))
+-        settings.setDisabledModels("old-fp", setOf("p/disabled"))
+-        settings.setModelAvailability("old-fp", setOf("p/available"))
+-        settings.setDraftText("old-fp", "ses-1", "draft")
+-        settings.setAgentForSession("old-fp", "ses-1", "build")
+-        settings.setModelForSession("old-fp", "ses-1", "openai", "gpt-4o")
+-
+-        settings.copyPerFpConfig("old-fp", "new-fp")
+-
+-        assertEquals(listOf("/repo-a", "/repo-b"), settings.getRecentWorkdirs("new-fp"))
+-        assertEquals(setOf("p/disabled"), settings.getDisabledModels("new-fp"))
+-        assertEquals(setOf("p/available"), settings.getModelAvailability("new-fp"))
+-        assertEquals("draft", settings.getDraftText("new-fp", "ses-1"))
+-        assertEquals("build", settings.getAgentForSession("new-fp", "ses-1"))
+-        assertEquals("gpt-4o", settings.getModelForSession("new-fp", "ses-1")?.modelId)
+-
+-        assertEquals(listOf("/repo-a", "/repo-b"), settings.getRecentWorkdirs("old-fp"))
+-        assertEquals("draft", settings.getDraftText("old-fp", "ses-1"))
+-    }
+-
+     // ───────────────── getModelForSession / setModelForSession (composite key) ─────────────────
+     // Phase 5: composite (fp, sessionId) map key — see SettingsManager.getDraftText doc.
+ 
+diff --git a/app/src/test/java/cn/vectory/ocdroid/util/SettingsManagerTest.kt b/app/src/test/java/cn/vectory/ocdroid/util/SettingsManagerTest.kt
+index 2604420..4ff4ec1 100644
+--- a/app/src/test/java/cn/vectory/ocdroid/util/SettingsManagerTest.kt
++++ b/app/src/test/java/cn/vectory/ocdroid/util/SettingsManagerTest.kt
+@@ -143,13 +143,14 @@ class SettingsManagerTest {
+ 
+     @Test
+     fun `addRecentWorkdir caps at MAX_RECENT_WORKDIRS`() {
+-        // 加 12 个不同 workdir；只有最近 8 个保留（MRU 序）。
+-        for (i in 1..12) settings.addRecentWorkdir(rwFp, "/proj/$i")
++        // §grouping-rewrite 项 5: MRU cap is 30. 加 32 个不同 workdir；只有最近
++        // 30 个保留（MRU 序）。
++        for (i in 1..32) settings.addRecentWorkdir(rwFp, "/proj/$i")
+         val result = settings.getRecentWorkdirs(rwFp)
+-        assertEquals(8, result.size)
+-        // MRU first：/proj/12 … /proj/5。
+-        assertEquals("/proj/12", result.first())
+-        assertEquals("/proj/5", result.last())
++        assertEquals(30, result.size)
++        // MRU first：/proj/32 … /proj/3。
++        assertEquals("/proj/32", result.first())
++        assertEquals("/proj/3", result.last())
+     }
+ 
+     @Test

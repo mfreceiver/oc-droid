@@ -1,0 +1,246 @@
+diff --git a/app/src/main/java/cn/vectory/ocdroid/data/repository/http/OkHttpClientFactory.kt b/app/src/main/java/cn/vectory/ocdroid/data/repository/http/OkHttpClientFactory.kt
+index 5a47f15..98ac779 100644
+--- a/app/src/main/java/cn/vectory/ocdroid/data/repository/http/OkHttpClientFactory.kt
++++ b/app/src/main/java/cn/vectory/ocdroid/data/repository/http/OkHttpClientFactory.kt
+@@ -130,11 +130,23 @@ class OkHttpClientFactory @Inject constructor(
+      * in `AppCoreOrchestration.executeCommand` is the second line of defence
+      * for the (now rare) >300 s case.
+      *
+-     * NB: deliberately omits the [responseSizeGuardInterceptor] — command
+-     * responses are tiny JSON acks, not bulk payloads.
++     * §grouping-rewrite Round-6 F2 (kimo release review #4): the
++     * [responseSizeGuardInterceptor] is now included (was previously omitted
++     * because legitimate command acks are tiny JSON). Rationale: the 300 s
++     * read timeout widens the window during which a compromised or
++     * pathological server could stream a very large response body before the
++     * read timeout fires; without the size guard, kotlinx-serialization's
++     * whole-body String allocation (≈2× bytes) could OOM the 256 MB heap
++     * before the timeout ever triggers. The guard's
++     * [ResponseSizeGuardInterceptor.MAX_RESPONSE_BYTES] cap (32 MB) is
++     * orders of magnitude above any legitimate command ack (typically < 1 KB
++     * JSON), so it does not constrain real traffic — it is purely a
++     * defence-in-depth bound that brings [commandClient]'s body-size
++     * posture in line with [restClient]'s.
+      */
+     fun commandClient(allowInsecure: Boolean): OkHttpClient =
+         baseBuilder(allowInsecure)
++            .addInterceptor(responseSizeGuardInterceptor)
+             .readTimeout(300, TimeUnit.SECONDS)
+             .build()
+ 
+diff --git a/app/src/main/java/cn/vectory/ocdroid/ui/sessions/SessionsScreen.kt b/app/src/main/java/cn/vectory/ocdroid/ui/sessions/SessionsScreen.kt
+index 878323b..d99c703 100644
+--- a/app/src/main/java/cn/vectory/ocdroid/ui/sessions/SessionsScreen.kt
++++ b/app/src/main/java/cn/vectory/ocdroid/ui/sessions/SessionsScreen.kt
+@@ -238,7 +238,24 @@ fun SessionsScreen(
+                     val isExpanded = expandedWorkdirs.contains(workdir)
+                     val displayName = workdir.split("/").filter { it.isNotEmpty() }.lastOrNull()
+                         ?: workdir
+-                    val isDraft = workdir == draftWorkdir && sessionsInWorkdir.isEmpty()
++                    // §grouping-rewrite Round-6 F3: normalize-match the draft
++                    // badge. The visibility gate (buildWorkdirGroups) uses
++                    // WorkdirPaths.normalize for the visible-set, so a draft
++                    // whose raw form is a slash variant of a visible workdir
++                    // (e.g. draftWorkdir="proj-a/" while the displayed group's
++                    // workdir is "/proj-a") collapses onto the same group —
++                    // the badge MUST fire for that group, not silently miss
++                    // because the raw strings differ. Mirrors the C3/C4/C5
++                    // pipeline's normalization contract.
++                    //
++                    // Capture draftWorkdir into a local val first so Kotlin
++                    // can smart-cast the null-check (draftWorkdir is a
++                    // delegated property — the compiler refuses to smart-cast
++                    // those inline).
++                    val draft = draftWorkdir
++                    val isDraft = sessionsInWorkdir.isEmpty() &&
++                        draft != null &&
++                        WorkdirPaths.normalize(workdir) == WorkdirPaths.normalize(draft)
+ 
+                     Column(modifier = Modifier.fillMaxWidth()) {
+                         // Workdir header row (click = expand/collapse, long-click = disconnect).
+diff --git a/app/src/main/java/cn/vectory/ocdroid/ui/settings/SettingsScreen.kt b/app/src/main/java/cn/vectory/ocdroid/ui/settings/SettingsScreen.kt
+index eada4ad..96dc8ce 100644
+--- a/app/src/main/java/cn/vectory/ocdroid/ui/settings/SettingsScreen.kt
++++ b/app/src/main/java/cn/vectory/ocdroid/ui/settings/SettingsScreen.kt
+@@ -15,12 +15,11 @@ import androidx.compose.foundation.verticalScroll
+ import androidx.compose.material.icons.Icons
+ import androidx.compose.material.icons.automirrored.filled.ArrowBack
+ import androidx.compose.material.icons.filled.Close
+-import androidx.compose.material3.Card
+-import androidx.compose.material3.CardDefaults
+ import androidx.compose.material3.ExperimentalMaterial3Api
+ import androidx.compose.material3.Icon
+ import androidx.compose.material3.IconButton
+ import androidx.compose.material3.MaterialTheme
++import androidx.compose.material3.Surface
+ import androidx.compose.material3.Text
+ import androidx.compose.material3.TopAppBar
+ import androidx.compose.runtime.Composable
+@@ -222,18 +221,22 @@ fun SettingsScreen(
+         }
+     }
+ 
+-    // §grouping-rewrite 项 3: cache-management popup. The Dialog wraps a Card
+-    // that carries the popup title (with a close affordance) above the section
+-    // body. CacheManagementSection already renders its own inner card; the
+-    // outer card provides the popup chrome (title bar + dismissal).
++    // §grouping-rewrite 项 3 (+ Round-6 F5): cache-management popup. A
++    // [Surface] carries the popup chrome (title row + close affordance); the
++    // section body is [CacheManagementSection], which renders its OWN inner
++    // card. Pre-F5 the popup wrapped the section in a Card-in-Card (Dialog →
++    // outer Card → title row + CacheManagementSection's own Card) — the
++    // redundant outer Card was visual noise (two stacked surfaces with
++    // identical container colour). Surface is the right drop-in: it gives
++    // the popup its shape + tonal elevation + dismissal affordance, and
++    // CacheManagementSection's inner Card remains the content surface.
+     if (showCacheDialog) {
+         Dialog(onDismissRequest = { showCacheDialog = false }) {
+-            Card(
++            Surface(
+                 modifier = Modifier.fillMaxWidth(),
+                 shape = MaterialTheme.shapes.large,
+-                colors = CardDefaults.cardColors(
+-                    containerColor = MaterialTheme.colorScheme.surface
+-                )
++                color = MaterialTheme.colorScheme.surface,
++                tonalElevation = 6.dp,
+             ) {
+                 Column(modifier = Modifier.padding(bottom = 16.dp)) {
+                     Row(
+diff --git a/app/src/main/java/cn/vectory/ocdroid/util/SettingsManager.kt b/app/src/main/java/cn/vectory/ocdroid/util/SettingsManager.kt
+index dd5029c..fbad13a 100644
+--- a/app/src/main/java/cn/vectory/ocdroid/util/SettingsManager.kt
++++ b/app/src/main/java/cn/vectory/ocdroid/util/SettingsManager.kt
+@@ -153,14 +153,32 @@ class SettingsManager @Inject constructor(
+      * and the second write clobbers the first — losing the first caller's
+      * workdir (read-modify-write race). SharedPreferences itself is process-
+      * thread-safe but the read→filter→write compound is not.
++     *
++     * §grouping-rewrite Round-6 F4: dedup is now by NORMALIZED EQUIVALENCE
++     * via [WorkdirPaths.normalize] (symmetric with [removeRecentWorkdir]'s
++     * normalized match per C4). Pre-F4 the dedup was exact-trimmed, so
++     * adding "/proj-a" then "proj-a/" would store BOTH — they normalize
++     * together but compared unequal under raw `==`. The asymmetry vs
++     * removeRecentWorkdir (which normalized) meant the disconnect would
++     * remove both via normalized match but a re-add could leave a stale
++     * twin. Both sides now agree: add removes any existing entry whose
++     * normalized form matches the new entry's, then prepends the new
++     * entry's stored form.
++     *
++     * **Storage stays ORIGINAL-form** (the trimmed string the server
++     * returned) — NOT the normalized key. The server needs the real path
++     * for `getSessionsForDirectory`; normalizing on store would break the
++     * cold-start fan-out. Only the comparison is normalized.
+      */
+     fun addRecentWorkdir(serverGroupFp: String, workdir: String) {
+         if (serverGroupFp.isBlank()) return
+-        val normalized = workdir.trim()
+-        if (normalized.isEmpty()) return
++        val storedForm = workdir.trim()
++        if (storedForm.isEmpty()) return
++        val normalizedKey = WorkdirPaths.normalize(storedForm)
+         synchronized(this) {
+-            val updated = (listOf(normalized) + getRecentWorkdirs(serverGroupFp).filter { it != normalized })
+-                .take(MAX_RECENT_WORKDIRS)
++            val updated = (listOf(storedForm) + getRecentWorkdirs(serverGroupFp).filter {
++                WorkdirPaths.normalize(it) != normalizedKey
++            }).take(MAX_RECENT_WORKDIRS)
+             setRecentWorkdirs(serverGroupFp, updated)
+         }
+     }
+diff --git a/app/src/main/res/values-zh/strings.xml b/app/src/main/res/values-zh/strings.xml
+index b445755..ac748b1 100644
+--- a/app/src/main/res/values-zh/strings.xml
++++ b/app/src/main/res/values-zh/strings.xml
+@@ -222,9 +222,6 @@
+     <string name="debug_log_level_all">全部</string>
+     <string name="debug_log_empty">（暂无日志）</string>
+     <string name="debug_log_empty_filtered">（当前过滤下无日志）</string>
+-    <string name="debug_effect_bus_dropped_title">Effect Bus 丢弃</string>
+-    <string name="debug_sse_unknown_events_title">SSE 未知事件</string>
+-    <string name="debug_diagnostics_none">无</string>
+     <string name="chat_load_more_history">加载更多历史</string>
+     <string name="chat_loading">加载中…</string>
+     <string name="chat_no_messages">暂无消息</string>
+@@ -301,8 +298,6 @@
+     <string name="cache_management_action_clear_project">清除项目</string>
+     <string name="cache_management_action_sweep">立即扫描孤儿</string>
+     <string name="cache_management_action_clear_all">清除全部缓存</string>
+-    <string name="cache_management_action_split">拆分为独立分组</string>
+-    <string name="cache_management_action_split_hint">解除归并逃生口：此接入点的缓存不再与同组其它接入点共享。完整配置复制需要 Phase 5 完成。</string>
+     <string name="cache_management_clear_all_title">清除全部缓存会话？</string>
+     <string name="cache_management_clear_all_body">将清除所有服务器分组下的全部缓存会话（消息、parts、间隔标记）。接入点、连接信息、隧道口令会保留。重新打开会话时缓存会从服务器重新拉取。</string>
+     <string name="cache_management_clear_all_confirm">全部清除</string>
+diff --git a/app/src/main/res/values/strings.xml b/app/src/main/res/values/strings.xml
+index f07eddc..a5847a6 100644
+--- a/app/src/main/res/values/strings.xml
++++ b/app/src/main/res/values/strings.xml
+@@ -222,9 +222,6 @@
+     <string name="debug_log_level_all">All</string>
+     <string name="debug_log_empty">(no logs yet)</string>
+     <string name="debug_log_empty_filtered">(no logs under current filter)</string>
+-    <string name="debug_effect_bus_dropped_title">Effect Bus Dropped</string>
+-    <string name="debug_sse_unknown_events_title">SSE Unknown Events</string>
+-    <string name="debug_diagnostics_none">None</string>
+     <string name="chat_load_more_history">Load more history</string>
+     <string name="chat_loading">Loading…</string>
+     <string name="chat_no_messages">No messages yet</string>
+@@ -306,8 +303,6 @@
+     <string name="cache_management_action_clear_project">Clear project</string>
+     <string name="cache_management_action_sweep">Scan for orphans now</string>
+     <string name="cache_management_action_clear_all">Clear all cached sessions</string>
+-    <string name="cache_management_action_split">Split into its own group</string>
+-    <string name="cache_management_action_split_hint">Copy-on-split escape hatch: this profile\'s cache stops being shared with the rest of its group. Full configuration copy lands with Phase 5.</string>
+     <string name="cache_management_clear_all_title">Clear ALL cached sessions?</string>
+     <string name="cache_management_clear_all_body">This wipes every cached session across every server group (messages, parts, gap markers). Host profiles, connection info, and tunnel passwords are preserved. The cache rebuilds from the server as you re-open sessions.</string>
+     <string name="cache_management_clear_all_confirm">Clear all</string>
+diff --git a/app/src/test/java/cn/vectory/ocdroid/util/SettingsManagerTest.kt b/app/src/test/java/cn/vectory/ocdroid/util/SettingsManagerTest.kt
+index 3937c98..da69d94 100644
+--- a/app/src/test/java/cn/vectory/ocdroid/util/SettingsManagerTest.kt
++++ b/app/src/test/java/cn/vectory/ocdroid/util/SettingsManagerTest.kt
+@@ -129,6 +129,45 @@ class SettingsManagerTest {
+         assertEquals(listOf("/a", "/b"), settings.getRecentWorkdirs(rwFp))
+     }
+ 
++    @Test
++    fun `addRecentWorkdir deduplicates across slash variants by normalized match`() {
++        // §grouping-rewrite Round-6 F4: pre-F4 the dedup was exact-trimmed, so
++        // adding "/proj-a" then "proj-a/" stored BOTH (raw `==` saw them as
++        // distinct). Both normalize to "proj-a" via WorkdirPaths.normalize →
++        // the second add now removes the first variant before prepending.
++        // The latest-trimmed-original form lands at the front; the stale
++        // twin is gone. Storage stays original-form (server-facing).
++        settings.addRecentWorkdir(rwFp, "/proj-a")
++        settings.addRecentWorkdir(rwFp, "proj-a/") // slash-variant twin
++        val result = settings.getRecentWorkdirs(rwFp)
++        assertEquals(
++            "exactly one entry — the slash variant collapsed onto the prior",
++            1,
++            result.size,
++        )
++        assertEquals(
++            "the latest add's stored form is at the front (MRU)",
++            listOf("proj-a/"),
++            result,
++        )
++    }
++
++    @Test
++    fun `addRecentWorkdir normalized dedup leaves sibling workdirs intact`() {
++        // Over-removal guard: the normalized-match dedup must not accidentally
++        // nuke a sibling whose name is a substring or shares a prefix.
++        settings.addRecentWorkdir(rwFp, "/proj-a")
++        settings.addRecentWorkdir(rwFp, "/proj-b")
++        // Re-add /proj-a via a slash variant → /proj-a's prior form is
++        // replaced, /proj-b is untouched.
++        settings.addRecentWorkdir(rwFp, "proj-a/")
++        assertEquals(
++            "sibling survived; new variant at front",
++            listOf("proj-a/", "/proj-b"),
++            settings.getRecentWorkdirs(rwFp),
++        )
++    }
++
+     @Test
+     fun `addRecentWorkdir ignores blank entries`() {
+         settings.addRecentWorkdir(rwFp, "   ")
