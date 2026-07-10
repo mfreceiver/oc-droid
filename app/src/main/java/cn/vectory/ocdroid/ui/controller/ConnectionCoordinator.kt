@@ -319,7 +319,10 @@ class ConnectionCoordinator(
                     val hostPort = hostPortFromUrl(baseUrl)
                     if (rootCause != null && hostPort != null &&
                         repository.pinnedSpkiFor(hostPort) == null &&
-                        pendingTofuHostPort == null
+                        pendingTofuHostPort == null &&
+                        // §tofu fix: mTLS 主机不进 TOFU——mTLS 优先级会忽略 TOFU pin，
+                        // 弹"信任"无效且误导；mTLS 服务器证书失败应直接作连接错误呈现。
+                        !repository.isMutualTlsActive()
                     ) {
                         // §tofu R2 round-1 fix (cgpt B3/opuser): 在 capture 探测【之前】
                         // 占住 pending（single-flight）。并发的 ForceReconnect 驱动的

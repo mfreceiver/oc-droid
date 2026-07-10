@@ -265,6 +265,14 @@ class OpenCodeRepository @Inject constructor(
     fun currentSslConfig(): SslConfig = sslConfigFactory.sslConfigFor(hostConfig.hostPort)
 
     /**
+     * §tofu fix: 当前 live SSL 配置是否走 mTLS 路径（客户端证书已配置并加载）。
+     * TOFU 触发须跳过 mTLS 主机——mTLS 优先级会忽略 TOFU pin，弹"信任"是无效的
+     * 误导；mTLS 服务器证书失败应直接作连接错误呈现。镜像 [sslConfigFor] 的
+     * mTLS-priority 路由（SslConfig.kt sslConfigFor: mutualTlsConfig != null → MutualTLS）。
+     */
+    fun isMutualTlsActive(): Boolean = currentSslConfig() is SslConfig.MutualTLS
+
+    /**
      * §fix-3 (gro-1#2/gpt-2#2/max-1 M1): 转发 [SslConfigFactory.lastClientCertError]。
      * 非空 = 最近一次 [configure] 注入的客户端证书材料试构建失败（p12 损坏 / CA 无法
      * 解析）→ mTLS 已降级回 SystemDefault，profile 仍宣称 mtlsEnabled。controller/UI
