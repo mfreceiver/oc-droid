@@ -159,7 +159,7 @@
     <string name="host_section_basic_auth_title">Basic Auth</string>
     <string name="host_section_basic_auth_sub">Username / password</string>
     <string name="host_section_tunnel_title">Tunnel password</string>
-    <string name="host_section_tunnel_sub">Intranet penetration</string>
+    <string name="host_section_tunnel_sub">Private network access</string>
     <string name="host_mtls_no_cert">No client certificate imported — mTLS hosts will be rejected until one is provided.</string>
     <string name="host_mtls_client_pem_label">Client cert + key (PEM)</string>
     <string name="host_mtls_client_pem_hint">Paste client-cert.pem and client-key.pem (can be combined, cert before key; for a chain put leaf first), no passphrase</string>
@@ -168,6 +168,11 @@
     <string name="host_mtls_ca_pem_existing_hint">A private CA is configured (paste to replace / clear to remove)</string>
     <string name="host_mtls_remove_ca">Remove CA</string>
     <string name="host_mtls_missing_cert">mTLS is enabled but the client certificate is missing or invalid: %1$s</string>
+    <!-- §review-r4 (gpter R4 #1): inline reason shown in the mTLS section when mTLS is on but
+         no usable client-cert material is present (new profile never pasted, or existing cert
+         removed). Mirrors the mtlsBanner/mtlsImportError style; keeps the disabled Save button
+         from looking like a no-op. -->
+    <string name="host_mtls_missing_client_cert">Import a client certificate first to enable mTLS</string>
     <string name="host_profile_untitled">Untitled</string>
     <string name="question_title">Question</string>
     <string name="question_multi_hint">Select one or more options</string>

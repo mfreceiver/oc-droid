@@ -161,6 +161,16 @@ class HostProfileController(
         // a toggle change: reconfigure + force reconnect to build clients for
         // the new URL.
         val previous = hostProfileStore.profiles().firstOrNull { it.id == normalized.id }
+        // §review-r3 (gpter block): validate + persist mTLS material FIRST.
+        // applyClientCertSave can throw (e.g. mtlsEnabled with no client cert
+        // material → "开启 mTLS 需先导入客户端证书", or an invalid p12/CA failing
+        // buildMutualTlsConfig). Running it BEFORE the Basic/Tunnel password
+        // writes below guarantees a failed save is side-effect-free — no partial
+        // credential commit that would leave ESP (passwords) inconsistent with an
+        // unsaved profile. On success it writes p12/ca + returns normalized with
+        // the final clientCertId/mtlsEnabled; the password writes use normalized.id
+        // / normalized.basicAuth which it does not alter.
+        normalized = applyClientCertSave(normalized, clientCertEdit)
         if (basicAuthEdited) {
             settingsManager.setBasicAuthPassword(normalized.id, basicAuthPassword)
         }
@@ -172,10 +182,6 @@ class HostProfileController(
         if (normalized.basicAuth == null) {
             settingsManager.setBasicAuthPassword(normalized.id, "")
         }
-        // §2.7: mTLS 客户端证书持久化（在 hostProfileStore.save 之前，使 normalized
-        // 带上最终 clientCertId/mtlsEnabled）。Dialog 纯 UI 把编辑意图透传至此；
-        // 本处据此试构建 + 原子写 ESP。
-        normalized = applyClientCertSave(normalized, clientCertEdit)
         hostProfileStore.save(normalized)
         refreshHostProfileState()
 

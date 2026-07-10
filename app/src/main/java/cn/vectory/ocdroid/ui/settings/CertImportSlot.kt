@@ -29,7 +29,6 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -137,7 +136,10 @@ internal fun CertImportSlot(
                 Icon(
                     Icons.Default.Check,
                     contentDescription = null,
-                    tint = ImportedCheckColor,
+                    // §review-r4 (gpter R4 #4): was a raw Color(0xFF4CAF50) literal
+                    // — now the themed primary so it tracks light/dark and stays
+                    // inside the M3 color system (M3 has no built-in "success" role).
+                    tint = MaterialTheme.colorScheme.primary,
                     modifier = Modifier.size(20.dp),
                 )
                 Spacer(Modifier.width(8.dp))
@@ -197,10 +199,3 @@ private fun PasteButton(label: String, onClick: () -> Unit, enabled: Boolean) {
         }
     }
 }
-
-/**
- * A green that reads on both light and dark surfaces — M3 has no built-in
- * "success" color role, so this conveys the "imported OK" state for the check
- * glyph. Green 500 sits comfortably on surfaceContainerHigh in either theme.
- */
-private val ImportedCheckColor = Color(0xFF4CAF50)

@@ -166,6 +166,8 @@
     <string name="host_mtls_ca_pem_existing_hint">已配置私有 CA（粘贴替换 / 清空移除）</string>
     <string name="host_mtls_remove_ca">移除 CA</string>
     <string name="host_mtls_missing_cert">mTLS 已开启但客户端证书缺失或无效：%1$s</string>
+    <!-- §review-r4 (gpter R4 #1): mTLS 开启但无可用客户端证书材料时在 mTLS 区块内联提示的原因。 -->
+    <string name="host_mtls_missing_client_cert">需先导入客户端证书</string>
     <string name="host_profile_untitled">未命名</string>
     <string name="question_title">问题</string>
     <string name="question_multi_hint">可选择一个或多个选项</string>

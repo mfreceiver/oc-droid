@@ -446,6 +446,12 @@ internal fun HostProfileEditorDialog(
     // （如失败的粘贴）不应继续阻断提交（gpter R2 non-block #2）。
     val hasCertError =
         mtlsEnabled && (clientSlotStatus is CertSlotStatus.Error || caSlotStatus is CertSlotStatus.Error)
+    // §review-r4 (gpter R4 #1/#2): dialog-level mTLS material check — the pure
+    // [mtlsHasMaterial] predicate hoisted out of the Save onClick /
+    // triggerTestConnection inline copies. Drives (a) the Save-button disable
+    // when `mtlsEnabled && !hasMaterial` so the failing save can't even be
+    // attempted, and (b) the inline "需先导入客户端证书" hint in the mTLS section.
+    val hasMaterial = mtlsHasMaterial(clientCleared, initial.clientCertId, stagedP12)
     // §fix-3: 导入错误（解析失败等）局部回显，mTLS 区块顶部 banner。
     var mtlsImportError by remember(initial.id) { mutableStateOf<String?>(null) }
     // §issue-5: 测试连接状态上提——触发器移入 confirmButton 的 test icon，结果
@@ -564,7 +570,8 @@ internal fun HostProfileEditorDialog(
         val caSnap = caStage
         // §review-3: clientCleared 屏蔽 ESP 里残留的旧 p12——「移除→重开 mTLS→不粘贴」
         // 时 hasMaterial 为 false，resolveClientCert 返回 null，保存被拒（不再静默重载）。
-        val hasMaterial = (!clientCleared && initial.clientCertId != null) || p12Snap != null
+        // §review-r4 (gpter R4 #2): hoisted into the pure [mtlsHasMaterial] predicate.
+        val hasMaterial = mtlsHasMaterial(clientCleared, initial.clientCertId, p12Snap)
         val oldCertId = initial.clientCertId
         // §review-4: honor the Basic Auth toggle. When the section is OFF, probe with
         // NO credentials and suppress the stored-password fallback (profileId=null +
@@ -823,6 +830,19 @@ internal fun HostProfileEditorDialog(
                             modifier = Modifier.padding(bottom = 6.dp)
                         )
                     }
+                    // §review-r4 (gpter R4 #1): mTLS on but no usable client-cert
+                    // material (new profile never pasted, or existing cert removed
+                    // via clientCleared). Surface the reason inline here so the
+                    // disabled Save button is never a mystery — mirrors the
+                    // mtlsBanner/mtlsImportError style above.
+                    if (mtlsEnabled && !hasMaterial) {
+                        Text(
+                            stringResource(R.string.host_mtls_missing_client_cert),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.error,
+                            modifier = Modifier.padding(bottom = 6.dp)
+                        )
+                    }
                     CertImportSlot(
                         roleLabel = roleClientLabel,
                         status = clientSlotStatus,
@@ -921,10 +941,14 @@ internal fun HostProfileEditorDialog(
                     //   取消在飞的测试协程。
                     // §review-2: 另受 hasCertError 门控——任一证书槽处于 Error 时
                     //   暂存意图已过期，禁止提交。
+                    // §review-r4 (gpter R4 #1): 另受 mtlsEnabled && !hasMaterial 门控——
+                    //   mTLS 开启但无可用客户端证书材料时禁用 Save，使原本会抛「需先导入
+                    //   客户端证书」（错误回显在底层屏幕、被对话框遮挡，看起来像「点了没
+                    //   反应」）的保存根本无法发起。
                     Button(
-                        enabled = !isConverting && !isTesting && !hasCertError,
+                        enabled = !isConverting && !isTesting && !hasCertError && !(mtlsEnabled && !hasMaterial),
                         onClick = {
-                            if (isConverting || isTesting || hasCertError) return@Button
+                            if (isConverting || isTesting || hasCertError || (mtlsEnabled && !hasMaterial)) return@Button
                             // §mtls-clipboard: 凭据区折叠门控——区关时清空对应凭据。
                             //   Basic Auth 区关：用户名/密码置空，passwordEdited 强制
                             //   true（若原 profile 有 basicAuth）使 saveHostProfile 清
@@ -973,7 +997,8 @@ internal fun HostProfileEditorDialog(
                             // 残留旧 p12，使「移除→重开 mTLS→不粘贴→保存」hasMaterial=false
                             // → resolveClientCert 返回 null → 保存被拒「需先导入客户端证书」。
                             // 直接「移除→保存（mTLS 关）」仍走 Disable 清空 ESP（mtlsOn=false）。
-                            val hasMaterial = (!clientCleared && initial.clientCertId != null) || stagedP12 != null
+                            // §review-r4 (gpter R4 #2): hoisted into the pure [mtlsHasMaterial] predicate.
+                            val hasMaterial = mtlsHasMaterial(clientCleared, initial.clientCertId, stagedP12)
                             onSave(
                                 saved,
                                 effectiveAuthPw,
@@ -1041,6 +1066,25 @@ internal fun HostProfileEditorDialog(
 }
 
 private fun newDirectProfile(): HostProfile = HostProfile.defaultDirect()
+
+/**
+ * §review-r4 (gpter R4 #2): pure — does this edit have usable mTLS client-cert
+ * material?
+ *
+ * `(!clientCleared && clientCertId != null) || stagedP12 != null`. The
+ * [clientCleared] signal is what distinguishes "UI slot empty but ESP still
+ * holds the old p12" (an existing cert the user just removed → must NOT
+ * count) from "existing cert untouched" (counts). Without it, the
+ * "remove → re-enable mTLS → don't paste → save" sequence silently reloads
+ * the old p12 from ESP.
+ *
+ * Extracted from the inline expression that was duplicated in
+ * `triggerTestConnection` and the Save `onClick` so the rule is unit-testable
+ * without Compose (see [MtlsHasMaterialTest]) and reusable for the dialog-level
+ * Save-disable (gpter R4 #1).
+ */
+internal fun mtlsHasMaterial(clientCleared: Boolean, clientCertId: String?, stagedP12: ByteArray?): Boolean =
+    (!clientCleared && clientCertId != null) || stagedP12 != null
 
 /**
  * §2.7: mTLS 编辑对话框中"CA 编辑意图"的三态显式表达（v3-gpter R2#3）。
