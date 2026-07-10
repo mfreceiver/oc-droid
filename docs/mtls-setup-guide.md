@@ -137,7 +137,7 @@ openssl pkcs12 -export -inkey /etc/stunnel/client-key.pem -in /etc/stunnel/clien
 openssl x509 -in /etc/stunnel/ca-cert.pem -outform DER | base64 -w0
 ```
 
-> macOS 的 `base64` 无 `-w0`，改用 `base64 | tr -d '\n'`；旧 Android 设备若解析 PKCS12 失败，槽1 命令加 `-legacy`（3DES/SHA1，与 App 已测的兼容用例一致）。App 会自动去除粘贴内容里的换行/空白/PEM 头等非 base64 字符，纯单行 base64 最干净。
+> macOS 的 `base64` 无 `-w0`，改用 `base64 | tr -d '\n'`；旧 Android 设备若解析 PKCS12 失败，槽1 命令加 `-legacy`（3DES/SHA1，与 App 已测的兼容用例一致）。App 会自动处理粘贴通道的常见篡改：去除换行/空白/PEM 头，并还原 URL 编码（`%2B`→`+`/`%2F`→`/`/`%3D`→`=`，常见于网页终端/聊天复制）——从 SSH 网页终端等复制即便被 URL 编码也能正常导入。
 
 ### 6.2 App 导入流程（剪贴板 base64）
 ocdroid：**设置 → 主机配置 → 新建/编辑 profile**：

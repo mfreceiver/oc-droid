@@ -29,15 +29,34 @@ import java.util.Base64
 /**
  * Reduces a base64-or-PEM string to its pure base64 payload.
  *
- * First strips PEM armor tokens (`-----BEGIN …-----` / `-----END …-----`,
- * case-insensitive, including the label words between the dashes), then drops
- * every remaining non-alphabet character (`[A-Za-z0-9+/=]`): newlines,
- * carriage returns, spaces, tabs and any other junk. A pasted PEM therefore
- * reduces to just its base64 body (decodable), while pure-base64 input is
- * unaffected (it carries no armor tokens).
+ * Three steps, in order:
+ * 1. **URL-decode `%XX`** — copy/paste channels (web SSH terminals, chat apps,
+ *    some clipboards) URL-encode the base64 (`+`→`%2B`, `/`→`%2F`, `=`→`%3D`).
+ *    Decoding these back FIRST recovers the original base64; without it, stripping
+ *    the `%` later would lengthen/misalign the string (`%3D`→`3D`) and break the
+ *    MIME decoder ("无法解析为 base64"). Only well-formed `%HH` (two hex digits)
+ *    sequences are decoded; a stray `%` (e.g. a terminal EOL marker) is left for
+ *    step 3 to drop.
+ * 2. Strip PEM armor tokens (`-----BEGIN …-----` / `-----END …-----`,
+ *    case-insensitive, including the label words between the dashes).
+ * 3. Drop every remaining non-alphabet character (`[A-Za-z0-9+/=]`): newlines,
+ *    carriage returns, spaces, tabs and any other junk.
+ *
+ * A pasted PEM therefore reduces to just its base64 body (decodable), a
+ * URL-encoded base64 recovers to its original form, and pure-base64 input is
+ * unaffected (it carries no `%` and no armor tokens).
  */
-fun sanitizeBase64(s: String): String =
-    s.replace(PEM_ARMOR_REGEX, "").filter { it.isBase64Alphabet() }
+fun sanitizeBase64(s: String): String {
+    val urlDecoded = URL_ENC_REGEX.replace(s) { mr ->
+        // %HH → the decoded char. (Always a Latin-1 char for valid HH; non-base64
+        // results like %20 (space) are simply dropped by the filter below.)
+        mr.groupValues[1].toInt(16).toChar().toString()
+    }
+    return urlDecoded.replace(PEM_ARMOR_REGEX, "").filter { it.isBase64Alphabet() }
+}
+
+/** Matches a percent-encoded byte `%HH` (two hex digits). */
+private val URL_ENC_REGEX = Regex("%([0-9A-Fa-f]{2})")
 
 /** Matches PEM armor lines, e.g. `-----BEGIN CERTIFICATE-----` (case-insensitive). */
 private val PEM_ARMOR_REGEX = Regex("-----[A-Z0-9 ]+-----", RegexOption.IGNORE_CASE)

@@ -51,7 +51,7 @@ openssl pkcs12 -export -inkey client-key.pem -in client-cert.pem -passout pass: 
 openssl x509 -in ca-cert.pem -outform DER | base64 -w0
 ```
 
-> macOS 的 `base64` 无 `-w0`，改用 `base64 | tr -d '\n'`；旧 Android 设备若解析 PKCS12 失败，槽1 命令加 `-legacy`（3DES/SHA1，与 App 已测的兼容用例一致）。App 会自动去除粘贴内容里的换行/空白/PEM 头等非 base64 字符——粘带换行的 base64 或整段 PEM 也能解析，但纯单行 base64 最干净。
+> macOS 的 `base64` 无 `-w0`，改用 `base64 | tr -d '\n'`；旧 Android 设备若解析 PKCS12 失败，槽1 命令加 `-legacy`（3DES/SHA1，与 App 已测的兼容用例一致）。App 会自动处理粘贴通道的常见篡改：去除换行/空白/PEM 头，并**还原 URL 编码**（`%2B`→`+`、`%2F`→`/`、`%3D`→`=`，常见于网页终端/聊天复制）——所以从 SSH 网页终端等复制即便被 URL 编码也能正常导入。
 
 ## 构建
 

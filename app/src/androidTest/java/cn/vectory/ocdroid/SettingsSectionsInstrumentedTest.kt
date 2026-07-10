@@ -111,4 +111,59 @@ class SettingsSectionsInstrumentedTest {
         // prefix renders so we know the About section uses the dynamic value.
         composeRule.onNodeWithText("OC Droid").assertIsDisplayed()
     }
+
+    // §review-r5 (Bug B regression): re-entering an mTLS profile must render the
+    // cert slots from the stored-byte summaries — NOT inverted, NOT showing a
+    // paste button for an imported cert. Both slots present here → both Imported.
+    @Test
+    fun mtlsEditorSlots_renderImportedStatusWhenBothStored() {
+        val profile = HostProfile(
+            id = "p", name = "X", serverUrl = "https://x.example",
+            mtlsEnabled = true, clientCertId = "cid",
+        )
+        composeRule.setContent {
+            MaterialTheme {
+                HostProfileEditorDialog(
+                    initial = profile,
+                    onDismiss = {},
+                    onSave = { _, _, _, _, _, _, _, _, _, _, _ -> },
+                    initialHasCa = true,
+                    initialClientSummary = "CN=client" to 1234,
+                    initialCaSummary = "CN=opencode CA" to 5678,
+                )
+            }
+        }
+        composeRule.waitForIdle()
+        // Both slots show the Imported status line (subject · size); neither shows
+        // its paste button.
+        composeRule.onNodeWithText("Client certificate: CN=client · 1234 B").assertExists()
+        composeRule.onNodeWithText("CA certificate: CN=opencode CA · 5678 B").assertExists()
+    }
+
+    // §review-r5 (Bug B regression): the user's reported shape — client NOT
+    // stored, CA stored. Must render client slot = paste button, CA slot =
+    // Imported status (the user saw this inverted). Verifies no inversion.
+    @Test
+    fun mtlsEditorSlots_clientMissingCaPresent_notInverted() {
+        val profile = HostProfile(
+            id = "p", name = "X", serverUrl = "https://x.example",
+            mtlsEnabled = true, clientCertId = "cid",
+        )
+        composeRule.setContent {
+            MaterialTheme {
+                HostProfileEditorDialog(
+                    initial = profile,
+                    onDismiss = {},
+                    onSave = { _, _, _, _, _, _, _, _, _, _, _ -> },
+                    initialHasCa = true,
+                    initialClientSummary = null,
+                    initialCaSummary = "CN=opencode CA" to 5678,
+                )
+            }
+        }
+        composeRule.waitForIdle()
+        // Client (not stored) → its paste button; CA (stored) → Imported status.
+        composeRule.onNodeWithText("Paste client certificate (PKCS12)").assertExists()
+        composeRule.onNodeWithText("CA certificate: CN=opencode CA · 5678 B").assertExists()
+    }
 }
