@@ -19,6 +19,7 @@
 # Build
 /app/build/
 */build/
+/APK
 
 # Built APKs (never commit; distribute via Gitea Releases)
 *.apk
@@ -44,6 +45,7 @@ google-services.json
 *.swp
 *.swo
 *~
+.opencode/
 
 # OS
 .DS_Store
