@@ -5,7 +5,9 @@ import androidx.test.platform.app.InstrumentationRegistry
 import cn.vectory.ocdroid.data.repository.http.ClientCertMaterial
 import cn.vectory.ocdroid.data.repository.http.SslConfig
 import cn.vectory.ocdroid.data.repository.http.buildMutualTlsConfig
+import cn.vectory.ocdroid.util.loadClientP12OrNull
 import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -89,5 +91,28 @@ class MtlsPkcs12CompatInstrumentedTest {
         // 构建出的 socketFactory / trustManager 非空（data class 字段）。
         assertNotNull(cfg.socketFactory)
         assertNotNull(cfg.trustManager)
+    }
+
+    /**
+     * §android-bc-limitation: documents WHY the server command must use
+     * `-legacy -descert`. Android's built-in PKCS12 provider (frozen old
+     * BouncyCastle; Conscrypt offers no PKCS12-PBES2) does NOT load an
+     * OpenSSL-3+ default p12 (PBES2/AES/SHA-256) — even on API 35 — while the
+     * legacy 3DES/SHA1 p12 loads fine. If this test ever fails (modern p12
+     * loads), Android gained modern-PKCS12 support and `-legacy -descert` is
+     * no longer required.
+     */
+    @Test
+    fun documentedLimitation_modernAesP12_unsupportedOnAndroidBc_legacy3desLoads() {
+        val modern = readAsset("mtls_modern_test.p12")
+        val legacy = readAsset("mtls_legacy_test.p12")
+        val modernKs = loadClientP12OrNull(modern, CharArray(0))
+        val legacyKs = loadClientP12OrNull(legacy, CharArray(0))
+        // Legacy (3DES/SHA1) MUST load — the proven Android-BC-compatible format.
+        assertNotNull("legacy 3DES/SHA1 p12 must load on Android BC", legacyKs)
+        // Modern (PBES2/AES/SHA-256) — the user-reported "PKCS12 无效或口令错误".
+        // Assert it FAILS here; if this assertion fails, modern loads on this
+        // Android (newer provider) and the user's failure is device/API-specific.
+        assertNull("modern PBES2/AES p12 should FAIL on Android BC", modernKs)
     }
 }

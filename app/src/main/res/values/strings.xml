@@ -151,7 +151,7 @@
     <string name="host_cert_remove">Remove</string>
     <!-- §review-3: default locale (fallback) must be English; Chinese lives in values-zh. -->
     <string name="host_cert_err_base64">Could not parse as base64</string>
-    <string name="host_cert_err_p12">Invalid or wrong-password PKCS12</string>
+    <string name="host_cert_err_p12">Invalid PKCS12 (Android can\'t read OpenSSL-3+ AES p12 — regenerate with -legacy -descert)</string>
     <string name="host_cert_err_ca">Invalid CA certificate</string>
     <!-- §mtls-clipboard-i18n: cert-import slot role labels (were hardcoded) -->
     <string name="host_cert_role_client">Client certificate</string>

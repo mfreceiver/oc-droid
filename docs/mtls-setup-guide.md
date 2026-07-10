@@ -127,9 +127,9 @@ opencode serve --hostname 127.0.0.1 --port 4096   # 仅绑 127.0.0.1，只 stunn
 
 **在服务器上取得粘贴文本**（v0.6.6+ 改为剪贴板 base64 导入）：SSH 进服务器跑下面两条命令，各自的输出（单行 base64）分别粘进 App 的两个槽（路径换成你 §2 生成证书的目录，如 `/etc/stunnel/`，或本用户服务的 `~/.config/stunnel/certs/`）。
 
-槽1「客户端证书」—— cert + key 打包成**无口令 PKCS12**，再单行 base64：
+槽1「客户端证书」—— cert + key 打包成**无口令 PKCS12**，再单行 base64。⚠️ **必须 `-legacy -descert`**：Android 内置 PKCS12 提供者（冻结的旧 BouncyCastle）不支持 OpenSSL 3+ 默认的 AES/PBES2 加密（连 API 35 也读不了，报「PKCS12 无效或口令错误」）；`-legacy -descert` 产出 3DES/SHA1（证书袋+密钥袋均 3DES，Android 可读；`-descert` 很关键——单 `-legacy` 的证书袋是 RC2，部分设备仍读不了）：
 ```bash
-openssl pkcs12 -export -inkey /etc/stunnel/client-key.pem -in /etc/stunnel/client-cert.pem -passout pass: | base64 -w0
+openssl pkcs12 -export -legacy -descert -inkey /etc/stunnel/client-key.pem -in /etc/stunnel/client-cert.pem -passout pass: | base64 -w0
 ```
 
 槽2「CA 证书」—— CA 证书 DER 单行 base64：
@@ -137,7 +137,7 @@ openssl pkcs12 -export -inkey /etc/stunnel/client-key.pem -in /etc/stunnel/clien
 openssl x509 -in /etc/stunnel/ca-cert.pem -outform DER | base64 -w0
 ```
 
-> macOS 的 `base64` 无 `-w0`，改用 `base64 | tr -d '\n'`；旧 Android 设备若解析 PKCS12 失败，槽1 命令加 `-legacy`（3DES/SHA1，与 App 已测的兼容用例一致）。App 会自动处理粘贴通道的常见篡改：去除换行/空白/PEM 头，并还原 URL 编码（`%2B`→`+`/`%2F`→`/`/`%3D`→`=`，常见于网页终端/聊天复制）——从 SSH 网页终端等复制即便被 URL 编码也能正常导入。
+> macOS 的 `base64` 无 `-w0`，改用 `base64 | tr -d '\n'`。App 会自动处理粘贴通道的常见篡改：去除换行/空白/PEM 头，并还原 URL 编码（`%2B`→`+`/`%2F`→`/`/`%3D`→`=`）——从 SSH 网页终端等复制即便被 URL 编码也能正常导入。
 
 ### 6.2 App 导入流程（剪贴板 base64）
 ocdroid：**设置 → 主机配置 → 新建/编辑 profile**：

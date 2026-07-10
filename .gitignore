@@ -83,3 +83,7 @@ opencode-src/
 # mTLS client PKCS12 (contains private key — never commit)
 client-cert.b64
 *.b64
+
+# mTLS client cert paste files (contain private key — never commit)
+client-cert-b64*.txt
+client-cert*.b64

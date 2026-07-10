@@ -149,7 +149,7 @@
     <string name="host_cert_paste_generic">从剪贴板粘贴</string>
     <string name="host_cert_remove">移除</string>
     <string name="host_cert_err_base64">无法解析为 base64</string>
-    <string name="host_cert_err_p12">PKCS12 无效或口令错误</string>
+    <string name="host_cert_err_p12">PKCS12 无效：Android 不支持 OpenSSL 3+ 的 AES 加密，请用 -legacy -descert 重新导出</string>
     <string name="host_cert_err_ca">CA 证书无效</string>
     <!-- §mtls-clipboard-i18n: 证书导入槽角色标签（原为硬编码） -->
     <string name="host_cert_role_client">客户端证书</string>
