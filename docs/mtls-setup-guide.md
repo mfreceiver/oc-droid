@@ -1,7 +1,7 @@
 # ocdroid mTLS 服务端配置与证书导入指南
 
 > 实操指南：在 opencode 服务器上配置 stunnel mTLS、生成签名证书对、把客户端证书导入 ocdroid App。
-> 设计 rationale 见 `docs/mtls-tunnel-plan.md`。本指南面向支持**粘贴 PEM 文本导入**的 ocdroid 版本（v0.6.4 之后，minSdk 34）。
+> 设计 rationale 见 `docs/mtls-tunnel-plan.md`。本指南面向支持**剪贴板 base64 导入**的 ocdroid 版本（v0.6.6+）。旧版「粘贴 PEM 文本」流程（v0.6.4–0.6.5）已废弃——服务端现直接产出 base64（无口令 PKCS12 + CA DER）。
 
 ## 0. 架构一句话
 
@@ -17,7 +17,7 @@ stunnel（公网端口，强制 mTLS）── 明文转发 ──▶ opencode se
 - **mTLS**：传输层强认证 + 加密。只有持有「由你的私有 CA 签发的客户端证书」的设备能完成 TLS 握手；**无证书设备在 TLS 握手阶段就被 stunnel 拒绝**（连一个 HTTP 字节都发不出去，拿不到任何 opencode 信息）。
 - **basic auth**：应用层第二道闸（mTLS 通过后才校验），纵深防御。
 - 客户端证书**仅存于 App 内**（EncryptedSharedPreferences，AndroidKeyStore 加密），**不进系统证书库**。
-- App 以**粘贴 PEM 文本**方式导入客户端证书 + CA（无文件、无口令；导入时内部转空口令 PKCS12 存储）。
+- App 以**剪贴板粘贴 base64**方式导入客户端证书（无口令 PKCS12）+ CA（DER base64）；无文件、无口令（§6.1 给出从本节 PEM 文件产出 base64 的命令）。
 
 ---
 
@@ -67,9 +67,8 @@ openssl x509 -req -in client-csr.pem -CA ca-cert.pem -CAkey ca-key.pem -CAcreate
   -out client-cert.pem -days $DAYS \
   -extfile <(printf "basicConstraints=critical,CA:FALSE\nkeyUsage=critical,digitalSignature,keyEncipherment\nextendedKeyUsage=clientAuth")
 ```
-> App 直接粘贴 PEM 文本（`client-cert.pem` + `client-key.pem`），导入时内部转成空口令 PKCS12 存储——**无需 p12 文件、无需口令**。
-> `client-key.pem` 须为**无口令 PKCS8**（`-----BEGIN PRIVATE KEY-----`，openssl 3 `-nodes` 默认即此）。加密私钥（`ENCRYPTED PRIVATE KEY`）与传统 PKCS1（`RSA/EC PRIVATE KEY`）App 会拒绝并提示。
-> 分发保留 `ca-cert.pem` + `client-cert.pem` + `client-key.pem` 三份文本。
+> App（v0.6.6+）**不再直接吃 PEM 文本**——服务端用 §6.1 的命令把 `client-cert.pem` + `client-key.pem` 打包成**无口令 PKCS12 再 base64** 给 App 粘贴。`openssl pkcs12 -export` 能读 PKCS8 与传统 PKCS1 私钥，故此处 `-nodes` 生成的私钥即可；无需手工造 PKCS12、无需口令。
+> 仍需分发保留 `ca-cert.pem` + `client-cert.pem` + `client-key.pem` 三份文本（服务端 §6.1 据此产出两条 base64）。
 
 ---
 
@@ -126,29 +125,31 @@ opencode serve --hostname 127.0.0.1 --port 4096   # 仅绑 127.0.0.1，只 stunn
 - `client-key.pem`（客户端私钥，无口令 PKCS8）
 - `ca-cert.pem`（私有 CA 公钥证书）
 
-**在服务器上取得粘贴文本**：SSH 进服务器跑下面两条命令，各自的输出分别粘进 App 的两个框（路径换成你 §2 生成证书的目录，如 `/etc/stunnel/`，或本用户服务的 `~/.config/stunnel/certs/`）。两段都无口令；证书与私钥顺序不限、可整段合并粘贴。
+**在服务器上取得粘贴文本**（v0.6.6+ 改为剪贴板 base64 导入）：SSH 进服务器跑下面两条命令，各自的输出（单行 base64）分别粘进 App 的两个槽（路径换成你 §2 生成证书的目录，如 `/etc/stunnel/`，或本用户服务的 `~/.config/stunnel/certs/`）。
 
-框1「客户端证书+私钥 (PEM)」—— 证书 + 私钥合并输出：
+槽1「客户端证书」—— cert + key 打包成**无口令 PKCS12**，再单行 base64：
 ```bash
-cat /etc/stunnel/client-cert.pem /etc/stunnel/client-key.pem
+openssl pkcs12 -export -inkey /etc/stunnel/client-key.pem -in /etc/stunnel/client-cert.pem -passout pass: | base64 -w0
 ```
 
-框2「CA 证书 (PEM)」：
+槽2「CA 证书」—— CA 证书 DER 单行 base64：
 ```bash
-cat /etc/stunnel/ca-cert.pem
+openssl x509 -in /etc/stunnel/ca-cert.pem -outform DER | base64 -w0
 ```
 
-### 6.2 App 导入流程（粘贴 PEM 文本）
+> macOS 的 `base64` 无 `-w0`，改用 `base64 | tr -d '\n'`；旧 Android 设备若解析 PKCS12 失败，槽1 命令加 `-legacy`（3DES/SHA1，与 App 已测的兼容用例一致）。App 会自动去除粘贴内容里的换行/空白/PEM 头等非 base64 字符，纯单行 base64 最干净。
+
+### 6.2 App 导入流程（剪贴板 base64）
 ocdroid：**设置 → 主机配置 → 新建/编辑 profile**：
 
 1. **服务器地址**：`https://<HOST>:<PORT>`（注意 `https`，指向 stunnel 公网端口）。
 2. **Basic Auth**：填 opencode 的用户名 / 密码（第二层）。
-3. 打开 **「mTLS 客户端证书」** 开关。
-4. **客户端证书+私钥 (PEM)** 文本框：粘贴 `client-cert.pem` 与 `client-key.pem`（两段可合并粘贴，顺序不限，无口令）。App 导入时内部转成空口令 PKCS12 存储。
-5. **CA 证书 (PEM)** 文本框：粘贴 `ca-cert.pem`。⚠️ **必粘**：你的服务端证书是私有 CA 签的，导入后 App **只信该 CA**（严格模式，防 MITM）；不粘则 App 走系统/平台 CA，会因不认识你的私有 CA 而握手失败。
-6. **保存**。App 即以 mTLS 连接；证书仅存本应用（EncryptedSharedPreferences），不进系统证书库。PEM 解析失败会在对话框顶部红色横幅提示「证书文本无效：…」。
+3. 打开 **「mTLS」** 开关（展开证书区）。
+4. **客户端证书** 槽：点「粘贴」按钮，粘入 §6.1 槽1 的 base64（无口令 PKCS12）。App 解码 + 校验后显示「✓ <subject> · <N> B」。
+5. **CA 证书** 槽：点「粘贴」按钮，粘入 §6.1 槽2 的 base64。⚠️ **必粘**：你的服务端证书是私有 CA 签的，导入后 App **只信该 CA**（严格模式，防 MITM）；不粘则 App 走系统/平台 CA，会因不认识你的私有 CA 而握手失败。
+6. **保存**。App 即以 mTLS 连接；证书仅存本应用（EncryptedSharedPreferences），不进系统证书库。base64 解析/校验失败会在槽位内联红色提示具体原因；「开启 mTLS 需先导入客户端证书」等会在 mTLS 区提示并禁用保存。
 
-> 导入后若 mTLS 材料有问题（如开启了 mTLS 但未粘客户端证书），App 会在对话框顶部红色横幅提示。
+> 重入编辑对话框时，已导入的证书/CA 显示为「✓ <subject> · <N> B」（不回显原文——材料仅以字节存储）；移除客户端证书等价于关闭 mTLS（保存即清证）。
 
 ---
 
@@ -200,7 +201,7 @@ openssl s_client -connect <HOST>:<PORT> -CAfile ca-cert.pem </dev/null 2>&1 | ta
 
 ## 10. 安全要点速查
 
-- ✅ 客户端证书**粘贴 PEM 文本**导入（无口令 PKCS8），App 内部转空口令 PKCS12 存储；不依赖文件、不传口令。
+- ✅ 客户端证书**剪贴板粘贴 base64（无口令 PKCS12）**导入；不依赖文件、不传口令。
 - ✅ 证书仅存 App 内（EncryptedSharedPreferences / AndroidKeyStore 加密），**不进系统证书库**、不需 root。
 - ✅ 导入 CA → App **只信你的私有 CA**（严格模式，防 WebPKI MITM）。
 - ✅ 主机名严格校验（服务端证书 SAN 必须匹配 `serverUrl` 主机，未被禁用）。
