@@ -3,10 +3,8 @@ package cn.vectory.ocdroid.ui
 import cn.vectory.ocdroid.R
 import cn.vectory.ocdroid.data.model.Message
 import cn.vectory.ocdroid.util.runSuspendCatching
-import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
 import java.util.Locale
 
 /**
@@ -67,9 +65,17 @@ internal fun AppCore.resolveQuestionDirectory(requestId: String): String? {
 internal fun AppCore.openSessionFromDeepLink(sessionId: String) {
     appScope.launch {
         if (store.sessionListFlow.value.sessions.none { it.id == sessionId }) {
-            val fetched = withContext(Dispatchers.IO) {
-                runSuspendCatching { repository.getSession(sessionId).getOrNull() }.getOrNull()
-            }
+            // §fix-flake: NO withContext(Dispatchers.IO) here.
+            // repository.getSession is a suspend Retrofit call — OkHttp already
+            // offloads the actual network IO off the calling thread, so wrapping
+            // it in withContext(IO) was redundant AND broke test determinism:
+            // it escaped the StandardTestDispatcher so advanceUntilIdle() could
+            // not drive the fetch, racing coVerify under full-suite IO-pool
+            // contention. Running on appScope's dispatcher (Main in prod, the
+            // test dispatcher in tests) keeps the whole coroutine on one
+            // dispatcher and is production-semantics-neutral (the only
+            // surrounding work is runSuspendCatching{}.getOrNull()).
+            val fetched = runSuspendCatching { repository.getSession(sessionId).getOrNull() }.getOrNull()
             if (fetched != null) {
                 writeSessionList { st -> st.copy(sessions = upsertSession(st.sessions, fetched)) }
             }

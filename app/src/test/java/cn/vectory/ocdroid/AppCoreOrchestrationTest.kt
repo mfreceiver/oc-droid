@@ -438,19 +438,25 @@ class AppCoreOrchestrationTest : MainViewModelTestBase() {
         val core = wire()
 
         core.openSessionFromDeepLink("deep-link-1")
-        // §note: openSessionFromDeepLink uses withContext(Dispatchers.IO) which
-        // escapes the test dispatcher; pump multiple times to flush the IO
-        // resumption chain.
-        repeat(3) {
-            advanceUntilIdle()
-            kotlinx.coroutines.delay(50)
-        }
+        // §fix-flake: openSessionFromDeepLink used to wrap repository.getSession
+        // in withContext(Dispatchers.IO), which escaped the StandardTestDispatcher
+        // — advanceUntilIdle() could not drive the fetch, so this verify raced
+        // (intermittently failed under full-suite IO-pool contention). The
+        // production code no longer hops to Dispatchers.IO (Retrofit already
+        // offloads the network IO), so the whole coroutine now runs on the test
+        // dispatcher and a single advanceUntilIdle() deterministically completes
+        // the fetch + upsert.
         advanceUntilIdle()
 
         // The deep-link path always issues a GET when the session is not in
-        // the local list (the upsert into sessionListFlow happens in the same
-        // coroutine, gated only by the IO resumption).
+        // the local list, then upserts the fetched session into sessionListFlow.
         coVerify { repository.getSession("deep-link-1") }
+        // Stronger guard: the fetched session is actually materialised in the
+        // local list — proves the fetch coroutine ran to completion on the test
+        // dispatcher (not just that getSession was invoked). Regression guard
+        // against re-introducing a dispatcher escape that would make this flake.
+        val upserted = core.sessionListFlow.value.sessions.firstOrNull { it.id == "deep-link-1" }
+        assertEquals(fetched, upserted)
     }
 
     @Test
