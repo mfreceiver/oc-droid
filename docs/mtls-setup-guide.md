@@ -1,7 +1,7 @@
 # ocdroid mTLS 服务端配置与证书导入指南
 
 > 实操指南：在 opencode 服务器上配置 stunnel mTLS、生成签名证书对、把客户端证书导入 ocdroid App。
-> 设计 rationale 见 `docs/mtls-tunnel-plan.md`。本指南面向 ocdroid **≥ v0.6.4**（含 mTLS 支持，minSdk 34）。
+> 设计 rationale 见 `docs/mtls-tunnel-plan.md`。本指南面向支持**粘贴 PEM 文本导入**的 ocdroid 版本（v0.6.4 之后，minSdk 34）。
 
 ## 0. 架构一句话
 
@@ -17,6 +17,7 @@ stunnel（公网端口，强制 mTLS）── 明文转发 ──▶ opencode se
 - **mTLS**：传输层强认证 + 加密。只有持有「由你的私有 CA 签发的客户端证书」的设备能完成 TLS 握手；**无证书设备在 TLS 握手阶段就被 stunnel 拒绝**（连一个 HTTP 字节都发不出去，拿不到任何 opencode 信息）。
 - **basic auth**：应用层第二道闸（mTLS 通过后才校验），纵深防御。
 - 客户端证书**仅存于 App 内**（EncryptedSharedPreferences，AndroidKeyStore 加密），**不进系统证书库**。
+- App 以**粘贴 PEM 文本**方式导入客户端证书 + CA（无文件、无口令；导入时内部转空口令 PKCS12 存储）。
 
 ---
 
@@ -24,19 +25,18 @@ stunnel（公网端口，强制 mTLS）── 明文转发 ──▶ opencode se
 
 - 服务器：`openssl`、`stunnel ≥ 5.x`、`opencode`。
 - 一个可从公网访问的 `<HOST>:<PORT>`（经你现有的 **纯 TCP 透传隧道**——必须是纯 TCP，不能在隧道层再加 TLS，否则 TLS-in-TLS 双层封装会被 DPI 识别）。
-- App：ocdroid ≥ v0.6.4。
+- App：ocdroid（支持粘贴 PEM 导入的版本）。
 - ⚠️ `<HOST>` 必须与 App 里填的 `serverUrl` 主机**完全一致**（域名或 IP）——服务端证书的 SAN 会按它签发，App 严格校验主机名。
 
 ---
 
-## 2. 生成签名证书对（私有 CA + 服务端证书 + 共享客户端 PKCS12）
+## 2. 生成签名证书对（私有 CA + 服务端证书 + 共享客户端 PEM）
 
 在服务器上（建议单独目录，如 `/etc/stunnel/`）执行。**`ca-key.pem` 是根私钥，生成后离线保管，切勿泄露。**
 
 ### 2.1 变量
 ```bash
 HOST=ocdroid.example.net        # ← 改成 App 实际连接的主机（隧道公网域名；按 IP 连接见 2.3 注）
-P12_PW='change-me-strong'       # ← 客户端 PKCS12 密码（分发到设备；可为空）
 DAYS=825                        # 证书有效期（天）；CA 用 3650
 ```
 
@@ -60,17 +60,16 @@ chmod 600 server-key.pem
 # 按 IP 连接时：subjectAltName=IP:1.2.3.4（勿用 DNS:）
 ```
 
-### 2.4 共享客户端证书 → PKCS12（多设备共用同一份）
+### 2.4 共享客户端证书（PEM；多设备共用同一份，App 粘贴文本导入）
 ```bash
 openssl req -newkey rsa:2048 -nodes -keyout client-key.pem -out client-csr.pem -subj "/CN=ocdroid-shared-client"
 openssl x509 -req -in client-csr.pem -CA ca-cert.pem -CAkey ca-key.pem -CAcreateserial \
   -out client-cert.pem -days $DAYS \
   -extfile <(printf "basicConstraints=critical,CA:FALSE\nkeyUsage=critical,digitalSignature,keyEncipherment\nextendedKeyUsage=clientAuth")
-openssl pkcs12 -export -inkey client-key.pem -in client-cert.pem -certfile ca-cert.pem \
-  -name ocdroid-client -out client.p12 -password pass:"$P12_PW"
 ```
-> minSdk 34（Conscrypt）：现代 PKCS12 加密可直接读，无需 `-legacy`。若要更保守可加 `-legacy`（3DES，仍兼容）。
-> `client-key.pem` 签发后即可删除（已打进 `client.p12`）；保留 `client.p12` + `ca-cert.pem` 用于分发。
+> App 直接粘贴 PEM 文本（`client-cert.pem` + `client-key.pem`），导入时内部转成空口令 PKCS12 存储——**无需 p12 文件、无需口令**。
+> `client-key.pem` 须为**无口令 PKCS8**（`-----BEGIN PRIVATE KEY-----`，openssl 3 `-nodes` 默认即此）。加密私钥（`ENCRYPTED PRIVATE KEY`）与传统 PKCS1（`RSA/EC PRIVATE KEY`）App 会拒绝并提示。
+> 分发保留 `ca-cert.pem` + `client-cert.pem` + `client-key.pem` 三份文本。
 
 ---
 
@@ -122,23 +121,22 @@ opencode serve --hostname 127.0.0.1 --port 4096   # 仅绑 127.0.0.1，只 stunn
 ## 6. 分发 + 导入 ocdroid App
 
 ### 6.1 分发（带外，到每台设备）
-把这三样安全地送到设备：
-- `client.p12`（客户端证书 + 私钥）
-- `<P12_PW>`（PKCS12 密码）
+把这三样**文本**安全地送到设备（可经加密聊天/邮件正文粘贴，无需传文件）：
+- `client-cert.pem`（客户端证书）
+- `client-key.pem`（客户端私钥，无口令 PKCS8）
 - `ca-cert.pem`（私有 CA 公钥证书）
 
-### 6.2 App 导入流程
+### 6.2 App 导入流程（粘贴 PEM 文本）
 ocdroid：**设置 → 主机配置 → 新建/编辑 profile**：
 
 1. **服务器地址**：`https://<HOST>:<PORT>`（注意 `https`，指向 stunnel 公网端口）。
 2. **Basic Auth**：填 opencode 的用户名 / 密码（第二层）。
 3. 打开 **「mTLS 客户端证书」** 开关。
-4. **导入客户端证书 (.p12)** → 选 `client.p12`。
-5. **PKCS12 密码**：填 `<P12_PW>`（空密码则留空）。
-6. **导入 CA 证书** → 选 `ca-cert.pem`。⚠️ **必导**：你的服务端证书是私有 CA 签的，导入后 App **只信该 CA**（严格模式，防 MITM）；不导则 App 走系统/平台 CA，会因不认识你的私有 CA 而握手失败。
-7. **保存**。App 即以 mTLS 连接；证书仅存本应用（EncryptedSharedPreferences），不进系统证书库。
+4. **客户端证书+私钥 (PEM)** 文本框：粘贴 `client-cert.pem` 与 `client-key.pem`（两段可合并粘贴，顺序不限，无口令）。App 导入时内部转成空口令 PKCS12 存储。
+5. **CA 证书 (PEM)** 文本框：粘贴 `ca-cert.pem`。⚠️ **必粘**：你的服务端证书是私有 CA 签的，导入后 App **只信该 CA**（严格模式，防 MITM）；不粘则 App 走系统/平台 CA，会因不认识你的私有 CA 而握手失败。
+6. **保存**。App 即以 mTLS 连接；证书仅存本应用（EncryptedSharedPreferences），不进系统证书库。PEM 解析失败会在对话框顶部红色横幅提示「证书文本无效：…」。
 
-> 导入后若 mTLS 材料 有问题，App 会在主机配置对话框顶部红色横幅提示（如「mTLS 已开启但客户端证书缺失 / 加载失败」）。
+> 导入后若 mTLS 材料有问题（如开启了 mTLS 但未粘客户端证书），App 会在对话框顶部红色横幅提示。
 
 ---
 
@@ -168,7 +166,7 @@ openssl s_client -connect <HOST>:<PORT> -CAfile ca-cert.pem </dev/null 2>&1 | ta
 |---|---|---|
 | App 连接失败、TLS 握手错 | 服务端证书 SAN 与 `serverUrl` 主机不匹配 | 重签服务端证书，SAN 用 `DNS:<HOST>`（IP 连接用 `IP:`）|
 | App 提示不信任服务端证书 | 未导入 CA，或导入了错误的 CA | 导入签发服务端证书的那个 `ca-cert.pem` |
-| App「客户端证书加载失败」 | p12 密码错 / p12 损坏 / 导入了非 p12 文件 | 重新导出 p12，核对密码；App 会显示 `lastClientCertError` 横幅 |
+| App「证书文本无效：…」 | 粘贴的 PEM 缺证书/缺私钥/私钥非无口令 PKCS8（加密或传统格式）/ 多份私钥 | 用 openssl 生成无口令 PKCS8（`openssl ... -nodes`），核对含 `BEGIN CERTIFICATE` 与 `BEGIN PRIVATE KEY` 各一块；横幅会显示具体原因 |
 | 有证书但仍被 stunnel 拒 | 客户端证书非本 CA 签发 / 已过期 | 用 `ca-cert.pem` 重签客户端证书；检查 `days` |
 | stunnel 启动失败 | `verifyPeer`/`requireCert` 语法（旧版 `verify=3`）/ 文件权限 | 按 stunnel 版本调整指令；`chmod 600` keys |
 | 切换/重导证书后旧连接未更新 | App 在主机切换/冷启/手动改 URL 时才 reconfigure | 保存后稍候或重启 App（已修复 live reconfigure，但极端情况重启兜底）|
@@ -180,9 +178,9 @@ openssl s_client -connect <HOST>:<PORT> -CAfile ca-cert.pem </dev/null 2>&1 | ta
 本方案是**共享客户端证书**（所有设备同一私钥），故：
 
 - **无单设备吊销**。某设备失控 → **整体轮换**：
-  1. 重新生成 CA + 服务端证书 + 客户端 p12（§2，建议同时换 `HOST` 不变、证书换新）。
+  1. 重新生成 CA + 服务端证书 + 客户端 PEM（§2，建议同时换 `HOST` 不变、证书换新）。
   2. 替换 stunnel 的 `ca-cert.pem`/`server-cert.*`，`systemctl restart stunnel`。
-  3. 把新 `client.p12` + 密码 + `ca-cert.pem` 带外分发到**所有**设备，App 内重新导入（旧证书自动失效）。
+  3. 把新 `client-cert.pem` + `client-key.pem` + `ca-cert.pem` 带外分发到**所有**设备，App 内重新粘贴导入（旧证书自动失效）。
   4. ⚠️ **同步更换 opencode basic auth 密码**（失控设备可能已读取 basic auth）。
 - 证书过期前（`days` 到期）按同流程轮换。
 
@@ -190,7 +188,8 @@ openssl s_client -connect <HOST>:<PORT> -CAfile ca-cert.pem </dev/null 2>&1 | ta
 
 ## 10. 安全要点速查
 
-- ✅ 客户端证书仅存 App 内（EncryptedSharedPreferences / AndroidKeyStore 加密），**不进系统证书库**、不需 root。
+- ✅ 客户端证书**粘贴 PEM 文本**导入（无口令 PKCS8），App 内部转空口令 PKCS12 存储；不依赖文件、不传口令。
+- ✅ 证书仅存 App 内（EncryptedSharedPreferences / AndroidKeyStore 加密），**不进系统证书库**、不需 root。
 - ✅ 导入 CA → App **只信你的私有 CA**（严格模式，防 WebPKI MITM）。
 - ✅ 主机名严格校验（服务端证书 SAN 必须匹配 `serverUrl` 主机，未被禁用）。
 - ✅ `ca-key.pem` 离线保管；所有 `*-key.pem` `chmod 600`。
