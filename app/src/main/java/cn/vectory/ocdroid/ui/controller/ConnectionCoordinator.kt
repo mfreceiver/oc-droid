@@ -235,6 +235,13 @@ class ConnectionCoordinator(
                 var attempt = 0
                 var backoffMs = 1000L
                 while (isActive) {
+                    // §tofu R2 round-2 fix (cgpt): 并发连接 job 在 TOFU 待决期间 defer——
+                    // 不探/不烧重试/不写终态；待决的 job 独占 settle。入口守卫只挡"新调用"，
+                    // 此处挡"已 launch 但 pending 尚未置位时入队的并发 job"的迭代。
+                    if (pendingTofuHostPort != null) {
+                        DebugLog.i(TAG, "testConnection: deferring loop — TOFU pending for $pendingTofuHostPort")
+                        return@launch
+                    }
                     attempt++
                     if (attempt > 1) {
                         writeConnection {
@@ -342,11 +349,15 @@ class ConnectionCoordinator(
                                             // 写 pin + 重建 live 客户端（applyTofuDecision 对当
                                             // 前 host 重建）→ 下一次 checkHealth 解析为 TofuPinned
                                             // （SPKI 匹配 → 握手成功）。不消耗 retry、不延迟。
-                                            repository.applyTofuDecision(hostPort, decision)
-                                            writeConnection {
-                                                it.copy(connectionPhase = ConnectionPhase.Connecting)
-                                            }
-                                            continue
+                                        repository.applyTofuDecision(hostPort, decision)
+                                        // §tofu R2 round-2 fix (cgpt/groker): applyTofuDecision 重建了
+                                        // REST/SSE/command，但图片客户端独立——同步刷新，否则新信任的自签
+                                        // host 的 markdown 图片仍走 SystemDefault 直到下次 reconfigure。
+                                        cn.vectory.ocdroid.ui.util.HttpImageHolder.updateSsl(repository.currentSslConfig())
+                                        writeConnection {
+                                            it.copy(connectionPhase = ConnectionPhase.Connecting)
+                                        }
+                                        continue
                                         }
                                         TofuDecision.Cancel -> {
                                             // User declined — terminal failure.
@@ -378,6 +389,12 @@ class ConnectionCoordinator(
                         }
                     }
                     if (attempt >= maxAttempts || !isActive) {
+                        // §tofu R2 round-2 fix (cgpt): 另一个 job 正在 await TOFU 决策时，
+                        // 不宣布终态 Disconnected（否则弹窗仍显示却已断开，UI 不一致）——defer。
+                        if (pendingTofuHostPort != null) {
+                            DebugLog.i(TAG, "testConnection: deferring terminal — TOFU pending for $pendingTofuHostPort")
+                            return@launch
+                        }
                         // §R-17 batch2: error is now a one-shot UiEvent on
                         // _uiEvents (consumed app-wide). Connection fields stay
                         // on connectionFlow. Intermediate state legal (error

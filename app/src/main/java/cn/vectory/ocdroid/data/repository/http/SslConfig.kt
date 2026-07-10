@@ -16,17 +16,21 @@ import javax.net.ssl.TrustManagerFactory
 import javax.net.ssl.X509TrustManager
 
 /**
- * R-01 / R-18: SSL configuration abstraction. The default path delegates to
- * the system trust store; only when a profile explicitly opts into
- * `allowInsecureConnections` do we downgrade to trust-all. Extracted from
- * `OpenCodeRepository` to give all four OkHttp clients (REST / SSE / tunnel /
- * health) a single shared entry point and remove the previously duplicated
- * `applySsl` blocks.
+ * SSL configuration abstraction. The default path delegates to the system
+ * trust store (public-CA certs pass silently). Extracted from
+ * `OpenCodeRepository` to give every OkHttp client (REST / SSE / command /
+ * tunnel / health) a single shared entry point.
  *
- * §2.1: adds the [MutualTLS] branch for client-certificate mTLS (stunnel +
- * shared PKCS12). mTLS takes priority over `allowInsecure`; the mTLS path
- * NEVER overrides the hostname verifier (strict CN/SAN check against the
- * stunnel server cert).
+ * §2.1: [MutualTLS] — client-certificate mTLS (stunnel + shared PKCS12). mTLS
+ * takes priority; the mTLS path NEVER overrides the hostname verifier (strict
+ * CN/SAN check against the stunnel server cert).
+ *
+ * §tofu R2: [TofuPinned] — SSH-style TOFU; accepts a server leaf iff its SPKI
+ * matches the pinned fingerprint for the host:port. [SslConfigFactory] returns
+ * TofuPinned when a pin exists for the host; otherwise SystemDefault (a failed
+ * handshake triggers a capture probe → user decision). The legacy per-host
+ * `allowInsecureConnections` trust-all toggle is superseded by TOFU — there is
+ * NO trust-all path anymore (the old [TrustAll] variant was removed).
  */
 sealed interface SslConfig {
 
@@ -146,16 +150,16 @@ internal fun buildTofuPinnedConfig(spkiHex: String): SslConfig.TofuPinned {
 }
 
 /**
- * Builds (and memoizes) the [SslConfig] appropriate for a given
- * [allowInsecure] flag / client certificate. `@Singleton` so the trust-all
- * SSLContext is initialized at most once per process — consistent with the
- * pre-R-18 `private val trustAllConfig: SslConfig.TrustAll by lazy { ... }`
- * field on the repository.
+ * §tofu R2: resolves the [SslConfig] for a given host:port / client cert.
+ * `@Singleton` holding the cached mTLS config (configure-time) + the injected
+ * [TofuPinStore].
  *
- * §2.1: adds the mTLS branch. `sslConfigFor` returns mTLS first (priority
- * over allowInsecure); `resolveProbe` is the stateless variant for one-shot
- * health probes so probing an unrelated profile never reuses the live mTLS
- * cache (v3-gpter R2#1 阻断).
+ *  - `sslConfigFor(hostPort)` (live clients): mTLS (client cert) priority; else
+ *    TofuPinned if a pin exists for [hostPort]; else SystemDefault (public-CA
+ *    certs pass silently — a failed handshake triggers the capture flow).
+ *  - `resolveProbe(hostPort, clientCert)` (one-shot health probe): same routing
+ *    but NEVER reads the held mTLS cache (so probing an unrelated profile can't
+ *    leak the live client cert / private-CA trust — v3-gpter R2#1 阻断).
  */
 @Singleton
 class SslConfigFactory @Inject constructor(
