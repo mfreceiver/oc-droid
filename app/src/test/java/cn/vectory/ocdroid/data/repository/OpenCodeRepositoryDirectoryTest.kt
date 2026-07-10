@@ -552,7 +552,7 @@ class OpenCodeRepositoryDirectoryTest {
                 baseUrl = other.url("/").toString().trimEnd('/'),
                 username = null,
                 password = null,
-                allowInsecure = false
+                hostPort = null
             )
 
             assertTrue(result.isSuccess)
@@ -582,7 +582,7 @@ class OpenCodeRepositoryDirectoryTest {
             baseUrl = server.url("/").toString().trimEnd('/'),
             username = "alice",
             password = "secret",
-            allowInsecure = false
+            hostPort = null
         )
 
         assertTrue(result.isSuccess)
@@ -605,7 +605,7 @@ class OpenCodeRepositoryDirectoryTest {
             baseUrl = server.url("/").toString().trimEnd('/'),
             username = "",   // blank
             password = "secret",
-            allowInsecure = false
+            hostPort = null
         )
 
         val request = server.takeRequest()
@@ -623,7 +623,7 @@ class OpenCodeRepositoryDirectoryTest {
             baseUrl = server.url("/").toString().trimEnd('/'),
             username = null,
             password = null,
-            allowInsecure = false
+            hostPort = null
         )
 
         assertTrue(result.isFailure)
@@ -640,7 +640,7 @@ class OpenCodeRepositoryDirectoryTest {
             baseUrl = server.url("/").toString().trimEnd('/'),
             username = null,
             password = null,
-            allowInsecure = false
+            hostPort = null
         )
 
         assertTrue(result.isFailure)

@@ -11,6 +11,7 @@ package cn.vectory.ocdroid.ui
 import cn.vectory.ocdroid.data.model.toSession
 import cn.vectory.ocdroid.data.repository.OpenCodeRepository
 import cn.vectory.ocdroid.data.repository.HostProfileStore
+import cn.vectory.ocdroid.data.repository.http.hostPortFromUrl
 import cn.vectory.ocdroid.ui.settings.resolveMtlsDegradationMessage
 import cn.vectory.ocdroid.ui.util.HttpImageHolder
 import cn.vectory.ocdroid.util.SettingsManager
@@ -40,7 +41,7 @@ internal fun applySavedSettings(
         baseUrl = currentProfile.serverUrl,
         username = currentProfile.basicAuth?.username,
         password = password,
-        allowInsecureConnections = currentProfile.allowInsecureConnections,
+        hostPort = hostPortFromUrl(currentProfile.serverUrl),
         clientCert = clientCert
     )
     // #12 / §2.5(c) (gpter#4): 冷启动也要把 mTLS 信任策略同步给 image client，

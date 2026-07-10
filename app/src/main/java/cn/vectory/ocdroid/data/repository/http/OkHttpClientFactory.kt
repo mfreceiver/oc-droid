@@ -25,8 +25,14 @@ import javax.inject.Singleton
  *  - [tunnelClient]: SSL + 10 s/10 s timeouts, no interceptors (form POST auth).
  *  - [healthClient]: SSL + 10 s/10 s timeouts, no interceptors (one-shot probe).
  *
+ * §tofu R2: every variant takes `hostPort: String?` (the host:port authority
+ * of the current profile) instead of the legacy `allowInsecure: Boolean`.
+ * [SslConfigFactory.sslConfigFor] resolves the host:port to a TOFU pin when
+ * one exists (TofuPinned), else falls back to SystemDefault — there is no
+ * longer a blanket trust-all downgrade.
+ *
  * The base chain (see [baseBuilder]) composes, in order:
- *  1. SSL + cache (per [allowInsecure]).
+ *  1. SSL + cache (per [hostPort]).
  *  2. R-07 log gate: `BASIC` in DEBUG builds, `NONE` in release.
  *  3. [DirectoryHeaderInterceptor] → [AuthInterceptor] → [CacheControlInterceptor].
  *  4. [TrafficCountingInterceptor].
@@ -84,12 +90,17 @@ class OkHttpClientFactory @Inject constructor(
      * gate. Does NOT add the response-size cap (REST only) and does NOT
      * set `readTimeout` (REST vs SSE differ) — those are layered by each
      * variant.
+     *
+     * §tofu R2: takes [hostPort] (the host:port authority of the current
+     * profile) so the shared [SslConfigFactory.sslConfigFor] can resolve a
+     * TOFU pin for this endpoint (TofuPinned) or fall back to SystemDefault.
      */
-    private fun baseBuilder(allowInsecure: Boolean): OkHttpClient.Builder {
+    private fun baseBuilder(hostPort: String?): OkHttpClient.Builder {
         return OkHttpClient.Builder()
             .apply {
-                // R-01: SSL via the single shared entry point.
-                applySsl(sslConfigFactory.sslConfigFor(allowInsecure))
+                // R-01 / §tofu R2: SSL via the single shared entry point —
+                // resolves TOFU pin for [hostPort] when present.
+                applySsl(sslConfigFactory.sslConfigFor(hostPort))
                 // §16.1(a): attach the singleton cache (if resolvable) so
                 // it is reused across host switches rather than rebuilt
                 // per client.
@@ -109,15 +120,15 @@ class OkHttpClientFactory @Inject constructor(
     }
 
     /** REST client: base chain + §OOM P0 body-size cap + 30 s read timeout. */
-    fun restClient(allowInsecure: Boolean): OkHttpClient =
-        baseBuilder(allowInsecure)
+    fun restClient(hostPort: String?): OkHttpClient =
+        baseBuilder(hostPort)
             .addInterceptor(responseSizeGuardInterceptor)
             .readTimeout(30, TimeUnit.SECONDS)
             .build()
 
     /** SSE client: base chain + 0 read timeout (SSE long connection). */
-    fun sseClient(allowInsecure: Boolean): OkHttpClient =
-        baseBuilder(allowInsecure)
+    fun sseClient(hostPort: String?): OkHttpClient =
+        baseBuilder(hostPort)
             .readTimeout(0, TimeUnit.SECONDS)
             .build()
 
@@ -151,8 +162,8 @@ class OkHttpClientFactory @Inject constructor(
      * defence-in-depth bound that brings [commandClient]'s body-size
      * posture in line with [restClient]'s.
      */
-    fun commandClient(allowInsecure: Boolean): OkHttpClient =
-        baseBuilder(allowInsecure)
+    fun commandClient(hostPort: String?): OkHttpClient =
+        baseBuilder(hostPort)
             .addInterceptor(responseSizeGuardInterceptor)
             .readTimeout(300, TimeUnit.SECONDS)
             .build()
@@ -162,8 +173,10 @@ class OkHttpClientFactory @Inject constructor(
      * timeouts, NO base interceptors — tunnel auth uses a form-encoded POST
      * (not HTTP Basic Auth), so the [AuthInterceptor] MUST NOT touch this
      * client (cf. `activateTunnel does not carry Basic Auth header`).
+     *
+     * §tofu R2: takes [hostPort] for TOFU pin resolution (was `allowInsecure`).
      */
-    fun tunnelClient(allowInsecure: Boolean): OkHttpClient = bareClient(allowInsecure)
+    fun tunnelClient(hostPort: String?): OkHttpClient = bareClient(hostPort)
 
     /**
      * One-shot health-probe client: SSL via the shared entry point + 15 s /
@@ -174,22 +187,25 @@ class OkHttpClientFactory @Inject constructor(
      * credentials inline as needed.
      *
      * §2.4: delegates to the [healthClient] overload that takes an explicit
-     * [SslConfig]. The [allowInsecure]-boolean variant resolves via the
-     * held [sslConfigFactory] (live host state); the test-connection path
-     * MUST use the [SslConfig] overload with a `resolveProbe`-resolved cfg
-     * so probing an unrelated profile does NOT reuse the current mTLS cache
+     * [SslConfig]. The [hostPort]-String? variant resolves via the held
+     * [sslConfigFactory] (live host state); the test-connection path MUST
+     * use the [SslConfig] overload with a `resolveProbe`-resolved cfg so
+     * probing an unrelated profile does NOT reuse the current mTLS cache
      * (v3-gpter R2#1 阻断).
+     *
+     * §tofu R2: [hostPort] replaces the legacy `allowInsecure: Boolean` —
+     * TOFU pin lookup is by host:port authority.
      */
-    fun healthClient(allowInsecure: Boolean): OkHttpClient =
-        healthClient(sslConfigFactory.sslConfigFor(allowInsecure))
+    fun healthClient(hostPort: String?): OkHttpClient =
+        healthClient(sslConfigFactory.sslConfigFor(hostPort))
 
     /**
      * §2.4: non-mutating health-probe client built from an explicit [cfg]
      * (typically produced by [SslConfigFactory.resolveProbe]). Same timeouts
-     * + no base interceptors as the [allowInsecure] variant; the difference
-     * is that the SSL config is caller-supplied, so a one-shot mTLS probe
-     * against an UNRELATED host does not consult this factory's held live
-     * mTLS state.
+     * + no base interceptors as the [hostPort] variant; the difference is
+     * that the SSL config is caller-supplied, so a one-shot mTLS / TOFU
+     * probe against an UNRELATED host does not consult this factory's held
+     * live mTLS state.
      */
     fun healthClient(cfg: SslConfig): OkHttpClient =
         OkHttpClient.Builder()
@@ -198,8 +214,8 @@ class OkHttpClientFactory @Inject constructor(
             .readTimeout(10, TimeUnit.SECONDS)
             .build()
 
-    private fun bareClient(allowInsecure: Boolean): OkHttpClient =
-        healthClient(allowInsecure)
+    private fun bareClient(hostPort: String?): OkHttpClient =
+        healthClient(hostPort)
 
     companion object {
         /** §16.1(a): HTTP cache size cap (50 MB) per the redesign plan. */

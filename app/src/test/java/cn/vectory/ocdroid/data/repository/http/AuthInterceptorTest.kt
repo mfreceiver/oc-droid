@@ -32,7 +32,7 @@ class AuthInterceptorTest {
                 baseUrl = server.url("/").toString().trimEnd('/'),
                 username = null,
                 password = null,
-                allowInsecure = false
+hostPort = null
             )
         }
         client = OkHttpClient.Builder()
@@ -51,7 +51,7 @@ class AuthInterceptorTest {
             baseUrl = server.url("/").toString().trimEnd('/'),
             username = "alice",
             password = "secret",
-            allowInsecure = false
+            hostPort = null
         )
         server.enqueue(MockResponse().setBody("ok"))
 
@@ -80,7 +80,7 @@ class AuthInterceptorTest {
             baseUrl = server.url("/").toString().trimEnd('/'),
             username = "alice",
             password = null,
-            allowInsecure = false
+            hostPort = null
         )
         server.enqueue(MockResponse().setBody("ok"))
 
@@ -100,7 +100,7 @@ class AuthInterceptorTest {
             baseUrl = server.url("/").toString().trimEnd('/'),
             username = null,
             password = "secret",
-            allowInsecure = false
+            hostPort = null
         )
         server.enqueue(MockResponse().setBody("ok"))
 
@@ -117,7 +117,7 @@ class AuthInterceptorTest {
             baseUrl = server.url("/").toString().trimEnd('/'),
             username = "u",
             password = "p",
-            allowInsecure = false
+            hostPort = null
         )
         server.enqueue(MockResponse().setBody("ok"))
 

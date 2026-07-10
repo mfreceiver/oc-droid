@@ -47,6 +47,20 @@ fun hostPortFromUrl(url: String): String? = runCatching {
 /** A captured leaf + its SPKI, from a one-shot capture probe. */
 data class CapturedCert(val leaf: X509Certificate, val spkiHex: String)
 
+/**
+ * §tofu R2: the UI's trust decision for a captured cert. Drives the two-tier
+ * [TofuPinStore] write (or no-op on Cancel). Carried back to the coordinator
+ * which applies it via [OpenCodeRepository.applyTofuDecision] and re-probes.
+ */
+sealed interface TofuDecision {
+    /** "Accept once": session-only pin (lost on process death → re-prompts). */
+    data class AcceptOnce(val spki: String) : TofuDecision
+    /** "Trust": persistent pin (cold-start-surviving). */
+    data class Trust(val spki: String) : TofuDecision
+    /** "Cancel": abort — no pin written, the in-flight connect is settled false. */
+    data object Cancel : TofuDecision
+}
+
 /** Best-effort reason a server cert failed system validation (UI tone only). */
 enum class TofuFailureReason { UNKNOWN_ISSUER, EXPIRED, HOSTNAME_MISMATCH, OTHER }
 

@@ -39,7 +39,6 @@ import androidx.compose.material3.ListItemDefaults
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.RadioButton
-import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
@@ -205,11 +204,13 @@ internal fun HostProfilesManagerScreen(
             // 回退查已保存密码。用户主动清空/改密码（passwordEdited=true）则按表单值测，
             // 不回退旧凭据（安全）。§2.7: mTLS 字段透传给 VM，由 VM 构造 ClientCertMaterial
             // （Dialog 无 settingsManager）→ checkHealthFor(..., clientCert)。
-            onTestConnection = { url, user, pass, insecure, profileId, passwordEdited,
+            // §tofu R2: allowInsecure 不再透传——TOFU 取代 trust-all 降级；self-signed
+            // endpoint 在 checkHealthFor 失败时由 coordinator 捕获 leaf 证书并弹 TOFU 对话框。
+            onTestConnection = { url, user, pass, profileId, passwordEdited,
                                  mtlsEnabled, stagedP12, hasImportedP12, caStage, p12Password, p12PasswordEdited,
                                  clientCertId, callback ->
                 connectionVM.testConnectionForm(
-                    url, user, pass, insecure, profileId, passwordEdited,
+                    url, user, pass, profileId, passwordEdited,
                     mtlsEnabled, stagedP12, hasImportedP12, caStage, p12Password, p12PasswordEdited,
                     clientCertId, callback
                 )
@@ -371,7 +372,6 @@ internal fun HostProfileEditorDialog(
         baseUrl: String,
         username: String?,
         password: String?,
-        allowInsecure: Boolean,
         profileId: String?,
         passwordEdited: Boolean,
         // §2.7 mTLS 透传字段：
@@ -383,7 +383,7 @@ internal fun HostProfileEditorDialog(
         p12PasswordEdited: Boolean,
         clientCertId: String?,
         onResult: (Boolean, String) -> Unit
-    ) -> Unit = { _, _, _, _, _, _, _, _, _, _, _, _, _, _ -> },
+    ) -> Unit = { _, _, _, _, _, _, _, _, _, _, _, _, _ -> },
     // §fix-3 (gro-1#2/gpt-2#2/max-1 M1): 当前 host 的 mTLS 降级错误（缺失/损坏），
     // 由调用方从 ConnectionState.mtlsDegradedError 注入；非 null 时在 mTLS 区块顶部
     // 显示红色 banner，让用户看到「证书加载失败」而非泛化连接失败。
@@ -404,9 +404,11 @@ internal fun HostProfileEditorDialog(
         initial.serverGroupFp.takeIf { it in groupLabels }
     }
     var selectedGroup by remember(initial.id, initial.serverGroupFp) { mutableStateOf(initialGroup) }
-    // R-01: per-host "接受不安全连接"开关（自签证书/内网 TLS 用户需要显式启用，
-    // 否则全局 strict 校验会直接拒绝连接）。种子取自当前 HostProfile。
-    var allowInsecure by remember(initial.id) { mutableStateOf(initial.allowInsecureConnections) }
+    // §tofu R2: the legacy `allowInsecure` toggle (per-host trust-all) is
+    // GONE — self-signed / unknown-issuer endpoints now surface a TOFU trust
+    // dialog at first connect (the connection coordinator captures the leaf
+    // cert and asks the user to Accept once / Trust / Cancel). No editor
+    // state needed.
     // §mtls-clipboard: 折叠区开关——新 profile 全 false（§design E），既有 profile
     // 按是否配置了对应凭据种子。三个区（Basic Auth / 隧道 / mTLS）共用
     // [CollapsibleSection] 容器，关则隐藏内容并在保存时清空对应凭据。
@@ -588,7 +590,6 @@ internal fun HostProfileEditorDialog(
         val testResult = buildTestCall(
             initial = initial,
             serverUrl = serverUrl,
-            allowInsecure = allowInsecure,
             basicAuthEnabled = basicAuthEnabled,
             authUsername = authUsername,
             authPassword = authPassword,
@@ -603,11 +604,11 @@ internal fun HostProfileEditorDialog(
         testStatus = null
         // §2.7: 透传 mTLS 编辑意图（不在此构造 ClientCertMaterial——Dialog 无
         // settingsManager；由回调接收方 VM 构造）。onTestConnection 内部走 viewModelScope。
+        // §tofu R2: allowInsecure 不再透传——TOFU 取代 trust-all 降级。
         onTestConnection(
             testResult.url,
             testResult.userSnap,
             testResult.authPwSnap,
-            testResult.insecureSnap,
             testResult.profileIdSnap,
             testResult.pwEditedSnap,
             testResult.mtlsOn,
@@ -836,45 +837,25 @@ internal fun HostProfileEditorDialog(
                     }
                 }
                 Spacer(modifier = Modifier.height(12.dp))
-                // R-01: per-host insecure-connections toggle. Off by default
-                // (strict TLS); enabling it downgrades this host's REST/SSE/
-                // health/tunnel clients to trust-all so self-signed or internal
-                // TLS servers can connect. The warning makes the MITM risk
-                // explicit at the point of enablement.
-                // §2.7 (glmer I7): 与 mTLS 互斥——开启 mTLS 时禁用本开关，防日后
-                // 关 mTLS 时静默降级 trust-all（mTLS 优先级也由 SslConfigFactory 保证）。
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Column(modifier = Modifier.weight(1f)) {
-                        Text(stringResource(R.string.host_allow_insecure_title))
-                        Text(
-                            stringResource(R.string.host_allow_insecure_summary),
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                    }
-                    Spacer(modifier = Modifier.width(8.dp))
-                    Switch(
-                        checked = allowInsecure,
-                        onCheckedChange = { allowInsecure = it },
-                        enabled = !mtlsEnabled
-                    )
-                }
+                // §tofu R2: the legacy "Insecure HTTPS" toggle Row is REMOVED.
+                // Self-signed / unknown-issuer endpoints now surface a TOFU
+                // trust dialog at first connect (Accept once / Trust / Cancel),
+                // keyed by host:port. No editor affordance needed — the user
+                // trusts at runtime when the actual cert is in hand, not in
+                // the abstract per-profile. The strings
+                // host_allow_insecure_title / host_allow_insecure_summary
+                // are dropped from both locales (see strings.xml).
                 Spacer(modifier = Modifier.height(12.dp))
                 // §mtls-clipboard: mTLS 区块——折叠区容器（与 Basic Auth / 隧道一致），
-                // 内容为客户端证书 + CA 两个剪贴板导入槽。互斥：开启 mTLS 强制重置
-                // allowInsecure=false（onCheckedChange 内，glmer I7）。
+                // 内容为客户端证书 + CA 两个剪贴板导入槽。
+                // §tofu R2: 与原 allowInsecure 的互斥（开 mTLS 强制重置 allowInsecure）
+                // 已无意义——allowInsecure 字段已删；mTLS 不再需要重置它。
                 CollapsibleSection(
                     title = stringResource(R.string.host_mtls_title),
                     subtitle = stringResource(R.string.host_mtls_summary),
                     checked = mtlsEnabled,
                     onCheckedChange = {
                         mtlsEnabled = it
-                        // §2.7 / glmer I7：开启 mTLS 强制重置 allowInsecure，
-                        // 防关闭 mTLS 时静默降级 trust-all。
-                        if (it) allowInsecure = false
                     },
                 ) {
                     // §mtls-clipboard: 降级 banner（缺失/损坏 或粘贴解析错误）。
@@ -1004,7 +985,6 @@ internal fun HostProfileEditorDialog(
                                 initial = initial,
                                 name = name,
                                 serverUrl = serverUrl,
-                                allowInsecure = allowInsecure,
                                 selectedGroup = selectedGroup,
                                 initialGroup = initialGroup,
                                 basicAuthEnabled = basicAuthEnabled,

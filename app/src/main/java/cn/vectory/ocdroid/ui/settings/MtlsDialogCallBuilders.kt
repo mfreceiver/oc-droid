@@ -76,17 +76,21 @@ data class SaveCallResult(
 
 /**
  * §review-r4 (gpter R4 #3): positional-arg bundle produced by [buildTestCall]
- * and consumed by the dialog's `onTestConnection` 14-arg callback. The 14th arg
- * (`onResult: (Boolean, String) -> Unit`) is UI-side (updates isTesting /
- * testStatus) and is applied by the dialog at the call site — it is not part
- * of this snapshot bundle. Field order matches the onTestConnection positional
- * call site verbatim.
+ * and consumed by the dialog's `onTestConnection` 13-arg callback. The
+ * 14th arg (`onResult: (Boolean, String) -> Unit`) is UI-side (updates
+ * isTesting / testStatus) and is applied by the dialog at the call site — it
+ * is not part of this snapshot bundle. Field order matches the
+ * onTestConnection positional call site verbatim.
+ *
+ * §tofu R2: legacy `insecureSnap` dropped — `allowInsecure` no longer exists
+ * on the profile; self-signed / unknown-issuer endpoints are now handled by
+ * the TOFU trust dialog at first connect. The positional onTestConnection
+ * call site shrank from 14→13 args accordingly.
  */
 data class TestCallResult(
     val url: String,
     val userSnap: String?,
     val authPwSnap: String?,
-    val insecureSnap: Boolean,
     val profileIdSnap: String?,
     val pwEditedSnap: Boolean,
     val mtlsOn: Boolean,
@@ -115,7 +119,6 @@ internal fun buildSaveCall(
     initial: HostProfile,
     name: String,
     serverUrl: String,
-    allowInsecure: Boolean,
     selectedGroup: String?,
     initialGroup: String?,
     basicAuthEnabled: Boolean,
@@ -163,7 +166,6 @@ internal fun buildSaveCall(
         serverUrl = serverUrl,
         basicAuth = basicAuth,
         tunnelPasswordId = tunnelId,
-        allowInsecureConnections = allowInsecure,
         serverGroupFp = if (selectedGroup != initialGroup) {
             selectedGroup ?: initial.id
         } else {
@@ -198,14 +200,17 @@ internal fun buildSaveCall(
  * `hasMaterial` gating via [mtlsHasMaterial] are unit-testable without Compose
  * (see [MtlsDialogCallBuildersTest]).
  *
- * Returns a [TestCallResult] whose field order matches the 13-arg-data part of
- * the 14-arg `onTestConnection` positional call site (the 14th arg is the
+ * Returns a [TestCallResult] whose field order matches the 12-arg-data part of
+ * the 13-arg `onTestConnection` positional call site (the 13th arg is the
  * UI-side result callback, not part of the snapshot).
+ *
+ * §tofu R2: the legacy `allowInsecure` param is gone — self-signed endpoints
+ * surface a TOFU trust dialog at first connect instead of a per-profile
+ * trust-all toggle.
  */
 internal fun buildTestCall(
     initial: HostProfile,
     serverUrl: String,
-    allowInsecure: Boolean,
     basicAuthEnabled: Boolean,
     authUsername: String,
     authPassword: String,
@@ -250,7 +255,6 @@ internal fun buildTestCall(
         url = serverUrl,
         userSnap = userSnap,
         authPwSnap = authPwSnap,
-        insecureSnap = allowInsecure,
         profileIdSnap = profileIdSnap,
         pwEditedSnap = pwEditedSnap,
         mtlsOn = mtlsOn,

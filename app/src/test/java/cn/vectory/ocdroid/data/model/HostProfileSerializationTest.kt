@@ -40,13 +40,14 @@ class HostProfileSerializationTest {
             serverUrl = "https://opencode.example.com",
             basicAuth = BasicAuthConfig(username = "user", passwordId = "secret-1"),
             tunnelPasswordId = null,
-            allowInsecureConnections = true,
             lastUsedAt = 1234L
         )
         val encoded = json.encodeToString(profile)
         assertTrue(encoded.contains("\"serverURL\":\"https://opencode.example.com\""))
-        assertTrue(encoded.contains("\"allowInsecureConnections\":true"))
         assertTrue(encoded.contains("\"passwordId\":\"secret-1\""))
+        // §tofu R2: allowInsecureConnections field is GONE — its key must NOT
+        // appear in the encoded form.
+        assertFalse(encoded.contains("allowInsecureConnections"))
         val decoded = json.decodeFromString<HostProfile>(encoded)
         assertEquals(profile, decoded)
     }
@@ -54,7 +55,7 @@ class HostProfileSerializationTest {
     @Test
     fun `HostProfile tolerates unknown JSON fields`() {
         val decoded = json.decodeFromString<HostProfile>(
-            """{"id":"x","name":"n","serverURL":"u","transport":"direct","host":"h"}"""
+            """{"id":"x","name":"n","serverURL":"u","transport":"direct","host":"h","allowInsecureConnections":true}"""
         )
         assertEquals("x", decoded.id)
         assertEquals("u", decoded.serverUrl)
@@ -68,7 +69,6 @@ class HostProfileSerializationTest {
         assertEquals("x", decoded.id)
         assertNull(decoded.basicAuth)
         assertNull(decoded.tunnelPasswordId)
-        assertFalse(decoded.allowInsecureConnections)
         assertNull(decoded.lastUsedAt)
     }
 
@@ -100,7 +100,6 @@ class HostProfileSerializationTest {
         assertEquals("http://localhost:4096", profile.serverUrl)
         assertNull(profile.basicAuth)
         assertNotNull(profile.lastUsedAt)
-        assertFalse(profile.allowInsecureConnections)
     }
 
     @Test
@@ -162,15 +161,15 @@ class HostProfileSerializationTest {
     // ── HostProfileExportPayload.from ─────────────────────────────────────
 
     @Test
-    fun `HostProfileExportPayload from copies name url and insecure flag`() {
+    fun `HostProfileExportPayload from copies name and url`() {
+        // §tofu R2: export payload no longer carries allowInsecureConnections
+        // (the field is gone from HostProfile; TOFU replaces the trust toggle).
         val profile = HostProfile(
-            id = "x", name = "Export Me", serverUrl = "https://oc.example.com",
-            allowInsecureConnections = true
+            id = "x", name = "Export Me", serverUrl = "https://oc.example.com"
         )
         val payload = HostProfileExportPayload.from(profile)
         assertEquals("Export Me", payload.name)
         assertEquals("https://oc.example.com", payload.serverUrl)
-        assertTrue(payload.allowInsecureConnections)
         assertEquals(1, payload.version)
     }
 
@@ -184,8 +183,9 @@ class HostProfileSerializationTest {
 
     @Test
     fun `HostProfileExportPayload round trip`() {
+        // §tofu R2: payload dropped its allowInsecureConnections field.
         val payload = HostProfileExportPayload(
-            version = 2, name = "N", serverUrl = "u", allowInsecureConnections = true
+            version = 2, name = "N", serverUrl = "u"
         )
         val encoded = json.encodeToString(payload)
         val decoded = json.decodeFromString<HostProfileExportPayload>(encoded)
@@ -195,18 +195,18 @@ class HostProfileSerializationTest {
     // ── HostProfileImportPayload.makeProfile ──────────────────────────────
 
     @Test
-    fun `HostProfileImportPayload makeProfile preserves allowInsecureConnections`() {
+    fun `HostProfileImportPayload makeProfile preserves name and trims url`() {
+        // §tofu R2: payload dropped its allowInsecureConnections field;
+        // makeProfile just seeds name + url.
         val payload = HostProfileImportPayload(
             version = 1,
             name = "From Import",
             serverUrl = "  https://oc.example.com  ",
-            allowInsecureConnections = true
         )
         val profile = payload.makeProfile()
         assertEquals("From Import", profile.name)
         // URL is trimmed before validation.
         assertEquals("https://oc.example.com", profile.serverUrl)
-        assertTrue(profile.allowInsecureConnections)
     }
 
     @Test
@@ -216,6 +216,5 @@ class HostProfileSerializationTest {
         )
         assertNull(payload.version)
         assertNull(payload.serverUrl)
-        assertFalse(payload.allowInsecureConnections)
     }
 }

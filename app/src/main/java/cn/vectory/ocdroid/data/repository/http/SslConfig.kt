@@ -55,6 +55,18 @@ sealed interface SslConfig {
         val trustManager: X509TrustManager,
         val socketFactory: SSLSocketFactory
     ) : SslConfig
+
+    /**
+     * §tofu R2: SSH-style TOFU — accepts the server chain iff the leaf SPKI
+     * matches the pinned fingerprint for this host:port. [trustManager] is a
+     * [PinningTrustManager]; the pin IS the trust (no chain/path validation).
+     * The hostname verifier is permissive (the SPKI pin, bound to the
+     * host:port we connected to, is the identity — grill Q4/Q5).
+     */
+    data class TofuPinned(
+        val trustManager: X509TrustManager,
+        val socketFactory: SSLSocketFactory
+    ) : SslConfig
 }
 
 /**
@@ -133,6 +145,19 @@ internal fun buildMutualTlsConfig(material: ClientCertMaterial): SslConfig.Mutua
 }
 
 /**
+ * §tofu R2: builds a [SslConfig.TofuPinned] that accepts a server leaf iff its
+ * SPKI SHA-256 == [spkiHex]. The pin IS the trust (no chain validation); the
+ * hostname verifier is permissive (identity = the pin). Built per stored pin.
+ */
+internal fun buildTofuPinnedConfig(spkiHex: String): SslConfig.TofuPinned {
+    val tm = PinningTrustManager(spkiHex)
+    val ctx = SSLContext.getInstance("TLS").apply {
+        init(null, arrayOf<TrustManager>(tm), SecureRandom())
+    }
+    return SslConfig.TofuPinned(tm, ctx.socketFactory)
+}
+
+/**
  * Builds (and memoizes) the [SslConfig] appropriate for a given
  * [allowInsecure] flag / client certificate. `@Singleton` so the trust-all
  * SSLContext is initialized at most once per process — consistent with the
@@ -145,7 +170,9 @@ internal fun buildMutualTlsConfig(material: ClientCertMaterial): SslConfig.Mutua
  * cache (v3-gpter R2#1 阻断).
  */
 @Singleton
-class SslConfigFactory @Inject constructor() {
+class SslConfigFactory @Inject constructor(
+    private val tofuStore: TofuPinStore
+) {
 
     private val trustAllTrustManager: X509TrustManager = object : X509TrustManager {
         override fun checkClientTrusted(chain: Array<X509Certificate>, authType: String) {}
@@ -195,13 +222,14 @@ class SslConfigFactory @Inject constructor() {
     }
 
     /**
-     * 有状态解析（给 live client）：mTLS 优先于 allowInsecure；
-     * SystemDefault 安全兜底。
+     * 有状态解析（给 live client）：mTLS 优先；否则该 host:port 有 TOFU pin →
+     * TofuPinned；否则 SystemDefault（公网证书静默放行；握手失败才触发捕获）。
+     * §tofu R2: [hostPort] 替代了原 allowInsecure（grill Q5/Q6）。
      */
-    fun sslConfigFor(allowInsecure: Boolean): SslConfig = when {
+    fun sslConfigFor(hostPort: String?): SslConfig = when {
         mutualTlsConfig != null -> mutualTlsConfig!!
-        allowInsecure -> trustAllConfig
-        else -> SslConfig.SystemDefault
+        else -> hostPort?.let { tofuStore.pinnedSpki(it) }?.let { buildTofuPinnedConfig(it) }
+            ?: SslConfig.SystemDefault
     }
 
     /**
@@ -209,11 +237,12 @@ class SslConfigFactory @Inject constructor() {
      * **不读 held [mutualTlsConfig]**，完全由入参决定——否则测他 profile
      * （clientCert=null）时会复用当前 mTLS profile 的缓存，误出示其客户端证书 /
      * 只信其私有 CA，甚至泄漏客户端身份给无关 host。
+     * §tofu R2: [hostPort] 替代 allowInsecure（探测也走 TOFU pin 查询）。
      */
-    fun resolveProbe(allowInsecure: Boolean, clientCert: ClientCertMaterial?): SslConfig = when {
+    fun resolveProbe(hostPort: String?, clientCert: ClientCertMaterial?): SslConfig = when {
         clientCert != null -> buildMutualTlsConfig(clientCert)
-        allowInsecure -> trustAllConfig
-        else -> SslConfig.SystemDefault
+        else -> hostPort?.let { tofuStore.pinnedSpki(it) }?.let { buildTofuPinnedConfig(it) }
+            ?: SslConfig.SystemDefault
     }
 
     private fun buildTrustAllSocketFactory(): SSLSocketFactory {
@@ -245,4 +274,10 @@ fun OkHttpClient.Builder.applySsl(cfg: SslConfig): OkHttpClient.Builder = when (
         sslSocketFactory(cfg.socketFactory, cfg.trustManager)
         // 无 hostnameVerifier 覆盖 → OkHttp 严格默认。stunnel 服务端证书 SAN
         // 必须匹配 serverUrl host（DNS / IP）。
+    is SslConfig.TofuPinned ->
+        sslSocketFactory(cfg.socketFactory, cfg.trustManager)
+            .hostnameVerifier { _, _ -> true }
+        // §tofu R2: pin 即身份（SPKI 绑定 host:port）。自签名证书 SAN 常不匹配
+        // 连接目标，故放行 hostnameVerifier——安全由 PinningTrustManager 的 SPKI
+        // 比对保证，而非主机名（grill Q4）。
 }

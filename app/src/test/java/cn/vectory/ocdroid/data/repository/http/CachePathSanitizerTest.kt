@@ -23,7 +23,7 @@ class CachePathSanitizerTest {
             baseUrl = "http://localhost:4096",
             username = null,
             password = null,
-            allowInsecure = false
+            hostPort = null
         )
         assertEquals("/global/health", sanitizer.cacheRelativePath("/global/health"))
         assertEquals("/session/abc", sanitizer.cacheRelativePath("/session/abc"))
@@ -35,7 +35,7 @@ class CachePathSanitizerTest {
             baseUrl = "localhost:4096",
             username = null,
             password = null,
-            allowInsecure = false
+            hostPort = null
         )
         assertEquals("/agent", sanitizer.cacheRelativePath("/agent"))
     }
@@ -46,7 +46,7 @@ class CachePathSanitizerTest {
             baseUrl = "http://host.example/opencode",
             username = null,
             password = null,
-            allowInsecure = false
+            hostPort = null
         )
         assertEquals(
             "/agent",
@@ -64,7 +64,7 @@ class CachePathSanitizerTest {
             baseUrl = "http://host.example/opencode/",
             username = null,
             password = null,
-            allowInsecure = false
+            hostPort = null
         )
         // trimEnd('/') normalises the trailing slash so the prefix-strip
         // behaves identically to the no-trailing-slash case.
@@ -80,7 +80,7 @@ class CachePathSanitizerTest {
             baseUrl = "http://host.example/opencode",
             username = null,
             password = null,
-            allowInsecure = false
+            hostPort = null
         )
         // /session is not under /opencode, so it should be returned as-is
         // (the startsWith("$basePath/") check is intentionally strict to
@@ -94,7 +94,7 @@ class CachePathSanitizerTest {
             baseUrl = "http://host.example/opencode",
             username = null,
             password = null,
-            allowInsecure = false
+            hostPort = null
         )
         // Request path equals basePath exactly (no trailing segment) — the
         // startsWith("$basePath/") check is false, so nothing is stripped.
@@ -110,7 +110,7 @@ class CachePathSanitizerTest {
             baseUrl = "http://host/a",
             username = null,
             password = null,
-            allowInsecure = false
+            hostPort = null
         )
         assertEquals("/agent", sanitizer.cacheRelativePath("/a/agent"))
 
@@ -118,7 +118,7 @@ class CachePathSanitizerTest {
             baseUrl = "http://other/b",
             username = null,
             password = null,
-            allowInsecure = false
+            hostPort = null
         )
         assertEquals("/agent", sanitizer.cacheRelativePath("/b/agent"))
         // The old prefix is no longer stripped.
@@ -144,7 +144,7 @@ class CachePathSanitizerTest {
             baseUrl = "http://host/opencode",
             username = null,
             password = null,
-            allowInsecure = false
+            hostPort = null
         )
         // Empty string does NOT start with "$basePath/" so it falls through
         // to the else branch (return as-is). Pin this so the sanitizer
@@ -158,7 +158,7 @@ class CachePathSanitizerTest {
             baseUrl = "http://host/api/v2",
             username = null,
             password = null,
-            allowInsecure = false
+            hostPort = null
         )
         // The whole "/api/v2" prefix must come off in one shot.
         assertEquals("/session", sanitizer.cacheRelativePath("/api/v2/session"))
@@ -171,7 +171,7 @@ class CachePathSanitizerTest {
             baseUrl = "http://host/api/v2/",
             username = null,
             password = null,
-            allowInsecure = false
+            hostPort = null
         )
         // trimEnd('/') normalises the trailing slash so the strip behaves
         // identically to the no-trailing-slash case.
@@ -184,7 +184,7 @@ class CachePathSanitizerTest {
             baseUrl = "http://host/api/v2",
             username = null,
             password = null,
-            allowInsecure = false
+            hostPort = null
         )
         // "/api/v3/agent" only shares "/api" prefix; the strict startsWith
         // check requires the FULL basePath, so this is NOT stripped.
@@ -203,7 +203,7 @@ class CachePathSanitizerTest {
             baseUrl = "/opencode",
             username = null,
             password = null,
-            allowInsecure = false
+            hostPort = null
         )
         assertEquals("/agent", sanitizer.cacheRelativePath("/opencode/agent"))
         assertEquals("/opencode", sanitizer.cacheRelativePath("/opencode"))
@@ -212,15 +212,15 @@ class CachePathSanitizerTest {
     @Test
     fun `sanitizer reads the latest baseUrl snapshot after multiple reconfigures`() {
         // Three consecutive configs; each must replace the previous basePath.
-        hostConfig.configure("http://h/x", null, null, false)
+        hostConfig.configure("http://h/x", null, null, null)
         assertEquals("/agent", sanitizer.cacheRelativePath("/x/agent"))
         assertEquals("/y/agent", sanitizer.cacheRelativePath("/y/agent"))
 
-        hostConfig.configure("http://h/y", null, null, false)
+        hostConfig.configure("http://h/y", null, null, null)
         assertEquals("/agent", sanitizer.cacheRelativePath("/y/agent"))
         assertEquals("/x/agent", sanitizer.cacheRelativePath("/x/agent"))
 
-        hostConfig.configure("http://h", null, null, false)
+        hostConfig.configure("http://h", null, null, null)
         // No basePath now → both old prefixed paths returned as-is.
         assertEquals("/x/agent", sanitizer.cacheRelativePath("/x/agent"))
         assertEquals("/y/agent", sanitizer.cacheRelativePath("/y/agent"))

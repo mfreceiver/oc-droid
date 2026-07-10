@@ -1,5 +1,6 @@
 package cn.vectory.ocdroid.ui.util
 
+import cn.vectory.ocdroid.data.repository.http.InMemoryTofuPinStore
 import cn.vectory.ocdroid.data.repository.http.SslConfig
 import cn.vectory.ocdroid.data.repository.http.SslConfigFactory
 import org.junit.After
@@ -9,15 +10,20 @@ import org.junit.Before
 import org.junit.Test
 
 /**
- * R18 Phase 5++ / §2.6: the testable (non-Bitmap, non-OkHttp-execution) surface
- * of [HttpImageHolder]. Coverage gap before this file: 2/62 methods, 79/719
- * instructions (mostly driven indirectly by HostProfileControllerTest via
- * updateSsl; resetTestState / onLowMemory / lastUpdateSslMode /
- * prefetch-no-op-when-cached / diskName-hash-stability were uncovered).
+ * R18 Phase 5++ / §2.6 / §tofu R2: the testable (non-Bitmap, non-OkHttp-
+ * execution) surface of [HttpImageHolder]. Coverage gap before this file:
+ * 2/62 methods, 79/719 instructions (mostly driven indirectly by
+ * HostProfileControllerTest via updateSsl; resetTestState / onLowMemory /
+ * lastUpdateSslMode / prefetch-no-op-when-cached / diskName-hash-stability
+ * were uncovered).
  *
- * §2.6: [HttpImageHolder.updateSsl] 现接收 [SslConfig]（不再是 allowInsecure
- * Boolean）；测试钩子字段由 `lastUpdateSslAllowInsecure: Boolean?` 改为
- * `lastUpdateSslMode: String?`（{"SYSTEM","TRUST_ALL","MUTUAL_TLS"}）。
+ * §tofu R2: [HttpImageHolder.updateSsl] receives a resolved [SslConfig]
+ * (SystemDefault / TofuPinned / MutualTLS) — never TrustAll anymore (the
+ * trust-all downgrade was replaced by TOFU pinning). The test hook field
+ * `lastUpdateSslMode: String?` now reports values from
+ * {"SYSTEM","TRUST_ALL","MUTUAL_TLS","TOFU_PINNED"}; TrustAll stays in the
+ * `when` for back-compat with any future reintroduction but is no longer
+ * produced by [SslConfigFactory.sslConfigFor].
  *
  * Bitmap-touching paths (downloadAndCache / loadFromDiskIntoMemory /
  * putBitmap / load @Composable) are exercised under instrumentation; here we
@@ -26,7 +32,10 @@ import org.junit.Test
  */
 class HttpImageHolderStateTest {
 
-    private val factory = SslConfigFactory()
+    // §tofu R2: SslConfigFactory now requires a TofuPinStore; use the in-memory
+    // fake. A pinned host:port makes sslConfigFor return TofuPinned.
+    private val tofuStore = InMemoryTofuPinStore()
+    private val factory = SslConfigFactory(tofuStore)
 
     @Before
     fun resetState() {
@@ -61,25 +70,32 @@ class HttpImageHolderStateTest {
     }
 
     @Test
-    fun `updateSsl with a different config triggers a rebuild and records the call`() {
-        // Flip from default SystemDefault → TrustAll; the rebuild path runs.
-        HttpImageHolder.updateSsl(factory.sslConfigFor(allowInsecure = true))
+    fun `updateSsl with a TofuPinned config triggers a rebuild and records the call`() {
+        // §tofu R2: plant a session pin → factory returns TofuPinned for that
+        // host:port → the image client rebuild records TOFU_PINNED.
+        tofuStore.acceptSession("pinned.example:443", "ab".repeat(32))
+        val pinned = factory.sslConfigFor("pinned.example:443")
+        assertEquals("factory should produce TofuPinned", SslConfig.TofuPinned::class.java, pinned::class.java)
 
-        assertEquals("TRUST_ALL", HttpImageHolder.lastUpdateSslMode)
+        HttpImageHolder.updateSsl(pinned)
+
+        assertEquals("TOFU_PINNED", HttpImageHolder.lastUpdateSslMode)
     }
 
     @Test
     fun `updateSsl is idempotent when called twice with the same config instance`() {
-        val trustAll = factory.sslConfigFor(allowInsecure = true)
-        HttpImageHolder.updateSsl(trustAll)
-        HttpImageHolder.updateSsl(trustAll)
+        tofuStore.trustPersistent("pinned.example:443", "cd".repeat(32))
+        val pinned = factory.sslConfigFor("pinned.example:443")
+        HttpImageHolder.updateSsl(pinned)
+        HttpImageHolder.updateSsl(pinned)
 
-        assertEquals("TRUST_ALL", HttpImageHolder.lastUpdateSslMode)
+        assertEquals("TOFU_PINNED", HttpImageHolder.lastUpdateSslMode)
     }
 
     @Test
-    fun `updateSsl can flip back to SYSTEM after going TRUST_ALL`() {
-        HttpImageHolder.updateSsl(factory.sslConfigFor(allowInsecure = true))
+    fun `updateSsl can flip back to SYSTEM after going TOFU_PINNED`() {
+        tofuStore.acceptSession("pinned.example:443", "ef".repeat(32))
+        HttpImageHolder.updateSsl(factory.sslConfigFor("pinned.example:443"))
         HttpImageHolder.updateSsl(SslConfig.SystemDefault)
 
         assertEquals("SYSTEM", HttpImageHolder.lastUpdateSslMode)

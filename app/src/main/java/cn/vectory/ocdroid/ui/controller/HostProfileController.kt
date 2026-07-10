@@ -9,6 +9,7 @@ import cn.vectory.ocdroid.data.repository.HostProfileStore
 import cn.vectory.ocdroid.data.repository.OpenCodeRepository
 import cn.vectory.ocdroid.data.repository.http.ClientCertMaterial
 import cn.vectory.ocdroid.data.repository.http.buildMutualTlsConfig
+import cn.vectory.ocdroid.data.repository.http.hostPortFromUrl
 import cn.vectory.ocdroid.ui.ComposerState
 import cn.vectory.ocdroid.ui.ConnectionFormSettings
 import cn.vectory.ocdroid.ui.ConnectionPhase
@@ -148,18 +149,19 @@ class HostProfileController(
             profile
         }
         // #12: snapshot the previous profile (before save) so we can detect
-        // whether the allowInsecure toggle of the ACTIVE host changed — that
-        // is the case that needs a live repository reconfigure + reconnect.
-        // Without this, editing the current host's "不安全连接" persisted the
-        // flag but left the existing REST/SSE OkHttp clients on the old
-        // (SystemDefault) SSL config, so the toggle only took effect after a
-        // host switch or app restart.
-        // S-1: also detect a serverUrl change on the ACTIVE host — previously
+        // whether the serverUrl of the ACTIVE host changed — that is the case
+        // that needs a live repository reconfigure + reconnect. Without this,
+        // editing the current host's URL persisted the value but left the
+        // existing REST/SSE OkHttp clients on the old endpoint, so the change
+        // only took effect after a host switch or app restart.
+        // S-1: detect a serverUrl change on the ACTIVE host — previously
         // editing the current host's URL persisted the new value but left the
         // existing clients pointed at the OLD endpoint, so the change only
         // took effect after a host switch / app restart. Treat it the same as
         // a toggle change: reconfigure + force reconnect to build clients for
         // the new URL.
+        // §tofu R2: the allowInsecure toggle no longer exists; serverUrl +
+        // mTLS are the only reconfigure-triggering changes.
         val previous = hostProfileStore.profiles().firstOrNull { it.id == normalized.id }
         // §review-r3 (gpter block): validate + persist mTLS material FIRST.
         // applyClientCertSave can throw (e.g. mtlsEnabled with no client cert
@@ -186,12 +188,15 @@ class HostProfileController(
         refreshHostProfileState()
 
         // #12 / S-1 / §fix-3 gro-1/gpt-2/glm-2: if the saved profile is the
-        // currently active host AND either its allowInsecureConnections flag,
-        // its serverUrl, OR its mTLS configuration actually changed,
-        // reconfigure the live repository clients (REST / SSE / image) and
-        // force a reconnect so the new TLS trust policy / endpoint / client
-        // cert takes effect immediately. Mirrors the reconfigure+reconnect
-        // path used by selectHostProfile / deleteHostProfile(wasCurrent).
+        // currently active host AND either its serverUrl OR its mTLS
+        // configuration actually changed, reconfigure the live repository
+        // clients (REST / SSE / image) and force a reconnect so the new TLS
+        // trust policy / endpoint / client cert takes effect immediately.
+        // Mirrors the reconfigure+reconnect path used by selectHostProfile /
+        // deleteHostProfile(wasCurrent).
+        //
+        // §tofu R2: allowInsecure toggle removed; serverUrl + mTLS are the
+        // only reconfigure triggers.
         //
         // §fix-3 gro-1/gpt-2/glm-2 阻断: 旧条件不含 mTLS → 当前 host 开/关/换 mTLS
         // 证书后 live client 不重建。新增 mtlsChanged 维度。关键（glm-2/max-1 S1）：
@@ -199,7 +204,6 @@ class HostProfileController(
         // p12 / 换 CA / 改密码) 时 clientCertId 不变——仅比 id 不够，必须用显式材料
         // 编辑信号 [mtlsMaterialEdited]。
         val isActiveHost = normalized.id == slices.host.value.currentHostProfileId
-        val toggleChanged = previous?.allowInsecureConnections != normalized.allowInsecureConnections
         val urlChanged = previous?.serverUrl != normalized.serverUrl
         val mtlsMaterialEdited = when (clientCertEdit) {
             is ClientCertEditIntent.Update ->
@@ -220,7 +224,7 @@ class HostProfileController(
             // (now-empty) set.
             settingsManager.clearModelDataForGroup(normalized.serverGroupFp.ifBlank { normalized.id })
         }
-        if (isActiveHost && (toggleChanged || urlChanged || mtlsChanged)) {
+        if (isActiveHost && (urlChanged || mtlsChanged)) {
             configureRepositoryForProfile(normalized)
             // §R18 Phase 3 Wave 1 (P1-3 C 类): saveHostProfile 多发顺序敏感 → 保持同步 tryEmitEffect。
             // wrapping in scope.launch would race the synchronous purge above; FIFO via the
@@ -588,7 +592,9 @@ class HostProfileController(
      *
      * §Stage D: cancels in-flight SSE BEFORE repository.configure so events
      * from the previous credential/host don't land in AppState during the new
-     * probe. R-01: passes `allowInsecureConnections` from the current profile.
+     * probe. §tofu R2: passes the host:port authority (derived from the URL
+     * via [hostPortFromUrl]) so the TOFU pin lookup resolves for previously-
+     * trusted endpoints — replaces the legacy `allowInsecureConnections` flag.
      */
     fun configureServer(url: String, username: String? = null, password: String? = null) {
         val oldUrl = settingsManager.serverUrl
@@ -610,12 +616,12 @@ class HostProfileController(
         settingsManager.password = password
         val profile = currentHostProfile()
         // §2.5(b): 注入 mTLS 客户端证书材料（profile.mtlsEnabled 时从 ESP 载入）。
-        // 手动输新 URL（未存为 profile）会沿用当前 profile 的证书——与现有
-        // allowInsecure 同一对称局限；客户端证书为带外公开件、风险低（glmer S9）。
+        // 手动输新 URL（未存为 profile）会沿用当前 profile 的证书——客户端证书为
+        // 带外公开件、风险低（glmer S9）。
         val clientCert = if (profile.mtlsEnabled) profile.clientCertId?.let { settingsManager.loadClientCertMaterial(it) } else null
         repository.configure(
             url, username, password,
-            allowInsecureConnections = profile.allowInsecureConnections,
+            hostPort = hostPortFromUrl(url),
             clientCert = clientCert
         )
         // #12 / §2.5(b): mirror the host's TLS trust policy (incl. mTLS) into
@@ -631,8 +637,9 @@ class HostProfileController(
 
     /**
      * Reconfigures the repository for a [profile]: cancels SSE, configures the
-     * URL/credentials with the profile's allowInsecureConnections flag (R-01),
-     * and (Phase 1) restored the persisted workdir.
+     * URL/credentials with the profile's host:port authority for TOFU pin
+     * lookup (§tofu R2 — was the legacy `allowInsecureConnections` flag), and
+     * (Phase 1) restored the persisted workdir.
      *
      * §Stage D (gpter 阻塞 #1): this is the single authoritative SSE
      * cancellation point for all profile-based reconfigure paths
@@ -652,7 +659,7 @@ class HostProfileController(
         val clientCert = if (profile.mtlsEnabled) profile.clientCertId?.let { settingsManager.loadClientCertMaterial(it) } else null
         repository.configure(
             profile.serverUrl, profile.basicAuth?.username, password,
-            allowInsecureConnections = profile.allowInsecureConnections,
+            hostPort = hostPortFromUrl(profile.serverUrl),
             clientCert = clientCert
         )
         // #12 / §2.5(a): keep the markdown image HTTP client's TLS trust policy
@@ -713,7 +720,8 @@ class HostProfileController(
      * Activates the tunnel for the current host profile. Surfaces
      * loading/error/success state through `tunnelActivationState` on the
      * connection slice + UiEvent.Error/Success via [effects.uiEvents].
-     * R-01: passes `allowInsecureConnections` from the profile.
+     * §tofu R2: passes the host:port authority (derived from the profile URL)
+     * so the tunnel client honors any TOFU pin for this endpoint.
      */
     fun activateTunnelForCurrentHost() {
         val profile = hostProfileStore.currentProfile()
@@ -742,7 +750,7 @@ class HostProfileController(
         scope.launch {
             repository.activateTunnel(
                 profile.serverUrl, password,
-                allowInsecure = profile.allowInsecureConnections
+                hostPort = hostPortFromUrl(profile.serverUrl)
             )
                 .onSuccess {
                     slices.mutateConnection {

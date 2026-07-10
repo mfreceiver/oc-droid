@@ -54,6 +54,14 @@ sealed class ConnectionPhase {
     data object Reconnecting : ConnectionPhase()
     /** Retry-loop reconnect with backoff; carries the attempt counter for UI. */
     data class ReconnectingAttempt(val attempt: Int, val maxAttempts: Int) : ConnectionPhase()
+    /**
+     * §tofu R2: SSL/cert error against an unpinned endpoint — the coordinator
+     * captured the leaf cert and is WAITING for the user's TOFU trust decision
+     * (Accept once / Trust / Cancel). The retry loop is suspended (no retries
+     * burn) and cold-start reconnect / SSE start are FROZEN while in this
+     * phase. UI renders [cn.vectory.ocdroid.ui.settings.TofuTrustDialog].
+     */
+    data object AwaitingTofuTrust : ConnectionPhase()
     /** Probe failed terminally (retries exhausted or one-shot failure). */
     data object Disconnected : ConnectionPhase()
 }
@@ -82,7 +90,19 @@ data class ConnectionState(
      * 用户看到「证书加载失败」而非泛化「连接失败」。null = 无 mTLS 降级。每次
      * configure（切 host / 冷启 / 保存）重置。
      */
-    val mtlsDegradedError: String? = null
+    val mtlsDegradedError: String? = null,
+    /**
+     * §tofu R2: non-null = the connection hit an SSL/cert error against an
+     * endpoint with NO TOFU pin yet, the coordinator captured the leaf cert,
+     * and is now WAITING for the user's trust decision (Accept once / Trust /
+     * Cancel). The UI observes this field and renders [TofuTrustDialog]. While
+     * non-null, the retry loop is SUSPENDED (no retries burn) AND
+     * [cn.vectory.ocdroid.ui.controller.ConnectionCoordinator.coldStartReconnect]
+     * / [startSSE] are FROZEN (they early-return). Set by the coordinator on
+     * capture; cleared by [ConnectionCoordinator.resolveTofuTrust] once the
+     * decision is applied (then the loop re-probes with the new pin).
+     */
+    val pendingTofuCapture: cn.vectory.ocdroid.data.repository.OpenCodeRepository.TofuCaptureResult? = null
 )
 
 /**

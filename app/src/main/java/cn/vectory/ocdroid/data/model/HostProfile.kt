@@ -50,18 +50,14 @@ data class HostProfile(
     @SerialName("serverGroupFp")
     val serverGroupFp: String = "",
     /**
-     * R-01: per-host "接受不安全连接"开关。默认 false（仅信任系统证书），
-     * 设为 true 时该 host 的 REST/SSE/health/tunnel client 全部降级为 trust-all。
-     * 这是把原先全局硬编码的 trustAll 收紧为按 host 的显式、可审计的开关。
-     */
-    @SerialName("allowInsecureConnections")
-    val allowInsecureConnections: Boolean = false,
-    /**
      * §2.2: 开启后所有客户端 TLS 握手出示 [clientCertId] 对应的 PKCS12。
-     * 与 [allowInsecureConnections] 效果互斥（mTLS 优先；UI 开 mTLS 时强制
-     * 重置 allowInsecure=false，防日后关 mTLS 时静默降级 trust-all）。
      *
-     * 向后兼容：旧 JSON 无此字段 → false（默认值）。
+     * §tofu R2: 与原 `allowInsecureConnections`（已删——TOFU 替代 trust-all 降级）
+     * 不再互斥——self-signed / unknown-issuer 证书现在由首次连接时的 TOFU 信任
+     * 对话框处理，无需 profile 字段。本字段仅控制是否出示客户端证书（mTLS）。
+     *
+     * 向后兼容：旧 JSON 无此字段 → false（默认值）。`ignoreUnknownKeys=true` 让
+     * 旧 JSON 里的 `allowInsecureConnections` 字段在反序列化时静默丢弃。
      */
     @SerialName("mtlsEnabled")
     val mtlsEnabled: Boolean = false,
@@ -114,9 +110,9 @@ data class HostProfileImportPayload(
     val version: Int? = null,
     val name: String,
     @SerialName("serverURL")
-    val serverUrl: String? = null,
-    @SerialName("allowInsecureConnections")
-    val allowInsecureConnections: Boolean = false
+    val serverUrl: String? = null
+    // §tofu R2: legacy `allowInsecureConnections` dropped — TOFU replaces the
+    // trust-all downgrade. ignoreUnknownKeys lets old imports still parse.
 ) {
     fun makeProfile(): HostProfile {
         val url = serverUrl?.trim().orEmpty()
@@ -129,7 +125,6 @@ data class HostProfileImportPayload(
             id = id,
             name = name,
             serverUrl = url,
-            allowInsecureConnections = allowInsecureConnections,
             serverGroupFp = id
         )
     }
@@ -140,9 +135,8 @@ data class HostProfileExportPayload(
     val version: Int = 1,
     val name: String,
     @SerialName("serverURL")
-    val serverUrl: String,
-    @SerialName("allowInsecureConnections")
-    val allowInsecureConnections: Boolean = false
+    val serverUrl: String
+    // §tofu R2: legacy `allowInsecureConnections` dropped (see HostProfileImportPayload).
 ) {
     companion object {
         fun from(profile: HostProfile): HostProfileExportPayload {
@@ -151,8 +145,7 @@ data class HostProfileExportPayload(
             // same payload twice creates two independent groups.
             return HostProfileExportPayload(
                 name = profile.displayName,
-                serverUrl = profile.serverUrl,
-                allowInsecureConnections = profile.allowInsecureConnections
+                serverUrl = profile.serverUrl
             )
         }
     }

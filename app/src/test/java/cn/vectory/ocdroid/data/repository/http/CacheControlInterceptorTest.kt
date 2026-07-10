@@ -35,7 +35,7 @@ class CacheControlInterceptorTest {
                 baseUrl = server.url("/").toString().trimEnd('/'),
                 username = null,
                 password = null,
-                allowInsecure = false
+                hostPort = null
             )
         }
         client = OkHttpClient.Builder()
@@ -70,7 +70,7 @@ class CacheControlInterceptorTest {
             baseUrl = server.url("/").toString().trimEnd('/'),
             username = "alice",
             password = "secret",
-            allowInsecure = false
+            hostPort = null
         )
         server.enqueue(MockResponse().setBody("ok"))
 
@@ -167,7 +167,7 @@ class CacheControlInterceptorTest {
             baseUrl = server.url("/opencode").toString().trimEnd('/'),
             username = null,
             password = null,
-            allowInsecure = false
+            hostPort = null
         )
         server.enqueue(MockResponse().setBody("ok"))
 
@@ -187,7 +187,7 @@ class CacheControlInterceptorTest {
             baseUrl = server.url("/opencode").toString().trimEnd('/'),
             username = null,
             password = null,
-            allowInsecure = false
+            hostPort = null
         )
         server.enqueue(MockResponse().setBody("ok"))
 
@@ -263,7 +263,7 @@ class CacheControlInterceptorTest {
             baseUrl = server.url("/").toString().trimEnd('/'),
             username = "alice",
             password = "secret",
-            allowInsecure = false
+            hostPort = null
         )
         server.enqueue(MockResponse().setBody("ok"))
         client.newCall(Request.Builder().url(server.url("/global/health")).build())

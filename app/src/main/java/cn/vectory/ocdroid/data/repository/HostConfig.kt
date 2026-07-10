@@ -1,5 +1,6 @@
 package cn.vectory.ocdroid.data.repository
 
+import cn.vectory.ocdroid.data.repository.http.hostPortFromUrl
 import javax.inject.Inject
 import javax.inject.Singleton
 
@@ -15,7 +16,7 @@ import javax.inject.Singleton
  *   username / password reads by interceptor threads).
  * - Multi-field updates (host switch via [configure]) are `@Synchronized` so
  *   the four interdependent fields (baseUrl / username / password /
- *   allowInsecure) become visible to a downstream `rebuildClients()` call as
+ *   hostPort) become visible to a downstream `rebuildClients()` call as
  *   a single atomic group, mirroring the pre-R-18 `@Synchronized
  *   OpenCodeRepository.configure` contract.
  *
@@ -23,6 +24,12 @@ import javax.inject.Singleton
  * via DI; today it is constructed manually by [OpenCodeRepository] because
  * the repository's public constructor signature is locked by
  * `OpenCodeRepositoryTest` (`OpenCodeRepository(mockk(), mockk())`).
+ *
+ * §tofu R2: the boolean `allowInsecure` field was REPLACED by
+ * `hostPort: String?` (host:port authority of `_baseUrl`, derived in
+ * [configure]). The TOFU pin store is keyed by this authority (known_hosts
+ * model), so every code path that previously read `allowInsecure` to
+ * downgrade TLS now reads `hostPort` to look up a pinned SPKI instead.
  */
 @Singleton
 class HostConfig @Inject constructor() {
@@ -36,31 +43,40 @@ class HostConfig @Inject constructor() {
     // EXPLICITLY via `@Header(HttpHeaders.DIRECTORY_HEADER)` on the API method,
     // and DirectoryHeaderInterceptor no longer reads from HostConfig.
 
-    @Volatile private var _allowInsecure: Boolean = false
+    /**
+     * §tofu R2: `host:port` authority of [_baseUrl] (derived once per
+     * [configure] via [hostPortFromUrl]). The TOFU pin store is keyed by
+     * this authority. null for non-authority URLs (e.g. content providers).
+     */
+    @Volatile private var _hostPort: String? = null
 
     val baseUrl: String get() = _baseUrl
     val username: String? get() = _username
     val password: String? get() = _password
 
-    val allowInsecure: Boolean get() = _allowInsecure
+    val hostPort: String? get() = _hostPort
 
     /** True iff a complete Basic Auth credential pair is configured. */
     val hasBasicAuth: Boolean get() = _username != null && _password != null
 
     /**
      * Atomic host switch. See class kdoc for the synchronization rationale.
+     *
+     * §tofu R2: takes [hostPort] (derived by the caller via [hostPortFromUrl])
+     * instead of the legacy `allowInsecure` boolean — TLS trust is now
+     * TOFU-pinned per host:port, not blanket-allowed per profile.
      */
     @Synchronized
     fun configure(
         baseUrl: String,
         username: String?,
         password: String?,
-        allowInsecure: Boolean
+        hostPort: String?
     ) {
         _baseUrl = baseUrl
         _username = username
         _password = password
-        _allowInsecure = allowInsecure
+        _hostPort = hostPort ?: hostPortFromUrl(baseUrl)
     }
 
     companion object {

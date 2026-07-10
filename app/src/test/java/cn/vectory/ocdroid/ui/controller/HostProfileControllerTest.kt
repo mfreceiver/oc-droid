@@ -110,16 +110,19 @@ class HostProfileControllerTest {
         name = "Host B",
         serverUrl = "http://b:4096",
         basicAuth = BasicAuthConfig(username = "user-b", passwordId = "p-B"),
-        allowInsecureConnections = true,
         serverGroupFp = "g-B"
     )
 
     /**
-     * §2.6: 用来在 trust-all host 场景下 stub `repository.currentSslConfig()` →
-     * `SslConfigFactory.sslConfigFor(true)`，使 HttpImageHolder.updateSsl 收到 TrustAll
-     * （生产里 currentSslConfig 反映 host 的 allowInsecure；mock 里需显式给）。
+     * §2.6 / §tofu R2: used to stub `repository.currentSslConfig()` in the
+     * trust-all-host scenarios. The legacy `sslConfigFor(allowInsecure=true)`
+     * → TrustAll path was REMOVED — TOFU replaced it. The factory is now
+     * constructed with an [InMemoryTofuPinStore] (the test fake); production
+     * wiring via [cn.vectory.ocdroid.di.TofuModule] is covered separately.
      */
-    private val sslConfigFactory = SslConfigFactory()
+    private val sslConfigFactory = cn.vectory.ocdroid.data.repository.http.SslConfigFactory(
+        cn.vectory.ocdroid.data.repository.http.InMemoryTofuPinStore()
+    )
 
     @Before
     fun setUp() {
@@ -395,39 +398,41 @@ class HostProfileControllerTest {
         assertEquals("p-A", slices.host.value.currentHostProfileId)
     }
 
-    // ── saveHostProfile (#12: live reconfigure when allowInsecure toggled) ─
+    // ── saveHostProfile (#12 + §tofu R2: live reconfigure when URL/mTLS change) ─
 
     @Test
-    fun `saveHostProfile of active host reconfigures and force-reconnects when allowInsecure is toggled on`() {
-        // #12: profileA is the current host (id p-A, allowInsecure=false).
-        // Flip the toggle to true and save → must reconfigure REST/SSE/image
-        // clients + reconnect so the new TLS trust policy applies live,
-        // without needing a host switch or app restart.
+    fun `saveHostProfile of active host reconfigures and force-reconnects when serverUrl changes`() {
+        // §tofu R2: the legacy allowInsecure-toggle reconfigure trigger was
+        // REMOVED (TOFU replaces trust-all). serverUrl + mTLS are now the only
+        // reconfigure triggers. Editing the active host's URL → must
+        // reconfigure REST/SSE/image clients + reconnect so the new endpoint
+        // (and its TOFU pin lookup) applies live.
         seed { it.copy(currentHostProfileId = "p-A") }
-        val toggled = profileA.copy(allowInsecureConnections = true)
-        // §2.6: 生产里 currentSslConfig() 会随 host allowInsecure=true 返回 TrustAll；
-        // mock 需显式 stub（覆盖 setUp 的 SystemDefault 默认）。
-        every { repository.currentSslConfig() } returns sslConfigFactory.sslConfigFor(true)
+        val moved = profileA.copy(serverUrl = "http://new-host:5050")
 
-        controller.saveHostProfile(toggled, basicAuthEdited = false)
+        controller.saveHostProfile(moved, basicAuthEdited = false)
 
-        // Reconfigured for the updated profileA with allowInsecure=true.
-        verify { repository.configure(toggled.serverUrl, any(), any(), true) }
-        // forceReconnect fired so the new SSL config takes effect immediately.
+        // Reconfigured for the updated profileA with the new URL; 4th arg is
+        // hostPort (String?) — match anything (the controller derives it via
+        // hostPortFromUrl).
+        verify { repository.configure(moved.serverUrl, any(), any(), any()) }
+        // forceReconnect fired so the new endpoint takes effect immediately.
         assertEquals(1, collectedEffects.filterIsInstance<ControllerEffect.ForceReconnect>().size)
         // configureRepositoryForProfile cancels SSE once.
         assertEquals(1, collectedEffects.filterIsInstance<ControllerEffect.CancelSseForReconfigure>().size)
-        // #12: image client 的 TLS 信任策略也同步切到 trust-all（与 REST/SSE 对称）。
-        // §2.6: 钩子字段由 lastUpdateSslAllowInsecure(Boolean?) 改为 lastUpdateSslMode(String?)。
-        assertEquals("TRUST_ALL", HttpImageHolder.lastUpdateSslMode)
+        // §tofu R2: image client SSL sync still fires (the new endpoint's
+        // TOFU pin / SystemDefault resolves on the configure path).
+        assertNotNull(HttpImageHolder.lastUpdateSslMode)
     }
 
     @Test
-    fun `saveHostProfile of active host does NOT reconfigure when allowInsecure is unchanged`() {
-        // Editing the active host's name (or any non-toggle field) must NOT
-        // trigger a reconnect — zero regression for the toggle-unchanged case.
+    fun `saveHostProfile of active host does NOT reconfigure when only name changes`() {
+        // Editing the active host's name (or any non-URL / non-mTLS field)
+        // must NOT trigger a reconnect — zero regression for the
+        // serverUrl-unchanged case. §tofu R2: this generalizes the former
+        // "allowInsecure unchanged" test (the toggle no longer exists).
         seed { it.copy(currentHostProfileId = "p-A") }
-        val renamed = profileA.copy(name = "Renamed A") // allowInsecure stays false
+        val renamed = profileA.copy(name = "Renamed A") // serverUrl + mTLS unchanged
 
         controller.saveHostProfile(renamed, basicAuthEdited = false)
         scope.testScheduler.advanceUntilIdle()
@@ -438,15 +443,15 @@ class HostProfileControllerTest {
     }
 
     @Test
-    fun `saveHostProfile of non-current host does NOT reconfigure even if allowInsecure toggled`() {
+    fun `saveHostProfile of non-current host does NOT reconfigure even when its URL changes`() {
         // Saving a NON-active host (profileB while p-A is current) must only
-        // persist + refresh state, never touch the live connection — even when
-        // its toggle changed. The change takes effect when that host is later
-        // selected.
+        // persist + refresh state, never touch the live connection — even
+        // when its URL changed. The change takes effect when that host is
+        // later selected.
         seed { it.copy(currentHostProfileId = "p-A") }
-        val toggled = profileB.copy(allowInsecureConnections = false) // was true
+        val moved = profileB.copy(serverUrl = "http://moved:5050")
 
-        controller.saveHostProfile(toggled, basicAuthEdited = false)
+        controller.saveHostProfile(moved, basicAuthEdited = false)
         scope.testScheduler.advanceUntilIdle()
 
         verify(exactly = 0) { repository.configure(any(), any(), any(), any()) }
@@ -454,60 +459,27 @@ class HostProfileControllerTest {
         assertTrue(collectedEffects.filterIsInstance<ControllerEffect.CancelSseForReconfigure>().isEmpty())
     }
 
-    @Test
-    fun `saveHostProfile of active host reconfigures and force-reconnects when allowInsecure is toggled off`() {
-        // #12 对称覆盖（R-01 "OFF 零回归" 核心承诺）：当前 host 初始
-        // allowInsecure=true，保存改为 false → 必须重配 REST/SSE/image client
-        // 并强制重连，使新的 TLS 信任策略即时生效——与 ON 路径完全对称。
-        seedStore(listOf(profileA, profileB), currentId = "p-B") // profileB 当前且 allowInsecure=true
-        seed { it.copy(currentHostProfileId = "p-B") }
-        val toggledOff = profileB.copy(allowInsecureConnections = false) // true → false
-
-        controller.saveHostProfile(toggledOff, basicAuthEdited = false)
-        scope.testScheduler.advanceUntilIdle()
-
-        // 重配为 allowInsecure=false（切回系统信任）。
-        verify { repository.configure(toggledOff.serverUrl, any(), any(), false) }
-        assertEquals(1, collectedEffects.filterIsInstance<ControllerEffect.ForceReconnect>().size)
-        assertEquals(1, collectedEffects.filterIsInstance<ControllerEffect.CancelSseForReconfigure>().size)
-        // #12: image client 信任策略同步切回 system trust。
-        assertEquals("SYSTEM", HttpImageHolder.lastUpdateSslMode)
-    }
+    // ── #12 / §tofu R2: HttpImageHolder.updateSsl sync verification ─────────
 
     @Test
-    fun `saveHostProfile of active host does NOT reconfigure when allowInsecure stays true`() {
-        // #12 对称覆盖：当前 host 已 allowInsecure=true，保存仍 true（仅改 name）
-        // → 不应触发重配/重连，与现有 unchanged(false→false) 用例对称。
-        seedStore(listOf(profileA, profileB), currentId = "p-B")
-        seed { it.copy(currentHostProfileId = "p-B") }
-        val renamed = profileB.copy(name = "Renamed B") // allowInsecure 保持 true
-
-        controller.saveHostProfile(renamed, basicAuthEdited = false)
-        scope.testScheduler.advanceUntilIdle()
-
-        verify(exactly = 0) { repository.configure(any(), any(), any(), any()) }
-        assertTrue(collectedEffects.filterIsInstance<ControllerEffect.ForceReconnect>().isEmpty())
-        assertTrue(collectedEffects.filterIsInstance<ControllerEffect.CancelSseForReconfigure>().isEmpty())
-        // 未走 configureRepositoryForProfile → updateSsl 不应被调用（钩子保持 null）。
-        assertNull(HttpImageHolder.lastUpdateSslMode)
-    }
-
-    // ── #12: HttpImageHolder.updateSsl sync verification ───────────────────
-
-    @Test
-    fun `selectHostProfile propagates the selected host allowInsecure flag to HttpImageHolder`() {
-        // #12: selectHostProfile(profileB allowInsecure=true) 走
-        // configureRepositoryForProfile → HttpImageHolder.updateSsl(true)，
-        // 保证自签名 HTTPS markdown 图片在 trust-all toggle ON 时可加载。
+    fun `selectHostProfile propagates the selected host SSL config to HttpImageHolder`() {
+        // §tofu R2: the legacy "propagates allowInsecure flag" assertion is
+        // gone (no TrustAll anymore). selectHostProfile still calls
+        // configureRepositoryForProfile → HttpImageHolder.updateSsl(...), now
+        // with the resolved TOFU / SystemDefault config. Verify the sync hook
+        // fires (the actual config value comes from currentSslConfig which is
+        // mocked here).
         every { store.select("p-B") } returns profileB
         every { settingsManager.basicAuthPassword("p-B") } returns "secret-b"
-        // §2.6: profileB allowInsecure=true → currentSslConfig() 返回 TrustAll。
-        every { repository.currentSslConfig() } returns sslConfigFactory.sslConfigFor(true)
+        every { repository.currentSslConfig() } returns SslConfig.SystemDefault
 
         controller.selectHostProfile("p-B")
         runPending()
 
-        assertEquals("TRUST_ALL", HttpImageHolder.lastUpdateSslMode)
+        // §tofu R2: image client SSL config was synced (SystemDefault for an
+        // unpinned endpoint — the TOFU capture/prompt path is exercised in
+        // ConnectionCoordinatorTest, not here).
+        assertEquals("SYSTEM", HttpImageHolder.lastUpdateSslMode)
     }
 
     // ── duplicateHostProfile ───────────────────────────────────────────────
@@ -533,7 +505,9 @@ class HostProfileControllerTest {
         scope.testScheduler.advanceUntilIdle()
 
         // Reconfigures repository for the (unchanged) current host profileA.
-        verify { repository.configure(profileA.serverUrl, any(), any(), profileA.allowInsecureConnections) }
+        // §tofu R2: 4th arg is hostPort (String?), derived by the controller
+        // via hostPortFromUrl(profileA.serverUrl) → "a:4096".
+        verify { repository.configure(profileA.serverUrl, any(), any(), "a:4096") }
         // NOT current → no purge, no reconnect.
         assertTrue(collectedEffects.filterIsInstance<ControllerEffect.ForceReconnect>().isEmpty())
         assertTrue(collectedEffects.filterIsInstance<ControllerEffect.ClearSessionWindowCache>().isEmpty())
@@ -562,8 +536,9 @@ class HostProfileControllerTest {
         controller.deleteHostProfile("p-A")
         scope.testScheduler.advanceUntilIdle()
 
-        // Reconfigured for the replacement profileB (with its allowInsecure flag).
-        verify { repository.configure(profileB.serverUrl, any(), any(), profileB.allowInsecureConnections) }
+        // Reconfigured for the replacement profileB (§tofu R2: hostPort
+        // derived as "b:4096").
+        verify { repository.configure(profileB.serverUrl, any(), any(), "b:4096") }
         // wasCurrent → purge + forceReconnect.
         assertEquals(1, collectedEffects.filterIsInstance<ControllerEffect.ForceReconnect>().size)
         // §review-fix #5/#6: ClearSessionWindowCache was removed from
@@ -645,19 +620,21 @@ class HostProfileControllerTest {
     }
 
     @Test
-    fun `selectHostProfile reconfigures repository for the selected profile with its allowInsecure flag`() {
+    fun `selectHostProfile reconfigures repository for the selected profile with its derived hostPort`() {
         every { store.select("p-B") } returns profileB
         every { settingsManager.basicAuthPassword("p-B") } returns "secret-b"
 
         controller.selectHostProfile("p-B")
         runPending()
 
+        // §tofu R2: 4th arg is hostPort (String?), derived from profileB.serverUrl
+        // ("http://b:4096" → "b:4096").
         verify {
             repository.configure(
                 profileB.serverUrl,
                 profileB.basicAuth?.username,
                 "secret-b",
-                profileB.allowInsecureConnections
+                "b:4096"
             )
         }
     }
@@ -745,11 +722,12 @@ class HostProfileControllerTest {
     // ── configureServer (direct connection form) ───────────────────────────
 
     @Test
-    fun `configureServer cancels SSE, writes settings, and configures repository with current profile allowInsecure`() {
-        // currentHostProfile() returns profileB (allowInsecure=true).
+    fun `configureServer cancels SSE, writes settings, and configures repository with derived hostPort`() {
+        // §tofu R2: currentHostProfile() returns profileB; configureServer
+        // derives hostPort from the manual URL (not the profile URL) since
+        // the user is typing a new endpoint.
         every { store.currentProfile() } returns profileB
-        // §2.6: profileB allowInsecure=true → currentSslConfig() 返回 TrustAll。
-        every { repository.currentSslConfig() } returns sslConfigFactory.sslConfigFor(true)
+        every { repository.currentSslConfig() } returns SslConfig.SystemDefault
 
         controller.configureServer("http://manual:4096", "mu", "mp")
 
@@ -757,9 +735,11 @@ class HostProfileControllerTest {
         verify { settingsManager.serverUrl = "http://manual:4096" }
         verify { settingsManager.username = "mu" }
         verify { settingsManager.password = "mp" }
-        verify { repository.configure("http://manual:4096", "mu", "mp", profileB.allowInsecureConnections) }
-        // #12: configureServer 也把信任策略同步给 image client（与 REST/SSE 对称）。
-        assertEquals("TRUST_ALL", HttpImageHolder.lastUpdateSslMode)
+        // §tofu R2: 4th arg = hostPortFromUrl("http://manual:4096") = "manual:4096".
+        verify { repository.configure("http://manual:4096", "mu", "mp", "manual:4096") }
+        // §tofu R2: image client SSL sync fires (SystemDefault for an unpinned
+        // endpoint — TrustAll no longer exists).
+        assertEquals("SYSTEM", HttpImageHolder.lastUpdateSslMode)
     }
 
     @Test
@@ -776,7 +756,7 @@ class HostProfileControllerTest {
     // ── configureRepositoryForProfile ──────────────────────────────────────
 
     @Test
-    fun `configureRepositoryForProfile cancels SSE and configures with profile creds + allowInsecure`() {
+    fun `configureRepositoryForProfile cancels SSE and configures with profile creds + derived hostPort`() {
         every { settingsManager.basicAuthPassword("p-B") } returns "secret-b"
         every { settingsManager.currentWorkdir } returns "/persisted/proj"
 
@@ -788,7 +768,7 @@ class HostProfileControllerTest {
                 profileB.serverUrl,
                 profileB.basicAuth?.username,
                 "secret-b",
-                profileB.allowInsecureConnections
+                "b:4096"
             )
         }
         // §R18 Phase 2-E step 2: the repository.setCurrentDirectory call was
@@ -806,12 +786,13 @@ class HostProfileControllerTest {
         controller.configureRepositoryForProfile(profileA)
 
         // Repository is still configured; no exception, no effect.
+        // §tofu R2: 4th arg = hostPortFromUrl("http://a:4096") = "a:4096".
         verify {
             repository.configure(
                 profileA.serverUrl,
                 profileA.basicAuth?.username,
                 any(),
-                profileA.allowInsecureConnections
+                "a:4096"
             )
         }
     }
@@ -849,7 +830,9 @@ class HostProfileControllerTest {
         val profile = profileA.copy(tunnelPasswordId = "t1")
         every { store.currentProfile() } returns profile
         every { settingsManager.getTunnelPassword("t1") } returns "real-pw"
-        coEvery { repository.activateTunnel(profile.serverUrl, "real-pw", profile.allowInsecureConnections) } returns
+        // §tofu R2: activateTunnel now takes hostPort (String?) — the controller
+        // derives it via hostPortFromUrl(profile.serverUrl) → "a:4096".
+        coEvery { repository.activateTunnel(profile.serverUrl, "real-pw", "a:4096") } returns
             Result.success(Unit)
 
         controller.activateTunnelForCurrentHost()
@@ -868,7 +851,7 @@ class HostProfileControllerTest {
         // §R18 Phase 2-G: success-toast text is now R.string.success_tunnel_activated.
         val successEvent = recordedEvents.filterIsInstance<UiEvent.Success>().single()
         assertEquals(R.string.success_tunnel_activated, successEvent.resId)
-        coVerify { repository.activateTunnel(profile.serverUrl, "real-pw", profile.allowInsecureConnections) }
+        coVerify { repository.activateTunnel(profile.serverUrl, "real-pw", "a:4096") }
     }
 
     @Test
@@ -970,10 +953,10 @@ class HostProfileControllerTest {
     fun `saveHostProfile of active host reconfigures and reconnects when serverUrl changes`() {
         // S-1: editing the current host's URL persisted the new value but left
         // the existing REST/SSE/image clients pointed at the OLD endpoint. The
-        // fix mirrors the allowInsecure-toggle path: when the ACTIVE host's
-        // serverUrl changes, clear old-URL model data + reconfigure + reconnect
-        // so the new endpoint takes effect immediately. This also covers the
-        // previously-uncovered clearModelDataForUrl call (line 356).
+        // fix: when the ACTIVE host's serverUrl changes, clear old-URL model
+        // data + reconfigure + reconnect so the new endpoint (and its TOFU pin
+        // lookup) takes effect immediately. §tofu R2: this also covers the
+        // previously-toggle path — serverUrl is now the reconfigure trigger.
         seed { it.copy(currentHostProfileId = "p-A") }
         val moved = profileA.copy(serverUrl = "http://new-host:4096")
 
@@ -982,8 +965,9 @@ class HostProfileControllerTest {
 
         // §bug5: old-URL model data dropped so the disable set does not orphan.
         verify { settingsManager.clearModelDataForGroup("g-A") }
-        // Reconfigured for the updated profileA at the new URL.
-        verify { repository.configure(moved.serverUrl, any(), any(), moved.allowInsecureConnections) }
+        // Reconfigured for the updated profileA at the new URL; §tofu R2: 4th
+        // arg = hostPortFromUrl("http://new-host:4096") = "new-host:4096".
+        verify { repository.configure(moved.serverUrl, any(), any(), "new-host:4096") }
         // forceReconnect fired so clients rebuild against the new endpoint.
         assertEquals(1, collectedEffects.filterIsInstance<ControllerEffect.ForceReconnect>().size)
         // §disabled-models-consistency: per-host state reloaded for the new baseUrl.
@@ -993,18 +977,19 @@ class HostProfileControllerTest {
     }
 
     @Test
-    fun `saveHostProfile of active host with both URL and allowInsecure changed clears old-URL data once`() {
-        // Composite: URL + toggle both change on the active host. The URL-clear
+    fun `saveHostProfile of active host with URL change clears old-URL data once`() {
+        // §tofu R2: the legacy "both URL and allowInsecure changed" composite
+        // collapsed to URL-only (allowInsecure no longer exists). URL-clear
         // fires exactly once (guard is urlChanged-only), the reconfigure uses
-        // the new URL + new allowInsecure, and both effects emit.
+        // the new URL + derived hostPort, and both effects emit.
         seed { it.copy(currentHostProfileId = "p-A") }
-        val moved = profileA.copy(serverUrl = "http://new:4096", allowInsecureConnections = true)
+        val moved = profileA.copy(serverUrl = "http://new:4096")
 
         controller.saveHostProfile(moved, basicAuthEdited = false)
         scope.testScheduler.advanceUntilIdle()
 
         verify(exactly = 1) { settingsManager.clearModelDataForGroup("g-A") }
-        verify { repository.configure("http://new:4096", any(), any(), true) }
+        verify { repository.configure("http://new:4096", any(), any(), "new:4096") }
         assertEquals(1, collectedEffects.filterIsInstance<ControllerEffect.ForceReconnect>().size)
         assertEquals(1, collectedEffects.filterIsInstance<ControllerEffect.HostProfileSwitched>().size)
     }
@@ -1030,8 +1015,8 @@ class HostProfileControllerTest {
 
         // Deleted active host's old URL model data purged.
         verify { settingsManager.clearModelDataForGroup("g-A") }
-        // Reconfigured for the replacement profileB.
-        verify { repository.configure(profileB.serverUrl, any(), any(), profileB.allowInsecureConnections) }
+        // Reconfigured for the replacement profileB (§tofu R2: hostPort "b:4096").
+        verify { repository.configure(profileB.serverUrl, any(), any(), "b:4096") }
         // wasCurrent → purge + forceReconnect + hostProfileSwitched.
         assertEquals(1, collectedEffects.filterIsInstance<ControllerEffect.ForceReconnect>().size)
         assertEquals(1, collectedEffects.filterIsInstance<ControllerEffect.HostProfileSwitched>().size)
@@ -1071,7 +1056,7 @@ class HostProfileControllerTest {
         // SSE is still cancelled before the reconfigure so events from the
         // previous credential don't land during the new probe.
         every { settingsManager.serverUrl } returns "http://same:4096"
-        every { store.currentProfile() } returns profileA // allowInsecure=false
+        every { store.currentProfile() } returns profileA
 
         controller.configureServer("http://same:4096", "u", "p")
 
@@ -1083,7 +1068,8 @@ class HostProfileControllerTest {
         verify { settingsManager.serverUrl = "http://same:4096" }
         verify { settingsManager.username = "u" }
         verify { settingsManager.password = "p" }
-        verify { repository.configure("http://same:4096", "u", "p", profileA.allowInsecureConnections) }
+        // §tofu R2: 4th arg = hostPortFromUrl("http://same:4096") = "same:4096".
+        verify { repository.configure("http://same:4096", "u", "p", "same:4096") }
         // No host switch → no HostProfileSwitched effect.
         assertTrue("HostProfileSwitched must NOT fire on unchanged URL",
             collectedEffects.filterIsInstance<ControllerEffect.HostProfileSwitched>().isEmpty())

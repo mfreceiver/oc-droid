@@ -166,10 +166,13 @@ object HttpImageHolder {
     fun updateSsl(cfg: SslConfig) {
         // 测试钩子：记录每次调用（含 no-op）的解析模式，供单测断言 controller→image
         // client 的信任策略同步。赋值开销可忽略，不影响生产行为。
+        // §tofu R2: 新增 TOFU_PINNED 模式——当 host:port 有 TOFU pin 时，image
+        // client 也用 SPKI pinning TM（与 REST/SSE 对称，自签图片 host 同样放行）。
         lastUpdateSslMode = when (cfg) {
             SslConfig.SystemDefault -> "SYSTEM"
             is SslConfig.TrustAll -> "TRUST_ALL"
             is SslConfig.MutualTLS -> "MUTUAL_TLS"
+            is SslConfig.TofuPinned -> "TOFU_PINNED"
         }
         if (cfg == imageSslConfig) return
         imageSslConfig = cfg

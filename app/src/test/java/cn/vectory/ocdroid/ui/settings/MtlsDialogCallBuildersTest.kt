@@ -36,7 +36,6 @@ class MtlsDialogCallBuildersTest {
         basicAuth: BasicAuthConfig? = null,
         tunnelPasswordId: String? = null,
         serverGroupFp: String = "",
-        allowInsecureConnections: Boolean = false,
         mtlsEnabled: Boolean = false,
         clientCertId: String? = null,
     ): HostProfile = HostProfile(
@@ -46,7 +45,6 @@ class MtlsDialogCallBuildersTest {
         basicAuth = basicAuth,
         tunnelPasswordId = tunnelPasswordId,
         serverGroupFp = serverGroupFp,
-        allowInsecureConnections = allowInsecureConnections,
         mtlsEnabled = mtlsEnabled,
         clientCertId = clientCertId,
     )
@@ -59,7 +57,6 @@ class MtlsDialogCallBuildersTest {
         initial: HostProfile,
         name: String = initial.name,
         serverUrl: String = initial.serverUrl,
-        allowInsecure: Boolean = initial.allowInsecureConnections,
         selectedGroup: String? = null,
         initialGroup: String? = null,
         clientCleared: Boolean = false,
@@ -69,7 +66,6 @@ class MtlsDialogCallBuildersTest {
         initial = initial,
         name = name,
         serverUrl = serverUrl,
-        allowInsecure = allowInsecure,
         selectedGroup = selectedGroup,
         initialGroup = initialGroup,
         basicAuthEnabled = false,
@@ -91,7 +87,6 @@ class MtlsDialogCallBuildersTest {
     private fun testMinimal(
         initial: HostProfile,
         serverUrl: String = initial.serverUrl,
-        allowInsecure: Boolean = initial.allowInsecureConnections,
         basicAuthEnabled: Boolean = false,
         authUsername: String = "",
         authPassword: String = "",
@@ -104,7 +99,6 @@ class MtlsDialogCallBuildersTest {
     ): TestCallResult = buildTestCall(
         initial = initial,
         serverUrl = serverUrl,
-        allowInsecure = allowInsecure,
         basicAuthEnabled = basicAuthEnabled,
         authUsername = authUsername,
         authPassword = authPassword,
@@ -129,7 +123,7 @@ class MtlsDialogCallBuildersTest {
         assertEquals("http://localhost:4096", r.saved.serverUrl)
         assertNull(r.saved.basicAuth)
         assertNull(r.saved.tunnelPasswordId)
-        assertFalse(r.saved.allowInsecureConnections)
+        // §tofu R2: allowInsecureConnections field removed — no assertion.
         assertFalse(r.effectivePasswordEdited)
         assertFalse(r.hasMaterial)
     }
@@ -144,7 +138,6 @@ class MtlsDialogCallBuildersTest {
             initial = initial,
             name = "Renamed",
             serverUrl = "https://example.com",
-            allowInsecure = true,
             selectedGroup = null,
             initialGroup = null,
             basicAuthEnabled = true,
@@ -166,7 +159,7 @@ class MtlsDialogCallBuildersTest {
         assertEquals("p1", r.saved.basicAuth?.passwordId)
         // tunnelEdited=true, password not blank → tunnelPasswordId = initial.id
         assertEquals("p1", r.saved.tunnelPasswordId)
-        assertTrue(r.saved.allowInsecureConnections)
+        // §tofu R2: allowInsecureConnections field removed — no assertion.
         // mtlsEnabled=true + clientCertId!=null + !clientCleared → hasMaterial
         assertTrue(r.hasMaterial)
         assertTrue(r.mtlsOn)
@@ -196,7 +189,6 @@ class MtlsDialogCallBuildersTest {
             initial = initial,
             name = "Test",
             serverUrl = "http://localhost:4096",
-            allowInsecure = false,
             selectedGroup = null,
             initialGroup = null,
             basicAuthEnabled = true,
@@ -235,7 +227,6 @@ class MtlsDialogCallBuildersTest {
             initial = initial,
             name = "Test",
             serverUrl = "http://localhost:4096",
-            allowInsecure = false,
             selectedGroup = null,
             initialGroup = null,
             basicAuthEnabled = false,
@@ -264,7 +255,6 @@ class MtlsDialogCallBuildersTest {
             initial = initial,
             name = "Test",
             serverUrl = "http://localhost:4096",
-            allowInsecure = false,
             selectedGroup = null,
             initialGroup = null,
             basicAuthEnabled = false,
@@ -294,7 +284,6 @@ class MtlsDialogCallBuildersTest {
             initial = initial,
             name = "Test",
             serverUrl = "http://localhost:4096",
-            allowInsecure = false,
             selectedGroup = null,
             initialGroup = null,
             basicAuthEnabled = false,
@@ -332,7 +321,6 @@ class MtlsDialogCallBuildersTest {
             initial = initial,
             name = "Test",
             serverUrl = "http://localhost:4096",
-            allowInsecure = false,
             selectedGroup = null,
             initialGroup = null,
             basicAuthEnabled = false,
@@ -369,7 +357,6 @@ class MtlsDialogCallBuildersTest {
             initial = initial,
             name = "Test",
             serverUrl = "http://localhost:4096",
-            allowInsecure = false,
             selectedGroup = "B",
             initialGroup = "A",
             basicAuthEnabled = false,
@@ -397,7 +384,6 @@ class MtlsDialogCallBuildersTest {
             initial = initial,
             name = "Test",
             serverUrl = "http://localhost:4096",
-            allowInsecure = false,
             selectedGroup = null,
             initialGroup = "A",
             basicAuthEnabled = false,
@@ -425,7 +411,6 @@ class MtlsDialogCallBuildersTest {
             initial = initial,
             name = "Test",
             serverUrl = "http://localhost:4096",
-            allowInsecure = false,
             selectedGroup = null, // editor maps non-slot serverGroupFp to null in initialGroup
             initialGroup = null,
             basicAuthEnabled = false,
@@ -453,7 +438,6 @@ class MtlsDialogCallBuildersTest {
             initial = initial,
             name = "Test",
             serverUrl = "http://localhost:4096",
-            allowInsecure = false,
             selectedGroup = null,
             initialGroup = null,
             basicAuthEnabled = false,
@@ -480,12 +464,9 @@ class MtlsDialogCallBuildersTest {
         assertTrue(r.caStage is CaStage.Clear)
     }
 
-    @Test
-    fun `buildSaveCall allowInsecure flag is forwarded to saved profile`() {
-        val initial = profile()
-        val r = saveAllOff(initial, allowInsecure = true)
-        assertTrue(r.saved.allowInsecureConnections)
-    }
+    // §tofu R2: the buildSaveCall allowInsecure forwarding test was removed —
+    // the allowInsecure field no longer exists on HostProfile (TOFU replaces
+    // the trust-all toggle). ServerUrl forwarding is still covered below.
 
     @Test
     fun `buildSaveCall serverUrl is forwarded to saved profile verbatim`() {
@@ -504,7 +485,6 @@ class MtlsDialogCallBuildersTest {
         val r = buildTestCall(
             initial = initial,
             serverUrl = "http://localhost:4096",
-            allowInsecure = false,
             basicAuthEnabled = true,
             authUsername = "u",
             authPassword = "p",
@@ -532,7 +512,6 @@ class MtlsDialogCallBuildersTest {
         val r = buildTestCall(
             initial = initial,
             serverUrl = "http://localhost:4096",
-            allowInsecure = false,
             basicAuthEnabled = false,
             authUsername = "should-be-ignored",
             authPassword = "should-be-ignored",
@@ -560,7 +539,6 @@ class MtlsDialogCallBuildersTest {
         val r = buildTestCall(
             initial = initial,
             serverUrl = "http://localhost:4096",
-            allowInsecure = false,
             basicAuthEnabled = true,
             authUsername = "u",
             authPassword = "p",
@@ -587,7 +565,6 @@ class MtlsDialogCallBuildersTest {
         val r = buildTestCall(
             initial = initial,
             serverUrl = "http://localhost:4096",
-            allowInsecure = false,
             basicAuthEnabled = true,
             authUsername = "",
             authPassword = "p",
@@ -611,7 +588,6 @@ class MtlsDialogCallBuildersTest {
         val r = buildTestCall(
             initial = initial,
             serverUrl = "http://localhost:4096",
-            allowInsecure = false,
             basicAuthEnabled = false,
             authUsername = "",
             authPassword = "",
@@ -634,7 +610,6 @@ class MtlsDialogCallBuildersTest {
         val r = buildTestCall(
             initial = initial,
             serverUrl = "http://localhost:4096",
-            allowInsecure = false,
             basicAuthEnabled = false,
             authUsername = "",
             authPassword = "",
@@ -650,15 +625,15 @@ class MtlsDialogCallBuildersTest {
     }
 
     @Test
-    fun `buildTestCall caStage stagedP12 serverUrl allowInsecure passthrough`() {
-        // §kover-4.5: covers the 7th case (caStage, stagedP12, serverUrl,
-        // allowInsecure all passthrough verbatim).
+    fun `buildTestCall caStage stagedP12 serverUrl passthrough`() {
+        // §kover-4.5: covers the 7th case (caStage, stagedP12, serverUrl all
+        // passthrough verbatim). §tofu R2: allowInsecure removed — the
+        // insecureSnap assertion is dropped.
         val initial = profile()
         val stagedP12 = byteArrayOf(1, 2, 3)
         val r = buildTestCall(
             initial = initial,
             serverUrl = "https://override.example.com",
-            allowInsecure = true,
             basicAuthEnabled = false,
             authUsername = "",
             authPassword = "",
@@ -670,7 +645,6 @@ class MtlsDialogCallBuildersTest {
             caStage = CaStage.Replace(byteArrayOf(99)),
         )
         assertEquals("https://override.example.com", r.url)
-        assertTrue(r.insecureSnap)
         assertSame(stagedP12, r.p12Snap)
         assertTrue(r.caSnap is CaStage.Replace)
         assertTrue(r.mtlsOn)
@@ -696,7 +670,6 @@ class MtlsDialogCallBuildersTest {
         val r = buildTestCall(
             initial = initial,
             serverUrl = "http://localhost:4096",
-            allowInsecure = false,
             basicAuthEnabled = true,
             authUsername = "u",
             authPassword = "p",

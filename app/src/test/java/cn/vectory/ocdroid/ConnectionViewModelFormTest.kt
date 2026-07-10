@@ -50,7 +50,6 @@ class ConnectionViewModelFormTest : MainViewModelTestBase() {
             baseUrl = "http://x",
             username = "u",
             password = "p",
-            allowInsecure = false,
             profileId = "p1",
             passwordEdited = true,
             onResult = { ok, msg -> result = ok to msg },
@@ -76,7 +75,6 @@ class ConnectionViewModelFormTest : MainViewModelTestBase() {
             baseUrl = "http://x",
             username = null,
             password = null,
-            allowInsecure = true,
             profileId = null,
             passwordEdited = false,
             onResult = { ok, msg -> result = ok to msg },
@@ -101,7 +99,6 @@ class ConnectionViewModelFormTest : MainViewModelTestBase() {
             baseUrl = "http://x",
             username = null,
             password = null,
-            allowInsecure = false,
             profileId = null,
             passwordEdited = false,
             onResult = { ok, msg -> result = ok to msg },
@@ -126,7 +123,6 @@ class ConnectionViewModelFormTest : MainViewModelTestBase() {
             baseUrl = "http://x",
             username = null,
             password = null,
-            allowInsecure = false,
             profileId = null,
             passwordEdited = false,
             onResult = { ok, msg -> result = ok to msg },
@@ -151,7 +147,6 @@ class ConnectionViewModelFormTest : MainViewModelTestBase() {
             baseUrl = "http://x",
             username = null,
             password = null,
-            allowInsecure = false,
             profileId = null,
             passwordEdited = false,
             onResult = { ok, msg -> result = ok to msg },
@@ -181,7 +176,6 @@ class ConnectionViewModelFormTest : MainViewModelTestBase() {
             baseUrl = "http://x",
             username = "u",
             password = null,  // not edited → resolve via profile
-            allowInsecure = false,
             profileId = "p1",
             passwordEdited = false,
             onResult = { ok, msg -> result = ok to msg },
@@ -223,7 +217,7 @@ class ConnectionViewModelFormTest : MainViewModelTestBase() {
         var result: Pair<Boolean, String>? = null
 
         vm.testConnectionForm(
-            baseUrl = "http://x", username = null, password = null, allowInsecure = false,
+            baseUrl = "http://x", username = null, password = null,
             profileId = null, passwordEdited = false,
             mtlsEnabled = true, stagedP12 = p12, hasImportedP12 = true,
             caStage = cn.vectory.ocdroid.ui.settings.CaStage.Unchanged,
@@ -243,7 +237,7 @@ class ConnectionViewModelFormTest : MainViewModelTestBase() {
         var result: Pair<Boolean, String>? = null
 
         vm.testConnectionForm(
-            baseUrl = "http://x", username = null, password = null, allowInsecure = false,
+            baseUrl = "http://x", username = null, password = null,
             profileId = null, passwordEdited = false,
             mtlsEnabled = true, stagedP12 = null, hasImportedP12 = false,
             caStage = cn.vectory.ocdroid.ui.settings.CaStage.Unchanged,

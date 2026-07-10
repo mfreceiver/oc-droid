@@ -137,8 +137,21 @@
     <string name="host_profile_basic_auth_password">Basic Auth 密码（可选）</string>
     <string name="host_profile_tunnel_password">隧道密码</string>
     <string name="host_profile_tunnel_password_label">认证密码（内网穿透）</string>
-    <string name="host_allow_insecure_title">不安全HTTPS连接</string>
-    <string name="host_allow_insecure_summary">跳过该主机的 TLS 证书与主机名校验</string>
+    <!-- §tofu R2: SSH 式「首次连接信任」证书指纹 pinning。旧的
+         host_allow_insecure_title / host_allow_insecure_summary 字符串已删除——
+         自签名 endpoint 现在在首次连接时弹出 TOFU 信任对话框，不再用按 profile 的
+         全局信任降级开关。 -->
+    <string name="tofu_dialog_title">服务器证书</string>
+    <string name="tofu_cert_subject">主体</string>
+    <string name="tofu_cert_issuer">签发者</string>
+    <string name="tofu_cert_expiry">过期时间</string>
+    <string name="tofu_cert_fingerprint">SHA-256 指纹</string>
+    <string name="tofu_cert_reason_unknown_issuer">此证书并非由已知证书颁发机构签发。信任前请与服务器管理员核对指纹。</string>
+    <string name="tofu_cert_reason_expired">此证书已过期或尚未生效。</string>
+    <string name="tofu_cert_reason_hostname">此证书不覆盖你所连接的主机名。</string>
+    <string name="tofu_accept_once">仅本次接受</string>
+    <string name="tofu_trust">永久信任</string>
+    <string name="tofu_cancel">取消</string>
     <string name="host_insecure_warning">警告：关闭证书校验。仅用于受信任的自签名/内网服务器，存在中间人攻击风险。</string>
     <!-- §2.7 mTLS 客户端证书（stunnel + 共享 PKCS12） -->
     <string name="host_mtls_title">mTLS 连接</string>

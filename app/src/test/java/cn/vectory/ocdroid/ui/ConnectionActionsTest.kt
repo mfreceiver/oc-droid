@@ -83,7 +83,7 @@ class ConnectionActionsTest {
                 baseUrl = "https://example.test",
                 username = "alice",
                 password = "secret",
-                allowInsecureConnections = false,
+                hostPort = "example.test:443",
             )
         }
     }

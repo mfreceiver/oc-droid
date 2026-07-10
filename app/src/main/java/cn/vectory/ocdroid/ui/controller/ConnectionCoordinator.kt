@@ -8,6 +8,8 @@ import cn.vectory.ocdroid.data.model.SSEEvent
 import cn.vectory.ocdroid.data.model.Session
 import cn.vectory.ocdroid.data.repository.OpenCodeRepository
 import cn.vectory.ocdroid.data.repository.ServerCompatProfile
+import cn.vectory.ocdroid.data.repository.http.TofuDecision
+import cn.vectory.ocdroid.data.repository.http.hostPortFromUrl
 import cn.vectory.ocdroid.ui.ConnectionPhase
 import cn.vectory.ocdroid.ui.ConnectionState
 import cn.vectory.ocdroid.ui.SharedEffectBus
@@ -25,6 +27,8 @@ import kotlinx.coroutines.flow.catch
 import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import javax.net.ssl.SSLHandshakeException
+import java.security.cert.CertificateException
 import java.util.Locale
 
 /**
@@ -103,6 +107,20 @@ class ConnectionCoordinator(
 ) {
     private var sseJob: Job? = null
     private var lastHealthCheckTime = 0L
+
+    /**
+     * §tofu R2: pending-trust state — non-null hostPort means a TOFU trust
+     * dialog is showing for this endpoint and the [testConnection] retry loop
+     * is SUSPENDED on [pendingTofuDecision].await(). Three guards read this:
+     *  1. The retry loop itself (no retries burn while waiting).
+     *  2. [coldStartReconnect] / [startSSE] early-return while frozen so a
+     *     tunnel/reset path or foreground catch-up cannot race the decision.
+     *  3. [resolveTofuTrust] is the ONLY writer (completes the deferred +
+     *     clears both fields + applies the decision to the pin store).
+     */
+    @Volatile
+    private var pendingTofuHostPort: String? = null
+    private var pendingTofuDecision: kotlinx.coroutines.CompletableDeferred<TofuDecision>? = null
 
     /**
      * §generation-guard: bumped on every [cancelSseForReconfigure] (host/profile
@@ -257,6 +275,85 @@ class ConnectionCoordinator(
                             writeConnection { it.copy(serverVersion = health.version) }
                         }
                     }
+                    // §tofu R2: SSL/cert error against an endpoint with NO pin
+                    // yet → capture the leaf cert and prompt the user. This
+                    // replaces the legacy "allowInsecure=true → trust-all"
+                    // downgrade with SSH-style trust-on-first-use: the user
+                    // sees the actual leaf (subject / issuer / expiry / SPKI)
+                    // and chooses Accept once / Trust / Cancel. Security is
+                    // the SPKI pin (the dialog just decides whether to write
+                    // it), NOT a blanket trust-all.
+                    //
+                    // Guards: only prompt when
+                    //   (a) the failure is SSL/cert-shaped (NOT a generic
+                    //       network/HTTP error — those surface the usual way),
+                    //   (b) [hostPort] is resolvable,
+                    //   (c) no pin yet exists (already-trusted endpoints
+                    //       never re-prompt — the pin mismatch path stays a
+                    //       hard failure for security),
+                    //   (d) we are not already pending a decision (avoid
+                    //       stacking prompts on a re-entrant coldStart).
+                    val exc = healthResult.exceptionOrNull()
+                    val rootCause = generateSequence(exc) { it.cause }
+                        .firstOrNull { it is SSLHandshakeException || it is CertificateException }
+                    val baseUrl = settingsManager.serverUrl
+                    val hostPort = hostPortFromUrl(baseUrl)
+                    if (rootCause != null && hostPort != null &&
+                        repository.pinnedSpkiFor(hostPort) == null &&
+                        pendingTofuHostPort == null
+                    ) {
+                        val capture = repository.captureServerCert(baseUrl, hostPort, clientCert = null)
+                        if (capture != null) {
+                            // Enter pending-trust: SUSPEND the retry loop on a
+                            // CompletableDeferred that [resolveTofuTrust]
+                            // completes. While pending, the freeze guards in
+                            // [coldStartReconnect] / [startSSE] early-return.
+                            pendingTofuHostPort = hostPort
+                            val deferred = kotlinx.coroutines.CompletableDeferred<TofuDecision>()
+                            pendingTofuDecision = deferred
+                            writeConnection {
+                                it.copy(
+                                    connectionPhase = ConnectionPhase.AwaitingTofuTrust,
+                                    pendingTofuCapture = capture
+                                )
+                            }
+                            val decision = deferred.await()
+                            pendingTofuHostPort = null
+                            pendingTofuDecision = null
+                            writeConnection { it.copy(pendingTofuCapture = null) }
+                            when (decision) {
+                                is TofuDecision.AcceptOnce,
+                                is TofuDecision.Trust -> {
+                                    // Apply the pin → next loop iteration calls
+                                    // checkHealth, which now resolves a
+                                    // TofuPinned SSL config (SPKI match →
+                                    // handshake succeeds). DON'T burn a retry
+                                    // or delay — `continue` re-probes at once.
+                                    repository.applyTofuDecision(hostPort, decision)
+                                    writeConnection {
+                                        it.copy(connectionPhase = ConnectionPhase.Connecting)
+                                    }
+                                    continue
+                                }
+                                TofuDecision.Cancel -> {
+                                    // User declined — terminal failure.
+                                    writeConnection {
+                                        it.copy(
+                                            isConnected = false,
+                                            isConnecting = false,
+                                            connectionPhase = ConnectionPhase.Disconnected
+                                        )
+                                    }
+                                    settled = true
+                                    onSettled?.invoke(false)
+                                    return@launch
+                                }
+                            }
+                        }
+                        // capture == null (unreachable / no cert presented):
+                        // fall through to the normal failure path below — the
+                        // original SSLHandshakeException is surfaced verbatim.
+                    }
                     if (attempt >= maxAttempts || !isActive) {
                         // §R-17 batch2: error is now a one-shot UiEvent on
                         // _uiEvents (consumed app-wide). Connection fields stay
@@ -301,8 +398,17 @@ class ConnectionCoordinator(
      * the OpenCode server itself is bootstrapping) still comes up instead of
      * stranding the user on the disconnected empty state. Used exclusively
      * from MainActivity's cold-start LaunchedEffect (and resetLocalDataAndResync).
+     *
+     * §tofu R2: FROZEN while a TOFU trust dialog is pending — a reconnect
+     * race against the in-flight decision would either burn retries or fork
+     * two capture probes. The user's [resolveTofuTrust] clears the pending
+     * state and the loop re-probes; cold-start then proceeds naturally.
      */
     fun coldStartReconnect() {
+        if (pendingTofuHostPort != null) {
+            DebugLog.i(TAG, "coldStartReconnect: frozen — TOFU trust pending for $pendingTofuHostPort")
+            return
+        }
         testConnection(force = true, retries = 3)
     }
 
@@ -504,9 +610,31 @@ class ConnectionCoordinator(
      * consistency (no currentWorkdir drift across cancel → restart).
      */
     fun startSSE() {
+        // §tofu R2: FROZEN while a TOFU trust dialog is pending — the SSE
+        // feed would try the same unpinned TLS handshake and fail the same
+        // way (the pin isn't written until the user decides). Wait for
+        // [resolveTofuTrust]; the connect retry loop calls startSSE itself
+        // once the pin is in place.
+        if (pendingTofuHostPort != null) {
+            DebugLog.i(TAG, "startSSE: frozen — TOFU trust pending for $pendingTofuHostPort")
+            return
+        }
         DebugLog.i("SSE", "startSSE")
         sseJob?.cancel()
         sseJob = launchSseCollection()
+    }
+
+    /**
+     * §tofu R2: applies the user's TOFU trust decision for the pending
+     * endpoint. Called by the UI (via [cn.vectory.ocdroid.ui.ConnectionViewModel])
+     * when the user taps Accept once / Trust / Cancel in [cn.vectory.ocdroid.ui.settings.TofuTrustDialog].
+     * Completes the deferred the [testConnection] retry loop is awaiting; the
+     * loop then writes the pin (Accept/Trust) and re-probes, or settles false
+     * (Cancel). No-op when no TOFU prompt is pending.
+     */
+    fun resolveTofuTrust(decision: TofuDecision) {
+        pendingTofuDecision?.complete(decision)
+            ?: DebugLog.w(TAG, "resolveTofuTrust: no pending TOFU decision — ignoring $decision")
     }
 
     /**

@@ -8,14 +8,17 @@ import org.junit.Test
 
 /**
  * R-18 Phase 5 coverage: [HostConfig] is the thread-safe holder for the
- * currently-active host profile (baseUrl / username / password /
- * allowInsecure) consumed by the OkHttp interceptors
- * (`AuthInterceptor` / `CacheControlInterceptor` / `CachePathSanitizer`).
+ * currently-active host profile (baseUrl / username / password / hostPort)
+ * consumed by the OkHttp interceptors (`AuthInterceptor` /
+ * `CacheControlInterceptor` / `CachePathSanitizer`) and the SSL config
+ * resolution path.
  *
- * §R18 Phase 2-E step 2 removed the deprecated `_currentDirectory` field; this
- * suite covers the REMAINING surface — defaults, atomic [configure], the
- * [hasBasicAuth] derived flag, and the `DEFAULT_SERVER` constant mirrored by
- * `OpenCodeRepository.DEFAULT_SERVER` (locked by an existing test).
+ * §R18 Phase 2-E step 2 removed the deprecated `_currentDirectory` field.
+ * §tofu R2 replaced the boolean `allowInsecure` field with `hostPort: String?`
+ * (the host:port authority of `_baseUrl` — the TOFU pin store key). This suite
+ * covers the REMAINING surface — defaults, atomic [configure], the
+ * [hasBasicAuth] derived flag, hostPort derivation, and the `DEFAULT_SERVER`
+ * constant mirrored by `OpenCodeRepository.DEFAULT_SERVER`.
  */
 class HostConfigTest {
 
@@ -33,29 +36,43 @@ class HostConfigTest {
     }
 
     @Test
-    fun `defaults have no credentials and allowInsecure is false`() {
+    fun `defaults have no credentials and hostPort is null`() {
         val config = HostConfig()
         assertNull(config.username)
         assertNull(config.password)
-        assertFalse(config.allowInsecure)
+        assertNull(config.hostPort)
         assertFalse(config.hasBasicAuth)
     }
 
     @Test
-    fun `configure updates baseUrl username password and allowInsecure atomically`() {
+    fun `configure updates baseUrl username password and hostPort atomically`() {
         val config = HostConfig()
 
         config.configure(
             baseUrl = "http://example.com:8080",
             username = "alice",
             password = "secret",
-            allowInsecure = true
+            hostPort = "example.com:8080"
         )
 
         assertEquals("http://example.com:8080", config.baseUrl)
         assertEquals("alice", config.username)
         assertEquals("secret", config.password)
-        assertTrue(config.allowInsecure)
+        assertEquals("example.com:8080", config.hostPort)
+    }
+
+    @Test
+    fun `configure derives hostPort from baseUrl when the caller passes null`() {
+        val config = HostConfig()
+        // https + no explicit port → 443 default.
+        config.configure("https://example.com", null, null, null)
+        assertEquals("example.com:443", config.hostPort)
+        // http + explicit port preserved.
+        config.configure("http://example.com:8080", null, null, null)
+        assertEquals("example.com:8080", config.hostPort)
+        // http + no explicit port → 80 default.
+        config.configure("http://example.com", null, null, null)
+        assertEquals("example.com:80", config.hostPort)
     }
 
     @Test
@@ -66,35 +83,35 @@ class HostConfigTest {
         assertFalse(config.hasBasicAuth)
 
         // (user, null) → false
-        config.configure("http://h", "user", null, false)
+        config.configure("http://h", "user", null, null)
         assertFalse(config.hasBasicAuth)
 
         // (null, pass) → false
-        config.configure("http://h", null, "pass", false)
+        config.configure("http://h", null, "pass", null)
         assertFalse(config.hasBasicAuth)
 
         // (user, pass) → true
-        config.configure("http://h", "user", "pass", false)
+        config.configure("http://h", "user", "pass", null)
         assertTrue(config.hasBasicAuth)
     }
 
     @Test
     fun `reconfigure clears previously-set credentials`() {
         val config = HostConfig().apply {
-            configure("http://h", "alice", "secret", true)
+            configure("http://h", "alice", "secret", "h:443")
         }
         assertTrue(config.hasBasicAuth)
-        assertTrue(config.allowInsecure)
+        assertEquals("h:443", config.hostPort)
 
         // A subsequent configure with null credentials MUST wipe them —
         // CacheControlInterceptor / AuthInterceptor both read these
         // reflectively on every request.
-        config.configure("http://h2", null, null, false)
+        config.configure("http://h2", null, null, null)
 
         assertNull(config.username)
         assertNull(config.password)
         assertFalse(config.hasBasicAuth)
-        assertFalse(config.allowInsecure)
+        assertEquals("h2:80", config.hostPort) // http default port 80 (derived from baseUrl when hostPort=null)
         assertEquals("http://h2", config.baseUrl)
     }
 
@@ -105,10 +122,10 @@ class HostConfigTest {
         // the raw value so CachePathSanitizer can derive the basePath from
         // whatever shape the caller supplied.
         val config = HostConfig()
-        config.configure("http://host/opencode/", null, null, false)
+        config.configure("http://host/opencode/", null, null, null)
         assertEquals("http://host/opencode/", config.baseUrl)
 
-        config.configure("http://host/opencode", null, null, false)
+        config.configure("http://host/opencode", null, null, null)
         assertEquals("http://host/opencode", config.baseUrl)
     }
 
@@ -119,7 +136,7 @@ class HostConfigTest {
         // a configured credential from the holder's perspective; callers
         // are expected to validate non-blank before configure().
         val config = HostConfig()
-        config.configure("http://h", "", "", false)
+        config.configure("http://h", "", "", null)
         assertTrue(config.hasBasicAuth)
         assertEquals("", config.username)
         assertEquals("", config.password)
@@ -135,34 +152,34 @@ class HostConfigTest {
         val config = HostConfig()
         repeat(5) { i ->
             config.configure(
-                baseUrl = "http://h$i",
+                baseUrl = "http://h$i:8080",
                 username = "u$i",
                 password = "p$i",
-                allowInsecure = i % 2 == 0
+                hostPort = "h$i:8080"
             )
-            assertEquals("http://h$i", config.baseUrl)
+            assertEquals("http://h$i:8080", config.baseUrl)
             assertEquals("u$i", config.username)
             assertEquals("p$i", config.password)
-            assertEquals(i % 2 == 0, config.allowInsecure)
+            assertEquals("h$i:8080", config.hostPort)
         }
     }
 
     @Test
-    fun `allowInsecure toggles independently of credentials`() {
+    fun `hostPort toggles independently of credentials`() {
         val config = HostConfig()
-        // insecure on, creds set
-        config.configure("http://h", "u", "p", true)
-        assertTrue(config.allowInsecure)
+        // hostPort set, creds set
+        config.configure("http://h", "u", "p", "h:443")
+        assertEquals("h:443", config.hostPort)
         assertTrue(config.hasBasicAuth)
 
-        // insecure off, creds cleared
-        config.configure("http://h", null, null, false)
-        assertFalse(config.allowInsecure)
+        // hostPort null → re-derived from baseUrl; creds cleared
+        config.configure("http://h2", null, null, null)
+        assertEquals("h2:80", config.hostPort)
         assertFalse(config.hasBasicAuth)
 
-        // insecure on, no creds
-        config.configure("http://h", null, null, true)
-        assertTrue(config.allowInsecure)
+        // hostPort explicit, no creds
+        config.configure("http://h", null, null, "explicit:9999")
+        assertEquals("explicit:9999", config.hostPort)
         assertFalse(config.hasBasicAuth)
     }
 }

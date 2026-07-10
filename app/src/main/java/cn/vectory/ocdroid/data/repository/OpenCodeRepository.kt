@@ -16,7 +16,16 @@ import cn.vectory.ocdroid.data.repository.http.OkHttpClientFactory
 import cn.vectory.ocdroid.data.repository.http.ResponseSizeGuardInterceptor
 import cn.vectory.ocdroid.data.repository.http.SslConfig
 import cn.vectory.ocdroid.data.repository.http.SslConfigFactory
+import cn.vectory.ocdroid.data.repository.http.TofuDecision
+import cn.vectory.ocdroid.data.repository.http.TofuFailureReason
+import cn.vectory.ocdroid.data.repository.http.TofuPinStore
+import cn.vectory.ocdroid.data.repository.http.TofuValidation
+import cn.vectory.ocdroid.data.repository.http.InMemoryTofuPinStore
 import cn.vectory.ocdroid.data.repository.http.buildMutualTlsConfig
+import cn.vectory.ocdroid.data.repository.http.classifyValidation
+import cn.vectory.ocdroid.data.repository.http.hostPortFromUrl
+import cn.vectory.ocdroid.data.repository.http.spkiSha256Hex
+import cn.vectory.ocdroid.data.repository.http.CaptureTrustManager
 import cn.vectory.ocdroid.data.repository.http.TrafficCountingInterceptor
 import cn.vectory.ocdroid.util.DebugLog
 import cn.vectory.ocdroid.util.TrafficLogger
@@ -35,9 +44,17 @@ import okhttp3.MediaType.Companion.toMediaType
 import com.jakewharton.retrofit2.converter.kotlinx.serialization.asConverterFactory
 import retrofit2.Retrofit
 import java.io.IOException
+import java.io.ByteArrayInputStream
+import java.security.KeyStore
+import java.security.SecureRandom
 import java.util.Base64
+import java.security.cert.X509Certificate
+import java.util.concurrent.TimeUnit
 import javax.inject.Inject
 import javax.inject.Singleton
+import javax.net.ssl.KeyManagerFactory
+import javax.net.ssl.SSLContext
+import javax.net.ssl.TrustManager
 
 /**
  * One page of cursor-paginated messages. [nextCursor] is the opaque V1 cursor
@@ -69,7 +86,19 @@ data class MessagesPage(
 @Singleton
 class OpenCodeRepository @Inject constructor(
     private val trafficTracker: TrafficTracker,
-    private val trafficLogger: TrafficLogger
+    private val trafficLogger: TrafficLogger,
+    /**
+     * §tofu R2: the TOFU pin store (persistent ESP-backed in production via
+     * [cn.vectory.ocdroid.di.TofuModule]; [InMemoryTofuPinStore] in unit tests).
+     * Held so [applyTofuDecision] can write Accept-once / Trust decisions and
+     * [captureServerCert] / [checkHealthFor] can read pinned state via the
+     * shared [sslConfigFactory]. Defaults to [InMemoryTofuPinStore] so the
+     * test-locked 2-arg `OpenCodeRepository(mockk(), mockk())` construction
+     * keeps compiling (Hilt ignores Kotlin defaults and injects the bound
+     * [EspTofuPinStore][cn.vectory.ocdroid.data.repository.http.EspTofuPinStore]
+     * in production).
+     */
+    private val tofuStore: TofuPinStore = InMemoryTofuPinStore(),
 ) {
     private val json = Json {
         ignoreUnknownKeys = true
@@ -94,11 +123,13 @@ class OpenCodeRepository @Inject constructor(
     private val responseSizeGuardInterceptor = ResponseSizeGuardInterceptor()
     // §2.4: 持有同一个 [SslConfigFactory] 实例——既给 clientFactory 构建 OkHttp client
     // （live REST/SSE/command/tunnel），也供本类的 [configure]/[checkHealthFor]/
-    // [currentSslConfig] 解析 mTLS / allowInsecure。原先 inline `OkHttpClientFactory(
+    // [currentSslConfig] 解析 mTLS / TOFU pin。原先 inline `OkHttpClientFactory(
     // SslConfigFactory(), ...)` 每次构造一个独立 factory，configure 时注入的客户端
-    // 证书无法被 healthClient(allowInsecure) 旧重载读到，也无法集中观测
+    // 证书无法被 healthClient 旧重载读到，也无法集中观测
     // [SslConfigFactory.lastClientCertError]。
-    private val sslConfigFactory = SslConfigFactory()
+    // §tofu R2: SslConfigFactory 现在需要 [TofuPinStore]——传入构造函数注入的 store，
+    // 使生产 (ESP) / 测试 (InMemory) 都走同一 graph。
+    private val sslConfigFactory = SslConfigFactory(tofuStore)
     private val clientFactory = OkHttpClientFactory(
         sslConfigFactory,
         directoryHeaderInterceptor,
@@ -108,8 +139,8 @@ class OpenCodeRepository @Inject constructor(
         responseSizeGuardInterceptor
     )
 
-    private var restHttp: OkHttpClient = clientFactory.restClient(hostConfig.allowInsecure)
-    private var sseHttp: OkHttpClient = clientFactory.sseClient(hostConfig.allowInsecure)
+    private var restHttp: OkHttpClient = clientFactory.restClient(hostConfig.hostPort)
+    private var sseHttp: OkHttpClient = clientFactory.sseClient(hostConfig.hostPort)
     private var retrofit: Retrofit = buildRetrofit(restHttp, hostConfig.baseUrl)
     private var api: OpenCodeApi = retrofit.create(OpenCodeApi::class.java)
     private var sseClient: SSEClient = SSEClient(sseHttp)
@@ -125,7 +156,7 @@ class OpenCodeRepository @Inject constructor(
      * (auth / directory / cache / traffic) as [api]; only the OkHttp client
      * differs. All other API methods stay on [api].
      */
-    private var commandHttp: OkHttpClient = clientFactory.commandClient(hostConfig.allowInsecure)
+    private var commandHttp: OkHttpClient = clientFactory.commandClient(hostConfig.hostPort)
     private var commandRetrofit: Retrofit = buildRetrofit(commandHttp, hostConfig.baseUrl)
     private var commandApi: OpenCodeApi = commandRetrofit.create(OpenCodeApi::class.java)
 
@@ -170,13 +201,13 @@ class OpenCodeRepository @Inject constructor(
 
     @Synchronized
     private fun rebuildClients() {
-        restHttp = clientFactory.restClient(hostConfig.allowInsecure)
-        sseHttp = clientFactory.sseClient(hostConfig.allowInsecure)
+        restHttp = clientFactory.restClient(hostConfig.hostPort)
+        sseHttp = clientFactory.sseClient(hostConfig.hostPort)
         retrofit = buildRetrofit(restHttp, hostConfig.baseUrl)
         api = retrofit.create(OpenCodeApi::class.java)
         // §grouping-rewrite item 4: rebuild the command-side client + Retrofit
         // so a host switch (configure) refreshes baseUrl / auth on it too.
-        commandHttp = clientFactory.commandClient(hostConfig.allowInsecure)
+        commandHttp = clientFactory.commandClient(hostConfig.hostPort)
         commandRetrofit = buildRetrofit(commandHttp, hostConfig.baseUrl)
         commandApi = commandRetrofit.create(OpenCodeApi::class.java)
         v2Retrofit = buildV2Retrofit(restHttp, hostConfig.baseUrl)
@@ -185,10 +216,12 @@ class OpenCodeRepository @Inject constructor(
     }
 
     /**
-     * R-01: [allowInsecureConnections] controls whether this host's TLS is
-     * downgraded to trust-all. Pass from the calling profile's
-     * [HostProfile.allowInsecureConnections]; default false (system trust
-     * store only).
+     * §tofu R2: configure the live host. [hostPort] (the host:port authority
+     * of [baseUrl]) replaces the legacy `allowInsecureConnections: Boolean`;
+     * it keys the TOFU pin lookup so a previously-trusted endpoint's
+     * TofuPinned config is applied to the rebuilt REST/SSE/command clients.
+     * The caller may derive it via [hostPortFromUrl] (a null [hostPort] is
+     * also resolved from [baseUrl] inside [HostConfig.configure]).
      *
      * §2.4: [clientCert] is the optional mTLS client certificate material
      * (PKCS12 + password + optional private CA). Loaded by the caller from
@@ -206,27 +239,30 @@ class OpenCodeRepository @Inject constructor(
         baseUrl: String,
         username: String? = null,
         password: String? = null,
-        allowInsecureConnections: Boolean = false,
+        hostPort: String? = null,
         clientCert: ClientCertMaterial? = null
     ) {
         // §2.4: MUST precede hostConfig.configure / rebuildClients so the
         // shared sslConfigFactory holds the new mTLS material when the live
         // REST/SSE/command clients are rebuilt (they read sslConfigFor(...)).
         sslConfigFactory.configureClientCert(clientCert)
-        hostConfig.configure(baseUrl, username, password, allowInsecureConnections)
+        hostConfig.configure(baseUrl, username, password, hostPort)
         rebuildClients()
     }
 
     /**
      * §2.4: the current effective [SslConfig] for the live host (mTLS priority
-     * over allowInsecure, SystemDefault safe fallback). Callers
+     * over TOFU pin, SystemDefault safe fallback). Callers
      * ([HttpImageHolder] / cold-start image sync) use this to mirror the same
      * trust policy onto the markdown image client. `@Synchronized` because it
      * reads the mutable [sslConfigFactory] state that [configure] writes under
      * the same monitor (v3-glmer R2).
+     *
+     * §tofu R2: resolves via [SslConfigFactory.sslConfigFor] keyed by the
+     * current [HostConfig.hostPort] (was `allowInsecure`).
      */
     @Synchronized
-    fun currentSslConfig(): SslConfig = sslConfigFactory.sslConfigFor(hostConfig.allowInsecure)
+    fun currentSslConfig(): SslConfig = sslConfigFactory.sslConfigFor(hostConfig.hostPort)
 
     /**
      * §fix-3 (gro-1#2/gpt-2#2/max-1 M1): 转发 [SslConfigFactory.lastClientCertError]。
@@ -236,6 +272,121 @@ class OpenCodeRepository @Inject constructor(
      * 未配置 mTLS。
      */
     val lastClientCertError: String? get() = sslConfigFactory.lastClientCertError
+
+    // ── §tofu R2: capture probe + decision application ──────────────────────
+
+    /**
+     * §tofu R2: a captured leaf cert + its SPKI + the system-validation
+     * classification. Surfaced to the UI as the trust-prompt payload; the UI's
+     * [TofuDecision] is fed back via [applyTofuDecision].
+     */
+    data class TofuCaptureResult(
+        val hostPort: String,
+        val leaf: X509Certificate,
+        val spkiHex: String,
+        val validation: TofuValidation
+    )
+
+    /**
+     * §tofu R2: one-shot TLS handshake probe that RECORDS the server's leaf
+     * cert chain for the trust prompt. Used by the connection coordinator
+     * when [checkHealth] / [checkHealthFor] fails with an SSL/cert error and
+     * no pin yet exists for [hostPort] — i.e. the user has never trusted this
+     * endpoint.
+     *
+     * Builds its OWN one-shot OkHttpClient (does NOT touch the live mTLS
+     * cache nor the held client-cert state — mirrors [SslConfigFactory.resolveProbe]'s
+     * non-polluting contract): a [CaptureTrustManager] records the chain, the
+     * optional [clientCert] is presented via a fresh KeyManager (so an mTLS
+     * server that requires client auth still completes the handshake far
+     * enough to present its chain), and a permissive hostnameVerifier lets
+     * the handshake complete for self-signed certs whose SAN doesn't match.
+     *
+     * Returns null on total failure (unreachable host, no cert presented,
+     * UI-thread cancellation) — the coordinator surfaces the original
+     * SSLHandshakeException in that case.
+     */
+    suspend fun captureServerCert(
+        baseUrl: String,
+        hostPort: String,
+        clientCert: ClientCertMaterial? = null
+    ): TofuCaptureResult? = withContext(Dispatchers.IO) {
+        val capture = CaptureTrustManager()
+        // Build the one-shot SSLContext: CaptureTrustManager (records) +
+        // optional KeyManagers from the supplied p12 (mTLS client auth).
+        val keyManagers = clientCert?.let { material ->
+            runCatching {
+                val p12 = KeyStore.getInstance("PKCS12").apply {
+                    load(ByteArrayInputStream(material.p12Bytes), material.p12Password)
+                }
+                val kmf = KeyManagerFactory.getInstance(KeyManagerFactory.getDefaultAlgorithm())
+                    .apply { init(p12, material.p12Password) }
+                kmf.keyManagers
+            }.getOrNull()
+        }
+        val ctx = SSLContext.getInstance("TLS").apply {
+            init(keyManagers, arrayOf<TrustManager>(capture), SecureRandom())
+        }
+        val oneShot = OkHttpClient.Builder()
+            .sslSocketFactory(ctx.socketFactory, capture)
+            // §tofu R2: pin即身份 — capture 阶段放行 hostnameVerifier，使自签证书
+            // （SAN 常不匹配）也能完成握手并暴露 leaf。安全由随后 SPKI pin 保证。
+            .hostnameVerifier { _, _ -> true }
+            .connectTimeout(8, TimeUnit.SECONDS)
+            .readTimeout(8, TimeUnit.SECONDS)
+            .build()
+        val normalizedUrl = (if (baseUrl.startsWith("http")) baseUrl else "https://$baseUrl")
+            .trimEnd('/') + "/global/health"
+        val requestBuilder = Request.Builder()
+            .url(normalizedUrl)
+            .header(HttpHeaders.SKIP_DIR_HEADER, "1")
+        // Surface the leaf + classification regardless of whether the GET
+        // itself succeeded — a 4xx/5xx after a completed handshake STILL
+        // captured the chain (the handshake happens before any HTTP
+        // exchange). Only total handshake/connection failures return null.
+        runCatching {
+            oneShot.newCall(requestBuilder.build()).execute().use { /* drain */ }
+        }
+        val chain = capture.capturedChain
+        if (chain.isNullOrEmpty()) return@withContext null
+        val leaf = chain.first()
+        val spki = leaf.spkiSha256Hex()
+        val host = hostPort.substringBefore(':')
+        val validation = classifyValidation(chain, host)
+        TofuCaptureResult(hostPort = hostPort, leaf = leaf, spkiHex = spki, validation = validation)
+    }
+
+    /**
+     * §tofu R2: applies the UI's [TofuDecision] for [hostPort] to the injected
+     * [TofuPinStore]. After [TofuDecision.AcceptOnce] / [TofuDecision.Trust]
+     * the next [checkHealth] resolves a TofuPinned SSL config and the
+     * handshake succeeds; [TofuDecision.Cancel] writes nothing (the user
+     * declined — the in-flight connect is settled false by the coordinator).
+     *
+     * The decision is keyed by [hostPort] so two profiles reaching the same
+     * endpoint share the trust state (known_hosts model — grill Q4=a).
+     */
+    fun applyTofuDecision(hostPort: String, decision: TofuDecision) {
+        when (decision) {
+            is TofuDecision.AcceptOnce -> tofuStore.acceptSession(hostPort, decision.spki)
+            is TofuDecision.Trust -> tofuStore.trustPersistent(hostPort, decision.spki)
+            TofuDecision.Cancel -> { /* no-op — user declined */ }
+        }
+    }
+
+    /**
+     * §tofu R2: query the current pinned SPKI for [hostPort] (persistent OR
+     * session tier). Used by the coordinator's "should I prompt?" guard so
+     * we never re-prompt an endpoint the user has already trusted.
+     */
+    fun pinnedSpkiFor(hostPort: String): String? = tofuStore.pinnedSpki(hostPort)
+
+    /**
+     * §tofu R2: forget the pin for [hostPort] (both tiers). Re-prompt is
+     * forced on the next connect. Used by the host management UI's "forget
+     * trust" affordance.
+     */
+    fun clearTofuPin(hostPort: String) = tofuStore.clear(hostPort)
 
     // §R18 Phase 2-E step 2: the deprecated setCurrentDirectory /
     // getCurrentDirectory forwarding helpers were removed. Non-file routes
@@ -250,9 +401,9 @@ class OpenCodeRepository @Inject constructor(
      * mutating this repository's current configuration. Used by the host list's
      * per-row "test" action so a profile can be probed without switching hosts.
      *
-     * R-01: [allowInsecure] controls whether this probe trust-all (caller
-     * should pass per profile's [HostProfile.allowInsecureConnections]).
-     * Default false.
+     * §tofu R2: [hostPort] (host:port authority of [baseUrl]) replaces the
+     * legacy `allowInsecure: Boolean`. It keys the TOFU pin lookup so a
+     * previously-trusted endpoint's pin is honored during the probe.
      *
      * Builds a throwaway OkHttp client via [OkHttpClientFactory.healthClient]
      * (the SSL-trust shared entry point) and parses the same [HealthResponse]
@@ -262,15 +413,17 @@ class OpenCodeRepository @Inject constructor(
         baseUrl: String,
         username: String? = null,
         password: String? = null,
-        allowInsecure: Boolean = false,
+        hostPort: String? = null,
         clientCert: ClientCertMaterial? = null
     ): Result<HealthResponse> = withContext(Dispatchers.IO) {
         runSuspendCatching {
             // v3-gpter R2#1 阻断修复：用 [SslConfigFactory.resolveProbe] 纯参数解析
-            // （allowInsecure + clientCert），**禁止**用 sslConfigFor——后者会读 held
+            // （hostPort + clientCert），**禁止**用 sslConfigFor——后者会读 held
             // mTLS 状态，于是测他 profile（clientCert=null）时会复用当前 mTLS profile
             // 的缓存，误出示其客户端证书 / 只信其私有 CA，甚至泄漏客户端身份给无关 host。
-            val cfg: SslConfig = sslConfigFactory.resolveProbe(allowInsecure, clientCert)
+            // §tofu R2: hostPort 替代 allowInsecure，探测也走 TOFU pin 查询。
+            val resolvedHostPort = hostPort ?: hostPortFromUrl(baseUrl)
+            val cfg: SslConfig = sslConfigFactory.resolveProbe(resolvedHostPort, clientCert)
             val client = clientFactory.healthClient(cfg)
         val normalizedUrl = (if (baseUrl.startsWith("http")) baseUrl else "http://$baseUrl")
             .trimEnd('/') + "/global/health"
@@ -688,16 +841,18 @@ class OpenCodeRepository @Inject constructor(
      * Uses an independent OkHttpClient without any Basic Auth interceptor,
      * since tunnel authentication uses form-encoded POST (not HTTP Basic Auth).
      *
-     * R-01: [allowInsecure] controls whether the tunnel client trust-all.
+     * §tofu R2: [hostPort] (host:port authority of [tunnelUrl]) replaces the
+     * legacy `allowInsecure: Boolean`; it keys the TOFU pin lookup for the
+     * one-shot tunnel POST.
      */
     suspend fun activateTunnel(
         tunnelUrl: String,
         password: String,
-        allowInsecure: Boolean = false
+        hostPort: String? = null
     ): Result<Unit> = withContext(Dispatchers.IO) {
         runSuspendCatching {
             try {
-                val client = clientFactory.tunnelClient(allowInsecure)
+                val client = clientFactory.tunnelClient(hostPort)
                 val formBody = FormBody.Builder()
                     .add("persist_auth", "off")
                     .add("pw", password)

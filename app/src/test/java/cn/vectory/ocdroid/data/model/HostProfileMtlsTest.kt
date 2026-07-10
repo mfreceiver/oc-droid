@@ -53,13 +53,14 @@ class HostProfileMtlsTest {
     fun `legacy JSON without mTLS fields decodes to safe defaults`() {
         // 旧版本 JSON 无 mtlsEnabled / clientCertId → 反序列化后 false / null
         // （不会悬空引用已不存在的 clientCertId，也不会误开 mTLS）。
+        // §tofu R2: legacy `allowInsecureConnections` is silently dropped by
+        // ignoreUnknownKeys=true (the field no longer exists on HostProfile).
         val legacy = """{"id":"legacy","name":"old","serverURL":"http://old:4096","allowInsecureConnections":true}"""
         val decoded = json.decodeFromString<HostProfile>(legacy)
 
         assertEquals("legacy", decoded.id)
         assertFalse("legacy mtlsEnabled defaults false", decoded.mtlsEnabled)
         assertNull("legacy clientCertId defaults null", decoded.clientCertId)
-        assertTrue(decoded.allowInsecureConnections)
     }
 
     @Test

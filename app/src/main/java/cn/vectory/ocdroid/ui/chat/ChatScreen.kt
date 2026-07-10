@@ -59,6 +59,7 @@ import cn.vectory.ocdroid.R
 import cn.vectory.ocdroid.ui.resolveMessage
 import cn.vectory.ocdroid.ui.files.FilesScreen
 import cn.vectory.ocdroid.ui.files.FilesViewModel
+import cn.vectory.ocdroid.ui.settings.TofuTrustDialog
 import cn.vectory.ocdroid.ui.ChatViewModel
 import cn.vectory.ocdroid.ui.ComposerViewModel
 import cn.vectory.ocdroid.ui.ConnectionViewModel
@@ -920,6 +921,21 @@ fun ChatScreen(
                 }
             )
         }
+    }
+
+    // §tofu R2: SSH-style trust-on-first-use prompt. When the connection
+    // coordinator captures a leaf cert against an unpinned endpoint, it writes
+    // ConnectionState.pendingTofuCapture and the loop SUSPENDS waiting for the
+    // user's decision. Render [TofuTrustDialog] here (ChatScreen already
+    // observes `connection` + holds `connectionVM`) and feed the decision
+    // straight back via ConnectionViewModel.resolveTofuTrust — the coordinator
+    // unblocks, writes the pin (Accept/Trust) or settles false (Cancel), and
+    // re-probes / terminates.
+    connection.pendingTofuCapture?.let { capture ->
+        TofuTrustDialog(
+            capture = capture,
+            onDecision = { decision -> connectionVM.resolveTofuTrust(decision) }
+        )
     }
 }
 

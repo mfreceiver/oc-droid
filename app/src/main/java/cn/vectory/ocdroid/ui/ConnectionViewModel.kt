@@ -4,7 +4,9 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import cn.vectory.ocdroid.data.repository.OpenCodeRepository
 import cn.vectory.ocdroid.data.repository.http.ClientCertMaterial
+import cn.vectory.ocdroid.data.repository.http.TofuDecision
 import cn.vectory.ocdroid.data.repository.http.buildMutualTlsConfig
+import cn.vectory.ocdroid.data.repository.http.hostPortFromUrl
 import cn.vectory.ocdroid.ui.controller.ConnectionCoordinator
 import cn.vectory.ocdroid.ui.settings.CaStage
 import cn.vectory.ocdroid.ui.settings.resolveClientCert
@@ -79,13 +81,12 @@ class ConnectionViewModel @Inject constructor(
         baseUrl: String,
         username: String?,
         password: String?,
-        allowInsecure: Boolean,
         profileId: String?,
         passwordEdited: Boolean,
         onResult: (success: Boolean, message: String) -> Unit,
     ) = testConnectionForm(
-        baseUrl, username, password, allowInsecure, profileId, passwordEdited,
-        // §2.7 默认无 mTLS（兼容既有 7-arg 调用方 / 旧测试）：
+        baseUrl, username, password, profileId, passwordEdited,
+        // §2.7 默认无 mTLS（兼容既有 6-arg 调用方 / 旧测试）：
         mtlsEnabled = false, stagedP12 = null, hasImportedP12 = false,
         caStage = CaStage.Unchanged, p12Password = null, p12PasswordEdited = false,
         clientCertId = null, onResult = onResult,
@@ -104,12 +105,14 @@ class ConnectionViewModel @Inject constructor(
      * 走 [OpenCodeRepository.checkHealthFor] 的 `resolveProbe` 纯参数解析（不污染
      * 当前 host 的 held mTLS 状态），否则 mTLS host 测试必被 stunnel 拒（gpter#3/
      * glmer I6）。
+     *
+     * §tofu R2: `allowInsecure` 参数已删——self-signed / unknown-issuer 证书由首次
+     * 连接时的 TOFU 信任对话框处理（host:port 经 [hostPortFromUrl] 解析）。
      */
     fun testConnectionForm(
         baseUrl: String,
         username: String?,
         password: String?,
-        allowInsecure: Boolean,
         profileId: String?,
         passwordEdited: Boolean,
         mtlsEnabled: Boolean,
@@ -153,7 +156,9 @@ class ConnectionViewModel @Inject constructor(
                 }
             }
             val result = repository.checkHealthFor(
-                baseUrl, username, effectivePassword, allowInsecure, clientCert
+                baseUrl, username, effectivePassword,
+                hostPort = hostPortFromUrl(baseUrl),
+                clientCert = clientCert
             )
             result
                 .onSuccess { health ->
@@ -196,6 +201,16 @@ class ConnectionViewModel @Inject constructor(
     fun cancelSse() { connectionCoordinator.cancelSse() }
 
     fun cancelSseForReconfigure() { connectionCoordinator.cancelSseForReconfigure() }
+
+    /**
+     * §tofu R2: feeds the user's trust decision for the currently-pending
+     * TOFU capture into the connection coordinator. The coordinator unblocks
+     * the [testConnection] retry loop, writes the pin (Accept/Trust) or
+     * settles false (Cancel), and either re-probes or terminates.
+     */
+    fun resolveTofuTrust(decision: TofuDecision) {
+        connectionCoordinator.resolveTofuTrust(decision)
+    }
 
     /** Connection-driven initial data fetch (sessions/agents/providers/...).
      *  Routes through the connection coordinator which owns the fan-out. */
