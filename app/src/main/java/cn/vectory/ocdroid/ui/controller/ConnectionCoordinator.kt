@@ -27,7 +27,7 @@ import kotlinx.coroutines.flow.catch
 import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
-import javax.net.ssl.SSLHandshakeException
+import javax.net.ssl.SSLException
 import java.security.cert.CertificateException
 import java.util.Locale
 
@@ -120,6 +120,7 @@ class ConnectionCoordinator(
      */
     @Volatile
     private var pendingTofuHostPort: String? = null
+    @Volatile
     private var pendingTofuDecision: kotlinx.coroutines.CompletableDeferred<TofuDecision>? = null
 
     /**
@@ -190,6 +191,14 @@ class ConnectionCoordinator(
             return
         }
         lastHealthCheckTime = now
+        // §tofu R2 round-1 fix (cgpt B3/opuser): 待 TOFU 决策期间不并发探测——pending
+        // 流程负责 settle；并行 testConnection（弹窗期间的 ForceReconnect）否则可能在
+        // 弹窗仍显示时写 Disconnected。入口守卫 + 下面 pendingTofuHostPort==null 检查
+        // + coldStart/startSSE 早退共同保证 single-flight。
+        if (pendingTofuHostPort != null) {
+            DebugLog.i(TAG, "testConnection: TOFU trust pending for $pendingTofuHostPort — deferring")
+            return
+        }
         scope.launch {
             // §onSettled-exactly-once (gpt-1 🔴 / glm-1): the original post-loop
             // `onSettled?.invoke(false)` was UNREACHABLE on cancellation —
@@ -295,64 +304,78 @@ class ConnectionCoordinator(
                     //       stacking prompts on a re-entrant coldStart).
                     val exc = healthResult.exceptionOrNull()
                     val rootCause = generateSequence(exc) { it.cause }
-                        .firstOrNull { it is SSLHandshakeException || it is CertificateException }
+                        // §tofu R2 round-1 fix (cgpt B2): 扩到 SSLException（覆盖
+                        // SSLHandshakeException + SSLPeerUnverifiedException——OkHttp 把
+                        // 主机名不匹配报成后者），使任何 TLS 校验失败都进 TOFU（全口径，grill Q2=a）。
+                        .firstOrNull { it is SSLException || it is CertificateException }
                     val baseUrl = settingsManager.serverUrl
                     val hostPort = hostPortFromUrl(baseUrl)
                     if (rootCause != null && hostPort != null &&
                         repository.pinnedSpkiFor(hostPort) == null &&
                         pendingTofuHostPort == null
                     ) {
-                        val capture = repository.captureServerCert(baseUrl, hostPort, clientCert = null)
-                        if (capture != null) {
-                            // Enter pending-trust: SUSPEND the retry loop on a
-                            // CompletableDeferred that [resolveTofuTrust]
-                            // completes. While pending, the freeze guards in
-                            // [coldStartReconnect] / [startSSE] early-return.
-                            pendingTofuHostPort = hostPort
-                            val deferred = kotlinx.coroutines.CompletableDeferred<TofuDecision>()
-                            pendingTofuDecision = deferred
-                            writeConnection {
-                                it.copy(
-                                    connectionPhase = ConnectionPhase.AwaitingTofuTrust,
-                                    pendingTofuCapture = capture
-                                )
+                        // §tofu R2 round-1 fix (cgpt B3/opuser): 在 capture 探测【之前】
+                        // 占住 pending（single-flight）。并发的 ForceReconnect 驱动的
+                        // testConnection 会因入口守卫 + 此处的 pendingTofuHostPort==null
+                        // 检查而 defer，不再二次 capture 覆盖本循环的 deferred 致其孤儿。
+                        pendingTofuHostPort = hostPort
+                        try {
+                            val capture = repository.captureServerCert(baseUrl, hostPort, clientCert = null)
+                            if (capture != null) {
+                                // Enter pending-trust: SUSPEND the retry loop on a
+                                // CompletableDeferred that [resolveTofuTrust] completes.
+                                // While pending, the freeze guards in [coldStartReconnect] /
+                                // [startSSE] + the testConnection entry guard early-return.
+                                val deferred = kotlinx.coroutines.CompletableDeferred<TofuDecision>()
+                                pendingTofuDecision = deferred
+                                writeConnection {
+                                    it.copy(
+                                        connectionPhase = ConnectionPhase.AwaitingTofuTrust,
+                                        pendingTofuCapture = capture
+                                    )
+                                }
+                                try {
+                                    val decision = deferred.await()
+                                    when (decision) {
+                                        is TofuDecision.AcceptOnce,
+                                        is TofuDecision.Trust -> {
+                                            // 写 pin + 重建 live 客户端（applyTofuDecision 对当
+                                            // 前 host 重建）→ 下一次 checkHealth 解析为 TofuPinned
+                                            // （SPKI 匹配 → 握手成功）。不消耗 retry、不延迟。
+                                            repository.applyTofuDecision(hostPort, decision)
+                                            writeConnection {
+                                                it.copy(connectionPhase = ConnectionPhase.Connecting)
+                                            }
+                                            continue
+                                        }
+                                        TofuDecision.Cancel -> {
+                                            // User declined — terminal failure.
+                                            writeConnection {
+                                                it.copy(
+                                                    isConnected = false,
+                                                    isConnecting = false,
+                                                    connectionPhase = ConnectionPhase.Disconnected
+                                                )
+                                            }
+                                            settled = true
+                                            onSettled?.invoke(false)
+                                            return@launch
+                                        }
+                                    }
+                                } finally {
+                                    // §tofu R2 round-1 fix (opuser): 每条路径都清弹窗 + decision
+                                    // 引用——决策完成 OR 协程在 await 期间被取消（外层 finally 清
+                                    // pendingTofuHostPort，防 coldStart/startSSE 永久冻结）。
+                                    pendingTofuDecision = null
+                                    writeConnection { it.copy(pendingTofuCapture = null) }
+                                }
                             }
-                            val decision = deferred.await()
+                            // capture == null (unreachable / no cert presented):
+                            // fall through to the normal failure path below — the
+                            // original SSLHandshakeException is surfaced verbatim.
+                        } finally {
                             pendingTofuHostPort = null
-                            pendingTofuDecision = null
-                            writeConnection { it.copy(pendingTofuCapture = null) }
-                            when (decision) {
-                                is TofuDecision.AcceptOnce,
-                                is TofuDecision.Trust -> {
-                                    // Apply the pin → next loop iteration calls
-                                    // checkHealth, which now resolves a
-                                    // TofuPinned SSL config (SPKI match →
-                                    // handshake succeeds). DON'T burn a retry
-                                    // or delay — `continue` re-probes at once.
-                                    repository.applyTofuDecision(hostPort, decision)
-                                    writeConnection {
-                                        it.copy(connectionPhase = ConnectionPhase.Connecting)
-                                    }
-                                    continue
-                                }
-                                TofuDecision.Cancel -> {
-                                    // User declined — terminal failure.
-                                    writeConnection {
-                                        it.copy(
-                                            isConnected = false,
-                                            isConnecting = false,
-                                            connectionPhase = ConnectionPhase.Disconnected
-                                        )
-                                    }
-                                    settled = true
-                                    onSettled?.invoke(false)
-                                    return@launch
-                                }
-                            }
                         }
-                        // capture == null (unreachable / no cert presented):
-                        // fall through to the normal failure path below — the
-                        // original SSLHandshakeException is surfaced verbatim.
                     }
                     if (attempt >= maxAttempts || !isActive) {
                         // §R-17 batch2: error is now a one-shot UiEvent on

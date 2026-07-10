@@ -41,7 +41,7 @@ fun hostPortFromUrl(url: String): String? = runCatching {
     val port = if (u.port != -1) u.port else when (u.scheme?.lowercase()) {
         "https" -> 443; "http" -> 80; else -> return null
     }
-    "$host:$port"
+    "${host.lowercase()}:$port"  // §tofu R2 round-1 fix (cgpt): DNS 大小写不敏感，lowercase 使 Example.com:443 == example.com:443
 }.getOrNull()
 
 /** A captured leaf + its SPKI, from a one-shot capture probe. */

@@ -34,22 +34,10 @@ sealed interface SslConfig {
     data object SystemDefault : SslConfig
 
     /**
-     * Trust-all manager + permissive hostname verifier. The wrapped
-     * [X509TrustManager] and [SSLSocketFactory] are cached by
-     * [SslConfigFactory] so SSLContext initialization happens at most once
-     * per process.
-     */
-    data class TrustAll(
-        val trustManager: X509TrustManager,
-        val socketFactory: SSLSocketFactory
-    ) : SslConfig
-
-    /**
      * §2.1: mTLS — presents a client certificate (PKCS12) during the TLS
      * handshake. [caBytes] non-null at build time → the [trustManager] only
      * trusts the supplied private CA(s); null → platform CA. The mTLS path
-     * does NOT override the hostname verifier (strict CN/SAN), unlike
-     * [TrustAll].
+     * does NOT override the hostname verifier (strict CN/SAN).
      */
     data class MutualTLS(
         val trustManager: X509TrustManager,
@@ -174,16 +162,6 @@ class SslConfigFactory @Inject constructor(
     private val tofuStore: TofuPinStore
 ) {
 
-    private val trustAllTrustManager: X509TrustManager = object : X509TrustManager {
-        override fun checkClientTrusted(chain: Array<X509Certificate>, authType: String) {}
-        override fun checkServerTrusted(chain: Array<X509Certificate>, authType: String) {}
-        override fun getAcceptedIssuers(): Array<X509Certificate> = arrayOf()
-    }
-
-    private val trustAllConfig: SslConfig.TrustAll by lazy {
-        SslConfig.TrustAll(trustAllTrustManager, buildTrustAllSocketFactory())
-    }
-
     /**
      * §2.1: 当前客户端证书对应的 mTLS 配置（configure 时缓存）。null=未配置
      * 或最近一次加载失败（见 [lastClientCertError]）。
@@ -244,19 +222,11 @@ class SslConfigFactory @Inject constructor(
         else -> hostPort?.let { tofuStore.pinnedSpki(it) }?.let { buildTofuPinnedConfig(it) }
             ?: SslConfig.SystemDefault
     }
-
-    private fun buildTrustAllSocketFactory(): SSLSocketFactory {
-        val context = SSLContext.getInstance("TLS")
-        context.init(null, arrayOf<TrustManager>(trustAllTrustManager), SecureRandom())
-        return context.socketFactory
-    }
 }
 
 /**
  * Applies [cfg] to this builder. No-op for [SslConfig.SystemDefault] so the
- * JVM default trust store / hostname verifier are used; for
- * [SslConfig.TrustAll] installs the permissive socket factory + hostname
- * verifier.
+ * JVM default trust store / hostname verifier are used.
  *
  * §2.1: [SslConfig.MutualTLS] installs the client-key socket factory + the
  * private/platform trust manager, but **does NOT override the hostname
@@ -264,12 +234,12 @@ class SslConfigFactory @Inject constructor(
  * SAN MUST match the serverUrl host (DNS or IP). This is the single canonical
  * SSL entry point — every OkHttp client built by [OkHttpClientFactory] routes
  * through here.
+ *
+ * §tofu R2: [SslConfig.TofuPinned] installs the pinning trust manager +
+ * permissive hostname verifier (the SPKI pin is the identity).
  */
 fun OkHttpClient.Builder.applySsl(cfg: SslConfig): OkHttpClient.Builder = when (cfg) {
     SslConfig.SystemDefault -> this
-    is SslConfig.TrustAll ->
-        sslSocketFactory(cfg.socketFactory, cfg.trustManager)
-            .hostnameVerifier { _, _ -> true }
     is SslConfig.MutualTLS ->
         sslSocketFactory(cfg.socketFactory, cfg.trustManager)
         // 无 hostnameVerifier 覆盖 → OkHttp 严格默认。stunnel 服务端证书 SAN

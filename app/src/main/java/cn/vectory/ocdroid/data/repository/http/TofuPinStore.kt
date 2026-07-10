@@ -66,7 +66,9 @@ class EspTofuPinStore @Inject constructor(
         prefs.getString(key(hostPort), null) ?: session[hostPort]
 
     override fun trustPersistent(hostPort: String, spki: String) {
-        prefs.edit().putString(key(hostPort), spki).apply()
+        // §tofu R2 round-1 fix (groker): commit()（同步）而非 apply()——用户发起的 Trust
+        // 须在返回前落盘，否则 tap 与异步 flush 之间被杀进程可能静默丢失持久 pin。
+        prefs.edit().putString(key(hostPort), spki).commit()
         session[hostPort] = spki
     }
 

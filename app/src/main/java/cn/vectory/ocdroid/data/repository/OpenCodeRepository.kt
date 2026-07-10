@@ -366,11 +366,20 @@ class OpenCodeRepository @Inject constructor(
      * The decision is keyed by [hostPort] so two profiles reaching the same
      * endpoint share the trust state (known_hosts model — grill Q4=a).
      */
+    @Synchronized
     fun applyTofuDecision(hostPort: String, decision: TofuDecision) {
         when (decision) {
             is TofuDecision.AcceptOnce -> tofuStore.acceptSession(hostPort, decision.spki)
             is TofuDecision.Trust -> tofuStore.trustPersistent(hostPort, decision.spki)
             TofuDecision.Cancel -> { /* no-op — user declined */ }
+        }
+        // §tofu R2 round-1 fix (cgpt/opuser/groker 一致 blocker): live OkHttp 客户端在
+        // configure()/rebuildClients() 时按【决策前】的 SSL 配置(SystemDefault)快照构建，
+        // socket factory 构建后不可变——只写 pin 不重建则重试仍走 SystemDefault 握手失败，
+        // 而此时 pin 已存在→不再弹窗→重试耗尽→Disconnected（Accept/Trust 成死路）。故对
+        // 当前后 host 重建客户端，使 sslConfigFor(hostPort) 重新解析为 TofuPinned 再重试。
+        if (decision !is TofuDecision.Cancel && hostConfig.hostPort == hostPort) {
+            rebuildClients()
         }
     }
 

@@ -170,7 +170,6 @@ object HttpImageHolder {
         // client 也用 SPKI pinning TM（与 REST/SSE 对称，自签图片 host 同样放行）。
         lastUpdateSslMode = when (cfg) {
             SslConfig.SystemDefault -> "SYSTEM"
-            is SslConfig.TrustAll -> "TRUST_ALL"
             is SslConfig.MutualTLS -> "MUTUAL_TLS"
             is SslConfig.TofuPinned -> "TOFU_PINNED"
         }
