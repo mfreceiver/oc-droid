@@ -146,7 +146,6 @@
     <!-- §mtls-clipboard: 剪贴板粘贴导入证书 + 折叠区 -->
     <string name="host_cert_paste_client">粘贴客户端证书 (PKCS12)</string>
     <string name="host_cert_paste_ca">粘贴 CA 证书</string>
-    <string name="host_cert_paste_generic">从剪贴板粘贴</string>
     <!-- §profile-cleanup R1: 紧凑 mTLS 行已导入状态对勾的 contentDescription。%1$s 为角色标签（客户端/CA）。 -->
     <string name="host_cert_status_imported">%1$s 证书已导入</string>
     <string name="host_cert_err_base64">无法解析为 base64</string>
