@@ -126,6 +126,18 @@ opencode serve --hostname 127.0.0.1 --port 4096   # 仅绑 127.0.0.1，只 stunn
 - `client-key.pem`（客户端私钥，无口令 PKCS8）
 - `ca-cert.pem`（私有 CA 公钥证书）
 
+**在服务器上取得粘贴文本**：SSH 进服务器跑下面两条命令，各自的输出分别粘进 App 的两个框（路径换成你 §2 生成证书的目录，如 `/etc/stunnel/`，或本用户服务的 `~/.config/stunnel/certs/`）。两段都无口令；证书与私钥顺序不限、可整段合并粘贴。
+
+框1「客户端证书+私钥 (PEM)」—— 证书 + 私钥合并输出：
+```bash
+cat /etc/stunnel/client-cert.pem /etc/stunnel/client-key.pem
+```
+
+框2「CA 证书 (PEM)」：
+```bash
+cat /etc/stunnel/ca-cert.pem
+```
+
 ### 6.2 App 导入流程（粘贴 PEM 文本）
 ocdroid：**设置 → 主机配置 → 新建/编辑 profile**：
 
