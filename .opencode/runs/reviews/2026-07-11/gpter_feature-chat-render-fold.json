@@ -1,0 +1,15 @@
+{
+  "agent": "gpter",
+  "scope": "feature-chat-render-fold",
+  "date": "2026-07-11",
+  "reviewed_commit": "07a68c6",
+  "version_target": "0.7.1",
+  "verdict": "pass",
+  "score": 9.6,
+  "blocking_issues": [],
+  "non_blocking_issues": [
+    "builder 测试结构上验证 decoration 归属；无 Compose UI 测试直接计数渲染 footer/error 节点",
+    "standalone reasoning 仍用常量 Lazy key streaming-reasoning；未发现具体状态泄漏"
+  ],
+  "notes": "Phase 3 跨消息 tool 折叠最终独立门控。前三轮阻塞均已闭环：(1) FoldBar 需 >=2 实际 parts，单工具直出；(2) ToolRun/Fold 共享稳定 run|firstPartId；(3) fold|firstPartId 仅展开态；(4) hidden streaming reasoning 绕过 in-flight loading 经 MessageRow 恰一次出 footer/error；(5) classified-empty hidden todo/question 先 flushFold 保时序切跨缝 fold。回归测试断言 run|a -> hidden decoration -> run|b 且恰一次 decoration。无阻塞。"
+}

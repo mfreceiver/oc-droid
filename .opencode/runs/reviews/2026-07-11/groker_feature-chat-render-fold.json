@@ -1,0 +1,16 @@
+{
+  "agent": "groker",
+  "scope": "feature-chat-render-fold",
+  "date": "2026-07-11",
+  "reviewed_commit": "07a68c6",
+  "version_target": "0.7.1",
+  "verdict": "pass",
+  "score": 9.8,
+  "blocking_issues": [],
+  "non_blocking_issues": [
+    "./scripts/check.sh --full 采信实现报告，本 gate 未独立复跑",
+    "跨消息 expand key fold|id 与 MessageRow 内 msg|fold|id 仍是两套命名空间（assistant 工具主路径走 ToolRun/Fold 时不撞）",
+    "hidden seam 测试覆盖 todowrite；question 同属 classified-empty 共用逻辑，无独立用例"
+  ],
+  "notes": "Phase 3 跨消息 tool 折叠最终门控。核查 D3 切段（user/prose/sub-agent/gap/live reasoning）、>=2 FoldBar 阈值、单工具原生卡、ToolRun->Fold 稳定 run|firstPartId Lazy identity、fold|firstPartId 仅用于展开态、footer/error 每消息恰一次挂最终代表块、hidden streaming decoration 不走 InFlightEmptyLoading、classified-empty hidden decoration 先 flushFold 保时序。无 file:line 阻塞。"
+}
