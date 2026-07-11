@@ -138,6 +138,7 @@ sealed class SseReconnectTrigger {
  * §R-19 Sprint 1 Lane A (P1-10): the reconciler's verdict. Translated by
  * [SessionSyncCoordinator.handleEvent] into concrete effects / actions:
  *  - [ReloadSession]            → `ControllerEffect.LoadMessages(sessionId, resetLimit)`
+ *  - [LoadSessionStatus]        → `ControllerEffect.LoadSessionStatus`
  *  - [RefreshSessions]          → `ControllerEffect.LoadSessions`
  *  - [ClearDeltaBuffers]        → `clearDeltaBuffers()`
  */
@@ -147,6 +148,9 @@ sealed class SseSyncDecision {
         val sessionId: String,
         val resetLimit: Boolean = true
     ) : SseSyncDecision()
+
+    /** Refresh all session statuses after an SSE reconnect. */
+    data object LoadSessionStatus : SseSyncDecision()
 
     /** Refresh the entire session list (a non-current session was dirty). */
     data object RefreshSessions : SseSyncDecision()
@@ -284,6 +288,9 @@ fun reconcileGap(
                 if (currentSessionId != null) {
                     decisions.add(SseSyncDecision.ReloadSession(currentSessionId, resetLimit = true))
                 }
+                // session.status frames are only emitted on changes, so an already-busy
+                // session needs an authoritative REST refresh after reconnect.
+                decisions.add(SseSyncDecision.LoadSessionStatus)
                 // If a non-current session was dirty (scenario 3: user switched
                 // mid-disconnect), RefreshSessions reconciles its list-level state
                 // (badge / last-activity). The current session is handled by

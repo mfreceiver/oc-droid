@@ -74,7 +74,7 @@ class GapReconcilePureFunctionsTest {
         val (newState, decisions) = reconcileGap(state, trigger)
 
         assertEquals(
-            listOf(SseSyncDecision.ClearDeltaBuffers, SseSyncDecision.ReloadSession("A", true)),
+            listOf(SseSyncDecision.ClearDeltaBuffers, SseSyncDecision.ReloadSession("A", true), SseSyncDecision.LoadSessionStatus),
             decisions
         )
         // lastDisconnectAt cleared → idempotent for the next server.connected.
@@ -112,7 +112,7 @@ class GapReconcilePureFunctionsTest {
         // isLoadingMessages coalescing (same path that absorbs
         // ForegroundCatchUpController's overlapping catch-up effects).
         assertEquals(
-            listOf(SseSyncDecision.ClearDeltaBuffers, SseSyncDecision.ReloadSession("A", true)),
+            listOf(SseSyncDecision.ClearDeltaBuffers, SseSyncDecision.ReloadSession("A", true), SseSyncDecision.LoadSessionStatus),
             decisions
         )
         assertNull(newState.lastDisconnectAt)
@@ -268,7 +268,7 @@ class GapReconcilePureFunctionsTest {
 
         assertEquals(
             "no ReloadSession when currentSessionId is null",
-            listOf(SseSyncDecision.ClearDeltaBuffers, SseSyncDecision.RefreshSessions),
+            listOf(SseSyncDecision.ClearDeltaBuffers, SseSyncDecision.LoadSessionStatus, SseSyncDecision.RefreshSessions),
             decisions
         )
         assertEquals(setOf("A"), newState.sessionsDirty)
@@ -296,7 +296,7 @@ class GapReconcilePureFunctionsTest {
         // ReloadSession fires unconditionally (always-reconcile after cold-start,
         // §R-19 fix Blocker 3).
         assertEquals(
-            listOf(SseSyncDecision.ClearDeltaBuffers, SseSyncDecision.ReloadSession("A", true)),
+            listOf(SseSyncDecision.ClearDeltaBuffers, SseSyncDecision.ReloadSession("A", true), SseSyncDecision.LoadSessionStatus),
             decisions
         )
         assertNull(newState.lastDisconnectAt)
@@ -326,7 +326,7 @@ class GapReconcilePureFunctionsTest {
 
         assertEquals(
             "implicit gap recovery fires ClearDeltaBuffers + ReloadSession",
-            listOf(SseSyncDecision.ClearDeltaBuffers, SseSyncDecision.ReloadSession("session-X", true)),
+            listOf(SseSyncDecision.ClearDeltaBuffers, SseSyncDecision.ReloadSession("session-X", true), SseSyncDecision.LoadSessionStatus),
             decisions
         )
         // §R-19 fix Blocker 2 v2: currentSessionId is NOT added to sessionsDirty.

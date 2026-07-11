@@ -619,7 +619,7 @@ class ChatViewModelTest : MainViewModelTestBase() {
     }
 
     @Test
-    fun `selectSession clears expandedParts`() = runTest {
+    fun `selectSession on current session is a no-op preserving expandedParts`() = runTest {
         val core = createCore()
         val chatVM = cn.vectory.ocdroid.ui.ChatViewModel(core)
         val sessionVM = cn.vectory.ocdroid.ui.SessionViewModel(core)
@@ -637,13 +637,32 @@ class ChatViewModelTest : MainViewModelTestBase() {
         chatVM.togglePartExpand("msg-2|part-2", false)
         assertEquals(2, chatVM.expandedParts.value.size)
 
+        // §item-3 (re-select no-op): selecting the already-current session must
+        // be a complete no-op. SessionSwitcher.switchTo's guard
+        // (if currentSessionId == sessionId return) short-circuits before any
+        // state mutation, so expandedParts is preserved, currentSessionId is
+        // unchanged, and — critically — no message reload is dispatched (the
+        // original motivation: avoid a full reload of an already-loaded
+        // session). This replaces the former assertion that expandedParts was
+        // cleared, which relied on the pre-item-3 behaviour where a same-
+        // session select still ran the full switch path. Cross-session
+        // expandedParts clearing is still covered at the controller layer by
+        // SessionSwitcherTest `switchTo clears expanded parts`.
         sessionVM.selectSession("session-1")
         advanceUntilIdle()
 
-        assertTrue(
-            "expandedParts must be cleared on session switch",
-            chatVM.expandedParts.value.isEmpty()
+        assertEquals(
+            "expandedParts must be preserved on same-session reselect (no-op)",
+            2,
+            chatVM.expandedParts.value.size
         )
+        assertEquals(
+            "currentSessionId unchanged by same-session reselect",
+            "session-1",
+            chatVM.chatFlow.value.currentSessionId
+        )
+        // The strongest no-op signal: no message fetch was dispatched at all.
+        coVerify(exactly = 0) { repository.getMessagesPaged(any(), any(), any()) }
     }
 
     @Test

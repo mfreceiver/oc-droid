@@ -91,6 +91,14 @@ internal data class ChatTopBarState(
      */
     val unreadSessions: Set<String> = emptySet(),
     /**
+     * item 4: session IDs that have a pending question (question.asked with no
+     * reply yet). Drives the "?" indicator on each session tab — but only for
+     * non-current sessions (the current session's question is already surfaced
+     * via QuestionCard in the chat list). Projected from
+     * [SessionListState.pendingQuestions] by the caller (sessionId set).
+     */
+    val questionSessionIds: Set<String> = emptySet(),
+    /**
      * When non-null, the user is in draft (deferred-create) mode for this
      * workdir. The bar shows the workdir basename in place of a session title
      * and the dropdown is hidden (there is no session yet).
@@ -457,6 +465,7 @@ internal fun ChatTopBar(
                 parentSessionId = state.parentSessionId,
                 currentWorkdir = currentSession?.directory,
                 unreadSessions = state.unreadSessions,
+                questionSessionIds = state.questionSessionIds,
                 actions = actions
             )
         }

@@ -34,7 +34,11 @@ fun FilesScreen(
     pathToShow: String? = null,
     sessionDirectory: String? = null,
     onCloseFile: () -> Unit = {},
-    onFileClick: (String) -> Unit = {}
+    onFileClick: (String) -> Unit = {},
+    // §F5b-back: invoked when system back fires while a preview is open.
+    // Hosts pass their close-overlay logic (e.g. showFileBrowser = false) so a
+    // single back closes the whole FilesScreen overlay, not just the preview.
+    onExit: () -> Unit = {}
 ) {
     val state by viewModel.state.collectAsStateWithLifecycle()
 
@@ -64,10 +68,13 @@ fun FilesScreen(
         viewModel.syncPathToShow(pathToShow, sessionDirectory)
     }
 
-    // §F5: 预览（含 md）开启时，系统返回键先关闭预览、回到刚才的文件列表同层级，
-    // 而不是直接弹出 FilesScreen 回到会话 list（预览是 FilesScreen 内部状态，非独立 destination）。
+    // §F5b-back: preview open → back exits the whole FilesScreen overlay (via
+    // the host's onExit) rather than just closing the preview back to the file
+    // list (which would need a second back to leave). When no preview is open
+    // this handler is disabled, and the host's outer BackHandler dismisses the
+    // overlay (behavior unchanged).
     androidx.activity.compose.BackHandler(enabled = state.selectedFilePath != null) {
-        viewModel.closePreview()
+        onExit()
     }
 
     // The snackbar is rendered as a sibling overlay (NOT a child of the Column)

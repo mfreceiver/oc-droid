@@ -409,7 +409,10 @@ private fun PhoneLayout(viewModel: OrchestratorViewModel, initialPage: Int = 0) 
                     pathToShow = file.filePathToShowInFiles,
                     sessionDirectory = file.fileBrowserWorkdir,
                     onCloseFile = { viewModel.closeFileBrowser() },
-                    onFileClick = { path -> viewModel.showFileInFiles(path, "sessions") }
+                    onFileClick = { path -> viewModel.showFileInFiles(path, "sessions") },
+                    // §F5b-back: preview-open back closes this overlay (same
+                    // target as the outer BackHandler at L401).
+                    onExit = { viewModel.closeFileBrowser() }
                 )
             }
         }

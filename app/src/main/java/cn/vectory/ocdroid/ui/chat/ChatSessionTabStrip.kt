@@ -49,6 +49,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import cn.vectory.ocdroid.R
 import cn.vectory.ocdroid.data.model.Session
 import cn.vectory.ocdroid.data.model.TodoItem
@@ -168,6 +169,7 @@ internal fun SessionTabStrip(
     parentSessionId: String?,
     currentWorkdir: String?,
     unreadSessions: Set<String>,
+    questionSessionIds: Set<String> = emptySet(),
     actions: ChatTopBarActions,
     modifier: Modifier = Modifier
 ) {
@@ -256,8 +258,10 @@ internal fun SessionTabStrip(
                         SessionTab(
                             session = session,
                             isSelected = session.id == effectiveSelectedId,
+                            currentSessionId = currentSessionId,
                             accentColor = accentColor,
                             unreadSessions = unreadSessions,
+                            questionSessionIds = questionSessionIds,
                             actions = actions,
                             modifier = Modifier.width(TAB_MIN_WIDTH)
                         )
@@ -275,8 +279,10 @@ internal fun SessionTabStrip(
                         SessionTab(
                             session = session,
                             isSelected = session.id == effectiveSelectedId,
+                            currentSessionId = currentSessionId,
                             accentColor = accentColor,
                             unreadSessions = unreadSessions,
+                            questionSessionIds = questionSessionIds,
                             actions = actions,
                             modifier = Modifier.weight(1f)
                         )
@@ -296,45 +302,77 @@ internal fun SessionTabStrip(
 private fun SessionTab(
     session: Session,
     isSelected: Boolean,
+    currentSessionId: String?,
     accentColor: Color,
     unreadSessions: Set<String>,
+    questionSessionIds: Set<String>,
     actions: ChatTopBarActions,
     modifier: Modifier = Modifier
 ) {
+    // item 1: workdir-hash translucent background. A stable per-directory tint
+    // (via workdirTone) at low alpha — stronger when selected (0.18) so the
+    // active tab reads as a distinct surface, fainter otherwise (0.08) to hint
+    // the workdir identity without competing with the title. Only applied when
+    // directory is non-empty (avoid hashing the empty string into an arbitrary
+    // palette slot). Combined with the existing selected vertical bar + Bold
+    // weight, this is additive — no removal of prior selection signals.
+    val tabBackground = if (session.directory.isNotEmpty()) {
+        workdirTone(session.directory).copy(alpha = if (isSelected) 0.18f else 0.08f)
+    } else Color.Transparent
     Tab(
         selected = isSelected,
-        onClick = { actions.onSelectSession(session.id) },
+        // item 3: re-selecting the already-active tab is a complete no-op so
+        // it cannot trigger a full reload (this is the UI-layer guard; the
+        // SessionSwitcher.switchTo deep-guard is the second layer).
+        // §item3: 用 currentSessionId(实际当前会话)而非 isSelected(基于
+        // effectiveSelectedId, 子 agent 时父 tab 高亮). 否则查看子 agent 时点父 tab
+        // 会被 !isSelected 拦死, 无法回父根会话. 已打开本会话(id==current)再点 = no-op.
+        onClick = { if (session.id != currentSessionId) actions.onSelectSession(session.id) },
         // Compact 36dp height — this is a secondary nav row, not the primary
         // tab surface. Modifier.height overrides the M3 default 48dp
         // (heightIn min) by clamping both min and max. §chat-session-tab-selected:
         // the selected tab is marked by the vertical accent bar inside its
-        // title (see text slot below); SessionTab itself carries no background
-        // so the strip blends with the TopAppBar surface.
+        // title (see text slot below).
         modifier = modifier
             .height(36.dp)
-            .background(Color.Transparent),
-        // §chat-session-tab-selected: no background fill on the tab itself —
-        // the selection signal is the vertical accent bar at the title's left
-        // edge plus Bold weight (see text slot below). Text colour:
+            .background(tabBackground),
+        // §chat-session-tab-selected: the selection signal is the workdir-hash
+        // background tint (item 1) + the vertical accent bar at the title's left
+        // edge + Bold weight (see text slot below). Text colour:
         // onSurface/onSurfaceVariant.
         selectedContentColor = MaterialTheme.colorScheme.onSurface,
         unselectedContentColor = MaterialTheme.colorScheme.onSurfaceVariant,
         text = {
             Row(verticalAlignment = Alignment.CenterVertically) {
-                // §problem-10: unread dot uses the *session's own* workdir
-                // hash, not the global currentWorkdir accent, so each dot
-                // keeps a stable colour as the user switches tabs. 5dp fits
-                // the compact 36dp row.
-                if (session.id in unreadSessions) {
-                    val dotColor = session.directory
-                        ?.let { workdirTone(it) }
-                        ?: MaterialTheme.colorScheme.primary
-                    Box(
-                        modifier = Modifier
-                            .padding(end = 4.dp)
-                            .size(5.dp)
-                            .background(color = dotColor, shape = CircleShape)
-                    )
+                // item 4 + §problem-10: the leading slot shows one of three
+                // states. A pending question ("?" glyph) takes priority and is
+                // shown ONLY on non-current sessions — the current session's
+                // question already surfaces via QuestionCard in the chat list,
+                // so a tab marker there would be redundant. The "?" uses the
+                // session's own workdir-hash colour for per-tab stability.
+                // Otherwise the pre-existing 5dp unread dot (also workdir-hash
+                // coloured) is shown; nothing renders when neither applies.
+                val hasQuestion = session.id != currentSessionId &&
+                    session.id in questionSessionIds
+                when {
+                    hasQuestion -> {
+                        Text(
+                            text = "?",
+                            color = workdirTone(session.directory),
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 13.sp,
+                            modifier = Modifier.padding(end = 4.dp)
+                        )
+                    }
+                    session.id in unreadSessions -> {
+                        val dotColor = workdirTone(session.directory)
+                        Box(
+                            modifier = Modifier
+                                .padding(end = 4.dp)
+                                .size(5.dp)
+                                .background(color = dotColor, shape = CircleShape)
+                        )
+                    }
                 }
                 // §chat-session-tab-selected: the title + vertical accent bar
                 // form a single centred group. The bar sits immediately left
@@ -379,23 +417,31 @@ private fun SessionTab(
                     )
                 }
                 Spacer(modifier = Modifier.width(2.dp))
-                // §fix-3: compact close affordance. 24dp touch target is a
-                // deliberate compromise — noticeably narrower than the prior
-                // 28dp (so each tab keeps room for the title) while staying
-                // within the small-target range reviewers accept for a
-                // secondary, non-data-destructive affordance.
-                Box(
-                    modifier = Modifier
-                        .size(24.dp)
-                        .clickable(onClick = { actions.onCloseSession(session.id) }),
-                    contentAlignment = Alignment.Center
-                ) {
-                    Icon(
-                        Icons.Default.Close,
-                        contentDescription = stringResource(R.string.common_close),
-                        modifier = Modifier.size(11.dp),
-                        tint = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
+                // item 2: close affordance renders ONLY on the selected tab.
+                // Unselected tabs omit it entirely (no reserved placeholder),
+                // so the weighted title Row reclaims the 24dp and shows a
+                // longer name. The selected tab is already reinforced by the
+                // vertical bar + Bold + workdir background, so giving up that
+                // title space while selected is an acceptable trade-off.
+                // §fix-3: 24dp touch target is a deliberate compromise —
+                // noticeably narrower than the prior 28dp (so each tab keeps
+                // room for the title) while staying within the small-target
+                // range reviewers accept for a secondary, non-destructive
+                // affordance.
+                if (isSelected) {
+                    Box(
+                        modifier = Modifier
+                            .size(24.dp)
+                            .clickable(onClick = { actions.onCloseSession(session.id) }),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(
+                            Icons.Default.Close,
+                            contentDescription = stringResource(R.string.common_close),
+                            modifier = Modifier.size(11.dp),
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
                 }
             }
         }

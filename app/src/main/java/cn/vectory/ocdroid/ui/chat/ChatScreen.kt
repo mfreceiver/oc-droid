@@ -303,6 +303,10 @@ fun ChatScreen(
                 showTunnelAuth = (curHostProfile?.tunnelPasswordId != null),
                 openSessions = resolvedOpenSessions,
                 unreadSessions = unread.unreadSessions,
+                // item 4: pending-question session IDs drive the tab "?" marker.
+                // The current session is filtered out at render time (SessionTab),
+                // so passing the full set here is safe.
+                questionSessionIds = sessionList.pendingQuestions.map { it.sessionId }.toSet(),
                 draftWorkdir = composer.draftWorkdir,
                 parentSessionId = curSession?.parentId,
                 parentSessionTitle = curSession?.parentId?.let { pid ->
@@ -862,7 +866,10 @@ fun ChatScreen(
                 },
                 onFileClick = { path ->
                     orchestratorVM.showFileInFiles(path, "chat")
-                }
+                },
+                // §F5b-back: preview-open back closes this overlay (same
+                // target as the outer BackHandler at L849).
+                onExit = { showFileBrowser = false }
             )
         }
     }

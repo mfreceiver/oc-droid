@@ -211,6 +211,12 @@ class SessionSwitcher(
      * metadata yet), we emit createdAt=null → UnknownColdStart → cold load.
      */
     fun switchTo(sessionId: String) {
+        // item 3 deep guard (second layer): if the requested session is already
+        // current, do nothing. This is the defensive backstop behind the UI-layer
+        // guard (SessionTab's onClick no-op) — it catches other call paths
+        // (pager swipe, programmatic select) that bypass the tab tap and would
+        // otherwise trigger a full reload of an already-loaded session.
+        if (slices.chat.value.currentSessionId == sessionId) return
         // ── Step 1: Capture outgoing session state ──────────────────────────
         // Capture the previously-selected session BEFORE overwriting
         // currentSessionId. Used below to decide whether the session the user

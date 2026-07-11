@@ -512,6 +512,33 @@ class SessionListActionsTest {
     }
 
     @Test
+    fun `launchLoadSessionStatus replaces snapshot dropping stale idle entries`() = runTest {
+        // §item6: /session/status 是全局权威快照, 只含 active(busy/retry) — idle 已被
+        // server delete (opencode session/status.ts: data.delete on idle). 整体替换清除
+        // server 已 idle(快照缺失)的 stale 本地 busy; merge(+statuses) 会永久保留旧 busy.
+        slices.mutateSessionList {
+            it.copy(sessionStatuses = mutableMapOf(
+                "stale-idle" to cn.vectory.ocdroid.data.model.SessionStatus(type = "busy"),
+                "keep" to cn.vectory.ocdroid.data.model.SessionStatus(type = "retry")
+            ))
+        }
+        coEvery { repository.getSessionStatus() } returns Result.success(
+            mapOf("keep" to cn.vectory.ocdroid.data.model.SessionStatus(type = "busy"))
+        )
+
+        launchLoadSessionStatus(scope, repository, slices)
+        advanceUntilIdle()
+
+        val result = slices.sessionList.value.sessionStatuses
+        assertFalse(
+            "stale busy must be cleared (server idle = absent from snapshot)",
+            result.containsKey("stale-idle")
+        )
+        assertEquals(cn.vectory.ocdroid.data.model.SessionStatus(type = "busy"), result["keep"])
+        assertEquals(1, result.size)
+    }
+
+    @Test
     fun `launchLoadSessionStatus failure does not crash and leaves slice untouched`() = runTest {
         coEvery { repository.getSessionStatus() } returns Result.failure(IllegalStateException("nope"))
 

@@ -320,7 +320,13 @@ internal fun launchLoadSessionStatus(
     scope.launch {
         repository.getSessionStatus()
             .onSuccess { statuses ->
-                slices.mutateSessionList { sl -> sl.copy(sessionStatuses = statuses) }
+                slices.mutateSessionList { sl ->
+                    // §item6: /session/status 是全局权威快照, 只含 active(busy/retry) —
+                    // idle 已被 server delete (opencode session/status.ts: data.delete on
+                    // idle). 整体替换正确清除 server 已 idle(快照缺失)的 stale 本地 busy.
+                    // 切勿改 merge(+statuses): 会永久保留旧 busy 致"已 idle 仍判 busy 显 Stop".
+                    sl.copy(sessionStatuses = statuses)
+                }
             }
             .onFailure { error ->
                 reportNonFatalIssue("MainViewModel", "Failed to load session status", error)

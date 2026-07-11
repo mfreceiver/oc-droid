@@ -296,6 +296,8 @@ class SessionSyncCoordinator(
      *  - [SseSyncDecision.ReloadSession]    → `LoadMessages` effect
      *    (single-shot, non-suspend → tryEmitEffect to preserve FIFO order
      *    relative to the ServerConnected emit above).
+     *  - [SseSyncDecision.LoadSessionStatus] → `LoadSessionStatus` effect
+     *    (the AppCore handler performs the repository-backed status reload).
      *  - [SseSyncDecision.RefreshSessions]  → `LoadSessions` effect (the
      *    non-current dirty session's list-level state is refreshed).
      *  - [SseSyncDecision.ClearDeltaBuffers] → local [clearDeltaBuffers] call.
@@ -309,6 +311,9 @@ class SessionSyncCoordinator(
                     effects.tryEmitEffect(
                         ControllerEffect.LoadMessages(decision.sessionId, decision.resetLimit)
                     )
+                }
+                SseSyncDecision.LoadSessionStatus -> {
+                    effects.tryEmitEffect(ControllerEffect.LoadSessionStatus)
                 }
                 SseSyncDecision.RefreshSessions -> {
                     // §R-19 P1-10: RefreshSessions decision maps to the
