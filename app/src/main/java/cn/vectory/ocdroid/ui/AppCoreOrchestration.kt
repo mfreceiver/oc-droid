@@ -327,6 +327,7 @@ internal fun AppCore.materializeDraftSession(onSessionReady: (String) -> Unit) {
                     openIds = store.sessionListFlow.value.openSessionIds,
                     currentId = session.id,
                     currentWorkdir = settingsManager.currentWorkdir,
+                    revertCutoffs = store.chatFlow.value.revertCutoffs,
                 )
                 scheduleTitleRefreshAfterFirstMessage(session.id)
                 onSessionReady(session.id)
@@ -408,7 +409,11 @@ private fun AppCore.dispatchSendMessage(sessionId: String) {
 
     writeComposer { state -> state.copy(sendingSessionIds = state.sendingSessionIds + sessionId) }
     settingsManager.setDraftText(currentServerGroupFp(), sessionId, "")
-    writeComposer { it.copy(inputText = "") }
+    // §1B-FIX (I4): clear inputText, imageAttachments AND fileReferences
+    // when the user hits Send — chips must not leak to the next prompt.
+    // The `text` + `attachments` locals above already captured the values
+    // that go on the wire, so this is safe to clear immediately.
+    writeComposer { it.copy(inputText = "", imageAttachments = emptyList(), fileReferences = emptyList()) }
 
     val currentSession = currentSession(store.sessionListFlow.value.sessions, store.chatFlow.value.currentSessionId)
 
@@ -428,7 +433,15 @@ private fun AppCore.dispatchSendMessage(sessionId: String) {
             onRefreshSessions = { loadSessionsForEffect() },
             onSuccess = {
                 settingsManager.setDraftText(currentServerGroupFp(), sessionId, "")
-                writeComposer { it.copy(imageAttachments = emptyList()) }
+                // §1B-FIX (I4): onSuccess is a no-op for fileReferences
+                // because line 412-413 already cleared inputText +
+                // imageAttachments + fileReferences when the user hit
+                // Send. (This is the safety net for any edge case where
+                // the orchestrator's `text` local was empty / attachments
+                // empty and the early-return at line 408 did NOT fire —
+                // in that case the state was never cleared and this is
+                // where we do it.)
+                writeComposer { it.copy(inputText = "", imageAttachments = emptyList(), fileReferences = emptyList()) }
             },
             onComplete = {
                 writeComposer { state -> state.copy(sendingSessionIds = state.sendingSessionIds - sessionId) }
@@ -643,7 +656,15 @@ private fun AppCore.createSessionInWorkdirForEffect(workdir: String) {
     writeSessionList { it.copy(sessionTodos = emptyMap()) }
     writeChat { it.copy(currentModel = null) }
     writeComposer {
-        it.copy(inputText = "", imageAttachments = emptyList(), draftWorkdir = workdir)
+        // §1B-FIX (I4): also clear fileReferences on draft-create so a
+        // chip from the previous session's draft does not survive the
+        // workdir switch.
+        it.copy(
+            inputText = "",
+            imageAttachments = emptyList(),
+            fileReferences = emptyList(),
+            draftWorkdir = workdir,
+        )
     }
     settingsManager.currentWorkdir = workdir
     settingsManager.addRecentWorkdir(currentServerGroupFp(), workdir)

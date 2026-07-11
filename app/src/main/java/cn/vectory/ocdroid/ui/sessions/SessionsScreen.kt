@@ -14,14 +14,17 @@ import androidx.compose.material.icons.automirrored.filled.Chat
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.AddComment
 import androidx.compose.material.icons.filled.Archive
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.CreateNewFolder
 import androidx.compose.material.icons.filled.FolderOpen
 import androidx.compose.material.icons.filled.Forum
 import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.Inbox
 import androidx.compose.material.icons.filled.KeyboardArrowDown
+import androidx.compose.material.icons.filled.Search
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -62,6 +65,14 @@ fun SessionsScreen(
     repository: OpenCodeRepository,
     onSwitchToChat: () -> Unit = {},
     /**
+     * §phase2-unbreak: open the file browser / Workspace Files destination.
+     * Carries the tapped workdir (non-null here — the folder button is per-
+     * workdir) and an optional specific file path (null from Sessions; only
+     * chat file-path taps carry a path). Two-param signature so the new-shell
+     * AppShell can build a typed route with both fields.
+     */
+    onOpenWorkspaceFiles: (workdir: String, path: String?) -> Unit = { _, _ -> },
+    /**
      * Phase 7：横屏左 1/3 面板内渲染时设 false，隐藏 TopAppBar 的 navigationIcon
      * （面板始终与 chat pane 并列，无需"返回 chat"——onSwitchToChat 在面板内为 no-op）。
      * 竖屏全屏渲染时默认 true。
@@ -95,6 +106,9 @@ fun SessionsScreen(
     var pendingDisconnectWorkdir by remember { mutableStateOf<String?>(null) }
     // M7: long-press a session card → archive confirmation dialog. Null = hidden.
     var pendingArchiveSession by remember { mutableStateOf<Session?>(null) }
+    // §round-B ③ (Phase 2 G.2 step 1): search query for the SessionsScreen
+    // SearchBar. Empty query ⇒ no filter (matches the pre-search render).
+    var searchQuery by rememberSaveable { mutableStateOf("") }
 
     // Derive recent sessions (root sessions: parentId == null, by time.updated desc, top 5).
     // Source merges the global sessions list with directorySessions (#10: prior
@@ -106,11 +120,18 @@ fun SessionsScreen(
     // suppresses structurally-equal results, so an unrelated sessionStatuses
     // tweak recomputes the block but yields an equal list and the LazyColumn
     // items are skipped.
+    //
+    // §round-B ③: applies the search filter via the pure [filterSessionsByQuery]
+    // helper (title / directory, case-insensitive) on the merged+deduped+root
+    // candidate list BEFORE the take(5) so a query surfaces matches beyond
+    // the no-query top-5 (otherwise a "search" that only filtered the top-5
+    // would silently miss older matching sessions).
     val recentSessions by remember {
         derivedStateOf {
-            (sessionListState.sessions + sessionListState.directorySessions.values.flatten())
+            val candidates = (sessionListState.sessions + sessionListState.directorySessions.values.flatten())
                 .distinctBy { it.id }
                 .filter { it.parentId == null && !it.isArchived }
+            filterSessionsByQuery(candidates, searchQuery)
                 .sortedByDescending { it.time?.updated ?: 0L }
                 .take(5)
         }
@@ -135,14 +156,25 @@ fun SessionsScreen(
     // this derivedStateOf just feeds it the live slice values + caches the
     // structurally-equal result so SSE chat deltas / typing (which do not
     // touch any of the input slices) do not recompose the workdir LazyColumn.
+    //
+    // §round-B ③: searchQuery is part of the derivedStateOf's read set so a
+    // keystroke recomputes the workdir groups (filtering each group's session
+    // list down to the matches). buildWorkdirGroups itself stays search-
+    // oblivious (the gate contract is about visibility, not query filtering);
+    // the per-group session list is filtered AFTER grouping so empty groups
+    // still render their workdir header (matches the no-search shape).
     val workdirGroups by remember {
         derivedStateOf {
-            buildWorkdirGroups(
+            val grouped = buildWorkdirGroups(
                 allSessions = (sessionListState.sessions + sessionListState.directorySessions.values.flatten())
                     .distinctBy { it.id },
                 recentWorkdirs = recentWorkdirs,
                 draftWorkdir = draftWorkdir,
             )
+            if (searchQuery.isBlank()) grouped
+            else grouped.map { (workdir, sessions) ->
+                workdir to filterSessionsByQuery(sessions, searchQuery)
+            }
         }
     }
 
@@ -186,6 +218,44 @@ fun SessionsScreen(
             contentPadding = PaddingValues(vertical = 8.dp),
             verticalArrangement = Arrangement.spacedBy(2.dp)
         ) {
+            // --- §round-B ③ (Phase 2 G.2 step 1): SearchBar row ---
+            // Covers both the "Recent" and "Connected projects" groups
+            // (the query is applied to both derivations above). Docked
+            // style — the LazyColumn item gives it full row width + lets
+            // the list scroll underneath the bar (M3 SearchBar defaults to
+            // a TextField-shaped surface; we keep active=false so it never
+            // expands into the IME-search-overlay mode — the list filters
+            // live as the user types).
+            item(key = "search_bar") {
+                androidx.compose.material3.SearchBar(
+                    query = searchQuery,
+                    onQueryChange = { searchQuery = it },
+                    onSearch = { /* live filter — no explicit submit needed */ },
+                    active = false,
+                    onActiveChange = { /* docked — never enters overlay mode */ },
+                    placeholder = { Text(stringResource(R.string.sessions_search_hint)) },
+                    leadingIcon = {
+                        Icon(
+                            Icons.Default.Search,
+                            contentDescription = null,
+                        )
+                    },
+                    trailingIcon = {
+                        if (searchQuery.isNotEmpty()) {
+                            IconButton(onClick = { searchQuery = "" }) {
+                                Icon(
+                                    Icons.Default.Close,
+                                    contentDescription = stringResource(R.string.common_close),
+                                )
+                            }
+                        }
+                    },
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 16.dp, vertical = 4.dp),
+                ) {}
+            }
+
             // --- Recent Sessions Section ---
             item(key = "recent_header") {
                 SectionHeader(
@@ -196,7 +266,11 @@ fun SessionsScreen(
 
             if (recentSessions.isEmpty()) {
                 item(key = "recent_empty") {
-                    EmptyRow(stringResource(R.string.sessions_tab_no_sessions))
+                    EmptyRow(
+                        text = if (searchQuery.isNotEmpty())
+                            stringResource(R.string.sessions_search_no_results)
+                        else stringResource(R.string.sessions_tab_no_sessions)
+                    )
                 }
             } else {
                 items(recentSessions, key = { it.id }) { session ->
@@ -342,7 +416,7 @@ fun SessionsScreen(
                                     // target (the former 32dp was below the minimum).
                                     IconButton(
                                         onClick = {
-                                            orchestratorVM.browseFilesInWorkdir(workdir)
+                                            onOpenWorkspaceFiles(workdir, null)
                                         }
                                     ) {
                                         Icon(

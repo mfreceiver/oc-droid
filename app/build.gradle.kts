@@ -44,6 +44,11 @@ android {
         testInstrumentationRunnerArguments["openCodeAgent"] = env["OPENCODE_AGENT"] ?: ""
         testInstrumentationRunnerArguments["openCodeModelProvider"] = env["OPENCODE_MODEL_PROVIDER"] ?: ""
         testInstrumentationRunnerArguments["openCodeModelId"] = env["OPENCODE_MODEL_ID"] ?: ""
+        // §phase3 (G.5 / plan §5 task 6 step c): the legacy PhoneLayout shell +
+        // USE_NEW_SHELL flag have been physically deleted after the four-judge
+        // gate + emulator regression (USE_NEW_SHELL=true, 36/38) passed.
+        // AppShell (ui/shell/AppShell.kt) is now the only shell; MainActivity
+        // unconditionally renders it. There is no longer a build flag to flip.
     }
 
     // P0-8: load release keystore config once; availability drives both the
@@ -173,9 +178,14 @@ kover {
         //   ChatScreen: currentSessionActivity/bestSessionActivityText/formatStatusFromPart/
         //                formatThinkingFromReasoningText
         //   ChatTextParts: fenceMarkerOf/splitCodeAndProse/codeText/codeFenceLanguage
-        //   ChatInputBar: handleComposerSend
         //   ChatContextUsageDialog: formatCount/formatOptionalCount
         //   ChatMessageContent: markerLabelFor
+        // §phase3 (plan §5 task 6 step c): "ChatInputBar: handleComposerSend"
+        // removed from this list — the helper was already lifted to
+        // ChatFormatHelpers.kt, and the ChatInputBar composable itself has been
+        // deleted (Composer.kt replaces it). ChatInputBarKt remains in the
+        // excludes set below because the file still hosts CommandSuggestionsPanel
+        // (a pure @Composable reused by Composer.kt).
         filters {
             excludes {
                 classes = setOf(
@@ -194,6 +204,14 @@ kover {
                     // ChatTopBarKt: visiblePickerProviders 已提取到 PickerProviderFilter.kt
                     // （独立文件，保留计入覆盖）；ChatTopBarKt 剩余为纯 @Composable，排除。
                     "cn.vectory.ocdroid.ui.chat.ChatTopBarKt",
+                    // §1B: ChatScaffold / Composer / SessionPickerSheet are
+                    // @Composable-heavy chrome surfaces — same exclusion
+                    // rationale as ChatTopBarKt (kover excludes Composable
+                    // file bodies; pure helpers remain covered in
+                    // ChatFormatHelpers.kt / ChatActivityHelpers.kt).
+                    "cn.vectory.ocdroid.ui.chat.ChatScaffoldKt",
+                    "cn.vectory.ocdroid.ui.chat.ComposerKt",
+                    "cn.vectory.ocdroid.ui.chat.SessionPickerSheetKt",
                     "cn.vectory.ocdroid.ui.chat.QuestionCardViewKt",
                     "cn.vectory.ocdroid.ui.chat.ChatInputBarKt",
                     "cn.vectory.ocdroid.ui.chat.ChatMessageRowKt",
@@ -210,6 +228,16 @@ kover {
                     // ui.sessions (Composable)
                     "cn.vectory.ocdroid.ui.sessions.SessionsScreenKt",
                     "cn.vectory.ocdroid.ui.sessions.DirectoryPickerKt",
+                    // §round-B: ui.workspace Composable-heavy surfaces (the
+                    // pure helpers in WorkspaceVcsHelpersKt remain in the
+                    // coverage set — same extraction pattern as SessionsScreen).
+                    "cn.vectory.ocdroid.ui.workspace.ChangesPaneKt",
+                    "cn.vectory.ocdroid.ui.workspace.WorkspaceScaffoldKt",
+                    "cn.vectory.ocdroid.ui.workspace.FilesPaneKt",
+                    // §round-B ②: ContextSelectorSheet is a @Composable-only
+                    // file (the workdir-selection rule lives in the pure,
+                    // covered ContextSelectorAction.kt).
+                    "cn.vectory.ocdroid.ui.chat.ContextSelectorSheetKt",
                     // ui.settings (Composable)
                     "cn.vectory.ocdroid.ui.settings.SettingsScreenKt",
                     "cn.vectory.ocdroid.ui.settings.SettingsSectionsKt",
@@ -291,6 +319,7 @@ dependencies {
     implementation(libs.androidx.compose.ui.graphics)
     implementation(libs.androidx.compose.ui.tooling.preview)
     implementation(libs.androidx.compose.material3)
+    implementation(libs.androidx.compose.material3.adaptive.navigation.suite)
     implementation("androidx.compose.material:material-icons-extended")
     
     implementation(libs.androidx.navigation.compose)

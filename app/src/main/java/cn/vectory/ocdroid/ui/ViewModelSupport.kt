@@ -2,6 +2,7 @@ package cn.vectory.ocdroid.ui
 
 import android.util.Log
 import cn.vectory.ocdroid.data.model.Part
+import cn.vectory.ocdroid.data.model.PermissionRequest
 import cn.vectory.ocdroid.data.model.QuestionRequest
 import cn.vectory.ocdroid.data.model.SSEEvent
 import cn.vectory.ocdroid.data.model.Session
@@ -171,9 +172,17 @@ internal fun mergeRefreshedSessionsPreservingLocalActivity(
             // title). A concurrently-issued full refresh can return a stale snapshot that
             // predates the title generation, so prefer the local title here to avoid clobbering
             // it. The full refresh remains authoritative whenever it is at least as fresh.
+            //
+            // §revert-cutoff (A3-1): when the local copy is newer, also preserve the local
+            // revert instead of letting a stale refresh null it out. A stale list response may
+            // omit `revert` even while a revert is still active; honoring that stale null would
+            // make the chat selector release the full post-revert window (the A3-1 data leak).
+            // Conservative direction: keep whichever side carries a revert, preferring the
+            // fresher local copy — this can only over-filter (fail-closed), never leak.
             remote.copy(
                 title = localSession.title ?: remote.title,
-                time = remote.time.withUpdatedAtLeast(localUpdated)
+                time = remote.time.withUpdatedAtLeast(localUpdated),
+                revert = if (localSession.revert != null) localSession.revert else remote.revert
             )
         } else {
             remote
@@ -196,6 +205,29 @@ private fun Session.TimeInfo?.withUpdatedAtLeast(updated: Long): Session.TimeInf
 internal fun nextSessionFetchLimit(current: Int, pageSize: Int = MainViewModelTimings.sessionPageSize): Int {
     return maxOf(current, pageSize) + maxOf(pageSize, 1)
 }
+
+/**
+ * §1C-FIX-⑦ / scheme D.1: count of pending permission + question requests
+ * from sessions OTHER than [currentSessionId]. Drives the Sessions nav
+ * badge in [cn.vectory.ocdroid.ui.shell.AppShell].
+ *
+ * The Chat StatusSlot renders the CURRENT session's pending items (P5-7
+ * session-scope filter), so the badge is the only surface for cross-session
+ * pending items. Counting ALL pending here would double-count the current
+ * session (its items would appear BOTH in the StatusSlot AND inflate the
+ * badge). Filtering by `sessionId != currentSessionId` ensures the badge
+ * reflects only OTHER sessions that need the user's attention.
+ *
+ * Edge case: `currentSessionId == null` (no session open) counts everything
+ * — nothing is shown in the StatusSlot without a current session, so all
+ * pending are genuinely cross-session.
+ */
+internal fun crossSessionPendingCount(
+    state: SessionListState,
+    currentSessionId: String?
+): Int =
+    state.pendingPermissions.count { it.sessionId != currentSessionId } +
+        state.pendingQuestions.count { it.sessionId != currentSessionId }
 
 internal fun parseSessionStatusEvent(event: SSEEvent): SessionStatusEvent? {
     val sessionId = event.payload.getString("sessionID") ?: return null

@@ -1,86 +1,15 @@
 package cn.vectory.ocdroid.ui.chat
 
-import androidx.activity.compose.BackHandler
-import androidx.activity.compose.rememberLauncherForActivityResult
-import androidx.activity.result.contract.ActivityResultContracts
-import androidx.compose.animation.AnimatedVisibility
-import androidx.compose.animation.core.animateDpAsState
-import androidx.compose.animation.expandVertically
-import androidx.compose.animation.fadeIn
-import androidx.compose.animation.fadeOut
-import androidx.compose.animation.shrinkVertically
-import androidx.compose.foundation.background
-import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.BoxScope
-import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.heightIn
-import androidx.compose.foundation.layout.imePadding
-import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.pager.HorizontalPager
-import androidx.compose.foundation.pager.rememberPagerState
-import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.text.selection.SelectionContainer
-import androidx.compose.foundation.verticalScroll
-import androidx.compose.material3.AlertDialog
-import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.SnackbarHost
-import androidx.compose.material3.SnackbarHostState
-import androidx.compose.material3.Surface
-import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.material3.windowsizeclass.WindowSizeClass
-import androidx.compose.material3.windowsizeclass.WindowWidthSizeClass
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.derivedStateOf
-import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.mutableStateListOf
-import androidx.compose.runtime.mutableStateMapOf
-import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberCoroutineScope
-import androidx.compose.runtime.rememberUpdatedState
-import androidx.compose.runtime.setValue
-import androidx.compose.runtime.snapshotFlow
 import androidx.compose.runtime.staticCompositionLocalOf
-import androidx.compose.ui.Alignment
-import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.RectangleShape
-import androidx.compose.ui.layout.onGloballyPositioned
-import androidx.compose.ui.platform.LocalConfiguration
-import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.platform.LocalDensity
-import androidx.compose.ui.res.stringResource
-import androidx.compose.ui.unit.dp
-import androidx.lifecycle.compose.collectAsStateWithLifecycle
-import androidx.hilt.navigation.compose.hiltViewModel
-import cn.vectory.ocdroid.R
-import cn.vectory.ocdroid.ui.resolveMessage
-import cn.vectory.ocdroid.ui.files.FilesScreen
-import cn.vectory.ocdroid.ui.files.FilesViewModel
-import cn.vectory.ocdroid.ui.settings.TofuTrustDialog
 import cn.vectory.ocdroid.ui.ChatViewModel
 import cn.vectory.ocdroid.ui.ComposerViewModel
 import cn.vectory.ocdroid.ui.ConnectionViewModel
 import cn.vectory.ocdroid.ui.HostViewModel
 import cn.vectory.ocdroid.ui.OrchestratorViewModel
 import cn.vectory.ocdroid.ui.SessionViewModel
-import cn.vectory.ocdroid.ui.TunnelActivationState
-import cn.vectory.ocdroid.ui.UiEvent
-import cn.vectory.ocdroid.ui.computeContextUsage
-import cn.vectory.ocdroid.ui.currentHostProfile
-import cn.vectory.ocdroid.ui.currentSession
-import cn.vectory.ocdroid.ui.currentSessionStatus
-import cn.vectory.ocdroid.ui.showTimed
-import cn.vectory.ocdroid.ui.visibleMessages
-import kotlinx.coroutines.flow.distinctUntilChanged
-import kotlinx.coroutines.launch
-import kotlinx.coroutines.delay
 
 /**
  * §B3: provides a [WindowSizeClass] computed once in [cn.vectory.ocdroid.MainActivity]
@@ -89,9 +18,34 @@ import kotlinx.coroutines.delay
  * checks, which drift from the canonical M3 breakpoints (Compact <600,
  * Medium 600-839, Expanded ≥840). Nullable so previews / unit tests that run
  * without a provider fall back gracefully rather than crash.
+ *
+ * §1B: kept on the public surface because [ChatScaffold] reads it through
+ * this local for the wide-screen card wrap (§B3 / `isWide` branch in
+ * ChatScaffold). Removing the provider would break the wide-screen parity.
  */
 val LocalWindowSizeClass = staticCompositionLocalOf<WindowSizeClass?> { null }
 
+/**
+ * §1B: Phase 1B thin shell. The previous monolithic ChatScreen
+ * composable (TopAppBar + HorizontalPager + ChatInputBar + Toast/Question/
+ * Permission overlays + status bar) was split in Phase 1B:
+ *  - the chrome (TopAppBar, session-picker sheet, overflow menu) is now
+ *    inside [ChatScaffold];
+ *  - the composer (input row + Add menu + agent/model chips + file-reference
+ *    chip strip) is now in [Composer];
+ *  - the session picker is in [SessionPickerSheet];
+ *  - the message list / streaming overlay / gap-paging / scroll anchoring
+ *    / draft lifecycle / pending-question / pending-permission / TOFU
+ *    surfaces are still inside [ChatScaffold] but their slice reads
+ *    + derived values are unchanged.
+ *
+ * [ChatScreen] is preserved as a thin wrapper so the legacy AppShell
+ * wiring (see AppShell.kt:111-122) continues to compile and route the
+ * Chat destination to the new internal scaffold. The signature is
+ * unchanged — same 6 VMs + 2 navigation callbacks. The migration to a
+ * standalone "new shell" entry point (without the wrapper) lands in
+ * Phase 3.
+ */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun ChatScreen(
@@ -101,829 +55,47 @@ fun ChatScreen(
     sessionVM: SessionViewModel,
     hostVM: HostViewModel,
     orchestratorVM: OrchestratorViewModel,
+    /**
+     * §round-B ② (D.5): the active host's recent workdirs, sourced from
+     * [cn.vectory.ocdroid.ui.SettingsViewModel.recentWorkdirs] at the call
+     * site. Fed into [ContextSelectorSheet] so the workdir list matches the
+     * SessionsScreen "Connected projects" gate (recent_workdirs is the
+     * single source of truth for "connected"). Defaults to empty for the
+     * legacy wiring paths that don't supply it.
+     */
+    recentWorkdirs: List<String> = emptyList(),
+    /**
+     * §round-B ② (D.5): open the Settings → Hosts management surface from
+     * the ContextSelectorSheet ("Manage hosts" entry). ServerManagement
+     * parity (connect / refresh / tunnel / switch host) lives there.
+     */
+    onManageHosts: () -> Unit = {},
     onNavigateToSettings: () -> Unit = {},
-    onNavigateToSessions: () -> Unit = {}
+    onNavigateToSessions: () -> Unit = {},
+    /**
+     * §phase2-unbreak: open Workspace Files. The workdir is the current
+     * session's directory; the path is the specific file the user tapped in a
+     * message (may be null when no specific file is targeted). ChatScaffold's
+     * onChatFileClick passes the ACTUAL tapped path (not the session directory
+     * — that was the §phase2 fix-6 regression that dropped the path).
+     */
+    onOpenWorkspaceFiles: (workdir: String?, path: String?) -> Unit = { _, _ -> },
+    onOpenWorkspaceChanges: (String) -> Unit = {},
 ) {
-    // §R-17 batch3e: ChatScreen injects the 6 domain VMs directly and calls
-    // domain methods on them — no `viewModel.core.<method>()` bypass. All VMs
-    // share the same AppCore singleton (Hilt-scoped), so slice reads return
-    // the same flows regardless of which VM is asked.
-    //
-    // §batch2 history: ChatScreen used to subscribe to AppState.error /
-    // AppState.successMessage (removed). One-shot error/success toasts ride
-    // orchestratorVM.uiEvents (a SharedFlow<UiEvent>) — collected below in a
-    // single LaunchedEffect(Unit) so each event fires the snackbar exactly
-    // once. The slice-flow subscriptions below stay as-is.
-    val connection by chatVM.connectionFlow.collectAsStateWithLifecycle()
-    // §R18 Phase 3 Wave 3 (P2-6): traffic moved from OrchestratorViewModel to
-    // ConnectionViewModel (connectivity-shaped state). Same SharedStateStore
-    // slice — pure injection-site update.
-    val traffic by connectionVM.trafficFlow.collectAsStateWithLifecycle()
-    val composer by composerVM.composerFlow.collectAsStateWithLifecycle()
-    val file by orchestratorVM.fileFlow.collectAsStateWithLifecycle()
-    val settings by orchestratorVM.settingsFlow.collectAsStateWithLifecycle()
-    val chat by chatVM.chatFlow.collectAsStateWithLifecycle()
-    val sessionList by chatVM.sessionListFlow.collectAsStateWithLifecycle()
-    val unread by chatVM.unreadFlow.collectAsStateWithLifecycle()
-    val host by orchestratorVM.hostFlow.collectAsStateWithLifecycle()
-    var showFileBrowser by remember { mutableStateOf(false) }
-    // §顶部 session tab 联动显隐：状态产生在 ChatMessageList（listState 所在），
-    // 消费在 ChatTopBar（AnimatedVisibility 包裹 SessionTabStrip）。这里在
-    // 共同祖先 ChatScreen 提升 `tabVisible`，通过 onTabVisibilityChange 回调
-    // 从 ChatMessageList 写入，通过 prop 从 ChatTopBar 读取。默认显示。
-    var tabVisible by remember { mutableStateOf(true) }
-    // §Feature B: first back in a root session arms a 1s exit-confirmation
-    // window; the BackHandler is disabled while pendingExit is true so the next
-    // back propagates to the system and exits the app.
-    var pendingExit by remember { mutableStateOf(false) }
-    // §error-detail-dialog: when a detailed error message is shown via snackbar,
-    // the full text is stashed here for the "查看" dialog instead of cluttering
-    // the snackbar itself.
-    var errorDetail by remember { mutableStateOf<String?>(null) }
-    // §G4 会话切换时重置 tab 可见——避免从隐藏态切到新会话后 tab 仍不可见。
-    LaunchedEffect(chat.currentSessionId) { tabVisible = true }
-    // §R-17 Stage 2: expandedParts collect moved INTO ChatMessageList (it now
-    // subscribes to viewModel.core.expandedParts directly), so ChatScreen no longer
-    // needs to observe it — toggling a card recomposes only ChatMessageList.
-    val context = LocalContext.current
-    val scope = rememberCoroutineScope()
-    // §C1: standard M3 Snackbar host. Replaces the former top-aligned AppToast
-    // for both AppState.error and bottom-bar question-submit failures. Mounted
-    // inside the chat-area Box below (BottomCenter); showSnackbar() is driven
-    // by LaunchedEffects keyed on the error sources.
-    val snackbarHostState = remember { SnackbarHostState() }
-    val imagePickerLauncher = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.GetMultipleContents()
-    ) { uris ->
-        scope.launch {
-            composerVM.addImageAttachments(loadImageAttachments(context, uris))
-        }
-    }
-
-    // §R-17 Stage 2: stable lambda references so ChatMessageList / ChatInputBar
-    // (which now collect their own slices) can be SKIPPED by the Compose runtime
-    // when their slice inputs are unchanged. Without this, a fresh lambda
-    // identity on every ChatScreen recomposition would force both children to
-    // recompose regardless of slice state. showFileBrowser is a
-    // remember{mutableStateOf} delegate whose setter is referentially stable,
-    // so capturing it inside remember(viewModel) is safe.
-    val onChatFileClick: (String) -> Unit = remember(orchestratorVM) {
-        { path -> orchestratorVM.showFileInFiles(path, "chat"); showFileBrowser = true }
-    }
-    val onAddImages: () -> Unit = remember(imagePickerLauncher) {
-        { imagePickerLauncher.launch("image/*") }
-    }
-
-    // Cross-slice derived views (R-17 M5: moved out of the AppState getters).
-    val curSession = currentSession(sessionList.sessions, chat.currentSessionId)
-    val curSessionStatus = currentSessionStatus(sessionList.sessionStatuses, chat.currentSessionId)
-    // Cache last non-null contextUsage so the ring stays visible during streaming
-    val computedContextUsage = computeContextUsage(chat.messages, settings.providers)
-    var cachedContextUsage by remember { mutableStateOf(computedContextUsage) }
-    computedContextUsage?.let { cachedContextUsage = it }
-    val currentSessionIsRunning = curSessionStatus?.let { it.isBusy || it.isRetry } == true ||
-        chat.currentSessionId?.let { it in composer.sendingSessionIds } == true
-    val currentActivity = remember(
-        chat.currentSessionId,
-        curSessionStatus,
-        chat.messages,
-        chat.partsByMessage,
-        chat.streamingReasoningPart,
-        chat.streamingPartTexts,
-    ) {
-        currentSessionActivity(
-            sessionId = chat.currentSessionId,
-            status = curSessionStatus,
-            messages = visibleMessages(chat.messages, curSession),
-            partsByMessage = chat.partsByMessage,
-            streamingReasoningPart = chat.streamingReasoningPart,
-            streamingPartTexts = chat.streamingPartTexts,
-        )
-    }
-
-
-    // #14: edge-swipe / system-back returns to the parent session when viewing a
-    // child session. Registered here (deeper than PhoneLayout's pager-level
-    // BackHandler from #12) so it wins dispatch priority while a child session
-    // is open. lastParent caches the most recent non-null parentId so the back
-    // callback still resolves the right target even if state recomposes mid-press.
-    val parent = curSession?.parentId
-    var lastParent by remember { mutableStateOf<String?>(null) }
-    if (parent != null) lastParent = parent
-    BackHandler(enabled = parent != null) { lastParent?.let { sessionVM.selectSession(it) } }
-
-    // Hoisted string resources (snackbar messages are read inside non-composable
-    // coroutine lambdas below — BackHandler callback + LaunchedEffect blocks —
-    // where @Composable stringResource() cannot be called directly).
-    val exitConfirmMessage = stringResource(R.string.chat_exit_confirm)
-    val errorMessage = stringResource(R.string.chat_error_occurred)
-    val errorActionLabel = stringResource(R.string.chat_view)
-    val staleNoticeMessage = stringResource(R.string.chat_stale_notice)
-    val staleNoticeActionLabel = stringResource(R.string.common_refresh)
-
-    // §Feature B: root-session double-confirm before system back exits the app.
-    // First back shows a 1s snackbar and disables this handler; a second back
-    // within the window propagates to the system. After 1s the handler re-arms.
-    BackHandler(enabled = parent == null && !pendingExit) {
-        pendingExit = true
-        scope.launch {
-            snackbarHostState.showTimed(
-                message = exitConfirmMessage,
-                durationMillis = 1000L
-            )
-        }
-    }
-    // §Feature B: auto-reset the exit-confirmation window after 1s. This also
-    // dismisses the snackbar naturally because showTimed uses Indefinite + a
-    // 1s timeout; when pendingExit flips back the UI re-arms the handler.
-    LaunchedEffect(pendingExit) {
-        if (pendingExit) {
-            delay(1_000)
-            pendingExit = false
-        }
-    }
-
-    // Status-bar inset is handled by ChatTopBar's M3 TopAppBar (its default
-    // TopAppBarDefaults.windowInsets consumes the status bar inset), so this
-    // Column must NOT also apply statusBarsPadding() — that would double-pad.
-    // If ChatTopBar ever reverts to not handling the inset, re-add
-    // .statusBarsPadding() here.
-    // R-17 M1: derive ChatTopBarState inside a remembered derivedStateOf.
-    // The lambda only reads the AppState slices that ChatTopBar actually
-    // consumes (sessions / currentSessionId / statuses / agents / cached
-    // contextUsage / connection / host profiles / tunnel / tabs / traffic /
-    // serverVersion). It deliberately does NOT read the high-frequency SSE
-    // fields (streamingPartTexts / visibleMessages / partsByMessage /
-    // streamingReasoningPart / inputText). An SSE token delta mutates only
-    // those fields, which makes the State<AppState> emit a new value and
-    // forces this block to re-evaluate, but the resulting ChatTopBarState is
-    // structurally equal to the previous one (data-class equals) — so
-    // derivedStateOf suppresses the change and ChatTopBar is skipped.
-    val curHostProfile = currentHostProfile(host.hostProfiles, host.currentHostProfileId)
-    val topBarState by remember {
-        derivedStateOf {
-            // §tunnel-reactivity: recompute curHostProfile / curSession INSIDE the
-            // lambda (not captured from the outer scope). remember{} creates the
-            // DerivedState once; outer vals are captured by value at first
-            // composition and would go stale on host/session switch (the tunnel
-            // activate button / parent title failed to update until recompose-
-            // from-scratch). Reading host.*/sessionList.*/chat.* State here makes
-            // derivedStateOf re-evaluate with fresh values.
-            val curHostProfile = currentHostProfile(host.hostProfiles, host.currentHostProfileId)
-            val curSession = currentSession(sessionList.sessions, chat.currentSessionId)
-            // Resolve openSessionIds to actual Session objects for the
-            // top-bar tab strip. Filtered to root sessions (parentId == null)
-            // so sub-agents never duplicate the title-slot breadcrumb. Also
-            // drops archived sessions as a render defense — the cold-start,
-            // user-archive, and SSE session.updated paths all evict archived
-            // ids from openSessionIds, but this guarantees no archived tab
-            // renders even if a path misses (e.g. a stale cached id).
-            val resolvedOpenSessions = sessionList.openSessionIds
-                .mapNotNull { id -> sessionList.sessions.find { it.id == id } }
-                .filter { it.parentId == null && !it.isArchived }
-            ChatTopBarState(
-                sessions = sessionList.sessions,
-                currentSessionId = chat.currentSessionId,
-                sessionStatuses = sessionList.sessionStatuses,
-                hasMoreSessions = sessionList.hasMoreSessions,
-                isLoadingMoreSessions = sessionList.isLoadingMoreSessions,
-                isRefreshingSessions = sessionList.isRefreshingSessions,
-                expandedSessionIds = sessionList.expandedSessionIds,
-                agents = settings.agents.filter { it.isVisible },
-                selectedAgentName = settings.selectedAgentName,
-                contextUsage = cachedContextUsage,
-                sessionTodos = sessionList.sessionTodos[chat.currentSessionId ?: ""] ?: emptyList(),
-                hostName = curHostProfile?.name ?: "No Host",
-                isConnected = connection.isConnected,
-                isConnecting = connection.isConnecting,
-                connectionPhase = connection.connectionPhase,
-                hostProfiles = host.hostProfiles,
-                currentHostProfileId = host.currentHostProfileId,
-                tunnelActivationState = connection.tunnelActivationState,
-                showTunnelAuth = (curHostProfile?.tunnelPasswordId != null),
-                openSessions = resolvedOpenSessions,
-                unreadSessions = unread.unreadSessions,
-                // item 4: pending-question session IDs drive the tab "?" marker.
-                // The current session is filtered out at render time (SessionTab),
-                // so passing the full set here is safe.
-                questionSessionIds = sessionList.pendingQuestions.map { it.sessionId }.toSet(),
-                draftWorkdir = composer.draftWorkdir,
-                parentSessionId = curSession?.parentId,
-                parentSessionTitle = curSession?.parentId?.let { pid ->
-                    sessionList.sessions.firstOrNull { it.id == pid }?.displayName
-                },
-                trafficSent = traffic.trafficSent,
-                trafficReceived = traffic.trafficReceived,
-                serverVersion = connection.serverVersion,
-                // §model-selection: providers + disabledModels + currentModel
-                // drive the top-bar model quick-switch picker.
-                providers = settings.providers,
-                disabledModels = settings.disabledModels,
-                currentModel = chat.currentModel
-            )
-        }
-    }
-
-    // R-17 M1 R1: wrap ChatTopBarActions in remember so the actions instance
-    // (and its lambda / method-reference fields) stays referentially stable
-    // across recompositions. Without this the actions argument was a fresh
-    // instance on every recomposition and defeated the topBarState
-    // derivedStateOf — ChatTopBar recomposed regardless of whether topBarState
-    // had changed. Keys: viewModel is a @Stable hilt single-instance VM (stable
-    // for the screen's lifetime); onNavigateToSettings / onNavigateToSessions
-    // are nav lambdas sourced from the parent, listed as keys so a new parent
-    // identity re-builds the actions bundle. The VM method references and the
-    // wrapping lambdas only capture viewModel (itself stable), so they do not
-    // need to be keys.
-    val topBarActions = remember(sessionVM, composerVM, connectionVM, onNavigateToSettings, onNavigateToSessions) {
-        ChatTopBarActions(
-            onSelectSession = sessionVM::selectSession,
-            onCloseSession = sessionVM::closeSession,
-            onSelectAgent = composerVM::selectAgent,
-            onNavigateToSettings = onNavigateToSettings,
-            onNavigateToSessions = onNavigateToSessions,
-            onRefreshMessages = { chatVM.refreshCurrentSession() },
-            onRefreshTrafficStats = connectionVM::refreshTrafficStats,
-            onSelectHost = { hostVM.selectHostProfile(it) },
-            onActivateTunnel = { hostVM.activateTunnelForCurrentHost() },
-            onSwitchModel = { providerId, modelId -> composerVM.switchSessionModel(providerId, modelId) },
-        )
-    }
-    // §kimo#6: remember the compact lambda so ChatTopBar can skip when stable.
-    val onContextCompact = remember(chatVM) { { chatVM.compactSession() } }
-
-    // §3-scroll-memory: hoisted per-session scroll-position cache. Owned HERE
-    // (above the HorizontalPager) so the pager disposing & recreating a page's
-    // ChatMessageList on currentSessionId flip no longer drops the user's
-    // scroll position for the page they swiped away from. Previously these
-    // were `remember{}` blocks INSIDE ChatMessageList — bound to its
-    // composition lifetime — so a horizontal swipe A→B discarded A's saved
-    // position (the A page's ChatMessageList was disposed when its
-    // `sessionId == chat.currentSessionId` guard flipped to false) and B
-    // started fresh. Hoisting fixes the disposal; the saved-position restore
-    // logic inside ChatMessageList reads/writes these via params.
-    val savedPositions = remember { mutableStateMapOf<String, Pair<Int, Int>>() }
-    val accessOrder = remember { mutableStateListOf<String>() }
-    // §3-clear: when a session leaves `openSessionIds` (close tab / archive /
-    // SSE-driven removal) drop its cached scroll position — the user has
-    // signalled they're done with it, and a future reopen should land on the
-    // default latest-message view instead of a stale offset for a different
-    // message window. Keyed on openSessionIds structural equality (NOT pointer
-    // identity — LaunchedEffect compares keys by equals(); List<String>
-    // participates in equals so a same-content replacement does NOT re-fire).
-    // (gpt-1 fix): the prior `if (open.isNotEmpty())` guard skipped cleanup
-    // when the LAST session closed — leaving stale entries that a reopen would
-    // wrongly restore. Removed: on cold start savedPositions is itself empty,
-    // so `keys - open` = empty - empty = empty → natural no-op; the guard was
-    // both unnecessary and harmful.
-    LaunchedEffect(sessionList.openSessionIds) {
-        val open = sessionList.openSessionIds.toSet()
-        val stale = savedPositions.keys - open
-        if (stale.isNotEmpty()) {
-            stale.forEach { id ->
-                savedPositions.remove(id)
-                accessOrder.remove(id)
-            }
-        }
-    }
-    // §3-clear: manual refresh = full forget (per product decision: the cached
-    // position is no longer meaningful after a window reset). The nonce is a
-    // monotonic counter incremented in performGlobalColdStartRefresh; observing
-    // it via distinctUntilChanged-like LaunchedEffect(key) re-fires on each
-    // bump. Initial composition (nonce == 0) is skipped so cold start doesn't
-    // pointlessly clear an already-empty cache.
-    val refreshNonce = chat.refreshNonce
-    LaunchedEffect(refreshNonce) {
-        if (refreshNonce > 0L) {
-            savedPositions.clear()
-            accessOrder.clear()
-        }
-    }
-
-    // §pager: native HorizontalPager for swipe-to-switch. Each page maps to
-    // one root session; adjacent pages are visible during the drag for a book-
-    // like pager feel. Sub-agent sessions fall back to direct content.
-    val rootSessions = remember(sessionList.openSessionIds, sessionList.sessions) {
-        sessionList.openSessionIds
-            .mapNotNull { id -> sessionList.sessions.find { it.id == id } }
-            .filter { it.parentId == null && !it.isArchived }
-    }
-    val currentRootIndex = remember(rootSessions, chat.currentSessionId, parent) {
-        val id = resolveEffectiveSelectedId(rootSessions, chat.currentSessionId, parent)
-        rootSessions.indexOfFirst { it.id == id }.coerceAtLeast(0)
-    }
-    val pagerState = rememberPagerState(
-        initialPage = currentRootIndex,
-        pageCount = { rootSessions.size.coerceAtLeast(1) }
+    ChatScaffold(
+        chatVM = chatVM,
+        composerVM = composerVM,
+        connectionVM = connectionVM,
+        sessionVM = sessionVM,
+        hostVM = hostVM,
+        orchestratorVM = orchestratorVM,
+        recentWorkdirs = recentWorkdirs,
+        onManageHosts = onManageHosts,
+        onNavigateToSettings = onNavigateToSettings,
+        onNavigateToSessions = onNavigateToSessions,
+        onOpenWorkspaceFiles = onOpenWorkspaceFiles,
+        onOpenWorkspaceChanges = onOpenWorkspaceChanges,
     )
-
-    // D2.1–D2.4: pending questions for the current session. Answer state and
-    // submit/reject error display live self-contained inside QuestionCardView;
-    // ChatScreen only decides whether the card is rendered and where.
-    val matchingQuestions = remember(sessionList.pendingQuestions, chat.currentSessionId) {
-        sessionList.pendingQuestions.filter { it.sessionId == chat.currentSessionId }
-    }
-    val pendingQuestion = matchingQuestions.firstOrNull()
-    // 🔴2: track the visible question card's rendered height so the SnackbarHost
-    // can offset itself above the card instead of being hidden behind it.
-    var questionCardHeightDp by remember { mutableStateOf(0.dp) }
-    val density = LocalDensity.current
-    val questionCardOffset by animateDpAsState(
-        targetValue = if (pendingQuestion != null) questionCardHeightDp else 0.dp,
-        label = "questionCardOffset"
-    )
-    // §C1 / §R-17 batch2 / §R18 Phase 2-G: surface UiEvent.Error / UiEvent.Success
-    // via a 3s/2.5s M3 Snackbar. Collection lives in ONE LaunchedEffect(Unit)
-    // so each event fires the snackbar exactly once (the SharedFlow is one-shot,
-    // consumed on emission — no clearError/clearSuccessMessage to call afterwards).
-    // The Error branch reuses the §error-detail "查看" action; Success is short
-    // ("隧道激活成功" / "已刷新") with no action. SnackbarHostState serializes
-    // concurrent showSnackbar calls so simultaneous Error + Success still
-    // display in turn.
-    //
-    // §R18 Phase 2-G: UiEvent.Error/Success now carry a `@StringRes resId` +
-    // format args; resolve to a localized String via [context] (captured at
-    // composable scope above — `LaunchedEffect`'s lambda is non-composable, so
-    // LocalContext.current cannot be read inside it).
-    LaunchedEffect(Unit) {
-        orchestratorVM.uiEvents.collect { event ->
-            val message = event.resolveMessage(context)
-            when (event) {
-                is UiEvent.Error -> {
-                    // §error-detail: all errors show a generic snackbar + "查看"
-                    // action that opens a detail dialog with the full message.
-                    // 10s duration (not the default 3s) so the user has time to
-                    // notice and tap.
-                    snackbarHostState.showTimed(
-                        message = errorMessage,
-                        durationMillis = 10_000L,
-                        actionLabel = errorActionLabel,
-                        onAction = { errorDetail = message }
-                    )
-                }
-                is UiEvent.Success -> {
-                    // §success-channel: positive snackbar, 2.5s, no action.
-                    snackbarHostState.showTimed(
-                        message = message,
-                        durationMillis = 2_500L
-                    )
-                }
-                is UiEvent.Info -> {
-                    // §grouping-rewrite item 4: neutral, non-fatal snackbar
-                    // (e.g. command POST timed out on its ACK but SSE carries
-                    // the results). Same short duration as Success; no action,
-                    // no error styling — distinct from the red 10 s Error path.
-                    snackbarHostState.showTimed(
-                        message = message,
-                        durationMillis = 2_500L
-                    )
-                }
-                is UiEvent.Debug -> Unit
-            }
-        }
-    }
-    // §Phase1E stale notice — now a 3s M3 Snackbar (was a top-aligned
-    // StaleNoticeBanner). Fires when returning after a >5min background
-    // absence. Carries the "reload all sessions" action; tapping it within the
-    // 3s window triggers a full cold-start refresh. If the timeout fires first
-    // the snackbar auto-dismisses — the stale flag clears naturally on session
-    // switch / next successful catch-up, so no source-clear is needed here.
-    // Keyed on (staleNotice, currentSessionId) so switching into the stale
-    // session re-arms it.
-    LaunchedEffect(chat.staleNotice, chat.currentSessionId) {
-        if (chat.staleNotice && chat.currentSessionId != null) {
-            snackbarHostState.showTimed(
-                message = staleNoticeMessage,
-                actionLabel = staleNoticeActionLabel,
-                onAction = { chatVM.refreshCurrentSession() }
-            )
-        }
-    }
-    // §compact: clear the compacting flag when the session transitions from
-    // busy → idle (compaction complete on the server). The 3s floor guard
-    // prevents premature clearing during the POST→server-startup gap.
-    LaunchedEffect(currentSessionIsRunning, chat.isCompacting) {
-        if (chat.isCompacting && !currentSessionIsRunning) {
-            if (System.currentTimeMillis() - chat.compactStartedAt > 3000) {
-                chatVM.clearCompacting()
-            }
-        }
-    }
-    // §pager: when the pager settles on a new page, select that session.
-    // Guarded to root sessions so a sub-agent view never accidentally switches
-    // tabs via the pager.
-    //
-    // §draft-guard (new-session bug fix): keep the LATEST currentSessionId in a
-    // rememberUpdatedState so this long-lived effect (keyed on the stable
-    // pagerState, launched once) reads the current value instead of the stale
-    // launch-time capture, and SKIP the auto-select while currentSessionId is
-    // null (draft mode — entered via createSessionInWorkdir's "new session"
-    // affordance). Without this guard, the snapshotFlow's INITIAL emit of
-    // settledPage on Chat entry would find a real root session and call
-    // onSelectSession on it, clobbering the draft (showing an old session
-    // instead of the empty composer the user just asked for). The session only
-    // materialises on first send; until then the pager must not steal focus.
-    val currentSessionIdLatest by rememberUpdatedState(chat.currentSessionId)
-    // §flicker-fix: this settle effect is keyed only on pagerState so it does
-    // NOT restart on every tab-list change (restarting would re-emit the
-    // current settledPage and auto-select during the close transition). That
-    // means its closure captures rootSessions/parent at launch time. After a
-    // tab close the captured list is stale, so a swipe resolves the settled
-    // page index against the OLD list — often landing on the just-closed
-    // session, which SessionSwitcher reopens, which the external-sync effect
-    // below then fights, oscillating the tabs a↔b. Mirror the
-    // rememberUpdatedState pattern commit 2344e38 used for currentSessionId so
-    // the collector always resolves against the freshest list + parent.
-    val rootSessionsLatest by rememberUpdatedState(rootSessions)
-    val parentLatest by rememberUpdatedState(parent)
-    LaunchedEffect(pagerState) {
-        snapshotFlow { pagerState.settledPage }
-            .distinctUntilChanged()
-            .collect { page ->
-                val session = rootSessionsLatest.getOrNull(page)
-                // §close-left-guard: only drive a selection when the pager has
-                // truly settled on the page it currently shows. After closing a
-                // tab LEFT of the current one, the list shifts and settledPage
-                // can transiently lag currentPage (which the external-sync
-                // effect has already corrected via scrollToPage). Requiring
-                // page == currentPage filters that stale emission so we don't
-                // fire a one-frame onSelectSession on the shifted neighbour.
-                if (session != null && currentSessionIdLatest != null &&
-                    session.id != currentSessionIdLatest && parentLatest == null &&
-                    page == pagerState.currentPage
-                ) {
-                    topBarActions.onSelectSession(session.id)
-                }
-            }
-    }
-    // §pager: when the session changes externally (tab tap, sessions list,
-    // back gesture), scroll the pager to match without animation.
-    LaunchedEffect(chat.currentSessionId, rootSessions) {
-        if (parent == null && rootSessions.isNotEmpty()) {
-            val idx = rootSessions.indexOfFirst { it.id == chat.currentSessionId }
-            if (idx != -1 && idx != pagerState.currentPage) {
-                pagerState.scrollToPage(idx)
-            }
-        }
-    }
-    Column(modifier = Modifier.fillMaxSize()) {
-        ChatTopBar(
-            state = topBarState,
-            actions = topBarActions,
-            tabVisible = tabVisible,
-            onContextCompact = onContextCompact
-        )
-
-        // In draft mode (no session yet but a workdir has been chosen), the
-        // chat area is intentionally empty — the user is mid-composition and
-        // the session will materialise on first send. We do not render the
-        // "select or create session" empty state in that case.
-        // §10: on wide screens (M3 WindowSizeClass: Medium 600-839dp or
-        // Expanded ≥840dp) wrap the conversation area (messages + composer) in
-        // a v2-style card — rounded 10, surface (bg-base), 2dp elevation, 8dp
-        // outer padding. On phone (Compact <600dp) the chat stays full-bleed
-        // for maximum display area (RectangleShape + transparent + 0 elevation
-        // ⇒ an invisible, non-clipping wrapper). The TopBar stays outside the
-        // card either way (a full-width top bar is more natural on mobile and
-        // avoids double-rounded corners at the top).
-        // §B3: `isWide` follows the M3 WindowSizeClass provided by MainActivity
-        // (Compact vs Medium/Expanded) instead of a hand-rolled `screenWidthDp
-        // >= 600` threshold. The `?: screenWidthDp >= 600` arm is a
-        // preview/test fallback when no provider is mounted — it preserves the
-        // previous behavior in those contexts.
-        val isWide = LocalWindowSizeClass.current
-            ?.let { it.widthSizeClass != WindowWidthSizeClass.Compact }
-            ?: (LocalConfiguration.current.screenWidthDp >= 600)
-        val cardShape = if (isWide) MaterialTheme.shapes.large else RectangleShape
-        Surface(
-            modifier = Modifier
-                .weight(1f)
-                .fillMaxWidth()
-                .then(if (isWide) Modifier.padding(8.dp) else Modifier),
-            color = MaterialTheme.colorScheme.surfaceContainerLow,
-            shape = cardShape,
-            shadowElevation = if (isWide) 2.dp else 0.dp,
-            tonalElevation = if (isWide) 1.dp else 0.dp
-        ) {
-            Column(modifier = Modifier.fillMaxSize()) {
-                // §pager: chat content wrapper. HorizontalPager shows root
-                // sessions side-by-side so adjacent pages are visible during the
-                // swipe, giving the book-like "both pages move together" feel.
-                Box(
-                    modifier = Modifier
-                        .weight(1f)
-                        .fillMaxWidth()
-                ) {
-                    val isDraft = composer.draftWorkdir != null && chat.currentSessionId == null
-                    if (chat.currentSessionId != null && parent == null && rootSessions.size >= 2) {
-                        HorizontalPager(
-                            state = pagerState,
-                            modifier = Modifier.fillMaxSize(),
-                            // §flicker-fix (Issue 1): key each page composable by
-                            // session id so the pager does NOT reuse a page slot
-                            // for a different session on reorder. Without this,
-                            // SessionSwitcher.switchTo prepends to openSessionIds
-                            // and the page slot keeps the previous session's
-                            // LazyListState scroll offset for one frame → flicker.
-                            key = { page -> rootSessions.getOrNull(page)?.id ?: "page-$page" }
-                        ) { page ->
-                            // §review (momo 🟠-4): defensive bounds guard. When a
-                            // root session is archived/deleted from another client,
-                            // rootSessions shrinks but pagerState.currentPage can
-                            // transiently exceed pageCount until the
-                            // currentSessionId/rootSessions sync effect clamps it.
-                            // Compose does not guarantee clamping the `page` arg,
-                            // so guard against IndexOutOfBoundsException here.
-                            val session = rootSessions.getOrNull(page)
-                            val sessionId = session?.id
-                            if (sessionId != null && sessionId == chat.currentSessionId) {
-                                ChatMessageList(
-                                    chatVM = chatVM,
-                                    composerVM = composerVM,
-                                    sessionVM = sessionVM,
-                                    onFileClick = onChatFileClick,
-                                    onTabVisibilityChange = { tabVisible = it },
-                                    savedPositions = savedPositions,
-                                    accessOrder = accessOrder
-                                )
-                            } else {
-                                // Adjacent session — messages are not loaded
-                                // until the pager settles and selects it.
-                                Box(
-                                    modifier = Modifier.fillMaxSize(),
-                                    contentAlignment = Alignment.Center
-                                ) {
-                                    CircularProgressIndicator()
-                                }
-                            }
-                        }
-                    } else if (chat.currentSessionId != null) {
-                        // Single root session, sub-agent session, or pager
-                        // disabled — render the message list directly.
-                        ChatMessageList(
-                            chatVM = chatVM,
-                            composerVM = composerVM,
-                            sessionVM = sessionVM,
-                            onFileClick = onChatFileClick,
-                            onTabVisibilityChange = { tabVisible = it },
-                            savedPositions = savedPositions,
-                            accessOrder = accessOrder
-                        )
-                    } else if (!isDraft) {
-                        ChatEmptyState(
-                            isConnected = connection.isConnected,
-                            isConnecting = connection.isConnecting,
-                            connectionPhase = connection.connectionPhase,
-                            hostName = curHostProfile?.name
-                                ?: curHostProfile?.serverUrl
-                                    ?.substringAfter("://")
-                                    ?.substringBefore("/")
-                                    ?: "server",
-                            onConnect = { connectionVM.testConnection() }
-                        )
-                    }
-
-                    // §Phase1E stale notice now surfaces as a timed M3 Snackbar (see
-                    // the LaunchedEffect keyed on chat.staleNotice above), so no
-                    // top-aligned banner is rendered here. The bottom-mounted
-                    // SnackbarHost below overlays both error/stale snackbars.
-
-                    // §C1: M3 Snackbar replaces the former top-aligned AppToast for
-                    // global errors (tunnel activation / UiEvent.Error). Default bottom
-                    // placement is accepted per the migration spec. The question card
-                    // is now also a BottomCenter overlay; SnackbarHost is offset upward
-                    // by the card's measured height so global errors remain visible
-                    // above the card instead of being hidden behind it.
-                    SnackbarHost(
-                        hostState = snackbarHostState,
-                        modifier = Modifier
-                            .align(Alignment.BottomCenter)
-                            .padding(bottom = questionCardOffset)
-                    )
-
-                    // §Feature C: floating capsule at top-center.
-                    // §compact: when isCompacting, show a capsule without abort
-                    // button ("压缩中…") instead of the normal thinking capsule.
-                    if (chat.isCompacting) {
-                        ThinkingCapsuleOverlay(
-                            visible = true,
-                            text = stringResource(R.string.chat_compacting),
-                            startedAtMillis = chat.compactStartedAt.takeIf { it > 0 },
-                            onAbort = {},
-                            showAbort = false
-                        )
-                    } else {
-                        // §session-retry: suppress the generic "running"/
-                        // "Retrying" capsule during retry — the dedicated
-                        // SessionRetryCard below carries the countdown +
-                        // message, so the plain capsule would just duplicate
-                        // the same status text without the backoff context.
-                        ThinkingCapsuleOverlay(
-                            visible = currentSessionIsRunning && currentActivity != null &&
-                                curSessionStatus?.isRetry != true,
-                            text = currentActivity?.text ?: "",
-                            startedAtMillis = currentActivity?.startedAtMillis,
-                            onAbort = chatVM::abortSession
-                        )
-                    }
-
-                    // §session-retry: floating retry card with live countdown.
-                    // Always-composed BoxScope overlay (mirrors ThinkingCapsuleOverlay);
-                    // SessionRetryCard owns its AnimatedVisibility + TopCenter align and
-                    // toggles visible on isRetry so enter/exit animate cleanly.
-                    // §compact-priority: suppress the retry card while compacting — the
-                    // compacting capsule above is the foreground op and a retry during
-                    // compaction is incidental; avoids two top-center overlays stacking.
-                    SessionRetryCard(status = curSessionStatus?.takeIf { !chat.isCompacting })
-
-                    // §user-req: 手动刷新/连接期间显示胶囊提示
-                    ThinkingCapsuleOverlay(
-                        visible = connection.isConnecting && !connection.isConnected,
-                        text = stringResource(R.string.chat_connecting_status),
-                        startedAtMillis = null,
-                        onAbort = { }
-                    )
-
-                    // D2.1: floating question card overlay anchored BottomCenter.
-                    // It floats above the chat surface and is visually just above
-                    // the input bar (the Surface bottom is the input bar top). It
-                    // does NOT affect the LazyColumn's layout/height.
-                    // 🟠3: imePadding lets the card ride up above the keyboard when
-                    // the custom-text field is focused.
-                    // 🔴2: onGloballyPositioned reports the card's height so the
-                    // SnackbarHost can offset itself above the card.
-                    pendingQuestion?.let { question ->
-                        QuestionCardView(
-                            question = question,
-                            queuePosition = matchingQuestions.indexOfFirst { it.id == question.id } + 1,
-                            queueTotal = matchingQuestions.size,
-                            onReply = { answers, onError ->
-                                orchestratorVM.replyQuestion(question.id, answers, onError)
-                            },
-                            onReject = { onError ->
-                                orchestratorVM.rejectQuestion(question.id, onError)
-                            },
-                            modifier = Modifier
-                                .align(Alignment.BottomCenter)
-                                .imePadding()
-                                .onGloballyPositioned {
-                                    questionCardHeightDp = with(density) {
-                                        it.size.height.toDp()
-                                    }
-                                }
-                        )
-                    }
-                }
-
-        // §error-detail: dialog showing the full error text when the user taps
-        // "查看" on a detailed-error snackbar. Scrollable + selectable so long
-        // technical messages (HTTP bodies, stack traces) are readable.
-        errorDetail?.let { detail ->
-            AlertDialog(
-                onDismissRequest = { errorDetail = null },
-                title = { Text(stringResource(R.string.chat_error_details)) },
-                text = {
-                    SelectionContainer {
-                        // AlertDialog's text slot has unbounded height, so the
-                        // scrollable must be capped with heightIn before
-                        // verticalScroll — otherwise "Vertically scrollable
-                        // component was measured with an infinity maximum height
-                        // constraints" crash. Mirrors ChatServerManagementDialog /
-                        // ModelManagementDialog pattern.
-                        Column(
-                            modifier = Modifier
-                                .heightIn(max = 400.dp)
-                                .verticalScroll(rememberScrollState())
-                        ) {
-                            Text(
-                                text = detail,
-                                style = MaterialTheme.typography.bodySmall
-                            )
-                        }
-                    }
-                },
-                confirmButton = {
-                    TextButton(onClick = { errorDetail = null }) {
-                        Text(stringResource(R.string.common_done))
-                    }
-                }
-            )
-        }
-            }
-        }
-
-        // §user-req: ChatInputBar 移到 Surface 外部（与 Surface 同级，作为
-        // 顶层 Column 的下一个 child），避免被聊天卡片的背景/圆角/elevation 包裹。
-        // Input bar is enabled whenever there is either a concrete session OR
-        // a draft workdir (so the user can type the first message that will
-        // materialise the session).
-        if (chat.currentSessionId != null || composer.draftWorkdir != null) {
-            ChatInputBar(
-                chatVM = chatVM,
-                composerVM = composerVM,
-                orchestratorVM = orchestratorVM,
-                isBusy = currentSessionIsRunning || chat.isCompacting,
-                onAddImages = onAddImages,
-                questionPending = pendingQuestion != null
-            )
-        }
-
-        sessionList.pendingPermissions.firstOrNull()?.let { permission ->
-            ChatPermissionCard(
-                permission = permission,
-                onRespond = { response ->
-                    orchestratorVM.respondPermission(permission.sessionId, permission.id, response)
-                }
-            )
-        }
-
-    }
-
-    // File browser overlay — opened by tapping a file path in chat (preview).
-    // (Project-level browsing lives on the Sessions screen now.) The Box is
-    // given an opaque surface background so the chat content underneath does
-    // not bleed through (FilesScreen's own root is transparent by design —
-    // opaqueness is the host's responsibility).
-    if (showFileBrowser) {
-        val filesViewModel: FilesViewModel = hiltViewModel()
-        // System back closes the in-chat file preview instead of exiting the
-        // app (the parent-session BackHandler at L104 is gated on parent!=null,
-        // and PhoneLayout's is disabled on the Chat destination, so without
-        // this a root-session file preview would back-exit the app).
-        BackHandler { showFileBrowser = false }
-        Box(
-            modifier = Modifier
-                .fillMaxSize()
-                .background(MaterialTheme.colorScheme.surface)
-        ) {
-            FilesScreen(
-                viewModel = filesViewModel,
-                pathToShow = file.filePathToShowInFiles,
-                sessionDirectory = curSession?.directory,
-                onCloseFile = {
-                    orchestratorVM.clearFileToShow()
-                    showFileBrowser = false
-                },
-                onFileClick = { path ->
-                    orchestratorVM.showFileInFiles(path, "chat")
-                },
-                // §F5b-back: preview-open back closes this overlay (same
-                // target as the outer BackHandler at L849).
-                onExit = { showFileBrowser = false }
-            )
-        }
-    }
-
-    // §tofu R2: SSH-style trust-on-first-use prompt. When the connection
-    // coordinator captures a leaf cert against an unpinned endpoint, it writes
-    // ConnectionState.pendingTofuCapture and the loop SUSPENDS waiting for the
-    // user's decision. Render [TofuTrustDialog] here (ChatScreen already
-    // observes `connection` + holds `connectionVM`) and feed the decision
-    // straight back via ConnectionViewModel.resolveTofuTrust — the coordinator
-    // unblocks, writes the pin (Accept/Trust) or settles false (Cancel), and
-    // re-probes / terminates.
-    connection.pendingTofuCapture?.let { capture ->
-        TofuTrustDialog(
-            capture = capture,
-            onDecision = { decision -> connectionVM.resolveTofuTrust(decision) }
-        )
-    }
-}
-
-/**
- * §Phase1E stale notice now surfaces as a timed M3 Snackbar (see the
- * LaunchedEffect keyed on chat.staleNotice in ChatScreen). The former
- * top-aligned StaleNoticeBanner composable was removed when the notice
- * migrated to the snackbar host.
- */
-
-/**
- * §Feature C: top-center floating thinking capsule. Extracted to a BoxScope
- * extension so [AnimatedVisibility] resolves to the top-level function and can
- * use [BoxScope.align]; inside the root [Column] it was colliding with the
- * [ColumnScope.AnimatedVisibility] overload.
- */
-@Composable
-private fun BoxScope.ThinkingCapsuleOverlay(
-    visible: Boolean,
-    text: String,
-    startedAtMillis: Long?,
-    onAbort: () -> Unit,
-    showAbort: Boolean = true
-) {
-    AnimatedVisibility(
-        visible = visible,
-        modifier = Modifier.align(Alignment.TopCenter)
-    ) {
-        Box(Modifier.padding(top = 8.dp)) {
-            ThinkingCapsule(
-                text = text,
-                startedAtMillis = startedAtMillis,
-                onAbort = onAbort,
-                showAbort = showAbort
-            )
-        }
-    }
 }
 
 // §R-19 Sprint 2 #7(b): the four session-activity helpers + the

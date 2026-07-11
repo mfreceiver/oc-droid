@@ -197,4 +197,41 @@ class AppStateSlicesTest {
         assertEquals(2, n1.lastNavPage)
         assertEquals(0, n2.lastNavPage)
     }
+
+    // §1B (F.4): the additive ComposerState.fileReferences field + the
+    // ComposerFileReference value type. Round-tripping the data class is
+    // essential to flag accidental data-class changes (kover counts the
+    // synthetic equals/hashCode/copy/componentN/toString accessors).
+
+    @Test
+    fun `ComposerState default fileReferences is empty`() {
+        val s = cn.vectory.ocdroid.ui.ComposerState()
+        assertEquals(emptyList<cn.vectory.ocdroid.ui.ComposerFileReference>(), s.fileReferences)
+    }
+
+    @Test
+    fun `ComposerState full constructor round-trips fileReferences`() {
+        val ref = cn.vectory.ocdroid.ui.ComposerFileReference(path = "/a/b.kt", id = "id1")
+        val s = cn.vectory.ocdroid.ui.ComposerState(fileReferences = listOf(ref))
+        assertEquals(listOf(ref), s.fileReferences)
+    }
+
+    @Test
+    fun `ComposerFileReference default id is a non-empty UUID`() {
+        val ref = cn.vectory.ocdroid.ui.ComposerFileReference(path = "/a/b.kt")
+        // Default id is a random UUID — non-empty and non-blank.
+        assertTrue(ref.id.isNotBlank())
+        assertEquals("/a/b.kt", ref.path)
+    }
+
+    @Test
+    fun `ComposerFileReference equals hashCode copy`() {
+        val r1 = cn.vectory.ocdroid.ui.ComposerFileReference(path = "/a", id = "x")
+        val r2 = r1.copy()
+        assertEquals(r1, r2)
+        assertEquals(r1.hashCode(), r2.hashCode())
+        val r3 = r1.copy(path = "/b")
+        assertEquals("/b", r3.path)
+        assertEquals("x", r3.id)
+    }
 }

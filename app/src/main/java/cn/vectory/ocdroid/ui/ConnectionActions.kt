@@ -9,6 +9,8 @@ package cn.vectory.ocdroid.ui
  */
 
 import cn.vectory.ocdroid.data.model.toSession
+import cn.vectory.ocdroid.data.model.RevertCutoff
+import cn.vectory.ocdroid.data.model.RevertCutoffState
 import cn.vectory.ocdroid.data.repository.OpenCodeRepository
 import cn.vectory.ocdroid.data.repository.HostProfileStore
 import cn.vectory.ocdroid.data.repository.http.hostPortFromUrl
@@ -70,7 +72,9 @@ internal fun applySavedSettings(
     // Seed sessions from the persisted metadata cache so tabs/title/
     // workdir groups render instantly on cold start (before the server
     // list loads). loadSessions replaces these with authoritative data.
-    val restoredSessions = settingsManager.sessionCache.map { entry -> entry.toSession() }
+    val cachedEntries = settingsManager.sessionCache
+    val restoredSessions = cachedEntries.map { entry -> entry.toSession() }
+    val restoredRevertCutoffs = restoreRevertCutoffs(cachedEntries)
     // Archived-session filtering: a cached entry may carry timeArchived if the
     // user archived it last run (or another client did, surfaced via SSE
     // session.updated before the process died). Without this filter the tab
@@ -100,7 +104,7 @@ internal fun applySavedSettings(
     // is no longer written from here — slices are the sole authoritative
     // store.
     slices.mutateChat {
-        it.copy(currentSessionId = restoredCurrentSessionId)
+        it.copy(currentSessionId = restoredCurrentSessionId, revertCutoffs = restoredRevertCutoffs)
     }
     slices.mutateHost {
         it.copy(
@@ -153,6 +157,20 @@ internal fun applySavedSettings(
         it.copy(connectionPhase = connectionPhase, isConnecting = isConnecting, mtlsDegradedError = mtlsDegradedError)
     }
 }
+
+/** Builds the fail-closed cutoff map before any server session hydration. */
+internal fun restoreRevertCutoffs(
+    entries: List<cn.vectory.ocdroid.data.model.SessionCacheEntry>
+): Map<String, RevertCutoff> = entries.mapNotNull { entry ->
+    entry.revertMessageId?.let { messageId ->
+        entry.id to RevertCutoff(
+            sessionId = entry.id,
+            messageId = messageId,
+            state = entry.revertCreatedAtEpochMs?.let(RevertCutoffState::Resolved)
+                ?: RevertCutoffState.PendingFetch
+        )
+    }
+}.toMap()
 
 /**
  * §R-17 batch3d: free-function extraction of the former

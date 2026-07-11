@@ -254,9 +254,11 @@ internal fun MultiFilePatchAccordion(
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                                 modifier = Modifier.weight(1f)
                             )
+                            // §phase3 48dp audit (plan §5 task 4): dropped
+                            // the explicit Modifier.size(22.dp) — IconButton
+                            // defaults to a 48dp minimum touch target.
                             IconButton(
                                 onClick = { onFileClick(path) },
-                                modifier = Modifier.size(22.dp)
                             ) {
                                 Icon(
                                     Icons.AutoMirrored.Filled.OpenInNew,

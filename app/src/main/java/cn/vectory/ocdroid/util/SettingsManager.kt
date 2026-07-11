@@ -177,6 +177,32 @@ class SettingsManager @Inject constructor(
         set(value) = encryptedPrefs.edit().putInt(KEY_LAST_NAV_PAGE, value.coerceIn(0, 2)).apply()
 
     /**
+     * Stable top-level route persistence for the opt-in navigation shell.
+     *
+     * Existing installations have only [KEY_LAST_NAV_PAGE]. The first read
+     * migrates 0/1/2 to chat/sessions/settings and writes the route key. In
+     * particular, legacy 2 is Settings rather than the new Workspace route.
+     * The old integer remains until the false-flag PhoneLayout is removed.
+     */
+    var lastRoute: String
+        get() {
+            encryptedPrefs.getString(KEY_LAST_ROUTE, null)?.let { stored ->
+                if (stored in TOP_LEVEL_ROUTE_KEYS) return stored
+            }
+            val migrated = when (encryptedPrefs.getInt(KEY_LAST_NAV_PAGE, 0)) {
+                1 -> ROUTE_SESSIONS
+                2 -> ROUTE_SETTINGS
+                else -> ROUTE_CHAT
+            }
+            encryptedPrefs.edit().putString(KEY_LAST_ROUTE, migrated).apply()
+            return migrated
+        }
+        set(value) {
+            val route = value.takeIf { it in TOP_LEVEL_ROUTE_KEYS } ?: ROUTE_CHAT
+            encryptedPrefs.edit().putString(KEY_LAST_ROUTE, route).apply()
+        }
+
+    /**
      * The workdir (project directory) the user last connected to. Restored on
      * cold start so repository queries are re-scoped to the same project and
      * its directory-scoped sessions are re-fetched — without this, restart
@@ -186,8 +212,9 @@ class SettingsManager @Inject constructor(
         get() = encryptedPrefs.getString(KEY_CURRENT_WORKDIR, null)
         set(value) {
             encryptedPrefs.edit().putString(KEY_CURRENT_WORKDIR, value).apply()
-            // §reactive-workdir: keep the flow mirror in sync so VcsSection (and
-            // any other collector) reacts to workdir changes without manual refresh.
+            // §reactive-workdir: keep the flow mirror in sync so the
+            // Workspace → Changes pane (and any other collector) reacts to
+            // workdir changes without manual refresh.
             _currentWorkdirFlow.value = value
         }
 
@@ -876,6 +903,17 @@ class SettingsManager @Inject constructor(
         private const val KEY_CURRENT_HOST_PROFILE_ID = "current_host_profile_id"
         private const val KEY_SESSION_ID = "session_id"
         private const val KEY_LAST_NAV_PAGE = "last_nav_page"
+        private const val KEY_LAST_ROUTE = "last_route"
+        private const val ROUTE_CHAT = "chat"
+        private const val ROUTE_SESSIONS = "sessions"
+        private const val ROUTE_WORKSPACE = "workspace"
+        private const val ROUTE_SETTINGS = "settings"
+        private val TOP_LEVEL_ROUTE_KEYS = setOf(
+            ROUTE_CHAT,
+            ROUTE_SESSIONS,
+            ROUTE_WORKSPACE,
+            ROUTE_SETTINGS,
+        )
         private const val KEY_CURRENT_WORKDIR = "current_workdir"
         private const val KEY_RECENT_WORKDIRS = "recent_workdirs"
         /**

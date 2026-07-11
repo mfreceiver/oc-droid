@@ -1,33 +1,42 @@
 package cn.vectory.ocdroid.ui.settings
 
-import androidx.compose.foundation.background
+import android.Manifest
+import android.content.pm.PackageManager
+import android.os.Build
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
-import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
-import androidx.compose.material.icons.filled.Close
-import androidx.compose.material3.Card
-import androidx.compose.material3.CardDefaults
-import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
+import androidx.compose.material.icons.filled.Dns
+import androidx.compose.material.icons.filled.Info
+import androidx.compose.material.icons.filled.Memory
+import androidx.compose.material.icons.filled.Notifications
+import androidx.compose.material.icons.filled.Palette
+import androidx.compose.material.icons.filled.Storage
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.ListItem
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.Surface
+import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -35,38 +44,48 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
-import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
-import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.window.Dialog
+import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import cn.vectory.ocdroid.R
-import cn.vectory.ocdroid.data.model.VcsInfo
-import cn.vectory.ocdroid.data.model.VcsStatusEntry
-import cn.vectory.ocdroid.data.repository.OpenCodeRepository
 import cn.vectory.ocdroid.ui.ComposerViewModel
 import cn.vectory.ocdroid.ui.ConnectionViewModel
 import cn.vectory.ocdroid.ui.HostViewModel
+import cn.vectory.ocdroid.ui.NavRoute
 import cn.vectory.ocdroid.ui.SettingsViewModel
-import cn.vectory.ocdroid.ui.theme.BundledMonoFamily
-import cn.vectory.ocdroid.ui.theme.SemanticColors
 import cn.vectory.ocdroid.util.ThemeMode
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.map
 
 /**
- * Main Settings screen — top-level page skeleton (TopAppBar + scrollable
- * sections: connection profile, traffic, appearance, debug, about). The
- * HostProfile management sub-flow lives in [HostProfilesManagerScreen] and is
- * reached from here via the "manage profiles" action.
+ * Slim Settings root (Phase 3 / scheme D.8 + G.3).
  *
- * §grouping-rewrite 项 3: cache management used to live inline under the
- * Debug section; it now opens as a modal popup triggered by the stats line
- * under the connection profile (the popup title is `cache_management_popup_title`).
- * The Debug section keeps DebugLogSection + DangerZone in place.
+ * Replaces the prior everything-inline Settings page with a `LazyColumn` of
+ * `ListItem` section rows. Each row pushes a sub-route via [onNavigateSection]
+ * — the sub-routes own their own `Scaffold` + `TopAppBar` + back, so this
+ * composable no longer boolean-branches into HostProfilesManagerScreen /
+ * CacheManagement popup / etc.
+ *
+ * The Settings top-app-bar **always** carries a back affordance (previously
+ * conditional on `onBack != null` — `SettingsScreen.kt:176-180`). The Phase 1A
+ * shell + the PhoneLayout fallback both supply a real [onBack]; the
+ * conditional has been removed.
+ *
+ * Sub-routes (route constants live in [NavRoute]):
+ *  - [NavRoute.settingsHostsRoute]       → [SettingsHostsRoute]
+ *  - [NavRoute.settingsAppearanceRoute]  → [SettingsAppearanceRoute]
+ *  - [NavRoute.settingsModelsRoute]      → [SettingsModelsRoute]
+ *  - [NavRoute.settingsNotificationsRoute] → [SettingsNotificationsRoute]
+ *  - [NavRoute.settingsStorageRoute]     → [SettingsStorageRoute]
+ *  - [NavRoute.settingsAboutRoute]       → [SettingsAboutRoute]
+ *
+ * §phase3 red line: the Appearance sub-route REUSES the existing M3
+ * [AppearanceSection] (SegmentedButton + Slider in [SettingsSections.kt])
+ * verbatim — no replacement, no rewrite (plan §5 task 5 / §12 gpter #12).
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -75,163 +94,218 @@ fun SettingsScreen(
     composerVM: ComposerViewModel,
     connectionVM: ConnectionViewModel,
     settingsVM: SettingsViewModel,
-    /**
-     * §vcs-section: repository for the read-only Working-directory / Git
-     * section. Wired the same way [cn.vectory.ocdroid.ui.sessions.SessionsScreen]
-     * receives it (via FilesViewModel.repository in MainActivity) — the
-     * Settings-domain VM deliberately does NOT inject AppCore, so the
-     * repository is threaded through the Composable signature instead. Used
-     * ONLY by [VcsSection]; the rest of this screen reads its data off the
-     * shared slices through the VMs as before.
-     */
-    repository: OpenCodeRepository,
-    onBack: (() -> Unit)? = null
+    onBack: () -> Unit,
+    onNavigateSection: (String) -> Unit,
 ) {
-    // §R-17 Stage 3 (+ follow-up debt cleanup): subscribe to the relevant
-    // slice Flows directly so the host-profile picker / theme picker / traffic
-    // counters / connection badge no longer recompose on every AppState
-    // emission (SSE deltas, typing, session switches, etc.). The whole-app
-    // `viewModel.core.state` subscription has been removed entirely.
-    //
-    // Field-level subscriptions (.map { it.field }.distinctUntilChanged()) are
-    // used where a single field is read off a multi-field slice, so an
-    // unrelated sibling-field mutation does NOT retrigger this screen. Concret
-    // -ly: settingsFlow also carries agents/providers/selectedAgentName/
-    // availableCommands, none of which SettingsScreen reads — so themeMode is
-    // projected to a field Flow. hostFlow / trafficFlow / connectionFlow are
-    // consumed whole because every field on those small slices is read here.
+    Scaffold(
+        topBar = {
+            TopAppBar(
+                title = { Text(stringResource(R.string.settings_title)) },
+                navigationIcon = {
+                    IconButton(onClick = onBack) {
+                        Icon(
+                            Icons.AutoMirrored.Filled.ArrowBack,
+                            contentDescription = stringResource(R.string.common_back),
+                        )
+                    }
+                },
+            )
+        },
+    ) { padding ->
+        // Phone-mode status-bar inset: windowInsetsPadding consumes the inset
+        // so the tablet layout + the Scaffold-padded branch both see 0.
+        LazyColumn(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(padding)
+                .statusBarsPadding(),
+        ) {
+            settingsSections().forEachIndexed { index, sec ->
+                item(key = sec.route) {
+                    SettingsSectionRow(section = sec, onClick = { onNavigateSection(sec.route) })
+                    if (index < settingsSections().lastIndex) HorizontalDivider()
+                }
+            }
+        }
+    }
+}
+
+/** Section descriptor consumed by [SettingsSectionRow]. */
+private data class SettingsSectionEntry(
+    val route: String,
+    val titleRes: Int,
+    val subtitleRes: Int,
+    val icon: ImageVector,
+)
+
+/** Single source of truth for the slim list ordering + route key + label. */
+private fun settingsSections(): List<SettingsSectionEntry> = listOf(
+    SettingsSectionEntry(NavRoute.settingsHostsRoute, R.string.settings_section_hosts, R.string.settings_section_hosts_subtitle, Icons.Default.Dns),
+    SettingsSectionEntry(NavRoute.settingsAppearanceRoute, R.string.settings_section_appearance, R.string.settings_section_appearance_subtitle, Icons.Default.Palette),
+    SettingsSectionEntry(NavRoute.settingsModelsRoute, R.string.settings_section_models, R.string.settings_section_models_subtitle, Icons.Default.Memory),
+    SettingsSectionEntry(NavRoute.settingsNotificationsRoute, R.string.settings_section_notifications, R.string.settings_section_notifications_subtitle, Icons.Default.Notifications),
+    SettingsSectionEntry(NavRoute.settingsStorageRoute, R.string.settings_section_storage, R.string.settings_section_storage_subtitle, Icons.Default.Storage),
+    SettingsSectionEntry(NavRoute.settingsAboutRoute, R.string.settings_section_about, R.string.settings_section_about_subtitle, Icons.Default.Info),
+)
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun SettingsSectionRow(section: SettingsSectionEntry, onClick: () -> Unit) {
+    // M3 ListItem has no onClick overload in the bundled version; clickability
+    // is wired by `Modifier.clickable` on the row. All six slim-list rows
+    // share this single click pattern.
+    ListItem(
+        headlineContent = { Text(stringResource(section.titleRes)) },
+        supportingContent = { Text(stringResource(section.subtitleRes)) },
+        leadingContent = {
+            Icon(section.icon, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
+        },
+        trailingContent = {
+            Icon(
+                Icons.AutoMirrored.Filled.KeyboardArrowRight,
+                contentDescription = null,
+                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        },
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(onClick = onClick),
+    )
+}
+
+// ──────────────────────────────────────────────────────────────────────────
+// §phase3 (G.3 / D.8): per-section sub-route composables.
+//
+// Each owns its own Scaffold + TopAppBar (always-back). The existing M3
+// section composables ([AppearanceSection], [ModelManagementSection],
+// [CacheManagementSection], [DangerZoneSection], [TrafficSection],
+// [AboutSection], [DebugLogSection]) are reused verbatim — they were already
+// M3-canonical (SegmentedButton/Slider/Card/Switch). No control replacement.
+// ──────────────────────────────────────────────────────────────────────────
+
+/**
+ * Shared TopAppBar shell for every Settings sub-route. Always renders a back
+ * arrow wired to [onBack] (Phase 3 / G.3 step 2: the Settings top bar carries
+ * back unconditionally on every sub-page).
+ */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun SettingsSubRouteScaffold(
+    titleRes: Int,
+    onBack: () -> Unit,
+    actions: @Composable RowScope.() -> Unit = {},
+    content: @Composable (Modifier) -> Unit,
+) {
+    Scaffold(
+        topBar = {
+            TopAppBar(
+                title = { Text(stringResource(titleRes)) },
+                navigationIcon = {
+                    IconButton(onClick = onBack) {
+                        Icon(
+                            Icons.AutoMirrored.Filled.ArrowBack,
+                            contentDescription = stringResource(R.string.common_back),
+                        )
+                    }
+                },
+                actions = actions,
+            )
+        },
+    ) { padding ->
+        content(
+            Modifier
+                .fillMaxSize()
+                .padding(padding)
+                .statusBarsPadding()
+        )
+    }
+}
+
+/**
+ * settings/hosts — wraps the existing [HostProfilesManagerScreen]. The manager
+ * screen already supplies its own TopAppBar + back, so we delegate to it
+ * directly. The previous inline [ConnectionProfileSection] header is dropped:
+ * the manager IS the list, and tapping a row opens the same detail/edit
+ * dialogs the inline card surfaced.
+ */
+@Composable
+fun SettingsHostsRoute(
+    viewModel: HostViewModel,
+    connectionVM: ConnectionViewModel,
+    onBack: () -> Unit,
+) {
     val host by viewModel.hostFlow.collectAsStateWithLifecycle()
-    // §flow-remember: each settingsFlow projection is wrapped in remember{}
-    // so map/distinctUntilChanged aren't re-applied on every recomposition
-    // (FlowOperatorInvokedInComposition).
-    //
-    // §R18 Phase 3 Wave 3 (P2-6): the settingsFlow reads + writes (theme /
-    // providers / scales) now route through [settingsVM] (the new
-    // Settings-domain VM); the trafficFlow read + refresh / reset route
-    // through [connectionVM] (traffic moved into the Connection domain). The
-    // flows themselves are the same SharedStateStore slices — the VM split
-    // is a write-side / role-overload fix, not a state move.
+    HostProfilesManagerScreen(
+        viewModel = viewModel,
+        connectionVM = connectionVM,
+        profiles = host.hostProfiles,
+        currentProfileId = host.currentHostProfileId,
+        onBack = onBack,
+    )
+}
+
+/**
+ * settings/appearance — REUSES [AppearanceSection] (M3 SegmentedButton +
+ * Slider) **verbatim**. §phase3 red line (plan §5 task 5 + §12 gpter #12): do
+ * NOT replace or rewrite the existing controls; only relocate them into this
+ * sub-route. The theme/font/content-scale subscriptions are read here (off
+ * `settingsVM.settingsFlow`) so SSE/composer deltas do not recompose the
+ * slim Settings root.
+ */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun SettingsAppearanceRoute(
+    settingsVM: SettingsViewModel,
+    onBack: () -> Unit,
+) {
     val themeMode by remember { settingsVM.settingsFlow.map { it.themeMode }.distinctUntilChanged() }
         .collectAsStateWithLifecycle(initialValue = ThemeMode.SYSTEM)
-    // §model-selection: providers + disabledModels are read by the Model
-    // management section. Subscribed here (not in the parent) so SSE /
-    // composer deltas do not recompose SettingsScreen.
-    val providers by remember { settingsVM.settingsFlow.map { it.providers }.distinctUntilChanged() }
-        .collectAsStateWithLifecycle(initialValue = null)
-    val disabledModels by remember { settingsVM.settingsFlow.map { it.disabledModels }.distinctUntilChanged() }
-        .collectAsStateWithLifecycle(initialValue = emptySet())
-    // §ui-scale: subscribe to the two scale factors so the Appearance sliders
-    // render the live value + dispatch changes through the ViewModel setters.
     val uiFontScale by remember { settingsVM.settingsFlow.map { it.uiFontScale }.distinctUntilChanged() }
         .collectAsStateWithLifecycle(initialValue = 1f)
     val uiContentScale by remember { settingsVM.settingsFlow.map { it.uiContentScale }.distinctUntilChanged() }
         .collectAsStateWithLifecycle(initialValue = 1f)
-    val traffic by connectionVM.trafficFlow.collectAsStateWithLifecycle()
-    val connection by connectionVM.connectionFlow.collectAsStateWithLifecycle()
-    // §reactive-workdir: the active workdir (absolute path) for the read-only
-    // Working-directory / Git section. Collected as State so VcsSection reacts
-    // to workdir changes (session switch / profile switch / disconnect) and its
-    // LaunchedEffect(workdir) re-fetches /vcs/status automatically — previously
-    // a plain snapshot read never recomposed, so the VCS panel went stale on
-    // workdir change. VCS fetch + state still lives entirely in VcsSection.
-    val workdir by settingsVM.currentWorkdirFlow.collectAsStateWithLifecycle()
-    // §grouping-rewrite 项 2: group-stats counts for the connection-profile
-    // stats line (drives the popup entry point).
-    val groupProfileCount by settingsVM.activeGroupProfileCount.collectAsStateWithLifecycle()
-    val cachedSessionCount by settingsVM.activeGroupCachedSessionCount.collectAsStateWithLifecycle()
 
-    // Refresh traffic counters once when the Settings screen enters
-    // composition so the displayed totals reflect the latest background
-    // accumulation. The tracker keeps counting regardless; this just syncs
-    // the snapshot for display.
-    LaunchedEffect(Unit) {
-        connectionVM.refreshTrafficStats()
-    }
-
-    var showHostProfiles by remember { mutableStateOf(false) }
-    // §grouping-rewrite 项 3: cache-management popup state. Opened from the
-    // ConnectionProfileSection stats line; the popup hosts the (formerly
-    // inline) CacheManagementSection under the `cache_management_popup_title`.
-    var showCacheDialog by remember { mutableStateOf(false) }
-
-    if (showHostProfiles) {
-        HostProfilesManagerScreen(
-            viewModel = viewModel,
-            connectionVM = connectionVM,
-            profiles = host.hostProfiles,
-            currentProfileId = host.currentHostProfileId,
-            onBack = { showHostProfiles = false }
-        )
-        return
-    }
-
-    // Phone mode renders no TopAppBar here, so apply the status bar inset on the
-    // root so content never slides under the status bar. windowInsetsPadding
-    // consumes the inset, so the tablet layout (already padded at its Row) and
-    // the TopAppBar branch below both see 0 and never double-pad.
-    Column(modifier = Modifier.fillMaxSize().statusBarsPadding()) {
-        TopAppBar(
-            title = { Text(stringResource(R.string.settings_title)) },
-            navigationIcon = {
-                if (onBack != null) {
-                    IconButton(onClick = onBack) {
-                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = stringResource(R.string.common_back))
-                    }
-                }
-            }
-        )
-
+    SettingsSubRouteScaffold(titleRes = R.string.settings_section_appearance, onBack = onBack) { mod ->
         Column(
-            modifier = Modifier
-                .weight(1f)
+            modifier = mod
                 .verticalScroll(rememberScrollState())
-                .padding(16.dp)
+                .padding(16.dp),
         ) {
-            // ── 连接管理 (Connection management): profile + traffic
-            // under a single shared section header. Each sub-card hides its own
-            // header (hideHeader = true) so only the group header shows. ──
-            SectionHeader(title = stringResource(R.string.settings_section_connections))
-            ConnectionProfileSection(
-                profile = host.hostProfiles.firstOrNull { it.id == host.currentHostProfileId } ?: viewModel.currentHostProfile(),
-                connectionState = connection,
-                groupProfileCount = groupProfileCount,
-                cachedSessionCount = cachedSessionCount,
-                onStatsClick = { showCacheDialog = true },
-                onManageProfiles = { showHostProfiles = true },
-                hideHeader = true
-            )
-            Spacer(modifier = Modifier.height(12.dp))
-            TrafficSection(
-                sent = traffic.trafficSent,
-                received = traffic.trafficReceived,
-                onReset = connectionVM::resetTrafficStats,
-                hideHeader = true
-            )
-            Spacer(modifier = Modifier.height(12.dp))
-
-            Spacer(modifier = Modifier.height(24.dp))
-
             AppearanceSection(
                 themeMode = themeMode,
                 onThemeSelected = settingsVM::setThemeMode,
                 uiFontScale = uiFontScale,
                 uiContentScale = uiContentScale,
                 onFontScaleChange = settingsVM::setUiFontScale,
-                onContentScaleChange = settingsVM::setUiContentScale
+                onContentScaleChange = settingsVM::setUiContentScale,
             )
+        }
+    }
+}
 
-            Spacer(modifier = Modifier.height(12.dp))
-            // §vcs-section: read-only Working-directory / Git group. Visible
-            // whenever there is a workdir (not gated on server connection — it
-            // is "about the project", not "about the live session"). All VCS
-            // state is local to the composable (single consumer); not routed
-            // through SettingsState / SharedStateStore.
-            VcsSection(repository = repository, workdir = workdir)
+/**
+ * settings/models — wraps [ModelManagementSection]. The inline AlertDialog
+ * launcher stays as-is; tapping the row in this sub-route opens the same
+ * dialog. Subscriptions to providers + disabledModels live here.
+ */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun SettingsModelsRoute(
+    composerVM: ComposerViewModel,
+    settingsVM: SettingsViewModel,
+    onBack: () -> Unit,
+) {
+    val providers by remember { settingsVM.settingsFlow.map { it.providers }.distinctUntilChanged() }
+        .collectAsStateWithLifecycle(initialValue = null)
+    val disabledModels by remember { settingsVM.settingsFlow.map { it.disabledModels }.distinctUntilChanged() }
+        .collectAsStateWithLifecycle(initialValue = emptySet())
 
-            Spacer(modifier = Modifier.height(12.dp))
-            // §model-selection: per-baseUrl disabled-model management. Toggle
-            // state is persisted via SettingsManager and projected into the
-            // settings slice's disabledModels field.
+    SettingsSubRouteScaffold(titleRes = R.string.settings_section_models, onBack = onBack) { mod ->
+        Column(
+            modifier = mod
+                .verticalScroll(rememberScrollState())
+                .padding(16.dp),
+        ) {
             ModelManagementSection(
                 providers = providers,
                 disabledModels = disabledModels,
@@ -240,332 +314,163 @@ fun SettingsScreen(
                 },
                 onSetProviderModelsEnabled = { providerId, enabled ->
                     composerVM.setProviderModelsEnabled(providerId, enabled)
-                }
+                },
             )
+        }
+    }
+}
 
+/**
+ * settings/notifications — Phase 3 / D.8 new section. Minimal read-only
+ * surface: shows the system's POST_NOTIFICATIONS grant state + the §18
+ * completion channel's purpose line. No controller surgery (no new state
+ * slice, no SettingsManager write) — runtime permission prompt (when the
+ * user has not yet granted) is still gated by the existing §18 toggle and
+ * AppLifecycleMonitor; we just surface the resulting state here.
+ */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun SettingsNotificationsRoute(onBack: () -> Unit) {
+    val context = LocalContext.current
+    var granted by remember { mutableStateOf(notificationPermissionGranted(context)) }
+    // Optional runtime prompt for API 33+. Mirrors AppLifecycleMonitor's
+    // grant-bypass-on-older-OS check. Launched lazily via a button so the
+    // system dialog is never triggered from the background.
+    val permLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.RequestPermission(),
+    ) { result ->
+        granted = result || notificationPermissionGranted(context)
+    }
+
+    SettingsSubRouteScaffold(titleRes = R.string.settings_section_notifications, onBack = onBack) { mod ->
+        Column(
+            modifier = mod
+                .verticalScroll(rememberScrollState())
+                .padding(16.dp),
+        ) {
+            SectionHeader(title = stringResource(R.string.settings_section_notifications))
+            ListItem(
+                headlineContent = {
+                    Text(
+                        if (granted) stringResource(R.string.settings_notifications_runtime_perm_granted)
+                        else stringResource(R.string.settings_notifications_runtime_perm_blocked),
+                    )
+                },
+                supportingContent = {
+                    Text(stringResource(R.string.settings_notifications_completion_channel_desc))
+                },
+                leadingContent = {
+                    Icon(
+                        Icons.Default.Notifications,
+                        contentDescription = null,
+                        tint = if (granted) MaterialTheme.colorScheme.primary
+                        else MaterialTheme.colorScheme.error,
+                    )
+                },
+            )
+            HorizontalDivider()
+            // The grant button is shown only when blocked AND API 33+ (the OS
+            // surface that requires a runtime prompt). Pre-33 installs inherit
+            // the install-time grant, so the button would be a dead no-op.
+            if (!granted && Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                Spacer(modifier = Modifier.height(12.dp))
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.Center,
+                ) {
+                    androidx.compose.material3.TextButton(onClick = {
+                        permLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+                    }) {
+                        Text(stringResource(R.string.settings_section_notifications))
+                    }
+                }
+            }
+        }
+    }
+}
+
+/**
+ * settings/storage — wraps [TrafficSection] + [CacheManagementSection] +
+ * [DangerZoneSection]. The previous modal-popup chrome (Dialog + Surface
+ * wrapper around CacheManagementSection) is collapsed back to an inline
+ * section — the sub-route's own Scaffold provides the framing.
+ */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun SettingsStorageRoute(
+    viewModel: HostViewModel,
+    connectionVM: ConnectionViewModel,
+    settingsVM: SettingsViewModel,
+    onBack: () -> Unit,
+) {
+    val traffic by connectionVM.trafficFlow.collectAsStateWithLifecycle()
+    LaunchedEffect(Unit) { connectionVM.refreshTrafficStats() }
+
+    SettingsSubRouteScaffold(titleRes = R.string.settings_section_storage, onBack = onBack) { mod ->
+        Column(
+            modifier = mod
+                .verticalScroll(rememberScrollState())
+                .padding(16.dp),
+        ) {
+            SectionHeader(title = stringResource(R.string.settings_traffic))
+            TrafficSection(
+                sent = traffic.trafficSent,
+                received = traffic.trafficReceived,
+                onReset = connectionVM::resetTrafficStats,
+                hideHeader = true,
+            )
             Spacer(modifier = Modifier.height(24.dp))
 
-            // ── 调试 (Debug): debug log + danger zone under one header.
-            // §grouping-rewrite 项 3: cache management has moved into a modal
-            // popup (opened from the Connections section stats line) and is
-            // no longer rendered inline here. ──
-            SectionHeader(title = stringResource(R.string.settings_section_debug))
-            DebugLogSection(hideHeader = true)
-            Spacer(modifier = Modifier.height(12.dp))
+            SectionHeader(title = stringResource(R.string.cache_management_popup_title))
+            CacheManagementSection(vm = settingsVM, hideHeader = true)
+            Spacer(modifier = Modifier.height(24.dp))
+
+            SectionHeader(title = stringResource(R.string.settings_danger_zone))
             DangerZoneSection(
                 onClearLocalData = viewModel::resetLocalDataAndResync,
-                hideHeader = true
+                hideHeader = true,
             )
+        }
+    }
+}
 
+/**
+ * settings/about — wraps [AboutSection] + [DebugLogSection]. The "Debug"
+ * header (formerly a top-level Settings group) now lives here, with debug-log
+ * as the only entry (the diagnostic panels moved to Connections in an earlier
+ * release, and the cache-management popup moved to settings/storage above).
+ *
+ * Parameters `viewModel` + `settingsVM` document the Activity-scoped Hilt
+ * graph callers must keep alive for [DebugLogSection]'s @EntryPoint
+ * (SettingsManager / AppState). They are not directly referenced in the body.
+ */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun SettingsAboutRoute(
+    @Suppress("UNUSED_PARAMETER") viewModel: HostViewModel,
+    @Suppress("UNUSED_PARAMETER") settingsVM: SettingsViewModel,
+    onBack: () -> Unit,
+) {
+    SettingsSubRouteScaffold(titleRes = R.string.settings_section_about, onBack = onBack) { mod ->
+        Column(
+            modifier = mod
+                .verticalScroll(rememberScrollState())
+                .padding(16.dp),
+        ) {
+            AboutSection()
             Spacer(modifier = Modifier.height(24.dp))
 
-            AboutSection()
-        }
-    }
-
-    // §grouping-rewrite 项 3 (+ Round-6 F5): cache-management popup. A
-    // [Surface] carries the popup chrome (title row + close affordance); the
-    // section body is [CacheManagementSection], which renders its OWN inner
-    // card. Pre-F5 the popup wrapped the section in a Card-in-Card (Dialog →
-    // outer Card → title row + CacheManagementSection's own Card) — the
-    // redundant outer Card was visual noise (two stacked surfaces with
-    // identical container colour). Surface is the right drop-in: it gives
-    // the popup its shape + tonal elevation + dismissal affordance, and
-    // CacheManagementSection's inner Card remains the content surface.
-    if (showCacheDialog) {
-        Dialog(onDismissRequest = { showCacheDialog = false }) {
-            Surface(
-                modifier = Modifier.fillMaxWidth(),
-                shape = MaterialTheme.shapes.large,
-                color = MaterialTheme.colorScheme.surface,
-                tonalElevation = 6.dp,
-            ) {
-                Column(modifier = Modifier.padding(bottom = 16.dp)) {
-                    Row(
-                        modifier = Modifier.fillMaxWidth().padding(16.dp),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Text(
-                            stringResource(R.string.cache_management_popup_title),
-                            style = MaterialTheme.typography.titleLarge
-                        )
-                        IconButton(onClick = { showCacheDialog = false }) {
-                            Icon(
-                                Icons.Default.Close,
-                                contentDescription = stringResource(R.string.common_close)
-                            )
-                        }
-                    }
-                    CacheManagementSection(vm = settingsVM, hideHeader = true)
-                }
-            }
+            SectionHeader(title = stringResource(R.string.settings_section_debug))
+            DebugLogSection(hideHeader = true)
         }
     }
 }
 
-// ── §vcs-section: read-only Working-directory / Git group ───────────────────
-//
-// Self-contained: VCS data has a single consumer (this section), so it is NOT
-// routed through SettingsState / SettingsViewModel / SharedStateStore. The
-// composable owns its own load state via [remember] + [LaunchedEffect] keyed
-// on [workdir]; the workdir input is read off the existing settingsManager
-// field (passed in by SettingsScreen). The repository is threaded in from
-// MainActivity (same pattern SessionsScreen uses).
-//
-// States rendered: Loading, NoWorkdir, NoGit, Error, Loaded. The optional
-// "View diff" affordance is intentionally OMITTED to stay bounded — the diff
-// helpers (DiffPatchView / buildAnnotatedDiff / statusColor) in
-// [cn.vectory.ocdroid.ui.chat.SessionDiffCard] are private and that file is
-// out of scope for this change; duplicating them would violate the "reuse,
-// don't duplicate" guidance. The section therefore shows branch + the
-// changed-files list only.
-
-private sealed interface VcsLoadState {
-    data object Loading : VcsLoadState
-    data object NoWorkdir : VcsLoadState
-    data object NoGit : VcsLoadState
-    data class Error(val message: String) : VcsLoadState
-    data class Loaded(
-        val info: VcsInfo,
-        val status: List<VcsStatusEntry>
-    ) : VcsLoadState
-}
-
-/**
- * §vcs-section: read-only VCS / Git group for the Settings screen. Renders
- * the active workdir's branch + changed-files list. [repository] is the same
- * OpenCodeRepository every other screen uses (wired through MainActivity);
- * [workdir] is the absolute path (null while no session/project is bound).
- *
- * Loads on entry and whenever [workdir] changes; treats an absent workdir or a
- * non-git workdir as a first-class state (not an error). A null branch with an
- * empty status list is interpreted as "not a git repository" (the v1 /vcs
- * endpoint returns 200 with null fields when the workdir is not a git repo).
- */
-@Composable
-private fun VcsSection(
-    repository: OpenCodeRepository,
-    workdir: String?,
-    modifier: Modifier = Modifier
-) {
-    var state by remember(workdir) { mutableStateOf<VcsLoadState>(VcsLoadState.Loading) }
-    LaunchedEffect(workdir) {
-        val dir = workdir
-        if (dir.isNullOrBlank()) {
-            state = VcsLoadState.NoWorkdir
-            return@LaunchedEffect
-        }
-        // §glm-P3: re-throw CancellationException (structured-concurrency) — raw
-        // runCatching would swallow it when the workdir changes mid-fetch and the
-        // LaunchedEffect is cancelled.
-        state = try {
-            val info = repository.getVcs(dir).getOrThrow()
-            val status = repository.getVcsStatus(dir).getOrDefault(emptyList())
-            // Both null/empty → workdir is not a git repo (server returns 200
-            // with null fields rather than 4xx).
-            if (info.branch == null && info.defaultBranch == null && status.isEmpty()) {
-                VcsLoadState.NoGit
-            } else {
-                VcsLoadState.Loaded(info, status)
-            }
-        } catch (e: kotlinx.coroutines.CancellationException) {
-            throw e
-        } catch (e: Exception) {
-            VcsLoadState.Error(e.message ?: "unknown")
-        }
-    }
-
-    SectionHeader(title = stringResource(R.string.settings_section_working_directory))
-
-    Card(
-        modifier = modifier.fillMaxWidth(),
-        colors = CardDefaults.cardColors(
-            containerColor = MaterialTheme.colorScheme.surfaceVariant
-        )
-    ) {
-        Column(modifier = Modifier.padding(16.dp)) {
-            when (val s = state) {
-                is VcsLoadState.Loading -> Row(
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    CircularProgressIndicator(
-                        modifier = Modifier.size(16.dp),
-                        strokeWidth = 2.dp
-                    )
-                    Spacer(modifier = Modifier.width(12.dp))
-                    Text(
-                        text = workdir.orEmpty(),
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis
-                    )
-                }
-
-                is VcsLoadState.NoWorkdir -> Text(
-                    text = stringResource(R.string.settings_vcs_no_working_directory),
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-
-                is VcsLoadState.NoGit -> Column {
-                    Text(
-                        text = workdir.orEmpty(),
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        maxLines = 2,
-                        overflow = TextOverflow.Ellipsis
-                    )
-                    Spacer(modifier = Modifier.height(4.dp))
-                    Text(
-                        text = stringResource(R.string.settings_vcs_not_a_git_repo),
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                }
-
-                is VcsLoadState.Error -> Column {
-                    Text(
-                        text = workdir.orEmpty(),
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        maxLines = 2,
-                        overflow = TextOverflow.Ellipsis
-                    )
-                    Spacer(modifier = Modifier.height(4.dp))
-                    Text(
-                        text = stringResource(R.string.settings_vcs_load_error, s.message),
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = MaterialTheme.colorScheme.error
-                    )
-                }
-
-                is VcsLoadState.Loaded -> VcsLoadedBody(info = s.info, status = s.status)
-            }
-        }
-    }
-}
-
-@Composable
-private fun VcsLoadedBody(info: VcsInfo, status: List<VcsStatusEntry>) {
-    // Branch line: branch (dim "default <defaultBranch>" suffix when the
-    // current branch differs from / complements the default).
-    Text(
-        text = stringResource(R.string.settings_vcs_branch),
-        style = MaterialTheme.typography.labelMedium
-    )
-    Spacer(modifier = Modifier.height(4.dp))
-    Row(verticalAlignment = Alignment.CenterVertically) {
-        Text(
-            text = info.branch ?: "—",
-            style = MaterialTheme.typography.bodyLarge,
-            color = MaterialTheme.colorScheme.onSurface
-        )
-        info.defaultBranch?.takeIf { it.isNotBlank() }?.let { default ->
-            Spacer(modifier = Modifier.width(8.dp))
-            Text(
-                text = stringResource(R.string.settings_vcs_default_branch_suffix, default),
-                style = MaterialTheme.typography.labelSmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
-            )
-        }
-    }
-
-    if (status.isNotEmpty()) {
-        Spacer(modifier = Modifier.height(16.dp))
-        Text(
-            text = stringResource(R.string.settings_vcs_changed_files),
-            style = MaterialTheme.typography.labelMedium
-        )
-        Spacer(modifier = Modifier.height(8.dp))
-        // §gpter-P3: cap the eagerly-composed rows so a repo with many untracked /
-        // changed files doesn't compose/layout a huge list inside the Settings
-        // verticalScroll. The remainder is summarised as "+N more".
-        val maxRows = 50
-        status.take(maxRows).forEach { entry -> VcsStatusRow(entry = entry) }
-        if (status.size > maxRows) {
-            Spacer(modifier = Modifier.height(4.dp))
-            Text(
-                text = stringResource(R.string.settings_vcs_more_files, status.size - maxRows),
-                style = MaterialTheme.typography.labelSmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
-            )
-        }
-    } else {
-        Spacer(modifier = Modifier.height(8.dp))
-        Text(
-            text = stringResource(R.string.settings_vcs_no_changes),
-            style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant
-        )
-    }
-}
-
-@Composable
-private fun VcsStatusRow(entry: VcsStatusEntry) {
-    val statusColor = vcsStatusColor(entry.status)
-    val basename = entry.file.substringAfterLast("/").ifEmpty { entry.file }
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(vertical = 4.dp),
-        verticalAlignment = Alignment.CenterVertically
-    ) {
-        Box(
-            modifier = Modifier
-                .size(8.dp)
-                .background(color = statusColor, shape = CircleShape)
-        )
-        Spacer(modifier = Modifier.width(8.dp))
-        Text(
-            text = basename,
-            style = MaterialTheme.typography.bodyMedium,
-            color = MaterialTheme.colorScheme.onSurface,
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis,
-            modifier = Modifier.weight(1f, fill = false)
-        )
-        Spacer(modifier = Modifier.width(6.dp))
-        Text(
-            text = entry.file,
-            style = MaterialTheme.typography.labelSmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis,
-            modifier = Modifier.weight(1f)
-        )
-        if (entry.additions > 0) {
-            Spacer(modifier = Modifier.width(6.dp))
-            Text(
-                text = "+${entry.additions}",
-                style = MaterialTheme.typography.labelSmall,
-                color = SemanticColors.stateSuccessFg(),
-                fontFamily = BundledMonoFamily
-            )
-        }
-        if (entry.deletions > 0) {
-            Spacer(modifier = Modifier.width(4.dp))
-            Text(
-                text = "-${entry.deletions}",
-                style = MaterialTheme.typography.labelSmall,
-                color = MaterialTheme.colorScheme.error,
-                fontFamily = BundledMonoFamily
-            )
-        }
-    }
-}
-
-/**
- * File-status → semantic color. Mirrors the mapping in
- * [cn.vectory.ocdroid.ui.chat.SessionDiffCard.statusColor] (added/modified/
- * deleted/untracked) so the working-directory list uses the same visual
- * language as the chat SessionDiffCard. Local copy because that helper is
- * private to the chat package (and SessionDiffCard.kt is out of scope).
- */
-private fun vcsStatusColor(status: String?): Color = when (status?.lowercase()) {
-    "added" -> SemanticColors.addedFile
-    "deleted" -> SemanticColors.deletedFile
-    "modified" -> SemanticColors.modifiedFile
-    else -> SemanticColors.untrackedFile
+/** POST_NOTIFICATIONS grant state (pre-33 = install-time granted). */
+private fun notificationPermissionGranted(context: android.content.Context): Boolean {
+    if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) return true
+    return ContextCompat.checkSelfPermission(
+        context,
+        Manifest.permission.POST_NOTIFICATIONS,
+    ) == PackageManager.PERMISSION_GRANTED
 }

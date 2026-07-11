@@ -160,7 +160,8 @@ class SessionModelSerializationTest {
         val entry = SessionCacheEntry(
             id = "s1", title = "T", directory = "/x", parentId = "p0",
             timeCreated = 1L, timeUpdated = 2L, timeArchived = 3L,
-            additions = 10, deletions = 5, files = 2
+            additions = 10, deletions = 5, files = 2,
+            revertMessageId = "m-revert", revertCreatedAtEpochMs = 42L
         )
         val encoded = json.encodeToString(entry)
         val decoded = json.decodeFromString<SessionCacheEntry>(encoded)
@@ -178,6 +179,8 @@ class SessionModelSerializationTest {
         assertNull(decoded.parentId)
         assertNull(decoded.timeCreated)
         assertNull(decoded.additions)
+        assertNull(decoded.revertMessageId)
+        assertNull(decoded.revertCreatedAtEpochMs)
     }
 
     // ── toCacheEntry / toSession lossy round trip ─────────────────────────
@@ -190,7 +193,8 @@ class SessionModelSerializationTest {
             parentId = "p0",
             title = "T",
             time = Session.TimeInfo(created = 1L, updated = 2L, archived = 3L),
-            summary = Session.SummaryInfo(additions = 10, deletions = 5, files = 2)
+            summary = Session.SummaryInfo(additions = 10, deletions = 5, files = 2),
+            revert = Session.RevertInfo(messageId = "m-revert")
         )
         val entry = session.toCacheEntry()
         assertEquals("s1", entry.id)
@@ -203,6 +207,7 @@ class SessionModelSerializationTest {
         assertEquals(10, entry.additions)
         assertEquals(5, entry.deletions)
         assertEquals(2, entry.files)
+        assertEquals("m-revert", entry.revertMessageId)
     }
 
     @Test
@@ -210,7 +215,8 @@ class SessionModelSerializationTest {
         val entry = SessionCacheEntry(
             id = "s1", directory = "/x", title = "T", parentId = "p0",
             timeCreated = 1L, timeUpdated = 2L, timeArchived = 3L,
-            additions = 10, deletions = 5, files = 2
+            additions = 10, deletions = 5, files = 2,
+            revertMessageId = "m-revert", revertCreatedAtEpochMs = 42L
         )
         val session = entry.toSession()
         assertEquals("s1", session.id)
@@ -225,11 +231,11 @@ class SessionModelSerializationTest {
         assertEquals(10, session.summary?.additions)
         assertEquals(5, session.summary?.deletions)
         assertEquals(2, session.summary?.files)
-        // Non-cached fields default to null.
+        assertEquals("m-revert", session.revert?.messageId)
+        // Other non-cached fields default to null.
         assertNull(session.slug)
         assertNull(session.projectId)
         assertNull(session.share)
-        assertNull(session.revert)
         assertNull(session.version)
     }
 

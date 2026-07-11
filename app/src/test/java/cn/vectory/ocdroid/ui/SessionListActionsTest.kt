@@ -84,7 +84,7 @@ class SessionListActionsTest {
 
     @Test
     fun `persistSessionCache writes only open + current + workdir-root entries`() {
-        val open = Session(id = "open", directory = "/x")
+        val open = Session(id = "open", directory = "/x", revert = Session.RevertInfo("revert"))
         val current = Session(id = "current", directory = "/y")
         val workdirRoot = Session(id = "root", directory = "/workdir")
         val unrelated = Session(id = "other", directory = "/elsewhere")
@@ -96,11 +96,18 @@ class SessionListActionsTest {
             openIds = listOf("open"),
             currentId = "current",
             currentWorkdir = "/workdir",
+            revertCutoffs = mapOf(
+                "open" to cn.vectory.ocdroid.data.model.RevertCutoff(
+                    "open", "revert", cn.vectory.ocdroid.data.model.RevertCutoffState.Resolved(42L)
+                )
+            ),
         )
 
         verify {
             settingsManager.sessionCache = match { entries ->
                 entries.map { it.id }.toSet() == setOf("open", "current", "root")
+                    && entries.first { it.id == "open" }.revertMessageId == "revert"
+                    && entries.first { it.id == "open" }.revertCreatedAtEpochMs == 42L
             }
         }
     }
@@ -115,6 +122,7 @@ class SessionListActionsTest {
             openIds = emptyList(),
             currentId = null,
             currentWorkdir = null,
+            revertCutoffs = emptyMap(),
         )
 
         verify { settingsManager.sessionCache = emptyList() }

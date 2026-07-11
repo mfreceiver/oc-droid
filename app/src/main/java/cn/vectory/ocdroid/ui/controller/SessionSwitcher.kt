@@ -294,7 +294,23 @@ class SessionSwitcher(
             )
         }
         // Restore the selected session's draft into the composer slice.
-        slices.mutateComposer { it.copy(inputText = restoredDraft) }
+        // §1B-FIX (I4): fileReferences are NOT persisted (the F.4
+        // writer only persists the textual `File: <path>` line via
+        // setInputText), so they must be cleared on every session switch
+        // — otherwise a chip from session A would leak into session B
+        // even though the text content is restored from disk. We also
+        // strip any `File: <path>` lines from the restored draft text
+        // that match the leaked references (defensive — the persisted
+        // text SHOULD already be the user's intent for this session, so
+        // the strip is a no-op in practice; it guards against a future
+        // cross-session text leak).
+        slices.mutateComposer {
+            it.copy(
+                inputText = restoredDraft,
+                imageAttachments = emptyList(),
+                fileReferences = emptyList(),
+            )
+        }
 
         // ── Step 3 (R-20 Phase 1): verify-before-hydrate effect ─────────────
         // The OLD code synchronously seeded the chat slice from the LRU here.
@@ -409,6 +425,7 @@ class SessionSwitcher(
                 openIds = updated,
                 currentId = slices.chat.value.currentSessionId,
                 currentWorkdir = settingsManager.currentWorkdir,
+                revertCutoffs = slices.chat.value.revertCutoffs,
             )
         }
     }

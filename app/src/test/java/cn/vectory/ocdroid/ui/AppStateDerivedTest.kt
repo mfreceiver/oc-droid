@@ -10,6 +10,8 @@ import cn.vectory.ocdroid.data.model.ProviderModelLimit
 import cn.vectory.ocdroid.data.model.ProvidersResponse
 import cn.vectory.ocdroid.data.model.QuestionInfo
 import cn.vectory.ocdroid.data.model.QuestionRequest
+import cn.vectory.ocdroid.data.model.RevertCutoff
+import cn.vectory.ocdroid.data.model.RevertCutoffState
 import cn.vectory.ocdroid.data.model.Session
 import cn.vectory.ocdroid.data.model.SessionStatus
 import org.junit.Assert.assertEquals
@@ -130,15 +132,34 @@ class AppStateDerivedTest {
     }
 
     @Test
+    fun `visibleMessages fails closed from cutoff when current session is transiently missing`() {
+        val before = Message(id = "before", role = "user", time = Message.TimeInfo(created = 1L))
+        val after = Message(id = "after", role = "user", time = Message.TimeInfo(created = 3L))
+        val cutoff = RevertCutoff("s1", "revert", RevertCutoffState.Resolved(2L))
+
+        val out = visibleMessages(listOf(before, after), null, cutoff)
+
+        assertEquals(listOf(before), out)
+    }
+
+    @Test
+    fun `visibleMessages honors present session revert removal over stale cutoff`() {
+        val messages = listOf(Message(id = "before", role = "user"), Message(id = "after", role = "user"))
+        val stale = RevertCutoff("s1", "old-revert", RevertCutoffState.Failed)
+
+        assertEquals(messages, visibleMessages(messages, Session(id = "s1", directory = "/x"), stale))
+    }
+
+    @Test
     fun `filterBeforeRevert returns input unchanged when revertId is null`() {
         val msgs = listOf(Message(id = "m1", role = "user"))
         assertEquals(msgs, msgs.filterBeforeRevert(null))
     }
 
     @Test
-    fun `filterBeforeRevert returns input unchanged when revertId is absent`() {
+    fun `filterBeforeRevert fails closed when revertId is absent`() {
         val msgs = listOf(Message(id = "m1", role = "user"))
-        assertEquals(msgs, msgs.filterBeforeRevert("missing"))
+        assertEquals(emptyList<Message>(), msgs.filterBeforeRevert("missing"))
     }
 
     @Test
@@ -153,17 +174,14 @@ class AppStateDerivedTest {
     }
 
     @Test
-    fun `filterBeforeRevert time-based tie-break keeps earlier-index messages when created equals revertCreated`() {
-        // Two messages with the same created time as the revert; only the one
-        // BEFORE the revert index is kept, the one AFTER is dropped.
+    fun `filterBeforeRevert time-based excludes all messages equal to revertCreated`() {
         val m1 = Message(id = "m1", role = "user", time = Message.TimeInfo(created = 200L))
         val m2 = Message(id = "m2", role = "user", time = Message.TimeInfo(created = 200L))
         val m3 = Message(id = "m3", role = "user", time = Message.TimeInfo(created = 200L))
         val list = listOf(m1, m2, m3)
 
-        // m2 is the revert; m1 (idx 0, before m2) is kept, m3 (idx 2, after) dropped.
-        val out = list.filterBeforeRevert("m2")
-        assertEquals(listOf(m1), out)
+        val out = list.filterBeforeRevert("m2", RevertCutoff("s1", "m2", RevertCutoffState.Resolved(200L)))
+        assertEquals(emptyList<Message>(), out)
     }
 
     @Test

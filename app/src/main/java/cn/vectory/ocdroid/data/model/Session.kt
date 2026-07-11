@@ -52,6 +52,19 @@ data class Session(
     )
 }
 
+data class RevertCutoff(
+    val sessionId: String,
+    val messageId: String,
+    val state: RevertCutoffState
+)
+
+sealed interface RevertCutoffState {
+    data class Resolved(val createdAtEpochMs: Long) : RevertCutoffState
+    data object PendingFetch : RevertCutoffState
+    data object NoTimestamp : RevertCutoffState
+    data object Failed : RevertCutoffState
+}
+
 @Serializable
 data class SessionStatus(
     val type: String,
@@ -68,7 +81,9 @@ data class SessionStatus(
  * Minimal persisted projection of a [Session] used to seed the UI on cold
  * start before the server list has loaded. Carries only the fields required
  * to render tabs, the title, workdir grouping and MRU sorting — everything
- * else (slug, projectId, share, revert, version) is left to server refresh.
+ * else (slug, projectId, share, version) is left to server refresh. A revert
+ * target and its resolved timestamp are retained because the transcript gate
+ * must remain fail-closed before a server refresh completes.
  *
  * See [toCacheEntry]/[toSession] for the lossy mapping (non-cached Session
  * fields default to null).
@@ -84,7 +99,9 @@ data class SessionCacheEntry(
     val timeArchived: Long? = null,
     val additions: Int? = null,
     val deletions: Int? = null,
-    val files: Int? = null
+    val files: Int? = null,
+    val revertMessageId: String? = null,
+    val revertCreatedAtEpochMs: Long? = null
 )
 
 /** Project a [Session] down to its cached metadata. */
@@ -98,12 +115,13 @@ internal fun Session.toCacheEntry(): SessionCacheEntry = SessionCacheEntry(
     timeArchived = time?.archived,
     additions = summary?.additions,
     deletions = summary?.deletions,
-    files = summary?.files
+    files = summary?.files,
+    revertMessageId = revert?.messageId
 )
 
 /**
  * Reinflate a [Session] from a cached entry. Non-cached fields (slug,
- * projectId, share, revert, version) default to null so the rendered card
+ * projectId, share, version) default to null so the rendered card
  * shows the cached title/directory/time/summary correctly; a subsequent
  * server refresh replaces it with authoritative data.
  */
@@ -121,5 +139,6 @@ internal fun SessionCacheEntry.toSession(): Session = Session(
         Session.SummaryInfo(additions = additions, deletions = deletions, files = files)
     } else {
         null
-    }
+    },
+    revert = revertMessageId?.let { Session.RevertInfo(messageId = it) }
 )

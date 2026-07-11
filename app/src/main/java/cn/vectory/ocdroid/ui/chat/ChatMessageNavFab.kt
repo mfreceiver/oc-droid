@@ -5,12 +5,11 @@ package cn.vectory.ocdroid.ui.chat
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.isImeVisible
-import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.KeyboardArrowDown
-import androidx.compose.material3.FloatingActionButton
 import androidx.compose.material3.Icon
+import androidx.compose.material3.SmallFloatingActionButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.Modifier
@@ -56,7 +55,7 @@ internal fun ChatMessageNavFab(
     // §fix-nav-position: modifier（含 .align(BottomEnd)）必须应用在 AnimatedVisibility
     // 上——它是外层 Box 的直接子节点。
     AnimatedVisibility(visible = visible, modifier = modifier) {
-        FloatingActionButton(
+        SmallFloatingActionButton(
             onClick = {
                 // §navfab-press: onJump 同步先执行——立即隐藏按钮（按一次即消失）+
                 // 置守卫，避免动画期间方向检测器重新点亮按钮（闪烁）。
@@ -70,7 +69,6 @@ internal fun ChatMessageNavFab(
                     }
                 }
             },
-            modifier = Modifier.size(40.dp),
         ) {
             Icon(
                 Icons.Default.KeyboardArrowDown,

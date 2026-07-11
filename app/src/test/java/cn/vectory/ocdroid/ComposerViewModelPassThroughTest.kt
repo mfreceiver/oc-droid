@@ -179,4 +179,35 @@ class ComposerViewModelPassThroughTest : MainViewModelTestBase() {
         assertEquals(core.settingsFlow, vm.settingsFlow)
         assertEquals(core.chatFlow, vm.chatFlow)
     }
+
+    // §1B (F.4): file-reference pass-through methods. They are thin
+    // delegators to ComposerController — coverage on the controller is
+    // deeper; the VM is here so the pass-through is at least one branch
+    // covered (otherwise the new methods are 0/0 on this file and the
+    // overall instruction floor drops a few tenths of a percent).
+
+    @Test
+    fun `addFileReference delegates to the controller`() = runTest {
+        val core = createCore()
+        val vm = ComposerViewModel(core)
+
+        vm.addFileReference("/a/b.kt")
+
+        assertEquals(1, core.composerFlow.value.fileReferences.size)
+        assertEquals("/a/b.kt", core.composerFlow.value.fileReferences[0].path)
+        assertEquals("File: /a/b.kt", core.composerFlow.value.inputText)
+    }
+
+    @Test
+    fun `removeFileReference delegates to the controller`() = runTest {
+        val core = createCore()
+        val vm = ComposerViewModel(core)
+        vm.addFileReference("/a/b.kt")
+        val id = core.composerFlow.value.fileReferences[0].id
+
+        vm.removeFileReference(id)
+
+        assertTrue(core.composerFlow.value.fileReferences.isEmpty())
+        assertEquals("", core.composerFlow.value.inputText)
+    }
 }

@@ -270,4 +270,65 @@ class SessionsScreenTest {
             archived = archived,
         ),
     )
+
+    // ─────────── §round-B ③: filterSessionsByQuery (SessionsScreen search) ─
+
+    @Test
+    fun `search — blank query returns the input list verbatim`() {
+        val s1 = session(id = "s1", dir = "/proj-a").copy(title = "Refactor chat")
+        val s2 = session(id = "s2", dir = "/proj-b").copy(title = "Fix bug")
+        val result = filterSessionsByQuery(listOf(s1, s2), query = "")
+        assertEquals(listOf(s1, s2), result)
+    }
+
+    @Test
+    fun `search — whitespace-only query returns the input list verbatim`() {
+        val s1 = session(id = "s1", dir = "/proj-a").copy(title = "Refactor chat")
+        val result = filterSessionsByQuery(listOf(s1), query = "   ")
+        assertEquals(listOf(s1), result)
+    }
+
+    @Test
+    fun `search — query matches title case-insensitively`() {
+        val s1 = session(id = "s1", dir = "/proj-a").copy(title = "Refactor Chat")
+        val s2 = session(id = "s2", dir = "/proj-b").copy(title = "Fix bug")
+        val result = filterSessionsByQuery(listOf(s1, s2), query = "chat")
+        assertEquals(listOf(s1), result)
+    }
+
+    @Test
+    fun `search — query matches directory case-insensitively`() {
+        val s1 = session(id = "s1", dir = "/home/me/Anthropic-Project")
+        val s2 = session(id = "s2", dir = "/home/me/openai-playground")
+        val result = filterSessionsByQuery(listOf(s1, s2), query = "anthropic")
+        assertEquals(listOf(s1), result)
+    }
+
+    @Test
+    fun `search — falls back to id when title is null or blank`() {
+        // Session.displayName uses title ?: dir-basename ?: id; the search
+        // mirrors that fallback so a never-titled session is still findable
+        // by its id (the only stable identifier for a draft).
+        val s = session(id = "abc123def", dir = "/proj").copy(title = null)
+        val result = filterSessionsByQuery(listOf(s), query = "abc123")
+        assertEquals(listOf(s), result)
+    }
+
+    @Test
+    fun `search — query that matches nothing returns empty`() {
+        val s1 = session(id = "s1", dir = "/proj-a").copy(title = "Refactor chat")
+        val result = filterSessionsByQuery(listOf(s1), query = "zzz-no-match")
+        assertTrue(result.isEmpty())
+    }
+
+    @Test
+    fun `search — preserves input order (no implicit re-sorting)`() {
+        // Sorting by updated-desc is the caller's responsibility (the
+        // SessionsScreen derivation does that); the filter itself is order-
+        // preserving so the caller's ordering contract holds.
+        val s1 = session(id = "s1", dir = "/proj-a").copy(title = "Project A")
+        val s2 = session(id = "s2", dir = "/proj-b").copy(title = "Project B")
+        val result = filterSessionsByQuery(listOf(s1, s2), query = "Project")
+        assertEquals(listOf(s1, s2), result)
+    }
 }

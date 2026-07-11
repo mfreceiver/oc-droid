@@ -214,4 +214,39 @@ class SessionMergeTest {
 
         assertEquals(listOf("s1"), merged.map { it.id })
     }
+
+    @Test
+    fun `stale refresh that omits revert does not clear a newer local revert`() {
+        // §revert-cutoff (A3-1): after a local revert the session carries revert=X with a
+        // fresh time.updated. A concurrently-issued (stale) full refresh predates the revert
+        // and omits the revert field. The merge must keep the local revert so the chat
+        // selector stays fail-closed and does NOT release the full post-revert window.
+        val revertX = Session.RevertInfo(messageId = "m-revert")
+        val refreshed = listOf(
+            Session(
+                id = "s1",
+                directory = "/tmp/project",
+                title = "Server Title",
+                time = Session.TimeInfo(updated = 1_000),
+                revert = null // stale snapshot omits the active revert
+            )
+        )
+        val local = listOf(
+            Session(
+                id = "s1",
+                directory = "/tmp/project",
+                title = "Server Title",
+                time = Session.TimeInfo(updated = 5_000),
+                revert = revertX
+            )
+        )
+
+        val merged = mergeRefreshedSessionsPreservingLocalActivity(
+            refreshed, local,
+            currentSessionId = null,
+            openSessionIds = emptySet()
+        )
+
+        assertEquals(revertX, merged.single().revert)
+    }
 }

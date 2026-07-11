@@ -8,9 +8,9 @@ import androidx.room.RoomDatabase
  * [cn.vectory.ocdroid.di.CacheModule]).
  *
  * Entities: [CachedSessionEntity] + [CachedMessageEntity] + [GapMarkerEntity]
- * (Phase 2 added). The GapMarkerEntity addition bumped the version 1 → 2;
- * `fallbackToDestructiveMigration` (set in [cn.vectory.ocdroid.di.CacheModule])
- * handles the v1→v2 transition destructively (acceptable for the dev period
+ * (Phase 2 added). The schema is now version 4; `fallbackToDestructiveMigration`
+ * (set in [cn.vectory.ocdroid.di.CacheModule]) handles cache schema changes
+ * destructively (acceptable for the dev period
  * per plan §6 Risk/回退 — the cache is a rebuildable local mirror, not a source
  * of truth). A fresh `2.json` schema is generated under `app/schemas/` by KSP.
  *
@@ -27,7 +27,7 @@ import androidx.room.RoomDatabase
         CachedMessageEntity::class,
         GapMarkerEntity::class
     ],
-    version = 2,
+    version = 4,
     exportSchema = true
 )
 abstract class CacheDatabase : RoomDatabase() {

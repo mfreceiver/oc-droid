@@ -100,6 +100,37 @@ class AppCoreOrchestrationTest : MainViewModelTestBase() {
     }
 
     @Test
+    fun `sendMessage clears fileReferences along with inputText and imageAttachments (I4)`() = runTest {
+        // §1B-FIX (I4): after Send, the fileReference chip set must be
+        // wiped — otherwise a chip from the just-sent prompt would
+        // survive into the next message and re-inject the `File: <path>`
+        // text into the user's next draft.
+        coEvery { repository.sendMessage(any(), any(), any(), any(), any()) } returns Result.success(Unit)
+        coEvery { repository.getSessions(any()) } returns Result.success(emptyList())
+        coEvery { repository.getSession(any()) } returns Result.success(Session(id = "session-1", directory = "/x"))
+        every { settingsManager.openSessionIds } returns emptyList()
+
+        val core = wire()
+        core.writeChat { it.copy(currentSessionId = "session-1") }
+        core.writeSessionList { it.copy(sessions = listOf(Session(id = "session-1", directory = "/x"))) }
+        core.writeComposer {
+            it.copy(
+                inputText = "User text\nFile: /a/b.kt",
+                fileReferences = listOf(
+                    cn.vectory.ocdroid.ui.ComposerFileReference(path = "/a/b.kt")
+                ),
+            )
+        }
+
+        core.sendMessage()
+        advanceUntilIdle()
+
+        // inputText + fileReferences are cleared together.
+        assertEquals("", core.composerFlow.value.inputText)
+        assertTrue(core.composerFlow.value.fileReferences.isEmpty())
+    }
+
+    @Test
     fun `sendMessage no-ops when input text and attachments are both empty`() = runTest {
         val core = wire()
         core.writeChat { it.copy(currentSessionId = "session-1") }

@@ -173,10 +173,13 @@ class ChatTopBarStateTest {
 
     @Test
     fun `ChatTopBarActions default callbacks are no-ops`() {
-        // The defaults for the optional callbacks are no-op lambdas — invoking
-        // them MUST NOT throw. Required callbacks (onSelectSession /
-        // onCloseSession / onSelectAgent) are not defaulted and not invoked
-        // here.
+        // §1B: the defaults for the optional callbacks are no-op lambdas —
+        // invoking them MUST NOT throw. Required callbacks
+        // (onSelectSession / onCloseSession / onSelectAgent) are not defaulted
+        // and not invoked here. §1B also renames the navigation callback to
+        // `onOpenSessionPicker` (the new affordance is a ModalBottomSheet,
+        // not a page navigation), and adds the new `onOpenOverflow` (for
+        // the conversation overflow menu) — both are no-op by default.
         val a = ChatTopBarActions(
             onSelectSession = {},
             onCloseSession = {},
@@ -188,7 +191,8 @@ class ChatTopBarStateTest {
         a.onActivateTunnel()
         a.onRefreshMessages()
         a.onRefreshTrafficStats()
-        a.onNavigateToSessions()
+        a.onOpenSessionPicker()
+        a.onOpenOverflow()
         a.onSwitchModel("p", "m")
     }
 
@@ -202,9 +206,13 @@ class ChatTopBarStateTest {
         var activateTunnel = 0
         var refreshMessages = 0
         var refreshTraffic = 0
-        var navSessions = 0
+        var openSessionPicker = 0
+        var openOverflow = 0
         var switchModel = ""
 
+        // §1B: onNavigateToSessions is gone (the navigation icon now opens
+        // a sheet); onOpenSessionPicker + onOpenOverflow are the new
+        // affordances. The test asserts the new shape.
         val a = ChatTopBarActions(
             onSelectSession = { selectSessionCalls += it },
             onCloseSession = { closeSessionCalls += it },
@@ -214,7 +222,8 @@ class ChatTopBarStateTest {
             onActivateTunnel = { activateTunnel += 1 },
             onRefreshMessages = { refreshMessages += 1 },
             onRefreshTrafficStats = { refreshTraffic += 1 },
-            onNavigateToSessions = { navSessions += 1 },
+            onOpenSessionPicker = { openSessionPicker += 1 },
+            onOpenOverflow = { openOverflow += 1 },
             onSwitchModel = { p, m -> switchModel = "$p/$m" },
         )
 
@@ -226,7 +235,8 @@ class ChatTopBarStateTest {
         a.onActivateTunnel()
         a.onRefreshMessages()
         a.onRefreshTrafficStats()
-        a.onNavigateToSessions()
+        a.onOpenSessionPicker()
+        a.onOpenOverflow()
         a.onSwitchModel("p", "m")
 
         assertEquals(listOf("s1"), selectSessionCalls)
@@ -237,7 +247,8 @@ class ChatTopBarStateTest {
         assertEquals(1, activateTunnel)
         assertEquals(1, refreshMessages)
         assertEquals(1, refreshTraffic)
-        assertEquals(1, navSessions)
+        assertEquals(1, openSessionPicker)
+        assertEquals(1, openOverflow)
         assertEquals("p/m", switchModel)
     }
 

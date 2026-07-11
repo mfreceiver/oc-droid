@@ -196,7 +196,12 @@ internal fun PatchCard(
                                     overflow = TextOverflow.Visible,
                                     modifier = Modifier.weight(1f)
                                 )
-                                IconButton(onClick = { onFileClick(path) }, modifier = Modifier.size(22.dp)) {
+                                // §phase3 48dp audit (plan §5 task 4): removed the explicit
+                                // Modifier.size(22.dp) — IconButton defaults to a 48dp minimum
+                                // touch target, so the icon inside still measures 14dp but the
+                                // tap region is now accessible. The row's weight(1f) Text keeps
+                                // the layout stable.
+                                IconButton(onClick = { onFileClick(path) }) {
                                     Icon(
                                         Icons.AutoMirrored.Filled.OpenInNew,
                                         contentDescription = stringResource(R.string.files_show_in_files),

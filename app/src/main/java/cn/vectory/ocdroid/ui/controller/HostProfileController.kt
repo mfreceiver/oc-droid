@@ -500,7 +500,14 @@ class HostProfileController(
                     directorySessions = emptyMap(),
                     openSessionIds = emptyList(),
                     sessionStatuses = emptyMap(),
-                    sessionTodos = emptyMap()
+                    sessionTodos = emptyMap(),
+                    // §phase2-isolation: clear cross-host diff leak. sessionDiffs
+                    // (per-session FileDiff snapshots) are per-server data; a
+                    // stale snapshot from host A must NOT bleed into host B's
+                    // Workspace Changes view. Same-group switches preserve it
+                    // (server-identical data — same reasoning as sessions /
+                    // statuses / todos above). R-20 §Per-server data.
+                    sessionDiffs = emptyMap()
                 )
             }
             slices.mutateUnread {

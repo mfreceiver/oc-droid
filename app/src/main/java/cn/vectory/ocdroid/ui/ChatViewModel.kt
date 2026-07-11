@@ -5,6 +5,8 @@ import androidx.lifecycle.viewModelScope
 import cn.vectory.ocdroid.R
 import cn.vectory.ocdroid.data.repository.OpenCodeRepository
 import dagger.hilt.android.lifecycle.HiltViewModel
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import javax.inject.Inject
@@ -37,6 +39,8 @@ import javax.inject.Inject
 class ChatViewModel @Inject constructor(
     internal val core: AppCore,
 ) : ViewModel() {
+    private val revertConversation = RevertConversation(core)
+    private val revertCutoffCoordinator = RevertCutoffCoordinator(core)
 
     val chatFlow get() = core.chatFlow
     val sessionListFlow get() = core.sessionListFlow
@@ -49,6 +53,26 @@ class ChatViewModel @Inject constructor(
     val trafficFlow get() = core.trafficFlow
     val hostFlow get() = core.hostFlow
     val uiEvents get() = core.uiEvents
+
+    /**
+     * §1B-FIX (I5): narrow projection of [chatFlow] exposing only
+     * `currentModel`. Subscribers (Composer) recompose on
+     * model-change only — NOT on every SSE streaming delta. The
+     * underlying `chatFlow` emits the whole [ChatState] on each
+     * `streamingPartTexts` mutation; collecting the whole flow would
+     * force the Composer to recompose per token. `distinctUntilChanged`
+     * drops equal-value emissions; the model field changes only on
+     * model switch + initial inference from assistant message, both
+     * low-frequency. Lazy-initialized so the first collector pays the
+     * one-time map+distinctUntilChanged wiring cost; subsequent
+     * collectors share the same Flow instance.
+     */
+    val currentModelFlow: kotlinx.coroutines.flow.Flow<cn.vectory.ocdroid.data.model.Message.ModelInfo?>
+        by lazy {
+            core.chatFlow
+                .map { it.currentModel }
+                .distinctUntilChanged()
+        }
 
     /** §R-17 batch3e: repository exposed so ChatMessageList can pass it down
      *  to MessageRow without touching `.core.` from a Composable. */
@@ -182,22 +206,21 @@ class ChatViewModel @Inject constructor(
         // no-op intent and is defensive against any future restructuring that
         // moves the body off viewModelScope).
         viewModelScope.launch {
-            if (!isActive) return@launch
-            core.repository.revertSession(sessionId, messageId)
-                .onSuccess { updatedSession ->
-                    if (!isActive) return@launch
-                    core.writeSessionList { state ->
-                        state.copy(sessions = state.sessions.map { session -> if (session.id == sessionId) updatedSession else session })
-                    }
-                    core.writeComposer { c -> c.copy(inputText = draft, imageAttachments = emptyList()) }
-                    core.settingsManager.setDraftText(core.currentServerGroupFp(), sessionId, draft)
-                    loadMessages(sessionId, resetLimit = true)
-                    core.loadSessionsForEffect()
-                }
-                .onFailure { error ->
-                    core.effectBus.tryEmitUiEvent(UiEvent.Error(R.string.error_edit_message_failed, listOf(errorMessageOrFallback(error, "unknown error"))))
-                }
+            when (val outcome = revertConversation.execute(sessionId, messageId) { loadMessages(it, resetLimit = true) }) {
+                is RevertOutcome.Failure -> core.effectBus.tryEmitUiEvent(UiEvent.Error(R.string.error_edit_message_failed, listOf(errorMessageOrFallback(outcome.error, "unknown error"))))
+                RevertOutcome.Cancelled, is RevertOutcome.Success -> Unit
+            }
         }
+    }
+
+    /** [force] is reserved for an explicit user retry after a terminal failure. */
+    fun retryRevertCutoff(force: Boolean = false) {
+        val sessionId = core.store.chatFlow.value.currentSessionId ?: return
+        val messageId = core.store.sessionListFlow.value.sessions.firstOrNull { it.id == sessionId }
+            ?.revert?.messageId
+            ?: core.store.chatFlow.value.revertCutoffs[sessionId]?.messageId
+            ?: return
+        core.appScope.launch { revertCutoffCoordinator.ensure(sessionId, messageId, retryFailed = force) }
     }
 
     fun abortSession() {

@@ -613,11 +613,12 @@ class SettingsManagerTest {
     }
 
     // ───── §reactive-workdir: currentWorkdirFlow mirror (opuser🟠-5 / kimo 0.6.1 round-1) ─
-    // The StateFlow mirror of currentWorkdir backs VcsSection (and any future
-    // collector) so they react to workdir changes without a manual refresh.
-    // Contract: (1) seeded from ESP at construction (cold-start collectors see
-    // the persisted value, not null); (2) setter emits synchronously; (3)
-    // clearAllLocalData flips to null (Fix B: direct null assignment, not an
+    // The StateFlow mirror of currentWorkdir backs the Workspace → Changes
+    // pane (and any future collector) so they react to workdir changes
+    // without a manual refresh. Contract: (1) seeded from ESP at construction
+    // (cold-start collectors see the persisted value, not null); (2) setter
+    // emits synchronously; (3) clearAllLocalData flips to null (Fix B: direct
+    // null assignment, not an
     // ESP re-read — eliminates the theoretical race between the batched
     // .remove() and a re-read). Direct .value assertions suffice (StateFlow is
     // hot; no Turbine needed).

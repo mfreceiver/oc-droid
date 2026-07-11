@@ -1,110 +1,51 @@
 package cn.vectory.ocdroid
 
 import cn.vectory.ocdroid.data.model.Message
+import cn.vectory.ocdroid.data.model.RevertCutoff
+import cn.vectory.ocdroid.data.model.RevertCutoffState
 import cn.vectory.ocdroid.ui.filterBeforeRevert
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNotEquals
 import org.junit.Test
 
-/**
- * §revert-fix: covers [filterBeforeRevert] in isolation. The helper must
- * EXCLUDE the revert message itself (mirrors the legacy `id < revertMessageId`
- * semantics) on BOTH the time-based and index-fallback paths, while keeping
- * orphan messages (no `time.created`) and tie-breaking equal timestamps by
- * list position.
- */
 class FilterBeforeRevertTest {
+    private fun msg(id: String, created: Long? = null) = Message(id = id, role = "user", time = created?.let { Message.TimeInfo(created = it) })
+    private fun cutoff(messageId: String, state: RevertCutoffState) = RevertCutoff("s1", messageId, state)
 
-    private fun msg(id: String, created: Long? = null): Message = Message(
-        id = id,
-        role = "user",
-        time = created?.let { Message.TimeInfo(created = it) }
-    )
-
-    @Test
-    fun `null revert id returns all messages unchanged`() {
-        val list = listOf(msg("a", 1L), msg("b", 2L), msg("c", 3L))
-        assertEquals(list, list.filterBeforeRevert(null))
+    @Test fun `no active revert returns complete window`() {
+        val all = listOf(msg("a", 1), msg("b", 2)); assertEquals(all, all.filterBeforeRevert(null, null))
     }
-
-    @Test
-    fun `revert message in middle with time - excluded itself, keeps strictly earlier`() {
-        val list = listOf(
-            msg("a", created = 100L),
-            msg("revert", created = 200L),
-            msg("c", created = 300L)
-        )
-        val result = list.filterBeforeRevert("revert")
-        assertEquals(listOf("a"), result.map { it.id })
+    @Test fun `pending in-window uses safe index prefix`() {
+        val all = listOf(msg("a", 1), msg("r", 2), msg("after", 3))
+        assertEquals(listOf("a"), all.filterBeforeRevert("r", cutoff("r", RevertCutoffState.PendingFetch)).map { it.id })
     }
-
-    @Test
-    fun `time-based - equal timestamp BEFORE revert position is kept`() {
-        // m-eq 与 revert 时间相同，但列表中位于 revert 之前 → 保留。
-        val list = listOf(
-            msg("m-eq", created = 200L),
-            msg("revert", created = 200L)
-        )
-        val result = list.filterBeforeRevert("revert")
-        assertEquals(listOf("m-eq"), result.map { it.id })
+    @Test fun `pending absent is empty and never releases window`() {
+        val all = listOf(msg("after1", 3), msg("after2", 4)); val result = all.filterBeforeRevert("r", null)
+        assertEquals(emptyList<Message>(), result); assertNotEquals(all, result)
     }
-
-    @Test
-    fun `time-based - equal timestamp AFTER revert position is excluded`() {
-        // m-eq 与 revert 时间相同，但列表中位于 revert 之后 → 排除。
-        val list = listOf(
-            msg("revert", created = 200L),
-            msg("m-eq", created = 200L)
-        )
-        val result = list.filterBeforeRevert("revert")
-        assertEquals(emptyList<String>(), result.map { it.id })
+    @Test fun `failed absent remains fail closed`() {
+        assertEquals(emptyList<Message>(), listOf(msg("x", 3)).filterBeforeRevert("r", cutoff("r", RevertCutoffState.Failed)))
     }
-
-    @Test
-    fun `time-based - orphan message after revert with null time is kept`() {
-        // 无时间信息的孤儿消息（time==null）始终保留，即使在 revert 之后。
-        val list = listOf(
-            msg("revert", created = 200L),
-            msg("orphan", created = null)
-        )
-        val result = list.filterBeforeRevert("revert")
-        assertEquals(listOf("orphan"), result.map { it.id })
+    @Test fun `stale cutoff message id is atomically invalidated`() {
+        val stale = cutoff("old-revert", RevertCutoffState.Resolved(10))
+        assertEquals(emptyList<Message>(), listOf(msg("old", 1), msg("new", 9)).filterBeforeRevert("new-revert", stale))
     }
-
-    @Test
-    fun `revert id absent from list returns all unchanged`() {
-        val list = listOf(msg("a", 1L), msg("b", 2L))
-        assertEquals(list, list.filterBeforeRevert("nonexistent"))
+    @Test fun `resolved out-of-window filters by persisted timestamp`() {
+        val all = listOf(msg("before", 1), msg("after", 3), msg("unknown"))
+        assertEquals(listOf("before"), all.filterBeforeRevert("r", cutoff("r", RevertCutoffState.Resolved(2))).map { it.id })
     }
-
-    @Test
-    fun `empty list returns empty`() {
-        val empty = emptyList<Message>()
-        assertEquals(empty, empty.filterBeforeRevert("revert"))
+    @Test fun `resolved equal timestamp excludes every equal row and unknown times`() {
+        val all = listOf(msg("equal-before", 2), msg("r", 2), msg("equal-after", 2), msg("unknown"))
+        assertEquals(emptyList<String>(), all.filterBeforeRevert("r", cutoff("r", RevertCutoffState.Resolved(2))).map { it.id })
     }
-
-    @Test
-    fun `index fallback - revert message with null time excludes itself and later`() {
-        // revert 消息自身 time.created==null → 走 index fallback。
-        // subList(0, revertIndex) 排除 revert 自身及之后所有消息。
-        val list = listOf(
-            msg("a", created = null),
-            msg("revert", created = null),
-            msg("c", created = null)
-        )
-        val result = list.filterBeforeRevert("revert")
-        assertEquals(listOf("a"), result.map { it.id })
+    @Test fun `no timestamp uses index prefix only when target present`() {
+        val all = listOf(msg("before"), msg("r"), msg("after"))
+        assertEquals(listOf("before"), all.filterBeforeRevert("r", cutoff("r", RevertCutoffState.NoTimestamp)).map { it.id })
+        assertEquals(emptyList<Message>(), all.filterBeforeRevert("missing", cutoff("missing", RevertCutoffState.NoTimestamp)))
     }
-
-    @Test
-    fun `revert at head with time - only earlier and orphans survive`() {
-        // revert 是第一条（created=100）；它自身被排除。orphan（time==null）保留；
-        // c（created=50 < 100）保留。
-        val list = listOf(
-            msg("revert", created = 100L),
-            msg("orphan", created = null),
-            msg("c", created = 50L)
-        )
-        val result = list.filterBeforeRevert("revert")
-        assertEquals(listOf("orphan", "c"), result.map { it.id })
+    @Test fun `paging target into window changes pending empty to safe prefix`() {
+        val pending = cutoff("r", RevertCutoffState.PendingFetch)
+        assertEquals(emptyList<Message>(), listOf(msg("after", 3)).filterBeforeRevert("r", pending))
+        assertEquals(listOf("before"), listOf(msg("before", 1), msg("r", 2), msg("after", 3)).filterBeforeRevert("r", pending).map { it.id })
     }
 }

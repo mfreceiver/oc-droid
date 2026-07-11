@@ -57,11 +57,22 @@ class OrchestratorViewModel @Inject constructor(
     // ── Nav ─────────────────────────────────────────────────────────────────
 
     fun setLastNavPage(page: Int) {
-        // §R-17 batch3d: body moved verbatim from AppCore.
         val clamped = page.coerceIn(0, 2)
         if (core.store.navFlow.value.lastNavPage == clamped) return
         core.settingsManager.lastNavPage = clamped
-        core.store.mutateNav { it.copy(lastNavPage = clamped) }
+        val route = NavRoute.fromLegacyPage(clamped)
+        core.settingsManager.lastRoute = route.route
+        core.store.mutateNav { it.copy(lastRoute = route.route, lastNavPage = clamped) }
+    }
+
+    /** Called by the opt-in shell after composition; getter performs old-int migration. */
+    fun restoreLastRoute() = setLastRoute(NavRoute.fromRouteKey(core.settingsManager.lastRoute))
+
+    fun setLastRoute(route: NavRoute) {
+        val state = core.store.navFlow.value
+        if (state.lastRoute == route.route && state.lastNavPage == route.legacyPage) return
+        core.settingsManager.lastRoute = route.route
+        core.store.mutateNav { it.copy(lastRoute = route.route, lastNavPage = route.legacyPage) }
     }
 
     // ── Permission / Question responses (orchestrator-domain) ───────────────

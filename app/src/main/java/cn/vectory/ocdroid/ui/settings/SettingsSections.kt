@@ -1,6 +1,5 @@
 package cn.vectory.ocdroid.ui.settings
 
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -10,10 +9,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
-import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Delete
-import androidx.compose.material.icons.filled.Dns
 import androidx.compose.material.icons.outlined.Refresh
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
@@ -41,122 +37,23 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import cn.vectory.ocdroid.R
-import cn.vectory.ocdroid.ui.ConnectionState
-import cn.vectory.ocdroid.data.model.HostProfile
 import cn.vectory.ocdroid.ui.util.formatBytes
 import cn.vectory.ocdroid.util.SettingsManager
 import cn.vectory.ocdroid.util.ThemeMode
-
-@Composable
-internal fun ConnectionProfileSection(
-    profile: HostProfile,
-    connectionState: ConnectionState,
-    /**
-     * §grouping-rewrite 项 2: stats for the active fp rendered as a clickable
-     * line under the URL row. `groupProfileCount` is the number of profiles
-     * sharing the active fp (1 when solo / soft-migrated UUID fp);
-     * `cachedSessionCount` is the number of cached chat sessions under that
-     * fp. The line opens the cache-management popup (项 3).
-     */
-    groupProfileCount: Int,
-    cachedSessionCount: Int,
-    onStatsClick: () -> Unit,
-    onManageProfiles: () -> Unit,
-    hideHeader: Boolean = false
-) {
-    if (!hideHeader) {
-        SectionHeader(title = stringResource(R.string.settings_connection_profile))
-    }
-
-    ListItem(
-        leadingContent = {
-            Icon(
-                Icons.Default.Dns,
-                contentDescription = null,
-                tint = MaterialTheme.colorScheme.primary
-            )
-        },
-        headlineContent = {
-            Text(
-                profile.displayName,
-                style = MaterialTheme.typography.titleMedium
-            )
-        },
-        supportingContent = {
-            Text(
-                profile.serverUrl,
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                maxLines = 1
-            )
-        },
-        trailingContent = {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                if (connectionState.isConnected) {
-                    Icon(
-                        Icons.Default.CheckCircle,
-                        contentDescription = null,
-                        tint = MaterialTheme.colorScheme.primary,
-                        modifier = Modifier.size(20.dp)
-                    )
-                    Spacer(modifier = Modifier.width(4.dp))
-                    Text(
-                        stringResource(R.string.settings_connected),
-                        style = MaterialTheme.typography.labelMedium,
-                        color = MaterialTheme.colorScheme.primary
-                    )
-                }
-                IconButton(onClick = onManageProfiles) {
-                    Icon(
-                        Icons.AutoMirrored.Filled.KeyboardArrowRight,
-                        contentDescription = stringResource(R.string.settings_manage_profiles),
-                        tint = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                }
-            }
-        }
-    )
-
-    // ── §grouping-rewrite 项 2: group-stats line. The active fp is a "named
-    // group" only when it is one of the 4 fixed labels (A/B/C/D); any other
-    // value (including the soft-migrated UUID form `fp == id`) reads as
-    // "standalone". The line is the entry point to the cache-management
-    // popup (项 3), so it carries a trailing chevron + is fully clickable.
-    // This replaces the diagnostic panels that used to live in DebugLogSection.
-    val groupName = profile.serverGroupFp.takeIf { it in NamedGroupLabels }
-    val statsText = if (groupName != null) {
-        stringResource(R.string.group_stats_named, groupName, groupProfileCount, cachedSessionCount)
-    } else {
-        stringResource(R.string.group_stats_solo, cachedSessionCount)
-    }
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .clickable(onClick = onStatsClick)
-            .padding(horizontal = 16.dp, vertical = 12.dp),
-        verticalAlignment = Alignment.CenterVertically
-    ) {
-        Text(
-            statsText,
-            style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-            modifier = Modifier.weight(1f)
-        )
-        Icon(
-            Icons.AutoMirrored.Filled.KeyboardArrowRight,
-            contentDescription = stringResource(R.string.cache_management_popup_title),
-            tint = MaterialTheme.colorScheme.onSurfaceVariant,
-            modifier = Modifier.size(20.dp)
-        )
-    }
-}
 
 /**
  * §grouping-rewrite 项 1 (spec decision): the only valid named-group labels.
  * Any `serverGroupFp` outside this set reads as "standalone" (不分组),
  * including the soft-migrated UUID form (`fp == profile.id`). Centralised
- * here so [ConnectionProfileSection] and the editor stay in lockstep with
- * [HostProfilesManagerScreen]'s selector.
+ * here so [cn.vectory.ocdroid.ui.settings.HostProfilesManagerScreen]'s
+ * selector and the profile editor stay in lockstep.
+ *
+ * §phase3 (plan §5 task 6 step c): the `ConnectionProfileSection` composable
+ * that previously consumed this list (the "current profile" header on the
+ * Settings front page) was an orphan — SettingsScreen renders its own slim
+ * header and never called the section. The section + its androidTest were
+ * deleted; this `NamedGroupLabels` value is retained because
+ * HostProfilesManagerScreen still uses it for its group dropdown.
  */
 internal val NamedGroupLabels: List<String> = listOf("A", "B", "C", "D")
 

@@ -21,7 +21,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.res.stringResource
-import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import cn.vectory.ocdroid.R
@@ -86,10 +86,12 @@ fun FilesScreen(
             // tree. Android's accessibility service traverses it via binder (~300ms
             // per traversal, 16-33KB each), producing massive binder floods
             // (ADB-confirmed: BpBinder Large outgoing transaction every ~300ms).
-            // Clearing semantics at the root prevents the service from walking the
-            // tree; the top bar (back/refresh buttons) remain independently
-            // accessible via their own contentDescription.
-            .semantics { }
+            // clearAndSetSemantics here actually CLEARS the descendant semantics
+            // tree so the accessibility service cannot walk it (a plain
+            // .semantics { } would only MERGE an empty config — a no-op). The top
+            // bar (back/refresh buttons) remain independently accessible via their
+            // own contentDescription.
+            .clearAndSetSemantics { }
         ) {
             if (state.selectedFilePath == null) {
                 TopAppBar(

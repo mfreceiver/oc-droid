@@ -201,8 +201,15 @@ class ForegroundCatchUpController(
     private fun clearDraft() {
         if (store.composerFlow.value.draftWorkdir == null || store.chatFlow.value.currentSessionId != null) return
         settingsManager.currentWorkdir = null
+        // §1B-FIX (I4): also clear fileReferences — chips must not leak
+        // to the next session.
         store.mutateComposer {
-            it.copy(draftWorkdir = null, inputText = "", imageAttachments = emptyList())
+            it.copy(
+                draftWorkdir = null,
+                inputText = "",
+                imageAttachments = emptyList(),
+                fileReferences = emptyList(),
+            )
         }
     }
 

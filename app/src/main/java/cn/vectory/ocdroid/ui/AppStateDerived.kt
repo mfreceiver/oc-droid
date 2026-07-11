@@ -75,9 +75,12 @@ internal val METADATA_MARKER_ROLES = setOf("agent-switched", "model-switched", "
  * inline between turns. Verbatim move of the AppState.visibleMessages getter
  * + marker filter.
  */
-fun visibleMessages(messages: List<Message>, currentSession: Session?): List<Message> {
-    val revertMessageId = currentSession?.revert?.messageId
-    val reverted = messages.filterBeforeRevert(revertMessageId)
+fun visibleMessages(messages: List<Message>, currentSession: Session?, cutoff: cn.vectory.ocdroid.data.model.RevertCutoff? = null): List<Message> {
+    // A present Session is authoritative, including revert=null (the server
+    // removed the revert). The durable map is only a transient-missing-session
+    // fallback; null then means neither signal exists and the full window is safe.
+    val revertMessageId = if (currentSession != null) currentSession.revert?.messageId else cutoff?.messageId
+    val reverted = messages.filterBeforeRevert(revertMessageId, cutoff)
     // Filter out system / tool / environment messages — only user and
     // assistant messages are shown in the chat transcript, EXCEPT the
     // synthetic metadata-marker messages (§s3-markers) which carry one of
@@ -93,39 +96,33 @@ fun visibleMessages(messages: List<Message>, currentSession: Session?): List<Mes
  * `id < revertMessageId` string comparison truncated the transcript at the
  * wrong point. This helper:
  *
- *  1. Resolves the revert threshold as the `time.created` of the message whose
- *     id == [revertMessageId]. The revert message ITSELF is always excluded
- *     (mirrors the pre-time-based `id < revertMessageId` semantics). Messages
- *     with no `time.created` are kept (cannot be ordered → conservative keep,
- *     EXCEPT the revert message which is dropped by id). A timestamped message
- *     is kept iff its `created < revertCreated`, OR its `created == revertCreated`
- *     AND its list position is strictly before the revert message's position
- *     (tie-break on index so the revert row is never kept).
+ *  1. Resolved thresholds retain only messages whose `time.created` is strictly
+ *     less than the cutoff. Timestamp-less and equal-timestamp messages are
+ *     excluded: hiding an ambiguous row is safer than releasing a post-revert row.
  *  2. When the revert message has no `time.created`, falls back to list index
  *     order: keeps messages whose index is strictly before the revert message
  *     (excludes the revert point itself).
  *
- * If [revertMessageId] is null OR is absent from the list, the input is
- * returned unchanged (no cutoff can be applied).
+ * A null [revertMessageId] means callers found neither a present Session revert
+ * nor a missing-session cutoff fallback, so returning the input is safe. A
+ * non-null target absent from the loaded list fails closed.
  */
-internal fun List<Message>.filterBeforeRevert(revertMessageId: String?): List<Message> {
+internal fun List<Message>.filterBeforeRevert(revertMessageId: String?, cutoff: cn.vectory.ocdroid.data.model.RevertCutoff? = null): List<Message> {
     if (revertMessageId == null) return this
     val revertIndex = indexOfFirst { it.id == revertMessageId }
-    if (revertIndex < 0) return this
-    val revertCreated = this[revertIndex].time?.created
-    return if (revertCreated != null) {
-        // time-based: 保留 created < revertCreated 的，或 created == revertCreated 但列表
-        // 位置在 revert 之前的；排除 revert 自身（idx == revertIndex）。
+    // This comparison is the atomic consistency gate: a stale cutoff can never
+    // be observed as valid, even though Session and ChatState are separate slices.
+    val valid = cutoff?.takeIf { it.messageId == revertMessageId }
+    val resolved = (valid?.state as? cn.vectory.ocdroid.data.model.RevertCutoffState.Resolved)?.createdAtEpochMs
+    return if (resolved != null) {
         filterIndexed { idx, msg ->
-            idx != revertIndex && (
-                msg.time?.created == null ||
-                msg.time!!.created < revertCreated ||
-                (msg.time!!.created == revertCreated && idx < revertIndex)
-            )
+            val created = msg.time?.created ?: return@filterIndexed false
+            created < resolved
         }
     } else {
-        // index fallback: 按列表位置截断，排除 revert 自身
-        subList(0, revertIndex)
+        // Pending/Failed/NoTimestamp/missing/stale: only an in-window index can
+        // prove a safe prefix. Otherwise fail closed to empty, never full window.
+        if (revertIndex >= 0) subList(0, revertIndex) else emptyList()
     }
 }
 

@@ -26,6 +26,24 @@
     <string name="settings_connection_profile">连接配置</string>
     <string name="settings_section_connections">连接管理</string>
     <string name="settings_section_debug">调试</string>
+    <!-- §phase3 (G.3 / D.8): 精简 Settings 分区标题与副标题。 -->
+    <string name="settings_section_hosts">主机与安全</string>
+    <string name="settings_section_hosts_subtitle">添加、切换或移除 OpenCode 主机</string>
+    <string name="settings_section_appearance">外观</string>
+    <string name="settings_section_appearance_subtitle">主题、字体、显示尺寸</string>
+    <string name="settings_section_models">模型</string>
+    <string name="settings_section_models_subtitle">每主机的模型可见性</string>
+    <string name="settings_section_notifications">通知</string>
+    <string name="settings_section_notifications_subtitle">完成与错误提醒</string>
+    <string name="settings_section_storage">存储</string>
+    <string name="settings_section_storage_subtitle">缓存、流量、危险操作</string>
+    <string name="settings_section_about">关于</string>
+    <string name="settings_section_about_subtitle">版本与诊断</string>
+    <!-- §phase3: 通知子路由占位内容。运行时权限提示仍由 §18 通道 + Settings 开关驱动。 -->
+    <string name="settings_notifications_runtime_perm_granted">通知：已允许</string>
+    <string name="settings_notifications_runtime_perm_blocked">通知：已被系统拦截</string>
+    <string name="settings_notifications_completion_channel">完成提醒</string>
+    <string name="settings_notifications_completion_channel_desc">会话完成或出错时推送</string>
     <!-- §vcs-section: 设置中的 工作目录 / Git 分组 -->
     <string name="settings_section_working_directory">工作目录</string>
     <string name="settings_vcs_branch">分支</string>
@@ -76,11 +94,38 @@
     <string name="sessions_archive">归档</string>
     <string name="sessions_restore">恢复</string>
     <string name="sessions_no_active">没有当前会话</string>
+    <string name="sessions_new_session">新建会话</string>
+    <string name="sessions_recent_section">最近</string>
+    <string name="sessions_by_workdir_section">按工作目录</string>
+    <string name="chat_session_overflow">会话操作</string>
+    <string name="chat_add_menu_title">添加到消息</string>
+    <string name="chat_add_photos">图片</string>
+    <string name="chat_add_photos_desc">附加图片到下一条消息</string>
+    <string name="chat_add_file_ref">引用工作区文件</string>
+    <string name="chat_add_file_ref_desc">即将上线 — Phase 2</string>
+    <string name="chat_add_commands">命令</string>
+    <string name="chat_add_commands_desc">插入斜杠命令</string>
+    <string name="chat_remove_file_ref">移除文件引用</string>
+    <string name="chat_action_overflow">会话操作</string>
+    <!-- §1C-FIX-⑧: ChatPermissionCard 中文化 + scheme E.4 元数据
+         （host / workdir / session / tool / target），让用户知道
+         是哪个会话在请求授权、"始终允许" 的作用范围。 -->
+    <string name="permission_card_title">需要授权</string>
+    <string name="permission_card_unknown_permission">未知权限</string>
+    <string name="permission_card_metadata_host">主机：%1$s</string>
+    <string name="permission_card_metadata_workdir">工作目录：%1$s</string>
+    <string name="permission_card_metadata_session">会话：%1$s</string>
+    <string name="permission_card_metadata_tool">工具：%1$s</string>
+    <string name="permission_card_metadata_target">目标：%1$s</string>
+    <string name="permission_card_metadata_no_target">（无目标）</string>
     <string name="sessions_no_archived">没有归档会话</string>
     <string name="sessions_expand">展开%1$s</string>
     <string name="sessions_collapse">折叠%1$s</string>
     <string name="chat_todo">待办</string>
     <string name="chat_context">上下文</string>
+    <string name="chat_compact_session">压缩</string>
+    <string name="chat_no_host_fallback">无主机</string>
+    <string name="chat_server_fallback">服务器</string>
     <string name="chat_no_usage_data">没有用量数据</string>
     <string name="chat_context_model_section">模型</string>
     <string name="chat_context_provider">Provider</string>
@@ -109,6 +154,16 @@
     <string name="chat_more_options">更多操作</string>
     <string name="chat_edit_from_here">从这里编辑</string>
     <string name="chat_fork_from_here">从这里分叉</string>
+    <!-- §1C: 消息溢出菜单 + 破坏性确认。MessageCard.kt 类注释说明为何
+         此项目用单一的 "Edit & rerun" 入口（editFromMessage 即
+         RevertConversation use case；分两个入口会重复指向同一动作）。 -->
+    <string name="message_actions_menu">消息操作</string>
+    <string name="message_action_copy">复制</string>
+    <string name="message_action_edit_rerun">从此处编辑并重发</string>
+    <string name="message_action_fork">从此处分叉</string>
+    <string name="message_revert_confirm_title">回退对话？</string>
+    <string name="message_revert_confirm_body">agent 将回退到此处，之后发送的所有内容都将被丢弃。此操作不可恢复。</string>
+    <string name="message_revert_confirm_button">回退</string>
     <string name="chat_select_or_create_session">选择或新建会话</string>
     <string name="chat_connect_to_server">连接服务器</string>
     <string name="chat_connect">连接</string>

@@ -27,6 +27,28 @@
     <string name="settings_connection_profile">Connection Profile</string>
     <string name="settings_section_connections">Connections</string>
     <string name="settings_section_debug">Debug</string>
+    <!-- §phase3 (G.3 / D.8): slim Settings section labels + subtitles for
+         the LazyColumn-of-ListItem root. Each pushes a sub-route. -->
+    <string name="settings_section_hosts">Hosts &amp; security</string>
+    <string name="settings_section_hosts_subtitle">Add, switch, or remove OpenCode hosts</string>
+    <string name="settings_section_appearance">Appearance</string>
+    <string name="settings_section_appearance_subtitle">Theme, font, display size</string>
+    <string name="settings_section_models">Models</string>
+    <string name="settings_section_models_subtitle">Per-host model visibility</string>
+    <string name="settings_section_notifications">Notifications</string>
+    <string name="settings_section_notifications_subtitle">Alerts for completions and errors</string>
+    <string name="settings_section_storage">Storage</string>
+    <string name="settings_section_storage_subtitle">Cache, traffic, danger zone</string>
+    <string name="settings_section_about">About</string>
+    <string name="settings_section_about_subtitle">Version, diagnostics</string>
+    <!-- §phase3: placeholder body for the Notifications sub-route. The
+         POST_NOTIFICATIONS runtime prompt is still driven by the existing
+         §18 channel + Settings gate; this section surfaces the current
+         state as a read-only list until a richer controller lands. -->
+    <string name="settings_notifications_runtime_perm_granted">Notifications: allowed</string>
+    <string name="settings_notifications_runtime_perm_blocked">Notifications: blocked by system</string>
+    <string name="settings_notifications_completion_channel">Completion alerts</string>
+    <string name="settings_notifications_completion_channel_desc">Posted when a session finishes or errors out</string>
     <!-- §vcs-section: Working directory / Git group in Settings -->
     <string name="settings_section_working_directory">Working directory</string>
     <string name="settings_vcs_branch">Branch</string>
@@ -59,6 +81,7 @@
     <string name="common_close">Close</string>
     <string name="common_done">Done</string>
     <string name="common_dismiss">Dismiss</string>
+    <string name="common_loading">Loading…</string>
     <string name="common_edit">Edit</string>
     <string name="common_delete">Delete</string>
     <string name="common_refresh">Refresh</string>
@@ -77,11 +100,26 @@
     <string name="sessions_archive">Archive</string>
     <string name="sessions_restore">Restore</string>
     <string name="sessions_no_active">No active sessions</string>
+    <string name="sessions_new_session">New session</string>
+    <string name="sessions_recent_section">Recent</string>
+    <string name="sessions_by_workdir_section">By workdir</string>
+    <string name="chat_session_overflow">Session actions</string>
+    <string name="chat_add_menu_title">Add to message</string>
+    <string name="chat_add_photos">Photos</string>
+    <string name="chat_add_photos_desc">Attach images to the next message</string>
+    <string name="chat_add_file_ref">Reference workspace file</string>
+    <string name="chat_add_file_ref_desc">Coming soon — Phase 2</string>
+    <string name="chat_add_commands">Commands</string>
+    <string name="chat_add_commands_desc">Insert a slash command</string>
+    <string name="chat_remove_file_ref">Remove file reference</string>
     <string name="sessions_no_archived">No archived sessions</string>
     <string name="sessions_expand">Expand %1$s</string>
     <string name="sessions_collapse">Collapse %1$s</string>
     <string name="chat_todo">Todo</string>
     <string name="chat_context">Context</string>
+    <string name="chat_compact_session">Compact</string>
+    <string name="chat_no_host_fallback">No host</string>
+    <string name="chat_server_fallback">server</string>
     <string name="chat_no_usage_data">No usage data</string>
     <string name="chat_context_model_section">Model</string>
     <string name="chat_context_provider">Provider</string>
@@ -98,9 +136,33 @@
     <string name="chat_context_no_cost">No cost data</string>
     <string name="chat_context_unknown">Unknown</string>
     <string name="chat_context_compact">Compact</string>
+    <!-- §round-B ② (D.5): ContextSelectorSheet host/workdir entries. -->
+    <string name="context_selector_title">Context</string>
+    <string name="context_selector_hosts">Host</string>
+    <string name="context_selector_workdirs">Workdir</string>
+    <string name="context_selector_manage_hosts">Manage hosts</string>
+    <string name="context_selector_no_host">No host</string>
+    <string name="context_selector_no_workdir">No workdir</string>
+    <string name="context_selector_search_hint">Search host or workdir</string>
+    <!-- §round-B ③: SessionsScreen SearchBar. -->
+    <string name="sessions_search_hint">Search by title or directory</string>
+    <string name="sessions_search_no_results">No matching sessions</string>
     <string name="chat_add_image">Add image</string>
     <string name="chat_remove_image">Remove image</string>
     <string name="chat_send">Send</string>
+    <string name="chat_action_overflow">Conversation actions</string>
+    <!-- §1C-FIX-⑧: ChatPermissionCard localized strings + scheme E.4
+         metadata. The card surfaces the host / workdir / session /
+         tool so the user knows which session is asking and which
+         scope an "Always allow" would apply to. -->
+    <string name="permission_card_title">Permission required</string>
+    <string name="permission_card_unknown_permission">Unknown permission</string>
+    <string name="permission_card_metadata_host">Host: %1$s</string>
+    <string name="permission_card_metadata_workdir">Workdir: %1$s</string>
+    <string name="permission_card_metadata_session">Session: %1$s</string>
+    <string name="permission_card_metadata_tool">Tool: %1$s</string>
+    <string name="permission_card_metadata_target">Target: %1$s</string>
+    <string name="permission_card_metadata_no_target">(no target)</string>
     <string name="chat_type_message">Type a message...</string>
     <string name="chat_interrupt_agent">Interrupt agent</string>
     <string name="chat_stop">Stop</string>
@@ -110,6 +172,20 @@
     <string name="chat_more_options">More options</string>
     <string name="chat_edit_from_here">Edit from here</string>
     <string name="chat_fork_from_here">Fork from here</string>
+    <!-- §1C: per-message overflow menu + destructive confirmation.
+         message_actions_menu is the IconButton content description (a11y
+         label for the MoreVert trigger). message_action_* are the menu
+         items (Copy / Edit & rerun / Fork). The destructive entry is
+         labelled "Edit & rerun" — see MessageCard.kt class doc for why
+         this single entry subsumes both "Edit & rerun" and "Revert" in
+         this project (both point at RevertConversation.execute). -->
+    <string name="message_actions_menu">Message actions</string>
+    <string name="message_action_copy">Copy</string>
+    <string name="message_action_edit_rerun">Edit &amp; rerun from here</string>
+    <string name="message_action_fork">Fork from here</string>
+    <string name="message_revert_confirm_title">Rewind the conversation?</string>
+    <string name="message_revert_confirm_body">The agent will be rewound to this point and everything you sent after it will be dropped. This cannot be undone.</string>
+    <string name="message_revert_confirm_button">Rewind</string>
     <string name="chat_select_or_create_session">Select or create a session</string>
     <string name="chat_connect_to_server">Connect to server</string>
     <string name="chat_connect">Connect</string>
@@ -257,6 +333,7 @@
     <string name="settings_clear_local_data_irreversible">This action cannot be undone.</string>
     <string name="chat_model_picker_title">Select model</string>
     <string name="chat_model_picker_empty">No models available</string>
+    <string name="chat_no_unified_diff">No unified diff available</string>
     <string name="settings_model_management">Model management</string>
     <string name="settings_model_management_hint">Disabled models won\'t appear in quick switch. Saved per server.</string>
     <string name="settings_model_management_edit">Edit model list</string>

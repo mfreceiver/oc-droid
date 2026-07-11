@@ -133,11 +133,32 @@ data class TrafficState(
  * every mutation goes through a single `writeComposer { ... }`. No dispatcher
  * batch reliance (RFC §9.2).
  */
+/**
+ * §1B (F.4): a single file reference attached to the composer — renders as a
+ * removable `InputChip` above the input row and serialises downstream as a
+ * `PartInput(type=text)` carrying the literal `File: <path>` payload (scheme
+ * A — zero protocol change). `id` is a stable key so chip-removal can find
+ * its way back to the right list entry even when paths repeat.
+ */
+data class ComposerFileReference(
+    val path: String,
+    val id: String = java.util.UUID.randomUUID().toString()
+)
+
 data class ComposerState(
     val inputText: String = "",
     val imageAttachments: List<ComposerImageAttachment> = emptyList(),
     val sendingSessionIds: Set<String> = emptySet(),
-    val draftWorkdir: String? = null
+    val draftWorkdir: String? = null,
+    /**
+     * §1B (F.4): file references attached to the composer (Phase 1B renders
+     * the chip strip; the writer-side add/remove lives on
+     * [cn.vectory.ocdroid.ui.controller.ComposerController]; the Add-menu
+     * "Reference workspace file" entry is still a Phase 2 deliverable so the
+     * list stays empty in normal flow until then). Additive — no existing
+     * writer reads it yet.
+     */
+    val fileReferences: List<ComposerFileReference> = emptyList()
 )
 
 /**
@@ -198,6 +219,7 @@ data class SettingsState(
 data class ChatState(
     val currentSessionId: String? = null,
     val messages: List<Message> = emptyList(),
+    val revertCutoffs: Map<String, cn.vectory.ocdroid.data.model.RevertCutoff> = emptyMap(),
     val partsByMessage: Map<String, List<Part>> = emptyMap(),
     val streamingPartTexts: Map<String, String> = emptyMap(),
     val streamingReasoningPart: Part? = null,
@@ -376,13 +398,6 @@ data class ConnectionFormSettings(
     val username: String,
     val password: String
 )
-
-/**
- * §R-17 batch2: navigation-domain state slice. Replaces the former
- * AppState.lastNavPage. Source of truth is SettingsManager (persisted); this
- * slice is the in-memory view. Not part of the 9 SliceFlows bundle.
- */
-data class NavState(val lastNavPage: Int = 0)
 
 /**
  * §R-17 batch2 → §R18 Phase 4 (P0-9): bundle view over the nine domain slices.

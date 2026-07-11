@@ -14,6 +14,8 @@ import cn.vectory.ocdroid.data.cache.FingerprintResult
 import cn.vectory.ocdroid.ui.controller.applySessionDiffIfAbsent
 import cn.vectory.ocdroid.data.model.Session
 import cn.vectory.ocdroid.data.model.SessionStatus
+import cn.vectory.ocdroid.data.model.RevertCutoff
+import cn.vectory.ocdroid.data.model.RevertCutoffState
 import cn.vectory.ocdroid.data.model.toCacheEntry
 import cn.vectory.ocdroid.data.repository.OpenCodeRepository
 import cn.vectory.ocdroid.util.DebugLog
@@ -47,7 +49,8 @@ internal fun persistSessionCache(
     sessions: List<Session>,
     openIds: List<String>,
     currentId: String?,
-    currentWorkdir: String?
+    currentWorkdir: String?,
+    revertCutoffs: Map<String, RevertCutoff>
 ) {
     val openIdSet = openIds.toSet()
     val cache = sessions
@@ -57,7 +60,13 @@ internal fun persistSessionCache(
                 s.id == currentId ||
                 (currentWorkdir != null && s.parentId == null && s.directory == currentWorkdir)
         }
-        .map { it.toCacheEntry() }
+        .map { session ->
+            session.toCacheEntry().copy(
+                revertCreatedAtEpochMs = revertCutoffs[session.id]
+                    ?.takeIf { it.messageId == session.revert?.messageId }
+                    ?.let { (it.state as? RevertCutoffState.Resolved)?.createdAtEpochMs }
+            )
+        }
         .toList()
     settingsManager.sessionCache = cache
 }
@@ -167,7 +176,8 @@ internal fun launchLoadSessions(
                     sessions = mergedSessions,
                     openIds = currentOpenIds,
                     currentId = currentSessionId,
-                    currentWorkdir = settingsManager.currentWorkdir
+                    currentWorkdir = settingsManager.currentWorkdir,
+                    revertCutoffs = slices.chat.value.revertCutoffs
                 )
                 if (staleHostAfterSuspend()) return@onSuccess
                 when {

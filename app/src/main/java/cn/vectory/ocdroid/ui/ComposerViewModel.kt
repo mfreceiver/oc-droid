@@ -139,4 +139,17 @@ class ComposerViewModel @Inject constructor(
     fun togglePartExpand(key: String, currentValue: Boolean) {
         composerController.togglePartExpand(key, currentValue)
     }
+
+    // ── File references (Phase 1B / scheme A) ───────────────────────────────
+
+    /** §1B (F.4): add a file reference; mirrors [ComposerController.addFileReference]. */
+    fun addFileReference(path: String) {
+        composerController.addFileReference(path)
+    }
+
+    /** §1B (F.4): remove a file reference by its stable id; mirrors
+     *  [ComposerController.removeFileReference]. */
+    fun removeFileReference(id: String) {
+        composerController.removeFileReference(id)
+    }
 }

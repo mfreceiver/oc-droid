@@ -213,7 +213,10 @@ internal fun ToolCard(
                     }
                     if (firstFile != null) {
                         Spacer(modifier = Modifier.width(4.dp))
-                        IconButton(onClick = { onFileClick(firstFile) }, modifier = Modifier.size(22.dp)) {
+                        // §phase3 48dp audit (plan §5 task 4): dropped the
+                        // explicit Modifier.size(22.dp) — IconButton defaults
+                        // to a 48dp minimum touch target.
+                        IconButton(onClick = { onFileClick(firstFile) }) {
                             Icon(
                                 Icons.AutoMirrored.Filled.OpenInNew,
                                 contentDescription = stringResource(R.string.files_show_in_files),
@@ -291,7 +294,10 @@ internal fun ToolCard(
                                     softWrap = true,
                                     modifier = Modifier.weight(1f)
                                 )
-                                IconButton(onClick = { onFileClick(path) }, modifier = Modifier.size(22.dp)) {
+                                // §phase3 48dp audit (plan §5 task 4): dropped
+                                // the explicit Modifier.size(22.dp) — IconButton
+                                // defaults to a 48dp minimum touch target.
+                                IconButton(onClick = { onFileClick(path) }) {
                                     Icon(
                                         Icons.AutoMirrored.Filled.OpenInNew,
                                         contentDescription = stringResource(R.string.files_show_in_files),

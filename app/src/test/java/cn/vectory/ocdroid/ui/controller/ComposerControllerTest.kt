@@ -171,11 +171,38 @@ class ComposerControllerTest {
         controller.clearDraftIfActive()
 
         assertEquals(null, composerFlow.value.draftWorkdir)
-        assertEquals("", composerFlow.value.inputText)
+        // §1B-FIX (I4): clearDraftIfActive only strips `File: <path>`
+        // lines (and clears fileReferences / imageAttachments); the
+        // user's plain text is left intact so the next draft session
+        // can pick up where the user left off.
+        assertEquals("draft content", composerFlow.value.inputText)
         assertTrue(composerFlow.value.imageAttachments.isEmpty())
+        assertTrue(composerFlow.value.fileReferences.isEmpty())
         // §batch 3b: clearPersistedWorkdir is now an inline SettingsManager
         // currentWorkdir=null write (rule A) — verify the mock received it.
         verify { settingsManager.currentWorkdir = null }
+    }
+
+    @Test
+    fun `clearDraftIfActive strips File lines but preserves plain text`() {
+        // §1B-FIX (I4): chip strip + text strip in the same call — the
+        // user's plain text is kept; any `File: <path>` lines are
+        // dropped because the fileReferences list is wiped.
+        store.mutateComposer {
+            it.copy(
+                draftWorkdir = "/tmp/proj",
+                inputText = "user typed this\nFile: /a/b.kt\nand more",
+                fileReferences = listOf(cn.vectory.ocdroid.ui.ComposerFileReference("/a/b.kt")),
+            )
+        }
+        store.mutateChat { it.copy(currentSessionId = null) }
+
+        controller.clearDraftIfActive()
+
+        assertEquals(null, composerFlow.value.draftWorkdir)
+        // The File: line is stripped, the rest of the text is preserved.
+        assertEquals("user typed this\nand more", composerFlow.value.inputText)
+        assertTrue(composerFlow.value.fileReferences.isEmpty())
     }
 
     @Test
@@ -247,5 +274,186 @@ class ComposerControllerTest {
         controller.setInputText("new text")
 
         assertEquals(setOf("s1"), composerFlow.value.sendingSessionIds)
+    }
+
+    // ── File references (Phase 1B / F.4) ──────────────────────────────────
+    // §1B (F.4): additive ComposerState.fileReferences. addFileReference
+    // appends a ComposerFileReference + a "File: <path>" line to inputText;
+    // removeFileReference strips the entry + the matching line. Both are
+    // pure additions — no other writer is touched.
+
+    @Test
+    fun `addFileReference appends to fileReferences and inputText`() {
+        controller.setInputText("hello")
+
+        controller.addFileReference("/tmp/proj/foo.kt")
+
+        assertEquals(1, composerFlow.value.fileReferences.size)
+        assertEquals("/tmp/proj/foo.kt", composerFlow.value.fileReferences[0].path)
+        // Scheme A: the literal `File: <path>` is appended as a new line.
+        assertEquals("hello\nFile: /tmp/proj/foo.kt", composerFlow.value.inputText)
+    }
+
+    @Test
+    fun `addFileReference with empty inputText seeds a single line`() {
+        controller.addFileReference("/a/b/c.txt")
+
+        assertEquals("File: /a/b/c.txt", composerFlow.value.inputText)
+    }
+
+    @Test
+    fun `addFileReference is a no-op for blank paths`() {
+        controller.addFileReference("")
+        controller.addFileReference("   ")
+
+        assertTrue(composerFlow.value.fileReferences.isEmpty())
+        assertEquals("", composerFlow.value.inputText)
+    }
+
+    @Test
+    fun `addFileReference does not duplicate an existing path`() {
+        controller.addFileReference("/a/b.kt")
+        controller.addFileReference("/a/b.kt")
+
+        assertEquals(1, composerFlow.value.fileReferences.size)
+    }
+
+    @Test
+    fun `addFileReference dedups against hand-typed File lines (I4)`() {
+        // §1B-FIX (I4): if the user has manually typed a `File: <path>`
+        // line in the composer text, calling addFileReference with the
+        // same path must not create a duplicate (text-line or chip).
+        controller.setInputText("prelude\nFile: /a/b.kt\npostlude")
+
+        controller.addFileReference("/a/b.kt")
+
+        // chip count stays 1
+        assertEquals(1, composerFlow.value.fileReferences.size)
+        // text contains exactly one `File: /a/b.kt` line
+        val fileCount = composerFlow.value.inputText
+            .split('\n')
+            .count { it.trimStart() == "File: /a/b.kt" }
+        assertEquals(1, fileCount)
+    }
+
+    @Test
+    fun `addFileReference only adds chip when text line already present (I4)`() {
+        // Edge case: the user has the text line but no chip — adding
+        // the reference should create a chip WITHOUT re-appending the
+        // text line (no duplicate).
+        controller.setInputText("File: /x/y.kt")
+
+        controller.addFileReference("/x/y.kt")
+
+        assertEquals(1, composerFlow.value.fileReferences.size)
+        assertEquals("File: /x/y.kt", composerFlow.value.inputText)
+    }
+
+    @Test
+    fun `addFileReference only adds text line when chip already present (I4)`() {
+        // Edge case: the user has a chip but somehow the text line is
+        // missing — adding the reference should append the text line
+        // (mirroring the chip). In practice the chip + text are always
+        // written together, so this is a defensive symmetry.
+        store.mutateComposer {
+            it.copy(
+                fileReferences = listOf(cn.vectory.ocdroid.ui.ComposerFileReference("/x/y.kt")),
+                inputText = "",
+            )
+        }
+
+        controller.addFileReference("/x/y.kt")
+
+        assertEquals(1, composerFlow.value.fileReferences.size)
+        assertEquals("File: /x/y.kt", composerFlow.value.inputText)
+    }
+
+    @Test
+    fun `removeFileReference strips all matching File lines including duplicates (I4)`() {
+        // §1B-FIX (I4): if the user typed the same `File: <path>` line
+        // twice, removing the chip must strip BOTH lines (consistent
+        // with the chip-removal intent: the user no longer wants this
+        // file referenced).
+        store.mutateComposer {
+            it.copy(
+                inputText = "User text\nFile: /x/y.kt\nMore text\nFile: /x/y.kt",
+                fileReferences = listOf(
+                    cn.vectory.ocdroid.ui.ComposerFileReference("/x/y.kt")
+                ),
+            )
+        }
+
+        controller.removeFileReference(composerFlow.value.fileReferences[0].id)
+
+        // All matching `File:` lines are stripped; other content is
+        // preserved.
+        assertEquals("User text\nMore text", composerFlow.value.inputText)
+        assertTrue(composerFlow.value.fileReferences.isEmpty())
+    }
+
+    @Test
+    fun `addFileReference appends after a trailing newline without smushing`() {
+        controller.setInputText("line1\n")
+
+        controller.addFileReference("/a/b.kt")
+
+        assertEquals("line1\nFile: /a/b.kt", composerFlow.value.inputText)
+    }
+
+    @Test
+    fun `removeFileReference strips the matching path and its inputText line`() {
+        controller.addFileReference("/a/b.kt")
+        controller.addFileReference("/c/d.kt")
+        val firstId = composerFlow.value.fileReferences[0].id
+        val secondId = composerFlow.value.fileReferences[1].id
+
+        controller.removeFileReference(firstId)
+
+        assertEquals(1, composerFlow.value.fileReferences.size)
+        assertEquals("/c/d.kt", composerFlow.value.fileReferences[0].path)
+        // Scheme A: the matching "File: <path>" line is removed from
+        // inputText as well — the outgoing prompt must not still
+        // reference the removed file.
+        assertEquals("File: /c/d.kt", composerFlow.value.inputText)
+        // secondId untouched
+        assertEquals(secondId, composerFlow.value.fileReferences[0].id)
+    }
+
+    @Test
+    fun `removeFileReference is a no-op for unknown id`() {
+        controller.addFileReference("/a/b.kt")
+
+        controller.removeFileReference("non-existent-id")
+
+        assertEquals(1, composerFlow.value.fileReferences.size)
+        assertEquals("File: /a/b.kt", composerFlow.value.inputText)
+    }
+
+    @Test
+    fun `removeFileReference is a no-op on empty list`() {
+        controller.removeFileReference("missing")
+
+        assertTrue(composerFlow.value.fileReferences.isEmpty())
+        assertEquals("", composerFlow.value.inputText)
+    }
+
+    @Test
+    fun `addFileReference persists draft for active session`() {
+        store.mutateChat { it.copy(currentSessionId = "s1") }
+
+        controller.addFileReference("/a/b.kt")
+
+        verify { settingsManager.setDraftText(any(), "s1", "File: /a/b.kt") }
+    }
+
+    @Test
+    fun `addFileReference then removeFileReference round-trips to empty state`() {
+        controller.addFileReference("/a/b.kt")
+        val id = composerFlow.value.fileReferences[0].id
+
+        controller.removeFileReference(id)
+
+        assertTrue(composerFlow.value.fileReferences.isEmpty())
+        assertEquals("", composerFlow.value.inputText)
     }
 }

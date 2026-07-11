@@ -123,18 +123,19 @@ class SettingsViewModel @Inject constructor(
      * path the active session is bound to). This is a plain read of the
      * existing [settingsManager.currentWorkdir] field — it is NOT routing VCS
      * data through this VM (the VCS fetch + state lives entirely inside the
-     * [cn.vectory.ocdroid.ui.settings.VcsSection] composable's local state).
-     * Surfaced here purely so SettingsScreen has a way to read the workdir
-     * input without reaching into another domain; mirrors how every controller
-     * reads `settingsManager.currentWorkdir` directly.
+     * Workspace → Changes pane's local state). Surfaced here purely so other
+     * domains have a way to read the workdir input without reaching into
+     * another domain; mirrors how every controller reads
+     * `settingsManager.currentWorkdir` directly.
      */
     val currentWorkdir: String? get() = settingsManager.currentWorkdir
 
     /**
-     * §reactive-workdir: observable workdir so SettingsScreen / VcsSection react
-     * to workdir changes (session switch, profile switch, disconnect) without a
-     * manual refresh. The plain [currentWorkdir] getter is kept for existing
-     * snapshot reads (zero blast radius); new reactive consumers collect this.
+     * §reactive-workdir: observable workdir so consumers (Workspace → Changes
+     * pane, ContextSelectorSheet, etc.) react to workdir changes (session
+     * switch, profile switch, disconnect) without a manual refresh. The plain
+     * [currentWorkdir] getter is kept for existing snapshot reads (zero blast
+     * radius); new reactive consumers collect this.
      */
     val currentWorkdirFlow: StateFlow<String?> = settingsManager.currentWorkdirFlow
 

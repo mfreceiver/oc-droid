@@ -51,6 +51,7 @@ import cn.vectory.ocdroid.ui.ChatViewModel
 import cn.vectory.ocdroid.ui.ComposerViewModel
 import cn.vectory.ocdroid.ui.SessionViewModel
 import cn.vectory.ocdroid.ui.METADATA_MARKER_ROLES
+import cn.vectory.ocdroid.ui.currentSessionStatus
 import cn.vectory.ocdroid.ui.filterBeforeRevert
 import cn.vectory.ocdroid.ui.injectMetadataMarkers
 import cn.vectory.ocdroid.ui.isStaleQuestionPart
@@ -73,6 +74,7 @@ internal fun ChatMessageList(
     composerVM: ComposerViewModel,
     sessionVM: SessionViewModel,
     onFileClick: (String) -> Unit,
+    onOpenChanges: (String) -> Unit = {},
     onTabVisibilityChange: (Boolean) -> Unit = {},
     // §3-scroll-memory: hoisted per-session scroll-position cache + its
     // access-order LRU ledger. Lifted out of this composable (previously
@@ -80,7 +82,33 @@ internal fun ChatMessageList(
     // and recreating ChatMessageList on currentSessionId flip no longer
     // drops the cached positions. Owned by ChatScreen; mutated here.
     savedPositions: SnapshotStateMap<String, Pair<Int, Int>>,
-    accessOrder: SnapshotStateList<String>
+    accessOrder: SnapshotStateList<String>,
+    // §1C: per-message destructive-action callbacks (Copy / Edit & rerun /
+    // Fork). Edit & rerun is the Phase 0 RevertConversation use case's
+    // single entry point — must be confirmed by the dialog INSIDE
+    // MessageCard before the callback fires. All three callbacks are
+    // non-null at call sites (ChatScaffold always supplies them) so we
+    // pass them as required parameters rather than optional defaults —
+    // the silent no-op default for destructive actions is the kind of
+    // bug the §destructive-gate contract explicitly rejects.
+    onCopyMessage: (messageId: String, text: String) -> Unit = { _, _ -> },
+    onEditAndRerun: (messageId: String) -> Unit = {},
+    onFork: (messageId: String) -> Unit = {},
+    /**
+     * §phase2-parity: narrow projection of composerFlow for the
+     * canEditAndRerun destructive gate. ChatScaffold derives this ONCE from
+     * its already-subscribed composer slice (`composer.sendingSessionIds
+     * .contains(currentSessionId)`) and passes the boolean down. This keeps
+     * ChatMessageList OFF composerFlow entirely — every keystroke mutates
+     * composerFlow (input text), so a direct subscription here would
+     * recompose the whole message list on every key. The §1B/1C parity
+     * contract ("typing does not recompose the message list") is restored.
+     * The other gate inputs (busy / retry / streamingPartTexts /
+     * streamingReasoningPart) are read from chatFlow + sessionListFlow
+     * inside this composable — those subscriptions fire on legitimate
+     * message/stream events, not keystrokes.
+     */
+    isCurrentSessionSending: Boolean = false,
 ) {
     // §R-17 Stage 2: subscribe to chatFlow + sessionListFlow directly so SSE
     // streaming deltas (streamingPartTexts mutation) only recompose this list,
@@ -89,6 +117,13 @@ internal fun ChatMessageList(
     // Compose) passed from ChatScreen's AppState read, which forced a
     // recomposition on every AppState emission. Reading from the slice Flows
     // here lets the runtime skip this composable when neither slice emits.
+    //
+    // §phase2-parity: composerFlow is deliberately NOT subscribed here. The
+    // single boolean the gate needs (`isCurrentSessionSending`) is derived
+    // once in ChatScaffold and passed as a narrow param. A composerFlow
+    // subscription would recompose this list on every keystroke (input text
+    // mutation), breaking the §1B/1C "typing does not recompose the list"
+    // parity contract.
     val chatState by chatVM.chatFlow.collectAsStateWithLifecycle()
     val sessionListState by chatVM.sessionListFlow.collectAsStateWithLifecycle()
     val expandedParts by chatVM.expandedParts.collectAsStateWithLifecycle()
@@ -97,9 +132,17 @@ internal fun ChatMessageList(
     // lives on the Session (sessionListFlow) but the messages list lives on
     // chatFlow. Recompute only when either input changes (remember key).
     val currentSession = sessionListState.sessions.find { it.id == chatState.currentSessionId }
-    val messages: List<Message> = remember(chatState.messages, currentSession?.revert?.messageId) {
-        val revertMessageId = currentSession?.revert?.messageId
-        val reverted = chatState.messages.filterBeforeRevert(revertMessageId)
+    val currentCutoff = chatState.currentSessionId?.let(chatState.revertCutoffs::get)
+    val revertMessageId = if (currentSession != null) currentSession.revert?.messageId else currentCutoff?.messageId
+    LaunchedEffect(chatState.currentSessionId, revertMessageId, currentSession?.revert?.messageId) {
+        // Start one bounded resolve for a newly-needed cutoff. Failed is terminal
+        // until an explicit retry; never spin on every ChatState emission.
+        if (revertMessageId != null && currentCutoff?.state !is cn.vectory.ocdroid.data.model.RevertCutoffState.Failed) {
+            chatVM.retryRevertCutoff()
+        }
+    }
+    val messages: List<Message> = remember(chatState.messages, revertMessageId, currentCutoff) {
+        val reverted = chatState.messages.filterBeforeRevert(revertMessageId, currentCutoff)
         // §s3-markers: keep user/assistant turns + the synthetic metadata
         // marker roles, then interleave markers wherever agent/model
         // changed between consecutive turns.
@@ -130,6 +173,14 @@ internal fun ChatMessageList(
     val sessionIsRunning = chatState.currentSessionId?.let { id ->
         sessionListState.sessionStatuses[id]?.let { it.isBusy || it.isRetry }
     } == true
+    // §1C: derived once for the canEditAndRerun gate inside the message
+    // rendering. Reading the SessionStatus directly avoids going
+    // through currentSessionStatus() (which is the same value but
+    // allocated per-message) and keeps the per-row gate logic
+    // explicit.
+    val currentSessionStatus = chatState.currentSessionId?.let { sid ->
+        sessionListState.sessionStatuses[sid]
+    }
     val hasMoreMessages: Boolean = chatState.hasMoreMessages
     // §F3-load-more: 同时取 cursor——渲染门加 cursor 守卫，任何 cursor 缺失/不一致
     // 都不显示"加载更多"按钮（避免按钮显示但点击因 cursor=null 无反应）。
@@ -599,7 +650,7 @@ internal fun ChatMessageList(
                     SessionDiffCard(
                         sessionId = diffSessionId,
                         diffs = sessionDiff,
-                        onFileClick = onFileClick
+                        onOpenChanges = onOpenChanges,
                     )
                 }
             }
@@ -630,7 +681,76 @@ internal fun ChatMessageList(
                         if (isInFlightEmpty) {
                             InFlightEmptyLoading()
                         } else {
-                            MessageRow(
+                            // §1C: wrap MessageRow in MessageCard so the
+                            // per-row overflow menu (Copy / Edit & rerun /
+                            // Fork) + the destructive confirmation dialog
+                            // have a mounting point. The card body is the
+                            // existing MessageRow (verbatim — no part-level
+                            // rendering change), and the menu's destructive
+                            // action is gated on its own confirmation dialog
+                            // (see MessageCard.kt's class doc for the
+                            // destructive-gate contract).
+                            //
+                            // §1C-FIX-②/④: build the gate-input
+                            // snapshot from the canonical slices and
+                            // run the PURE [canEditAndRerun] predicate.
+                            // The predicate is the SOLE authority for
+                            // the enablement boolean — the test in
+                            // [MessageCardDestructiveGateTest] calls
+                            // it directly (no duplication of logic).
+                            //
+                            // Conditions (mirroring
+                            // RevertConversation.execute:23-26, the
+                            // use case's own intercept set):
+                            //   - isUser                  : assistant /
+                            //                              system rows
+                            //                              are not valid
+                            //                              revert pivots
+                            //                              (use case
+                            //                              rejects them)
+                            //   - !sessionIsBusy         : SessionStatus
+                            //                              isBusy (server
+                            //                              producing)
+                            //   - !sessionIsRetry        : SessionStatus
+                            //                              isRetry (failed
+                            //                              run, backoff)
+                            //   - !isSending             : composerFlow
+                            //                              sendingSessionIds
+                            //                              contains
+                            //                              currentSessionId
+                            //                              (send-ACK
+                            //                              window).
+                            //                              §phase2-parity:
+                            //                              derived ONCE in
+                            //                              ChatScaffold (off
+                            //                              composerFlow) and
+                            //                              passed as the narrow
+                            //                              isCurrentSessionSending
+                            //                              param — this list no
+                            //                              longer subscribes to
+                            //                              composerFlow, so
+                            //                              typing does not
+                            //                              recompose it.
+                            //   - !hasStreamingText      : chatFlow
+                            //                              streamingPartTexts
+                            //                              non-empty
+                            //                              (SSE text
+                            //                              deltas in
+                            //                              flight)
+                            //   - !hasStreamingReasoning : chatFlow
+                            //                              streamingReasoningPart
+                            //                              != null
+                            val isEditAndRerunEnabled = canEditAndRerun(
+                                DestructiveGateInputs(
+                                    isUser = message.isUser,
+                                    sessionIsBusy = currentSessionStatus?.isBusy == true,
+                                    sessionIsRetry = currentSessionStatus?.isRetry == true,
+                                    isSending = isCurrentSessionSending,
+                                    hasStreamingText = streamingPartTexts.isNotEmpty(),
+                                    hasStreamingReasoning = streamingReasoningPart != null,
+                                )
+                            )
+                            MessageCard(
                                 message = message,
                                 parts = msgParts,
                                 streamingPartTexts = streamingPartTexts,
@@ -642,7 +762,19 @@ internal fun ChatMessageList(
                                 expandedParts = expandedParts,
                                 onToggleExpand = onToggleExpand,
                                 staleQuestionPartKeys = staleQuestionPartKeys,
-                                showMessageDecoration = block.showMessageDecoration
+                                showMessageDecoration = block.showMessageDecoration,
+                                // Copy + Fork are always offered (Fork is
+                                // non-destructive). Edit & rerun is gated
+                                // by canEditAndRerun above. Future gates
+                                // (offline / permission) can land on
+                                // canCopy / canFork without churning this
+                                // signature.
+                                canCopy = true,
+                                canEditAndRerun = isEditAndRerunEnabled,
+                                canFork = true,
+                                onCopy = { text -> onCopyMessage(message.id, text) },
+                                onEditAndRerun = onEditAndRerun,
+                                onFork = onFork,
                             )
                         }
                     }

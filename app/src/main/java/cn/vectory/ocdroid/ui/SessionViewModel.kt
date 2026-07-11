@@ -140,7 +140,10 @@ class SessionViewModel @Inject constructor(
             store.mutateChat { it.copy(currentSessionId = null, messages = emptyList(), partsByMessage = emptyMap()) }
         }
         if (isCurrent && nextId == null) {
-            store.mutateComposer { it.copy(inputText = "") }
+            // §1B-FIX (I4): closing the last session must also clear
+            // fileReferences + imageAttachments — the chips must not leak
+            // to the empty state.
+            store.mutateComposer { it.copy(inputText = "", imageAttachments = emptyList(), fileReferences = emptyList()) }
         }
         if (isCurrent && nextId != null) {
             selectSession(nextId)
@@ -187,7 +190,15 @@ class SessionViewModel @Inject constructor(
         store.mutateSessionList { it.copy(sessionTodos = emptyMap()) }
         store.mutateChat { it.copy(currentModel = null) }
         store.mutateComposer {
-            it.copy(inputText = "", imageAttachments = emptyList(), draftWorkdir = workdir)
+            // §1B-FIX (I4): also clear fileReferences — chips from the
+            // previous session's draft must not carry over to the new
+            // workdir.
+            it.copy(
+                inputText = "",
+                imageAttachments = emptyList(),
+                fileReferences = emptyList(),
+                draftWorkdir = workdir,
+            )
         }
         settingsManager.currentWorkdir = workdir
         // glm-3 🟡#1: single-read fp.
