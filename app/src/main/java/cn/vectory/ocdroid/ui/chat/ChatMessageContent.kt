@@ -21,7 +21,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListState
-import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
@@ -534,14 +534,16 @@ internal fun ChatMessageList(
         partsByMessage,
         streamingPartTexts,
         staleQuestionPartKeys,
-        streamingReasoningPart
+        streamingReasoningPart,
+        sessionIsRunning
     ) {
         buildRenderBlocks(
             entries = reversedEntries.asReversed(),
             partsByMessage = partsByMessage,
             streamingPartTexts = streamingPartTexts,
             staleQuestionPartKeys = staleQuestionPartKeys,
-            streamingReasoningPartId = streamingReasoningPart?.id
+            streamingReasoningPartId = streamingReasoningPart?.id,
+            sessionIsRunning = sessionIsRunning
         ).asReversed()
     }
 
@@ -551,11 +553,7 @@ internal fun ChatMessageList(
             state = listState,
             modifier = Modifier.fillMaxSize(),
         reverseLayout = true,
-        // §4.1 v2 spacing: 16dp between turns (each item is one turn = one
-        // MessageRow). Combined with MessageRow's own vertical=4dp padding,
-        // adjacent turns sit ~24dp apart visually (4 + 16 + 4). Within a turn,
-        // per-part cards carry their own 2-4dp vertical padding.
-        verticalArrangement = Arrangement.spacedBy(16.dp),
+        verticalArrangement = Arrangement.Top,
         contentPadding = androidx.compose.foundation.layout.PaddingValues(vertical = 8.dp)
     ) {
         if (streamingReasoningPart != null) {
@@ -611,7 +609,8 @@ internal fun ChatMessageList(
         // （供消息导航 FAB 复用）。R-20 Phase 2：gap divider 由 Entry.GapMarker 渲染，
         // 一个 items() 块统一处理消息行 + 分割线（替代旧的 beforeGap/gap-divider/afterGap
         // 三段式，支持 ≥1 gap）。
-        items(renderBlocks, key = { it.id }) { block ->
+        itemsIndexed(renderBlocks, key = { _, block -> block.id }) { index, block ->
+            Box(modifier = Modifier.fillMaxWidth().padding(top = renderBlockTopPaddingDp(block, index).dp)) {
             when (block) {
                 is RenderBlock.Conversation -> {
                     val message = block.message
@@ -727,6 +726,7 @@ internal fun ChatMessageList(
                         modifier = Modifier.fillMaxWidth()
                     )
                 }
+            }
             }
         }
         // §F3-load-more: 渲染门加 olderMessagesCursor 守卫——hasMore 与 cursor 必须

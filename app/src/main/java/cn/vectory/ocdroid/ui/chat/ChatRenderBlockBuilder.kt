@@ -62,7 +62,8 @@ internal fun buildRenderBlocks(
     partsByMessage: Map<String, List<Part>>,
     streamingPartTexts: Map<String, String>,
     staleQuestionPartKeys: Set<String>,
-    streamingReasoningPartId: String?
+    streamingReasoningPartId: String?,
+    sessionIsRunning: Boolean
 ): List<RenderBlock> {
     val blocks = mutableListOf<RenderBlock>()
     val pendingFold = mutableListOf<MessageToolRenderItem>()
@@ -108,10 +109,23 @@ internal fun buildRenderBlocks(
                 val message = entry.message
                 val parts = partsByMessage[message.id].orEmpty()
 
-                // Metadata markers and in-flight empty shells remain ordinary
-                // conversation items even though they carry no parts.
-                if (message.role in cn.vectory.ocdroid.ui.METADATA_MARKER_ROLES || parts.isEmpty()) {
+                // Metadata markers are always hard seams.
+                if (message.role in cn.vectory.ocdroid.ui.METADATA_MARKER_ROLES) {
                     flushFold()
+                    blocks += RenderBlock.Conversation(
+                        message = message,
+                        parts = parts,
+                        id = "conversation|${message.id}|empty"
+                    )
+                    continue
+                }
+
+                // A running assistant shell may later resolve to a tool call.
+                // Keep its loading placeholder without severing an already
+                // pending cross-message tool run. Idle empty messages and user
+                // turns remain real seams.
+                if (parts.isEmpty()) {
+                    if (message.isUser || !sessionIsRunning) flushFold()
                     blocks += RenderBlock.Conversation(
                         message = message,
                         parts = parts,
@@ -173,6 +187,11 @@ internal fun buildRenderBlocks(
                         )
                         appendToolRun(message, run)
                         index = relativeNextIndex
+                    } else if (part.isStepStart || part.isStepFinish) {
+                        // §fold-fix: step markers are metadata, not conversation content.
+                        // Skipping them prevents flushConversation()->flushFold() from
+                        // severing the cross-message tool fold between consecutive tools.
+                        index++
                     } else {
                         conversationParts += part
                         index++
@@ -222,6 +241,12 @@ internal fun buildRenderBlocks(
             is RenderBlock.Gap -> block
         }
     }
+}
+
+internal fun renderBlockTopPaddingDp(block: RenderBlock, index: Int): Int = when {
+    index == 0 -> 0
+    block is RenderBlock.Conversation && block.message.isUser -> 16
+    else -> 4
 }
 
 private fun RenderBlock.containsMessage(messageId: String): Boolean = when (this) {

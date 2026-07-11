@@ -30,18 +30,26 @@ class ChatRenderBlockBuilderTest {
     private fun patch(id: String, messageId: String) = Part(id = id, messageId = messageId, type = "patch")
     private fun question(id: String, messageId: String) =
         Part(id = id, messageId = messageId, type = "tool", tool = "question", state = PartState("running"))
+    // §fold-fix: real opencode tool calls are wrapped in [step-start, …, step-finish]
+    // part sequences. These markers are metadata, not conversation content.
+    private fun stepStart(id: String, messageId: String) =
+        Part(id = id, messageId = messageId, type = "step-start")
+    private fun stepFinish(id: String, messageId: String) =
+        Part(id = id, messageId = messageId, type = "step-finish")
 
     private fun build(
         entries: List<Entry>,
         parts: Map<String, List<Part>>,
         streamingReasoningPartId: String? = null,
-        staleQuestionPartKeys: Set<String> = emptySet()
+        staleQuestionPartKeys: Set<String> = emptySet(),
+        sessionIsRunning: Boolean = false
     ) = buildRenderBlocks(
         entries = entries,
         partsByMessage = parts,
         streamingPartTexts = emptyMap(),
         staleQuestionPartKeys = staleQuestionPartKeys,
-        streamingReasoningPartId = streamingReasoningPartId
+        streamingReasoningPartId = streamingReasoningPartId,
+        sessionIsRunning = sessionIsRunning
     )
 
     @Test
@@ -354,6 +362,216 @@ class ChatRenderBlockBuilderTest {
             sessionIsRunning = true
         ))
         assertFalse(shouldRenderInFlightEmpty(conversation(erroredMessage("error")), sessionIsRunning = true))
+    }
+
+    @Test
+    fun `running empty assistant shell does not sever a pending cross-message tool run`() {
+        val before = message("before")
+        val shell1 = message("shell-1")
+        val shell2 = message("shell-2")
+        val after = message("after")
+
+        val blocks = build(
+            entries = listOf(
+                Entry.Message(before),
+                Entry.Message(shell1),
+                Entry.Message(shell2),
+                Entry.Message(after)
+            ),
+            parts = mapOf(
+                before.id to listOf(tool("a", before.id)),
+                after.id to listOf(tool("b", after.id))
+            ),
+            sessionIsRunning = true
+        )
+
+        val fold = blocks.single { it is RenderBlock.Fold } as RenderBlock.Fold
+        assertEquals(listOf("a", "b"), fold.items.map { firstPartId(it.item) })
+        val shellBlocks = blocks.filterIsInstance<RenderBlock.Conversation>()
+        assertEquals(listOf("conversation|shell-1|empty", "conversation|shell-2|empty"), shellBlocks.map { it.id })
+        assertTrue(shellBlocks.all { it.showMessageDecoration })
+        assertTrue(shellBlocks.none { it.isDecorationOnly })
+    }
+
+    @Test
+    fun `render block top padding is compact except for user turn starts`() {
+        val assistant = RenderBlock.Conversation(
+            message = message("assistant"),
+            parts = emptyList(),
+            id = "assistant"
+        )
+        val user = RenderBlock.Conversation(
+            message = message("user", role = "user"),
+            parts = emptyList(),
+            id = "user"
+        )
+        val toolRun = RenderBlock.ToolRun(
+            items = listOf(MessageToolRenderItem(message("tool-message"), ToolRenderItem.Basic(tool("tool", "tool-message")))),
+            firstPartId = "tool"
+        )
+        val gap = RenderBlock.Gap(Entry.GapMarker("gap", GapFillState.Idle))
+
+        assertEquals(0, renderBlockTopPaddingDp(user, index = 0))
+        assertEquals(16, renderBlockTopPaddingDp(user, index = 1))
+        assertEquals(4, renderBlockTopPaddingDp(assistant, index = 1))
+        assertEquals(4, renderBlockTopPaddingDp(toolRun, index = 1))
+        assertEquals(4, renderBlockTopPaddingDp(gap, index = 1))
+    }
+
+    @Test
+    fun `empty shell seam matrix preserves user metadata and idle boundaries`() {
+        fun ids(role: String, running: Boolean): List<String> {
+            val before = message("before-$role-$running")
+            val empty = message("empty-$role-$running", role)
+            val after = message("after-$role-$running")
+            return build(
+                entries = listOf(Entry.Message(before), Entry.Message(empty), Entry.Message(after)),
+                parts = mapOf(
+                    before.id to listOf(tool("a-$role-$running", before.id)),
+                    after.id to listOf(tool("b-$role-$running", after.id))
+                ),
+                sessionIsRunning = running
+            ).map { it.id }
+        }
+
+        assertEquals(
+            listOf("run|a-assistant-false", "conversation|empty-assistant-false|empty", "run|b-assistant-false"),
+            ids(role = "assistant", running = false)
+        )
+        assertEquals(
+            listOf("run|a-user-true", "conversation|empty-user-true|empty", "run|b-user-true"),
+            ids(role = "user", running = true)
+        )
+        assertEquals(
+            listOf("run|a-user-false", "conversation|empty-user-false|empty", "run|b-user-false"),
+            ids(role = "user", running = false)
+        )
+        assertEquals(
+            listOf("run|a-agent-switched-true", "conversation|empty-agent-switched-true|empty", "run|b-agent-switched-true"),
+            ids(role = "agent-switched", running = true)
+        )
+    }
+
+    @Test
+    fun `streaming reasoning id on a non-reasoning part does not sever tools around it`() {
+        // buildRenderBlocks line 264 guards the standalone-streaming seam with
+        // `part.id == streamingReasoningPartId && part.isReasoning`. A part whose
+        // id collides with the streaming id but is NOT reasoning must NOT be
+        // treated as a live-thinking seam (it falls through to prose/tools).
+        val m = message("m")
+        val blocks = build(
+            listOf(Entry.Message(m)),
+            mapOf("m" to listOf(tool("a", "m"), text("live", "m"), tool("b", "m"))),
+            streamingReasoningPartId = "live"
+        )
+
+        // Without the `&& part.isReasoning` guard the text part would be dropped
+        // as a hidden seam; with it, the prose survives and splits the run.
+        assertEquals(listOf("run|a", "conversation|m|live", "run|b"), blocks.map { it.id })
+    }
+
+    // ── §fold-fix #3 (step-marker root cause) ──────────────────────────────────
+    // Each real opencode tool call is wrapped in [step-start, …, step-finish].
+    // `step-start`/`step-finish` (Part.type == "step-start"/"step-finish") are
+    // NOT tool/patch/reasoning, so pre-fix they hit the prose `else` branch,
+    // were pushed into conversationParts, and triggered
+    // flushConversation()->flushFold() between EVERY tool — severing the
+    // cross-message fold. The fix adds `else if (part.isStepStart ||
+    // part.isStepFinish) -> index++` so they are skipped. Every test below is
+    // RED without that branch and GREEN with it.
+
+    @Test
+    fun `step markers do not sever a read tool and patch within one message`() {
+        val m = message("m")
+        val blocks = build(
+            listOf(Entry.Message(m)),
+            mapOf("m" to listOf(
+                stepStart("ss", "m"),
+                contextTool("read", "m"),
+                stepFinish("sf", "m"),
+                patch("p", "m")
+            ))
+        )
+
+        // The read tool and the patch land in ONE Fold (partCount 2) instead of
+        // being severed into two single-tool ToolRuns by the step markers.
+        val fold = blocks.single() as RenderBlock.Fold
+        assertEquals(listOf("read", "p"), fold.items.map { firstPartId(it.item) })
+        assertTrue(blocks.none { it is RenderBlock.Conversation })
+    }
+
+    @Test
+    fun `real opencode step sequence keeps a cross-message fold intact across messages`() {
+        // Per-message shape captured in the emulator DebugLog:
+        // [step-start, reasoning, text, tool/bash, step-finish]. The trailing
+        // step-finish must NOT flush the pending fold at message end, so m1's
+        // bash survives the m1→m2 boundary and folds with m2's first tool-like
+        // part (its leading reasoning). (Text remains a real conversation seam
+        // — it severs the in-message run, which is intended builder semantics.)
+        val m1 = message("m1")
+        val m2 = message("m2")
+        val blocks = build(
+            listOf(Entry.Message(m1), Entry.Message(m2)),
+            mapOf(
+                "m1" to listOf(
+                    stepStart("ss1", "m1"), reasoning("r1", "m1"), text("t1", "m1"),
+                    tool("b1", "m1"), stepFinish("sf1", "m1")
+                ),
+                "m2" to listOf(
+                    stepStart("ss2", "m2"), reasoning("r2", "m2"), text("t2", "m2"),
+                    tool("b2", "m2"), stepFinish("sf2", "m2")
+                )
+            )
+        )
+
+        val fold = blocks.single { it is RenderBlock.Fold } as RenderBlock.Fold
+        // m1's bash (b1) carried across the boundary because step-finish no
+        // longer flushes; it folds with m2's leading reasoning (r2).
+        assertEquals(listOf("b1", "r2"), fold.items.map { firstPartId(it.item) })
+        assertEquals(setOf("m1", "m2"), fold.items.map { it.message.id }.toSet())
+        // No step marker survives as standalone conversation content.
+        assertTrue(blocks.none {
+            it is RenderBlock.Conversation && it.parts.any { p -> p.isStepStart || p.isStepFinish }
+        })
+    }
+
+    @Test
+    fun `step markers between consecutive single-tool turns fold into one cross-message fold`() {
+        // Minimal real step sequence per message: [step-start, tool/bash, step-finish].
+        // Here the two bash tools across messages DO fold into one cross-message
+        // Fold (partCount 2) — the literal "two tools, one fold" property that
+        // the step-marker skip guarantees when no prose intervenes.
+        val m1 = message("m1")
+        val m2 = message("m2")
+        val blocks = build(
+            listOf(Entry.Message(m1), Entry.Message(m2)),
+            mapOf(
+                "m1" to listOf(stepStart("ss1", "m1"), tool("b1", "m1"), stepFinish("sf1", "m1")),
+                "m2" to listOf(stepStart("ss2", "m2"), tool("b2", "m2"), stepFinish("sf2", "m2"))
+            )
+        )
+
+        val fold = blocks.single { it is RenderBlock.Fold } as RenderBlock.Fold
+        assertEquals(listOf("b1", "b2"), fold.items.map { firstPartId(it.item) })
+        assertEquals(listOf("m1", "m2"), fold.items.map { it.message.id })
+        assertTrue(blocks.none { it is RenderBlock.Conversation })
+    }
+
+    @Test
+    fun `step start and finish parts are skipped and never become conversation content`() {
+        val m = message("m")
+        val blocks = build(
+            listOf(Entry.Message(m)),
+            mapOf("m" to listOf(
+                stepStart("ss", "m"), tool("b", "m"), stepFinish("sf", "m")
+            ))
+        )
+
+        // The tool survives (here a single bash → ToolRun); the step markers are
+        // dropped entirely and never appear inside any Conversation block.
+        val toolRun = blocks.single() as RenderBlock.ToolRun
+        assertEquals(listOf("b"), toolRun.items.map { firstPartId(it.item) })
+        assertTrue(blocks.none { it is RenderBlock.Conversation })
     }
 
     private fun RenderBlock.decorates(messageId: String): Boolean = when (this) {
