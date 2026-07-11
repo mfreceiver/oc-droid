@@ -738,6 +738,110 @@ class OrchestratorViewModelTest : MainViewModelTestBase() {
         assertEquals(listOf("question-2"), sessionVM.sessionListFlow.value.pendingQuestions.map { it.id })
     }
 
+    // ── §issue-1 Phase 1/2 seam test: resolver→repository wiring ──────────────
+    //
+    // GAP this closes (gpter Phase-1 gate gap #2): Group A tests
+    // `resolveQuestionDirectory` directly; Group B tests the repository header
+    // on the wire directly; the legacy `replyQuestion calls repository…` test
+    // above uses `any()` for the directory arg. NOTHING pins that the directory
+    // the resolver COMPUTES is the directory actually PASSED to
+    // repository.replyQuestion / .rejectQuestion — a future caller could
+    // mis-pass / drop / hardcode the resolver result and A+B+legacy would all
+    // still pass. This test pins that SEAM by asserting the EXACT directory
+    // value on the repository call.
+    //
+    // Phase 2a Fix A IS applied (resolveQuestionDirectory is now `suspend`,
+    // fetches the parent session via repository.getSession when it is absent
+    // locally, and DROPS the old settingsManager.currentWorkdir fallback).
+    // This test seeds the bug-triggering scenario (parent session absent from
+    // local state + currentWorkdir="/wrong-Y") and asserts the FETCHED
+    // "/real-X" reaches the repository — proving resolver→repo wiring through
+    // the suspend fetch. currentWorkdir="/wrong-Y" is set specifically so this
+    // test would FAIL if anyone re-introduced the old currentWorkdir fallback.
+    //
+    // §issue-1 Phase 1/2 seam test: proves resolver→repository wiring (A tests
+    // resolver, B tests wire; this pins the directory arg actually passed).
+    // Would have failed pre-Fix-A (resolver returned currentWorkdir /wrong-Y).
+    @Test
+    fun `replyQuestion seam passes resolveQuestionDirectory output as the directory arg to the repository`() = runTest {
+        val answers = listOf(listOf("React"), listOf("Custom"))
+        // The WRONG value the pre-fix branch-2 fallback used to send. Fix A
+        // drops this path; set it so a regression (re-adding the fallback)
+        // would make this test fail.
+        every { settingsManager.currentWorkdir } returns "/wrong-Y"
+        // The REAL session directory Fix A fetches via GET /session/{id}.
+        coEvery { repository.getSession("session-S") } returns Result.success(Session(id = "session-S", directory = "/real-X"))
+        coEvery { repository.replyQuestion(any(), any(), any()) } returns Result.success(Unit)
+
+        val core = createCore()
+        val chatVM = cn.vectory.ocdroid.ui.ChatViewModel(core)
+        val sessionVM = cn.vectory.ocdroid.ui.SessionViewModel(core)
+        val connectionVM = cn.vectory.ocdroid.ui.ConnectionViewModel(core)
+        val hostVM = cn.vectory.ocdroid.ui.HostViewModel(core)
+        val composerVM = cn.vectory.ocdroid.ui.ComposerViewModel(core)
+        val orchestratorVM = OrchestratorViewModel(core)
+        // session-S is deliberately NOT in `sessions` nor `directorySessions`
+        // (the bug-triggering scenario: parent session absent from local state
+        // → resolver must fetch).
+        core.writeSessionList {
+            it.copy(
+                sessions = emptyList(),
+                directorySessions = emptyMap(),
+                pendingQuestions = listOf(
+                    QuestionRequest(id = "q-1", sessionId = "session-S", questions = emptyList()),
+                ),
+            )
+        }
+
+        orchestratorVM.replyQuestion("q-1", answers)
+        advanceUntilIdle()
+
+        // SEAM PROOF: the EXACT directory the resolver fetched (`/real-X`, NOT
+        // currentWorkdir `/wrong-Y`) is the directory passed to
+        // repository.replyQuestion. NOT `any()` — the literal value, end-to-end
+        // from fetch → resolver → repository arg → (per B1-B4) wire header.
+        coVerify(exactly = 1) { repository.replyQuestion("q-1", answers, "/real-X") }
+        // Fix A fetch: the resolver hit the local-miss → GET /session/{id} path.
+        coVerify(exactly = 1) { repository.getSession("session-S") }
+        // Question consumed from pending on success.
+        assertTrue(sessionVM.sessionListFlow.value.pendingQuestions.none { it.id == "q-1" })
+    }
+
+    // §issue-1 Phase 1/2 seam test (reject companion): same resolver→repo
+    // wiring pinned for rejectQuestion. See the reply seam test above.
+    @Test
+    fun `rejectQuestion seam passes resolveQuestionDirectory output as the directory arg to the repository`() = runTest {
+        every { settingsManager.currentWorkdir } returns "/wrong-Y"
+        coEvery { repository.getSession("session-S") } returns Result.success(Session(id = "session-S", directory = "/real-X"))
+        coEvery { repository.rejectQuestion(any(), any()) } returns Result.success(Unit)
+
+        val core = createCore()
+        val chatVM = cn.vectory.ocdroid.ui.ChatViewModel(core)
+        val sessionVM = cn.vectory.ocdroid.ui.SessionViewModel(core)
+        val connectionVM = cn.vectory.ocdroid.ui.ConnectionViewModel(core)
+        val hostVM = cn.vectory.ocdroid.ui.HostViewModel(core)
+        val composerVM = cn.vectory.ocdroid.ui.ComposerViewModel(core)
+        val orchestratorVM = OrchestratorViewModel(core)
+        core.writeSessionList {
+            it.copy(
+                sessions = emptyList(),
+                directorySessions = emptyMap(),
+                pendingQuestions = listOf(
+                    QuestionRequest(id = "q-1", sessionId = "session-S", questions = emptyList()),
+                ),
+            )
+        }
+
+        orchestratorVM.rejectQuestion("q-1")
+        advanceUntilIdle()
+
+        // SEAM PROOF: the resolver's fetched `/real-X` (not currentWorkdir
+        // `/wrong-Y`) is the directory passed to repository.rejectQuestion.
+        coVerify(exactly = 1) { repository.rejectQuestion("q-1", "/real-X") }
+        coVerify(exactly = 1) { repository.getSession("session-S") }
+        assertTrue(sessionVM.sessionListFlow.value.pendingQuestions.none { it.id == "q-1" })
+    }
+
     @Test
     fun `handleSSEEvent message created refreshes messages for current session`() = runTest {
         val messages = listOf(MessageWithParts(info = Message(id = "m1", role = "assistant")))

@@ -19,6 +19,7 @@ import cn.vectory.ocdroid.ui.SharedEffectBus
 import cn.vectory.ocdroid.ui.SliceFlows
 import cn.vectory.ocdroid.ui.UiEvent
 import cn.vectory.ocdroid.ui.UnreadState
+import cn.vectory.ocdroid.ui.computeQuestionFanOutWorkdirs
 import cn.vectory.ocdroid.ui.lenientJson
 import cn.vectory.ocdroid.ui.parseMessagePartDeltaEvent
 import cn.vectory.ocdroid.ui.parseQuestionAskedEvent
@@ -471,6 +472,11 @@ class SessionSyncCoordinator(
                 }
             }
             "session.status" -> {
+                // §Phase1a instrumentation (Issue 4): capture the FULL raw properties
+                // JSON so we can confirm which fields actually arrive for retry
+                // (type/attempt/message/next + any `action` sub-object). Parser/model
+                // is Phase 4 — for now, raw toString() of the whole JsonObject.
+                DebugLog.d("Retry", "session.status raw properties=${event.payload.properties?.toString() ?: "null"}")
                 val statusEvent = parseSessionStatusEvent(event)
                 if (statusEvent != null) {
                     slices.mutateSessionList {
@@ -896,8 +902,16 @@ class SessionSyncCoordinator(
                 applySseSideEffects(listOf(SseSideEffect.LoadPendingPermissions))
             }
             "question.asked" -> {
+                // §Phase1c instrumentation (Issue 1): raw JSON for live-adherence
+                // insurance (schema already confirmed: {id, sessionID, questions, tool},
+                // no directory) — cheap parity check vs the confirmed contract.
+                DebugLog.d("Question", "question.asked raw properties=${event.payload.properties?.toString() ?: "null"}")
                 val question = parseQuestionAskedEvent(event)
                 if (question != null) {
+                    // §Phase1a→1c instrumentation: DebugLog moved here from inside
+                    // applyQuestionAsked to keep that transform pure (see L1187 note).
+                    val duplicate = slices.sessionList.value.pendingQuestions.any { it.id == question.id }
+                    DebugLog.d("Question", "applyQuestionAsked id=${question.id} sid=${question.sessionId} duplicate=$duplicate")
                     slices.mutateSessionList { currentState -> currentState.applyQuestionAsked(question).first }
                 } else {
                     applySseSideEffects(listOf(SseSideEffect.ReportNonFatal("Ignoring invalid question.asked payload")))
@@ -907,6 +921,9 @@ class SessionSyncCoordinator(
                 val requestId = event.payload.getString("requestID")
                     ?: event.payload.getString("id")
                 if (requestId != null) {
+                    // §Phase1a→1c instrumentation: DebugLog moved here from inside
+                    // applyQuestionResolved to keep that transform pure (see L1187 note).
+                    DebugLog.d("Question", "applyQuestionResolved id=$requestId")
                     slices.mutateSessionList { currentState -> currentState.applyQuestionResolved(requestId).first }
                 }
             }
@@ -924,6 +941,10 @@ class SessionSyncCoordinator(
                 slices.mutateSessionList { s -> s.applyTodoUpdated(sessionId, todos).first }
             }
             "session.error" -> {
+                // §Phase1a instrumentation (Issue 4): capture the FULL raw properties
+                // JSON (name/data/message/statusCode + anything else) so the retry/
+                // error hydration parser in Phase 4 can be finalized against reality.
+                DebugLog.w("Retry", "session.error raw properties=${event.payload.properties?.toString() ?: "null"}")
                 // §error-feedback (Issue 4): the server emits session.error with
                 // payload { sessionID, error: { name, data: { message, statusCode } } }
                 // for rate-limit / quota / provider failures. Two surfaces:
@@ -1136,17 +1157,23 @@ class SessionSyncCoordinator(
      * [SessionSyncCoordinatorTest].
      */
     fun loadPendingQuestionsAllWorkdirs(repository: OpenCodeRepository) {
-        val workdirs = (
-            slices.sessionList.value.directorySessions.keys +
-                listOfNotNull(settingsManager.currentWorkdir)
-            )
-            .filter { it.isNotBlank() }
-            .distinct()
+        // §issue-1 Phase 2a Fix B: shared workdir-set computation (with per-fp
+        // recent_workdirs) — identical to AppCore's catchUpWorkdirs site, via
+        // the [computeQuestionFanOutWorkdirs] helper, so the two sites cannot drift.
+        val workdirs = computeQuestionFanOutWorkdirs(
+            directorySessionKeys = slices.sessionList.value.directorySessions.keys,
+            currentWorkdir = settingsManager.currentWorkdir,
+            recentWorkdirs = settingsManager.getRecentWorkdirs(currentServerGroupFp()),
+        )
+        // §Phase1a instrumentation (Issue 1): the full workdir SET being fanned out.
+        DebugLog.d("Question", "loadPendingQuestionsAllWorkdirs fanOut=${workdirs.size} workdirs=$workdirs")
         if (workdirs.isEmpty()) return
         workdirs.forEach { dir ->
             scope.launch {
                 repository.getPendingQuestions(dir)
                     .onSuccess { questions ->
+                        // §Phase1a instrumentation (Issue 1): per-workdir count returned.
+                        DebugLog.d("Question", "loadPendingQuestionsAllWorkdirs dir=$dir count=${questions.size}")
                         mergePendingQuestionsById(slices::mutateSessionList, questions)
                     }
                     .onFailure { error ->
@@ -1172,10 +1199,12 @@ class SessionSyncCoordinator(
 // Each function takes the prior slice value + the event payload and returns
 // `Pair<State, List<SseSideEffect>>` — the new state AND a list of side
 // effects the dispatcher should commit via `applySseSideEffects`. Pure: no
-// effect emits, no coroutine launches, no settings writes, no DebugLog INSIDE
-// the function. Most return `emptyList()` (the transform is pure state-only);
-// the dispatcher adds cross-slice effects (which need context the single-slice
-// function doesn't have) and routes the combined list.
+// effect emits, no coroutine launches, no settings writes. All DebugLog /
+// diagnostic calls live in the dispatcher (the `when` branches above), NOT
+// inside these functions, so the transforms stay pure + testable. Most return
+// `emptyList()` (the transform is pure state-only); the dispatcher adds
+// cross-slice effects (which need context the single-slice function doesn't
+// have) and routes the combined list.
 //
 // §R-19 Sprint 3 P2-4: the signature unification (all return Pair) is the
 // formalization step — the dispatcher's CAS pattern is now uniform across all

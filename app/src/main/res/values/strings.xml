@@ -200,6 +200,11 @@
     <string name="question_submit_failed">Failed to submit answer. Please try again.</string>
     <string name="question_of">%1$d of %2$d</string>
     <string name="question_empty">(No questions)</string>
+    <!-- D2.1–D2.4: collapsed question pill + disabled input bar placeholder + in-card dismiss failure. -->
+    <string name="question_agent_asking">Agent is asking</string>
+    <string name="question_tap_to_expand">tap to expand</string>
+    <string name="question_dismiss_failed">Failed to dismiss question. Please try again.</string>
+    <string name="chat_input_disabled_question">Answer the question to continue</string>
     <string name="sessions_tab_recent">Recent Sessions</string>
     <string name="sessions_tab_workdirs">Connected Projects</string>
     <string name="sessions_tab_new_workdir">Connect New Project</string>

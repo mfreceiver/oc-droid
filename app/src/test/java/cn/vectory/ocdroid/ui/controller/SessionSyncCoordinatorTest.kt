@@ -1207,11 +1207,14 @@ class SessionSyncCoordinatorTest {
 
     // ── §R18 Phase 3 Wave 1 (P1-9): multi-workdir pending questions fan-out ──
 
+    // §issue-1 Phase 2a Fix B: fan-out site (1) now INCLUDES per-fp recent_workdirs
+    // (flipped green from the Phase 1b characterization that asserted their absence).
     @Test
-    fun `loadPendingQuestionsAllWorkdirs fans out across directorySessions keys plus currentWorkdir and merges by id`() {
+    fun `loadPendingQuestionsAllWorkdirs fans out across directorySessions keys plus currentWorkdir plus recent_workdirs and merges by id`() {
         // §P1-9: the single-workdir AppCore dispatch path polls only
         // currentWorkdir; background workdirs' questions vanish. The fan-out
-        // here queries EVERY known directory + currentWorkdir and merges by id.
+        // here queries EVERY known directory + currentWorkdir + recent_workdirs
+        // (per-fp) and merges by id.
         seed {
             it.copy(
                 directorySessions = mapOf(
@@ -1224,16 +1227,29 @@ class SessionSyncCoordinatorTest {
             )
         }
         every { settingsManager.currentWorkdir } returns "/current"
+        // §issue-1 Fix B: recent_workdirs (per-fp) are now part of the fan-out.
+        // Seed a fake list for the test fp; the coordinator's currentServerGroupFp
+        // is "test-fp" (see setUp), so getRecentWorkdirs("test-fp") returns these.
+        every { settingsManager.getRecentWorkdirs("test-fp") } returns listOf("/recent-1", "/recent-2")
+        // Capture the EXACT workdir set fanned out (stronger than per-path coVerify).
+        val queriedDirs = mutableListOf<String>()
         val repository = mockk<cn.vectory.ocdroid.data.repository.OpenCodeRepository>(relaxed = true)
-        coEvery { repository.getPendingQuestions("/proj-a") } returns Result.success(
-            listOf(QuestionRequest(id = "qa", sessionId = "sa", questions = emptyList()))
-        )
-        coEvery { repository.getPendingQuestions("/proj-b") } returns Result.success(
-            listOf(QuestionRequest(id = "qb", sessionId = "sb", questions = emptyList()))
-        )
-        coEvery { repository.getPendingQuestions("/current") } returns Result.success(
-            listOf(QuestionRequest(id = "qc", sessionId = "sc", questions = emptyList()))
-        )
+        coEvery { repository.getPendingQuestions(any()) } answers {
+            val dir = firstArg<String>()
+            queriedDirs += dir
+            when (dir) {
+                "/proj-a" -> Result.success(
+                    listOf(QuestionRequest(id = "qa", sessionId = "sa", questions = emptyList()))
+                )
+                "/proj-b" -> Result.success(
+                    listOf(QuestionRequest(id = "qb", sessionId = "sb", questions = emptyList()))
+                )
+                "/current" -> Result.success(
+                    listOf(QuestionRequest(id = "qc", sessionId = "sc", questions = emptyList()))
+                )
+                else -> Result.success(emptyList())
+            }
+        }
 
         coordinator.loadPendingQuestionsAllWorkdirs(repository)
         scope.testScheduler.advanceUntilIdle()
@@ -1244,8 +1260,17 @@ class SessionSyncCoordinatorTest {
         assertTrue("qb from /proj-b", "qb" in ids)
         assertTrue("qc from /current", "qc" in ids)
         assertTrue("existing-not-on-server preserved (gap-fill)", "existing-not-on-server" in ids)
-        // No double-fetch of currentWorkdir even when it's also in directorySessions.
-        coVerify(exactly = 1) { repository.getPendingQuestions("/current") }
+        // §issue-1 Fix B: exact workdir SET = directorySessions.keys + currentWorkdir
+        // + recent_workdirs (per-fp). Each queried exactly once (distinct). The
+        // recent workdirs contribute no questions here (else-branch → empty) but
+        // ARE queried — proving a question on a recently-used-but-disconnected
+        // workdir is no longer missed.
+        assertEquals(5, queriedDirs.size)
+        assertEquals(
+            "fan-out set must be directorySessions.keys + currentWorkdir + recent_workdirs",
+            setOf("/proj-a", "/proj-b", "/current", "/recent-1", "/recent-2"),
+            queriedDirs.toSet(),
+        )
     }
 
     @Test

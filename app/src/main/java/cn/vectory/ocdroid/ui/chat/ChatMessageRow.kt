@@ -62,7 +62,8 @@ internal fun MessageRow(
     // Suppress historical reasoning parts whose id matches the active
     // streaming-reasoning part (the standalone streaming item in
     // ChatMessageList already renders it). Null when no stream is active.
-    streamingReasoningPartId: String? = null
+    streamingReasoningPartId: String? = null,
+    showMessageDecoration: Boolean = true
 ) {
     val isUser = message.isUser
     // §issue-4: task completion messages arrive as user-role but should
@@ -220,8 +221,25 @@ internal fun MessageRow(
         //    agent + model handled the turn and when the prompt was sent. The
         //    middot joins agent and model only when both are present; each is
         //    omitted individually when the server did not echo it.
+        if (showMessageDecoration) {
+            MessageDecoration(
+                message = message,
+                isTaskCompletionMsg = isTaskCompletionMsg,
+                cardMax = cardMax
+            )
+        }
+        } // Column
+        } // BoxWithConstraints
+}
+
+@Composable
+internal fun MessageDecoration(
+    message: Message,
+    isTaskCompletionMsg: Boolean = false,
+    cardMax: Dp
+) {
         val timeInfo = message.time
-        val footerText = if (isUser && !isTaskCompletionMsg) {
+        val footerText = if (message.isUser && !isTaskCompletionMsg) {
             val agentName = message.agent
             val modelId = message.resolvedModel?.modelId
             val sendTime = timeInfo?.created?.let(::formatHm)
@@ -255,8 +273,6 @@ internal fun MessageRow(
                 )
             }
         }
-        } // Column
-        } // BoxWithConstraints
 }
 
 @Composable
@@ -361,7 +377,7 @@ internal fun PartView(
  * defensive no-op (it is handled by the caller, never passed here in practice).
  */
 @Composable
-private fun renderToolItem(
+internal fun renderToolItem(
     item: ToolRenderItem,
     message: Message,
     expandedParts: Map<String, Boolean>,

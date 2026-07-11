@@ -924,6 +924,123 @@ class OpenCodeRepositoryTest {
         assertNull(request.getHeader("X-Opencode-Directory"))
     }
 
+    // --- §issue-1 Phase 1b: X-Opencode-Directory header VALUE on question endpoints ---
+    //
+    // Closes the gap exp-1 found: the legacy question-endpoint tests
+    // (getPendingQuestions/replyQuestion/rejectQuestion at L423-519) only
+    // assert path/method/body, NEVER the X-Opencode-Directory header VALUE.
+    // These tests pin the wire-level contract that the (possibly wrong) VALUE
+    // computed by resolveQuestionDirectory (Group A) IS transmitted on the
+    // wire → the server receives a directory header → routes to the
+    // InstanceState named by that header. Together with Group A this is the
+    // deterministic JVM reproduction of scenarios 1+2 (no emulator needed):
+    //   (A) wrong value computed (currentWorkdir when session not local)
+    //   → (B) that value IS sent on the wire
+    //   → server routes to wrong InstanceState → GET [] / POST 4xx.
+    //
+    // Phase 2 fixes resolveQuestionDirectory (the value source); the wire
+    // contract pinned here stays GREEN after the fix.
+
+    @Test
+    fun `B1 getPendingQuestions sends X-Opencode-Directory header and mirrors directory to query`() = runBlocking {
+        // GET /question: the DirectoryHeaderInterceptor preserves the caller
+        // header AND mirrors it into ?directory (proxy-safe double-insurance).
+        server.enqueue(jsonResponse("[]"))
+
+        repository.getPendingQuestions("/workdir-X")
+
+        val request = server.takeRequest()
+        assertEquals("GET", request.method)
+        assertEquals(
+            "directory MUST be transmitted via header",
+            "/workdir-X",
+            request.getHeader("X-Opencode-Directory"),
+        )
+        assertEquals(
+            "GET mirrors the directory header into ?directory (DirectoryHeaderInterceptor)",
+            "/workdir-X",
+            request.requestUrl?.queryParameter("directory"),
+        )
+    }
+
+    @Test
+    fun `B2 replyQuestion sends X-Opencode-Directory header on POST without query mirror`() = runBlocking {
+        // POST /question/{id}/reply: the DirectoryHeaderInterceptor preserves
+        // the caller header but must NOT mirror it into ?directory (POST mirror
+        // would corrupt the body-less query contract). The answers ride in the
+        // JSON body.
+        server.enqueue(MockResponse().setResponseCode(204))
+
+        repository.replyQuestion("q-1", listOf(listOf("A"), listOf("custom", "v")), "/workdir-X")
+
+        val request = server.takeRequest()
+        assertEquals("POST", request.method)
+        assertEquals("/question/q-1/reply", request.path)
+        assertEquals(
+            "directory MUST be transmitted via header",
+            "/workdir-X",
+            request.getHeader("X-Opencode-Directory"),
+        )
+        assertNull(
+            "POST must NOT mirror directory into query (DirectoryHeaderInterceptor contract)",
+            request.requestUrl?.queryParameter("directory"),
+        )
+        val body = request.body.readUtf8()
+        assertTrue("body must carry answers: $body", body.contains("\"answers\""))
+        assertTrue("body must carry the answer values: $body", body.contains("[[\"A\"],[\"custom\",\"v\"]]"))
+    }
+
+    @Test
+    fun `B3 rejectQuestion sends X-Opencode-Directory header on POST`() = runBlocking {
+        // POST /question/{id}/reject: same header contract as reply (POST keeps
+        // the header, no query mirror).
+        server.enqueue(MockResponse().setResponseCode(204))
+
+        repository.rejectQuestion("q-1", "/workdir-X")
+
+        val request = server.takeRequest()
+        assertEquals("POST", request.method)
+        assertEquals("/question/q-1/reject", request.path)
+        assertEquals(
+            "directory MUST be transmitted via header",
+            "/workdir-X",
+            request.getHeader("X-Opencode-Directory"),
+        )
+        assertNull(
+            "POST must NOT mirror directory into query",
+            request.requestUrl?.queryParameter("directory"),
+        )
+    }
+
+    @Test
+    fun `B4 null directory omits X-Opencode-Directory header on reply and reject`() = runBlocking {
+        // Documents the null case: passing directory=null means "do not inject"
+        // → no X-Opencode-Directory header is sent (the server then falls back
+        // to its own process.cwd()). Phase 2 may use null as the SAFE fallback
+        // (instead of the wrong currentWorkdir value) when the real workdir
+        // cannot be resolved — this test pins that the wire behavior for null
+        // is already correct.
+        // reply with null directory.
+        server.enqueue(MockResponse().setResponseCode(204))
+        repository.replyQuestion("q-1", listOf(listOf("A")), null)
+        val replyReq = server.takeRequest()
+        assertEquals("/question/q-1/reply", replyReq.path)
+        assertNull(
+            "null directory must NOT produce a header on reply",
+            replyReq.getHeader("X-Opencode-Directory"),
+        )
+
+        // reject with null directory.
+        server.enqueue(MockResponse().setResponseCode(204))
+        repository.rejectQuestion("q-1", null)
+        val rejectReq = server.takeRequest()
+        assertEquals("/question/q-1/reject", rejectReq.path)
+        assertNull(
+            "null directory must NOT produce a header on reject",
+            rejectReq.getHeader("X-Opencode-Directory"),
+        )
+    }
+
     @Test
     fun `skip-dir endpoints omit directory header and strip marker`() = runBlocking {
         server.enqueue(jsonResponse("[]"))

@@ -16,6 +16,7 @@ import cn.vectory.ocdroid.R
 import cn.vectory.ocdroid.data.model.PermissionRequest
 import cn.vectory.ocdroid.data.model.QuestionRequest
 import cn.vectory.ocdroid.data.repository.OpenCodeRepository
+import cn.vectory.ocdroid.util.DebugLog
 import cn.vectory.ocdroid.util.SettingsManager
 import cn.vectory.ocdroid.util.runSuspendCatching
 import dagger.Module
@@ -203,7 +204,11 @@ class AppLifecycleMonitor @Inject constructor(
         runSuspendCatching {
             repository.getPendingQuestions(settingsManager.currentWorkdir).getOrDefault(emptyList())
         }
-            .onSuccess { questions -> questions.forEach { handlePendingQuestion(it) } }
+            .onSuccess { questions ->
+                // §Phase1a instrumentation (Issue 1): workdir queried + count returned.
+                DebugLog.d("Question", "pollPendingQuestions workdir=${settingsManager.currentWorkdir ?: "null"} count=${questions.size}")
+                questions.forEach { handlePendingQuestion(it) }
+            }
             .onFailure { Log.w(TAG, "Background poll getPendingQuestions failed", it) }
     }
 

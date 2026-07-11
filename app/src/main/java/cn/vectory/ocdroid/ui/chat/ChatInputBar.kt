@@ -50,7 +50,6 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import cn.vectory.ocdroid.R
 import cn.vectory.ocdroid.data.api.CommandInfo
-import cn.vectory.ocdroid.data.model.QuestionRequest
 import cn.vectory.ocdroid.ui.ChatViewModel
 import cn.vectory.ocdroid.ui.ComposerViewModel
 import cn.vectory.ocdroid.ui.OrchestratorViewModel
@@ -62,19 +61,10 @@ internal fun ChatInputBar(
     orchestratorVM: OrchestratorViewModel,
     isBusy: Boolean,
     onAddImages: () -> Unit,
-    // §#4: when a pending system question is active and the hoisted answers
-    // satisfy its requirements, the primary send button submits the question
-    // (via onSubmitQuestion) instead of dispatching a normal prompt. This
-    // routes the user's instinctive tap on the bottom button into
-    // orchestratorVM.replyQuestion, mirroring QuestionCardView's own Submit.
-    pendingQuestion: QuestionRequest? = null,
-    questionAnswersValid: Boolean = false,
-    // 🟠-2: while a question submit is in flight (bottom-bar path), the
-    // primary button is disabled for the question branch to prevent
-    // double-submits on slow networks — mirrors the in-card Submit's isSending
-    // guard. A typed prompt / image attachments can still be sent normally.
-    questionSubmitting: Boolean = false,
-    onSubmitQuestion: () -> Unit = {}
+    // D2.2: when a question is pending for the current session, the input bar
+    // is fully disabled (text field + send/stop button greyed and non-editable).
+    // The question is modal and is submitted/rejected from the floating card only.
+    questionPending: Boolean = false
 ) {
     // §R-17 Stage 2: subscribe to composerFlow + settingsFlow directly so
     // typing (inputText mutation) only recomposes ChatInputBar, and streaming
@@ -95,14 +85,9 @@ internal fun ChatInputBar(
     val onAbort = chatVM::abortSession
     val onExecuteCommand = orchestratorVM::executeCommand
 
-    // §#4: canSend also covers the pending-question path — when a system
-    // question is open and its hoisted answers are valid, the primary button
-    // is enabled so the user can submit it from the bottom bar.
-    // 🟠-2: the question branch is suppressed while a submit is in flight
-    // (questionSubmitting) so the button greys out and re-taps don't queue.
-    val canSend = text.isNotBlank() ||
-        imageAttachments.isNotEmpty() ||
-        (pendingQuestion != null && questionAnswersValid && !questionSubmitting)
+    // D2.2: while a question is pending, the composer is modal — send/stop is
+    // disabled and the text field is not editable.
+    val canSend = (text.isNotBlank() || imageAttachments.isNotEmpty()) && !questionPending
 
     // --- Slash-command autocomplete state ---
     // The composer offers command suggestions when the user types a leading
@@ -194,16 +179,19 @@ internal fun ChatInputBar(
                 // the touch target is enlarged to 48dp via an outer clickable
                 // Box, so the affordance is comfortably tappable. The icon is
                 // centered so the visual density of the composer is unchanged.
+                // D2.2: disabled while a question is pending (modal interaction).
                 Box(
                     modifier = Modifier
                         .size(48.dp)
-                        .clickable(onClick = onAddImages),
+                        .clickable(enabled = !questionPending, onClick = onAddImages),
                     contentAlignment = Alignment.Center
                 ) {
                     Icon(
                         Icons.Default.Add,
                         contentDescription = null,
-                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(
+                            alpha = if (questionPending) 0.5f else 1f
+                        ),
                         modifier = Modifier.size(18.dp)
                     )
                 }
@@ -218,9 +206,14 @@ internal fun ChatInputBar(
                 ) {
                     if (text.isEmpty()) {
                         Text(
-                            stringResource(R.string.chat_type_message),
+                            stringResource(
+                                if (questionPending) R.string.chat_input_disabled_question
+                                else R.string.chat_type_message
+                            ),
                             style = MaterialTheme.typography.bodyLarge,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f)
+                            color = MaterialTheme.colorScheme.onSurfaceVariant.copy(
+                                alpha = if (questionPending) 0.35f else 0.6f
+                            )
                         )
                     }
                     BasicTextField(
@@ -229,7 +222,12 @@ internal fun ChatInputBar(
                         modifier = Modifier
                             .fillMaxWidth()
                             .heightIn(min = 24.dp, max = 120.dp),
-                        textStyle = LocalTextStyle.current.copy(color = MaterialTheme.colorScheme.onSurface),
+                        enabled = !questionPending,
+                        textStyle = LocalTextStyle.current.copy(
+                            color = MaterialTheme.colorScheme.onSurface.copy(
+                                alpha = if (questionPending) 0.5f else 1f
+                            )
+                        ),
                         cursorBrush = SolidColor(MaterialTheme.colorScheme.primary),
                         maxLines = 3
                     )
@@ -240,19 +238,12 @@ internal fun ChatInputBar(
                 // while the inner icon preserves the compact visual density.
                 // §user-req: 去底色——不再有 containerColor/.background，按钮
                 // 仅渲染 onSurfaceVariant 图标（disabled 时 0.5 alpha）。
-                // §#4: when a system question is pending and its hoisted answers
-                // are valid, the button submits the question instead of a normal
-                // send/stop. Question submit takes priority over a typed prompt
-                // (the question is the active modal interaction).
-                // 🟠-2: skip the question branch entirely while a submit is in
-                // flight (button is also disabled via canSend, but this guard
-                // makes the click a guaranteed no-op even if text/images keep
-                // canSend true during the in-flight window).
+                // D2.2: the bottom bar no longer submits questions; the primary
+                // button is always send/stop. While a question is pending the
+                // whole input bar is disabled (modal interaction).
                 ChatPrimaryActionButton(
                     onClick = {
-                        if (pendingQuestion != null && questionAnswersValid && !questionSubmitting) {
-                            onSubmitQuestion()
-                        } else if (canStop) {
+                        if (canStop) {
                             showStopConfirm = true
                         } else {
                             handleComposerSend(
@@ -265,7 +256,7 @@ internal fun ChatInputBar(
                             )
                         }
                     },
-                    enabled = canStop || canSend,
+                    enabled = (canStop || canSend) && !questionPending,
                     dimWhenDisabled = true,
                     icon = sendIcon,
                     contentDescription = sendContentDescription

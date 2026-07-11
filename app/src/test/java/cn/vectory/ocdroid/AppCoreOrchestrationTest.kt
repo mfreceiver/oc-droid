@@ -18,6 +18,7 @@ import cn.vectory.ocdroid.ui.SharedEffectBus
 import cn.vectory.ocdroid.ui.UiEvent
 import cn.vectory.ocdroid.ui.catchUpAfterDisconnectOrForeground
 import cn.vectory.ocdroid.ui.classifyCommandPostError
+import cn.vectory.ocdroid.ui.computeQuestionFanOutWorkdirs
 import cn.vectory.ocdroid.ui.executeCommand
 import cn.vectory.ocdroid.ui.loadMessagesForEffect
 import cn.vectory.ocdroid.ui.materializeDraftSession
@@ -382,6 +383,9 @@ class AppCoreOrchestrationTest : MainViewModelTestBase() {
 
         val dir = core.resolveQuestionDirectory("req1")
         assertEquals("/question-dir", dir)
+        // §issue-1 Fix A (branch-1 control): local session + non-blank dir MUST
+        // NOT trigger a server fetch (the fetch only runs on a miss).
+        coVerify(exactly = 0) { repository.getSession(any()) }
     }
 
     @Test
@@ -403,21 +407,32 @@ class AppCoreOrchestrationTest : MainViewModelTestBase() {
 
         val dir = core.resolveQuestionDirectory("req1")
         assertEquals("/connected", dir)
+        // §issue-1 Fix A (branch-1 control): directorySessions hit MUST NOT fetch.
+        coVerify(exactly = 0) { repository.getSession(any()) }
     }
 
+    // §issue-1 Phase 2a Fix A: fetch-FAIL → null (NOT currentWorkdir). Repurposed
+    // from the Phase 1b currentWorkdir-fallback characterization (that behavior
+    // is gone — currentWorkdir is no longer a fallback in resolveQuestionDirectory).
     @Test
-    fun `resolveQuestionDirectory falls back to currentWorkdir when no matching session`() = runTest {
-        every { settingsManager.currentWorkdir } returns "/fallback"
+    fun `resolveQuestionDirectory returns null when parent session fetch fails`() = runTest {
+        // Session absent locally → fetch → fetch FAILS → null. currentWorkdir is
+        // set but MUST NOT be used (the old silent wrong-value bug).
+        every { settingsManager.currentWorkdir } returns "/workdir-Y"
+        coEvery { repository.getSession("missing") } returns Result.failure(java.io.IOException("404"))
         val question = QuestionRequest(
             id = "req1",
             sessionId = "missing",
             questions = listOf(QuestionInfo(question = "q", header = "h", options = emptyList())),
         )
         val core = wire()
-        core.writeSessionList { it.copy(pendingQuestions = listOf(question)) }
+        core.writeSessionList {
+            it.copy(sessions = emptyList(), directorySessions = emptyMap(), pendingQuestions = listOf(question))
+        }
 
         val dir = core.resolveQuestionDirectory("req1")
-        assertEquals("/fallback", dir)
+        assertNull(dir)
+        coVerify(exactly = 1) { repository.getSession("missing") }
     }
 
     @Test
@@ -427,6 +442,150 @@ class AppCoreOrchestrationTest : MainViewModelTestBase() {
 
         val dir = core.resolveQuestionDirectory("nonexistent")
         assertNull(dir)
+        // §issue-1 Fix A: no pending question → no fetch (sessionId is null).
+        coVerify(exactly = 0) { repository.getSession(any()) }
+    }
+
+    // ── §issue-1 Phase 2a Fix A: resolveQuestionDirectory fetch+CAS contract ──
+    //
+    // Phase 1b characterized the BUG (currentWorkdir fallback → wrong value).
+    // Fix A changes the contract: a local miss now GETs /session/{id}, CAS-
+    // upserts the fetched session into `sessions`, and returns fetched.directory;
+    // a fetch failure returns null (NOT currentWorkdir).
+
+    // §issue-1 Phase 2a Fix A: absent locally → fetch-hit → fetched dir + CAS-cache.
+    @Test
+    fun `resolveQuestionDirectory fetches and CAS-caches parent session directory when session is absent from local state`() = runTest {
+        // A1: pending question for session-S, but session-S is NOT in `sessions`
+        // AND NOT in `directorySessions`. currentWorkdir is set to a DIFFERENT
+        // value to prove it is no longer used as the fallback.
+        every { settingsManager.currentWorkdir } returns "/workdir-Y"
+        coEvery { repository.getSession("session-S") } returns Result.success(
+            Session(id = "session-S", directory = "/real-dir"),
+        )
+        val question = QuestionRequest(
+            id = "req1",
+            sessionId = "session-S",
+            questions = listOf(QuestionInfo(question = "q", header = "h", options = emptyList())),
+        )
+        val core = wire()
+        core.writeSessionList {
+            it.copy(sessions = emptyList(), directorySessions = emptyMap(), pendingQuestions = listOf(question))
+        }
+
+        val dir = core.resolveQuestionDirectory("req1")
+        // Returns the FETCHED directory, not currentWorkdir.
+        assertEquals("/real-dir", dir)
+        coVerify(exactly = 1) { repository.getSession("session-S") }
+        // CAS-upserted into sessions so a later resolve hits branch 1 (no fetch).
+        val cached = core.sessionListFlow.value.sessions.firstOrNull { it.id == "session-S" }
+        assertNotNull("fetched session must be CAS-cached into sessions", cached)
+        assertEquals("/real-dir", cached!!.directory)
+    }
+
+    // §issue-1 Phase 2a Fix A: session local but directory blank → fetch-hit →
+    // fetched dir + CAS-cache (the blank-dir session is REPLACED).
+    @Test
+    fun `resolveQuestionDirectory fetches real directory when parent session directory is blank`() = runTest {
+        // A2: session-S IS in `sessions`, but its `directory` is blank ("").
+        // The production guard `!session.directory.isNullOrBlank()` fails on ""
+        // → falls through to the fetch path. Same fetch+CAS as A1.
+        every { settingsManager.currentWorkdir } returns "/workdir-Y"
+        coEvery { repository.getSession("session-S") } returns Result.success(
+            Session(id = "session-S", directory = "/real-dir"),
+        )
+        val session = Session(id = "session-S", directory = "")
+        val question = QuestionRequest(
+            id = "req1",
+            sessionId = "session-S",
+            questions = listOf(QuestionInfo(question = "q", header = "h", options = emptyList())),
+        )
+        val core = wire()
+        core.writeSessionList {
+            it.copy(sessions = listOf(session), pendingQuestions = listOf(question))
+        }
+
+        val dir = core.resolveQuestionDirectory("req1")
+        assertEquals("/real-dir", dir)
+        coVerify(exactly = 1) { repository.getSession("session-S") }
+        // CAS-upsert REPLACES the blank-dir session with the fetched real-dir one.
+        val cached = core.sessionListFlow.value.sessions.firstOrNull { it.id == "session-S" }
+        assertNotNull(cached)
+        assertEquals("/real-dir", cached!!.directory)
+        assertEquals(1, core.sessionListFlow.value.sessions.size)
+    }
+    // A3 (control: session in sessions with non-blank directory → returns it,
+    // branch 1) is already covered by `resolveQuestionDirectory returns the
+    // pending question's parent session directory` above — skipped per task.
+
+    // §issue-1 Phase 2 gpter fix: CONDITIONAL CAS — the fetched snapshot must NOT
+    // overwrite a session that a concurrent load/SSE hydrated during the suspend
+    // fetch. Before this fix the upsert was unconditional and clobbered the
+    // fresher entry; this test simulates the race deterministically.
+    @Test
+    fun `resolveQuestionDirectory does not overwrite a fresher session hydrated during the fetch`() = runTest {
+        // Race simulation: getSession's answers block writes a FRESHER session
+        // (dir=/fresher) into the store BEFORE returning a STALE fetched snapshot
+        // (dir=/stale-fetched). The conditional CAS lambda must observe the
+        // fresher entry inside writeSessionList, keep it, and return /fresher —
+        // NOT /stale-fetched (which would clobber the fresher entry pre-fix).
+        val question = QuestionRequest(
+            id = "req1",
+            sessionId = "session-S",
+            questions = listOf(QuestionInfo(question = "q", header = "h", options = emptyList())),
+        )
+        val core = wire()
+        core.writeSessionList {
+            it.copy(sessions = emptyList(), directorySessions = emptyMap(), pendingQuestions = listOf(question))
+        }
+        coEvery { repository.getSession("session-S") } answers {
+            // Simulate a concurrent hydration landing during the network wait.
+            core.writeSessionList { st ->
+                st.copy(sessions = listOf(Session(id = "session-S", directory = "/fresher")))
+            }
+            Result.success(Session(id = "session-S", directory = "/stale-fetched"))
+        }
+
+        val dir = core.resolveQuestionDirectory("req1")
+
+        // Returns the FRESHER entry's directory, not the stale fetched snapshot.
+        assertEquals("/fresher", dir)
+        // The fresher entry was NOT overwritten by the stale fetch.
+        val cached = core.sessionListFlow.value.sessions.firstOrNull { it.id == "session-S" }
+        assertNotNull(cached)
+        assertEquals("/fresher", cached!!.directory)
+    }
+
+    // §issue-1 Phase 2: non-blank lookup wins over blank duplicate (gpter round-3).
+    // If `sessions` holds session-S with a BLANK directory AND `directorySessions`
+    // holds the SAME id with a hydrated non-blank directory, the lookup MUST find
+    // the eligible (non-blank) entry — a blank-dir duplicate must not mask it and
+    // force an unnecessary fetch. Before round-3 the predicate was id-only, so
+    // firstOrNull returned the blank entry (sessions iterates first) and the
+    // separate post-check fell through to a fetch.
+    @Test
+    fun `resolveQuestionDirectory finds the non-blank duplicate and skips fetch when a blank-dir session masks a hydrated one`() = runTest {
+        val session = Session(id = "session-S", directory = "") // blank, in sessions
+        val hydrated = Session(id = "session-S", directory = "/hydrated") // same id, non-blank, in directorySessions
+        val question = QuestionRequest(
+            id = "req1",
+            sessionId = "session-S",
+            questions = listOf(QuestionInfo(question = "q", header = "h", options = emptyList())),
+        )
+        val core = wire()
+        core.writeSessionList {
+            it.copy(
+                sessions = listOf(session),
+                directorySessions = mapOf("/hydrated" to listOf(hydrated)),
+                pendingQuestions = listOf(question),
+            )
+        }
+
+        val dir = core.resolveQuestionDirectory("req1")
+
+        // The eligible /hydrated entry wins — NOT the blank duplicate, and no fetch.
+        assertEquals("/hydrated", dir)
+        coVerify(exactly = 0) { repository.getSession(any()) }
     }
 
     // ── openSessionFromDeepLink ───────────────────────────────────────────────
@@ -597,12 +756,23 @@ class AppCoreOrchestrationTest : MainViewModelTestBase() {
         assertFalse(core.chatFlow.value.isLoadingMessages)
     }
 
+    // §issue-1 Phase 2a Fix B: fan-out site (2) now INCLUDES per-fp recent_workdirs
+    // (flipped green from the Phase 1b characterization that asserted their absence).
     @Test
-    fun `catchUpAfterDisconnectOrForeground fans out pending-questions catch-up across known workdirs`() = runTest {
+    fun `catchUpAfterDisconnectOrForeground fans out pending-questions catch-up across known workdirs plus recent_workdirs`() = runTest {
         // Probe says nothing new → reload skipped; we just verify the workdir
-        // fan-out side-effect on foregroundCatchUpController.
+        // fan-out side-effect on foregroundCatchUpController (computed via the
+        // shared computeQuestionFanOutWorkdirs helper, same as site 1).
         coEvery { repository.probeLatestMessageId(any()) } returns Result.success("anchor")
-        coEvery { repository.getPendingQuestions(any()) } returns Result.success(emptyList())
+        // §issue-1 Fix B: recent_workdirs (per-fp) now part of the catch-up fan-out.
+        every { settingsManager.getRecentWorkdirs(any()) } returns listOf("/recent-1")
+        // Capture the EXACT workdir set passed to
+        // foregroundCatchUpController.catchUpPendingQuestionsAllWorkdirs (site 2).
+        val queriedDirs = mutableListOf<String>()
+        coEvery { repository.getPendingQuestions(any()) } answers {
+            queriedDirs += firstArg<String>()
+            Result.success(emptyList())
+        }
         val core = wire()
         core.writeChat {
             it.copy(currentSessionId = "s1", messages = listOf(Message(id = "anchor", role = "user")))
@@ -615,10 +785,14 @@ class AppCoreOrchestrationTest : MainViewModelTestBase() {
         core.catchUpAfterDisconnectOrForeground("s1")
         advanceUntilIdle()
 
-        // All three workdirs probed for pending questions.
-        coVerify(atLeast = 1) { repository.getPendingQuestions("/wA") }
-        coVerify(atLeast = 1) { repository.getPendingQuestions("/wB") }
-        coVerify(atLeast = 1) { repository.getPendingQuestions("/wC") }
+        // §issue-1 Fix B: exact workdir SET = directorySessions.keys + currentWorkdir
+        // + recent_workdirs (per-fp). A question on a recently-used-but-disconnected
+        // workdir (/recent-1) is now caught up — no longer missed.
+        assertEquals(
+            "catch-up fan-out set must be directorySessions.keys + currentWorkdir + recent_workdirs",
+            setOf("/wA", "/wB", "/wC", "/recent-1"),
+            queriedDirs.toSet(),
+        )
     }
 
     // ── R-20 Phase 2 复审 #2: launchCatchUp live fp provider ────────────────
@@ -763,5 +937,74 @@ class AppCoreOrchestrationTest : MainViewModelTestBase() {
             R.string.command_submitted_processing,
             (event as UiEvent.Info).resId,
         )
+    }
+
+    // ── §issue-1 Phase 2a Fix B / Phase 2 gate 🟡3: computeQuestionFanOutWorkdirs ──
+    //
+    // Pure helper (no AppCore wiring) — direct unit tests for the workdir-set
+    // computation shared by BOTH pending-question fan-out sites. Pins dedup,
+    // blank filtering, null-currentWorkdir, and order/distinct correctness so a
+    // future refactor of the helper cannot silently drop a source.
+
+    @Test
+    fun `computeQuestionFanOutWorkdirs dedupes a workdir present in all three sources to a single entry`() {
+        // /dup appears in directorySessions.keys AND currentWorkdir AND
+        // recent_workdirs → appears exactly once in the output.
+        val result = computeQuestionFanOutWorkdirs(
+            directorySessionKeys = setOf("/dup", "/a"),
+            currentWorkdir = "/dup",
+            recentWorkdirs = listOf("/dup", "/b"),
+        )
+        assertEquals(listOf("/dup", "/a", "/b"), result)
+        assertEquals("no duplicate entries", 3, result.toSet().size)
+    }
+
+    @Test
+    fun `computeQuestionFanOutWorkdirs filters blank and empty entries from every source`() {
+        // Blank/empty strings in any of the three inputs are excluded (the
+        // server rejects blank directories; currentWorkdir can be "" before a
+        // host is configured).
+        val result = computeQuestionFanOutWorkdirs(
+            directorySessionKeys = setOf("/ok", "", "   "),
+            currentWorkdir = "",
+            recentWorkdirs = listOf("/recent", "", "  "),
+        )
+        assertEquals(listOf("/ok", "/recent"), result)
+    }
+
+    @Test
+    fun `computeQuestionFanOutWorkdirs handles null currentWorkdir without crashing`() {
+        // null currentWorkdir is dropped by listOfNotNull — no NPE, no phantom
+        // "null" string entry.
+        val result = computeQuestionFanOutWorkdirs(
+            directorySessionKeys = setOf("/a"),
+            currentWorkdir = null,
+            recentWorkdirs = listOf("/b"),
+        )
+        assertEquals(listOf("/a", "/b"), result)
+    }
+
+    @Test
+    fun `computeQuestionFanOutWorkdirs returns empty list when every source is empty or blank`() {
+        // Edge: nothing to fan out → loadPendingQuestionsAllWorkdirs early-returns.
+        val result = computeQuestionFanOutWorkdirs(
+            directorySessionKeys = emptySet(),
+            currentWorkdir = null,
+            recentWorkdirs = emptyList(),
+        )
+        assertTrue(result.isEmpty())
+    }
+
+    @Test
+    fun `computeQuestionFanOutWorkdirs preserves first-seen order and drops later duplicates`() {
+        // distinct() keeps the FIRST occurrence. Order = directorySessions.keys
+        // (insertion order, LinkedHashSet) then currentWorkdir then recent_workdirs.
+        // A workdir repeated across sources collapses to its earliest position.
+        val result = computeQuestionFanOutWorkdirs(
+            directorySessionKeys = setOf("/x"),
+            currentWorkdir = "/x", // dup of a key
+            recentWorkdirs = listOf("/x", "/y"), // /x dup again, /y new
+        )
+        assertEquals(listOf("/x", "/y"), result)
     }
 }

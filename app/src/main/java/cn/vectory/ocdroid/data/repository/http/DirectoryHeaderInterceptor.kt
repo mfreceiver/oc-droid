@@ -2,6 +2,7 @@ package cn.vectory.ocdroid.data.repository.http
 
 import okhttp3.Interceptor
 import okhttp3.Response
+import cn.vectory.ocdroid.util.DebugLog
 import javax.inject.Inject
 import javax.inject.Singleton
 
@@ -89,7 +90,20 @@ class DirectoryHeaderInterceptor @Inject constructor() : Interceptor {
             }
         }
 
-        return chain.proceed(builder.build())
+        val built = builder.build()
+        // §Phase1a→1c de-noise: only log question/session-relevant paths. The
+        // interceptor fires on EVERY request; unconditionally logging floods the
+        // 1000-entry DebugLog ring buffer and evicts the Issue 1/4 diagnostics
+        // we added it for. Health/messages/files/VCS are high-volume + not
+        // diagnosis-relevant, so they are silenced. Same fields as Phase 1a.
+        val path = original.url.encodedPath
+        if (path.contains("/question") || path.contains("/session/")) {
+            DebugLog.d(
+                "Http",
+                "intercept path=$path skipDirPresent=$skipDir dirSent=${built.header(HttpHeaders.DIRECTORY_HEADER) ?: "null"}"
+            )
+        }
+        return chain.proceed(built)
     }
 
     private companion object {

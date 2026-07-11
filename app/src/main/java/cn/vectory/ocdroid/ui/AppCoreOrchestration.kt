@@ -2,6 +2,7 @@ package cn.vectory.ocdroid.ui
 
 import cn.vectory.ocdroid.R
 import cn.vectory.ocdroid.data.model.Message
+import cn.vectory.ocdroid.util.DebugLog
 import cn.vectory.ocdroid.util.runSuspendCatching
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -35,31 +36,132 @@ import java.util.Locale
 // ════════════════════════════════════════════════════════════════════════════
 
 /**
- * §R18 Phase 2-E step 1: resolves the directory header to attach to a
- * question reply/reject for [requestId]. Three-level fallback:
- *  1. The pending question's parent session's directory (handles cross-workdir
- *     routing — a question may belong to a session whose workdir differs from
- *     the currently-selected one).
- *  2. The persisted current workdir (matches the pre-Phase-2-E behavior,
- *     where the interceptor injected the global currentDirectory).
- *  3. null — server falls back to its own process.cwd() (last resort; should
- *     not happen in normal use).
+ * §R18 Phase 2-E step 1 → §issue-1 Phase 2a Fix A: resolves the directory
+ * header to attach to a question reply/reject for [requestId]. Now `suspend`
+ * so it can fetch the parent session from the server when it is missing
+ * locally (the schema confirms `question.asked` carries NO directory field,
+ * so the fetch is the only way to recover the workdir for a not-yet-local
+ * session).
  *
- * Defined here (next to executeCommand) because it touches sessionList +
- * directorySessions + settingsManager — three domains AppCore already owns.
+ * Resolution order:
+ *  1. The pending question's parent session's directory IF the session is
+ *     already in `sessions ∪ directorySessions` with a non-blank directory
+ *     (handles cross-workdir routing; no network). Unchanged from Phase 1.
+ *  2. Otherwise `GET /session/{sessionId}` (already Skip-Dir), then a CONDITIONAL
+ *     CAS: inside `writeSessionList` (which reads the latest state atomically),
+ *     re-check the session — if a fresher entry was hydrated by another load/SSE
+ *     during the network wait (non-blank dir), keep it and return ITS directory;
+ *     otherwise upsert `fetched` into `sessions` (so this + later resolves hit
+ *     branch 1) and return `fetched.directory`. Mirrors [openSessionFromDeepLink].
+ *  3. fetch fail / null / blank directory → `null`. `null` means "let the
+ *     server self-lookup via process.cwd()" — an INTENTIONAL degrade (observable
+ *     via DebugLog + Fix C's UiEvent) rather than the old silent wrong-value
+ *     bug where `currentWorkdir` was returned even when it mismatched the
+ *     question's real workdir. The `settingsManager.currentWorkdir` fallback is
+ *     deliberately DROPPED from this function.
+ *
+ * suspend-safe: the only production callers are
+ * [OrchestratorViewModel.replyQuestion] + [OrchestratorViewModel.rejectQuestion],
+ * both inside `viewModelScope.launch`.
  */
-internal fun AppCore.resolveQuestionDirectory(requestId: String): String? {
+internal suspend fun AppCore.resolveQuestionDirectory(requestId: String): String? {
     val pending = store.sessionListFlow.value.pendingQuestions.firstOrNull { it.id == requestId }
     val sessionId = pending?.sessionId
-    if (sessionId != null) {
-        val session = (
-            store.sessionListFlow.value.sessions +
-                store.sessionListFlow.value.directorySessions.values.flatten()
-            ).firstOrNull { it.id == sessionId }
-        if (session != null && !session.directory.isNullOrBlank()) return session.directory
+    if (sessionId == null) {
+        // §Phase1a/2a instrumentation: no pending question → null (no fetch).
+        DebugLog.d("Question", "resolveQuestionDirectory req=$requestId sid=null(no pending) branch=3(no-pending) return=null")
+        return null
     }
-    return settingsManager.currentWorkdir
+    // §Phase 2 gpter round-3: predicate requires non-blank directory DIRECTLY.
+    // A blank-dir entry with the same id in `sessions` must not mask an
+    // eligible hydrated entry in `directorySessions` (or vice-versa) — without
+    // the `!isNullOrBlank()` in the predicate, firstOrNull would return the
+    // blank one (depending on ordering) and the separate post-check would then
+    // fall through to an unnecessary fetch. Bundling the eligibility check into
+    // the predicate guarantees the first ELIGIBLE entry wins regardless of order.
+    val session = (
+        store.sessionListFlow.value.sessions +
+            store.sessionListFlow.value.directorySessions.values.flatten()
+        ).firstOrNull { it.id == sessionId && !it.directory.isNullOrBlank() }
+    if (session != null) {
+        // §Phase1a instrumentation: branch 1 — eligible parent session found (non-blank dir).
+        DebugLog.d(
+            "Question",
+            "resolveQuestionDirectory req=$requestId sid=$sessionId parentFound=true dir=\"${session.directory}\" branch=1(session.directory) return=\"${session.directory}\""
+        )
+        return session.directory
+    }
+    // §issue-1 Fix A: session absent OR directory blank → fetch from server
+    // (Skip-Dir; openSessionFromDeepLink is the isomorphic precedent).
+    val fetched = runSuspendCatching { repository.getSession(sessionId).getOrNull() }.getOrNull()
+    if (fetched == null || fetched.directory.isNullOrBlank()) {
+        // §Phase1a/2a instrumentation: fetch fail / null / blank directory → null
+        // (NOT currentWorkdir — intentional degrade, server self-looks-up).
+        DebugLog.d(
+            "Question",
+            "resolveQuestionDirectory req=$requestId sid=$sessionId parentFound=${session != null} dir=${session?.directory ?: "null"} branch=3(fetch-fail/null) fetchedDir=${fetched?.directory ?: "null"} return=null"
+        )
+        return null
+    }
+    // §Phase 2 gpter fix: CONDITIONAL CAS. The suspend fetch above may have
+    // raced with another load/SSE that hydrated this same session during the
+    // network wait. writeSessionList reads the LATEST state atomically inside
+    // its lambda — re-check there: if a fresher entry now exists (in sessions ∪
+    // directorySessions) with a non-blank directory, it is authoritative → keep
+    // it and do NOT let the fetched snapshot overwrite it. Only upsert `fetched`
+    // when the session is still absent/blank. Either way, return the
+    // authoritative directory (fresher entry's if present, else fetched's).
+    val fetchedDir = fetched.directory
+    var resolved: String? = null
+    var casPath = "fetch-hit-cached"
+    writeSessionList { st ->
+        // §Phase 2 gpter round-3: non-blank predicate (same as branch 1) — a
+        // blank-dir duplicate hydrated during the fetch is NOT authoritative.
+        val current = (st.sessions + st.directorySessions.values.flatten())
+            .firstOrNull { it.id == sessionId && !it.directory.isNullOrBlank() }
+        if (current != null) {
+            // Fresher authoritative entry hydrated during the fetch — keep it.
+            resolved = current.directory
+            casPath = "fetch-hit-fresher-kept"
+            st // no overwrite
+        } else {
+            resolved = fetchedDir
+            st.copy(sessions = upsertSession(st.sessions, fetched))
+        }
+    }
+    DebugLog.d(
+        "Question",
+        "resolveQuestionDirectory req=$requestId sid=$sessionId parentFound=${session != null} dir=${session?.directory ?: "null"} branch=2($casPath) fetchedDir=\"${fetchedDir}\" return=\"${resolved}\""
+    )
+    return resolved
 }
+
+/**
+ * §issue-1 Phase 2a Fix B: the ONE shared workdir-set computation for pending-
+ * question fan-out. Used at BOTH fan-out sites so they cannot drift:
+ *  (1) [cn.vectory.ocdroid.ui.controller.SessionSyncCoordinator.loadPendingQuestionsAllWorkdirs]
+ *      (SSE catch-up), and
+ *  (2) [catchUpAfterDisconnectOrForeground]'s `catchUpWorkdirs` (foreground
+ *      catch-up, inline-duplicated before this helper).
+ *
+ * Set = `directorySessions.keys` + `currentWorkdir` + per-fp `recent_workdirs`.
+ * `recent_workdirs` is per-serverGroupFp (R-20 Phase 5) — read via
+ * [cn.vectory.ocdroid.util.SettingsManager.getRecentWorkdirs] with the live fp,
+ * mirroring `ConnectionCoordinator`'s restore fan-out. Without it, a question
+ * arriving for a recently-used-but-not-currently-connected workdir is missed
+ * during catch-up (`directorySessions` only holds currently-connected ones).
+ *
+ * Pure free function (no AppCore coupling) so the coordinator can call it
+ * directly without an import cycle.
+ */
+internal fun computeQuestionFanOutWorkdirs(
+    directorySessionKeys: Set<String>,
+    currentWorkdir: String?,
+    recentWorkdirs: List<String>,
+): List<String> =
+    (directorySessionKeys + listOfNotNull(currentWorkdir) + recentWorkdirs)
+        .filter { it.isNotBlank() }
+        .distinct()
 
 /** nav → session-list → chat. Used by the notification deep-link path. */
 internal fun AppCore.openSessionFromDeepLink(sessionId: String) {
@@ -437,20 +539,17 @@ internal fun AppCore.catchUpAfterDisconnectOrForeground(sessionId: String) {
         onColdSnapshot = { sid -> sessionSyncCoordinator.markSessionColdSnapshotted(sid) },
     )
     // §R18 Phase 3 Wave 3 (P1-9 wire-up): fan-out pending-questions catch-up
-    // across EVERY known workdir (in-memory directorySessions keys +
-    // currentWorkdir), not just currentWorkdir. Without this, a question
-    // arriving for a background workdir during the SSE outage window is lost:
-    // the catch-up ran only against currentWorkdir. Mirrors the workdir-set
-    // computation in SessionSyncCoordinator.loadPendingQuestionsAllWorkdirs
-    // (duplicated inline because ForegroundCatchUpController does NOT own
-    // SliceFlows — the workdir list is supplied by the caller per the Wave 1
-    // signature contract).
-    val catchUpWorkdirs = (
-        store.sessionListFlow.value.directorySessions.keys +
-            listOfNotNull(settingsManager.currentWorkdir)
-        )
-        .filter { it.isNotBlank() }
-        .distinct()
+    // across EVERY known workdir, not just currentWorkdir. Without this, a
+    // question arriving for a background workdir during the SSE outage window
+    // is lost: the catch-up ran only against currentWorkdir.
+    // §issue-1 Phase 2a Fix B: now uses the shared [computeQuestionFanOutWorkdirs]
+    // helper (with per-fp recent_workdirs) so this site cannot drift from
+    // SessionSyncCoordinator.loadPendingQuestionsAllWorkdirs (site 1).
+    val catchUpWorkdirs = computeQuestionFanOutWorkdirs(
+        directorySessionKeys = store.sessionListFlow.value.directorySessions.keys,
+        currentWorkdir = settingsManager.currentWorkdir,
+        recentWorkdirs = settingsManager.getRecentWorkdirs(currentServerGroupFp()),
+    )
     foregroundCatchUpController.catchUpPendingQuestionsAllWorkdirs(
         repository = repository,
         workdirs = catchUpWorkdirs,

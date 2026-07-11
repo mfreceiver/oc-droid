@@ -195,6 +195,11 @@
     <string name="question_submit_failed">提交答案失败，请重试。</string>
     <string name="question_of">%1$d / %2$d</string>
     <string name="question_empty">（没有问题）</string>
+    <!-- D2.1–D2.4: 折叠问题胶囊 + 禁用输入栏占位文案 + 卡片内忽略失败提示。 -->
+    <string name="question_agent_asking">Agent 正在提问</string>
+    <string name="question_tap_to_expand">点击展开</string>
+    <string name="question_dismiss_failed">忽略问题失败，请重试。</string>
+    <string name="chat_input_disabled_question">回答问题以继续</string>
     <string name="sessions_tab_recent">近期会话</string>
     <string name="sessions_tab_workdirs">已连接的项目</string>
     <string name="sessions_tab_new_workdir">连接新项目</string>

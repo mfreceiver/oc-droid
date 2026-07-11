@@ -527,6 +527,23 @@ internal fun ChatMessageList(
             }
         }
     }
+    // Build folds in chronological order so the anchor is always the earliest
+    // part, then reverse the resulting blocks for reverseLayout's item order.
+    val renderBlocks = remember(
+        reversedEntries,
+        partsByMessage,
+        streamingPartTexts,
+        staleQuestionPartKeys,
+        streamingReasoningPart
+    ) {
+        buildRenderBlocks(
+            entries = reversedEntries.asReversed(),
+            partsByMessage = partsByMessage,
+            streamingPartTexts = streamingPartTexts,
+            staleQuestionPartKeys = staleQuestionPartKeys,
+            streamingReasoningPartId = streamingReasoningPart?.id
+        ).asReversed()
+    }
 
     // §Phase8-nav: Box 包裹 LazyColumn + 导航 FAB overlay（右侧中下）。
     Box(modifier = Modifier.fillMaxSize()) {
@@ -589,19 +606,15 @@ internal fun ChatMessageList(
                 }
             }
         }
-        // §Phase8-nav: reversedEntries（Message + GapMarker）已提到 LazyColumn 外
+        // §Phase8-nav: renderBlocks 已提到 LazyColumn 外；每个跨消息 fold 是一个
+        // LazyColumn item，key 由最早 part id 锚定。
         // （供消息导航 FAB 复用）。R-20 Phase 2：gap divider 由 Entry.GapMarker 渲染，
         // 一个 items() 块统一处理消息行 + 分割线（替代旧的 beforeGap/gap-divider/afterGap
         // 三段式，支持 ≥1 gap）。
-        items(reversedEntries, key = { entry ->
-            when (entry) {
-                is Entry.Message -> entry.message.id
-                is Entry.GapMarker -> "gap-${entry.gapId}"
-            }
-        }) { entry ->
-            when (entry) {
-                is Entry.Message -> {
-                    val message = entry.message
+        items(renderBlocks, key = { it.id }) { block ->
+            when (block) {
+                is RenderBlock.Conversation -> {
+                    val message = block.message
                     // §s3-markers: synthetic metadata-marker messages render as
                     // inline rows (agent / model chip or compaction divider).
                     if (message.role in METADATA_MARKER_ROLES) {
@@ -613,8 +626,8 @@ internal fun ChatMessageList(
                     } else {
                         // §empty-msg: in-flight empty assistant shell render a
                         // lightweight loading row; full MessageRow otherwise.
-                        val msgParts = partsByMessage[message.id].orEmpty()
-                        val isInFlightEmpty = !message.isUser && msgParts.isEmpty() && sessionIsRunning
+                        val msgParts = block.parts
+                        val isInFlightEmpty = shouldRenderInFlightEmpty(block, sessionIsRunning)
                         if (isInFlightEmpty) {
                             InFlightEmptyLoading()
                         } else {
@@ -629,20 +642,88 @@ internal fun ChatMessageList(
                                 onOpenSubAgent = onOpenSubAgent,
                                 expandedParts = expandedParts,
                                 onToggleExpand = onToggleExpand,
-                                staleQuestionPartKeys = staleQuestionPartKeys
+                                staleQuestionPartKeys = staleQuestionPartKeys,
+                                showMessageDecoration = block.showMessageDecoration
                             )
                         }
                     }
                 }
-                is Entry.GapMarker -> {
+                is RenderBlock.ToolRun -> {
+                    BoxWithConstraints(
+                        modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp)
+                    ) {
+                        val cardMax = minOf(maxWidth * 2f / 3f, 480.dp)
+                        Column(modifier = Modifier.fillMaxWidth(), horizontalAlignment = Alignment.Start) {
+                            block.items.forEach { contextual ->
+                                androidx.compose.runtime.key(
+                                    "${contextual.message.id}|${stableItemId(contextual.item, contextual.message.id)}"
+                                ) {
+                                    renderToolItem(
+                                        item = contextual.item,
+                                        message = contextual.message,
+                                        expandedParts = expandedParts,
+                                        onToggleExpand = onToggleExpand,
+                                        onFileClick = onFileClick,
+                                        onOpenSubAgent = onOpenSubAgent,
+                                        staleQuestionPartKeys = staleQuestionPartKeys,
+                                        cardMax = cardMax
+                                    )
+                                }
+                            }
+                            block.messageDecorations.forEach { message ->
+                                MessageDecoration(message = message, cardMax = cardMax)
+                            }
+                        }
+                    }
+                }
+                is RenderBlock.Fold -> {
+                    val folded = block.asFoldedToolRun()
+                    val foldKey = foldKey(block.firstPartId)
+                    BoxWithConstraints(
+                        modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp)
+                    ) {
+                        val cardMax = minOf(maxWidth * 2f / 3f, 480.dp)
+                        Column(modifier = Modifier.fillMaxWidth(), horizontalAlignment = Alignment.Start) {
+                            if (isCrossMessageFoldExpanded(folded, expandedParts)) {
+                                block.items.forEach { contextual ->
+                                    androidx.compose.runtime.key(
+                                        "${contextual.message.id}|${stableItemId(contextual.item, contextual.message.id)}"
+                                    ) {
+                                        renderToolItem(
+                                            item = contextual.item,
+                                            message = contextual.message,
+                                            expandedParts = expandedParts,
+                                            onToggleExpand = onToggleExpand,
+                                            onFileClick = onFileClick,
+                                            onOpenSubAgent = onOpenSubAgent,
+                                            staleQuestionPartKeys = staleQuestionPartKeys,
+                                            cardMax = cardMax
+                                        )
+                                    }
+                                }
+                            } else {
+                                ToolCallFoldBar(
+                                    counts = folded.foldCounts(),
+                                    isRunning = foldIsRunning(folded),
+                                    onToggleExpand = { onToggleExpand(foldKey, false) },
+                                    modifier = Modifier.widthIn(max = cardMax)
+                                )
+                            }
+                            block.messageDecorations.forEach { message ->
+                                MessageDecoration(message = message, cardMax = cardMax)
+                            }
+                        }
+                    }
+                }
+                is RenderBlock.Gap -> {
                     // R-20 Phase 2: the gap divider. Tapping routes the gap's
                     // id back to GapFillCoordinator.fillSingleGap (50-step
                     // backward fill). Exhausted gaps render a non-tappable
                     // "无法补齐" hint (Filling shows the spinner).
                     GapDivider(
-                        isLoading = entry.fillState == GapFillState.Filling,
-                        exhausted = entry.fillState == GapFillState.Exhausted,
-                        onClick = { onFillGap(entry.gapId) },
+                        isLoading = block.marker.fillState == GapFillState.Filling,
+                        exhausted = block.marker.fillState == GapFillState.Exhausted,
+                        onClick = { onFillGap(block.marker.gapId) },
                         modifier = Modifier.fillMaxWidth()
                     )
                 }
@@ -731,6 +812,12 @@ internal fun ChatMessageList(
         )
     }
 }
+
+internal fun shouldRenderInFlightEmpty(
+    block: RenderBlock.Conversation,
+    sessionIsRunning: Boolean
+): Boolean = !block.message.isUser && block.parts.isEmpty() && sessionIsRunning &&
+    block.message.error?.message.isNullOrBlank() && !block.isDecorationOnly
 
 /**
  * §empty-msg: lightweight inline loading row rendered for an assistant message

@@ -4,6 +4,7 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import cn.vectory.ocdroid.R
 import cn.vectory.ocdroid.data.model.PermissionResponse
+import cn.vectory.ocdroid.util.DebugLog
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.launch
 import javax.inject.Inject
@@ -91,31 +92,48 @@ class OrchestratorViewModel @Inject constructor(
             // workdir. Was the global currentDirectory before — currentWorkdir
             // was always its source on the main path.
             val directory = core.resolveQuestionDirectory(requestId)
+            // §Phase1a instrumentation (Issue 1): the directory actually sent on the reply.
+            DebugLog.d("Question", "replyQuestion req=$requestId dir=${directory ?: "null"}")
             core.repository.replyQuestion(requestId, answers, directory)
                 .onSuccess {
+                    DebugLog.d("Question", "replyQuestion OK req=$requestId")
                     core.writeSessionList { currentState ->
                         currentState.copy(pendingQuestions = currentState.pendingQuestions.filter { it.id != requestId })
                     }
                 }
                 .onFailure { error ->
+                    DebugLog.w("Question", "replyQuestion FAIL req=$requestId dir=${directory ?: "null"} err=${error.message}")
                     android.util.Log.w(TAG, "Failed to reply question: ${error.message}")
                     onError()
                 }
         }
     }
 
-    fun rejectQuestion(requestId: String) {
+    fun rejectQuestion(requestId: String, onError: () -> Unit = {}) {
         // §R18 Phase 3 Wave 3 (drift #6 / P1-7): same viewModelScope rationale
         // as respondPermission.
         viewModelScope.launch {
             val directory = core.resolveQuestionDirectory(requestId)
+            // §Phase1a instrumentation (Issue 1): the directory actually sent on the reject.
+            DebugLog.d("Question", "rejectQuestion req=$requestId dir=${directory ?: "null"}")
             core.repository.rejectQuestion(requestId, directory)
                 .onSuccess {
+                    DebugLog.d("Question", "rejectQuestion OK req=$requestId")
                     core.writeSessionList { currentState ->
                         currentState.copy(pendingQuestions = currentState.pendingQuestions.filter { it.id != requestId })
                     }
                 }
-                .onFailure { error -> android.util.Log.w(TAG, "Failed to reject question: ${error.message}") }
+                .onFailure { error ->
+                    DebugLog.w("Question", "rejectQuestion FAIL req=$requestId dir=${directory ?: "null"} err=${error.message}")
+                    android.util.Log.w(TAG, "Failed to reject question: ${error.message}")
+                    // §issue-1 Fix C / Phase 2 gate 🔴1: reject failure surfaces via the
+                    // card's onError callback → in-card errorText, symmetric with
+                    // replyQuestion (which also only calls onError, no global Snackbar).
+                    // The Phase 2a VM-level UiEvent.Error was removed: the card is always
+                    // visible for the current session's question (it owns isRejecting +
+                    // errorText), so the Snackbar was a redundant double-display.
+                    onError()
+                }
         }
     }
 

@@ -4,6 +4,7 @@ import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.animation.expandVertically
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
@@ -15,6 +16,7 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.pager.HorizontalPager
 import androidx.compose.foundation.pager.rememberPagerState
@@ -49,8 +51,10 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.RectangleShape
+import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -216,9 +220,6 @@ fun ChatScreen(
     val errorActionLabel = stringResource(R.string.chat_view)
     val staleNoticeMessage = stringResource(R.string.chat_stale_notice)
     val staleNoticeActionLabel = stringResource(R.string.common_refresh)
-    // Hoisted so the replyQuestion onError callback (non-composable lambda) can
-    // use a localized string without Context.getString inside composition.
-    val submitFailedMessage = stringResource(R.string.question_submit_failed)
 
     // §Feature B: root-session double-confirm before system back exits the app.
     // First back shows a 1s snackbar and disables this handler; a second back
@@ -412,39 +413,21 @@ fun ChatScreen(
         pageCount = { rootSessions.size.coerceAtLeast(1) }
     )
 
-    // §#4: hoist the current session's pending question + its answer snapshot
-    // here (root ChatScreen scope) so BOTH ChatInputBar (inside the chat
-    // Surface) and QuestionCardView (sibling of the Surface) can read/write
-    // the same state. The bottom ChatInputBar primary button submits the
-    // question via viewModel.core.replyQuestion, in lockstep with QuestionCardView's
-    // own Submit. questionAnswersValid requires EVERY sub-question to have an
-    // effective answer (matches the multi-tab Next→Submit flow: Submit only
-    // fires when all tabs are answered).
-    val pendingQuestion = remember(sessionList.pendingQuestions, chat.currentSessionId) {
-        sessionList.pendingQuestions.firstOrNull { it.sessionId == chat.currentSessionId }
+    // D2.1–D2.4: pending questions for the current session. Answer state and
+    // submit/reject error display live self-contained inside QuestionCardView;
+    // ChatScreen only decides whether the card is rendered and where.
+    val matchingQuestions = remember(sessionList.pendingQuestions, chat.currentSessionId) {
+        sessionList.pendingQuestions.filter { it.sessionId == chat.currentSessionId }
     }
-    var questionAnswers by remember { mutableStateOf<List<List<String>>>(emptyList()) }
-    // 🟠-1: surface bottom-bar question-submit failures to the user (the VM's
-    // replyQuestion only Log.w's + invokes onError; it does NOT write to
-    // AppState.error, and we can't modify MainViewModel this round). This local
-    // error string is surfaced via the M3 Snackbar (see the LaunchedEffect
-    // keyed on it below), which auto-dismisses after its duration elapses.
-    var questionSubmitError by remember { mutableStateOf<String?>(null) }
-    // 🟠-2: in-flight guard for the bottom-bar question submit — prevents
-    // double-submits on slow networks (the in-card Submit already has its own
-    // isSending guard; this mirrors it for the bottom-bar path).
-    var isSubmittingQuestion by remember { mutableStateOf(false) }
-    LaunchedEffect(pendingQuestion?.id) {
-        // Reset hoisted answers whenever the active question changes
-        // (covers a new question arriving, or the current one being
-        // dismissed/resolved).
-        questionAnswers = emptyList()
-        // 🟠-2: a question-id change (incl. →null on success/reject) means the
-        // in-flight request has resolved — release the guard. The success path
-        // has no onSuccess callback (replyQuestion only offers onError), so
-        // observing pendingQuestion becoming null is the success signal.
-        isSubmittingQuestion = false
-    }
+    val pendingQuestion = matchingQuestions.firstOrNull()
+    // 🔴2: track the visible question card's rendered height so the SnackbarHost
+    // can offset itself above the card instead of being hidden behind it.
+    var questionCardHeightDp by remember { mutableStateOf(0.dp) }
+    val density = LocalDensity.current
+    val questionCardOffset by animateDpAsState(
+        targetValue = if (pendingQuestion != null) questionCardHeightDp else 0.dp,
+        label = "questionCardOffset"
+    )
     // §C1 / §R-17 batch2 / §R18 Phase 2-G: surface UiEvent.Error / UiEvent.Success
     // via a 3s/2.5s M3 Snackbar. Collection lives in ONE LaunchedEffect(Unit)
     // so each event fires the snackbar exactly once (the SharedFlow is one-shot,
@@ -493,20 +476,6 @@ fun ChatScreen(
                 }
                 is UiEvent.Debug -> Unit
             }
-        }
-    }
-    // §C1: bottom-bar question-submit failure → same pattern as above; clears
-    // `questionSubmitError` after the snackbar finishes so a new failure can
-    // fire again.
-    LaunchedEffect(questionSubmitError) {
-        questionSubmitError?.let { error ->
-            snackbarHostState.showTimed(
-                message = errorMessage,
-                durationMillis = 10_000L,
-                actionLabel = errorActionLabel,
-                onAction = { errorDetail = error }
-            )
-            questionSubmitError = null
         }
     }
     // §Phase1E stale notice — now a 3s M3 Snackbar (was a top-aligned
@@ -593,13 +562,6 @@ fun ChatScreen(
             }
         }
     }
-    val questionAnswersValid = pendingQuestion?.let { pq ->
-        pq.questions.isNotEmpty() &&
-            pq.questions.indices.all { i ->
-                i < questionAnswers.size && questionAnswers[i].isNotEmpty()
-            }
-    } ?: false
-
     Column(modifier = Modifier.fillMaxSize()) {
         ChatTopBar(
             state = topBarState,
@@ -723,15 +685,16 @@ fun ChatScreen(
                     // SnackbarHost below overlays both error/stale snackbars.
 
                     // §C1: M3 Snackbar replaces the former top-aligned AppToast for
-                    // both AppState.error (tunnel activation / global errors) and the
-                    // bottom-bar question-submit failure. Default bottom placement is
-                    // accepted per the migration spec. SnackbarHost is the LAST child
-                    // of this Box so it overlays the message list / empty state; the
-                    // actual showSnackbar() calls are driven by the LaunchedEffects
-                    // keyed on `appStateError` / `questionSubmitError` above.
+                    // global errors (tunnel activation / UiEvent.Error). Default bottom
+                    // placement is accepted per the migration spec. The question card
+                    // is now also a BottomCenter overlay; SnackbarHost is offset upward
+                    // by the card's measured height so global errors remain visible
+                    // above the card instead of being hidden behind it.
                     SnackbarHost(
                         hostState = snackbarHostState,
-                        modifier = Modifier.align(Alignment.BottomCenter)
+                        modifier = Modifier
+                            .align(Alignment.BottomCenter)
+                            .padding(bottom = questionCardOffset)
                     )
 
                     // §Feature C: floating capsule at top-center.
@@ -776,6 +739,36 @@ fun ChatScreen(
                         startedAtMillis = null,
                         onAbort = { }
                     )
+
+                    // D2.1: floating question card overlay anchored BottomCenter.
+                    // It floats above the chat surface and is visually just above
+                    // the input bar (the Surface bottom is the input bar top). It
+                    // does NOT affect the LazyColumn's layout/height.
+                    // 🟠3: imePadding lets the card ride up above the keyboard when
+                    // the custom-text field is focused.
+                    // 🔴2: onGloballyPositioned reports the card's height so the
+                    // SnackbarHost can offset itself above the card.
+                    pendingQuestion?.let { question ->
+                        QuestionCardView(
+                            question = question,
+                            queuePosition = matchingQuestions.indexOfFirst { it.id == question.id } + 1,
+                            queueTotal = matchingQuestions.size,
+                            onReply = { answers, onError ->
+                                orchestratorVM.replyQuestion(question.id, answers, onError)
+                            },
+                            onReject = { onError ->
+                                orchestratorVM.rejectQuestion(question.id, onError)
+                            },
+                            modifier = Modifier
+                                .align(Alignment.BottomCenter)
+                                .imePadding()
+                                .onGloballyPositioned {
+                                    questionCardHeightDp = with(density) {
+                                        it.size.height.toDp()
+                                    }
+                                }
+                        )
+                    }
                 }
 
         // §error-detail: dialog showing the full error text when the user taps
@@ -827,30 +820,7 @@ fun ChatScreen(
                 orchestratorVM = orchestratorVM,
                 isBusy = currentSessionIsRunning || chat.isCompacting,
                 onAddImages = onAddImages,
-                pendingQuestion = pendingQuestion,
-                questionAnswersValid = questionAnswersValid,
-                questionSubmitting = isSubmittingQuestion,
-                onSubmitQuestion = {
-                    // 🟠-2: guard — if a submit is already in flight, ignore
-                    // the tap (the button is also disabled via canSend, but
-                    // this is the source-of-truth guard). Structured as a
-                    // positive if (not early-return) because onSubmitQuestion
-                    // is a param lambda — a bare `return` here would
-                    // non-locally return from the ChatScreen composable.
-                    if (!isSubmittingQuestion) {
-                        pendingQuestion?.let { pq ->
-                            isSubmittingQuestion = true
-                            // 🟠-1: onError surfaces the failure to the user.
-                            // replyQuestion has no onSuccess callback — success
-                            // is observed via LaunchedEffect(pendingQuestion?.id)
-                            // releasing the guard when the question is removed.
-                            orchestratorVM.replyQuestion(pq.id, questionAnswers) {
-                                isSubmittingQuestion = false
-                                questionSubmitError = submitFailedMessage
-                            }
-                        }
-                    }
-                }
+                questionPending = pendingQuestion != null
             )
         }
 
@@ -863,32 +833,6 @@ fun ChatScreen(
             )
         }
 
-        sessionList.pendingQuestions
-            .filter { it.sessionId == chat.currentSessionId }
-            .firstOrNull()
-            ?.let { question ->
-                QuestionCardView(
-                    question = question,
-                    onReply = { answers, onError ->
-                        // §momo 🟡-1: card Submit also flips isSubmittingQuestion so the
-                        // bottom-bar primary button is disabled in lockstep — unifies the
-                        // two guards against cross-path double-submit. onError resets both
-                        // (card's isSending via onError, isSubmittingQuestion here); success
-                        // → pendingQuestion→null → LaunchedEffect above resets.
-                        isSubmittingQuestion = true
-                        orchestratorVM.replyQuestion(question.id, answers) {
-                            isSubmittingQuestion = false
-                            onError()
-                        }
-                    },
-                    onReject = { orchestratorVM.rejectQuestion(question.id) },
-                    // §#4: receive the live answer snapshot so the bottom-bar
-                    // primary button can submit the question in lockstep with
-                    // this card's own Submit. [questionAnswers] is the same
-                    // state fed into ChatInputBar above.
-                    onAnswersChange = { questionAnswers = it }
-                )
-            }
     }
 
     // File browser overlay — opened by tapping a file path in chat (preview).
