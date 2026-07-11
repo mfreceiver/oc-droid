@@ -1,0 +1,17 @@
+{
+  "agent": "maxer",
+  "scope": "fix-fold-spacing",
+  "date": "2026-07-11",
+  "reviewed_commit": "2441694",
+  "version_target": "0.7.2",
+  "verdict": "pass",
+  "score": 9.6,
+  "blocking_issues": [],
+  "non_blocking_issues": [
+    "skip-list → allow-list 防御性重构：else 改 else if (part.isText)，file/source-url/未知 type 一律不进 conversationParts（上游 web app 同向 SKIP_PARTS 白名单）；留 R-19 epic",
+    "renderBlockTopPaddingDp 命名 vs 实际 gap：4dp 是下界，叠加内层 BoxWithConstraints vertical=4 实际 12dp 视觉 gap，kdoc 可补",
+    "partCount 3+ fold 单测缺口（path 已隐式覆盖）",
+    "kover floor 53 后续 epic 推回 54+"
+  ],
+  "notes": "依 opencode-src v1.17.18 MessagePart schema + 上游 web app SKIP_PARTS={patch,step-start,step-finish} 独立印证根因。step-marker skip 分支位置正确（isReasoning/isSubAgentTask 之后、else 之前），collectToolRun 天然 break 双层防护。sessionIsRunning wiring 完整（ChatMessageContent:130/538/546 + builder:128 + shouldRenderInFlightEmpty:816 对称）。Box wrapper 无 horizontal padding，cardMax 响应式宽度无 clipping。spacing 12dp 实际 gap 可接受。"
+}

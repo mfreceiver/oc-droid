@@ -1,0 +1,17 @@
+{
+  "agent": "groker",
+  "scope": "fix-fold-spacing",
+  "date": "2026-07-11",
+  "reviewed_commit": "2441694",
+  "version_target": "0.7.2",
+  "verdict": "pass",
+  "score": 9.5,
+  "blocking_issues": [],
+  "non_blocking_issues": [
+    "empty-shell × pendingFold 时序折中：running 空壳先入 blocks，pending 工具到最终 flushFold 才出列，~1s 预 part 窗口内 loading 可能短暂出现在已完成工具上方（终态自愈）",
+    "metadata 类型白名单仅 step-start/step-finish，未来新 metadata type 可能再污染（可收成 isNonContentPart 集合）",
+    "padding 双轨：外层 top 4 + 卡片内 vertical 4，节奏与旧 spacedBy(16) 不同（产品选择）",
+    "kover branch 54→53 有注释债"
+  ],
+  "notes": "根因判断与 step 跳过修复正确且可证伪。step-start/step-finish 无渲染分支（PartView/SessionSyncCoordinator 均无），跳过不丢 UI。spacing 未误包 streaming-reasoning/session-diff 独立 item。不跨 user/硬缝误合并 fold。4 个新测试真证伪（非误绿）。"
+}

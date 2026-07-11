@@ -1,0 +1,17 @@
+{
+  "agent": "glmer",
+  "scope": "fix-fold-spacing",
+  "date": "2026-07-11",
+  "reviewed_commit": "2441694",
+  "version_target": "0.7.2",
+  "verdict": "pass",
+  "score": 9.6,
+  "blocking_issues": [],
+  "non_blocking_issues": [
+    "step-marker skip 分支可与 ToolCallFoldGrouper.collectToolRun:39 的天然截断加交叉引用注释（双层防护）",
+    "renderBlockTopPaddingDp 的 index==0 语义在 reverseLayout 下是视觉最底块，kdoc 可显式",
+    "测试矩阵缺 trailing step-finish after prose 用例与 Fold 的 else→4 直接断言（低风险）",
+    "kover branch floor 53 缓冲仅 ~0.83pp，re-raise 为 follow-up 承诺"
+  ],
+  "notes": "三层修复逐行 trace 确认：step-marker 跳过是根因（emulator DebugLog 证实 [step-start,reasoning,text,tool,step-finish,patch] 序列），永不入 conversationParts/tool run，不破坏 chrome 归属与 hidden decoration seam；spacing 重写无双重 padding 问题，standalone item 未被误包；sessionIsRunning 空壳短路逻辑正确；4 个 TDD 测试红绿关系成立。"
+}
