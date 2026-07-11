@@ -1,0 +1,20 @@
+{
+  "agent": "groker",
+  "scope": "tab-files-busysync",
+  "date": "2026-07-11",
+  "reviewed_commit": "6cfb841",
+  "version_target": "0.7.4",
+  "verdict": "pass",
+  "score": 9.6,
+  "rounds": 2,
+  "round_history": [
+    {"round": 1, "score": 8.7, "blockers": ["🔴 merge粘busy(同gpter)", "🟠 item3 UI guard用isSelected, 子agent时父tab高亮, 点父tab被拦死无法回父根会话"]},
+    {"round": 2, "score": 9.6, "blocker": "无", "key": "两处都解决: merge→整体替换+单测; onClick改判currentSessionId"}
+  ],
+  "blocking_issues": [],
+  "non_blocking_issues": [
+    "REST/SSE竞态(replace仍可能旧REST盖新SSE), 本路径可接受, follow-up",
+    "白名单扩展(vue/svelte/cs/r)与isTextPath(isBinary=true)单测可加厚"
+  ],
+  "notes": "首审最严, 独立发现item3 isSelected vs currentSessionId的子agent边界(gpter/opuser未提或仅提示)。修复后: 根会话再点no-op; 子agent点父tab触发switch回父; switchTo深守卫保留。item6 replace与status.ts data.delete-on-idle对齐。六项需求复审全符合。"
+}

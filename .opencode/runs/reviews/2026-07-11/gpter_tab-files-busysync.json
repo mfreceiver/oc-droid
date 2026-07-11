@@ -1,0 +1,19 @@
+{
+  "agent": "gpter",
+  "scope": "tab-files-busysync",
+  "date": "2026-07-11",
+  "reviewed_commit": "6cfb841",
+  "version_target": "0.7.4",
+  "verdict": "pass",
+  "score": 9.6,
+  "rounds": 2,
+  "round_history": [
+    {"round": 1, "score": 9.2, "blocker": "merge(sl.sessionStatuses+statuses) 累积 stale busy: /session/status 只含active, idle会话快照缺失, merge永久保留旧busy致对称性缺陷(已idle仍判busy显Stop)"},
+    {"round": 2, "score": 9.6, "blocker": "无", "key": "采纳: 整体替换 + 端点语义注释 + replace防回归单测"}
+  ],
+  "blocking_issues": [],
+  "non_blocking_issues": [
+    "REST/SSE 响应乱序窗口(慢REST覆盖新SSE), 窄窗自愈, 留follow-up"
+  ],
+  "notes": "三集群6项需求全兑现。tab item1-4(workdir底色/选中close/no-reload双层guard/question?); files item5(白名单兜底覆盖server binary误报/onExit返回源); item6根因诊断准确(SSE session.status只在变化时推, ServerConnected reduce漏刷status), 修复A(重连LoadSessionStatus decision对齐网页版server.connected→refresh)。首审🔴经服务端status.ts:42-45(idle时data.delete)铁证坐实, 修复撤销错误merge回整体替换+单测锁定。"
+}
