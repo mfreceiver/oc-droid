@@ -275,6 +275,46 @@ internal fun MessageDecoration(
         }
 }
 
+/**
+ * §fold-ts: decoration rendered once per cross-message [RenderBlock.Fold] (and
+ * any multi-message tool run). Unlike per-message [MessageDecoration], the
+ * timestamp is collapsed to a single caption — the newest message's
+ * completed/created epoch — so a fold spanning N tool-only messages no longer
+ * stacks N near-empty timestamp rows under the fold bar. ErrorCard is NOT
+ * aggregated: each message that carries an error still surfaces its own error
+ * (errors must never be silently dropped when their owner is folded).
+ *
+ * `messages` is oldest-first (the build order from decorationOwners); the
+ * newest entry is therefore the last one with a non-null timestamp.
+ */
+@Composable
+internal fun FoldMessageDecoration(
+    messages: List<Message>,
+    cardMax: Dp
+) {
+    val latestTime = messages.asReversed().firstOrNull { m ->
+        (m.time?.completed ?: m.time?.created) != null
+    }?.let { it.time?.completed ?: it.time?.created }
+    if (latestTime != null) {
+        Text(
+            text = formatHm(latestTime),
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.padding(end = 4.dp, top = 4.dp)
+        )
+    }
+    messages.forEach { message ->
+        message.error?.message?.let { err ->
+            if (err.isNotBlank()) {
+                ErrorCard(
+                    text = err,
+                    modifier = Modifier.widthIn(max = cardMax)
+                )
+            }
+        }
+    }
+}
+
 @Composable
 internal fun PartView(
     part: Part,

@@ -11,17 +11,21 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Help
 import androidx.compose.material.icons.filled.CheckBox
@@ -250,60 +254,69 @@ fun QuestionCardView(
     // D2.3: a new question id auto-expands the card.
     LaunchedEffect(question.id) { expanded = true }
 
-    Card(
-        modifier = modifier
-            .fillMaxWidth()
-            .padding(horizontal = 16.dp, vertical = 8.dp)
-            .animateContentSize(),
-        shape = MaterialTheme.shapes.extraLarge,
-        colors = CardDefaults.cardColors(
-            containerColor = MaterialTheme.colorScheme.surfaceVariant
-        ),
-        elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)
-    ) {
-        AnimatedContent(
-            targetState = expanded,
-            transitionSpec = {
-                (fadeIn() + slideInVertically { it / 2 }) togetherWith
-                    (fadeOut() + slideOutVertically { it / 2 })
-            },
-            label = "questionExpandCollapse"
-        ) { isExpanded ->
-            if (isExpanded) {
-                ExpandedQuestionContent(
-                    question = question,
-                    currentTab = currentTab,
-                    currentQuestion = currentQuestion,
-                    currentAnswers = currentAnswers,
-                    hasAnswer = ::hasAnswer,
-                    isCustomActiveNow = isCustomActiveNow,
-                    customText = customText,
-                    isCustomEditing = isCustomEditing,
-                    isSending = isSending,
-                    isRejecting = isRejecting,
-                    anyInFlight = anyInFlight,
-                    errorText = errorText,
-                    queuePosition = queuePosition,
-                    queueTotal = queueTotal,
-                    accent = accent,
-                    onCollapse = { expanded = false },
-                    onSelectOption = ::selectOption,
-                    onCustomTextChange = {
-                        clearError()
-                        customTexts[currentTab] = it
-                    },
-                    onCommitCustom = ::commitCustom,
-                    onActivateCustom = ::activateCustom,
-                    onBack = ::back,
-                    onNext = ::next,
-                    onReject = ::reject
-                )
-            } else {
-                CollapsedQuestionPill(
-                    queuePosition = queuePosition,
-                    queueTotal = queueTotal,
-                    onExpand = { expanded = true }
-                )
+    BoxWithConstraints(modifier = modifier.fillMaxWidth()) {
+        // §scroll-safety: 硬 cap——对齐仓库惯例（verticalScroll 必配有限 height 上限）。
+        // 取 overlay maxHeight 的 80% 与绝对 560.dp 的较小值：有界宿主下自适应（imePadding
+        // 后的可用高、留呼吸空间）；即便将来 BoxWithConstraints 收到 Infinity（被挪入无界
+        // slot），560.dp 兜底仍保证 Card bounded，使 weight(1f,fill=false)+verticalScroll
+        // 在内容超高时正确滚动而非溢出 / Infinity 断言。内容不足时 Card 仍 wrap。
+        val cardHeightCap = minOf(maxHeight * 0.8f, 560.dp)
+        Card(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 16.dp, vertical = 8.dp)
+                .heightIn(max = cardHeightCap)
+                .animateContentSize(),
+            shape = MaterialTheme.shapes.extraLarge,
+            colors = CardDefaults.cardColors(
+                containerColor = MaterialTheme.colorScheme.surfaceVariant
+            ),
+            elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)
+        ) {
+            AnimatedContent(
+                targetState = expanded,
+                transitionSpec = {
+                    (fadeIn() + slideInVertically { it / 2 }) togetherWith
+                        (fadeOut() + slideOutVertically { it / 2 })
+                },
+                label = "questionExpandCollapse"
+            ) { isExpanded ->
+                if (isExpanded) {
+                    ExpandedQuestionContent(
+                        question = question,
+                        currentTab = currentTab,
+                        currentQuestion = currentQuestion,
+                        currentAnswers = currentAnswers,
+                        hasAnswer = ::hasAnswer,
+                        isCustomActiveNow = isCustomActiveNow,
+                        customText = customText,
+                        isCustomEditing = isCustomEditing,
+                        isSending = isSending,
+                        isRejecting = isRejecting,
+                        anyInFlight = anyInFlight,
+                        errorText = errorText,
+                        queuePosition = queuePosition,
+                        queueTotal = queueTotal,
+                        accent = accent,
+                        onCollapse = { expanded = false },
+                        onSelectOption = ::selectOption,
+                        onCustomTextChange = {
+                            clearError()
+                            customTexts[currentTab] = it
+                        },
+                        onCommitCustom = ::commitCustom,
+                        onActivateCustom = ::activateCustom,
+                        onBack = ::back,
+                        onNext = ::next,
+                        onReject = ::reject
+                    )
+                } else {
+                    CollapsedQuestionPill(
+                        queuePosition = queuePosition,
+                        queueTotal = queueTotal,
+                        onExpand = { expanded = true }
+                    )
+                }
             }
         }
     }
@@ -456,100 +469,113 @@ private fun ExpandedQuestionContent(
             }
         }
 
-        // Question text
-        Text(
-            text = cq.question,
-            style = MaterialTheme.typography.bodyLarge
-        )
-
-        // Hint text
-        Text(
-            text = if (cq.allowMultiple) stringResource(R.string.question_multi_hint) else stringResource(R.string.question_single_hint),
-            style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant
-        )
-
-        // Options
+        // §qcard-scroll: 可滚动内容区。weight(1f, fill=false) + verticalScroll：
+        // 内容短时取自然高（不撑开、不滚）；内容超出 overlay 容器透传下来的 bounded
+        // maxHeight 时，Column 被 cap 到该高度，weight 把剩余空间分给此区并滚动。
+        // Header(含收起按钮)与 Action buttons 留在外层，始终可见——避免长问题把选项
+        // 挤出屏幕导致用户无法作答而被卡死。
+        val scrollState = rememberScrollState()
         Column(
-            modifier = Modifier.fillMaxWidth(),
-            verticalArrangement = Arrangement.spacedBy(4.dp)
+            modifier = Modifier
+                .weight(1f, fill = false)
+                .verticalScroll(scrollState),
+            verticalArrangement = Arrangement.spacedBy(12.dp)
         ) {
-            cq.options.forEach { option ->
-                val selected = currentAnswers?.contains(option.label) == true
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .clip(MaterialTheme.shapes.medium)
-                        .background(if (selected) accent.copy(alpha = 0.08f) else Color.Transparent)
-                        .clickable { onSelectOption(option) }
-                        .padding(vertical = 10.dp, horizontal = 12.dp),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Icon(
-                        imageVector = if (selected) {
-                            if (cq.allowMultiple) Icons.Filled.CheckBox else Icons.Filled.RadioButtonChecked
-                        } else {
-                            if (cq.allowMultiple) Icons.Outlined.CheckBoxOutlineBlank else Icons.Outlined.RadioButtonUnchecked
-                        },
-                        contentDescription = null,
-                        tint = if (selected) accent else MaterialTheme.colorScheme.onSurfaceVariant,
-                        modifier = Modifier.size(20.dp)
-                    )
-                    Spacer(modifier = Modifier.width(10.dp))
-                    Column(modifier = Modifier.weight(1f)) {
-                        Text(
-                            text = option.label,
-                            style = MaterialTheme.typography.bodyMedium,
-                            color = if (selected) accent else MaterialTheme.colorScheme.onSurface
-                        )
-                        if (option.description.isNotEmpty()) {
-                            Text(
-                                text = option.description,
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
-                            )
-                        }
-                    }
-                }
-            }
+            // Question text
+            Text(
+                text = cq.question,
+                style = MaterialTheme.typography.bodyLarge
+            )
 
-            // Custom input option
-            if (cq.allowCustom) {
-                Column(modifier = Modifier.fillMaxWidth()) {
+            // Hint text
+            Text(
+                text = if (cq.allowMultiple) stringResource(R.string.question_multi_hint) else stringResource(R.string.question_single_hint),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+
+            // Options
+            Column(
+                modifier = Modifier.fillMaxWidth(),
+                verticalArrangement = Arrangement.spacedBy(4.dp)
+            ) {
+                cq.options.forEach { option ->
+                    val selected = currentAnswers?.contains(option.label) == true
                     Row(
                         modifier = Modifier
                             .fillMaxWidth()
                             .clip(MaterialTheme.shapes.medium)
-                            .background(if (isCustomActiveNow) accent.copy(alpha = 0.08f) else Color.Transparent)
-                            .clickable { onActivateCustom() }
+                            .background(if (selected) accent.copy(alpha = 0.08f) else Color.Transparent)
+                            .clickable { onSelectOption(option) }
                             .padding(vertical = 10.dp, horizontal = 12.dp),
                         verticalAlignment = Alignment.CenterVertically
                     ) {
                         Icon(
-                            imageVector = if (isCustomActiveNow) Icons.Filled.CheckBox else Icons.Outlined.CheckBoxOutlineBlank,
+                            imageVector = if (selected) {
+                                if (cq.allowMultiple) Icons.Filled.CheckBox else Icons.Filled.RadioButtonChecked
+                            } else {
+                                if (cq.allowMultiple) Icons.Outlined.CheckBoxOutlineBlank else Icons.Outlined.RadioButtonUnchecked
+                            },
                             contentDescription = null,
-                            tint = if (isCustomActiveNow) accent else MaterialTheme.colorScheme.onSurfaceVariant,
+                            tint = if (selected) accent else MaterialTheme.colorScheme.onSurfaceVariant,
                             modifier = Modifier.size(20.dp)
                         )
                         Spacer(modifier = Modifier.width(10.dp))
-                        Text(
-                            text = stringResource(R.string.question_type_own_answer),
-                            style = MaterialTheme.typography.bodyMedium,
-                            color = if (isCustomActiveNow) accent else MaterialTheme.colorScheme.onSurface
-                        )
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = option.label,
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = if (selected) accent else MaterialTheme.colorScheme.onSurface
+                            )
+                            if (option.description.isNotEmpty()) {
+                                Text(
+                                    text = option.description,
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                        }
                     }
+                }
 
-                    if (isCustomActiveNow) {
-                        Spacer(modifier = Modifier.height(6.dp))
-                        OutlinedTextField(
-                            value = customText,
-                            onValueChange = onCustomTextChange,
-                            label = { Text(stringResource(R.string.question_custom_placeholder)) },
-                            singleLine = true,
-                            keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
-                            keyboardActions = KeyboardActions(onDone = { onCommitCustom() }),
-                            modifier = Modifier.fillMaxWidth()
-                        )
+                // Custom input option
+                if (cq.allowCustom) {
+                    Column(modifier = Modifier.fillMaxWidth()) {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clip(MaterialTheme.shapes.medium)
+                                .background(if (isCustomActiveNow) accent.copy(alpha = 0.08f) else Color.Transparent)
+                                .clickable { onActivateCustom() }
+                                .padding(vertical = 10.dp, horizontal = 12.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Icon(
+                                imageVector = if (isCustomActiveNow) Icons.Filled.CheckBox else Icons.Outlined.CheckBoxOutlineBlank,
+                                contentDescription = null,
+                                tint = if (isCustomActiveNow) accent else MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.size(20.dp)
+                            )
+                            Spacer(modifier = Modifier.width(10.dp))
+                            Text(
+                                text = stringResource(R.string.question_type_own_answer),
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = if (isCustomActiveNow) accent else MaterialTheme.colorScheme.onSurface
+                            )
+                        }
+
+                        if (isCustomActiveNow) {
+                            Spacer(modifier = Modifier.height(6.dp))
+                            OutlinedTextField(
+                                value = customText,
+                                onValueChange = onCustomTextChange,
+                                label = { Text(stringResource(R.string.question_custom_placeholder)) },
+                                singleLine = true,
+                                keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
+                                keyboardActions = KeyboardActions(onDone = { onCommitCustom() }),
+                                modifier = Modifier.fillMaxWidth()
+                            )
+                        }
                     }
                 }
             }

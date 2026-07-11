@@ -708,9 +708,7 @@ internal fun ChatMessageList(
                                     modifier = Modifier.widthIn(max = cardMax)
                                 )
                             }
-                            block.messageDecorations.forEach { message ->
-                                MessageDecoration(message = message, cardMax = cardMax)
-                            }
+                            FoldMessageDecoration(messages = block.messageDecorations, cardMax = cardMax)
                         }
                     }
                 }
