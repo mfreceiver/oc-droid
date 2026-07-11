@@ -575,6 +575,72 @@ class SessionListActionsTest {
         assertTrue(slices.sessionList.value.sessionStatuses.isEmpty())
     }
 
+    @Test
+    fun `mergeStatusSnapshot replaces stale and preserves SSE-updated entries`() {
+        // §groker🟡 v0.7.5 表驱动矩阵: REST 权威整体替换 + SSE 在途更新保护.
+        val busy = cn.vectory.ocdroid.data.model.SessionStatus(type = "busy")
+        val idle = cn.vectory.ocdroid.data.model.SessionStatus(type = "idle")
+        val retry = cn.vectory.ocdroid.data.model.SessionStatus(type = "retry")
+        // 1. 纯整体替换: 本地无 SSE 在途变化(before==after) → 用 REST, 清除 stale x
+        assertEquals(
+            mapOf("a" to busy),
+            mergeStatusSnapshot(mapOf("x" to busy), mapOf("x" to busy), mapOf("a" to busy))
+        )
+        // 2. SSE 在途改 x→idle: 保留 SSE idle(REST 不含 x), 不被清
+        assertEquals(
+            mapOf("a" to busy, "x" to idle),
+            mergeStatusSnapshot(mapOf("x" to busy), mapOf("x" to idle), mapOf("a" to busy))
+        )
+        // 3. SSE 在途新增 y(before 无): 保留
+        assertEquals(
+            mapOf("a" to busy, "y" to retry),
+            mergeStatusSnapshot(emptyMap(), mapOf("y" to retry), mapOf("a" to busy))
+        )
+        // 4. REST 含 x 且 SSE 未改 x(before==after): 用 REST 值覆盖本地
+        assertEquals(
+            mapOf("x" to busy),
+            mergeStatusSnapshot(mapOf("x" to idle), mapOf("x" to idle), mapOf("x" to busy))
+        )
+        // 5. 全空
+        assertEquals(
+            emptyMap<String, cn.vectory.ocdroid.data.model.SessionStatus>(),
+            mergeStatusSnapshot(emptyMap(), emptyMap(), emptyMap())
+        )
+    }
+
+    @Test
+    fun `launchLoadSessionStatus discards stale result when superseded by newer call`() = runTest {
+        // §groker🟡 v0.7.5: 第一个请求挂起返回旧 busy; 期间第二个请求发起(epoch 更大)并先完成.
+        // 第一个后完成时 epoch 已过期 → 丢弃, 不覆盖第二个的结果.
+        val firstGate = kotlinx.coroutines.CompletableDeferred<Unit>()
+        var firstStarted = false
+        coEvery { repository.getSessionStatus() } coAnswers {
+            if (!firstStarted) {
+                firstStarted = true
+                firstGate.await()
+                Result.success(mapOf("X" to cn.vectory.ocdroid.data.model.SessionStatus(type = "busy")))
+            } else {
+                Result.success(emptyMap())
+            }
+        }
+        launchLoadSessionStatus(scope, repository, slices)
+        advanceUntilIdle() // 第一个挂起在 firstGate
+        launchLoadSessionStatus(scope, repository, slices) // 第二个 epoch 更大, 立即完成
+        advanceUntilIdle()
+        assertEquals(
+            "newer call's empty result must be in effect",
+            emptyMap<String, cn.vectory.ocdroid.data.model.SessionStatus>(),
+            slices.sessionList.value.sessionStatuses
+        )
+        firstGate.complete(Unit) // 第一个完成, 返回旧 busy
+        advanceUntilIdle()
+        assertEquals(
+            "stale superseded result must be discarded",
+            emptyMap<String, cn.vectory.ocdroid.data.model.SessionStatus>(),
+            slices.sessionList.value.sessionStatuses
+        )
+    }
+
     // ── launchLoadChildSessions ───────────────────────────────────────────────
 
     @Test

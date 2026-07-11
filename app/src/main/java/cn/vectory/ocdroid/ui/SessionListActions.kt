@@ -13,6 +13,7 @@ import cn.vectory.ocdroid.data.cache.CacheRepository
 import cn.vectory.ocdroid.data.cache.FingerprintResult
 import cn.vectory.ocdroid.ui.controller.applySessionDiffIfAbsent
 import cn.vectory.ocdroid.data.model.Session
+import cn.vectory.ocdroid.data.model.SessionStatus
 import cn.vectory.ocdroid.data.model.toCacheEntry
 import cn.vectory.ocdroid.data.repository.OpenCodeRepository
 import cn.vectory.ocdroid.util.DebugLog
@@ -311,37 +312,61 @@ internal fun launchLoadMoreSessions(
     }
 }
 
+// §single-flight/epoch (groker🟡 v0.7.5): 并发触发(重连 + switchTo + loadSessions)时,
+// 每次发起递增 epoch; REST 返回时若 epoch 已被更新请求超越则丢弃本结果——避免后完成者
+// 把先完成者的 REST 写入误判为"SSE 在途变化"而保留(并发粘 busy 边角)。
+private val statusLoadEpoch = java.util.concurrent.atomic.AtomicLong(0)
+
 internal fun launchLoadSessionStatus(
     scope: CoroutineScope,
     repository: OpenCodeRepository,
     slices: SliceFlows
 ) {
-
+    val myEpoch = statusLoadEpoch.incrementAndGet()
     scope.launch {
-        // §sse-rest-race: REST 发起前快照本地 status。onSuccess 时用它识别"REST 在途期间
-        // 被 SSE 更新过的 session"——旧 REST 快照不得覆盖较新的 SSE 值 (gpter🟠/groker🟠/opuser🟠)。
+        // §sse-rest-race: REST 发起前快照本地 status, onSuccess 时识别"REST 在途期间
+        // 被 SSE 更新过的 session"——旧 REST 快照不得覆盖较新的 SSE 值。
         val localBefore = slices.sessionList.value.sessionStatuses
         repository.getSessionStatus()
             .onSuccess { statuses ->
                 slices.mutateSessionList { sl ->
-                    // §item6: /session/status 是全局权威快照, 只含 active(busy/retry) —
-                    // idle 已被 server delete (opencode session/status.ts: data.delete on
-                    // idle). 整体替换正确清除 server 已 idle(快照缺失)的 stale 本地 busy.
-                    // §sse-rest-race: 但保护 REST 在途期间被 SSE 更新的 session: 若
-                    // localAfter[id] != localBefore[id], 说明 SSE 刚写过 → 保留新 SSE 值,
-                    // 避免慢 REST 的旧快照回覆盖较新的 idle/busy。
-                    val localAfter = sl.sessionStatuses
-                    val result = statuses.toMutableMap()
-                    for ((id, after) in localAfter) {
-                        if (localBefore[id] != after) result[id] = after
+                    // §epoch-toctou (groker🟡 v0.7.6): check+write 合并在同一 mutate 原子段,
+                    // 关闭 onSuccess-check→mutate 间 TOCTOU(A check 过 → B 抬高 epoch 并 mutate
+                    // → A 再 mutate 时把 B 的写入当 localAfter≠localBefore 误判 SSE 在途保留).
+                    // mutate 内重比 epoch, 不匹配则 no-op.
+                    if (myEpoch != statusLoadEpoch.get()) {
+                        DebugLog.d("Sync", "launchLoadSessionStatus: epoch $myEpoch superseded, discarding stale snapshot")
+                        return@mutateSessionList sl
                     }
-                    sl.copy(sessionStatuses = result)
+                    sl.copy(
+                        sessionStatuses = mergeStatusSnapshot(localBefore, sl.sessionStatuses, statuses)
+                    )
                 }
             }
             .onFailure { error ->
                 reportNonFatalIssue("MainViewModel", "Failed to load session status", error)
             }
     }
+}
+
+/**
+ * §sse-rest-race 纯函数 (groker🟡 v0.7.5): 合并 REST 权威快照与本地状态。
+ * - REST 快照整体替换: 清除 server 已 idle(快照缺失)的 stale busy (opencode status.ts:
+ *   idle 时 data.delete, /session/status 只含 active)。
+ * - 保护 REST 在途期间被 SSE 更新的 session: localAfter[id] != localBefore[id] → 保留
+ *   SSE 新值, 避免慢 REST 旧快照覆盖较新 idle/busy。
+ * 抽为纯函数便于表驱动矩阵单测。
+ */
+internal fun mergeStatusSnapshot(
+    localBefore: Map<String, SessionStatus>,
+    localAfter: Map<String, SessionStatus>,
+    restSnapshot: Map<String, SessionStatus>
+): Map<String, SessionStatus> {
+    val result = restSnapshot.toMutableMap()
+    for ((id, after) in localAfter) {
+        if (localBefore[id] != after) result[id] = after
+    }
+    return result
 }
 
 /**
