@@ -1,0 +1,17 @@
+{
+  "agent": "groker",
+  "scope": "followup-race-whitelist",
+  "date": "2026-07-11",
+  "reviewed_commit": "2ea0f1d",
+  "version_target": "0.7.5",
+  "verdict": "pass",
+  "score": 9.5,
+  "rounds": 1,
+  "blocking_issues": [],
+  "non_blocking_issues": [
+    "LoadSessionStatus single-flight/代次号: 并发两次LoadSessionStatus时后完成者可能把先完成的REST写入当'在途变化'保留, 极端下再粘busy(非阻塞, scenario3多为先后非并行, 留后续)",
+    "竞态逻辑可抽纯函数+表驱动单测(before/after/rest矩阵)",
+    "节流仍未做(与ReloadSession对称, 可接受)"
+  ],
+  "notes": "v0.7.4 non-blocking follow-up。竞态守卫主路径正确(replace清stale idle + SSE在途不被慢REST盖), 与SSE模型一致(applySessionStatus map+含idle条目); 双单测锁住双目标(replaces snapshot dropping stale idle + preserves SSE during in-flight REST)。isTextPath裸名修复正确(无/回退整串, 有/取basename)。放行。"
+}
