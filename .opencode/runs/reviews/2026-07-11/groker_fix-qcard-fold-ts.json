@@ -1,0 +1,22 @@
+{
+  "agent": "groker",
+  "scope": "fix-qcard-fold-ts",
+  "date": "2026-07-11",
+  "reviewed_commit": "f765aeb",
+  "version_target": "0.7.3",
+  "verdict": "pass",
+  "score": 9.6,
+  "rounds": 3,
+  "round_history": [
+    {"round": 1, "score": 8.5, "blocker": "无", "key_concern": "缺 heightIn 防御（仅靠宿主有界+weight 间接保证，未对齐 §scroll-safety）；短内容撑满需实证"},
+    {"round": 2, "score": 9.4, "blocker": "无", "key_concern": "maxHeight*0.8 在 Infinity 宿主下仍 Infinity，注释超卖无界 slot 仍 bounded"},
+    {"round": 3, "score": 9.6, "blocker": "无", "key_concern": "已闭环（minOf 绝对兜底）"}
+  ],
+  "blocking_issues": [],
+  "non_blocking_issues": [
+    "内层 §qcard-scroll 注释略旧（提 overlay maxHeight，实为 cardHeightCap），可改成 cardHeightCap 以免后人误读",
+    "560.dp 与 HostProfiles 表单 cap 同量级，合理；若再扩散可抽 ScrollSafetyCaps 常量",
+    "IME 弹起 + 超长 options 滚动手感未做模拟器实测（逻辑正确，发版 smoke 覆盖即可）"
+  ],
+  "notes": "三轮迭代后闭环。核心结论：Card 在当前 ChatScreen Box(weight(1f)) 宿主下不断链、透传 bounded maxHeight；heightIn(minOf(0.8*maxH,560.dp)) 硬 cap 经 minOf 兜底后对任意宿主（含理论 Infinity）都保证 Card bounded——weight(1f,fill=false)+verticalScroll 在超高时滚、不足时 wrap、不触发 Infinity 断言。FoldMessageDecoration 逻辑正确、error 不聚合。BoxWithConstraints 嵌套副作用经核实无回归（onGloballyPositioned/imePadding 语义正确）。放行。"
+}

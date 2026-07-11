@@ -1,0 +1,16 @@
+{
+  "agent": "gpter",
+  "scope": "fix-qcard-fold-ts",
+  "date": "2026-07-11",
+  "reviewed_commit": "f765aeb",
+  "version_target": "0.7.3",
+  "verdict": "pass",
+  "score": 9.7,
+  "rounds": 2,
+  "blocking_issues": [],
+  "non_blocking_issues": [
+    "内层 §qcard-scroll 注释提 overlay maxHeight，实际生效的是 cardHeightCap（min(0.8*maxH,560)），可微调一致",
+    "560.dp 魔法数可抽常量（若再扩散）"
+  ],
+  "notes": "两回归修复。① FoldMessageDecoration 取最新 message completed/created 单时间戳 + ErrorCard 逐条全留，asReversed O(1)，空/全null 安全；Fold 分支正确改用，ToolRun 不改（partCount<2 单 message 无堆叠）。② QuestionCard ExpandedQuestionContent 拆 Header(固定)/可滚区(weight(1f,fill=false)+verticalScroll)/Buttons(固定)；BoxWithConstraints + heightIn(max=minOf(maxHeight*0.8,560.dp)) 硬 cap 对齐 §scroll-safety，minOf 绝对兜底保证任意宿主下 bounded（Infinity 路径闭环）；Card 不断链，短内容 wrap 不撑满；BoxWithConstraints 嵌套无副作用——onGloballyPositioned 测真实卡高（snackbar offset 正确）、imePadding 在 BWC 外侧使 maxHeight 反映键盘。"
+}
