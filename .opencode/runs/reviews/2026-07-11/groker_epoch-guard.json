@@ -1,0 +1,18 @@
+{
+  "agent": "groker",
+  "scope": "epoch-guard",
+  "date": "2026-07-11",
+  "reviewed_commit": "76f88bb",
+  "version_target": "0.7.6",
+  "verdict": "pass",
+  "score": 9.5,
+  "rounds": 1,
+  "reviewed_pre_amend_commit": "5018580",
+  "blocking_issues": [],
+  "non_blocking_issues": [
+    "TOCTOU(check→mutate间) — 已在 amend 76f88bb 采纳本人建议关闭(epoch校验移入 mutate 原子段, check+write 合一)",
+    "节流仍未做(与 ReloadSession 对称/可接受)",
+    "AtomicLong 跨测递增(可选 @VisibleForTesting reset)"
+  ],
+  "notes": "本人 v0.7.5🟡 建议(single-flight/代次号 + 纯函数矩阵单测)落地。epoch guard 主路径正确(后发起抬 epoch, 先发起后完成丢弃), 选代次号 vs mutex 合理(无跨测 lock 污染); mergeStatusSnapshot 纯函数 + 5case 矩阵 + 代次号 gate 单测到位。amend 76f88bb 采纳本人 🟡 v0.7.6 建议关 TOCTOU。放行。"
+}
