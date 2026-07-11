@@ -318,14 +318,24 @@ internal fun launchLoadSessionStatus(
 ) {
 
     scope.launch {
+        // §sse-rest-race: REST 发起前快照本地 status。onSuccess 时用它识别"REST 在途期间
+        // 被 SSE 更新过的 session"——旧 REST 快照不得覆盖较新的 SSE 值 (gpter🟠/groker🟠/opuser🟠)。
+        val localBefore = slices.sessionList.value.sessionStatuses
         repository.getSessionStatus()
             .onSuccess { statuses ->
                 slices.mutateSessionList { sl ->
                     // §item6: /session/status 是全局权威快照, 只含 active(busy/retry) —
                     // idle 已被 server delete (opencode session/status.ts: data.delete on
                     // idle). 整体替换正确清除 server 已 idle(快照缺失)的 stale 本地 busy.
-                    // 切勿改 merge(+statuses): 会永久保留旧 busy 致"已 idle 仍判 busy 显 Stop".
-                    sl.copy(sessionStatuses = statuses)
+                    // §sse-rest-race: 但保护 REST 在途期间被 SSE 更新的 session: 若
+                    // localAfter[id] != localBefore[id], 说明 SSE 刚写过 → 保留新 SSE 值,
+                    // 避免慢 REST 的旧快照回覆盖较新的 idle/busy。
+                    val localAfter = sl.sessionStatuses
+                    val result = statuses.toMutableMap()
+                    for ((id, after) in localAfter) {
+                        if (localBefore[id] != after) result[id] = after
+                    }
+                    sl.copy(sessionStatuses = result)
                 }
             }
             .onFailure { error ->

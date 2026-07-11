@@ -43,4 +43,53 @@ class FilePreviewUtilsTest {
             FilePreviewUtils.previewContentKind("foo/notes.txt", isBinary = false)
         )
     }
+
+    @Test
+    fun `isTextPath recognizes text whitelist by extension and special filename`() {
+        // 代码/配置/日志扩展名
+        assertTrue(FilePreviewUtils.isTextPath("app.log"))
+        assertTrue(FilePreviewUtils.isTextPath("data.csv"))
+        assertTrue(FilePreviewUtils.isTextPath(".env"))
+        assertTrue(FilePreviewUtils.isTextPath("App.vue"))
+        assertTrue(FilePreviewUtils.isTextPath("main.cs"))
+        assertTrue(FilePreviewUtils.isTextPath("plot.r"))
+        // 无扩展名特殊文件名
+        assertTrue(FilePreviewUtils.isTextPath("Makefile"))
+        assertTrue(FilePreviewUtils.isTextPath("Dockerfile"))
+        assertTrue(FilePreviewUtils.isTextPath("repo/.gitignore"))
+        // 非文本
+        assertFalse(FilePreviewUtils.isTextPath("image.png"))
+        assertFalse(FilePreviewUtils.isTextPath("archive.bin"))
+        assertFalse(FilePreviewUtils.isTextPath("random_no_ext"))
+    }
+
+    @Test
+    fun `previewContentKind forces TEXT for whitelisted files even when server reports binary`() {
+        // §item5a: server 对 .log/.csv/.env/Dockerfile 误报 binary 时, 白名单强制 TEXT.
+        assertEquals(
+            FilePreviewUtils.PreviewContentKind.TEXT,
+            FilePreviewUtils.previewContentKind("debug.log", isBinary = true)
+        )
+        assertEquals(
+            FilePreviewUtils.PreviewContentKind.TEXT,
+            FilePreviewUtils.previewContentKind("export.csv", isBinary = true)
+        )
+        assertEquals(
+            FilePreviewUtils.PreviewContentKind.TEXT,
+            FilePreviewUtils.previewContentKind("Dockerfile", isBinary = true)
+        )
+    }
+
+    @Test
+    fun `previewContentKind keeps BINARY for non-whitelisted binary files`() {
+        // 真 binary 不被白名单误中.
+        assertEquals(
+            FilePreviewUtils.PreviewContentKind.BINARY,
+            FilePreviewUtils.previewContentKind("build/output.bin", isBinary = true)
+        )
+        assertEquals(
+            FilePreviewUtils.PreviewContentKind.BINARY,
+            FilePreviewUtils.previewContentKind("data.dat", isBinary = true)
+        )
+    }
 }

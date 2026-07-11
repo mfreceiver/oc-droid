@@ -539,6 +539,33 @@ class SessionListActionsTest {
     }
 
     @Test
+    fun `preserves SSE status updated during in-flight REST over stale snapshot`() = runTest {
+        // §sse-rest-race: REST 在途时 SSE 已把 X 推到 idle; REST 返回的旧快照仍 X=busy.
+        // 守卫应保留 SSE 的 idle, 不被旧 REST busy 覆盖 (gpter🟠/groker🟠/opuser🟠).
+        slices.mutateSessionList {
+            it.copy(sessionStatuses = mutableMapOf(
+                "X" to cn.vectory.ocdroid.data.model.SessionStatus(type = "busy")
+            ))
+        }
+        coEvery { repository.getSessionStatus() } coAnswers {
+            // 模拟 REST 在途期间 SSE 写入 X=idle
+            slices.mutateSessionList {
+                it.copy(sessionStatuses = it.sessionStatuses + ("X" to cn.vectory.ocdroid.data.model.SessionStatus(type = "idle")))
+            }
+            Result.success(mapOf("X" to cn.vectory.ocdroid.data.model.SessionStatus(type = "busy")))
+        }
+
+        launchLoadSessionStatus(scope, repository, slices)
+        advanceUntilIdle()
+
+        assertEquals(
+            "SSE idle during in-flight REST must win over stale busy snapshot",
+            cn.vectory.ocdroid.data.model.SessionStatus(type = "idle"),
+            slices.sessionList.value.sessionStatuses["X"]
+        )
+    }
+
+    @Test
     fun `launchLoadSessionStatus failure does not crash and leaves slice untouched`() = runTest {
         coEvery { repository.getSessionStatus() } returns Result.failure(IllegalStateException("nope"))
 

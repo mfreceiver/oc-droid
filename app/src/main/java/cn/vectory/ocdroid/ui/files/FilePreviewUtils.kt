@@ -20,6 +20,7 @@ object FilePreviewUtils {
         // code
         "kt", "java", "py", "ts", "tsx", "js", "jsx", "go", "rs", "c", "cpp", "h", "hpp",
         "rb", "php", "swift", "scala", "sh", "bash", "zsh", "sql",
+        "vue", "svelte", "cs", "r", "dart", "lua", "clj", "ex", "hs", "jl", "pl", "graphql", "proto",
         // config / markup
         "json", "yaml", "yml", "toml", "ini", "conf", "cfg", "properties", "xml",
         "html", "htm", "css", "gradle", "env",
@@ -46,7 +47,7 @@ object FilePreviewUtils {
      * report for common text files (.log/.csv/.env/.lock/Dockerfile/…).
      */
     fun isTextPath(path: String): Boolean {
-        val filename = path.substringAfterLast('/', "").lowercase()
+        val filename = path.substringAfterLast('/', path).lowercase()
         if (filename.isEmpty()) return false
         if (filename in textFilenames) return true
         val ext = path.substringAfterLast('.', "").lowercase()
