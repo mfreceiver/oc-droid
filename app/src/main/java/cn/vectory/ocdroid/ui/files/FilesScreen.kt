@@ -20,7 +20,10 @@ import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
+import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.res.stringResource
@@ -72,6 +75,66 @@ fun FilesScreen(
 ) {
     val state by viewModel.state.collectAsStateWithLifecycle()
 
+    // §B1-P0 (fix copy→predictive-back crash): the LayoutCoordinate crash
+    // happens because the FilesScreen `when` branch removes FilePreviewPane
+    // from composition IN THE SAME FRAME as the BackHandler / close-button
+    // commit calls viewModel.closePreview(). When the removed subtree happens
+    // to contain a SelectionContainer (text/markdown-source preview), its
+    // selection handles' onGloballyPositioned callback can still fire on the
+    // now-detached LayoutCoordinates node → IllegalStateException.
+    //
+    // Fix (oracle scheme d): gate removal behind a one-frame "dismissing"
+    // phase. While `dismissing == true`, FilePreviewPane is still composed
+    // BUT PreviewPlainText drops SelectionContainer (renders plain Text), so
+    // the selection-handle listeners unregister cleanly during that frame.
+    // On the next frame we call closePreview() — by then the pane removal is
+    // safe because SelectionContainer is already gone.
+    var dismissing by remember { mutableStateOf(false) }
+
+    // Reset dismissing on ANY selectedFilePath transition. See
+    // PreviewDismissGate's kdoc for the full rationale: in short, StateFlow
+    // is conflating and can collapse `X → null → Y` into a single `X → Y`
+    // emission that this LaunchedEffect observes. If we reset only on
+    // `== null`, a conflate-collapsed transition would never hit the reset
+    // branch and `dismissing` would stick at true — the preview would stay
+    // non-selectable and every close entry would early-return (lock-up).
+    // Resetting on any change covers all three cases: normal close (X→null),
+    // reopen mid-dismiss (X→Y), and first open (null→Y, no-op).
+    LaunchedEffect(state.selectedFilePath) {
+        if (PreviewDismissGate.shouldReset(dismissing)) {
+            dismissing = false
+        }
+    }
+
+    // Drives the deferred close. Keyed on `dismissing` so a fresh `true` tick
+    // relaunches the effect. withFrameNanos {} suspends until the next
+    // choreographer frame — that single frame is when the recomposition
+    // stripping SelectionContainer (because the host flipped textSelectable
+    // to false) commits and disposes the selection handles. Only then do we
+    // invoke closePreview() to drop the pane.
+    LaunchedEffect(dismissing) {
+        if (dismissing) {
+            withFrameNanos { }
+            viewModel.closePreview()
+        }
+    }
+
+    // Unified close entry point — every "close preview" path (system/predictive
+    // back commit, TopBar close button, Files-tab reselect) MUST go through
+    // this so the dismissing gate always runs.
+    //
+    // The transition decision is delegated to [PreviewDismissGate] (pure,
+    // JVM-tested). Closing guard: reentry-safe — see the gate's kdoc.
+    fun requestClosePreview() {
+        if (PreviewDismissGate.shouldStartDismissing(
+                currentSelectedFilePath = state.selectedFilePath,
+                dismissing = dismissing,
+            )
+        ) {
+            dismissing = true
+        }
+    }
+
     // §files-git-readonly-workdir: the workdir is derived directly from the
     // active session's directory on every recomposition so Files follows
     // Chat session switches. No local override, no last-browsed fallback —
@@ -104,7 +167,23 @@ fun FilesScreen(
     }
 
     LaunchedEffect(pathToShow, effectiveWorkdir) {
-        viewModel.syncPathToShow(pathToShow, effectiveWorkdir)
+        // §B1-P0: when pathToShow is null but a preview is currently open,
+        // the VM's syncPathToShow would internally call closePreview (same-
+        // frame pane removal → LayoutCoordinate crash on text/markdown-source
+        // previews). Route that case through the dismissing gate instead so
+        // SelectionContainer unlinks first. Workdir is already synced by the
+        // parallel LaunchedEffect(effectiveWorkdir) → bindWorkdir above, so
+        // skipping syncPathToShow here doesn't lose the workdir update.
+        //
+        // No `&& !dismissing` here: requestClosePreview's own closing guard
+        // already no-ops when dismissing is in flight, and adding the guard
+        // inline would let dismissing==true fall through to syncPathToShow's
+        // closePreview — a same-frame removal bypassing the gate.
+        if (pathToShow == null && state.selectedFilePath != null) {
+            requestClosePreview()
+        } else {
+            viewModel.syncPathToShow(pathToShow, effectiveWorkdir)
+        }
     }
 
     // §Q10 (P4b-B): reselect subscription — a second tap on the Files tab
@@ -116,8 +195,13 @@ fun FilesScreen(
         orchestratorVM.reselectFlow
             .filter { it == NavRoute.Files }
             .collect {
+                // §B1-P0: go through requestClosePreview so the SelectionContainer
+                // is unlinked cleanly before the pane is removed (same dismissing
+                // gate as back/close-button). popToRoot runs synchronously — it
+                // only touches currentPath, not selectedFilePath, so order
+                // against the deferred closePreview() is safe.
                 if (viewModel.state.value.selectedFilePath != null) {
-                    viewModel.closePreview()
+                    requestClosePreview()
                 }
                 viewModel.popToRoot()
             }
@@ -132,10 +216,11 @@ fun FilesScreen(
     // the back press and jump straight to Chat even with a preview open. The
     // two handlers here are mutually exclusive on `selectedFilePath != null`
     // so exactly one is enabled in every state:
-    //   - preview open  → closePreview (returns to file list)
+    //   - preview open  → requestClosePreview (returns to file list, via the
+    //                     dismissing gate so SelectionContainer unlinks first)
     //   - preview closed → onExit (exits Files back to Chat)
     androidx.activity.compose.BackHandler(enabled = state.selectedFilePath != null) {
-        viewModel.closePreview()
+        requestClosePreview()
     }
     androidx.activity.compose.BackHandler(enabled = state.selectedFilePath == null) {
         onExit()
@@ -195,8 +280,13 @@ fun FilesScreen(
                         sessionDirectory = effectiveWorkdir,
                         isRefreshing = state.isPreviewRefreshing,
                         onRefresh = { viewModel.refreshPreview(effectiveWorkdir) },
+                        // §B1-P0: drop SelectionContainer one frame before the
+                        // pane is removed; see dismissing / requestClosePreview.
+                        // Decision routed through PreviewDismissGate so the
+                        // contract is JVM-tested.
+                        textSelectable = PreviewDismissGate.textSelectable(dismissing),
                         onClose = {
-                            viewModel.closePreview()
+                            requestClosePreview()
                             onCloseFile()
                         }
                     )

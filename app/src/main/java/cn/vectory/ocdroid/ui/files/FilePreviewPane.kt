@@ -83,6 +83,11 @@ internal fun FilePreviewPane(
     sessionDirectory: String? = null,
     isRefreshing: Boolean = false,
     onRefresh: () -> Unit = {},
+    // §B1-P0 (fix copy→predictive-back crash): when false, the text preview
+    // degrades to plain Text (no SelectionContainer) so the host can dismiss
+    // this pane without tripping LayoutCoordinate-after-detach. Default true
+    // keeps existing callers (e.g. ChatFilePreviewScreen) unchanged.
+    textSelectable: Boolean = true,
     onClose: () -> Unit
 ) {
     val context = LocalContext.current
@@ -224,10 +229,10 @@ internal fun FilePreviewPane(
                         repository = repository,
                         sessionDirectory = sessionDirectory
                     )
-                    MarkdownPreviewMode.Source -> PreviewPlainText(content = content)
+                    MarkdownPreviewMode.Source -> PreviewPlainText(content = content, selectable = textSelectable)
                 }
                 previewKind == FilePreviewUtils.PreviewContentKind.BINARY -> PreviewBinaryFallback()
-                else -> PreviewPlainText(content = content)
+                else -> PreviewPlainText(content = content, selectable = textSelectable)
             }
         }
     }
@@ -300,13 +305,29 @@ private fun PreviewBinaryFallback() {
 }
 
 @Composable
-private fun PreviewPlainText(content: String) {
+private fun PreviewPlainText(content: String, selectable: Boolean = true) {
     LazyColumn(
         modifier = Modifier.fillMaxSize(),
         contentPadding = PaddingValues(16.dp)
     ) {
         item {
-            SelectionContainer {
+            // §B1-P0 (fix copy→predictive-back crash): keep SelectionContainer
+            // only while still selectable. The host flips textSelectable to
+            // false ONE FRAME before removing this pane — that frame is enough
+            // for SelectionContainer's selection handles / onGloballyPositioned
+            // callbacks to leave composition cleanly, so the subsequent pane
+            // removal cannot read LayoutCoordinates on a detached node
+            // (the IllegalStateException that used to crash the app on
+            // copy → edge-swipe-back).
+            if (selectable) {
+                SelectionContainer {
+                    Text(
+                        text = content,
+                        style = MaterialTheme.typography.bodySmall,
+                        fontFamily = BundledMonoFamily
+                    )
+                }
+            } else {
                 Text(
                     text = content,
                     style = MaterialTheme.typography.bodySmall,
