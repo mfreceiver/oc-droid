@@ -1,13 +1,10 @@
 package cn.vectory.ocdroid.ui.chat
 
 import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
@@ -15,6 +12,7 @@ import androidx.compose.material.icons.filled.Checklist
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.Icon
 import androidx.compose.material3.LinearProgressIndicator
+import androidx.compose.material3.ListItem
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -77,28 +75,29 @@ fun TodoListPanel(
         }
 
         items(todos, key = { it.id }) { todo ->
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(vertical = 6.dp),
-                verticalAlignment = Alignment.Top
-            ) {
-                Checkbox(
-                    checked = todo.isCompleted,
-                    onCheckedChange = null,
-                    modifier = Modifier.size(20.dp)
-                )
-                Spacer(modifier = Modifier.width(8.dp))
-                Text(
-                    text = todo.content,
-                    style = MaterialTheme.typography.bodyLarge.copy(
-                        textDecoration = if (todo.isCompleted) TextDecoration.LineThrough else null
-                    ),
-                    color = if (todo.isCompleted) MaterialTheme.colorScheme.onSurfaceVariant
-                    else MaterialTheme.colorScheme.onSurface,
-                    modifier = Modifier.weight(1f)
-                )
-            }
+            // §B4-P3C: 行渲染改 M3 ListItem（与 Agent/Model 选择 sheet 一致）。
+            // - leadingContent = Checkbox（状态指示）。
+            // - headlineContent = todo 内容 bodyLarge；completed 项叠删除线 + onSurfaceVariant。
+            // - 无 per-item 背景色（底色由 AppBottomSheet 的 surfaceContainerLow 统一）。
+            ListItem(
+                leadingContent = {
+                    Checkbox(
+                        checked = todo.isCompleted,
+                        onCheckedChange = null,
+                        modifier = Modifier.size(20.dp),
+                    )
+                },
+                headlineContent = {
+                    Text(
+                        text = todo.content,
+                        style = MaterialTheme.typography.bodyLarge.copy(
+                            textDecoration = if (todo.isCompleted) TextDecoration.LineThrough else null,
+                        ),
+                        color = if (todo.isCompleted) MaterialTheme.colorScheme.onSurfaceVariant
+                        else MaterialTheme.colorScheme.onSurface,
+                    )
+                },
+            )
         }
     }
 }

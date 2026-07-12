@@ -31,7 +31,6 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Text
@@ -74,6 +73,7 @@ import cn.vectory.ocdroid.ui.resolveMessage
 import cn.vectory.ocdroid.ui.showTimed
 import cn.vectory.ocdroid.ui.visibleMessages
 import cn.vectory.ocdroid.ui.settings.TofuTrustDialog
+import cn.vectory.ocdroid.ui.theme.AppBottomSheet
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
@@ -730,24 +730,21 @@ fun ChatScaffold(
     // menu (onOpenTodoDialog / onOpenContextDialog) instead of the remote
     // ConversationOverflowMenu.
     if (showTodoDialog) {
-        ModalBottomSheet(
+        // §B4-P3C: Todo sheet 迁移到 AppBottomSheet（与 Context/Agent/Model 统一）。
+        // - title 经 recipe 自动 titleLarge + padding(24,8)（原手写 titleMedium 升级）。
+        // - skipPartiallyExpanded 默认 true（recipe 固化点①），与其它三个 sheet 一致；
+        //   Todo 原是现网唯一半展的 sheet，现按本批决策统一全展。
+        // - 容器色 surfaceContainerLow 由 recipe 统一（用户点 5：底色统一）。
+        // - 高度：自然高度 + heightIn(max ≈ 屏 0.75) 封顶超长列表；不用 weight(1f)。
+        val todoSheetMaxHeight = (LocalConfiguration.current.screenHeightDp * 0.75f).dp
+        AppBottomSheet(
             onDismissRequest = { showTodoDialog = false },
+            title = stringResource(R.string.chat_todo),
         ) {
-            Column(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(bottom = 16.dp),
-            ) {
-                Text(
-                    text = stringResource(R.string.chat_todo),
-                    style = MaterialTheme.typography.titleMedium,
-                    modifier = Modifier.padding(horizontal = 24.dp, vertical = 8.dp),
-                )
-                TodoListPanel(
-                    todos = sessionList.sessionTodos[chat.currentSessionId ?: ""] ?: emptyList(),
-                    modifier = Modifier.heightIn(max = 400.dp),
-                )
-            }
+            TodoListPanel(
+                todos = sessionList.sessionTodos[chat.currentSessionId ?: ""] ?: emptyList(),
+                modifier = Modifier.heightIn(max = todoSheetMaxHeight),
+            )
         }
     }
 

@@ -29,19 +29,18 @@ import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.text.BasicTextField
-import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.AttachFile
+import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.PhotoLibrary
-import androidx.compose.material.icons.filled.SmartToy
 import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material.icons.filled.Terminal
-import androidx.compose.material.icons.outlined.Memory
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
@@ -76,6 +75,7 @@ import cn.vectory.ocdroid.ui.ChatViewModel
 import cn.vectory.ocdroid.ui.ComposerFileReference
 import cn.vectory.ocdroid.ui.ComposerViewModel
 import cn.vectory.ocdroid.ui.OrchestratorViewModel
+import cn.vectory.ocdroid.ui.theme.AppBottomSheet
 import cn.vectory.ocdroid.ui.theme.Dimens
 import kotlinx.coroutines.launch
 
@@ -469,50 +469,42 @@ internal fun AgentPickerSheet(
     onPick: (String?) -> Unit,
     onDismiss: () -> Unit,
 ) {
-    val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
-    ModalBottomSheet(
+    // §B4·P3-B: 迁移到 AppBottomSheet（容器色 / titleLarge / sheetState /
+    // 底部 inset 由 recipe 统一）。Agent 视为单一 section，无 provider 分组。
+    // 选中态：headline primary 色 + trailing 槽固定 18dp Check（替代 SmartToy，
+    // 与 ModelPickerSheet 统一为 Filled Check）。
+    AppBottomSheet(
         onDismissRequest = onDismiss,
-        sheetState = sheetState,
+        title = stringResource(R.string.chat_switch_agent),
     ) {
-        // §round-B ④: scrollable body so a long agent list (build + user
-        // + sub-agents) no longer overflows the ModalBottomSheet viewport.
-        Column(
-            modifier = Modifier
-                .fillMaxWidth()
-                .verticalScroll(rememberScrollState())
-                .padding(bottom = 16.dp)
-        ) {
-            Text(
-                text = stringResource(R.string.chat_switch_agent),
-                style = MaterialTheme.typography.titleMedium,
-                modifier = Modifier.padding(horizontal = 24.dp, vertical = 8.dp),
-            )
-            androidx.compose.material3.ListItem(
-                headlineContent = { Text(stringResource(R.string.agent_default_label)) },
-                trailingContent = {
-                    if (selectedAgentName == null) {
-                        Icon(
-                            Icons.Default.SmartToy,
-                            contentDescription = null,
-                            tint = MaterialTheme.colorScheme.primary,
+        LazyColumn(modifier = Modifier.fillMaxWidth()) {
+            // 默认 agent（选中 = null）。
+            item(key = "__default__") {
+                val isSelected = selectedAgentName == null
+                androidx.compose.material3.ListItem(
+                    headlineContent = {
+                        Text(
+                            text = stringResource(R.string.agent_default_label),
+                            color = if (isSelected) MaterialTheme.colorScheme.primary
+                            else MaterialTheme.colorScheme.onSurface,
                         )
-                    }
-                },
-                modifier = Modifier.clickable { onPick(null) },
-            )
-            agents.forEach { agent ->
+                    },
+                    trailingContent = { PickerTrailingCheck(isSelected) },
+                    modifier = Modifier.clickable { onPick(null) },
+                )
+            }
+            // §B4: 稳定 key 让选中态切换不丢动画；trailing 槽位恒渲染避免文本跳动。
+            items(items = agents, key = { it.name }) { agent ->
                 val isSelected = agent.name == selectedAgentName
                 androidx.compose.material3.ListItem(
-                    headlineContent = { Text(agent.name) },
-                    trailingContent = {
-                        if (isSelected) {
-                            Icon(
-                                Icons.Default.SmartToy,
-                                contentDescription = null,
-                                tint = MaterialTheme.colorScheme.primary,
-                            )
-                        }
+                    headlineContent = {
+                        Text(
+                            text = agent.name,
+                            color = if (isSelected) MaterialTheme.colorScheme.primary
+                            else MaterialTheme.colorScheme.onSurface,
+                        )
                     },
+                    trailingContent = { PickerTrailingCheck(isSelected) },
                     modifier = Modifier.clickable { onPick(agent.name) },
                 )
             }
@@ -529,46 +521,51 @@ internal fun ModelPickerSheet(
     onSwitch: (providerId: String, modelId: String) -> Unit,
     onDismiss: () -> Unit,
 ) {
-    val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+    // §B4·P3-B: 迁移到 AppBottomSheet（容器色 / titleLarge / sheetState /
+    // 底部 inset 由 recipe 统一）。provider header 用 labelLarge + 顶 8dp/
+    // 底 4dp（与 Agent 标题节奏对称）；trailing 槽统一 Filled Check（替代
+    // Outlined Memory）。
     val catalog = visiblePickerProviders(providers, disabledModels)
-    ModalBottomSheet(
+    AppBottomSheet(
         onDismissRequest = onDismiss,
-        sheetState = sheetState,
+        title = stringResource(R.string.chat_model_picker_title),
     ) {
-        // §round-B ④: scrollable body so a long provider×model catalog no
-        // longer overflows the ModalBottomSheet viewport.
-        Column(
-            modifier = Modifier
-                .fillMaxWidth()
-                .verticalScroll(rememberScrollState())
-                .padding(bottom = 16.dp)
-        ) {
+        if (catalog.isEmpty()) {
             Text(
-                text = stringResource(R.string.chat_model_picker_title),
-                style = MaterialTheme.typography.titleMedium,
-                modifier = Modifier.padding(horizontal = 24.dp, vertical = 8.dp),
+                text = stringResource(R.string.chat_model_picker_empty),
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(horizontal = 24.dp, vertical = 12.dp),
             )
-            if (catalog.isEmpty()) {
-                Text(
-                    text = stringResource(R.string.chat_model_picker_empty),
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    modifier = Modifier.padding(horizontal = 24.dp, vertical = 12.dp),
-                )
-            } else {
+        } else {
+            LazyColumn(modifier = Modifier.fillMaxWidth()) {
                 catalog.forEach { provider ->
-                    val matchingModels = provider.models.entries.map { (modelId, model) -> modelId to model }
+                    val matchingModels = provider.models.entries
+                        .map { (modelId, model) -> modelId to model }
                         .filter { (modelId, _) ->
                             "${provider.id}/$modelId" !in disabledModels
                         }
                     if (matchingModels.isEmpty()) return@forEach
-                    Text(
-                        text = provider.name?.takeIf { it.isNotEmpty() } ?: provider.id,
-                        style = MaterialTheme.typography.titleSmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        modifier = Modifier.padding(horizontal = 24.dp, vertical = 4.dp),
-                    )
-                    matchingModels.forEach { (modelId, model) ->
+                    // §B4 provider header：labelLarge(14sp/Med) + onSurfaceVariant，
+                    // padding 水平 24dp、顶 8dp / 底 4dp（provider 之间自然 8dp，
+                    // provider 内 model 行连续无额外间距）。
+                    item(key = "header_${provider.id}") {
+                        Text(
+                            text = provider.name?.takeIf { it.isNotEmpty() } ?: provider.id,
+                            style = MaterialTheme.typography.labelLarge,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.padding(
+                                start = 24.dp,
+                                end = 24.dp,
+                                top = 8.dp,
+                                bottom = 4.dp,
+                            ),
+                        )
+                    }
+                    items(
+                        items = matchingModels,
+                        key = { (modelId, _) -> "${provider.id}/$modelId" },
+                    ) { (modelId, model) ->
                         val isSelected = currentModel != null &&
                             currentModel.providerId == provider.id &&
                             (currentModel.modelId == modelId || currentModel.modelId == model.id)
@@ -580,20 +577,34 @@ internal fun ModelPickerSheet(
                                     else MaterialTheme.colorScheme.onSurface,
                                 )
                             },
-                            trailingContent = {
-                                if (isSelected) {
-                                    Icon(
-                                        Icons.Outlined.Memory,
-                                        contentDescription = null,
-                                        tint = MaterialTheme.colorScheme.primary,
-                                    )
-                                }
-                            },
+                            trailingContent = { PickerTrailingCheck(isSelected) },
                             modifier = Modifier.clickable { onSwitch(provider.id, modelId) },
                         )
                     }
                 }
             }
         }
+    }
+}
+
+/**
+ * §B4·P3-B picker 选中态的稳定 trailing 槽（用户点 6）。
+ *
+ * 选中 = `Icons.Filled.Check`(18dp, primary)；未选中 = 同尺寸 `Spacer`。
+ * 始终渲染保证：Check 出现/消失时左侧 headline 文本宽度不跳动，各行左对齐齐平。
+ * 同时承担用户点 5 的选中态统一：Agent 与 Model 选中项不再用 SmartToy /
+ * Outlined Memory，统一为 Filled Check + primary 文字（无 per-item 选中底色）。
+ */
+@Composable
+private fun PickerTrailingCheck(selected: Boolean) {
+    if (selected) {
+        Icon(
+            Icons.Filled.Check,
+            contentDescription = null,
+            tint = MaterialTheme.colorScheme.primary,
+            modifier = Modifier.size(18.dp),
+        )
+    } else {
+        Spacer(Modifier.size(18.dp))
     }
 }
