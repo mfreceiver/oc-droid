@@ -47,7 +47,6 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
-import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import cn.vectory.ocdroid.R
@@ -56,6 +55,7 @@ import cn.vectory.ocdroid.ui.ConnectionViewModel
 import cn.vectory.ocdroid.ui.HostViewModel
 import cn.vectory.ocdroid.ui.NavRoute
 import cn.vectory.ocdroid.ui.SettingsViewModel
+import cn.vectory.ocdroid.ui.theme.Dimens
 import cn.vectory.ocdroid.ui.util.formatBytes
 import cn.vectory.ocdroid.util.ThemeMode
 import kotlinx.coroutines.flow.distinctUntilChanged
@@ -303,7 +303,7 @@ fun SettingsAppearanceRoute(
         Column(
             modifier = mod
                 .verticalScroll(rememberScrollState())
-                .padding(horizontal = 16.dp),
+                .padding(horizontal = Dimens.spacing4),
         ) {
             AppearanceSection(
                 themeMode = themeMode,
@@ -340,7 +340,7 @@ fun SettingsModelsRoute(
         Column(
             modifier = mod
                 .verticalScroll(rememberScrollState())
-                .padding(16.dp),
+                .padding(Dimens.spacing4),
         ) {
             ModelManagementSection(
                 providers = providers,
@@ -382,7 +382,7 @@ fun SettingsNotificationsRoute(onBack: () -> Unit) {
         Column(
             modifier = mod
                 .verticalScroll(rememberScrollState())
-                .padding(horizontal = 16.dp),
+                .padding(horizontal = Dimens.spacing4),
         ) {
             SectionHeader(title = stringResource(R.string.settings_section_notifications))
             ListItem(
@@ -408,7 +408,7 @@ fun SettingsNotificationsRoute(onBack: () -> Unit) {
             // surface that requires a runtime prompt). Pre-33 installs inherit
             // the install-time grant, so the button would be a dead no-op.
             if (!granted && Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                Spacer(modifier = Modifier.height(12.dp))
+                Spacer(modifier = Modifier.height(Dimens.spacing3))
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.Center,
@@ -466,7 +466,7 @@ fun SettingsStorageRoute(
         Column(
             modifier = mod
                 .verticalScroll(rememberScrollState())
-                .padding(horizontal = 16.dp),
+                .padding(horizontal = Dimens.spacing4),
         ) {
             // ① 清除数据 (first, flat).
             SectionHeader(title = stringResource(R.string.settings_danger_zone))
@@ -475,7 +475,7 @@ fun SettingsStorageRoute(
                 onClearLocalData = viewModel::resetLocalDataAndResync,
                 hideHeader = true,
             )
-            Spacer(modifier = Modifier.height(24.dp))
+            Spacer(modifier = Modifier.height(Dimens.spacing6))
 
             // ② 缓存管理 (3-level tree + destructive sweeps + 3s snackbar).
             SectionHeader(title = stringResource(R.string.cache_management_popup_title))
@@ -509,10 +509,10 @@ fun SettingsAboutRoute(
         Column(
             modifier = mod
                 .verticalScroll(rememberScrollState())
-                .padding(horizontal = 16.dp),
+                .padding(horizontal = Dimens.spacing4),
         ) {
             AboutSection()
-            Spacer(modifier = Modifier.height(24.dp))
+            Spacer(modifier = Modifier.height(Dimens.spacing6))
 
             SectionHeader(title = stringResource(R.string.settings_section_debug))
             DebugLogSection(hideHeader = true)

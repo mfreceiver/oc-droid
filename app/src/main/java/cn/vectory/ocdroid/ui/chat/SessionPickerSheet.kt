@@ -58,6 +58,7 @@ import androidx.compose.ui.unit.dp
 import cn.vectory.ocdroid.R
 import cn.vectory.ocdroid.data.model.Session
 import cn.vectory.ocdroid.data.model.SessionStatus
+import cn.vectory.ocdroid.ui.theme.Dimens
 import androidx.compose.ui.res.stringResource
 
 /**
@@ -160,7 +161,7 @@ fun SessionPickerSheet(
             Text(
                 text = stringResource(R.string.chat_action_sessions),
                 style = MaterialTheme.typography.titleLarge,
-                modifier = Modifier.padding(horizontal = 24.dp, vertical = 8.dp),
+                modifier = Modifier.padding(horizontal = Dimens.spacing6, vertical = Dimens.spacing2),
             )
             SearchBar(
                 query = query,
@@ -169,7 +170,7 @@ fun SessionPickerSheet(
                 active = false,
                 onActiveChange = {},
                 placeholder = { Text("Search sessions") },
-                modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp),
+                modifier = Modifier.fillMaxWidth().padding(horizontal = Dimens.spacing4),
             ) {}
             HorizontalDivider()
 
@@ -228,7 +229,7 @@ fun SessionPickerSheet(
                             text = stringResource(R.string.sessions_no_active),
                             style = MaterialTheme.typography.bodyMedium,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            modifier = Modifier.padding(horizontal = 24.dp, vertical = 12.dp),
+                            modifier = Modifier.padding(horizontal = Dimens.spacing6, vertical = Dimens.spacing3),
                         )
                     }
                 }
@@ -240,7 +241,7 @@ fun SessionPickerSheet(
             Box(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(16.dp),
+                    .padding(Dimens.spacing4),
                 contentAlignment = Alignment.CenterEnd,
             ) {
                 ExtendedFloatingActionButton(
@@ -269,7 +270,7 @@ private fun SectionHeader(text: String) {
         text = text,
         style = MaterialTheme.typography.titleSmall,
         color = MaterialTheme.colorScheme.onSurfaceVariant,
-        modifier = Modifier.padding(horizontal = 24.dp, vertical = 8.dp),
+        modifier = Modifier.padding(horizontal = Dimens.spacing6, vertical = Dimens.spacing2),
     )
 }
 
@@ -280,7 +281,7 @@ private fun WorkdirHeader(workdir: String) {
         text = baseName,
         style = MaterialTheme.typography.labelLarge,
         color = MaterialTheme.colorScheme.onSurface,
-        modifier = Modifier.padding(horizontal = 24.dp, vertical = 4.dp),
+        modifier = Modifier.padding(horizontal = Dimens.spacing6, vertical = Dimens.spacing1),
         maxLines = 1,
         overflow = TextOverflow.Ellipsis,
     )
@@ -334,26 +335,26 @@ private fun SessionPickerRow(
                         text = "?",
                         color = tone,
                         style = MaterialTheme.typography.labelMedium,
-                        modifier = Modifier.padding(end = 6.dp),
+                        modifier = Modifier.padding(end = Dimens.spacingCompact),
                     )
                 }
                 if (status?.isRetry == true) {
                     Box(
                         modifier = Modifier
-                            .size(8.dp)
+                            .size(Dimens.spacing2)
                             .clip(CircleShape)
                             .background(MaterialTheme.colorScheme.error)
                     )
-                    Spacer(Modifier.size(6.dp))
+                    Spacer(Modifier.size(Dimens.spacingCompact))
                 }
                 if (isUnread) {
                     Box(
                         modifier = Modifier
-                            .size(8.dp)
+                            .size(Dimens.spacing2)
                             .clip(CircleShape)
                             .background(MaterialTheme.colorScheme.primary)
                     )
-                    Spacer(Modifier.size(6.dp))
+                    Spacer(Modifier.size(Dimens.spacingCompact))
                 }
                 IconButton(onClick = onOverflow) {
                     Icon(

@@ -69,8 +69,7 @@ internal fun ThinkingCapsule(
                 shape = RoundedCornerShape(50)
             ),
         shape = RoundedCornerShape(50),
-        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.95f),
-        shadowElevation = 3.dp,
+        color = MaterialTheme.colorScheme.surfaceContainer.copy(alpha = 0.95f),
         tonalElevation = 2.dp
     ) {
         Row(

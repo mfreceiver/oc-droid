@@ -38,12 +38,12 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.res.stringResource
-import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import cn.vectory.ocdroid.R
 import cn.vectory.ocdroid.data.model.FileNode
 import cn.vectory.ocdroid.data.repository.OpenCodeRepository
+import cn.vectory.ocdroid.ui.theme.Dimens
 
 /**
  * A directory browser shown as a modal bottom sheet. Used by the Sessions tab
@@ -109,12 +109,12 @@ fun DirectoryPickerSheet(
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(start = 20.dp, end = 8.dp, top = 4.dp, bottom = 4.dp),
+                    .padding(start = Dimens.spacing5, end = Dimens.spacing2, top = Dimens.spacing1, bottom = Dimens.spacing1),
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Text(
                     text = stringResource(R.string.sessions_tab_new_workdir),
-                    style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.SemiBold),
+                    style = MaterialTheme.typography.titleLarge,
                     color = MaterialTheme.colorScheme.onSurface,
                     modifier = Modifier.weight(1f)
                 )
@@ -131,10 +131,10 @@ fun DirectoryPickerSheet(
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 maxLines = 2,
                 overflow = TextOverflow.Ellipsis,
-                modifier = Modifier.padding(start = 20.dp, end = 20.dp, bottom = 8.dp)
+                modifier = Modifier.padding(start = Dimens.spacing5, end = Dimens.spacing5, bottom = Dimens.spacing2)
             )
 
-            Spacer(modifier = Modifier.height(8.dp))
+            Spacer(modifier = Modifier.height(Dimens.spacing2))
 
             // --- Up affordance ---
             if (canGoUp) {
@@ -144,7 +144,7 @@ fun DirectoryPickerSheet(
                         .clickable {
                             parentPath(currentPath)?.let { currentPath = it }
                         }
-                        .padding(horizontal = 20.dp, vertical = 14.dp),
+                        .padding(horizontal = Dimens.spacing5, vertical = 14.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     Icon(
@@ -153,14 +153,14 @@ fun DirectoryPickerSheet(
                         tint = MaterialTheme.colorScheme.primary,
                         modifier = Modifier.size(20.dp)
                     )
-                    Spacer(Modifier.width(12.dp))
+                    Spacer(Modifier.width(Dimens.spacing3))
                     Text(
                         text = "..",
                         style = MaterialTheme.typography.bodyLarge,
                         color = MaterialTheme.colorScheme.primary
                     )
                 }
-                Spacer(modifier = Modifier.height(8.dp))
+                Spacer(modifier = Modifier.height(Dimens.spacing2))
             }
 
             // --- Directory listing (weights to fill available sheet height) ---
@@ -174,7 +174,7 @@ fun DirectoryPickerSheet(
                         CircularProgressIndicator(
                             modifier = Modifier
                                 .align(Alignment.Center)
-                                .padding(32.dp)
+                                .padding(Dimens.spacing7)
                         )
                     }
 
@@ -182,7 +182,7 @@ fun DirectoryPickerSheet(
                         Column(
                             modifier = Modifier
                                 .align(Alignment.Center)
-                                .padding(24.dp),
+                                .padding(Dimens.spacing6),
                             horizontalAlignment = Alignment.CenterHorizontally
                         ) {
                             Text(
@@ -191,7 +191,7 @@ fun DirectoryPickerSheet(
                                 style = MaterialTheme.typography.bodyMedium,
                                 textAlign = androidx.compose.ui.text.style.TextAlign.Center
                             )
-                            Spacer(Modifier.size(8.dp))
+                            Spacer(Modifier.size(Dimens.spacing2))
                             TextButton(onClick = { reloadNonce++ }) {
                                 Text(stringResource(R.string.common_refresh))
                             }
@@ -205,7 +205,7 @@ fun DirectoryPickerSheet(
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                             modifier = Modifier
                                 .align(Alignment.Center)
-                                .padding(24.dp)
+                                .padding(Dimens.spacing6)
                         )
                     }
 
@@ -224,20 +224,20 @@ fun DirectoryPickerSheet(
                 }
             }
 
-            Spacer(modifier = Modifier.height(8.dp))
+            Spacer(modifier = Modifier.height(Dimens.spacing2))
 
             // --- Action bar ---
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(12.dp),
+                    .padding(Dimens.spacing3),
                 horizontalArrangement = Arrangement.End,
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 TextButton(onClick = onDismiss) {
                     Text(stringResource(R.string.common_cancel))
                 }
-                Spacer(Modifier.width(8.dp))
+                Spacer(Modifier.width(Dimens.spacing2))
                 Button(
                     onClick = { onSelect(currentPath) },
                     enabled = !isLoading

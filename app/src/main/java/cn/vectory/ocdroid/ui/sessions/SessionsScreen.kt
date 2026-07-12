@@ -199,9 +199,11 @@ fun SessionsScreen(
                 // internal padding, so 0 top here keeps a clean gap. Bottom
                 // pad retained for scroll comfort.
                 contentPadding = PaddingValues(bottom = Dimens.spacing2),
-                // §0.8.2 P3.3: tighten inter-item gap (was 2.dp); combined
-                // with SessionCard's vertical=0 padding → ~1dp between cards.
-                verticalArrangement = Arrangement.spacedBy(Dimens.hairline)
+                // §0.8.2 P3.3 / B6·P5: items flush (was hairline=1dp seam —
+                // hairline is a divider-thickness token, not list spacing).
+                // SessionCards' surfaceContainerLow background keeps visual
+                // grouping without a 1dp gap.
+                verticalArrangement = Arrangement.spacedBy(0.dp)
             ) {
             // --- Recent Sessions Section ---
             item(key = "recent_header") {
@@ -318,7 +320,7 @@ fun SessionsScreen(
                                         color = MaterialTheme.colorScheme.onSurface
                                     )
                                     if (isDraft) {
-                                        Spacer(modifier = Modifier.width(6.dp))
+                                        Spacer(modifier = Modifier.width(Dimens.spacingCompact))
                                         Text(
                                             text = stringResource(R.string.sessions_draft_badge),
                                             style = MaterialTheme.typography.labelSmall,
@@ -328,7 +330,7 @@ fun SessionsScreen(
                                                 .background(
                                                     MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.12f)
                                                 )
-                                                .padding(horizontal = 6.dp, vertical = 1.dp)
+                                                .padding(horizontal = Dimens.spacingCompact, vertical = Dimens.hairline)
                                         )
                                     }
                                 }
@@ -392,7 +394,7 @@ fun SessionsScreen(
                             Column(
                                 modifier = Modifier
                                     .fillMaxWidth()
-                                    .padding(horizontal = 8.dp)
+                                    .padding(horizontal = Dimens.spacing2)
                             ) {
                                 if (sessionsInWorkdir.isEmpty()) {
                                     EmptyWorkdirPlaceholder(
@@ -504,7 +506,7 @@ private fun SectionHeader(
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .padding(horizontal = 16.dp, vertical = 12.dp),
+            .padding(horizontal = Dimens.spacing4, vertical = Dimens.spacing3),
         verticalAlignment = Alignment.CenterVertically
     ) {
         Icon(
@@ -513,10 +515,10 @@ private fun SectionHeader(
             modifier = Modifier.size(Dimens.iconSm),
             tint = MaterialTheme.colorScheme.onSurfaceVariant
         )
-        Spacer(modifier = Modifier.width(8.dp))
+        Spacer(modifier = Modifier.width(Dimens.spacing2))
         Text(
             text = title,
-            style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.SemiBold),
+            style = MaterialTheme.typography.labelLarge,
             color = MaterialTheme.colorScheme.onSurface
         )
         // §entry-relocate: 把"连接新项目"入口从 TopAppBar 移到"已连接的项目"
@@ -564,10 +566,10 @@ private fun SessionCard(
         modifier = Modifier
             .fillMaxWidth()
             // §0.8.2 P3.3: vertical padding 2.dp → 0.dp (horizontal kept).
-            // Combined with the LazyColumn's spacedBy(Dimens.hairline) this
-            // yields a tight ~1dp inter-card gap (was ~6dp). Card internal
-            // layout untouched.
-            .padding(horizontal = 8.dp, vertical = 0.dp)
+            // LazyColumn arrangement is flush (spacedBy(0.dp)); cards rely on
+            // their surfaceContainerLow background for visual grouping. Card
+            // internal layout untouched.
+            .padding(horizontal = Dimens.spacing2, vertical = 0.dp)
             .combinedClickable(
                 onClick = onClick,
                 onLongClick = onLongClick
@@ -582,11 +584,11 @@ private fun SessionCard(
         // so the whole card remains the click/long-click target (archive button
         // consumes its own taps).
         ListItem(
-            modifier = Modifier.heightIn(min = 48.dp),
+            modifier = Modifier.heightIn(min = Dimens.touchTargetMin),
             headlineContent = {
                 Text(
                     text = session.displayName,
-                    style = MaterialTheme.typography.bodyMedium.copy(fontWeight = FontWeight.Bold),
+                    style = MaterialTheme.typography.titleSmall,
                     color = MaterialTheme.colorScheme.onSurface
                 )
             },
@@ -620,7 +622,7 @@ private fun SessionCard(
                         // affordance, and the unread marker sits just inside it.
                         Box(
                             modifier = Modifier
-                                .padding(start = 8.dp)
+                                .padding(start = Dimens.spacing2)
                                 .size(8.dp)
                                 .background(
                                     color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -656,7 +658,7 @@ private fun EmptyRow(text: String) {
         text = text,
         style = MaterialTheme.typography.bodySmall,
         color = MaterialTheme.colorScheme.onSurfaceVariant,
-        modifier = Modifier.padding(horizontal = 24.dp, vertical = 12.dp)
+        modifier = Modifier.padding(horizontal = Dimens.spacing6, vertical = Dimens.spacing3)
     )
 }
 
@@ -701,7 +703,7 @@ private fun SessionStatusDot(status: SessionStatus?) {
     if (status == null || status.isIdle || status.isBusy) return
     Box(
         modifier = Modifier
-            .padding(start = 8.dp)
+            .padding(start = Dimens.spacing2)
             .size(8.dp)
             .background(color = MaterialTheme.colorScheme.error, shape = CircleShape)
     )

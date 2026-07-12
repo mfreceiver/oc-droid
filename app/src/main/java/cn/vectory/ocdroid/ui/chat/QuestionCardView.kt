@@ -266,7 +266,7 @@ fun QuestionCardView(
                 .animateContentSize(),
             shape = MaterialTheme.shapes.extraLarge,
             colors = CardDefaults.cardColors(
-                containerColor = MaterialTheme.colorScheme.surfaceVariant
+                containerColor = MaterialTheme.colorScheme.surfaceContainer
             ),
             elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)
         ) {

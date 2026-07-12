@@ -93,7 +93,7 @@ internal fun DebugLogSection(hideHeader: Boolean = false) {
 
     Card(
         modifier = Modifier.fillMaxWidth(),
-        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainer)
     ) {
         Column(modifier = Modifier.padding(16.dp)) {
             // ── Header row: title + count badge ──
@@ -128,7 +128,7 @@ internal fun DebugLogSection(hideHeader: Boolean = false) {
 
             // ── Level filter chips ──
             // 全部 (DEBUG threshold) / INFO+ / WARN+. Selected chip uses the
-            // v2 accent token so the active state reads cleanly on surfaceVariant.
+            // v2 accent token so the active state reads cleanly on surfaceContainer.
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(8.dp),

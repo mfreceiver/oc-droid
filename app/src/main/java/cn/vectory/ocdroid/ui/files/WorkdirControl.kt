@@ -187,7 +187,7 @@ private fun WorkdirSwitcherBody(
             .fillMaxWidth()
             .heightIn(max = 600.dp)
             .verticalScroll(rememberScrollState())
-            .padding(bottom = 16.dp),
+            .padding(bottom = Dimens.spacing4),
     ) {
         if (distinctWorkdirs.isEmpty()) {
             ListItem(

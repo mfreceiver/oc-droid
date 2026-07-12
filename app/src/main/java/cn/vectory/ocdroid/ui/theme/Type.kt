@@ -33,8 +33,9 @@ val LocalAppFontFamily = staticCompositionLocalOf<FontFamily> { FontFamily.Defau
 /**
  * Build the 15-slot M3 [Typography] using the given [family]. Used by
  * [OpenCodeTheme] to inject the resolved font family (from settings) into
- * every slot. v2 字号刻度（`docs/v2-redesign-plan.md` §3）：bodyLarge=14/21、
- * bodyMedium=14/21、labelMedium=13/19、labelSmall=12/16、titleSmall=14/21。
+ * every slot. v2 字号刻度（`docs/v2-redesign-plan.md` §3；B6 决策 4 全局放大
+ * bodyLarge 14/21→16/24）：bodyLarge=16/24、bodyMedium=14/21、
+ * labelMedium=13/19、labelSmall=12/16、titleSmall=14/21。
  *
  * 审计：15 个 slot 全部用传入 [family]——无硬编码 [FontFamily.Default]。
  */
@@ -100,8 +101,10 @@ fun appTypography(family: FontFamily): Typography = Typography(
     bodyLarge = TextStyle(
         fontFamily = family,
         fontWeight = FontWeight.Normal,
-        fontSize = 14.sp,
-        lineHeight = 21.sp,
+        // B6 决策 4：全局放大 bodyLarge 14→16sp（M3 baseline 16/24/0.5），
+        // 与 bodyMedium(14) 拉开层级，影响 sheet item / context 值 / 重要正文。
+        fontSize = 16.sp,
+        lineHeight = 24.sp,
         letterSpacing = 0.5.sp,
     ),
     bodyMedium = TextStyle(
@@ -225,9 +228,13 @@ fun markdownTypographyCompact() = markdownTypography(
  *
  * 审计（评审 I5）：[compactTypography] 不直接引用 [FontFamily.Default]——它
  * 从 `base` 复制，自动继承 `base` 中已注入的 family（来自 [appTypography]）。
+ *
+ * B6 决策 4 同步：bodyLarge 与主 [appTypography] 保持 ~0.79 的 compact:main
+ * 比例（同 bodyMedium 11/14≈0.79）——主 bodyLarge 16 → compact 13（16×0.79
+ * ≈12.6，取 13 保 ≥12sp 可读下限且维持 bodyLarge>bodyMedium 层级）。
  */
 fun compactTypography(base: Typography): Typography = base.copy(
-    bodyLarge = base.bodyLarge.copy(fontSize = 12.sp, lineHeight = 18.sp),
+    bodyLarge = base.bodyLarge.copy(fontSize = 13.sp, lineHeight = 20.sp),
     bodyMedium = base.bodyMedium.copy(fontSize = 11.sp, lineHeight = 16.sp),
     bodySmall = base.bodySmall.copy(fontSize = 10.sp, lineHeight = 14.sp),
     labelLarge = base.labelLarge.copy(fontSize = 11.sp, lineHeight = 14.sp),

@@ -16,10 +16,9 @@ import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.RectangleShape
-import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import cn.vectory.ocdroid.data.api.CommandInfo
-import cn.vectory.ocdroid.ui.theme.BundledMonoFamily
+import cn.vectory.ocdroid.ui.theme.AppTextStyles
 
 // §phase3 (plan §5 task 6 step c): the legacy `ChatInputBar` composable +
 // its private `ChatPrimaryActionButton` helper that lived in this file were
@@ -64,9 +63,7 @@ internal fun CommandSuggestionsPanel(
                 ) {
                     Text(
                         text = "/${cmd.name}",
-                        style = MaterialTheme.typography.bodyMedium,
-                        fontFamily = BundledMonoFamily,
-                        fontWeight = FontWeight.SemiBold,
+                        style = AppTextStyles.codeBody,
                         color = MaterialTheme.colorScheme.primary
                     )
                     cmd.description?.takeIf { it.isNotBlank() }?.let { desc ->

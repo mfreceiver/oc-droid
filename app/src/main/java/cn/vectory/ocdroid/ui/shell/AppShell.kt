@@ -336,7 +336,7 @@ private fun CompactBottomBar(
                                         .size(width = 40.dp, height = 32.dp)
                                         .background(
                                             MaterialTheme.colorScheme.secondaryContainer,
-                                            RoundedCornerShape(6.dp),
+                                            MaterialTheme.shapes.small,
                                         ),
                                 )
                             }

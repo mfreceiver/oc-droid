@@ -63,7 +63,7 @@ fun TodoListPanel(
                     modifier = Modifier
                         .fillMaxWidth()
                         .padding(bottom = 4.dp),
-                    trackColor = MaterialTheme.colorScheme.surfaceVariant
+                    trackColor = MaterialTheme.colorScheme.outlineVariant
                 )
                 Text(
                     "$completed/$total completed",
