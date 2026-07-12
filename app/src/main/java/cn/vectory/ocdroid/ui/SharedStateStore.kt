@@ -6,6 +6,7 @@ import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.FlowCollector
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.update
@@ -51,6 +52,24 @@ import javax.inject.Singleton
 @Singleton
 class SharedStateStore @Inject constructor() {
     private val state: MutableStateFlow<StoreState> = MutableStateFlow(StoreState.initial())
+
+    /**
+     * §A5-3 Phase B2: read-only aggregate [StateFlow] over the single
+     * authoritative composite [state]. Exposed (internal) so the B2
+     * atomicity tests + any future cross-slice consumer can collect the
+     * AGGREGATE emission stream and prove a single [dispatch] commits
+     * exactly one transition with no torn intermediates (e.g. the
+     * SessionArchived action cannot produce an intermediate where
+     * sessionList is archived-but-chat.currentSessionId still references
+     * it — there is one `state.update` per dispatch, hence one emission).
+     *
+     * Per-slice consumers SHOULD keep reading the per-slice projections
+     * ([chatFlow] / [sessionListFlow] / etc.) — those are distinct-filtered
+     * for their slice only, which is the desired UX. This aggregate flow
+     * exists for tests + future cross-slice observers that need to reason
+     * about the WHOLE committed state at once.
+     */
+    internal val stateFlow: StateFlow<StoreState> = state.asStateFlow()
 
     // ── Per-slice read projections (lag-free DerivedStateFlow over [state]). ──
     // Each .value reads selector(state.value) synchronously — no dispatcher hop.
@@ -102,6 +121,26 @@ class SharedStateStore @Inject constructor() {
     /** §A5-3 B1: CAS write of the nav slice. */
     fun mutateNav(transform: (NavState) -> NavState) =
         state.update { it.copy(nav = transform(it.nav)) }
+
+    /**
+     * §A5-3 Phase B2: commit an [AppAction] against the aggregate as ONE
+     * composite state transition. The pure [reduce] turns `(state, action)`
+     * into a new [StoreState]; a single `state.update { … }` then CAS-
+     * commits it. Because there is exactly ONE update per dispatch, there
+     * is exactly ONE aggregate emission — concurrent [stateFlow] collectors
+     * observe a single atomic transition with no torn intermediates (the
+     * pre-B2 scattering of N `mutateXxx` calls produced N intermediate
+     * committed states per logical transition; this collapses them to one).
+     *
+     * Purity contract: [reduce] is pure (no effects / network / settings /
+     * emit); everything that is NOT pure state stays at the call site and
+     * runs AROUND the dispatch (network calls, `settingsManager.*` writes,
+     * `persistSessionCache`, effect-bus emissions — see the per-variant
+     * kdocs on [AppAction]).
+     */
+    internal fun dispatch(action: AppAction) {
+        state.update { reduce(it, action) }
+    }
 
     /** §history-load-fix: per-session message-list mutation lock shared by the
      *  three load paths (launchLoadMessages / launchLoadMoreMessages /

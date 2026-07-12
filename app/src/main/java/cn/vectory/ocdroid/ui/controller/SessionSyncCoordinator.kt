@@ -440,23 +440,30 @@ class SessionSyncCoordinator(
                         // currentSessionId + messages so the chat view falls
                         // back to the empty state instead of lingering on an
                         // archived session whose tab has disappeared.
-                        val chatBefore = slices.chat.value
                         val newOpenIds = slices.sessionList.value.openSessionIds.filter { id -> id != updated.id }
                         if (newOpenIds != slices.sessionList.value.openSessionIds) {
                             settingsManager.openSessionIds = newOpenIds
                         }
-                        if (chatBefore.currentSessionId == updated.id) {
-                            // §R18 Phase 2-F: chatFlow.currentSessionId is the
-                            // sole runtime source; the chat.update below clears
-                            // it and the AppCore collector persists non-null
-                            // changes (null is intentionally not persisted —
-                            // applySavedSettings re-filters archived ids on the
-                            // next cold start).
-                            slices.mutateSessionList { s -> s.applyArchiveEviction(updated, newOpenIds).first }
-                            slices.mutateChat { it.applyArchivedChatClear().first }
-                        } else {
-                            slices.mutateSessionList { s -> s.applyArchiveEviction(updated, newOpenIds).first }
-                        }
+                        // §A5-3 Phase B2: the pre-B2 dual
+                        // mutateSessionList(applyArchiveEviction) +
+                        // mutateChat(applyArchivedChatClear) (the latter only
+                        // when the archived session WAS the current one) is
+                        // collapsed into ONE atomic dispatch. The reducer
+                        // derives the "clear chat" decision from the snapshot
+                        // (chat.currentSessionId == updated.id), so the
+                        // action carries pure data only — no clearChat
+                        // boolean. The applyArchiveEviction + (conditional)
+                        // applyArchivedChatClear helpers are reused unchanged
+                        // inside [reduce]. ONE committed aggregate state →
+                        // no torn "sessionList archived but
+                        // chat.currentSessionId still references it"
+                        // intermediate for stateFlow collectors.
+                        slices.store.dispatch(
+                            cn.vectory.ocdroid.ui.AppAction.SessionArchived(
+                                session = updated,
+                                openSessionIds = newOpenIds,
+                            )
+                        )
                         // R-20 Phase 1 (plan §3 矩阵 "SSE 归档 session" 行):
                         // evict the archived session from both the memory LRU
                         // and the persistent cache. The fp comes from the

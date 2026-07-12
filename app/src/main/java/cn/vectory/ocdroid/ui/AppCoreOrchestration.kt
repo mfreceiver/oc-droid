@@ -302,12 +302,22 @@ internal fun AppCore.materializeDraftSession(onSessionReady: (String) -> Unit) {
                 val openIds = (listOf(session.id) + settingsManager.openSessionIds).distinct().take(8)
                 settingsManager.openSessionIds = openIds
                 val now = System.currentTimeMillis()
-                writeSessionList { state ->
-                    state.copy(sessions = upsertSession(state.sessions, session), openSessionIds = openIds)
-                }
-                writeChat { it.copy(currentSessionId = session.id) }
-                writeUnread { it.copy(unreadSessions = it.unreadSessions - session.id, lastViewedTime = it.lastViewedTime + (session.id to now)) }
-                writeComposer { it.copy(draftWorkdir = null) }
+                // §A5-3 Phase B2: the success-path writeSessionList + writeChat
+                // + writeUnread + writeComposer sequence is collapsed into ONE
+                // atomic dispatch — sessionList (upsert + openSessionIds),
+                // chat.currentSessionId, unread (drop + lastViewedTime), and
+                // composer.draftWorkdir clear all land as a SINGLE committed
+                // aggregate state (no torn intermediates for stateFlow
+                // collectors). The reducer is pure (see [AppAction]); the
+                // settings/persist/side-effect calls below stay OUTSIDE the
+                // dispatch (they are not state).
+                store.dispatch(
+                    AppAction.DraftSessionMaterialized(
+                        session = session,
+                        openSessionIds = openIds,
+                        viewedAt = now,
+                    )
+                )
                 // §R18 Phase 2-F: chatFlow.currentSessionId (set in writeChat
                 // above) is the sole runtime source; the AppCore init collector
                 // persists session.id to SettingsManager. No manual write here.
@@ -641,31 +651,18 @@ private fun AppCore.createSessionInWorkdirForEffect(workdir: String) {
     // removed; downstream directory-scoped calls (SSE / /question / /command)
     // now take an explicit `directory` parameter, and the workdir is carried
     // forward by settingsManager.currentWorkdir + composer.draftWorkdir below.
-    // §R18 Phase 2-F: chatFlow.currentSessionId (cleared in writeChat below) is
-    // the sole runtime source; the AppCore collector drops null so no manual
-    // SettingsManager write here.
-    writeChat {
-        it.copy(
-            currentSessionId = null,
-            messages = emptyList(),
-            partsByMessage = emptyMap(),
-            streamingPartTexts = emptyMap(),
-            streamingReasoningPart = null,
-        )
-    }
-    writeSessionList { it.copy(sessionTodos = emptyMap()) }
-    writeChat { it.copy(currentModel = null) }
-    writeComposer {
-        // §1B-FIX (I4): also clear fileReferences on draft-create so a
-        // chip from the previous session's draft does not survive the
-        // workdir switch.
-        it.copy(
-            inputText = "",
-            imageAttachments = emptyList(),
-            fileReferences = emptyList(),
-            draftWorkdir = workdir,
-        )
-    }
+    // §R18 Phase 2-F: chatFlow.currentSessionId (cleared by the dispatch
+    // below) is the sole runtime source; the AppCore collector drops null so
+    // no manual SettingsManager write here.
+    // §A5-3 Phase B2: the pre-B2 sequence — writeChat(clear chat + streaming),
+    // writeSessionList(clear sessionTodos), writeChat(clear currentModel),
+    // writeComposer(clear inputText + attachments + fileReferences, set
+    // draftWorkdir) — is collapsed into ONE atomic dispatch. The reducer
+    // ([AppAction.WorkdirDraftStarted]) folds currentModel clear INTO the
+    // same single chat .copy() (the pre-B2 site did it as a SEPARATE
+    // writeChat — same final state, just scattered). ONE committed aggregate
+    // state → no torn intermediates for stateFlow collectors.
+    store.dispatch(AppAction.WorkdirDraftStarted(workdir = workdir))
     settingsManager.currentWorkdir = workdir
     settingsManager.addRecentWorkdir(currentServerGroupFp(), workdir)
     appScope.launch {

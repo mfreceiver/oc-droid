@@ -477,46 +477,28 @@ class HostProfileController(
         // refreshNonce). Use .copy() on the existing slice value so those are
         // preserved (a fresh ChatState() would clobber them); only the AppState-
         // represented chat fields are reset here.
+        //
+        // §A5-3 Phase B2: the pre-B2 scattered mutateChat + mutateSessionList
+        // + mutateUnread (cross-group) / mutateChat-streaming-only (same-
+        // group) + unconditional mutateComposer / mutateSettings /
+        // mutateConnection sequence is collapsed into ONE atomic dispatch.
+        // The reducer ([AppAction.HostStatePurged]) derives the cross-vs-same-
+        // group field set from [preserveServerGroupData] and PRESERVES the
+        // three chat-only fields via .copy() (never a fresh ChatState()). ONE
+        // committed aggregate state → no torn intermediates for stateFlow
+        // collectors.
+        //
+        // What stays OUTSIDE the dispatch (oracle: not state): the
+        // settingsManager writes (clearRecentWorkdirs / currentWorkdir /
+        // openSessionIds / sessionCache) + the effect-bus emissions
+        // (EvictGroup / ForceReconnect / HostProfileSwitched) below — they
+        // are side-effects, run at the call site.
+        slices.store.dispatch(
+            cn.vectory.ocdroid.ui.AppAction.HostStatePurged(
+                preserveServerGroupData = preserveServerGroupData,
+            )
+        )
         if (!preserveServerGroupData) {
-            slices.mutateChat {
-                it.copy(
-                    currentSessionId = null,
-                    messages = emptyList(),
-                    partsByMessage = emptyMap(),
-                    streamingPartTexts = emptyMap(),
-                    streamingReasoningPart = null,
-                    // §history-load-fix: drop the previous host's load flags so
-                    // their spinner state cannot leak into the new host's chat
-                    // (round-4 gpt-2 🔴: isLoadingMessages too — the session-
-                    // guarded finally won't clear it for a non-current session,
-                    // so the host switch must, same as SessionSwitcher.switchTo).
-                    isLoadingMessages = false,
-                    isLoadingMoreMessages = false
-                )
-            }
-            slices.mutateSessionList {
-                it.copy(
-                    sessions = emptyList(),
-                    directorySessions = emptyMap(),
-                    openSessionIds = emptyList(),
-                    sessionStatuses = emptyMap(),
-                    sessionTodos = emptyMap(),
-                    // §phase2-isolation: clear cross-host diff leak. sessionDiffs
-                    // (per-session FileDiff snapshots) are per-server data; a
-                    // stale snapshot from host A must NOT bleed into host B's
-                    // Workspace Changes view. Same-group switches preserve it
-                    // (server-identical data — same reasoning as sessions /
-                    // statuses / todos above). R-20 §Per-server data.
-                    sessionDiffs = emptyMap()
-                )
-            }
-            slices.mutateUnread {
-                it.copy(
-                    unreadSessions = emptySet(),
-                    tempClearedUnread = emptySet(),
-                    lastViewedTime = emptyMap()
-                )
-            }
             // §recent-workdirs / R-20 Phase 5: clear per-host workdir memory
             // on 异组 switch (paths from server A are meaningless on server B).
             // Was a single global slot (`recentWorkdirs = emptyList()`); now
@@ -552,17 +534,6 @@ class HostProfileController(
             settingsManager.openSessionIds = emptyList()
             settingsManager.sessionCache = emptyList()
         } else {
-            // Same-group switch: keep sessions / directorySessions / unread /
-            // session-window cache / recentWorkdirs (server-identical data).
-            // The current session window stays valid; just clear the
-            // streaming overlay (a stale delta from the old profile's
-            // in-flight turn should not bleed into the new profile's view).
-            slices.mutateChat {
-                it.copy(
-                    streamingPartTexts = emptyMap(),
-                    streamingReasoningPart = null
-                )
-            }
             // §review-fix #5 (glm-3 ⚠️ per-profile UX): plan §3 glmer I2
             // classifies currentWorkdir as per-profile UX ("两接入点各有
             // currentWorkdir，不清会跨 profile 泄漏"). Same-group switches
@@ -582,13 +553,6 @@ class HostProfileController(
             // point each profile gets its own). No code change needed; the
             // comment documents the intentional divergence from plan §3.
         }
-        // per-profile UX state — always reset regardless of group.
-        // §review-fix #5: composer.draftWorkdir is the "new session in
-        // workdir X" draft pointer — per-profile (different profiles = different
-        // project contexts). Reset always.
-        slices.mutateComposer { it.copy(draftWorkdir = null) }
-        slices.mutateSettings { it.copy(availableCommands = emptyList()) }
-        slices.mutateConnection { it.copy(serverVersion = null) }
     }
 
     // ── Repository reconfiguration ────────────────────────────────────────
