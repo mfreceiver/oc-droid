@@ -13,7 +13,7 @@ import cn.vectory.ocdroid.data.model.Session
 import cn.vectory.ocdroid.data.model.SessionStatus
 import cn.vectory.ocdroid.data.model.TodoItem
 import cn.vectory.ocdroid.ui.ConnectionPhase
-import cn.vectory.ocdroid.ui.chat.GapMarker
+import cn.vectory.ocdroid.data.cache.contract.GapMarker
 import cn.vectory.ocdroid.ui.MainViewModelTimings
 import cn.vectory.ocdroid.ui.TunnelActivationState
 import cn.vectory.ocdroid.util.MarkdownFontSizes

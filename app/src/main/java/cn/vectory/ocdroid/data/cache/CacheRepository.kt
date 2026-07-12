@@ -1,13 +1,11 @@
 package cn.vectory.ocdroid.data.cache
 
 import androidx.room.withTransaction
+import cn.vectory.ocdroid.data.cache.contract.CachedSessionWindow
+import cn.vectory.ocdroid.data.cache.contract.GapFillState
+import cn.vectory.ocdroid.data.cache.contract.GapMarker
 import cn.vectory.ocdroid.data.model.Message
 import cn.vectory.ocdroid.data.model.Part
-import cn.vectory.ocdroid.ui.CachedSessionWindow
-import cn.vectory.ocdroid.ui.chat.Entry
-import cn.vectory.ocdroid.ui.chat.GapFillState
-import cn.vectory.ocdroid.ui.chat.GapMarker
-import cn.vectory.ocdroid.ui.chat.withGaps
 import cn.vectory.ocdroid.util.WorkdirPaths
 import kotlinx.serialization.builtins.ListSerializer
 import kotlinx.serialization.encodeToString
@@ -127,10 +125,14 @@ interface CacheRepository {
     // Declared for signature stability; bodies land in Phase 2.
 
     /**
-     * Phase 2: gap-aware non-contiguous message layout. Assembles the cached
-     * messages for `(serverGroupFp, sessionId)` interleaved with any open
-     * [GapMarker]s (sorted by upperBoundary message time ascending). Returns
-     * null when no cached session row exists (cold start).
+     * Phase 2: gap-aware non-contiguous message layout. Loads the cached
+     * messages + any open [GapMarker]s for `(serverGroupFp, sessionId)`
+     * SEPARATELY (messages oldest-first; gapMarkers in upperBoundary-time
+     * order). The UI interleaves them at render time via
+     * `messages.withGaps(gapMarkers)`; the data layer no longer interleaves
+     * (Phase 4 architecture: keep the UI-projection `Entry`/`withGaps` out of
+     * the data layer). Returns null when no cached session row exists (cold
+     * start).
      */
     suspend fun loadSessionLayout(
         serverGroupFp: String,
@@ -357,15 +359,20 @@ enum class AliveCompleteness { Complete, Incomplete }
 
 /**
  * R-20 Phase 2 (plan §2): gap-aware non-contiguous message layout — the
- * [CacheRepository.loadSessionLayout] return type. [entries] is the
- * [Entry]-list (Message + GapMarker) ordered oldest-first with markers at
- * their seams; [oldestCursor]/[newestMessageId] mirror CachedSessionWindow
+ * [CacheRepository.loadSessionLayout] return type. [messages] is the flat
+ * oldest-first message list; [gapMarkers] are the open gaps in upperBoundary-
+ * time order (the UI interleaves the two via `withGaps` at render time — the
+ * data layer no longer interleaves, per the Phase 4 ring-break:
+ * `CachedSessionLayout` carries raw domain data, not the UI-projection
+ * `Entry` list). [oldestCursor]/[newestMessageId] mirror CachedSessionWindow
  * for the loadMessages merge path.
  */
 data class CachedSessionLayout(
     val serverGroupFp: String,
     val sessionId: String,
-    val entries: List<Entry>,
+    val messages: List<Message>,
+    val partsByMessage: Map<String, List<Part>>,
+    val gapMarkers: List<GapMarker>,
     val oldestCursor: String?,
     val newestMessageId: String?
 ) {
@@ -375,8 +382,7 @@ data class CachedSessionLayout(
      * the gap-aware model (e.g. the in-memory LRU mirror). When there are no
      * gaps this is equivalent to the Phase-1 window.
      */
-    fun toCachedSessionWindow(partsByMessage: Map<String, List<Part>>): CachedSessionWindow {
-        val messages = entries.mapNotNull { (it as? Entry.Message)?.message }
+    fun toCachedSessionWindow(): CachedSessionWindow {
         return CachedSessionWindow(
             messages = messages,
             partsByMessage = partsByMessage,
@@ -592,12 +598,43 @@ class CacheRepositoryImpl @Inject constructor(
         val gaps = gapDao.gaps(serverGroupFp, sessionId)
         if (msgs.isEmpty() && gaps.isEmpty()) return@withTransaction null
         val messages = msgs.map { it.toMessage() }
-        val gapMarkers = gaps.map { it.toDomain() }
-        val entries = messages.withGaps(gapMarkers)
+        // partsByMessage: parse the per-row JSON blob (same decode as toWindow).
+        val partsByMessage = msgs.associateBy(
+            keySelector = { it.messageId },
+            valueTransform = { row ->
+                runCatching { CacheJson.decodeFromString(ListSerializer(Part.serializer()), row.parts) }
+                    .getOrElse { emptyList() }
+            }
+        )
+        // Sort gapMarkers by the SAME upperBoundary-time semantics as
+        // `withGaps()` in `ui/chat/GapAwareMessageList.kt`: resolve each
+        // gap's boundary message via the loaded `messages` list
+        // (Long.MAX_VALUE fallback for a stale marker whose boundary was
+        // evicted, or whose boundary message has no time.created), tie-break
+        // by upperBoundaryMessageId for determinism. The pre-Phase-4 path
+        // sorted inside `withGaps()`; the raw `gapMarkers` field must honor
+        // the documented upper-boundary-time contract on its own now that
+        // the data layer no longer interleaves (Phase 4 ring-break) — the
+        // GapMarkerDao has no ORDER BY, so without this the list would come
+        // back in rowid/insertion order and break render-time interleaving.
+        val boundaryTimeById = messages.asSequence()
+            .mapNotNull { m -> m.time?.created?.let { m.id to it } }
+            .toMap()
+        val gapMarkers = gaps.map { it.toDomain() }.sortedWith(
+            compareBy(
+                { boundaryTimeById[it.upperBoundaryMessageId] ?: Long.MAX_VALUE },
+                { it.upperBoundaryMessageId }
+            )
+        )
+        // Phase 4 ring-break: the data layer returns messages + gapMarkers
+        // SEPARATELY — the UI interleaves them via `withGaps` at render time
+        // (ui/chat/ChatMessageContent). No `Entry`/`withGaps` import here.
         CachedSessionLayout(
             serverGroupFp = serverGroupFp,
             sessionId = sessionId,
-            entries = entries,
+            messages = messages,
+            partsByMessage = partsByMessage,
+            gapMarkers = gapMarkers,
             // oldestCursor: derived from the oldest cached message id + time
             // (the server cursor is base64url({id,time_ms}) — but Phase 1
             // never persisted a server cursor for the cache window, so we

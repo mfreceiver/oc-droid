@@ -8,6 +8,7 @@ package cn.vectory.ocdroid.ui
  * Future cleanup (batch3e+): may be inlined into individual VM private methods.
  */
 
+import cn.vectory.ocdroid.data.cache.contract.CachedSessionWindow
 import cn.vectory.ocdroid.data.repository.OpenCodeRepository
 import cn.vectory.ocdroid.ui.chat.BackfillAlgorithm
 import cn.vectory.ocdroid.ui.chat.GapDetection

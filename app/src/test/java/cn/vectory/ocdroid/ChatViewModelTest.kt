@@ -1397,12 +1397,12 @@ class ChatViewModelTest : MainViewModelTestBase() {
                 olderMessagesCursor = "cursor-1",
                 hasMoreMessages = true,
                 gapMarkers = listOf(
-                    cn.vectory.ocdroid.ui.chat.GapMarker(
+                    cn.vectory.ocdroid.data.cache.contract.GapMarker(
                         gapId = "g1",
                         lowerAnchorMessageId = "m_older",
                         upperBoundaryMessageId = "m_older",
                         nextBeforeCursor = "c",
-                        fillState = cn.vectory.ocdroid.ui.chat.GapFillState.Idle,
+                        fillState = cn.vectory.ocdroid.data.cache.contract.GapFillState.Idle,
                     )
                 )
             )

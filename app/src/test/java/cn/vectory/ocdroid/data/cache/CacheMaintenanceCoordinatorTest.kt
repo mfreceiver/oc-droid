@@ -7,7 +7,7 @@ import androidx.test.core.app.ApplicationProvider
 import cn.vectory.ocdroid.data.model.Message
 import cn.vectory.ocdroid.data.model.Session
 import cn.vectory.ocdroid.data.repository.OpenCodeRepository
-import cn.vectory.ocdroid.ui.CachedSessionWindow
+import cn.vectory.ocdroid.data.cache.contract.CachedSessionWindow
 import cn.vectory.ocdroid.util.SettingsManager
 import io.mockk.coEvery
 import io.mockk.coVerify

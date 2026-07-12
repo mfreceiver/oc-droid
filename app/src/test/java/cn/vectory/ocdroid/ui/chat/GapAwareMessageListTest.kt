@@ -1,5 +1,7 @@
 package cn.vectory.ocdroid.ui.chat
 
+import cn.vectory.ocdroid.data.cache.contract.GapFillState
+import cn.vectory.ocdroid.data.cache.contract.GapMarker
 import cn.vectory.ocdroid.data.model.Message
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue

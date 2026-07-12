@@ -10,7 +10,8 @@ import cn.vectory.ocdroid.data.model.Message
 import cn.vectory.ocdroid.data.model.MessageWithParts
 import cn.vectory.ocdroid.data.repository.MessagesPage
 import cn.vectory.ocdroid.data.repository.OpenCodeRepository
-import cn.vectory.ocdroid.ui.CachedSessionWindow
+import cn.vectory.ocdroid.data.cache.contract.CachedSessionWindow
+import cn.vectory.ocdroid.data.cache.contract.GapFillState
 import cn.vectory.ocdroid.ui.SharedStateStore
 import io.mockk.coEvery
 import io.mockk.mockk

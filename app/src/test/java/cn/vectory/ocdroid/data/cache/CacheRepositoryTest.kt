@@ -6,7 +6,7 @@ import androidx.room.Room
 import androidx.test.core.app.ApplicationProvider
 import cn.vectory.ocdroid.data.model.Message
 import cn.vectory.ocdroid.data.model.Part
-import cn.vectory.ocdroid.ui.CachedSessionWindow
+import cn.vectory.ocdroid.data.cache.contract.CachedSessionWindow
 import kotlinx.coroutines.test.runTest
 import org.junit.After
 import org.junit.Assert.assertEquals
@@ -367,7 +367,7 @@ class CacheRepositoryTest {
         assertEquals("m1", gaps.single().lowerAnchorMessageId)
         assertEquals("m2", gaps.single().upperBoundaryMessageId)
         assertEquals("cursor-1", gaps.single().nextBeforeCursor)
-        assertEquals(cn.vectory.ocdroid.ui.chat.GapFillState.Idle, gaps.single().fillState)
+        assertEquals(cn.vectory.ocdroid.data.cache.contract.GapFillState.Idle, gaps.single().fillState)
     }
 
     @Test
@@ -403,7 +403,7 @@ class CacheRepositoryTest {
         val older = listOf(Message(id = "bridge", role = "user", time = Message.TimeInfo(created = 150L)))
         repo.appendOlderSlice(gapId, older, partsByMessage = emptyMap(), returnedCursor = null)
         val gap = repo.gapsOf("g1", "s1").single()
-        assertEquals(cn.vectory.ocdroid.ui.chat.GapFillState.Exhausted, gap.fillState)
+        assertEquals(cn.vectory.ocdroid.data.cache.contract.GapFillState.Exhausted, gap.fillState)
     }
 
     @Test
@@ -417,7 +417,7 @@ class CacheRepositoryTest {
         )
         repo.appendOlderSlice(gapId, older, partsByMessage = emptyMap(), returnedCursor = "c2")
         val gap = repo.gapsOf("g1", "s1").single()
-        assertEquals(cn.vectory.ocdroid.ui.chat.GapFillState.Idle, gap.fillState)
+        assertEquals(cn.vectory.ocdroid.data.cache.contract.GapFillState.Idle, gap.fillState)
         // upperBoundary advanced to the oldest id in the step.
         assertEquals("oldest", gap.upperBoundaryMessageId)
         assertEquals("c2", gap.nextBeforeCursor)
@@ -440,23 +440,87 @@ class CacheRepositoryTest {
         val remaining = repo.gapsOf("g1", "s1")
         // gapB resolved by overlap; gapA is Exhausted (anchorA not reached, null cursor).
         assertTrue("overlap must resolve the sibling gap", remaining.none { it.gapId == gapB })
-        assertTrue(remaining.any { it.gapId == gapA && it.fillState == cn.vectory.ocdroid.ui.chat.GapFillState.Exhausted })
+        assertTrue(remaining.any { it.gapId == gapA && it.fillState == cn.vectory.ocdroid.data.cache.contract.GapFillState.Exhausted })
     }
 
     @Test
-    fun `loadSessionLayout interleaves messages and gap markers`() = runTest {
-        seedWindowWithIds("g1", "s1", listOf("m1" to 100L, "m2" to 200L, "m3" to 300L))
-        repo.openGap("g1", "s1", lowerAnchorMessageId = "m1", upperBoundaryMessageId = "m2", initialNextBeforeCursor = "c1")
+    fun `loadSessionLayout returns messages and gap markers separately`() = runTest {
+        // Phase 4 ring-break + parts coverage: seed NON-EMPTY parts on the
+        // cached message rows and assert loadSessionLayout surfaces them on
+        // both `partsByMessage` and the toCachedSessionWindow() projection.
+        repo.putSessionWindow(
+            "g1", "s1", createdAt = 1L, workdir = "/proj",
+            CachedSessionWindow(
+                messages = listOf(
+                    Message(id = "m1", role = "user", time = Message.TimeInfo(created = 100L)),
+                    Message(id = "m2", role = "assistant", time = Message.TimeInfo(created = 200L)),
+                    Message(id = "m3", role = "assistant", time = Message.TimeInfo(created = 300L))
+                ),
+                partsByMessage = mapOf(
+                    "m1" to listOf(Part(id = "p1", type = "text", text = "hello")),
+                    "m2" to listOf(Part(id = "p2", type = "text", text = "world"))
+                ),
+                olderMessagesCursor = null,
+                hasMoreMessages = true
+            )
+        )
+        val gapId = repo.openGap(
+            "g1", "s1",
+            lowerAnchorMessageId = "m1",
+            upperBoundaryMessageId = "m2",
+            initialNextBeforeCursor = "cursor-1"
+        )
         val layout = repo.loadSessionLayout("g1", "s1")
         assertNotNull(layout)
-        val kinds = layout!!.entries.map {
-            when (val e = it) {
-                is cn.vectory.ocdroid.ui.chat.Entry.Message -> "msg:${e.message.id}"
-                is cn.vectory.ocdroid.ui.chat.Entry.GapMarker -> "gap:${e.gapId}"
-            }
-        }
-        // Gap inserted before m2 (its upperBoundary): m1, gap, m2, m3.
-        assertEquals(listOf("msg:m1", "gap", "msg:m2", "msg:m3"), kinds.map { if (it.startsWith("gap")) "gap" else it })
+        // Phase 4 ring-break: the data layer returns messages + gapMarkers
+        // SEPARATELY (no UI interleaving in the data layer). The interleaving
+        // assertion belongs in GapAwareMessageListTest (withGaps).
+        val l = layout!!
+        assertEquals(listOf("m1", "m2", "m3"), l.messages.map { it.id })
+        // Parts round-trip via the JSON blob column. One entry per cached
+        // message row (m3 has no parts → empty list, same as toWindow).
+        assertEquals(3, l.partsByMessage.size)
+        assertEquals("hello", l.partsByMessage["m1"]?.firstOrNull()?.text)
+        assertEquals("world", l.partsByMessage["m2"]?.firstOrNull()?.text)
+        assertTrue(l.partsByMessage["m3"].isNullOrEmpty())
+        // toCachedSessionWindow preserves the parts-by-message map.
+        val asWindow = l.toCachedSessionWindow()
+        assertEquals(3, asWindow.partsByMessage.size)
+        assertEquals("hello", asWindow.partsByMessage["m1"]?.firstOrNull()?.text)
+        assertEquals("world", asWindow.partsByMessage["m2"]?.firstOrNull()?.text)
+        assertTrue(asWindow.partsByMessage["m3"].isNullOrEmpty())
+        // Gap marker fields: gapId + cursor + boundaries + state.
+        assertEquals(1, l.gapMarkers.size)
+        val gap = l.gapMarkers.single()
+        assertEquals(gapId, gap.gapId)
+        assertEquals("m1", gap.lowerAnchorMessageId)
+        assertEquals("m2", gap.upperBoundaryMessageId)
+        assertEquals("cursor-1", gap.nextBeforeCursor)
+        assertEquals(cn.vectory.ocdroid.data.cache.contract.GapFillState.Idle, gap.fillState)
+    }
+
+    @Test
+    fun `loadSessionLayout returns gap markers in upper boundary order`() = runTest {
+        // Regression: CachedSessionLayout.gapMarkers documents an upper-
+        // boundary-time order contract. The GapMarkerDao has no ORDER BY,
+        // so without an explicit sort the list came back in rowid/insertion
+        // order. Seed TWO gaps in REVERSED upper-boundary order (the first-
+        // inserted gap has the LATER boundary) and assert loadSessionLayout
+        // sorts them by boundary time ascending — matching `withGaps()` in
+        // ui/chat/GapAwareMessageList.
+        seedWindowWithIds("g1", "s1", listOf("m1" to 100L, "m2" to 200L, "m3" to 300L, "m4" to 400L))
+        // First gap: upperBoundary = m4 (t=400). Second gap: upperBoundary =
+        // m2 (t=200). DAO/insertion order would yield [m4, m2]; the contract
+        // requires [m2, m4].
+        repo.openGap("g1", "s1", lowerAnchorMessageId = "m1", upperBoundaryMessageId = "m4", initialNextBeforeCursor = "cA")
+        repo.openGap("g1", "s1", lowerAnchorMessageId = "m1", upperBoundaryMessageId = "m2", initialNextBeforeCursor = "cB")
+
+        val layout = repo.loadSessionLayout("g1", "s1")!!
+        assertEquals(
+            "gapMarkers must be in upperBoundary-time ascending order, not insertion order",
+            listOf("m2", "m4"),
+            layout.gapMarkers.map { it.upperBoundaryMessageId },
+        )
     }
 
     @Test

@@ -1,5 +1,7 @@
 package cn.vectory.ocdroid.ui.chat
 
+import cn.vectory.ocdroid.data.cache.contract.GapFillState
+import cn.vectory.ocdroid.data.cache.contract.GapMarker
 import cn.vectory.ocdroid.data.model.Message as MessageModel
 
 /**
@@ -16,53 +18,20 @@ import cn.vectory.ocdroid.data.model.Message as MessageModel
  * correct seam regardless of insertion order.
  *
  * **Two types named "GapMarker"** (deliberate, plan §2):
- *  - [GapMarker] (top-level, this file) — the DOMAIN record carrying the full
- *    gap state (gapId + boundaries + cursor + fillState). This is what
+ *  - [GapMarker] (contract, `data.cache.contract`) — the DOMAIN record carrying
+ *    the full gap state (gapId + boundaries + cursor + fillState). This is what
  *    [cn.vectory.ocdroid.data.cache.CacheRepository.gapsOf] returns and what
  *    the [GapFillCoordinator] reads / mutates. It is the authoritative shape.
+ *    It was moved out of this file in Phase 4 to break the
+ *    `ui → data.cache → ui.chat` dependency ring.
  *  - [Entry.GapMarker] (nested) — the slim UI projection (gapId + fillState
  *    only) embedded in the rendered [Entry] list. Use [GapMarker.toEntry] to
  *    project; the cursor/boundaries never reach the UI layer.
- */
-enum class GapFillState {
-    /** No fill in flight; the user can tap to page the next 50-message step. */
-    Idle,
-    /** A 50-step backward fill is currently running for this gap. */
-    Filling,
-    /** The server returned a null cursor before the anchor was reached — the
-     *  gap cannot be bridged (history below the gap is gone). UI shows a
-     *  non-tappable "无法补齐" marker. */
-    Exhausted,
-    /** The last fill step errored; the user can retry. */
-    Error;
-}
-
-/**
- * The authoritative gap record. Mirrors the persisted
- * [cn.vectory.ocdroid.data.cache.GapMarkerEntity] (minus timestamps) and is
- * the return type of [cn.vectory.ocdroid.data.cache.CacheRepository.gapsOf].
  *
- * @param gapId synthetic UUID (generated at openGap time). Stable across the
- *   gap's lifecycle.
- * @param lowerAnchorMessageId the newest message id of the OLDER slice — the
- *   fill resolution target. A backward step containing this id resolves the gap.
- * @param upperBoundaryMessageId the oldest message id of the NEWER slice — the
- *   visual seam + the boundary that advances toward the anchor as fill lands.
- * @param nextBeforeCursor the server `before` cursor for the NEXT older step.
- *   `null` ⇒ history exhausted (state = Exhausted). Client never synthesizes
- *   this — it is the raw `X-Next-Cursor` / `Link rel=next` response-header value.
- * @param fillState drives both the UI divider label and the coordinator resume.
+ * [GapFillState] likewise lives in `data.cache.contract` now (pure data
+ * carrier); it is imported here only because the UI [Entry.GapMarker] + the
+ * [toEntry] extension reference it.
  */
-data class GapMarker(
-    val gapId: String,
-    val lowerAnchorMessageId: String,
-    val upperBoundaryMessageId: String,
-    val nextBeforeCursor: String?,
-    val fillState: GapFillState
-) {
-    /** Project to the slim UI entry used inside a rendered [Entry] list. */
-    fun toEntry(): Entry.GapMarker = Entry.GapMarker(gapId = gapId, fillState = fillState)
-}
 
 /**
  * One element of the rendered chat list. Either a real [Message] or a
@@ -74,12 +43,25 @@ sealed interface Entry {
 
     /**
      * A gap divider between two message slices. Carries only [gapId] +
-     * [fillState] — the cursor/boundaries live on the domain [GapMarker] and
-     * are never needed at the UI layer (a tap routes [gapId] back to the
-     * [GapFillCoordinator] which owns the full record).
+     * [fillState] — the cursor/boundaries live on the domain
+     * [cn.vectory.ocdroid.data.cache.contract.GapMarker] and are never needed
+     * at the UI layer (a tap routes [gapId] back to the [GapFillCoordinator]
+     * which owns the full record).
      */
     data class GapMarker(val gapId: String, val fillState: GapFillState) : Entry
 }
+
+/**
+ * Project the domain [GapMarker] (contract) to the slim UI
+ * [Entry.GapMarker] used inside a rendered [Entry] list.
+ *
+ * This is a UI-layer extension on the contract type (Phase 4 architecture):
+ * the contract [GapMarker] carries no UI method, so the data layer never
+ * depends on `ui.chat`. Only [gapId] + [fillState] are projected; the
+ * cursor/boundaries never reach the UI layer.
+ */
+fun GapMarker.toEntry(): Entry.GapMarker =
+    Entry.GapMarker(gapId = gapId, fillState = fillState)
 
 /**
  * Compose the non-contiguous [Entry] list from a flat oldest-first

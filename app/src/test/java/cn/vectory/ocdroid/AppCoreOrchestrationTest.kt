@@ -728,12 +728,12 @@ class AppCoreOrchestrationTest : MainViewModelTestBase() {
                 currentSessionId = "s1",
                 messages = listOf(Message(id = "stale", role = "user")),
                 gapMarkers = listOf(
-                    cn.vectory.ocdroid.ui.chat.GapMarker(
+                    cn.vectory.ocdroid.data.cache.contract.GapMarker(
                         gapId = "g1",
                         lowerAnchorMessageId = "a",
                         upperBoundaryMessageId = "b",
                         nextBeforeCursor = "c",
-                        fillState = cn.vectory.ocdroid.ui.chat.GapFillState.Idle,
+                        fillState = cn.vectory.ocdroid.data.cache.contract.GapFillState.Idle,
                     )
                 ),
                 staleNotice = true,

@@ -9,6 +9,7 @@ package cn.vectory.ocdroid.ui
  */
 
 import cn.vectory.ocdroid.R
+import cn.vectory.ocdroid.data.cache.contract.CachedSessionWindow
 import cn.vectory.ocdroid.data.model.Message
 import cn.vectory.ocdroid.data.model.Part
 import cn.vectory.ocdroid.data.repository.OpenCodeRepository

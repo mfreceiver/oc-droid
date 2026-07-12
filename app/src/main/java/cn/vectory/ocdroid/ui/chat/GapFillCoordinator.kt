@@ -1,10 +1,11 @@
 package cn.vectory.ocdroid.ui.chat
 
 import cn.vectory.ocdroid.data.cache.CacheRepository
+import cn.vectory.ocdroid.data.cache.contract.CachedSessionWindow
+import cn.vectory.ocdroid.data.cache.contract.GapFillState
 import cn.vectory.ocdroid.data.model.Message
 import cn.vectory.ocdroid.data.model.Part
 import cn.vectory.ocdroid.data.repository.OpenCodeRepository
-import cn.vectory.ocdroid.ui.CachedSessionWindow
 import cn.vectory.ocdroid.ui.MainViewModelTimings
 import cn.vectory.ocdroid.ui.SliceFlows
 import cn.vectory.ocdroid.util.DebugLog

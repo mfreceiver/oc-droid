@@ -1,6 +1,7 @@
 package cn.vectory.ocdroid.ui
 
 import cn.vectory.ocdroid.MainViewModelTestBase
+import cn.vectory.ocdroid.data.cache.contract.CachedSessionWindow
 import cn.vectory.ocdroid.data.model.SSEEvent
 import cn.vectory.ocdroid.data.model.SSEPayload
 import cn.vectory.ocdroid.data.repository.MessagesPage
@@ -585,7 +586,7 @@ class AppCoreDispatcherTest : MainViewModelTestBase() {
             // Simulate the user switching to B during the suspend.
             c.store.mutateChat { it.copy(currentSessionId = "sess-B") }
             cn.vectory.ocdroid.data.cache.HydrateResult.Verified(
-                cn.vectory.ocdroid.ui.CachedSessionWindow(
+                cn.vectory.ocdroid.data.cache.contract.CachedSessionWindow(
                     messages = listOf(io.mockk.mockk(relaxed = true)),
                     partsByMessage = emptyMap(),
                     olderMessagesCursor = null,
@@ -635,7 +636,7 @@ class AppCoreDispatcherTest : MainViewModelTestBase() {
             // provider now returns the new host's fp.
             io.mockk.every { hostProfileStore.currentProfile() } returns switchedProfile
             cn.vectory.ocdroid.data.cache.HydrateResult.Verified(
-                cn.vectory.ocdroid.ui.CachedSessionWindow(
+                cn.vectory.ocdroid.data.cache.contract.CachedSessionWindow(
                     messages = listOf(io.mockk.mockk(relaxed = true)),
                     partsByMessage = emptyMap(),
                     olderMessagesCursor = null,
@@ -684,7 +685,7 @@ class AppCoreDispatcherTest : MainViewModelTestBase() {
         io.mockk.coEvery {
             c.cacheRepository.verifyAndLoad(any(), any(), any())
         } returns cn.vectory.ocdroid.data.cache.HydrateResult.Verified(
-            cn.vectory.ocdroid.ui.CachedSessionWindow(
+            cn.vectory.ocdroid.data.cache.contract.CachedSessionWindow(
                 messages = listOf(
                     io.mockk.mockk(relaxed = true),
                     io.mockk.mockk(relaxed = true),
@@ -695,12 +696,12 @@ class AppCoreDispatcherTest : MainViewModelTestBase() {
             )
         )
         // Stub gapsOf → one open gap marker between the two messages.
-        val gapMarker = cn.vectory.ocdroid.ui.chat.GapMarker(
+        val gapMarker = cn.vectory.ocdroid.data.cache.contract.GapMarker(
             gapId = "gap-1",
             lowerAnchorMessageId = "anchor",
             upperBoundaryMessageId = "upper",
             nextBeforeCursor = "c1",
-            fillState = cn.vectory.ocdroid.ui.chat.GapFillState.Idle,
+            fillState = cn.vectory.ocdroid.data.cache.contract.GapFillState.Idle,
         )
         io.mockk.coEvery { c.cacheRepository.gapsOf(any(), any()) } returns listOf(gapMarker)
 
@@ -750,7 +751,7 @@ class AppCoreDispatcherTest : MainViewModelTestBase() {
         io.mockk.coEvery {
             c.cacheRepository.verifyAndLoad(any(), any(), any())
         } returns cn.vectory.ocdroid.data.cache.HydrateResult.Verified(
-            cn.vectory.ocdroid.ui.CachedSessionWindow(
+            cn.vectory.ocdroid.data.cache.contract.CachedSessionWindow(
                 messages = listOf(io.mockk.mockk(relaxed = true)),
                 partsByMessage = emptyMap(),
                 olderMessagesCursor = null,
@@ -760,12 +761,12 @@ class AppCoreDispatcherTest : MainViewModelTestBase() {
         // Stub gapsOf to simulate the suspend-time switch: when it's called,
         // flip currentSessionId to B (as if the user switched during the IO).
         // Then return a non-empty gap list (the stale A gaps).
-        val staleGap = cn.vectory.ocdroid.ui.chat.GapMarker(
+        val staleGap = cn.vectory.ocdroid.data.cache.contract.GapMarker(
             gapId = "stale-gap-A",
             lowerAnchorMessageId = "anchor-a",
             upperBoundaryMessageId = "upper-a",
             nextBeforeCursor = "c1",
-            fillState = cn.vectory.ocdroid.ui.chat.GapFillState.Idle,
+            fillState = cn.vectory.ocdroid.data.cache.contract.GapFillState.Idle,
         )
         io.mockk.coEvery {
             c.cacheRepository.gapsOf(any(), any())
@@ -825,7 +826,7 @@ class AppCoreDispatcherTest : MainViewModelTestBase() {
         }
         // Call makeCacheHook + invoke the hook for the directory-only session.
         val hook = c.makeCacheHook("test-fp")
-        hook("dir-sess-1", cn.vectory.ocdroid.ui.CachedSessionWindow(
+        hook("dir-sess-1", cn.vectory.ocdroid.data.cache.contract.CachedSessionWindow(
             messages = emptyList(), partsByMessage = emptyMap(),
             olderMessagesCursor = null, hasMoreMessages = false,
         ))

@@ -276,14 +276,14 @@ abstract class MainViewModelTestBase {
      */
     protected fun installInMemoryPersistentCache(core: AppCore) {
         // (fp, sessionId) -> (storedCreatedAt, window)
-        val cache = mutableMapOf<Pair<String, String>, Pair<Long?, cn.vectory.ocdroid.ui.CachedSessionWindow>>()
+        val cache = mutableMapOf<Pair<String, String>, Pair<Long?, cn.vectory.ocdroid.data.cache.contract.CachedSessionWindow>>()
         io.mockk.coEvery {
             core.cacheRepository.putSessionWindow(any(), any(), any(), any(), any())
         } answers {
             val fp = firstArg<String>()
             val sid = secondArg<String>()
             val createdAt = thirdArg<Long?>()
-            val window = arg<cn.vectory.ocdroid.ui.CachedSessionWindow>(4)
+            val window = arg<cn.vectory.ocdroid.data.cache.contract.CachedSessionWindow>(4)
             cache[fp to sid] = createdAt to window
         }
         io.mockk.coEvery {

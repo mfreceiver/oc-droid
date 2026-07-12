@@ -12,7 +12,7 @@ import cn.vectory.ocdroid.data.model.QuestionRequest
 import cn.vectory.ocdroid.data.model.Session
 import cn.vectory.ocdroid.data.model.SessionStatus
 import cn.vectory.ocdroid.data.model.TodoItem
-import cn.vectory.ocdroid.ui.chat.GapMarker
+import cn.vectory.ocdroid.data.cache.contract.GapMarker
 import cn.vectory.ocdroid.util.MarkdownFontSizes
 import cn.vectory.ocdroid.util.ThemeMode
 import kotlinx.coroutines.flow.StateFlow
@@ -362,32 +362,15 @@ data class HostState(
 )
 
 /**
- * §Per-session message cache: a snapshot of the loaded window for a single
- * session — the four pieces of message-state that the session-switch flow
- * (inlined in SessionSwitcher.switchTo()) otherwise wipes to empty on every switch. Restoring from this snapshot on
- * return avoids the visible flicker + history re-fetch (the latest 5 only)
- * that previously hit users on every A→B→A hop. Bounded LRU lives in
- * [MainViewModel.sessionWindowCache]; the post-restore tail fetch
- * (`loadMessages(resetLimit = false)`) still runs to merge fresh messages
- * non-destructively, so a stale snapshot never hides new content.
+ * §Per-session message cache: `CachedSessionWindow` moved to
+ * `data.cache.contract` in Phase 4 (break the `ui → data.cache → ui`
+ * dependency ring — the cache layer persisted/returned this type, so its
+ * definition belongs with the data layer, not the UI). See
+ * [cn.vectory.ocdroid.data.cache.contract.CachedSessionWindow].
  *
- * R-20 Phase 1: visibility changed from `internal` to `public` because the
- * cache layer ([cn.vectory.ocdroid.data.cache.CacheRepository]) exposes this
- * type in its public interface (the cache persists + returns these windows).
- * This is an app module (no library consumers), so the `internal` modifier
- * served no real purpose.
- */
-data class CachedSessionWindow(
-    val messages: List<Message>,
-    val partsByMessage: Map<String, List<Part>>,
-    val olderMessagesCursor: String?,
-    val hasMoreMessages: Boolean
-)
-
-/**
  * §Phase1C gap (断层) state — **REMOVED in R-20 Phase 2** (plan §3 N5 / glmer B1).
  * The single-gap `GapInfo` was replaced by the multi-gap
- * [cn.vectory.ocdroid.ui.chat.GapMarker] model on [ChatState.gapMarkers].
+ * [cn.vectory.ocdroid.data.cache.contract.GapMarker] model on [ChatState.gapMarkers].
  * The class definition and its field were deleted; every prior reader/writer
  * now routes through [cn.vectory.ocdroid.ui.chat.GapFillCoordinator] /
  * [cn.vectory.ocdroid.ui.chat.BackfillAlgorithm] /

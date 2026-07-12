@@ -40,14 +40,12 @@ object BackfillAlgorithm {
     fun anchorOf(cached: List<Message>): Message? = cached.dropLast(3).lastOrNull()
 
     /**
-     * Extract the [Entry.Message]s from a [CachedSessionLayout] (skipping
-     * [Entry.GapMarker]s), oldest-first. Used to feed [anchorOf] / detect on
-     * the cached view without the caller hand-filtering entries.
+     * Extract the [Message]s from a [CachedSessionLayout], oldest-first. The
+     * layout now carries messages + gapMarkers separately (Phase 4 ring-break),
+     * so this is a trivial accessor kept for callers that want the message list
+     * without the gaps.
      */
-    fun extractMessages(layout: CachedSessionLayout): List<Message> =
-        layout.entries.mapNotNull { entry ->
-            (entry as? Entry.Message)?.message
-        }
+    fun extractMessages(layout: CachedSessionLayout): List<Message> = layout.messages
 
     /**
      * Classify a probe window against the local anchor.

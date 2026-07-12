@@ -206,12 +206,12 @@ class CatchUpGapTest {
                 currentSessionId = "s1",
                 messages = listOf(Message(id = "A", role = "user", time = Message.TimeInfo(created = 100L))),
                 gapMarkers = listOf(
-                    cn.vectory.ocdroid.ui.chat.GapMarker(
+                    cn.vectory.ocdroid.data.cache.contract.GapMarker(
                         gapId = "g1",
                         lowerAnchorMessageId = "A",
                         upperBoundaryMessageId = "A",
                         nextBeforeCursor = "c",
-                        fillState = cn.vectory.ocdroid.ui.chat.GapFillState.Idle,
+                        fillState = cn.vectory.ocdroid.data.cache.contract.GapFillState.Idle,
                     )
                 )
             )

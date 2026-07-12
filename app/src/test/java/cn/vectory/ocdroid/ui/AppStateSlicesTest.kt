@@ -106,7 +106,7 @@ class AppStateSlicesTest {
 
     @Test
     fun `CachedSessionWindow default constructor round-trips`() {
-        val w = cn.vectory.ocdroid.ui.CachedSessionWindow(
+        val w = cn.vectory.ocdroid.data.cache.contract.CachedSessionWindow(
             messages = emptyList(),
             partsByMessage = emptyMap(),
             olderMessagesCursor = null,
@@ -122,7 +122,7 @@ class AppStateSlicesTest {
     fun `CachedSessionWindow full constructor round-trips`() {
         val msg = Message(id = "m1", role = "user")
         val part = Part(id = "p1", type = "text")
-        val w = cn.vectory.ocdroid.ui.CachedSessionWindow(
+        val w = cn.vectory.ocdroid.data.cache.contract.CachedSessionWindow(
             messages = listOf(msg),
             partsByMessage = mapOf("m1" to listOf(part)),
             olderMessagesCursor = "cursor-1",
@@ -136,7 +136,7 @@ class AppStateSlicesTest {
 
     @Test
     fun `CachedSessionWindow equals hashCode copy`() {
-        val w1 = cn.vectory.ocdroid.ui.CachedSessionWindow(
+        val w1 = cn.vectory.ocdroid.data.cache.contract.CachedSessionWindow(
             messages = emptyList(),
             partsByMessage = emptyMap(),
             olderMessagesCursor = null,
@@ -181,7 +181,7 @@ class AppStateSlicesTest {
 
     // R-20 Phase 2: the legacy single-gap `GapInfo` class + its constructor
     // round-trip test were removed (plan §3 N5). The multi-gap replacement
-    // (cn.vectory.ocdroid.ui.chat.GapMarker) is covered by GapAwareMessageListTest
+    // (cn.vectory.ocdroid.data.cache.contract.GapMarker) is covered by GapAwareMessageListTest
     // + BackfillAlgorithmTest.
 
     @Test

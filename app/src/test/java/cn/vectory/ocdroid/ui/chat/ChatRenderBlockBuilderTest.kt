@@ -1,5 +1,6 @@
 package cn.vectory.ocdroid.ui.chat
 
+import cn.vectory.ocdroid.data.cache.contract.GapFillState
 import cn.vectory.ocdroid.data.model.Message
 import cn.vectory.ocdroid.data.model.Part
 import cn.vectory.ocdroid.data.model.PartState

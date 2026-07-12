@@ -97,7 +97,7 @@ data class CachedMessageEntity(
  * to one session under one host group (plan §0 复合键控 — ses_xxxx is a branded
  * string, not a UUID, so the server-group fp namespaces it).
  *
- * [state] stores [cn.vectory.ocdroid.ui.chat.GapFillState].name — the four
+ * [state] stores [cn.vectory.ocdroid.data.cache.contract.GapFillState].name — the four
  * states (idle / filling / exhausted / error) drive both the UI divider label
  * and the coordinator's resume decisions. Stored as TEXT rather than an enum
  * so a future state addition does not require a migration (forward-compatible
@@ -117,7 +117,7 @@ data class CachedMessageEntity(
  *   step from. `null` means history is exhausted below this gap (state →
  *   exhausted). The cursor is the raw server response-header value
  *   (`base64url({id,time_ms})`) — the client NEVER synthesizes it.
- * @param state [cn.vectory.ocdroid.ui.chat.GapFillState].name.
+ * @param state [cn.vectory.ocdroid.data.cache.contract.GapFillState].name.
  */
 @Entity(
     tableName = "gap_marker",
