@@ -17,6 +17,8 @@ import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.unit.dp
+import androidx.test.platform.app.InstrumentationRegistry
+import cn.vectory.ocdroid.R
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertTrue
 import org.junit.Rule
@@ -91,8 +93,16 @@ class ChatMessageNavFabBounceTest {
         val before = composeRule.runOnIdle { listState.firstVisibleItemIndex }
         assertTrue("expected to start away from bottom (index 10), got $before", before == 10)
 
-        // Press "跳到最新" → animateScrollToItem(0).
-        composeRule.onNodeWithContentDescription("跳到最新").performClick()
+        // Press "jump to latest" (locale-resolved) → animateScrollToItem(0).
+        // §locale-stable: ChatMessageNavFab emits contentDescription via
+        // stringResource(R.string.chat_jump_to_latest), which yields the device
+        // locale's translation ("跳到最新" on zh, "Jump to latest" on en). Resolve
+        // the same resource from the app's target context (the same context
+        // Compose resolves stringResource against) so the assertion is
+        // locale-independent and matches whatever the composable actually emitted.
+        val jumpLabel = InstrumentationRegistry.getInstrumentation()
+            .targetContext.getString(R.string.chat_jump_to_latest)
+        composeRule.onNodeWithContentDescription(jumpLabel).performClick()
         composeRule.waitForIdle()
 
         val after = composeRule.runOnIdle { listState.firstVisibleItemIndex }
