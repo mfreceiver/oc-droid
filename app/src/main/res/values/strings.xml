@@ -36,9 +36,6 @@
          don't change. -->
     <string name="settings_section_hosts">Server Management</string>
     <string name="settings_section_hosts_subtitle">Add, switch, or remove OpenCode servers</string>
-    <!-- §P5b-A / Q7: 服务器管理 screen — short description rendered above
-         the three sections (服务器配置 / 流量统计 / 模型管理). -->
-    <string name="settings_server_management_desc">Manage this server (group).</string>
     <string name="settings_section_appearance">Appearance</string>
     <string name="settings_section_appearance_subtitle">Theme, font, display size</string>
     <string name="settings_section_models">Models</string>
@@ -143,11 +140,6 @@
     <string name="chat_context_no_cost">No cost data</string>
     <string name="chat_context_unknown">Unknown</string>
     <string name="chat_context_compact">Compact</string>
-    <!-- §round-B ③: SessionsScreen SearchBar. -->
-    <string name="sessions_search_hint">Search by title or directory</string>
-    <string name="sessions_search_no_results">No matching sessions</string>
-    <!-- §0.8.2 P3.2: contentDescription for the TopAppBar search action button. -->
-    <string name="sessions_action_search">Search</string>
     <string name="chat_add_image">Add image</string>
     <string name="chat_remove_image">Remove image</string>
     <string name="chat_send">Send</string>
@@ -451,6 +443,13 @@
     <string name="error_compact_no_session">Open or create a session before compacting</string>
     <string name="error_compact_no_model">No model info available for compaction</string>
     <string name="error_compact_failed">Compact failed: %1$s</string>
+    <!-- §compact-graded (Blocker-1): neutral Info emitted by ChatViewModel.compactSession
+         on the accepted / read-timeout branches (success-via-SSE still pending). -->
+    <string name="info_compact_in_progress">Compaction in progress, the result will sync automatically.</string>
+    <!-- §compact-graded (Blocker-1): watchdog timeout — isCompacting was
+         still true after WATCHDOG_MS so the flag is cleared and the user is
+         told to retry. -->
+    <string name="info_compact_timeout_retry">Compaction timed out with no response; please retry.</string>
     <string name="error_edit_message_failed">Failed to edit message: %1$s</string>
     <string name="error_abort_session_failed">Failed to abort session: %1$s</string>
     <string name="success_refreshed">Refreshed</string>

@@ -51,7 +51,6 @@ import androidx.compose.material3.InputChipDefaults
 import androidx.compose.material3.LocalTextStyle
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
-import androidx.compose.material3.SearchBar
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -251,7 +250,7 @@ fun Composer(
                 Spacer(Modifier.width(8.dp))
                 Box(
                     modifier = Modifier.weight(1f).padding(end = 8.dp),
-                    contentAlignment = Alignment.TopStart,
+                    contentAlignment = Alignment.CenterStart,
                 ) {
                     if (text.isEmpty()) {
                         Text(
@@ -471,15 +470,6 @@ internal fun AgentPickerSheet(
     onDismiss: () -> Unit,
 ) {
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
-    var query by remember { mutableStateOf("") }
-    // §round-B ④: pre-filter the agent list with the pure helper so the
-    // sheet body only renders matches. (No new helper extracted — the
-    // filter rule is a single `contains` on agent.name; lifting it into a
-    // pure file would be over-engineered for one line.)
-    val filteredAgents = remember(agents, query) {
-        if (query.isBlank()) agents
-        else agents.filter { it.name.contains(query, ignoreCase = true) }
-    }
     ModalBottomSheet(
         onDismissRequest = onDismiss,
         sheetState = sheetState,
@@ -497,9 +487,6 @@ internal fun AgentPickerSheet(
                 style = MaterialTheme.typography.titleMedium,
                 modifier = Modifier.padding(horizontal = 24.dp, vertical = 8.dp),
             )
-            SearchBar(query = query, onQueryChange = { query = it }, onSearch = {}, active = false,
-                onActiveChange = {}, placeholder = { Text("Search agents") },
-                modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp)) {}
             androidx.compose.material3.ListItem(
                 headlineContent = { Text(stringResource(R.string.agent_default_label)) },
                 trailingContent = {
@@ -513,7 +500,7 @@ internal fun AgentPickerSheet(
                 },
                 modifier = Modifier.clickable { onPick(null) },
             )
-            filteredAgents.forEach { agent ->
+            agents.forEach { agent ->
                 val isSelected = agent.name == selectedAgentName
                 androidx.compose.material3.ListItem(
                     headlineContent = { Text(agent.name) },
@@ -544,7 +531,6 @@ internal fun ModelPickerSheet(
 ) {
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
     val catalog = visiblePickerProviders(providers, disabledModels)
-    var query by remember { mutableStateOf("") }
     ModalBottomSheet(
         onDismissRequest = onDismiss,
         sheetState = sheetState,
@@ -562,9 +548,6 @@ internal fun ModelPickerSheet(
                 style = MaterialTheme.typography.titleMedium,
                 modifier = Modifier.padding(horizontal = 24.dp, vertical = 8.dp),
             )
-            SearchBar(query = query, onQueryChange = { query = it }, onSearch = {}, active = false,
-                onActiveChange = {}, placeholder = { Text("Search models") },
-                modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp)) {}
             if (catalog.isEmpty()) {
                 Text(
                     text = stringResource(R.string.chat_model_picker_empty),
@@ -574,16 +557,7 @@ internal fun ModelPickerSheet(
                 )
             } else {
                 catalog.forEach { provider ->
-                    // §round-B ④: provider header is hidden when ZERO of its
-                    // models match the query (so a non-matching provider no
-                    // longer renders a dangling section header above an empty
-                    // list). The previous shell always rendered the header,
-                    // which made the search feel broken ("I typed 'anthropic'
-                    // — why is every provider still listed?"). The pure
-                    // [filterProviderModels] helper also widens the match to
-                    // provider id + provider name, so "anthropic" now hits
-                    // every anthropic model (was: only modelId / model.name).
-                    val matchingModels = filterProviderModels(provider, query)
+                    val matchingModels = provider.models.entries.map { (modelId, model) -> modelId to model }
                         .filter { (modelId, _) ->
                             "${provider.id}/$modelId" !in disabledModels
                         }

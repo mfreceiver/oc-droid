@@ -33,8 +33,6 @@
          settings_section_hosts key，调用方无需改动。 -->
     <string name="settings_section_hosts">服务器管理</string>
     <string name="settings_section_hosts_subtitle">添加、切换或移除 OpenCode 服务器</string>
-    <!-- §P5b-A / Q7: 服务器管理屏顶部说明文本（三个分区：服务器配置 / 流量统计 / 模型管理）。 -->
-    <string name="settings_server_management_desc">维护该服务器（组）。</string>
     <string name="settings_section_appearance">外观</string>
     <string name="settings_section_appearance_subtitle">主题、字体、显示尺寸</string>
     <string name="settings_section_models">模型</string>
@@ -149,10 +147,6 @@
     <string name="chat_context_no_cost">没有费用数据</string>
     <string name="chat_context_unknown">未知</string>
     <string name="chat_context_compact">压缩</string>
-    <!-- §round-B ③ / §0.8.2 P3.2: SessionsScreen 搜索（补齐 zh 对齐）。 -->
-    <string name="sessions_search_hint">按标题或目录搜索</string>
-    <string name="sessions_search_no_results">没有匹配的会话</string>
-    <string name="sessions_action_search">搜索</string>
     <string name="chat_add_image">添加图片</string>
     <string name="chat_remove_image">移除图片</string>
     <string name="chat_send">发送</string>
@@ -422,6 +416,12 @@
     <string name="error_compact_no_session">压缩前请先打开或创建会话</string>
     <string name="error_compact_no_model">没有可用于压缩的模型信息</string>
     <string name="error_compact_failed">压缩失败：%1$s</string>
+    <!-- §compact-graded (Blocker-1)：compactSession 在已接受 / 读超时分支发出的中性 Info
+         （结果仍由 SSE 异步回送）。 -->
+    <string name="info_compact_in_progress">压缩进行中，结果将自动同步。</string>
+    <!-- §compact-graded (Blocker-1)：看门狗超时——WATCHDOG_MS 后 isCompacting 仍为 true，
+         已清除标志并提示用户重试。 -->
+    <string name="info_compact_timeout_retry">压缩超时未响应，请重试。</string>
     <string name="error_edit_message_failed">编辑消息失败：%1$s</string>
     <string name="error_abort_session_failed">中止会话失败：%1$s</string>
     <string name="success_refreshed">已刷新</string>

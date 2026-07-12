@@ -175,14 +175,6 @@ internal fun HostProfilesManagerScreen(
                 Spacer(modifier = Modifier.height(12.dp))
             }
 
-            // §P5b-A / Q7: 说明文本 at top of the screen.
-            Text(
-                stringResource(R.string.settings_server_management_desc),
-                style = MaterialTheme.typography.bodyMedium,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-            Spacer(modifier = Modifier.height(16.dp))
-
             // ── §P5b-A / Q7 Section 1: 服务器配置 ──
             SectionHeader(title = stringResource(R.string.host_profiles_title))
             profiles.forEach { profile ->

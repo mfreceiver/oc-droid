@@ -1,6 +1,5 @@
 package cn.vectory.ocdroid.ui.sessions
 
-import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
@@ -15,15 +14,12 @@ import androidx.compose.material.icons.automirrored.filled.Chat
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.AddComment
 import androidx.compose.material.icons.filled.Archive
-import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.CreateNewFolder
 import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.Inbox
 import androidx.compose.material.icons.filled.KeyboardArrowDown
-import androidx.compose.material.icons.filled.Search
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
-import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -38,7 +34,6 @@ import cn.vectory.ocdroid.data.model.Session
 import cn.vectory.ocdroid.data.model.SessionStatus
 import cn.vectory.ocdroid.data.repository.OpenCodeRepository
 import cn.vectory.ocdroid.ui.ComposerViewModel
-import cn.vectory.ocdroid.ui.NavRoute
 import cn.vectory.ocdroid.ui.OrchestratorViewModel
 import cn.vectory.ocdroid.ui.SessionViewModel
 import cn.vectory.ocdroid.ui.SettingsViewModel
@@ -47,7 +42,6 @@ import cn.vectory.ocdroid.ui.theme.Dimens
 import cn.vectory.ocdroid.util.DebugLog
 import cn.vectory.ocdroid.util.WorkdirPaths
 import kotlinx.coroutines.flow.distinctUntilChanged
-import kotlinx.coroutines.flow.filter
 import kotlinx.coroutines.flow.map
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -119,16 +113,6 @@ fun SessionsScreen(
     var pendingDisconnectWorkdir by remember { mutableStateOf<String?>(null) }
     // M7: long-press a session card → archive confirmation dialog. Null = hidden.
     var pendingArchiveSession by remember { mutableStateOf<Session?>(null) }
-    // §round-B ③ (Phase 2 G.2 step 1): search query for the SessionsScreen
-    // SearchBar. Empty query ⇒ no filter (matches the pre-search render).
-    // §0.8.2 P3.2: rememberSaveable so the query survives tab save/restore.
-    var searchQuery by rememberSaveable { mutableStateOf("") }
-    // §0.8.2 P3.2: search is now a top-right IconButton that opens the M3
-    // SearchBar as a full-screen overlay. rememberSaveable so the open state
-    // survives tab save/restore. (Intentionally NOT reset on tab reselect —
-    // the reselect-event mechanism isn't built yet; deferred to integration.)
-    var searchExpanded by rememberSaveable { mutableStateOf(false) }
-
     // Derive recent sessions (root sessions: parentId == null, by time.updated desc, top 5).
     // Source merges the global sessions list with directorySessions (#10: prior
     // conversations discovered for a connected workdir that may not yet appear
@@ -139,18 +123,11 @@ fun SessionsScreen(
     // suppresses structurally-equal results, so an unrelated sessionStatuses
     // tweak recomputes the block but yields an equal list and the LazyColumn
     // items are skipped.
-    //
-    // §round-B ③: applies the search filter via the pure [filterSessionsByQuery]
-    // helper (title / directory, case-insensitive) on the merged+deduped+root
-    // candidate list BEFORE the take(5) so a query surfaces matches beyond
-    // the no-query top-5 (otherwise a "search" that only filtered the top-5
-    // would silently miss older matching sessions).
     val recentSessions by remember {
         derivedStateOf {
-            val candidates = (sessionListState.sessions + sessionListState.directorySessions.values.flatten())
+            (sessionListState.sessions + sessionListState.directorySessions.values.flatten())
                 .distinctBy { it.id }
                 .filter { it.parentId == null && !it.isArchived }
-            filterSessionsByQuery(candidates, searchQuery)
                 .sortedByDescending { it.time?.updated ?: 0L }
                 .take(5)
         }
@@ -175,25 +152,14 @@ fun SessionsScreen(
     // this derivedStateOf just feeds it the live slice values + caches the
     // structurally-equal result so SSE chat deltas / typing (which do not
     // touch any of the input slices) do not recompose the workdir LazyColumn.
-    //
-    // §round-B ③: searchQuery is part of the derivedStateOf's read set so a
-    // keystroke recomputes the workdir groups (filtering each group's session
-    // list down to the matches). buildWorkdirGroups itself stays search-
-    // oblivious (the gate contract is about visibility, not query filtering);
-    // the per-group session list is filtered AFTER grouping so empty groups
-    // still render their workdir header (matches the no-search shape).
     val workdirGroups by remember {
         derivedStateOf {
-            val grouped = buildWorkdirGroups(
+            buildWorkdirGroups(
                 allSessions = (sessionListState.sessions + sessionListState.directorySessions.values.flatten())
                     .distinctBy { it.id },
                 recentWorkdirs = recentWorkdirs,
                 draftWorkdir = draftWorkdir,
             )
-            if (searchQuery.isBlank()) grouped
-            else grouped.map { (workdir, sessions) ->
-                workdir to filterSessionsByQuery(sessions, searchQuery)
-            }
         }
     }
 
@@ -201,39 +167,6 @@ fun SessionsScreen(
     // value is already locally-stable — no derivedStateOf wrapper needed. Lazy
     // item lambdas (recent + workdir session cards) capture this snapshot value
     // directly.
-
-    // §0.8.2 P3.2: flat filtered-results list for the SearchBar overlay.
-    // Same merge+dedupe+root+non-archived candidate set as recentSessions but
-    // WITHOUT the take(5) cap, so the overlay surfaces every match (the
-    // docked list is capped to 5; the overlay is the exhaustive view).
-    // derivedStateOf → only recomputed when an input slice / the query changes,
-    // and only READ when the overlay is composed (collapsed ⇒ not read).
-    val searchResults by remember {
-        derivedStateOf {
-            val candidates = (sessionListState.sessions + sessionListState.directorySessions.values.flatten())
-                .distinctBy { it.id }
-                .filter { it.parentId == null && !it.isArchived }
-            filterSessionsByQuery(candidates, searchQuery)
-                .sortedByDescending { it.time?.updated ?: 0L }
-        }
-    }
-
-    // §0.8.2 P3.2: back closes the search overlay before the system back
-    // navigates away from the Sessions tab. The SearchBar's own scrim
-    // dismissal also flips searchExpanded to false via onExpandedChange.
-    BackHandler(enabled = searchExpanded) { searchExpanded = false }
-
-    // §Q10 (P4b-B): reselect subscription — a second tap on the Sessions tab
-    // collapses the search overlay and clears the query, returning the user
-    // to the clean session list.
-    LaunchedEffect(orchestratorVM) {
-        orchestratorVM.reselectFlow
-            .filter { it == NavRoute.Sessions }
-            .collect {
-                searchExpanded = false
-                searchQuery = ""
-            }
-    }
 
     // Navigate to Chat tab after selecting a session
     fun onSessionClick(sessionId: String) {
@@ -252,17 +185,6 @@ fun SessionsScreen(
                     // is a top-level tab now (no back arrow). The
                     // showBackNavigation param is retained in the signature
                     // but no longer read here (see param doc above).
-                    actions = {
-                        // §0.8.2 P3.2: search affordance moved here from the
-                        // docked LazyColumn SearchBar item. Tapping opens the
-                        // full-screen M3 SearchBar overlay (sibling below).
-                        IconButton(onClick = { searchExpanded = true }) {
-                            Icon(
-                                Icons.Default.Search,
-                                contentDescription = stringResource(R.string.sessions_action_search),
-                            )
-                        }
-                    }
                 )
             }
         ) { padding ->
@@ -281,12 +203,6 @@ fun SessionsScreen(
                 // with SessionCard's vertical=0 padding → ~1dp between cards.
                 verticalArrangement = Arrangement.spacedBy(Dimens.hairline)
             ) {
-            // --- §0.8.2 P3.2: docked SearchBar LazyColumn item REMOVED. ---
-            // Search is now a top-right IconButton in the TopAppBar actions
-            // that opens the M3 SearchBar as a full-screen overlay (rendered
-            // as a sibling of this Scaffold below). Removing this item also
-            // eliminates the title↔first-item gap it inflated (see Q9).
-
             // --- Recent Sessions Section ---
             item(key = "recent_header") {
                 SectionHeader(
@@ -298,9 +214,7 @@ fun SessionsScreen(
             if (recentSessions.isEmpty()) {
                 item(key = "recent_empty") {
                     EmptyRow(
-                        text = if (searchQuery.isNotEmpty())
-                            stringResource(R.string.sessions_search_no_results)
-                        else stringResource(R.string.sessions_tab_no_sessions)
+                        text = stringResource(R.string.sessions_tab_no_sessions)
                     )
                 }
             } else {
@@ -507,72 +421,6 @@ fun SessionsScreen(
         }
     }
 
-    // §0.8.2 P3.2: full-screen M3 SearchBar overlay — a top-level sibling
-    // of the Scaffold (inside this Box) so it gets the full screen, not the
-    // TopAppBar.actions-constrained height. Conditionally composed: when
-    // searchExpanded=false the SearchBar is absent entirely, so its
-    // collapsed docked pill does NOT render over the TopAppBar (the app-bar
-    // IconButton is the only collapsed affordance). Uses the current
-    // `inputField` + `expanded` API (NOT the deprecated query/active
-    // overload). Dismissing the scrim / pressing the input's back arrow
-    // fires onExpandedChange(false); the BackHandler above also closes on
-    // system back before nav proceeds.
-    if (searchExpanded) {
-        SearchBar(
-            inputField = {
-                SearchBarDefaults.InputField(
-                    query = searchQuery,
-                    onQueryChange = { searchQuery = it },
-                    onSearch = { /* live filter — no explicit submit needed */ },
-                    expanded = searchExpanded,
-                    onExpandedChange = { searchExpanded = it },
-                    placeholder = { Text(stringResource(R.string.sessions_search_hint)) },
-                    leadingIcon = {
-                        Icon(Icons.Default.Search, contentDescription = null)
-                    },
-                    trailingIcon = {
-                        if (searchQuery.isNotEmpty()) {
-                            IconButton(onClick = { searchQuery = "" }) {
-                                Icon(
-                                    Icons.Default.Close,
-                                    contentDescription = stringResource(R.string.common_close),
-                                )
-                            }
-                        }
-                    },
-                )
-            },
-            expanded = searchExpanded,
-            onExpandedChange = { searchExpanded = it },
-        ) {
-            // Filtered results — reuse the searchResults derivedStateOf
-            // (filterSessionsByQuery over the full root+non-archived set,
-            // uncapped — unlike the docked recent list's take(5)) + the
-            // existing SessionCard. Selecting a result closes the overlay
-            // before navigating to Chat.
-            LazyColumn {
-                if (searchResults.isEmpty()) {
-                    item(key = "search_empty") {
-                        EmptyRow(stringResource(R.string.sessions_search_no_results))
-                    }
-                } else {
-                    items(searchResults, key = { it.id }) { session ->
-                        SessionCard(
-                            session = session,
-                            isUnread = session.id in unreadSessions,
-                            status = sessionListState.sessionStatuses[session.id],
-                            onClick = {
-                                searchExpanded = false
-                                onSessionClick(session.id)
-                            },
-                            onLongClick = { pendingArchiveSession = session },
-                            onArchive = { pendingArchiveSession = session },
-                        )
-                    }
-                }
-            }
-        }
-    }
     }
 
     // --- Disconnect workdir confirmation dialog (persistent disconnect) ---

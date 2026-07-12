@@ -31,6 +31,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Text
@@ -126,7 +127,7 @@ fun ChatScaffold(
     val host by orchestratorVM.hostFlow.collectAsStateWithLifecycle()
 
     // ── Chrome-only state (new for Phase 1B) ─────────────────────────────
-    // §0.8.2 P2: showSessionPicker / showContextSelector / showOverflow are
+    // §0.8.2 P2: showContextSelector / showOverflow are
     // GONE — the nav-icon workdir initial is non-clickable (P2.1), the
     // ContextCueChip + server-status IconButton are removed (P2.2), and the
     // overflow DropdownMenu is co-located with its ContextUsageRing trigger
@@ -140,6 +141,7 @@ fun ChatScaffold(
     // Composer.kt (now `internal` so this file can call them).
     var showAgentPicker by rememberSaveable { mutableStateOf(false) }
     var showModelPicker by rememberSaveable { mutableStateOf(false) }
+    var showSessionPicker by rememberSaveable { mutableStateOf(false) }
     var errorDetail by remember { mutableStateOf<String?>(null) }
     var pendingExit by remember { mutableStateOf(false) }
     // §1B-FIX (I6): dialog-state for the parity overflow entries (Todo +
@@ -284,7 +286,7 @@ fun ChatScaffold(
                 is UiEvent.Error -> {
                     snackbarHostState.showTimed(
                         message = errorMessage,
-                        durationMillis = 10_000L,
+                        durationMillis = 3_000L,
                         actionLabel = errorActionLabel,
                         onAction = { errorDetail = message }
                     )
@@ -401,17 +403,20 @@ fun ChatScaffold(
         sessionVM,
         chatVM,
     ) {
-        // §0.8.2 P2.3: the new overflow menu (Compress / Context / Todo /
-        // Agent / Model) lives inside ChatTopBar; its open-callbacks fire
-        // the local sheet/dialog state hoisted in this composable. The
-        // pickers' slice reads (agents / providers / currentModel / disabled
-        // models) are sourced below from the already-subscribed settings +
-        // chat slices, so opening a sheet does not trigger a fresh
-        // subscription. The AgentPickerSheet / ModelPickerSheet composables
-        // stay defined in Composer.kt (now `internal`).
+        // §0.8.2 P2.3: the new overflow menu (Context / Todo / Agent / Model)
+        // lives inside ChatTopBar; its open-callbacks fire the local
+        // sheet/dialog state hoisted in this composable. The pickers' slice
+        // reads (agents / providers / currentModel / disabled models) are
+        // sourced below from the already-subscribed settings + chat slices,
+        // so opening a sheet does not trigger a fresh subscription. The
+        // AgentPickerSheet / ModelPickerSheet composables stay defined in
+        // Composer.kt (now `internal`).
+        //
+        // §dead-onCompact-cleanup: the standalone "Compress" overflow item
+        // was removed; compaction is triggered via the ContextUsageDialog's
+        // own "Compress context" button (see showContextDialog below).
         ChatTopBarActions(
             onSelectSession = sessionVM::selectSession,
-            onCompact = { chatVM.compactSession() },
             onOpenContextDialog = { showContextDialog = true },
             onOpenTodoDialog = { showTodoDialog = true },
             onOpenAgentPicker = { showAgentPicker = true },
@@ -428,6 +433,7 @@ fun ChatScaffold(
             // but the callback is a no-op stub.
             tabVisible = true,
             onTabVisibilityChange = { /* no second-row strip in 1B */ },
+            onTitleClick = { showSessionPicker = true },
         )
 
         // §PARITY: wide-screen card wrap mirrors ChatScreen 10/§B3. Phase 1B
@@ -696,6 +702,27 @@ fun ChatScaffold(
         )
     }
 
+    if (showSessionPicker) {
+        SessionPickerSheet(
+            sessions = sessionList.sessions,
+            sessionStatuses = sessionList.sessionStatuses,
+            currentSessionId = chat.currentSessionId,
+            unreadSessions = unread.unreadSessions,
+            questionSessionIds = sessionList.pendingQuestions.map { it.sessionId }.toSet(),
+            onSelect = { sessionId ->
+                sessionVM.selectSession(sessionId)
+                showSessionPicker = false
+            },
+            onArchive = sessionVM::archiveSession,
+            onUnarchive = sessionVM::restoreSession,
+            onNewSession = {
+                sessionVM.createSession()
+                showSessionPicker = false
+            },
+            onDismiss = { showSessionPicker = false },
+        )
+    }
+
     // §1B-FIX (I6): the three parity dialogs (Todo / Context-usage) live
     // here in ChatScaffold so the overflow can open them. The dialog body
     // is unchanged from the old ChatTopBar.kt — only the owner moved.
@@ -703,21 +730,25 @@ fun ChatScaffold(
     // menu (onOpenTodoDialog / onOpenContextDialog) instead of the remote
     // ConversationOverflowMenu.
     if (showTodoDialog) {
-        AlertDialog(
+        ModalBottomSheet(
             onDismissRequest = { showTodoDialog = false },
-            title = { Text(stringResource(R.string.chat_todo)) },
-            text = {
+        ) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(bottom = 16.dp),
+            ) {
+                Text(
+                    text = stringResource(R.string.chat_todo),
+                    style = MaterialTheme.typography.titleMedium,
+                    modifier = Modifier.padding(horizontal = 24.dp, vertical = 8.dp),
+                )
                 TodoListPanel(
                     todos = sessionList.sessionTodos[chat.currentSessionId ?: ""] ?: emptyList(),
-                    modifier = Modifier.heightIn(max = 400.dp)
+                    modifier = Modifier.heightIn(max = 400.dp),
                 )
-            },
-            confirmButton = {
-                TextButton(onClick = { showTodoDialog = false }) {
-                    Text(stringResource(R.string.common_done))
-                }
             }
-        )
+        }
     }
 
     if (showContextDialog) {
@@ -770,7 +801,9 @@ fun ChatScaffold(
 // §0.8.2 P2.3: the standalone `ConversationOverflowMenu` composable that
 // used to live here is REMOVED. The overflow DropdownMenu is now co-located
 // with its ContextUsageRing trigger inside ChatTopBar (the fix for the
-// top-left popup bug — the prior remote menu had no tight Box anchor). The
-// 5 items (Compress / Context / Todo / Agent / Model) are composed inline
-// in `ContextMenuCluster` (ChatTopBar.kt). Archive was dropped (the
-// destructive affordance moves to the Sessions screen long-press).
+// top-left popup bug — the prior remote menu had no tight Box anchor).
+// §dead-onCompact-cleanup: the 4 items (Context / Todo / Agent / Model) are
+// composed inline in `ContextMenuCluster` (ChatTopBar.kt). Compaction is
+// triggered via the ContextUsageDialog's own "Compress context" button, NOT
+// a standalone overflow item. Archive was dropped (the destructive
+// affordance moves to the Sessions screen long-press).

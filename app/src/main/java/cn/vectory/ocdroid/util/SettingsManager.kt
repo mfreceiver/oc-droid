@@ -225,13 +225,6 @@ class SettingsManager @Inject constructor(
             _currentWorkdirFlow.value = value
         }
 
-    /** §Q2: last workdir the user explicitly browsed in Files/Git. Default-
-     *  fallback when Chat has no session. Switching workdir in Files/Git does
-     *  NOT mutate the Chat session (local browsing context only). */
-    var filesLastWorkdir: String?
-        get() = encryptedPrefs.getString(KEY_FILES_LAST_WORKDIR, null)
-        set(value) { encryptedPrefs.edit().putString(KEY_FILES_LAST_WORKDIR, value).apply() }
-
     /**
      * R-20 Phase 5: the set of workdirs the user has recently connected to
      * (MRU order), keyed per [serverGroupFp] so the right set survives a cold
@@ -246,6 +239,14 @@ class SettingsManager @Inject constructor(
      * migrated to `recent_workdirs_<fp>` once per fp by
      * [migrateLegacyKeysToFp] (idempotent via the `cache_migration_v1_done_<fp>`
      * flag) — see [ConnectionActions.applySavedSettings].
+     *
+     * §files-git-readonly-workdir: the legacy `files_last_workdir` field (the
+     * last workdir explicitly browsed in Files/Git) was removed when the
+     * Files/Git WorkdirControl became a read-only indicator — workdir now
+     * follows the active session's directory exclusively, so there is no
+     * longer a "browsed-but-not-current" workdir to persist. The storage key
+     * `files_last_workdir` is intentionally NOT reclaimed here (a leftover
+     * ESP entry is harmless); it is reclaimed by [clearAllLocalData].
      */
     fun getRecentWorkdirs(serverGroupFp: String): List<String> {
         if (serverGroupFp.isBlank()) return emptyList()
@@ -955,8 +956,15 @@ class SettingsManager @Inject constructor(
         )
         private const val KEY_CURRENT_WORKDIR = "current_workdir"
         private const val KEY_RECENT_WORKDIRS = "recent_workdirs"
-        /** §Q2: last workdir explicitly browsed in Files/Git (fallback when Chat has no session). */
-        private const val KEY_FILES_LAST_WORKDIR = "files_last_workdir"
+        /**
+         * §files-git-readonly-workdir: REMOVED. The `files_last_workdir` field
+         * (last workdir explicitly browsed in Files/Git) was dead code after
+         * the Files/Git WorkdirControl became a read-only indicator. The
+         * constant is intentionally kept commented-out as a tombstone so a
+         * future "let me re-add this" pass sees the rationale instead of
+         * re-deriving the same dead concept.
+         */
+        // private const val KEY_FILES_LAST_WORKDIR = "files_last_workdir"
         /**
          * Cap for [recentWorkdirs] — bounds cold-start directory-fetch fan-out.
          *

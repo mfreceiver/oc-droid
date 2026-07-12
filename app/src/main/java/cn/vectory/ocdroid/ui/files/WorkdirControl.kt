@@ -44,22 +44,28 @@ import cn.vectory.ocdroid.ui.theme.Dimens
 import cn.vectory.ocdroid.util.WorkdirPaths
 
 /**
- * §Q2 (P4b-A): a compact Workdir switcher for the Files and Git top bars.
+ * §Q2 (P4b-A): a compact Workdir indicator for the Files and Git top bars.
  *
  * Renders `[hash-color FolderOpen icon] + workdir basename` — the whole
  * control is tinted with [workdirTone] of [currentWorkdir] so the user gets
  * a consistent color cue for the active project. A null [currentWorkdir]
  * shows a muted [Icons.Default.FolderOff] + placeholder (no tone).
  *
- * Click opens a [ModalBottomSheet] listing [recentWorkdirs] (the current
- * host's connected workdirs, MRU). Each row: `[hash-color Folder icon] +
- * basename + full path`. NO section header. Tapping a row invokes [onSelect]
- * and dismisses the sheet. The current workdir row is highlighted with a
- * trailing checkmark. An empty [recentWorkdirs] shows a single
- * non-interactive "no connected projects" row.
+ * **§files-git-readonly-workdir**: when [readOnly] is true (the new default
+ * for Files and Git), the control is a NON-INTERACTIVE indicator only. It
+ * still shows the current workdir (hash color + path basename) so the user
+ * knows which project the Files/Git pane is scoped to, but it has no click
+ * affordance, no selection sheet, and no chevron / drop-arrow that would
+ * suggest it is tappable. Per the user requirement, workdir switching now
+ * happens ONLY by opening a session that belongs to that directory.
  *
- * Switching workdir here is a LOCAL browsing-context override — it does NOT
- * change the Chat session. The host persists the choice via [onSelect].
+ * When [readOnly] is false (legacy / future callers), the original behaviour
+ * is preserved: click opens a [ModalBottomSheet] listing [recentWorkdirs]
+ * (MRU). Each row: `[hash-color Folder icon] + basename + full path`. NO
+ * section header. Tapping a row invokes [onSelect] and dismisses the sheet.
+ * The current workdir row is highlighted with a trailing checkmark. An
+ * empty [recentWorkdirs] shows a single non-interactive "no connected
+ * projects" row.
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -68,15 +74,47 @@ fun WorkdirControl(
     recentWorkdirs: List<String>,
     onSelect: (String) -> Unit,
     modifier: Modifier = Modifier,
+    readOnly: Boolean = false,
 ) {
-    var showSheet by rememberSaveable { mutableStateOf(false) }
-
     val tone: Color = currentWorkdir?.let { workdirTone(it) }
         ?: MaterialTheme.colorScheme.onSurfaceVariant
     val basename = currentWorkdir
         ?.substringAfterLast('/')
         ?.ifBlank { currentWorkdir }
         ?: ""
+
+    if (readOnly) {
+        // §files-git-readonly-workdir: indicator-only. No onClick, no ripple,
+        // no semantics Role.Button, no chevron. The row still conveys the
+        // current workdir (icon + basename, hash-tinted) so the user can see
+        // which project the Files/Git pane is scoped to.
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            modifier = modifier
+                .padding(horizontal = Dimens.spacing2, vertical = Dimens.spacing1)
+                .semantics {
+                    contentDescription = basename.ifBlank { "No workdir" }
+                },
+        ) {
+            Icon(
+                imageVector = if (currentWorkdir != null) Icons.Default.FolderOpen else Icons.Default.FolderOff,
+                contentDescription = null,
+                tint = tone,
+                modifier = Modifier.size(Dimens.iconSm),
+            )
+            Spacer(Modifier.width(Dimens.spacing1))
+            Text(
+                text = basename.ifBlank { stringResource(R.string.files_workdir_none) },
+                color = tone,
+                style = MaterialTheme.typography.labelMedium,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+        }
+        return
+    }
+
+    var showSheet by rememberSaveable { mutableStateOf(false) }
     val switchDesc = stringResource(R.string.files_workdir_switch)
 
     Surface(

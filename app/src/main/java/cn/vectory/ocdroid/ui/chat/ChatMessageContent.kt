@@ -39,8 +39,11 @@ import androidx.compose.runtime.snapshots.SnapshotStateList
 import androidx.compose.runtime.snapshots.SnapshotStateMap
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import cn.vectory.ocdroid.R
@@ -293,13 +296,10 @@ internal fun ChatMessageList(
     // always null; the writes/reads here are no-ops but kept to avoid
     // disturbing those guards (cleanup is out of scope for §B1).
     var pendingRestoreSession by remember { mutableStateOf<String?>(null) }
-    val contentVersion = remember(messages, partsByMessage, streamingPartTexts, streamingReasoningPart, isLoading) {
-        messages.size +
-            partsByMessage.values.sumOf { it.size } +
-            streamingPartTexts.hashCode() +
-            (if (streamingReasoningPart != null) 1 else 0) +
-            (if (isLoading) 1 else 0)
-    }
+    // This intentionally excludes streaming text values. A token delta changes the
+    // overlay map about every 100ms, but it is not a navigation event; using it as
+    // a scroll-effect key created a scroll/layout feedback loop.
+    val isStreaming = sessionIsRunning || streamingReasoningPart != null || streamingPartTexts.isNotEmpty()
 
     // §Q4: The former snapshotFlow atBottom tracker that continuously set
     // followBottom is REMOVED. It caused a feedback latch: programmatic
@@ -513,56 +513,27 @@ internal fun ChatMessageList(
             }
     }
 
-    LaunchedEffect(contentVersion) {
-        // §flicker-fix + §B1: saved-position restore removed; auto-follow-to-
-        // latest is GATED on followBottom. With followBottom now saveable per
-        // sessionId, a preview return restores the user's prior viewport (and
-        // followBottom=false if they were reading history) → this branch skips
-        // and the user stays on history. (pendingRestoreSession is always null
-        // now; the restore branch that used to live here is intentionally gone.)
-        // §symptom3-fix: when the user expands the in-progress streaming
-        // reasoning card (to read the chain-of-thought from its beginning),
-        // pause the bottom-pinning auto-follow. Otherwise the per-token
-        // scrollToItem(0) below re-pins the card's bottom every ~100ms,
-        // scrolling the card's header / content-start above the viewport — the
-        // "expanded thinking card header is truncated, can't see the real
-        // start" symptom. Collapsing the card resumes auto-follow.
+    // Scroll only for stable structural events: session/message-count changes,
+    // streaming lifecycle transitions, or a newly introduced streaming part.
+    // `streamingPartTexts.keys` has set equality, so text-only token deltas do
+    // not restart this effect. In reverse layout, a growing index-0 item remains
+    // bottom-anchored; requesting another scroll for every height change is both
+    // unnecessary and the source of the previous flicker.
+    LaunchedEffect(sessionId, messages.size, isStreaming, streamingPartTexts.keys, streamingReasoningPart?.id) {
         val streamingReasoningExpanded = streamingReasoningPart?.let { sr ->
-            // §R-1: same key format as the standalone item + inline card.
             val key = sr.messageId?.let { "$it|${sr.id}" } ?: "streaming|${sr.id}"
             expandedParts[key] == true
         } == true
         if (followBottom && !streamingReasoningExpanded &&
             (messages.isNotEmpty() || streamingReasoningPart != null)) {
-            // 闪屏修复：流式输出（reasoning 进行中 / streamingPartTexts 非空）时
-            // 用瞬时 scrollToItem 代替 animateScrollToItem。
-            //
-            // 根因：contentVersion 含 streamingPartTexts.hashCode()，每个 token 到达
-            // 都重启本 LaunchedEffect → animateScrollToItem(0) 启动的 ~300ms 滚动动画
-            // 被下一个 token（M5 coalescing ~100ms）打断重启。动画反复中断 + reasoning
-            // 内容增长导致 item 高度漂移，使滚动位置在"到底（完全显示）"与"未到底
-            // （收缩视图）"间持续跳变 → 用户看到的"窗口在完全显示和收缩间持续变化"。
-            //
-            // 瞬时 scrollToItem 无动画可堆叠，每帧精确对齐 item 0 顶部，reasoning 顶部
-            // 钉住视口底部，新 token 平滑流入，零抖动。这是流式聊天列表（iMessage /
-            // Telegram / WhatsApp）跟随到底部的标准实现。
-            //
-            // 非流式（新消息到达、初始加载，streamingPartTexts 为空且无 reasoning part）
-            // 保留 animateScrollToItem 平滑跟随，体验不受影响。
-            if (streamingReasoningPart != null || streamingPartTexts.isNotEmpty()) {
-                // §streaming-flicker-diagnosis (Top2): log every programmatic
-                // scrollToItem(0) restart driven by contentVersion (which embeds
-                // streamingPartTexts.hashCode() → changes ~every 100ms flush). If
-                // this line fires at ~10Hz during streaming it implicates the
-                // scroll-interrupts-layout candidate (Top2).
-                if (STREAMING_FLICKER_DEBUG) {
-                    Log.w(FLICKER_TAG, "contentVersion changed → scrollToItem(0) t=${System.nanoTime()}")
-                }
-                listState.scrollToItem(0)
+            if (isStreaming) {
+                // Do not pull a history-reading user back when a new stream part
+                // arrives. requestScrollToItem schedules a one-shot measure-pass
+                // reposition rather than launching an animated scroll per token.
+                val atBottom = listState.firstVisibleItemIndex == 0 &&
+                    listState.firstVisibleItemScrollOffset <= 24
+                if (atBottom) listState.requestScrollToItem(0)
             } else {
-                if (STREAMING_FLICKER_DEBUG) {
-                    Log.w(FLICKER_TAG, "contentVersion changed → animateScrollToItem(0) t=${System.nanoTime()}")
-                }
                 listState.animateScrollToItem(0)
             }
         }
@@ -656,6 +627,34 @@ internal fun ChatMessageList(
 
     // §Phase8-nav: Box 包裹 LazyColumn + 导航 FAB overlay（右侧中下）。
     Box(modifier = Modifier.fillMaxSize()) {
+        // §watermark: low-key rotated project-name watermark stamped BEHIND
+        // the message list — replaces the old top-bar workdir-initial icon
+        // (see ChatTopBar). Renders the workdir basename (last path segment)
+        // as a single bold line tilted 45°, centered, tinted with
+        // [workdirTone] so each project carries its identity hue. The very
+        // low alpha keeps it discernible but never competitive with message
+        // text in either light or dark theme. Purely decorative —
+        // NON-INTERACTIVE (no clickable / pointerInput / hover). Listed as
+        // the FIRST child so it sits beneath the LazyColumn in z-order.
+        // `workspaceDirectory` is derived from the current session's
+        // directory (see declaration above); when null (no session / no
+        // draft) no watermark is shown.
+        workspaceDirectory?.let { dir ->
+            val workdirBasename = dir.substringAfterLast('/').ifBlank { dir }
+            if (workdirBasename.isNotBlank()) {
+                Text(
+                    text = workdirBasename,
+                    modifier = Modifier
+                        .align(Alignment.Center)
+                        .rotate(45f),
+                    color = workdirTone(dir).copy(alpha = 0.05f),
+                    style = MaterialTheme.typography.displaySmall,
+                    fontWeight = FontWeight.Bold,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
+        }
         LazyColumn(
             state = listState,
             modifier = Modifier.fillMaxSize(),

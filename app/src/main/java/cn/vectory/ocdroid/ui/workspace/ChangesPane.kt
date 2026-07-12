@@ -20,11 +20,11 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.ListItem
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
-import androidx.compose.material3.SegmentedButton
-import androidx.compose.material3.SegmentedButtonDefaults
-import androidx.compose.material3.SingleChoiceSegmentedButtonRow
+import androidx.compose.material3.Tab
+import androidx.compose.material3.TabRow
 import androidx.compose.material3.Text
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
@@ -112,17 +112,18 @@ fun ChangesPane(
     }
 
     Column(modifier = modifier.fillMaxSize()) {
-        SingleChoiceSegmentedButtonRow(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 16.dp, vertical = 8.dp),
+        // §4.1: 顶部两选项从胶囊式 SegmentedButton 改为 M3 下划线式 TabRow，
+        // 与项目其它顶部导航（BottomBar / SectionHeader）的视觉语言一致；full-
+        // bleed 条 + 紧跟 HorizontalDivider，是项目主流的 section 切换形态。
+        // 复用既有 ChangesPaneMode 枚举与 label，不引入新字符串。
+        TabRow(
+            selectedTabIndex = mode.ordinal,
         ) {
-            ChangesPaneMode.entries.forEachIndexed { index, entry ->
-                SegmentedButton(
+            ChangesPaneMode.entries.forEach { entry ->
+                Tab(
                     selected = mode == entry,
                     onClick = { mode = entry },
-                    shape = SegmentedButtonDefaults.itemShape(index, ChangesPaneMode.entries.size),
-                    label = { Text(entry.label) },
+                    text = { Text(entry.label) },
                 )
             }
         }
@@ -467,16 +468,26 @@ private fun DiffBottomSheet(
 private fun FileDiffRow(diff: FileDiff, onClick: () -> Unit) {
     val statusColor = vcsStatusColor(diff.status)
     val path = diff.file
-    Row(
+    // §4.2: 改用 M3 ListItem 体系——与 SessionsScreen.SessionCard / Settings
+    // TrafficSection 同构。ListItem 自带 16dp 水平内边距（与项目主流列表对齐，
+    // 不再额外套 padding），自带 ~48dp 最小行高 + 内部垂直节奏；不再用手写
+    // Row/Column + 16dp padding + 8dp vertical。
+    // 字号规范：headline=bodyMedium（文件名）、supporting=bodySmall（全路径，
+    // 替换原 labelSmall ~11sp 以对齐 Sessions 副标题）、trailing 状态/计数=
+    // labelMedium（替换原 labelSmall，与 bodySmall 视觉等高更易读）。
+    ListItem(
         modifier = Modifier
             .fillMaxWidth()
-            .clickable(onClick = onClick)
-            .padding(horizontal = 16.dp, vertical = 8.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        Box(modifier = Modifier.size(8.dp).background(color = statusColor, shape = CircleShape))
-        Spacer(Modifier.width(8.dp))
-        Column(modifier = Modifier.weight(1f)) {
+            .heightIn(min = 48.dp)
+            .clickable(onClick = onClick),
+        leadingContent = {
+            Box(
+                modifier = Modifier
+                    .size(8.dp)
+                    .background(color = statusColor, shape = CircleShape)
+            )
+        },
+        headlineContent = {
             Text(
                 text = path.substringAfterLast('/').ifEmpty { path },
                 style = MaterialTheme.typography.bodyMedium,
@@ -484,46 +495,55 @@ private fun FileDiffRow(diff: FileDiff, onClick: () -> Unit) {
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
             )
+        },
+        supportingContent = {
             Text(
                 text = path,
-                style = MaterialTheme.typography.labelSmall,
+                style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
             )
-        }
-        Spacer(Modifier.width(6.dp))
-        diff.status?.takeIf { it.isNotBlank() }?.let { status ->
-            Text(
-                text = status,
-                style = MaterialTheme.typography.labelSmall,
-                color = statusColor,
-                modifier = Modifier.padding(end = 4.dp),
-            )
-        }
-        Text(
-            text = "+${diff.additions ?: 0} −${diff.deletions ?: 0}",
-            style = MaterialTheme.typography.labelSmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-            fontFamily = BundledMonoFamily,
-        )
-    }
+        },
+        trailingContent = {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                diff.status?.takeIf { it.isNotBlank() }?.let { status ->
+                    Text(
+                        text = status,
+                        style = MaterialTheme.typography.labelMedium,
+                        color = statusColor,
+                        modifier = Modifier.padding(end = 6.dp),
+                    )
+                }
+                Text(
+                    text = "+${diff.additions ?: 0} −${diff.deletions ?: 0}",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    fontFamily = BundledMonoFamily,
+                )
+            }
+        },
+    )
 }
 
 @Composable
 private fun VcsStatusRow(entry: VcsStatusEntry, onClick: () -> Unit) {
     val statusColor = vcsStatusColor(entry.status)
     val basename = entry.file.substringAfterLast("/").ifEmpty { entry.file }
-    Row(
+    // §4.2: 同 FileDiffRow——M3 ListItem 体系，与项目主流列表对齐。
+    ListItem(
         modifier = Modifier
             .fillMaxWidth()
-            .clickable(onClick = onClick)
-            .padding(horizontal = 16.dp, vertical = 8.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        Box(modifier = Modifier.size(8.dp).background(color = statusColor, shape = CircleShape))
-        Spacer(Modifier.width(8.dp))
-        Column(modifier = Modifier.weight(1f)) {
+            .heightIn(min = 48.dp)
+            .clickable(onClick = onClick),
+        leadingContent = {
+            Box(
+                modifier = Modifier
+                    .size(8.dp)
+                    .background(color = statusColor, shape = CircleShape)
+            )
+        },
+        headlineContent = {
             Text(
                 text = basename,
                 style = MaterialTheme.typography.bodyMedium,
@@ -531,39 +551,44 @@ private fun VcsStatusRow(entry: VcsStatusEntry, onClick: () -> Unit) {
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
             )
+        },
+        supportingContent = {
             Text(
                 text = entry.file,
-                style = MaterialTheme.typography.labelSmall,
+                style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
             )
-        }
-        Spacer(Modifier.width(6.dp))
-        Text(
-            text = entry.status,
-            style = MaterialTheme.typography.labelSmall,
-            color = statusColor,
-            modifier = Modifier.padding(end = 4.dp),
-        )
-        if (entry.additions > 0) {
-            Text(
-                text = "+${entry.additions}",
-                style = MaterialTheme.typography.labelSmall,
-                color = SemanticColors.stateSuccessFg(),
-                fontFamily = BundledMonoFamily,
-            )
-        }
-        if (entry.deletions > 0) {
-            Spacer(Modifier.width(4.dp))
-            Text(
-                text = "-${entry.deletions}",
-                style = MaterialTheme.typography.labelSmall,
-                color = MaterialTheme.colorScheme.error,
-                fontFamily = BundledMonoFamily,
-            )
-        }
-    }
+        },
+        trailingContent = {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    text = entry.status,
+                    style = MaterialTheme.typography.labelMedium,
+                    color = statusColor,
+                    modifier = Modifier.padding(end = 6.dp),
+                )
+                if (entry.additions > 0) {
+                    Text(
+                        text = "+${entry.additions}",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = SemanticColors.stateSuccessFg(),
+                        fontFamily = BundledMonoFamily,
+                    )
+                }
+                if (entry.deletions > 0) {
+                    Spacer(Modifier.width(4.dp))
+                    Text(
+                        text = "-${entry.deletions}",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.error,
+                        fontFamily = BundledMonoFamily,
+                    )
+                }
+            }
+        },
+    )
 }
 
 @Composable

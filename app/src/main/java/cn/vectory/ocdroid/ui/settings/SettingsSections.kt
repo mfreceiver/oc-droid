@@ -364,5 +364,5 @@ internal fun SectionHeader(title: String) {
         title,
         style = MaterialTheme.typography.titleMedium
     )
-    Spacer(modifier = Modifier.height(16.dp))
+    Spacer(modifier = Modifier.height(8.dp))
 }

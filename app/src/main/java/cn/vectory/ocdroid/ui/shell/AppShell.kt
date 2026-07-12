@@ -3,14 +3,17 @@ package cn.vectory.ocdroid.ui.shell
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.consumeWindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.isImeVisible
-import androidx.compose.foundation.layout.navigationBarsPadding
+import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -33,6 +36,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.Role
@@ -75,7 +79,7 @@ import cn.vectory.ocdroid.ui.workspace.GitScreen
 /** Sole application shell and owner of top-level navigation chrome. */
 @Composable
 @OptIn(ExperimentalLayoutApi::class)
-fun AppShell(orchestratorVM: OrchestratorViewModel) {
+fun AppShell(orchestratorVM: OrchestratorViewModel, navBarBottomDp: Dp = 0.dp) {
     // Activity-scoped until the later feature graph isolation phase.
     val chatVM: ChatViewModel = hiltViewModel()
     val composerVM: ComposerViewModel = hiltViewModel()
@@ -114,6 +118,12 @@ fun AppShell(orchestratorVM: OrchestratorViewModel) {
         if (currentRoute != NavRoute.Chat) orchestratorVM.clearDraftIfActive()
     }
 
+    // §bug-6.4: navBarBottomDp is captured from the Android View inset system
+    // in MainActivity and threaded in as a plain Dp. Compose's
+    // WindowInsets.navigationBars resolves to 0 under this AppCompat theme
+    // (the DecorView consumes the inset before Compose sees it), so the value
+    // is sourced from ViewCompat/WindowInsetsCompat where it is reliable.
+
     Scaffold(
         contentWindowInsets = WindowInsets(0, 0, 0, 0),
         bottomBar = {
@@ -121,6 +131,7 @@ fun AppShell(orchestratorVM: OrchestratorViewModel) {
                 CompactBottomBar(
                     currentRoute = currentRoute,
                     crossSessionPendingCount = crossSessionPendingCount,
+                    navBarBottomDp = navBarBottomDp,
                     onSelect = { route ->
                         if (route == currentRoute) {
                             navController.popBackStack(NavRoute.homeRoute(route), inclusive = false)
@@ -129,7 +140,6 @@ fun AppShell(orchestratorVM: OrchestratorViewModel) {
                             orchestratorVM.setLastRoute(route)
                         }
                     },
-                    modifier = Modifier.navigationBarsPadding(),
                 )
             }
         },
@@ -195,22 +205,25 @@ fun AppShell(orchestratorVM: OrchestratorViewModel) {
                 ),
             ) { routeEntry ->
                 val explicitWorkdir = routeEntry.arguments?.getString("workdir")?.takeIf { it.isNotBlank() }
-                val chatSessionWorkdir = sessionListState.sessions
-                    .firstOrNull { it.id == chatState.currentSessionId }
-                    ?.directory
-                // §Q2: default-fallback chain — explicit route workdir ?:
-                // Chat session workdir ?: persisted filesLastWorkdir.
-                val filesDefaultWorkdir = explicitWorkdir
-                    ?: chatSessionWorkdir
-                    ?: settingsVM.filesLastWorkdir
-                val recentWorkdirs by settingsVM.recentWorkdirs.collectAsStateWithLifecycle()
+                // §files-git-readonly-workdir: recentWorkdirs / filesLastWorkdir
+                // are no longer consumed by FilesScreen (the WorkdirControl is
+                // read-only). Kept flowing for signature stability; switching
+                // workdir happens by opening a session in the target dir.
                 FilesScreen(
                     viewModel = filesVM,
                     orchestratorVM = orchestratorVM,
                     pathToShow = routeEntry.arguments?.getString("path")?.takeIf { it.isNotBlank() },
-                    sessionDirectory = filesDefaultWorkdir,
-                    recentWorkdirs = recentWorkdirs,
-                    onWorkdirSelected = { settingsVM.setFilesLastWorkdir(it) },
+                    sessions = sessionListState.sessions,
+                    activeSessionId = chatState.currentSessionId,
+                    initialWorkdir = explicitWorkdir,
+                    // §files-back-fix (Blocker-2): hand the back-to-Chat
+                    // affordance to FilesScreen so its two mutually-exclusive
+                    // BackHandlers can fully own system back. AppShell's
+                    // top-level BackHandler is disabled on the Files route
+                    // (see the BackHandler at the bottom of this composable),
+                    // so this onExit is the single exit path when the preview
+                    // is closed.
+                    onExit = { orchestratorVM.setLastRoute(NavRoute.Chat) },
                 )
             }
             composable(
@@ -219,7 +232,10 @@ fun AppShell(orchestratorVM: OrchestratorViewModel) {
                     navArgument("session") { type = NavType.StringType; nullable = true; defaultValue = null },
                 ),
             ) { routeEntry ->
-                val gitRecentWorkdirs by settingsVM.recentWorkdirs.collectAsStateWithLifecycle()
+                // §files-git-readonly-workdir: GitScreen's WorkdirControl is
+                // now read-only — recentWorkdirs / defaultWorkdir / onSelect
+                // are no longer consumed. Kept flowing for signature
+                // stability.
                 GitScreen(
                     filesVM = filesVM,
                     sessionVM = sessionVM,
@@ -227,9 +243,6 @@ fun AppShell(orchestratorVM: OrchestratorViewModel) {
                     orchestratorVM = orchestratorVM,
                     savedStateHandle = routeEntry.savedStateHandle,
                     initialSessionId = routeEntry.arguments?.getString("session"),
-                    recentWorkdirs = gitRecentWorkdirs,
-                    defaultWorkdir = settingsVM.filesLastWorkdir,
-                    onWorkdirSelected = { settingsVM.setFilesLastWorkdir(it) },
                 )
             }
             composable(NavRoute.Settings.route) {
@@ -264,7 +277,13 @@ fun AppShell(orchestratorVM: OrchestratorViewModel) {
     }
 
     // Nested Settings routes pop naturally; top-level non-Chat routes return to Chat.
-    BackHandler(enabled = !isNestedSettings && currentRoute != NavRoute.Chat) {
+    // §files-back-fix (Blocker-2): let FilesScreen own its system-back entirely
+    // (preview open → close preview; preview closed → onExit → Chat). Compose's
+    // BackHandler stack is LIFO and this handler is composed AFTER the screen,
+    // so without this disable it would steal the press and jump straight to
+    // Chat even with a preview open. Sessions / Git / Settings still fall
+    // through to the Chat-return behaviour.
+    BackHandler(enabled = !isNestedSettings && currentRoute != NavRoute.Chat && currentRoute != NavRoute.Files) {
         orchestratorVM.setLastRoute(NavRoute.Chat)
     }
 }
@@ -273,46 +292,70 @@ fun AppShell(orchestratorVM: OrchestratorViewModel) {
 private fun CompactBottomBar(
     currentRoute: NavRoute,
     crossSessionPendingCount: Int,
+    navBarBottomDp: androidx.compose.ui.unit.Dp,
     onSelect: (NavRoute) -> Unit,
     modifier: Modifier = Modifier,
 ) {
-    Surface(modifier = modifier, tonalElevation = 3.dp) {
-        Row {
-            NavRoute.topLevel.forEach { route ->
-                val selected = route == currentRoute
-                val label = routeLabel(route)
-                Box(
-                    modifier = Modifier
-                        .weight(1f)
-                        .height(Dimens.touchTargetMin + Dimens.spacing2)
-                        .semantics { contentDescription = label }
-                        .clip(RoundedCornerShape(Dimens.spacing2))
-                        .selectable(
-                            selected = selected,
-                            role = Role.Tab,
-                            onClick = { onSelect(route) },
-                        ),
-                    contentAlignment = Alignment.Center,
-                ) {
-                    Box(contentAlignment = Alignment.Center) {
-                        if (selected) {
-                            Box(
-                                Modifier
-                                    .size(width = 40.dp, height = 32.dp)
-                                    .background(
-                                        MaterialTheme.colorScheme.secondaryContainer,
-                                        RoundedCornerShape(16.dp),
-                                    ),
-                            )
-                        }
-                        NavIcon(route, selected)
-                        if (route == NavRoute.Sessions && crossSessionPendingCount > 0) {
-                            Badge(modifier = Modifier.align(Alignment.TopEnd)) {
-                                Text(crossSessionPendingCount.coerceAtMost(99).toString())
+    // §bug-6.4: consumption-immune background fill. The navigation-bar bottom
+    // inset is captured as a concrete Dp at the AppShell top level (outside
+    // the Scaffold and its contentWindowInsets=0 consumption link) and passed
+    // in as navBarBottomDp. The Surface paints its tonalElevation color across
+    // BOTH the fixed-height tab Row AND the explicit navBarBottomDp Spacer
+    // below it, so the bar's color extends all the way to the screen bottom —
+    // covering the gesture-pill area with no dark gap. The previous attempts
+    // used windowInsetsBottomHeight / windowInsetsPadding INSIDE this
+    // CompactBottomBar, but both resolved to 0 because the outer Scaffold's
+    // contentWindowInsets=0 had already consumed the inset upstream.
+    Surface(modifier = modifier.fillMaxWidth(), tonalElevation = 3.dp) {
+        Column(Modifier.fillMaxWidth()) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(Dimens.touchTargetMin + Dimens.spacing2),
+            ) {
+                NavRoute.topLevel.forEach { route ->
+                    val selected = route == currentRoute
+                    val label = routeLabel(route)
+                    Box(
+                        modifier = Modifier
+                            .weight(1f)
+                            .height(Dimens.touchTargetMin + Dimens.spacing2)
+                            .semantics { contentDescription = label }
+                            .clip(RoundedCornerShape(Dimens.spacing2))
+                            .selectable(
+                                selected = selected,
+                                role = Role.Tab,
+                                onClick = { onSelect(route) },
+                            ),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        Box(contentAlignment = Alignment.Center) {
+                            if (selected) {
+                                Box(
+                                    Modifier
+                                        .size(width = 40.dp, height = 32.dp)
+                                        .background(
+                                            MaterialTheme.colorScheme.secondaryContainer,
+                                            RoundedCornerShape(6.dp),
+                                        ),
+                                )
+                            }
+                            NavIcon(route, selected)
+                            if (route == NavRoute.Sessions && crossSessionPendingCount > 0) {
+                                Badge(modifier = Modifier.align(Alignment.TopEnd)) {
+                                    Text(crossSessionPendingCount.coerceAtMost(99).toString())
+                                }
                             }
                         }
                     }
                 }
+            }
+            // §bug-6.4: reserve EXACTLY the captured gesture-pill inset height
+            // so the Surface background fills it; the tab Row content stays
+            // above. Using a plain fixed Dp height (captured upstream) instead
+            // of the insets API makes this immune to upstream inset consumption.
+            if (navBarBottomDp > 0.dp) {
+                Spacer(Modifier.fillMaxWidth().height(navBarBottomDp))
             }
         }
     }

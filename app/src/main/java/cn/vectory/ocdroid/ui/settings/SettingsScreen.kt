@@ -11,11 +11,11 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
@@ -28,7 +28,6 @@ import androidx.compose.material.icons.filled.Notifications
 import androidx.compose.material.icons.filled.Palette
 import androidx.compose.material.icons.filled.Storage
 import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.ListItem
@@ -103,6 +102,15 @@ fun SettingsScreen(
     // on its TopAppBar. The `onBack` param stays in the signature so the
     // AppShell call site is unchanged, but is no longer rendered here.
     Scaffold(
+        // §bug-5.1: zero contentWindowInsets — the TopAppBar already consumes
+        // the status-bar inset via its own TopAppBarDefaults.windowInsets, so
+        // the default safeDrawing here was double-counting statusBars.top on
+        // top of the bar height, producing the ~1-item empty band between the
+        // "设置" title and the first row. Zeroing it makes contentPadding.top
+        // == topBar height only (no residual inset). fix-8 had removed the
+        // explicit .statusBarsPadding() on the LazyColumn but NOT this nested
+        // Scaffold default — that was the leftover source of the gap.
+        contentWindowInsets = WindowInsets(0, 0, 0, 0),
         topBar = {
             TopAppBar(
                 title = { Text(stringResource(R.string.settings_title)) },
@@ -114,8 +122,7 @@ fun SettingsScreen(
         LazyColumn(
             modifier = Modifier
                 .fillMaxSize()
-                .padding(padding)
-                .statusBarsPadding(),
+                .padding(padding),
         ) {
             // §P5b-A (5.1): dividers dropped — the slim list is title-only rows
             // separated by default ListItem spacing.
@@ -210,6 +217,11 @@ private fun SettingsSubRouteScaffold(
     content: @Composable (Modifier) -> Unit,
 ) {
     Scaffold(
+        // §bug-5.1: same nested-Scaffold inset double-count fix as the root
+        // SettingsScreen — the TopAppBar consumes statusBars itself; zeroing
+        // contentWindowInsets removes the residual statusBars.top that was
+        // pushing the first section ~1 item below the sub-route title.
+        contentWindowInsets = WindowInsets(0, 0, 0, 0),
         topBar = {
             TopAppBar(
                 title = { Text(stringResource(titleRes)) },
@@ -230,7 +242,6 @@ private fun SettingsSubRouteScaffold(
             Modifier
                 .fillMaxSize()
                 .padding(padding)
-                .statusBarsPadding()
         )
     }
 }
@@ -292,7 +303,7 @@ fun SettingsAppearanceRoute(
         Column(
             modifier = mod
                 .verticalScroll(rememberScrollState())
-                .padding(16.dp),
+                .padding(horizontal = 16.dp),
         ) {
             AppearanceSection(
                 themeMode = themeMode,
@@ -371,7 +382,7 @@ fun SettingsNotificationsRoute(onBack: () -> Unit) {
         Column(
             modifier = mod
                 .verticalScroll(rememberScrollState())
-                .padding(16.dp),
+                .padding(horizontal = 16.dp),
         ) {
             SectionHeader(title = stringResource(R.string.settings_section_notifications))
             ListItem(
@@ -393,7 +404,6 @@ fun SettingsNotificationsRoute(onBack: () -> Unit) {
                     )
                 },
             )
-            HorizontalDivider()
             // The grant button is shown only when blocked AND API 33+ (the OS
             // surface that requires a runtime prompt). Pre-33 installs inherit
             // the install-time grant, so the button would be a dead no-op.
@@ -456,7 +466,7 @@ fun SettingsStorageRoute(
         Column(
             modifier = mod
                 .verticalScroll(rememberScrollState())
-                .padding(16.dp),
+                .padding(horizontal = 16.dp),
         ) {
             // ① 清除数据 (first, flat).
             SectionHeader(title = stringResource(R.string.settings_danger_zone))
@@ -499,7 +509,7 @@ fun SettingsAboutRoute(
         Column(
             modifier = mod
                 .verticalScroll(rememberScrollState())
-                .padding(16.dp),
+                .padding(horizontal = 16.dp),
         ) {
             AboutSection()
             Spacer(modifier = Modifier.height(24.dp))

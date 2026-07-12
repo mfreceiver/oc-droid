@@ -10,6 +10,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.gestures.rememberTransformableState
 import androidx.compose.foundation.gestures.transformable
+import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
@@ -305,11 +306,13 @@ private fun PreviewPlainText(content: String) {
         contentPadding = PaddingValues(16.dp)
     ) {
         item {
-            Text(
-                text = content,
-                style = MaterialTheme.typography.bodySmall,
-                fontFamily = BundledMonoFamily
-            )
+            SelectionContainer {
+                Text(
+                    text = content,
+                    style = MaterialTheme.typography.bodySmall,
+                    fontFamily = BundledMonoFamily
+                )
+            }
         }
     }
 }

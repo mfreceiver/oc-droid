@@ -366,7 +366,11 @@ class OpenCodeRepositoryDirectoryTest {
     }
 
     @Test
-    fun `summarizeSession throws when server returns false`() = runBlocking {
+    fun `summarizeSession treats server-rejected false as Result_failure`() = runBlocking {
+        // §compact-graded (Blocker-1): body=false means the server explicitly
+        // rejected compaction (e.g. context too small). The repository now
+        // surfaces this as Result.failure(SummarizeServerRejectedException)
+        // so the caller can clear isCompacting + emit a deterministic Error.
         server.enqueue(jsonResponse("false"))
 
         val result = repository.summarizeSession(
@@ -375,8 +379,10 @@ class OpenCodeRepositoryDirectoryTest {
         )
 
         assertTrue(result.isFailure)
-        val msg = result.exceptionOrNull()!!.message!!
-        assertTrue("decline reason surfaced: $msg", msg.contains("false"))
+        assertTrue(
+            "body=false should surface as SummarizeServerRejectedException, got ${result.exceptionOrNull()}",
+            result.exceptionOrNull() is OpenCodeRepository.SummarizeServerRejectedException
+        )
     }
 
     @Test

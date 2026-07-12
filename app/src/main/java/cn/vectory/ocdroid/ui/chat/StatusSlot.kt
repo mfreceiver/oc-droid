@@ -38,7 +38,6 @@ import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.slideOutVertically
 import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.layout.BoxScope
-import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.saveable.SaveableStateHolder
 import androidx.compose.runtime.saveable.rememberSaveableStateHolder
@@ -264,7 +263,6 @@ internal fun BoxScope.StatusSlot(
         // → no wrong-response on the exiting card).
         contentKey = { it::class },
         modifier = modifier
-            .fillMaxWidth()
             .align(Alignment.TopCenter),
     ) { active ->
         when (active) {

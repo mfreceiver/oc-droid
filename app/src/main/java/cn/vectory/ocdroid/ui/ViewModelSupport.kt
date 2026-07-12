@@ -195,7 +195,16 @@ internal fun mergeRefreshedSessionsPreservingLocalActivity(
     return base + preserve
 }
 
-private fun Session.TimeInfo?.withUpdatedAtLeast(updated: Long): Session.TimeInfo {
+/**
+ * Returns a copy of this TimeInfo whose [updated] field is at least [updated]
+ * (monotonic — never goes backwards). Used by the recent-sessions sort bump
+ * (§recent-sort-by-message) and by the merge path that preserves a strictly-
+ * newer local updated vs a stale server snapshot.
+ *
+ * Internal so the SSE-fold pure functions in [SessionSyncCoordinator] can
+ * reuse the same monotonic bump semantics (single source of truth).
+ */
+internal fun Session.TimeInfo?.withUpdatedAtLeast(updated: Long): Session.TimeInfo {
     val currentUpdated = this?.updated
     return (this ?: Session.TimeInfo()).copy(
         updated = if (currentUpdated == null || updated > currentUpdated) updated else currentUpdated

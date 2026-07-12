@@ -108,7 +108,7 @@ internal fun ContextUsageDialog(
                 if (usage == null) {
                     Text(
                         stringResource(R.string.chat_no_usage_data),
-                        style = MaterialTheme.typography.bodyMedium,
+                        style = MaterialTheme.typography.bodyLarge,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
                 } else {
@@ -189,12 +189,12 @@ private fun ContextUsageRow(label: String, value: String) {
     ) {
         Text(
             label,
-            style = MaterialTheme.typography.bodySmall,
+            style = MaterialTheme.typography.bodyLarge,
             color = MaterialTheme.colorScheme.onSurfaceVariant
         )
         Text(
             value,
-            style = MaterialTheme.typography.bodySmall,
+            style = MaterialTheme.typography.bodyLarge,
             fontWeight = FontWeight.Medium,
             modifier = Modifier.padding(start = 16.dp)
         )

@@ -162,20 +162,12 @@ class SettingsViewModel @Inject constructor(
      */
     val currentWorkdirFlow: StateFlow<String?> = settingsManager.currentWorkdirFlow
 
-    /**
-     * §Q2: read accessor for the last workdir the user explicitly browsed in
-     * Files/Git. Used as the default-fallback when Chat has no session.
-     */
-    val filesLastWorkdir: String? get() = settingsManager.filesLastWorkdir
-
-    /**
-     * §Q2: persist the workdir the user explicitly picked in Files/Git. Does
-     * NOT mutate the Chat session (local browsing context only). Wired from
-     * AppShell's Files/Git destinations via the WorkdirControl onSelect.
-     */
-    fun setFilesLastWorkdir(workdir: String) {
-        settingsManager.filesLastWorkdir = workdir
-    }
+    // §files-git-readonly-workdir: the legacy `filesLastWorkdir` field +
+    // `setFilesLastWorkdir` setter (the last workdir explicitly browsed in
+    // Files/Git) were removed when the Files/Git WorkdirControl became a
+    // read-only indicator. workdir now follows the active session's directory
+    // exclusively, so there is no longer a "browsed-but-not-current" workdir
+    // to persist. See [SettingsManager] for the storage-side cleanup.
 
     /**
      * §grouping-rewrite Round-2 C1: disconnect reactivity trigger.

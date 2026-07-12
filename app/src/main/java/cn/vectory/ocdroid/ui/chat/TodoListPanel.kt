@@ -46,7 +46,7 @@ fun TodoListPanel(
                 )
                 Text(
                     "No todos yet",
-                    style = MaterialTheme.typography.bodyMedium,
+                    style = MaterialTheme.typography.bodyLarge,
                     color = MaterialTheme.colorScheme.outline
                 )
             }
@@ -91,7 +91,7 @@ fun TodoListPanel(
                 Spacer(modifier = Modifier.width(8.dp))
                 Text(
                     text = todo.content,
-                    style = MaterialTheme.typography.bodyMedium.copy(
+                    style = MaterialTheme.typography.bodyLarge.copy(
                         textDecoration = if (todo.isCompleted) TextDecoration.LineThrough else null
                     ),
                     color = if (todo.isCompleted) MaterialTheme.colorScheme.onSurfaceVariant

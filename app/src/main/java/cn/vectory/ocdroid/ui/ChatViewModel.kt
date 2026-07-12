@@ -5,10 +5,13 @@ import androidx.lifecycle.viewModelScope
 import cn.vectory.ocdroid.R
 import cn.vectory.ocdroid.data.repository.OpenCodeRepository
 import dagger.hilt.android.lifecycle.HiltViewModel
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import java.io.IOException
+import java.net.SocketTimeoutException
 import javax.inject.Inject
 
 /**
@@ -171,13 +174,106 @@ class ChatViewModel @Inject constructor(
         // (compact) → viewModelScope so it cancels cleanly on VM clear and the
         // captured `this@ChatViewModel` closure (loadMessages / core writes)
         // never outlives the VM.
+        //
+        // §compact-graded (Blocker-1): graded fire-and-forget. "Fire-and-forget"
+        // means a *successful POST dispatch* counts as success — we do NOT
+        // wait for the compaction result (SSE delivers it asynchronously and
+        // clears `isCompacting` via the ChatScaffold idle hook). The previous
+        // implementation used `runCatching { ... }` to swallow ALL failures,
+        // which meant a transport failure / server-reject / connect-refused
+        // left `isCompacting=true` forever and permanently disabled the
+        // Composer. The four branches below restore user control on the
+        // *deterministic* failure paths while keeping the SSE-driven happy
+        // path untouched:
+        //   1. accepted=true           → Info "in progress"; SSE clears flag.
+        //   2. accepted=false (reject) → clear flag + Error (server said no).
+        //   3. SocketTimeoutException  → Info "in progress" + watchdog. The
+        //                                POST was likely accepted but the ACK
+        //                                timed out — SSE may still deliver.
+        //   4. other IOException       → clear flag + Error (POST never
+        //                                reached the server; retry is safe).
         viewModelScope.launch {
             core.repository.summarizeSession(sessionId, model)
+                .onSuccess { accepted ->
+                    if (accepted) {
+                        // Do NOT clear isCompacting — the ChatScaffold
+                        // idle hook (session.status → idle) clears it when
+                        // the server-side compaction finishes via SSE.
+                        core.effectBus.tryEmitUiEvent(UiEvent.Info(R.string.info_compact_in_progress))
+                    } else {
+                        // Should not happen — summarizeSession turns body=false
+                        // into Result.failure(SummarizeServerRejectedException).
+                        // Treat defensively as a deterministic reject.
+                        clearCompacting()
+                        core.effectBus.tryEmitUiEvent(UiEvent.Error(R.string.error_compact_failed, listOf("rejected")))
+                    }
+                }
                 .onFailure { error ->
-                    core.writeChat { it.copy(isCompacting = false, compactStartedAt = 0L) }
-                    core.effectBus.tryEmitUiEvent(UiEvent.Error(R.string.error_compact_failed, listOf(errorMessageOrFallback(error, "unknown error"))))
+                    when (error) {
+                        // §compact-graded: deterministic server-reject — clear +
+                        // Error so the user can retry with a different setup.
+                        is OpenCodeRepository.SummarizeServerRejectedException -> {
+                            clearCompacting()
+                            core.effectBus.tryEmitUiEvent(UiEvent.Error(R.string.error_compact_failed, listOf(errorMessageOrFallback(error, "rejected"))))
+                        }
+                        // §compact-graded: read-timeout — POST was likely
+                        // accepted (OkHttp read-timeout fired while waiting
+                        // for the ACK); the server is still processing and
+                        // SSE may deliver the result. Keep isCompacting=true
+                        // so the Composer stays disabled mid-compaction, but
+                        // arm the watchdog so we cannot lock forever if SSE
+                        // also never delivers.
+                        is SocketTimeoutException -> {
+                            core.effectBus.tryEmitUiEvent(UiEvent.Info(R.string.info_compact_in_progress))
+                        }
+                        // §compact-graded: any other IOException (connect
+                        // refused, DNS, TLS, HttpException(non-2xx wrapped)...)
+                        // — POST never reached the server, SSE cannot deliver,
+                        // clear + Error so the user can retry.
+                        is IOException -> {
+                            clearCompacting()
+                            core.effectBus.tryEmitUiEvent(UiEvent.Error(R.string.error_compact_failed, listOf(errorMessageOrFallback(error, "network error"))))
+                        }
+                        // Anything thrown by summarizeSession that is NOT an
+                        // IOException (e.g. the IllegalStateException from a
+                        // malformed response). Conservatively clear so the
+                        // user is not stuck; report as Error.
+                        else -> {
+                            clearCompacting()
+                            core.effectBus.tryEmitUiEvent(UiEvent.Error(R.string.error_compact_failed, listOf(errorMessageOrFallback(error, "unknown error"))))
+                        }
+                    }
                 }
         }
+        // §compact-graded (Blocker-1) watchdog: defence-in-depth against the
+        // read-timeout branch (3) and any future path that leaves
+        // isCompacting=true with no SSE clear. If the flag is still up after
+        // WATCHDOG_MS, clear it + emit Info so the user knows the operation
+        // stalled and can retry. SSE-driven normal clear in ChatScaffold is
+        // unaffected: if it clears the flag first, the watchdog's recheck
+        // sees isCompacting=false and is a no-op.
+        viewModelScope.launch {
+            delay(WATCHDOG_MS)
+            if (core.store.chatFlow.value.isCompacting) {
+                clearCompacting()
+                core.effectBus.tryEmitUiEvent(UiEvent.Info(R.string.info_compact_timeout_retry))
+            }
+        }
+    }
+
+    companion object {
+        /**
+         * §compact-graded (Blocker-1): watchdog upper bound for the compact
+         * fire-and-forget. The server-side compaction normally completes in
+         * <30 s; SSE delivers the result and ChatScaffold clears
+         * `isCompacting`. If 180 s elapse with the flag still up (read-
+         * timeout branch where SSE also fails to deliver), the watchdog
+         * clears it so the Composer cannot lock forever.
+         *
+         * Test-visible as a public const so unit tests can drive virtual time
+         * to it without hardcoding the literal.
+         */
+        const val WATCHDOG_MS: Long = 180_000L
     }
 
     fun clearCompacting() {

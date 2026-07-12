@@ -30,6 +30,7 @@ import cn.vectory.ocdroid.ui.reasoningPartOrNull
 import cn.vectory.ocdroid.ui.reportNonFatalIssue
 import cn.vectory.ocdroid.ui.isStreamablePartType
 import cn.vectory.ocdroid.ui.upsertSession
+import cn.vectory.ocdroid.ui.withUpdatedAtLeast
 import cn.vectory.ocdroid.util.DebugLog
 import cn.vectory.ocdroid.util.FLICKER_TAG
 import cn.vectory.ocdroid.util.SettingsManager
@@ -573,6 +574,26 @@ class SessionSyncCoordinator(
                 val sessionId = event.payload.getString("sessionID")
                 val isCurrent = sessionId != null && sessionId == slices.chat.value.currentSessionId
                 DebugLog.i("Sync", "message.created: ${if (isCurrent) "reload current" else "mark unread"}")
+
+                // §recent-sort-by-message: forward-compat parity with the
+                // message.updated branch — bump the session's time.updated to
+                // max(current, info.time.created) so the recent-sessions list
+                // reorders on a new message even if a future server emits
+                // message.created instead of message.updated.
+                if (sessionId != null) {
+                    val createdInfo = event.payload.getJsonObject("info")?.let {
+                        runCatching {
+                            lenientJson.decodeFromJsonElement<Message>(it)
+                        }.getOrNull()
+                    }
+                    val msgCreated = createdInfo?.time?.created ?: 0L
+                    if (msgCreated > 0L) {
+                        slices.mutateSessionList { s ->
+                            s.applyMessageTimestampBump(sessionId, msgCreated).first
+                        }
+                    }
+                }
+
                 // §R-19 Sprint 3 P2-4: side effects formalized as SseSideEffect list.
                 val msgEffects = mutableListOf<SseSideEffect>()
                 if (sessionId != null && sessionId == slices.chat.value.currentSessionId) {
@@ -604,66 +625,88 @@ class SessionSyncCoordinator(
                 // reload). The session.status busy → reload path is the parallel
                 // belt-and-suspenders for messages emitted before the local view
                 // is even subscribed.
-                // Defensive session guard: only touch the current session's view.
+                // Defensive session guard: only touch the current session's chat
+                // view (the slice mutation below).
                 val eventSessionId = event.payload.getString("sessionID")
-                if (eventSessionId != null && eventSessionId != slices.chat.value.currentSessionId) return
                 val infoJson = event.payload.getJsonObject("info")
-                if (infoJson != null) {
-                    val updated = runCatching {
-                        lenientJson.decodeFromJsonElement<Message>(infoJson)
+                val updated = infoJson?.let {
+                    runCatching {
+                        lenientJson.decodeFromJsonElement<Message>(it)
                     }.getOrNull()
-                    if (updated != null && updated.id.isNotEmpty()) {
-                        // §R-17 batch5: pure transform returns (newState, found).
-                        // Single O(n) scan inside the atomic update — `found` is
-                        // set during the same `map` pass that builds the
-                        // replacement list, so the patch-vs-insert decision and
-                        // the found flag come from one atomic pass (no TOCTOU, no
-                        // second `.none{}` scan). When found, patch in place;
-                        // when NOT found, append (insert) the new message at the
-                        // tail (oldest-first list).
-                        var found = false
-                        slices.mutateChat { c ->
-                            val (next, wasFound) = c.applyMessageUpdated(updated)
-                            found = wasFound
-                            next
+                }
+
+                // §recent-sort-by-message: bump the owning session's time.updated
+                // to max(current, message.time.created) on every message event so
+                // the "recent sessions" surfaces (SessionsScreen recent +
+                // SessionPickerSheet recent, both sortedByDescending { time.updated })
+                // reflect actual message activity, not just server-side session
+                // metadata timestamps. The bump applies to BOTH current and non-
+                // current sessions (cross-client messages from another client
+                // surface in the recent list). withUpdatedAtLeast is idempotent /
+                // monotonic, so repeated patches for the same message are a no-op
+                // (no thrash) and out-of-order / replay events never go backwards.
+                if (eventSessionId != null && updated != null) {
+                    val msgCreated = updated.time?.created ?: 0L
+                    if (msgCreated > 0L) {
+                        slices.mutateSessionList { s ->
+                            s.applyMessageTimestampBump(eventSessionId, msgCreated).first
                         }
-                        if (found) {
-                            DebugLog.d("Sync", "message.updated: patched")
-                        } else {
-                            DebugLog.i("Sync", "message.updated: inserted (new message, absent from local list)")
-                            // R-20 Phase 1 (C4, maxer I11): the new message
-                            // was appended to the slice. Mirror it into the
-                            // persistent cache so a subsequent switch-back
-                            // (VerifyAndHydrate → Verified) sees it without a
-                            // full putSessionWindow round-trip. Append is
-                            // scoped to the CURRENT session (eventSessionId
-                            // was already guarded above to equal
-                            // currentSessionId), and appendMessageIfSessionCached
-                            // is a no-op when no cached session row exists
-                            // (cold-start sessions don't proactively build a
-                            // cache — only already-cached sessions stay fresh).
-                            // Fire-and-forget on scope; failures only log.
-                            if (cacheRepository != null) {
-                                val fp = currentServerGroupFp()
-                                val sid = eventSessionId!!
-                                scope.launch {
-                                    runCatching {
-                                        cacheRepository.appendMessageIfSessionCached(
-                                            fp,
-                                            sid,
-                                            updated,
-                                            // §parts-by-message: the new message
-                                            // has no parts yet (its first
-                                            // part.created / part.updated will
-                                            // arrive separately). Persist an
-                                            // empty list; the next part event +
-                                            // the post-turn idle reload fills
-                                            // them in.
-                                            emptyList(),
-                                        )
-                                    }.onFailure {
-                                        DebugLog.e(tag, "appendMessageIfSessionCached failed fp=$fp sid=$sid", it)
-                                    }
+                    }
+                }
+
+                // Defensive session guard: only touch the current session's chat view.
+                if (eventSessionId != null && eventSessionId != slices.chat.value.currentSessionId) return
+                if (updated != null && updated.id.isNotEmpty()) {
+                    // §R-17 batch5: pure transform returns (newState, found).
+                    // Single O(n) scan inside the atomic update — `found` is
+                    // set during the same `map` pass that builds the
+                    // replacement list, so the patch-vs-insert decision and
+                    // the found flag come from one atomic pass (no TOCTOU, no
+                    // second `.none{}` scan). When found, patch in place;
+                    // when NOT found, append (insert) the new message at the
+                    // tail (oldest-first list).
+                    var found = false
+                    slices.mutateChat { c ->
+                        val (next, wasFound) = c.applyMessageUpdated(updated)
+                        found = wasFound
+                        next
+                    }
+                    if (found) {
+                        DebugLog.d("Sync", "message.updated: patched")
+                    } else {
+                        DebugLog.i("Sync", "message.updated: inserted (new message, absent from local list)")
+                        // R-20 Phase 1 (C4, maxer I11): the new message
+                        // was appended to the slice. Mirror it into the
+                        // persistent cache so a subsequent switch-back
+                        // (VerifyAndHydrate → Verified) sees it without a
+                        // full putSessionWindow round-trip. Append is
+                        // scoped to the CURRENT session (eventSessionId
+                        // was already guarded above to equal
+                        // currentSessionId), and appendMessageIfSessionCached
+                        // is a no-op when no cached session row exists
+                        // (cold-start sessions don't proactively build a
+                        // cache — only already-cached sessions stay fresh).
+                        // Fire-and-forget on scope; failures only log.
+                        if (cacheRepository != null) {
+                            val fp = currentServerGroupFp()
+                            val sid = eventSessionId!!
+                            scope.launch {
+                                runCatching {
+                                    cacheRepository.appendMessageIfSessionCached(
+                                        fp,
+                                        sid,
+                                        updated,
+                                        // §parts-by-message: the new message
+                                        // has no parts yet (its first
+                                        // part.created / part.updated will
+                                        // arrive separately). Persist an
+                                        // empty list; the next part event +
+                                        // the post-turn idle reload fills
+                                        // them in.
+                                        emptyList(),
+                                    )
+                                }.onFailure {
+                                    DebugLog.e(tag, "appendMessageIfSessionCached failed fp=$fp sid=$sid", it)
                                 }
                             }
                         }
@@ -1235,6 +1278,36 @@ internal fun SessionListState.applySessionCreated(session: Session): Pair<Sessio
  */
 internal fun SessionListState.applySessionUpsert(updated: Session): Pair<SessionListState, List<SseSideEffect>> =
     copy(sessions = upsertSession(sessions, updated)) to emptyList()
+
+/**
+ * §recent-sort-by-message: when a session receives a message, bump its
+ * [Session.time.updated] to `max(current, [updated])` so the
+ * "recent sessions" surfaces (sortedByDescending { time.updated }) reflect
+ * actual message activity rather than just the server-side session metadata
+ * timestamp. Mirrors [applyArchiveEviction]'s two-store pattern: BOTH the
+ * top-level `sessions` list AND every `directorySessions` bucket are bumped
+ * (a session can be present in either / both stores, and both feed the
+ * SessionsScreen / SessionPickerSheet recent derivations).
+ *
+ * Idempotent + monotonic (see [Session.TimeInfo.withUpdatedAtLeast]) — repeated
+ * bumps for the same message are a no-op, and out-of-order / replayed events
+ * never go backwards. Pure.
+ */
+internal fun SessionListState.applyMessageTimestampBump(
+    sessionId: String,
+    updated: Long
+): Pair<SessionListState, List<SseSideEffect>> {
+    if (updated <= 0L) return this to emptyList()
+    val newSessions = sessions.map { s ->
+        if (s.id == sessionId) s.copy(time = s.time.withUpdatedAtLeast(updated)) else s
+    }
+    val newDirectorySessions = directorySessions.mapValues { (_, list) ->
+        list.map { s ->
+            if (s.id == sessionId) s.copy(time = s.time.withUpdatedAtLeast(updated)) else s
+        }
+    }
+    return copy(sessions = newSessions, directorySessions = newDirectorySessions) to emptyList()
+}
 
 /**
  * session.updated (archived) → upsert the session AND rewrite [openSessionIds]

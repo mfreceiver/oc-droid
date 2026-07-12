@@ -34,7 +34,6 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
-import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
@@ -126,7 +125,7 @@ internal fun CacheManagementSection(
 
     Card(
         modifier = Modifier.fillMaxWidth(),
-        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)
     ) {
         Column(modifier = Modifier.padding(Dimens.spacing4)) {
             // ── Top-level "清除失联会话" — fully sweeps the connected group;
@@ -155,24 +154,24 @@ internal fun CacheManagementSection(
             when (val state = listing) {
                 CacheListingState.Loading -> Text(
                     stringResource(R.string.cache_management_loading),
-                    style = MaterialTheme.typography.bodySmall,
+                    style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
                 CacheListingState.Empty -> Text(
                     stringResource(R.string.cache_management_empty),
-                    style = MaterialTheme.typography.bodySmall,
+                    style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
                 is CacheListingState.Error -> Text(
                     stringResource(R.string.cache_management_error, state.message),
-                    style = MaterialTheme.typography.bodySmall,
+                    style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.error
                 )
                 is CacheListingState.Loaded -> {
                     if (state.groups.isEmpty()) {
                         Text(
                             stringResource(R.string.cache_management_empty),
-                            style = MaterialTheme.typography.bodySmall,
+                            style = MaterialTheme.typography.bodyMedium,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
                     } else {
@@ -189,7 +188,6 @@ internal fun CacheManagementSection(
                                 },
                                 onSweep = { vm.sweepNow(group.serverGroupFp) }
                             )
-                            HorizontalDivider()
                         }
                     }
                 }
@@ -312,7 +310,7 @@ private fun ProjectSessionTree(
             Text(
                 project.displayWorkdir
                     ?: stringResource(R.string.cache_unknown_project),
-                style = MaterialTheme.typography.bodySmall,
+                style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 fontFamily = BundledMonoFamily
             )
@@ -378,7 +376,7 @@ private fun CachedSessionRowItem(
             Spacer(modifier = Modifier.width(Dimens.spacing1))
             Text(
                 row.sessionId,
-                style = MaterialTheme.typography.bodySmall,
+                style = MaterialTheme.typography.bodyMedium,
                 color = if (suspect) MaterialTheme.colorScheme.error
                         else MaterialTheme.colorScheme.onSurface,
                 fontFamily = BundledMonoFamily
@@ -397,12 +395,12 @@ private fun CachedSessionRowItem(
             Column(modifier = Modifier.weight(1f)) {
                 Text(
                     stringResource(R.string.cache_management_row_newest_at, newestText),
-                    style = MaterialTheme.typography.labelSmall,
+                    style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
                 Text(
                     stringResource(R.string.cache_management_row_verified_at, verifiedText),
-                    style = MaterialTheme.typography.labelSmall,
+                    style = MaterialTheme.typography.bodyMedium,
                     color = if (suspect) MaterialTheme.colorScheme.error
                             else MaterialTheme.colorScheme.onSurfaceVariant
                 )
@@ -628,7 +626,7 @@ private fun CacheManagementSectionPreviewHost(
 
     Card(
         modifier = Modifier.fillMaxWidth(),
-        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)
     ) {
         Column(modifier = Modifier.padding(Dimens.spacing4)) {
             Button(
@@ -646,24 +644,24 @@ private fun CacheManagementSectionPreviewHost(
             when (state) {
                 CacheListingState.Loading -> Text(
                     "Loading cached sessions…",
-                    style = MaterialTheme.typography.bodySmall,
+                    style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
                 CacheListingState.Empty -> Text(
                     "No cached sessions yet — chat sessions will be cached here automatically once you open them.",
-                    style = MaterialTheme.typography.bodySmall,
+                    style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
                 is CacheListingState.Error -> Text(
                     "Failed to read cache: ${state.message}",
-                    style = MaterialTheme.typography.bodySmall,
+                    style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.error
                 )
                 is CacheListingState.Loaded -> {
                     if (state.groups.isEmpty()) {
                         Text(
                             "No cached sessions yet — chat sessions will be cached here automatically once you open them.",
-                            style = MaterialTheme.typography.bodySmall,
+                            style = MaterialTheme.typography.bodyMedium,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
                     } else {
@@ -675,7 +673,6 @@ private fun CacheManagementSectionPreviewHost(
                                 onClearSession = {},
                                 onSweep = {}
                             )
-                            HorizontalDivider()
                         }
                     }
                 }

@@ -1,6 +1,9 @@
 package cn.vectory.ocdroid.ui.workspace
 
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.width
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Scaffold
@@ -11,10 +14,11 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.unit.dp
 import androidx.lifecycle.SavedStateHandle
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import cn.vectory.ocdroid.R
@@ -24,7 +28,6 @@ import cn.vectory.ocdroid.ui.OrchestratorViewModel
 import cn.vectory.ocdroid.ui.SessionViewModel
 import cn.vectory.ocdroid.ui.files.FilesViewModel
 import cn.vectory.ocdroid.ui.files.WorkdirControl
-import cn.vectory.ocdroid.util.WorkdirPaths
 import kotlinx.coroutines.flow.filter
 
 private const val STATE_HOST = "git.host"
@@ -41,42 +44,32 @@ fun GitScreen(
     orchestratorVM: OrchestratorViewModel,
     savedStateHandle: SavedStateHandle,
     initialSessionId: String? = null,
-    // §Q2 (P4b-A): the current host's connected workdirs (MRU) for the
-    // WorkdirControl switcher. Sourced from settingsVM.recentWorkdirs.
-    recentWorkdirs: List<String> = emptyList(),
-    // §Q2: fallback default workdir when the active session has no directory
-    // (e.g. Chat has no session). Typically settingsVM.filesLastWorkdir.
-    defaultWorkdir: String? = null,
-    // §Q2: invoked when the user picks a workdir in the WorkdirControl.
-    // AppShell wires this to persist settingsManager.filesLastWorkdir.
-    onWorkdirSelected: (String) -> Unit = {},
+    // §files-git-readonly-workdir: retained for AppShell call-site stability.
+    // The WorkdirControl is now read-only; this list is NOT consumed here.
+    @Suppress("UNUSED_PARAMETER") recentWorkdirs: List<String> = emptyList(),
+    // §files-git-readonly-workdir: retained for AppShell call-site stability.
+    // No longer honored as a fallback (workdir derives from active session).
+    @Suppress("UNUSED_PARAMETER") defaultWorkdir: String? = null,
+    // §files-git-readonly-workdir: retained for AppShell call-site stability.
+    // No longer invoked from this screen (the WorkdirControl is read-only).
+    @Suppress("UNUSED_PARAMETER") onWorkdirSelected: (String) -> Unit = {},
 ) {
     val host by hostVM.hostFlow.collectAsStateWithLifecycle()
     val chat by sessionVM.chatFlow.collectAsStateWithLifecycle()
     val sessions by sessionVM.sessionListFlow.collectAsStateWithLifecycle()
     val activeHost = host.currentHostProfileId
     val activeSession = initialSessionId ?: chat.currentSessionId
-    val sessionDerivedWorkdir = sessions.sessions.firstOrNull { it.id == activeSession }?.directory
+    // §files-git-readonly-workdir: derive the workdir directly from the
+    // active session's directory. No local override, no last-browsed
+    // fallback — null when there is no active session (the WorkdirControl
+    // renders the muted "No workdir" placeholder in that case).
+    val effectiveWorkdir = sessions.sessions.firstOrNull { it.id == activeSession }?.directory
 
-    // §Q2: local workdir override. Defaults to the session-derived workdir,
-    // falling back to defaultWorkdir (filesLastWorkdir) when Chat has no
-    // session. The user's WorkdirControl pick overrides it locally WITHOUT
-    // mutating the Chat session. rememberSaveable keyed on both defaults so
-    // it re-defaults only when the incoming derived value actually changes.
-    var localWorkdir by rememberSaveable(sessionDerivedWorkdir, defaultWorkdir) {
-        mutableStateOf(sessionDerivedWorkdir ?: defaultWorkdir)
-    }
-    val effectiveWorkdir = localWorkdir ?: sessionDerivedWorkdir ?: defaultWorkdir
-
-    // §Q2: when the user switches workdir, re-scope the diff to a session in
-    // the selected workdir (if one exists) so the Changes pane shows relevant
-    // diffs for the browsed project instead of the Chat session's project.
-    val effectiveSessionId = effectiveWorkdir?.let { wd ->
-        val target = WorkdirPaths.normalize(wd)
-        sessions.sessions.firstOrNull {
-            WorkdirPaths.normalize(it.directory ?: "") == target
-        }?.id
-    } ?: activeSession
+    // §Q2: scope the diff to the active session (the WorkdirControl is now
+    // read-only, so this is just the active session id). Kept as an explicit
+    // derivation so the LaunchedEffect / computeVisibleDiffs inputs stay
+    // observable + the saved-state restore path is unchanged.
+    val effectiveSessionId = activeSession
 
     var state by remember { mutableStateOf(WorkspaceState()) }
 
@@ -118,17 +111,17 @@ fun GitScreen(
     Scaffold(
         topBar = {
             TopAppBar(
-                title = { Text(stringResource(R.string.nav_git)) },
-                actions = {
-                    // §Q2: WorkdirControl switcher in the Git top bar.
-                    WorkdirControl(
-                        currentWorkdir = effectiveWorkdir,
-                        recentWorkdirs = recentWorkdirs,
-                        onSelect = { wd ->
-                            localWorkdir = wd
-                            onWorkdirSelected(wd)
-                        },
-                    )
+                title = {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text(stringResource(R.string.nav_git))
+                        Spacer(Modifier.width(8.dp))
+                        WorkdirControl(
+                            currentWorkdir = effectiveWorkdir,
+                            recentWorkdirs = emptyList(),
+                            onSelect = {},
+                            readOnly = true,
+                        )
+                    }
                 },
             )
         },

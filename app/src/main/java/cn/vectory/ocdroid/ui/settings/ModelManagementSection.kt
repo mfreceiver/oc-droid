@@ -9,7 +9,6 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
@@ -17,6 +16,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ChevronRight
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Icon
+import androidx.compose.material3.ListItem
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
@@ -85,20 +85,18 @@ internal fun ModelManagementSection(
     }
 
     var showDialog by rememberSaveable { mutableStateOf(false) }
-    Row(
+    ListItem(
         modifier = Modifier
             .fillMaxWidth()
-            .clickable { showDialog = true }
-            .padding(vertical = 12.dp),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(12.dp)
-    ) {
-        Column(modifier = Modifier.weight(1f)) {
+            .clickable { showDialog = true },
+        headlineContent = {
             Text(
                 text = stringResource(R.string.settings_model_management_edit),
                 style = MaterialTheme.typography.bodyLarge,
                 color = MaterialTheme.colorScheme.onSurface
             )
+        },
+        supportingContent = {
             Text(
                 text = supporting,
                 style = MaterialTheme.typography.bodySmall,
@@ -106,14 +104,15 @@ internal fun ModelManagementSection(
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis
             )
+        },
+        trailingContent = {
+            Icon(
+                Icons.Default.ChevronRight,
+                contentDescription = null,
+                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
         }
-        Icon(
-            Icons.Default.ChevronRight,
-            contentDescription = null,
-            tint = MaterialTheme.colorScheme.onSurfaceVariant,
-            modifier = Modifier.size(20.dp)
-        )
-    }
+    )
 
     if (showDialog) {
         ModelManagementDialog(

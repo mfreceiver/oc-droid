@@ -672,6 +672,206 @@ class SessionSyncCoordinatorTest {
         }
     }
 
+    // ── §recent-sort-by-message: bump session.time.updated on message events ──
+
+    @Test
+    fun `message updated bumps the owning session time updated to message time created`() {
+        // §recent-sort-by-message: a message.updated event must bump the owning
+        // session's time.updated to max(current, message.time.created) so the
+        // recent-sessions surfaces (sortedByDescending { time.updated })
+        // reflect actual message activity. The bump fires for the CURRENT
+        // session, even when the message is patched in place (found=true).
+        setCurrentSession("session-1")
+        seed {
+            it.copy(
+                sessions = listOf(
+                    Session(
+                        id = "session-1",
+                        directory = "/tmp",
+                        time = Session.TimeInfo(created = 1_000L, updated = 1_500L)
+                    )
+                )
+            )
+        }
+
+        coordinator.handleEvent(event("message.updated") {
+            put("sessionID", JsonPrimitive("session-1"))
+            put("info", buildJsonObject {
+                put("id", JsonPrimitive("m1"))
+                put("role", JsonPrimitive("assistant"))
+                put("time", buildJsonObject {
+                    put("created", JsonPrimitive(2_000L))
+                })
+            })
+        })
+
+        val updated = slices.sessionList.value.sessions.first { it.id == "session-1" }
+        assertEquals(2_000L, updated.time?.updated)
+    }
+
+    @Test
+    fun `message updated bumps time updated for a non-current session too`() {
+        // §recent-sort-by-message: the bump fires for NON-current sessions as
+        // well so cross-client activity in another session promotes it to the
+        // top of the recent list (the chat-slice patch is the only thing that
+        // short-circuits for non-current sessions — the session-list bump
+        // happens BEFORE the current-session guard).
+        setCurrentSession("session-1")
+        seed {
+            it.copy(
+                sessions = listOf(
+                    Session(id = "session-1", directory = "/a"),
+                    Session(
+                        id = "session-2",
+                        directory = "/b",
+                        time = Session.TimeInfo(created = 1_000L, updated = 1_000L)
+                    )
+                )
+            )
+        }
+
+        coordinator.handleEvent(event("message.updated") {
+            put("sessionID", JsonPrimitive("session-2"))
+            put("info", buildJsonObject {
+                put("id", JsonPrimitive("mX"))
+                put("role", JsonPrimitive("assistant"))
+                put("time", buildJsonObject {
+                    put("created", JsonPrimitive(5_000L))
+                })
+            })
+        })
+
+        val s2 = slices.sessionList.value.sessions.first { it.id == "session-2" }
+        assertEquals(
+            "non-current session's time.updated must bump to the message's created timestamp",
+            5_000L,
+            s2.time?.updated
+        )
+    }
+
+    @Test
+    fun `message updated time bump is monotonic and never goes backwards`() {
+        // §recent-sort-by-message: withUpdatedAtLeast is monotonic — an older
+        // message.updated event (replay / out-of-order) MUST NOT move the
+        // session's time.updated backwards.
+        setCurrentSession("session-1")
+        seed {
+            it.copy(
+                sessions = listOf(
+                    Session(
+                        id = "session-1",
+                        directory = "/a",
+                        time = Session.TimeInfo(created = 1_000L, updated = 10_000L)
+                    )
+                )
+            )
+        }
+
+        coordinator.handleEvent(event("message.updated") {
+            put("sessionID", JsonPrimitive("session-1"))
+            put("info", buildJsonObject {
+                put("id", JsonPrimitive("m1"))
+                put("role", JsonPrimitive("assistant"))
+                put("time", buildJsonObject {
+                    // older than the current updated — must be ignored.
+                    put("created", JsonPrimitive(2_000L))
+                })
+            })
+        })
+
+        val s = slices.sessionList.value.sessions.first { it.id == "session-1" }
+        assertEquals(
+            "time.updated must NOT go backwards",
+            10_000L,
+            s.time?.updated
+        )
+    }
+
+    @Test
+    fun `message updated with no message time created leaves session time updated untouched`() {
+        // Defensive: if the payload lacks info.time.created, the bump is a
+        // no-op (does not synthesize a System.currentTimeMillis() stamp that
+        // could race the server's authoritative time.updated later).
+        setCurrentSession("session-1")
+        seed {
+            it.copy(
+                sessions = listOf(
+                    Session(
+                        id = "session-1",
+                        directory = "/a",
+                        time = Session.TimeInfo(created = 1_000L, updated = 1_500L)
+                    )
+                )
+            )
+        }
+
+        coordinator.handleEvent(event("message.updated") {
+            put("sessionID", JsonPrimitive("session-1"))
+            put("info", buildJsonObject {
+                put("id", JsonPrimitive("m1"))
+                put("role", JsonPrimitive("assistant"))
+                // no time.created
+            })
+        })
+
+        val s = slices.sessionList.value.sessions.first { it.id == "session-1" }
+        assertEquals(1_500L, s.time?.updated)
+    }
+
+    @Test
+    fun `applyMessageTimestampBump bumps sessions in BOTH sessions and directorySessions stores`() {
+        // §recent-sort-by-message: a session can be present in EITHER the
+        // top-level sessions list OR a directorySessions bucket (or both — the
+        // recent derivation merges + dedupes by id). The bump must touch BOTH
+        // stores so a session that only surfaces via a directory fetch
+        // (SessionsScreen.directorySessions) also reorders correctly.
+        val dirSession = Session(
+            id = "dir-only",
+            directory = "/proj",
+            time = Session.TimeInfo(created = 100L, updated = 100L)
+        )
+        val state = SessionListState(
+            sessions = listOf(
+                Session(
+                    id = "top",
+                    directory = "/proj",
+                    time = Session.TimeInfo(created = 100L, updated = 100L)
+                )
+            ),
+            directorySessions = mapOf("/proj" to listOf(dirSession))
+        )
+
+        val (next, effects) = state.applyMessageTimestampBump("dir-only", 5_000L)
+
+        assertTrue("pure transform returns no side effects", effects.isEmpty())
+        // directorySessions copy bumped.
+        val dirBumped = next.directorySessions["/proj"]?.firstOrNull { it.id == "dir-only" }
+        assertNotNull("directory-only session still present", dirBumped)
+        assertEquals(5_000L, dirBumped!!.time?.updated)
+        // Untouched top-level session stays unchanged.
+        val topUntouched = next.sessions.first { it.id == "top" }
+        assertEquals(100L, topUntouched.time?.updated)
+    }
+
+    @Test
+    fun `applyMessageTimestampBump with non-positive timestamp is a no-op`() {
+        // Defensive: an invalid (zero / negative) timestamp must not corrupt
+        // the time.updated field (e.g. overwrite a real stamp with 0).
+        val state = SessionListState(
+            sessions = listOf(
+                Session(
+                    id = "s1",
+                    directory = "/p",
+                    time = Session.TimeInfo(created = 100L, updated = 1_000L)
+                )
+            )
+        )
+        val (next0, _) = state.applyMessageTimestampBump("s1", 0L)
+        assertEquals(1_000L, next0.sessions.first { it.id == "s1" }.time?.updated)
+        val (nextNeg, _) = state.applyMessageTimestampBump("s1", -5L)
+        assertEquals(1_000L, nextNeg.sessions.first { it.id == "s1" }.time?.updated)
+    }
+
     // ── message.part.updated (full text / delta / part.created) ─────────────
 
     @Test

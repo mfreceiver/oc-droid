@@ -1,7 +1,9 @@
 package cn.vectory.ocdroid.ui.chat
 
 import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.padding
@@ -13,7 +15,6 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
@@ -106,17 +107,21 @@ internal fun ThinkingCapsule(
             }
 
             if (showAbort) {
-                // §a11y: a Material 3 IconButton enforces the ≥48dp minimum touch
-                // target for the abort affordance. The Stop icon keeps its small
-                // visual size (~14dp) inside the 48dp container; this makes the
-                // thinking capsule taller than the compacting sibling (no abort
-                // button), which is the intended accessibility tradeoff.
-                IconButton(onClick = onAbort) {
+                // §a11y: this deliberately uses a compact 28dp touch target so the
+                // abort affordance is the same height as the compacting capsule.
+                // It trades the standard 48dp target for visual parity in this
+                // transient, compressed status surface.
+                Box(
+                    modifier = Modifier
+                        .size(28.dp)
+                        .clickable(onClick = onAbort),
+                    contentAlignment = Alignment.Center,
+                ) {
                     Icon(
                         imageVector = Icons.Default.Stop,
                         contentDescription = stringResource(R.string.chat_interrupt_agent),
                         tint = StopRed,
-                        modifier = Modifier.size(14.dp)
+                        modifier = Modifier.size(14.dp),
                     )
                 }
             }

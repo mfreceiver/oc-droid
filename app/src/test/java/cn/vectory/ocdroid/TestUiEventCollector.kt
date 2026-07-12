@@ -34,6 +34,12 @@ private val appCoreErrorBuffer = mutableMapOf<AppCore, MutableList<String>>()
 private val appCoreSuccessBuffer = mutableMapOf<AppCore, MutableList<String>>()
 private val appCoreErrorEventBuffer = mutableMapOf<AppCore, MutableList<UiEvent.Error>>()
 private val appCoreSuccessEventBuffer = mutableMapOf<AppCore, MutableList<UiEvent.Success>>()
+// §compact-graded (Blocker-1): Info ring buffer added so the new compact
+// grading tests can assert on which Info resId was emitted (the read-timeout
+// branch fires Info, the watchdog fires a different Info). Previously Info
+// was a no-op in the collector, which made it impossible to distinguish the
+// two branches by their emitted event.
+private val appCoreInfoEventBuffer = mutableMapOf<AppCore, MutableList<UiEvent.Info>>()
 private val appCoreCollectorJobs = mutableMapOf<AppCore, Job>()
 
 /** Most-recent-last list of Error event messages emitted on [AppCore.uiEvents]
@@ -54,6 +60,15 @@ internal val AppCore.recentTestErrorEvents: List<UiEvent.Error>
 internal val AppCore.recentTestSuccessEvents: List<UiEvent.Success>
     get() = synchronized(appCoreSuccessEventBuffer) { appCoreSuccessEventBuffer[this]?.toList() ?: emptyList() }
 
+/**
+ * §compact-graded (Blocker-1): most-recent-last list of raw [UiEvent.Info]
+ * events. Used by the compact grading tests to distinguish the read-timeout
+ * branch (`info_compact_in_progress`) from the watchdog branch
+ * (`info_compact_timeout_retry`).
+ */
+internal val AppCore.recentTestInfoEvents: List<UiEvent.Info>
+    get() = synchronized(appCoreInfoEventBuffer) { appCoreInfoEventBuffer[this]?.toList() ?: emptyList() }
+
 /** Convenience: the most recent raw Error event, or null. */
 internal val AppCore.lastErrorEvent: UiEvent.Error?
     get() = recentTestErrorEvents.lastOrNull()
@@ -61,6 +76,10 @@ internal val AppCore.lastErrorEvent: UiEvent.Error?
 /** Convenience: the most recent raw Success event, or null. */
 internal val AppCore.lastSuccessEvent: UiEvent.Success?
     get() = recentTestSuccessEvents.lastOrNull()
+
+/** §compact-graded (Blocker-1): the most recent raw Info event, or null. */
+internal val AppCore.lastInfoEvent: UiEvent.Info?
+    get() = recentTestInfoEvents.lastOrNull()
 
 /**
  * Install a coroutine collector on [AppCore.uiEvents] that records every Error /
@@ -81,6 +100,7 @@ internal fun AppCore.installTestUiEventCollector(
     synchronized(appCoreSuccessBuffer) { appCoreSuccessBuffer.getOrPut(this) { mutableListOf() } }
     synchronized(appCoreErrorEventBuffer) { appCoreErrorEventBuffer.getOrPut(this) { mutableListOf() } }
     synchronized(appCoreSuccessEventBuffer) { appCoreSuccessEventBuffer.getOrPut(this) { mutableListOf() } }
+    synchronized(appCoreInfoEventBuffer) { appCoreInfoEventBuffer.getOrPut(this) { mutableListOf() } }
     val job = scope.launch {
         uiEvents.collect { event ->
             when (event) {
@@ -102,13 +122,17 @@ internal fun AppCore.installTestUiEventCollector(
                         appCoreSuccessEventBuffer.getOrPut(this@installTestUiEventCollector) { mutableListOf() }.add(event)
                     }
                 }
-                // §grouping-rewrite item 4: neutral Info events (e.g. command
-                // POST timed out on ACK; SSE carries results). Test ring
-                // buffers only care about Error/Success for historical
-                // assertions — Info is a no-op here. Branch exists so the
-                // sealed-class `when` stays exhaustive after adding the
-                // UiEvent.Info variant.
-                is UiEvent.Info -> Unit
+                // §compact-graded (Blocker-1): Info events now buffered (was a
+                // no-op) so the compact grading tests can assert which Info
+                // was emitted (read-timeout vs watchdog). The historical ring
+                // buffers (recentTestErrors / recentTestSuccesses) remain
+                // Error/Success-only, so existing String assertions are
+                // unaffected.
+                is UiEvent.Info -> {
+                    synchronized(appCoreInfoEventBuffer) {
+                        appCoreInfoEventBuffer.getOrPut(this@installTestUiEventCollector) { mutableListOf() }.add(event)
+                    }
+                }
                 is UiEvent.Debug -> Unit
             }
         }
@@ -125,6 +149,7 @@ internal fun AppCore.uninstallTestUiEventCollector() {
     synchronized(appCoreSuccessBuffer) { appCoreSuccessBuffer.remove(this) }
     synchronized(appCoreErrorEventBuffer) { appCoreErrorEventBuffer.remove(this) }
     synchronized(appCoreSuccessEventBuffer) { appCoreSuccessEventBuffer.remove(this) }
+    synchronized(appCoreInfoEventBuffer) { appCoreInfoEventBuffer.remove(this) }
 }
 
 /**
@@ -157,6 +182,11 @@ private val TEST_UI_EVENT_STRING_TABLE: Map<Int, String> = mapOf(
     R.string.error_compact_no_session to "Open or create a session before compacting",
     R.string.error_compact_no_model to "No model info available for compaction",
     R.string.error_compact_failed to "Compact failed: %1\$s",
+    // §compact-graded (Blocker-1): neutral Info emitted by compactSession on
+    // the accepted / read-timeout / watchdog branches. Mapped here so any
+    // future Info string assertion stays locale-stable.
+    R.string.info_compact_in_progress to "Compaction in progress, the result will sync automatically.",
+    R.string.info_compact_timeout_retry to "Compaction timed out with no response; please retry.",
     R.string.error_edit_message_failed to "Failed to edit message: %1\$s",
     R.string.error_abort_session_failed to "Failed to abort session: %1\$s",
     R.string.success_refreshed to "Refreshed",

@@ -255,17 +255,14 @@ fun QuestionCardView(
     LaunchedEffect(question.id) { expanded = true }
 
     BoxWithConstraints(modifier = modifier.fillMaxWidth()) {
-        // §scroll-safety: 硬 cap——对齐仓库惯例（verticalScroll 必配有限 height 上限）。
-        // 取 overlay maxHeight 的 80% 与绝对 560.dp 的较小值：有界宿主下自适应（imePadding
-        // 后的可用高、留呼吸空间）；即便将来 BoxWithConstraints 收到 Infinity（被挪入无界
-        // slot），560.dp 兜底仍保证 Card bounded，使 weight(1f,fill=false)+verticalScroll
-        // 在内容超高时正确滚动而非溢出 / Infinity 断言。内容不足时 Card 仍 wrap。
-        val cardHeightCap = minOf(maxHeight * 0.8f, 560.dp)
+        // The status slot supplies the chat area's bounded height. Let a long
+        // question use all of it instead of reserving an arbitrary lower gap;
+        // short cards still use their intrinsic height.
         Card(
             modifier = Modifier
                 .fillMaxWidth()
                 .padding(horizontal = 16.dp, vertical = 8.dp)
-                .heightIn(max = cardHeightCap)
+                .heightIn(max = maxHeight)
                 .animateContentSize(),
             shape = MaterialTheme.shapes.extraLarge,
             colors = CardDefaults.cardColors(

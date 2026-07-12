@@ -1,7 +1,9 @@
 package cn.vectory.ocdroid
 
 import android.content.Intent
+import android.content.pm.ActivityInfo
 import android.os.Bundle
+import android.app.Activity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.appcompat.app.AppCompatActivity
@@ -15,6 +17,14 @@ import androidx.compose.runtime.remember
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.unit.Dp
+import androidx.core.view.ViewCompat
+import androidx.core.view.WindowInsetsCompat
 import cn.vectory.ocdroid.ui.OrchestratorViewModel
 import cn.vectory.ocdroid.ui.NavRoute
 import cn.vectory.ocdroid.ui.chat.LocalWindowSizeClass
@@ -56,6 +66,9 @@ class MainActivity : AppCompatActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        if (resources.configuration.smallestScreenWidthDp < 600) {
+            requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
+        }
         // §P5a (Q5): re-apply the persisted locale on every Activity create.
         // The authoritative cold-start point is OpenCodeApp.onCreate (runs
         // once per process, before the first frame); this warm-recreate call
@@ -141,7 +154,10 @@ class MainActivity : AppCompatActivity() {
                     // (with sub-routes) /
                     // Search / Revert are all reachable via AppShell's NavHost
                     // (see ui/shell/AppShell.kt).
-                    AppShell(orchestratorVM = viewModel)
+                    AppShell(
+                        orchestratorVM = viewModel,
+                        navBarBottomDp = rememberNavBarBottomDp(this@MainActivity),
+                    )
                 }
             }
         }
@@ -181,4 +197,31 @@ class MainActivity : AppCompatActivity() {
          */
         const val EXTRA_SESSION_ID = "opencode_session_id"
     }
+}
+
+/**
+ * §bug-6.4: capture the navigation-bar bottom inset from the Android View
+ * inset system (WindowInsetsCompat on the decorView root) — Compose's
+ * [androidx.compose.foundation.layout.WindowInsets.navigationBars] resolves to
+ * 0 under this AppCompat theme (the DecorView consumes the inset before Compose
+ * receives it), so every Compose-inset-based fill attempt left a gap below the
+ * bottom bar. The decorView root gets the unconsumed system inset; threading it
+ * in as a plain [Dp] lets [cn.vectory.ocdroid.ui.shell.AppShell] size the bar's
+ * bottom spacer to the real gesture-pill height. Reactive — updates on config
+ * changes (e.g. the inset height changing).
+ */
+@Composable
+private fun rememberNavBarBottomDp(activity: Activity): Dp {
+    val density = LocalDensity.current
+    var bottomPx by remember { mutableIntStateOf(0) }
+    DisposableEffect(activity) {
+        val decorView = activity.window.decorView
+        ViewCompat.setOnApplyWindowInsetsListener(decorView) { _, insets ->
+            bottomPx = insets.getInsets(WindowInsetsCompat.Type.navigationBars()).bottom
+            insets
+        }
+        decorView.requestApplyInsets()
+        onDispose { ViewCompat.setOnApplyWindowInsetsListener(decorView, null) }
+    }
+    return with(density) { bottomPx.toDp() }
 }

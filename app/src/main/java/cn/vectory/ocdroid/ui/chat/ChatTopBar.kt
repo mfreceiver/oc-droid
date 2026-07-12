@@ -31,7 +31,6 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.res.stringResource
-import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import cn.vectory.ocdroid.R
@@ -176,17 +175,12 @@ internal data class ChatTopBarActions(
      */
     val onSwitchModel: (providerId: String, modelId: String) -> Unit = { _, _ -> },
     /**
-     * §0.8.2 P2.3: trigger context compaction for the current session
-     * (chatVM.compactSession). Surfaced as the FIRST overflow menu item
-     * (text-only, no leading icon — distinct from the four icon-led
-     * entries below it).
-     */
-    val onCompact: () -> Unit = {},
-    /**
      * §0.8.2 P2.3: open the [ContextUsageDialog] (ModalBottomSheet) from
      * the overflow menu's "Context" item. The dialog body is unchanged;
      * only its trigger moved from the remote DropdownMenu (ChatScaffold)
-     * to here.
+     * to here. The dialog itself owns the "Compress context" button
+     * (ContextUsageDialog.onCompact → chatVM.compactSession); there is
+     * NO separate "Compress" item in this overflow menu.
      */
     val onOpenContextDialog: () -> Unit = {},
     /**
@@ -226,31 +220,19 @@ internal fun ChatTopBar(
     // chrome swap; the new ChatScaffold passes true unconditionally.
     @Suppress("UNUSED_PARAMETER") tabVisible: Boolean = true,
     @Suppress("UNUSED_PARAMETER") onTabVisibilityChange: (Boolean) -> Unit = {},
+    onTitleClick: () -> Unit = {},
     /**
      * §context-compact: optional callback formerly wired through to the
      * ServerManagementDialog's "压缩" button. §0.8.2 P2 removed that dialog
      * from this composable; the param is retained (suppressed) so the
      * ChatScaffold call site continues to compile. The live compact trigger
-     * is [ChatTopBarActions.onCompact] (fired from the overflow menu's
-     * "Compress context" item).
+     * is the [ContextUsageDialog]'s "Compress context" button
+     * (ChatScaffold passes chatVM.compactSession to it); there is no
+     * standalone "Compress" item in the overflow menu.
      */
     @Suppress("UNUSED_PARAMETER") onContextCompact: (() -> Unit)? = null,
 ) {
     val currentSession = state.sessions.find { it.id == state.currentSessionId }
-    // §0.8.2 P2.1: hash-color workdir initial for the nav-icon slot.
-    // NON-CLICKABLE — purely a scope cue. Sourced from the same place the
-    // title reads (currentSession.directory, falling back to draftWorkdir).
-    // basename = substringAfterLast('/').ifBlank { directory }; initial =
-    // the uppercase first character. Renders a neutral placeholder when no
-    // workdir is set (no session + no draft).
-    val directory: String? = currentSession?.directory ?: state.draftWorkdir
-    val workdirBasename: String? = directory
-        ?.substringAfterLast('/')
-        ?.ifBlank { directory }
-    val workdirInitial: String? = workdirBasename
-        ?.firstOrNull()
-        ?.uppercaseChar()
-        ?.toString()
     // §0.8.2 P2.3: model display name for the overflow menu's Model item.
     val currentModelName = resolveModelDisplayName(state.currentModel, state.providers)
     // §0.8.2 P2.3: overflow menu expanded state. Owned HERE so the
@@ -265,18 +247,6 @@ internal fun ChatTopBar(
     TopAppBar(
         modifier = modifier,
         windowInsets = TopAppBarDefaults.windowInsets,
-        navigationIcon = {
-            // §0.8.2 P2.1: hash-color UPPERCASE workdir initial. Replaces the
-            // hamburger Menu IconButton (which opened SessionPickerSheet).
-            // The picker is no longer reachable from the top bar; this
-            // affordance is non-clickable. Sized at Dimens.iconLg (28dp),
-            // centered inside the navigationIcon slot's natural padding.
-            WorkdirInitial(
-                initial = workdirInitial,
-                directory = directory,
-                modifier = Modifier.size(Dimens.iconLg),
-            )
-        },
         title = {
             when {
                 state.parentSessionId != null -> {
@@ -351,6 +321,7 @@ internal fun ChatTopBar(
                             color = MaterialTheme.colorScheme.onSurface,
                             maxLines = 1,
                             overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.clickable(onClick = onTitleClick),
                         )
                     } else {
                         // §F1: 所有会话 tab 已关闭、无当前会话时，顶栏显示
@@ -372,8 +343,11 @@ internal fun ChatTopBar(
             // — that sibling relationship is what anchors the popup below
             // the trigger (the prior remote DropdownMenu at ChatScaffold
             // popped to the top-left because it had no tight Box anchor).
-            // The 5 items (top→bottom): Compress context (text-only),
-            // Context, Todo, Agent, Model. Archive was removed.
+            // §dead-onCompact-cleanup: there is NO standalone "Compress"
+            // item here. The 4 items (top→bottom): Context, Todo, Agent,
+            // Model. Compaction is triggered via the ContextUsageDialog's
+            // own "Compress context" button (opened from the Context item).
+            // Archive was removed.
             ContextMenuCluster(
                 usage = state.contextUsage,
                 todos = state.sessionTodos,
@@ -382,10 +356,6 @@ internal fun ChatTopBar(
                 expanded = overflowExpanded,
                 onToggleExpand = { overflowExpanded = !overflowExpanded },
                 onDismiss = { overflowExpanded = false },
-                onCompact = {
-                    overflowExpanded = false
-                    actions.onCompact()
-                },
                 onOpenContext = {
                     overflowExpanded = false
                     actions.onOpenContextDialog()
@@ -408,42 +378,6 @@ internal fun ChatTopBar(
 }
 
 /**
- * §0.8.2 P2.1: the non-clickable hash-color workdir initial rendered in the
- * navigationIcon slot. Reads the FIRST character of the workdir basename
- * (uppercase) and tints it with [workdirTone] so the user has an at-a-glance
- * scope cue. When [initial] is null (no session + no draft) the slot renders
- * a transparent placeholder so the title alignment stays stable.
- *
- * Sized via [Dimens.iconLg] (28dp) per the spec — large enough to legibly
- * carry a single glyph, small enough to leave the title slot's breathing
- * room intact. NON-CLICKABLE: no onClick, no ripple, no combinedClickable.
- */
-@Composable
-private fun WorkdirInitial(
-    initial: String?,
-    directory: String?,
-    modifier: Modifier = Modifier,
-) {
-    Box(
-        modifier = modifier,
-        contentAlignment = Alignment.Center,
-    ) {
-        if (initial != null && directory != null) {
-            Text(
-                text = initial,
-                style = MaterialTheme.typography.titleMedium,
-                color = workdirTone(directory),
-                fontWeight = FontWeight.SemiBold,
-                maxLines = 1,
-            )
-        }
-        // else: render nothing (transparent placeholder — the Box reserves
-        // the slot so the title alignment is stable across sessions with
-        // and without a workdir).
-    }
-}
-
-/**
  * §0.8.2 P2.3: the trigger + DropdownMenu cluster rendered in the actions
  * slot. Mirrors the v0.7.6 `ContextMenuButton` pattern
  * (ChatSessionTabStrip.kt:458): a 44dp transparent Surface wraps the live
@@ -451,16 +385,18 @@ private fun WorkdirInitial(
  * at its tuned size); the [DropdownMenu] is a sibling inside the same Box
  * so it anchors below the trigger.
  *
- * Menu items (top→bottom), per the P2 spec:
- *   1. Compress context — TEXT ONLY (no leading icon). → onCompact.
- *   2. Context          — Icons.Default.DonutLarge. Text = "{pct}%
+ * §dead-onCompact-cleanup: menu items (top→bottom), per the P2 spec — there
+ * is NO standalone "Compress" item; compaction is triggered from the
+ * ContextUsageDialog's own "Compress context" button (opened by the Context
+ * item below):
+ *   1. Context          — Icons.Default.DonutLarge. Text = "{pct}%
  *                         {total/1000}/{limit/1000}" or the label
  *                         "Context" when usage is null. → onOpenContext.
- *   3. Todo             — Icons.Default.Checklist. Text = "{completed}/
+ *   2. Todo             — Icons.Default.Checklist. Text = "{completed}/
  *                         {total}" (always shown incl. 0/0). → onOpenTodo.
- *   4. Agent            — Icons.Default.SmartToy. Text = selected agent
+ *   3. Agent            — Icons.Default.SmartToy. Text = selected agent
  *                         name (or "Default"). → onOpenAgent.
- *   5. Model            — Icons.Outlined.Memory. Text = current model
+ *   4. Model            — Icons.Outlined.Memory. Text = current model
  *                         display name (or "Select model"). → onOpenModel.
  *
  * Archive was REMOVED (the prior remote menu's last item).
@@ -478,7 +414,6 @@ private fun ContextMenuCluster(
     expanded: Boolean,
     onToggleExpand: () -> Unit,
     onDismiss: () -> Unit,
-    onCompact: () -> Unit,
     onOpenContext: () -> Unit,
     onOpenTodo: () -> Unit,
     onOpenAgent: () -> Unit,
@@ -510,12 +445,7 @@ private fun ContextMenuCluster(
             expanded = expanded,
             onDismissRequest = { if (expanded) onDismiss() },
         ) {
-            // 1. Compress context — TEXT ONLY (no leading icon).
-            DropdownMenuItem(
-                text = { Text(stringResource(R.string.chat_compact_session)) },
-                onClick = onCompact,
-            )
-            // 2. Context — "{pct}% {totalTokens/1000}/{contextLimit/1000}"
+            // 1. Context — "{pct}% {totalTokens/1000}/{contextLimit/1000}"
             //    or the label "Context" when usage is null.
             DropdownMenuItem(
                 text = {
@@ -537,7 +467,7 @@ private fun ContextMenuCluster(
                 },
                 onClick = onOpenContext,
             )
-            // 3. Todo — "{completed}/{total}", always shown (including 0/0).
+            // 2. Todo — "{completed}/{total}", always shown (including 0/0).
             DropdownMenuItem(
                 text = {
                     val completed = todos.count { it.isCompleted }
@@ -553,7 +483,7 @@ private fun ContextMenuCluster(
                 },
                 onClick = onOpenTodo,
             )
-            // 4. Agent — selected agent name (or "Default").
+            // 3. Agent — selected agent name (or "Default").
             DropdownMenuItem(
                 text = {
                     Text(selectedAgentName ?: stringResource(R.string.agent_default_label))
@@ -567,7 +497,7 @@ private fun ContextMenuCluster(
                 },
                 onClick = onOpenAgent,
             )
-            // 5. Model — current model display name (or "Select model").
+            // 4. Model — current model display name (or "Select model").
             DropdownMenuItem(
                 text = {
                     Text(

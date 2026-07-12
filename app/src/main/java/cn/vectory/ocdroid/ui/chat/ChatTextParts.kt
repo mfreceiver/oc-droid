@@ -86,7 +86,7 @@ import org.intellij.markdown.flavours.gfm.GFMTokenTypes.CELL
 internal fun rememberPacedStreamingText(
     text: String,
     isStreaming: Boolean,
-    paceMs: Long = 100L
+    paceMs: Long = 150L
 ): String {
     // rememberUpdatedState keeps the latest text reachable from the
     // once-launched pace loop without restarting it on every token.

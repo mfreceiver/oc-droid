@@ -5,13 +5,17 @@ import cn.vectory.ocdroid.data.model.MessageWithParts
 import cn.vectory.ocdroid.data.model.Part
 import cn.vectory.ocdroid.data.model.Session
 import cn.vectory.ocdroid.data.repository.MessagesPage
+import cn.vectory.ocdroid.data.repository.OpenCodeRepository
 import cn.vectory.ocdroid.ui.ChatViewModel
+import cn.vectory.ocdroid.ui.UiEvent
 import io.mockk.coEvery
 import io.mockk.coVerify
 import io.mockk.every
 import io.mockk.verify
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.test.advanceTimeBy
 import kotlinx.coroutines.test.advanceUntilIdle
+import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -93,16 +97,30 @@ class ChatViewModelPassThroughTest : MainViewModelTestBase() {
         }
 
         vm.compactSession()
-        advanceUntilIdle()
+        // §compact-graded (Blocker-1): use runCurrent (NOT advanceUntilIdle) so
+        // the watchdog's 180 s delay does not fire and clear isCompacting.
+        runCurrent()
 
+        // §compact-graded: accepted=true → Info emitted, isCompacting stays set
+        // (SSE-driven ChatScaffold idle hook clears it later).
         assertTrue(core.chatFlow.value.isCompacting)
+        assertNull(core.recentTestErrors.lastOrNull())
+        assertEquals(
+            R.string.info_compact_in_progress,
+            core.lastInfoEvent?.resId,
+        )
         coVerify { repository.summarizeSession("s1", Message.ModelInfo("p", "m")) }
     }
 
     @Test
-    fun `compactSession failure clears isCompacting and emits error`() = runTest {
+    fun `compactSession server-rejected false clears isCompacting and emits Error`() = runTest {
+        // §compact-graded (Blocker-1): the server returned 2xx + body=false
+        // (deterministic reject). The repository turns this into
+        // Result.failure(SummarizeServerRejectedException); compactSession's
+        // onFailure branch must clear isCompacting + emit Error so the user
+        // can retry.
         coEvery { repository.summarizeSession(any(), any()) } returns Result.failure(
-            java.io.IOException("server denied"),
+            OpenCodeRepository.SummarizeServerRejectedException()
         )
         val core = createCore()
         val vm = ChatViewModel(core)
@@ -115,11 +133,144 @@ class ChatViewModelPassThroughTest : MainViewModelTestBase() {
         advanceUntilIdle()
 
         vm.compactSession()
-        advanceUntilIdle()
+        // Use runCurrent so the watchdog does not race the assertion.
+        runCurrent()
 
         assertFalse(core.chatFlow.value.isCompacting)
+        val errEvent = core.lastErrorEvent
+        assertNotNull(errEvent)
+        assertEquals(R.string.error_compact_failed, errEvent?.resId)
+        coVerify { repository.summarizeSession("s1", Message.ModelInfo("p", "m")) }
+    }
+
+    @Test
+    fun `compactSession read-timeout SocketTimeoutException keeps state and emits Info`() = runTest {
+        // §compact-graded (Blocker-1): read-side SocketTimeoutException → POST
+        // was likely accepted, SSE may still deliver. Don't clear isCompacting;
+        // emit Info; arm watchdog.
+        coEvery { repository.summarizeSession(any(), any()) } returns Result.failure(
+            java.net.SocketTimeoutException("response timed out"),
+        )
+        val core = createCore()
+        val vm = ChatViewModel(core)
+        core.writeChat {
+            it.copy(
+                currentSessionId = "s1",
+                currentModel = Message.ModelInfo("p", "m"),
+            )
+        }
+        advanceUntilIdle()
+
+        vm.compactSession()
+        // Use runCurrent so the watchdog does not fire and clear isCompacting
+        // before the immediate-after assertion.
+        runCurrent()
+
+        assertTrue(core.chatFlow.value.isCompacting)
+        assertTrue(core.chatFlow.value.compactStartedAt > 0L)
+        assertNull(core.recentTestErrors.lastOrNull())
+        assertEquals(
+            R.string.info_compact_in_progress,
+            core.lastInfoEvent?.resId,
+        )
+        coVerify { repository.summarizeSession("s1", Message.ModelInfo("p", "m")) }
+    }
+
+    @Test
+    fun `compactSession non-timeout IOException clears isCompacting and emits Error`() = runTest {
+        // §compact-graded (Blocker-1): connect refused / DNS / generic IO — POST
+        // never reached the server, SSE cannot deliver → clear isCompacting +
+        // emit Error.
+        coEvery { repository.summarizeSession(any(), any()) } returns Result.failure(
+            java.io.IOException("connection refused"),
+        )
+        val core = createCore()
+        val vm = ChatViewModel(core)
+        core.writeChat {
+            it.copy(
+                currentSessionId = "s1",
+                currentModel = Message.ModelInfo("p", "m"),
+            )
+        }
+        advanceUntilIdle()
+
+        vm.compactSession()
+        runCurrent()
+
+        assertFalse(core.chatFlow.value.isCompacting)
+        val errEvent = core.lastErrorEvent
+        assertNotNull(errEvent)
+        assertEquals(R.string.error_compact_failed, errEvent?.resId)
+        coVerify { repository.summarizeSession("s1", Message.ModelInfo("p", "m")) }
+    }
+
+    @Test
+    fun `compactSession watchdog clears isCompacting after timeout`() = runTest {
+        // §compact-graded (Blocker-1): when summarizeSession returns a
+        // SocketTimeoutException AND the SSE clear never arrives, the watchdog
+        // (delay WATCHDOG_MS) must clear isCompacting + emit Info so the
+        // Composer cannot lock forever.
+        coEvery { repository.summarizeSession(any(), any()) } returns Result.failure(
+            java.net.SocketTimeoutException("response timed out"),
+        )
+        val core = createCore()
+        val vm = ChatViewModel(core)
+        core.writeChat {
+            it.copy(
+                currentSessionId = "s1",
+                currentModel = Message.ModelInfo("p", "m"),
+            )
+        }
+
+        vm.compactSession()
+        runCurrent()
+        // Pre-watchdog: still compacting.
+        assertTrue(core.chatFlow.value.isCompacting)
+
+        // Advance virtual time past the watchdog delay and pump the dispatcher.
+        advanceTimeBy(ChatViewModel.WATCHDOG_MS)
+        runCurrent()
+
+        // Watchdog fired + cleared the flag.
+        assertFalse(core.chatFlow.value.isCompacting)
         assertEquals(0L, core.chatFlow.value.compactStartedAt)
-        assertNotNull(core.recentTestErrors.lastOrNull())
+        assertEquals(
+            R.string.info_compact_timeout_retry,
+            core.lastInfoEvent?.resId,
+        )
+    }
+
+    @Test
+    fun `compactSession watchdog is a no-op when SSE has already cleared isCompacting`() = runTest {
+        // §compact-graded (Blocker-1): if the SSE-driven ChatScaffold idle
+        // hook clears isCompacting before the watchdog fires, the watchdog's
+        // recheck sees isCompacting=false and emits nothing.
+        coEvery { repository.summarizeSession(any(), any()) } returns Result.failure(
+            java.net.SocketTimeoutException("response timed out"),
+        )
+        val core = createCore()
+        val vm = ChatViewModel(core)
+        core.writeChat {
+            it.copy(
+                currentSessionId = "s1",
+                currentModel = Message.ModelInfo("p", "m"),
+            )
+        }
+
+        vm.compactSession()
+        runCurrent()
+        // Simulate the SSE-driven clear.
+        vm.clearCompacting()
+        assertFalse(core.chatFlow.value.isCompacting)
+        val infoBefore = core.lastInfoEvent?.resId
+
+        advanceTimeBy(ChatViewModel.WATCHDOG_MS)
+        runCurrent()
+
+        // Watchdog recheck saw false → no new Info emitted (the most-recent
+        // Info resId is unchanged from before the watchdog fired).
+        assertEquals(infoBefore, core.lastInfoEvent?.resId)
+        assertFalse(core.chatFlow.value.isCompacting)
     }
 
     @Test

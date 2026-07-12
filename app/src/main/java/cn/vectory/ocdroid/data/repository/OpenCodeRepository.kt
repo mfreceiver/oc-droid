@@ -585,8 +585,25 @@ class OpenCodeRepository @Inject constructor(
      * reload automatically. [model] is the current session model (read from
      * app state by the caller) — the server uses it to generate the summary.
      *
-     * Returns true on success (server returns `true`); surfaces HTTP failures
-     * via the same error-body pattern as [executeCommand] / [sendMessage].
+     * §compact-graded (Blocker-1): the returned [Result] distinguishes three
+     * outcomes so the caller ([ChatViewModel.compactSession]) can grade its
+     * recovery instead of swallowing every failure:
+     *  - `Result.success(true)` — POST accepted and the server explicitly
+     *    acknowledged (body=`true`, or body=null as in HTTP 204 where the
+     *    server returned no body but the request was accepted).
+     *  - `Result.failure(ServerRejectedException)` — POST reached the server,
+     *    HTTP 2xx came back, but the body was `false`: the server explicitly
+     *    rejected compaction (e.g. context too small to summarize, server
+     *    refused). This is a *deterministic* failure — the user must be told
+     *    and `isCompacting` must be cleared so a retry is possible.
+     *  - `Result.failure(<IOException/HttpException>)` — transport or HTTP
+     *    non-2xx failure. The caller's grading logic further splits this into
+     *    read-side [java.net.SocketTimeoutException] (POST likely accepted,
+     *    SSE will carry the result) vs everything else (POST never reached
+     *    the server).
+     *
+     * Completion of the compaction itself is reported through SSE; the body
+     * is NOT interpreted as the compaction result.
      */
     suspend fun summarizeSession(
         sessionId: String,
@@ -597,10 +614,26 @@ class OpenCodeRepository @Inject constructor(
             val errorBody = response.errorBody()?.string() ?: response.message()
             throw Exception("Summarize failed ${response.code()}: $errorBody")
         }
-        val body = response.body()
-        if (body != null && !body) throw Exception("Summarize returned false (server declined)")
-        body ?: true
+        // body == null (HTTP 204 etc.) → server accepted, no body to read.
+        val accepted = response.body() ?: true
+        if (!accepted) {
+            // §compact-graded: server returned `false` → explicit rejection.
+            // Throw so runSuspendCatching turns it into Result.failure and the
+            // caller's onFailure(accepted-reject) branch can clear isCompacting.
+            throw SummarizeServerRejectedException()
+        }
+        accepted
     }
+
+    /**
+     * §compact-graded (Blocker-1): raised by [summarizeSession] when the
+     * server returns HTTP 2xx with body `false`. Distinct type so
+     * [ChatViewModel.compactSession] can branch on `onFailure` +
+     * `cause is SummarizeServerRejectedException` and clear `isCompacting`
+     * + emit a deterministic Error (vs the read-timeout Info path).
+     */
+    class SummarizeServerRejectedException :
+        Exception("Server rejected compaction (body=false)")
 
     suspend fun forkSession(sessionId: String, messageId: String? = null): Result<Session> = runSuspendCatching {
         api.forkSession(sessionId, ForkSessionRequest(messageId))
