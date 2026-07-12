@@ -1,10 +1,21 @@
 // MessageCard.kt — Phase 1C message-row overflow menu. Wraps the existing
-// [MessageRow] (the per-part dispatcher in ChatMessageRow.kt) with a
-// per-message MoreVert IconButton + DropdownMenu offering Copy / Edit &
-// rerun / Fork. The Edit & rerun entry is destructive (it routes to
+// [MessageRow] (the per-part dispatcher in ChatMessageRow.kt) with a long-
+// press-triggered DropdownMenu offering Copy / Edit & rerun / Fork. The
+// Edit & rerun entry is destructive (it routes to
 // ChatViewModel.editFromMessage, which is the RevertConversation use case's
 // single entry point — see plan §2.2 / §3.3 / scheme D.6) and therefore
 // MUST be confirmed before it fires.
+//
+// §B5-P4: the visible MoreVert IconButton was removed (it duplicated the
+// long-press affordance and was deemed visually noisy). The DropdownMenu
+// anchor is preserved by keeping the small TopEnd Box that previously
+// hosted the IconButton — the DropdownMenu is still composed INSIDE that
+// Box, so its popup anchors to the message card's top-end corner exactly
+// as before (the historical "menu attaches to window top-left" bug — see
+// §0.8.2 P2.4 anchor-fix below — does NOT regress). Long-press now also
+// fires [HapticFeedbackType.LongPress] for tactile confirmation, and the
+// row exposes a contentDescription (reusing R.string.message_actions_menu)
+// so screen-reader users discover the long-press → actions affordance.
 //
 // DESTRUCTIVE-GATE CONTRACT (plan §3.3 / scheme D.6):
 //   1. The action is the SINGLE call to ChatViewModel.editFromMessage —
@@ -26,10 +37,12 @@
 // GESTURE POLICY (plan §3.3 / scheme E.5):
 //   - Tap = no-op. The message is selected for scroll-anchor / keyboard
 //     navigation only; never triggers a destructive action.
-//   - Long-press = ACCELERATOR: opens the overflow menu. The accelerator
-//     opens the menu and stops there — the user must still tap an item
-//     AND confirm destructive items. A long-press NEVER fires revert /
-//     fork on its own.
+//   - Long-press = ACCELERATOR: opens the overflow menu. §B5-P4 also fires
+//     [HapticFeedbackType.LongPress] for tactile confirmation (no ripple —
+//     `indication = null` is preserved; the menu opening + haptic IS the
+//     feedback). The accelerator opens the menu and stops there — the user
+//     must still tap an item AND confirm destructive items. A long-press
+//     NEVER fires revert / fork on its own.
 //   - Horizontal swipe = reserved for transcript / sheet content; never
 //     wired to a destructive action on a message row.
 //
@@ -61,12 +74,10 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Edit
-import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -76,20 +87,26 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
 import cn.vectory.ocdroid.R
 import cn.vectory.ocdroid.data.model.Message
 import cn.vectory.ocdroid.data.model.Part
 
 /**
- * §1C: the per-message card wrapping the existing [MessageRow]. Adds a
- * single top-end `IconButton(MoreVert)` that opens the overflow menu, and
- * the destructive confirmation dialog. The card body is delegated to the
- * existing [MessageRow] via a `body: @Composable ColumnScope.() -> Unit`
- * slot — the per-part rendering and the parity scroll/coalesce path are
- * NOT touched.
+ * §1C: the per-message card wrapping the existing [MessageRow]. Long-press
+ * (with [HapticFeedbackType.LongPress]) opens a DropdownMenu offering Copy /
+ * Edit & rerun / Fork, and the destructive confirmation dialog. §B5-P4
+ * removed the always-visible MoreVert IconButton (long-press already opened
+ * the same menu); the DropdownMenu anchor is preserved by the small TopEnd
+ * Box below. The card body is delegated to the existing [MessageRow] via a
+ * `body: @Composable ColumnScope.() -> Unit` slot — the per-part rendering
+ * and the parity scroll/coalesce path are NOT touched.
  *
  * @param message the message being rendered (drives the per-row menu
  *                enablement — Edit & rerun is offered on user rows only;
@@ -166,6 +183,15 @@ internal fun MessageCard(
     // menu opening IS the feedback.
     val longPressInteraction = remember { MutableInteractionSource() }
     val context = LocalContext.current
+    // §B5-P4: haptic + a11y for the long-press accelerator. The removed
+    // MoreVert IconButton was redundant with long-press; we keep the
+    // menu discoverable by firing [HapticFeedbackType.LongPress] on the
+    // long-press and exposing a contentDescription (reusing the existing
+    // R.string.message_actions_menu — "Message actions" / "消息操作") so
+    // TalkBack users hear the long-press → actions affordance. No new
+    // string resource needed.
+    val hapticFeedback = LocalHapticFeedback.current
+    val actionsLabel = stringResource(R.string.message_actions_menu)
 
     Box(
         modifier = Modifier
@@ -174,8 +200,18 @@ internal fun MessageCard(
                 interactionSource = longPressInteraction,
                 indication = null,
                 onClick = { /* tap = select (no-op), per E.5 */ },
-                onLongClick = { overflowOpen = true },
+                onLongClick = {
+                    hapticFeedback.performHapticFeedback(HapticFeedbackType.LongPress)
+                    overflowOpen = true
+                },
             )
+            // §a11y-B5: 告知屏幕阅读器用户长按可触发消息操作菜单。复用现有
+            // message_actions_menu 标签，无需新增 string。`mergeDescendants =
+            // false`（默认）——不与子节点（消息正文文本）的 semantics 合并，
+            // TalkBack 会先读这行 affordance 提示，再读消息正文。
+            .semantics {
+                contentDescription = actionsLabel
+            }
     ) {
         Column(modifier = Modifier.fillMaxWidth()) {
             // The existing per-part rendering — delegated verbatim.
@@ -195,31 +231,28 @@ internal fun MessageCard(
             )
         }
 
-        // §0.8.2 P2.4: anchor-fix for the per-message "…" menu. The
-        // DropdownMenu MUST be a sibling of the IconButton inside a tight
-        // dedicated Box (aligned TopEnd) so the popup anchors below the
-        // trigger. The prior layout composed the DropdownMenu OUTSIDE the
-        // parent Box (a remote menu with no tight anchor), which caused
-        // the popup to attach to the window's top-left corner — the bug
-        // this phase fixes. Mirrors the same anchor pattern used by the
-        // top-bar ContextMenuCluster (P2.3). The previous fillMaxWidth()
-        // Box was a poor anchor (its width = the whole row); this small
-        // Box wraps only the trigger, so the menu's start offset is the
-        // trigger's end edge.
+        // §0.8.2 P2.4 / §B5-P4: anchor-fix for the long-press-triggered
+        // DropdownMenu. The popup MUST be a sibling of a tight anchor
+        // inside a dedicated Box (aligned TopEnd) so it attaches below the
+        // top-end corner of the message card. The prior layout (before
+        // P2.4) composed the DropdownMenu OUTSIDE the parent Box (a remote
+        // menu with no tight anchor), which caused the popup to attach to
+        // the window's top-left corner — the bug P2.4 fixed. Mirrors the
+        // same anchor pattern used by the top-bar ContextMenuCluster (P2.3).
+        //
+        // §B5-P4: the MoreVert IconButton that used to live inside this Box
+        // is removed (long-press already opened the same menu; the button
+        // was visually noisy). The Box itself is RETAINED as a 0-size
+        // anchor at the same TopEnd + 4dp position so the DropdownMenu's
+        // popup coordinate does NOT regress to the window's top-left. The
+        // empty Box costs nothing in measure/layout (wrap-content = 0 when
+        // the menu is collapsed) and preserves the well-defined anchor
+        // coordinate — the load-bearing property per the P2.4 anchor-fix.
         Box(
             modifier = Modifier
                 .align(androidx.compose.ui.Alignment.TopEnd)
                 .padding(top = 4.dp, end = 4.dp),
         ) {
-            IconButton(
-                onClick = { overflowOpen = true },
-            ) {
-                Icon(
-                    imageVector = Icons.Filled.MoreVert,
-                    contentDescription = stringResource(R.string.message_actions_menu),
-                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-            }
             DropdownMenu(
                 expanded = overflowOpen,
                 onDismissRequest = { overflowOpen = false },

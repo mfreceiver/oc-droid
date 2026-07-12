@@ -39,12 +39,12 @@ import androidx.compose.runtime.snapshots.SnapshotStateList
 import androidx.compose.runtime.snapshots.SnapshotStateMap
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.res.stringResource
-import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import cn.vectory.ocdroid.R
 import cn.vectory.ocdroid.data.cache.contract.GapFillState
@@ -63,6 +63,7 @@ import cn.vectory.ocdroid.ui.currentSessionStatus
 import cn.vectory.ocdroid.ui.filterBeforeRevert
 import cn.vectory.ocdroid.ui.injectMetadataMarkers
 import cn.vectory.ocdroid.ui.isStaleQuestionPart
+import cn.vectory.ocdroid.ui.theme.AppTextStyles
 import cn.vectory.ocdroid.util.FLICKER_TAG
 import cn.vectory.ocdroid.util.STREAMING_FLICKER_DEBUG
 import cn.vectory.ocdroid.util.flickerFilterOutCount
@@ -627,32 +628,68 @@ internal fun ChatMessageList(
 
     // §Phase8-nav: Box 包裹 LazyColumn + 导航 FAB overlay（右侧中下）。
     Box(modifier = Modifier.fillMaxSize()) {
-        // §watermark: low-key rotated project-name watermark stamped BEHIND
-        // the message list — replaces the old top-bar workdir-initial icon
-        // (see ChatTopBar). Renders the workdir basename (last path segment)
-        // as a single bold line tilted 45°, centered, tinted with
-        // [workdirTone] so each project carries its identity hue. The very
-        // low alpha keeps it discernible but never competitive with message
-        // text in either light or dark theme. Purely decorative —
-        // NON-INTERACTIVE (no clickable / pointerInput / hover). Listed as
-        // the FIRST child so it sits beneath the LazyColumn in z-order.
-        // `workspaceDirectory` is derived from the current session's
-        // directory (see declaration above); when null (no session / no
-        // draft) no watermark is shown.
+        // §watermark-B5: 大字号水平水印（去旋转），stamped BEHIND the message
+        // list — replaces the old top-bar workdir-initial icon (see ChatTopBar)
+        // AND the prior 45°-tilted displaySmall(24sp) watermark. Renders the
+        // workdir basename (last path segment) as a single bold HORIZONTAL
+        // line, centered, tinted with [workdirTone] so each project carries
+        // its identity hue. The very low alpha keeps it discernible but never
+        // competitive with message text in either light or dark theme.
+        // Purely decorative — NON-INTERACTIVE (no clickable / pointerInput /
+        // hover). Listed as the FIRST child so it sits beneath the LazyColumn
+        // in z-order.
+        //
+        // §watermark-autosize: 字号在 **48sp → 32sp** 区间自适应缩放，单行
+        // 不换行、不溢出（换行会大面积遮挡消息列表）。算法：
+        //   1. [BoxWithConstraints] 取容器 **88%** 宽（留边距，不全宽——全宽
+        //      水印会贴到屏幕边缘，视觉拥挤）。
+        //   2. 文本长度按 CJK 双宽估（`char.code > 0x2E80` 计 2，覆盖 CJK
+        //      Radicals / CJK Unified / Hiragana / Katakana / Hangul 等双宽
+        //      区块；Latin / 数字 / 标点计 1）。
+        //   3. 字号 = 可用宽(px) / (长度 × 字宽因子 0.62)，clamp 到 [32.sp,
+        //      48.sp]。因子 0.62 取 ExtraBold 平均字宽上界（实测 ExtraBold
+        //      Latin 字宽 ≈ 0.55–0.60 em），取上界偏保守以保证单行不溢出。
+        //      极端超长项目名（>32 单宽字符）触发 TextOverflow.Ellipsis 兜底
+        //      而非换行/溢出。
+        // alpha **0.07f**（较旧 0.05f 略升）：水平版可视面积较 45° 旋转版
+        // 小（旧版对角线拉长视感、字宽更突出），适度提亮维持同等存在感而不
+        // 干扰阅读。style 走 [AppTextStyles.watermark]（48sp/ExtraBold/56lh），
+        // 调用方按上策略 `.copy(fontSize = …)` 覆盖字号；color/fontFamily 不
+        // 写死（前者由调用方覆盖为 workdirTone + alpha，后者继承平台字体）。
+        // `workspaceDirectory` 派生自当前 session.directory（见上声明）；
+        // null/blank 时不渲染。
         workspaceDirectory?.let { dir ->
             val workdirBasename = dir.substringAfterLast('/').ifBlank { dir }
             if (workdirBasename.isNotBlank()) {
-                Text(
-                    text = workdirBasename,
+                BoxWithConstraints(
                     modifier = Modifier
                         .align(Alignment.Center)
-                        .rotate(45f),
-                    color = workdirTone(dir).copy(alpha = 0.05f),
-                    style = MaterialTheme.typography.displaySmall,
-                    fontWeight = FontWeight.Bold,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                )
+                        .fillMaxWidth(0.88f)
+                ) {
+                    val density = LocalDensity.current
+                    val availWidthPx = with(density) { maxWidth.toPx() }
+                    // CJK 双宽启发式：code > 0x2E80 覆盖 CJK Radicals / CJK
+                    // Unified / Hiragana / Katakana / Hangul 等双宽字符。
+                    val textLen = workdirBasename.sumOf { if (it.code > 0x2E80) 2 else 1 }
+                        .coerceAtLeast(1)
+                    val rawSizePx = availWidthPx / (textLen * 0.62f)
+                    // 在 px 域 clamp 到 [32.sp, 48.sp] 对应的 px 区间，再转回 sp。
+                    // 避开 TextUnit 上 coerceIn 的解析陷阱（直接 .toSp().coerceIn
+                    // 在某些 Kotlin/Compose 版本下候选不解析）。
+                    val minPx = with(density) { 32.sp.toPx() }
+                    val maxPx = with(density) { 48.sp.toPx() }
+                    val fontSize = with(density) {
+                        rawSizePx.coerceIn(minPx, maxPx).toSp()
+                    }
+                    Text(
+                        text = workdirBasename,
+                        modifier = Modifier.align(Alignment.Center),
+                        color = workdirTone(dir).copy(alpha = 0.07f),
+                        style = AppTextStyles.watermark.copy(fontSize = fontSize),
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
             }
         }
         LazyColumn(
