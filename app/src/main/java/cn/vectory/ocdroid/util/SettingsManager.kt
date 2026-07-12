@@ -177,12 +177,12 @@ class SettingsManager @Inject constructor(
         set(value) = encryptedPrefs.edit().putInt(KEY_LAST_NAV_PAGE, value.coerceIn(0, 2)).apply()
 
     /**
-     * Stable top-level route persistence for the opt-in navigation shell.
+     * Stable top-level route persistence for AppShell (the sole shell; the
+     * legacy PhoneLayout + USE_NEW_SHELL flag were removed in the redesign).
      *
      * Existing installations have only [KEY_LAST_NAV_PAGE]. The first read
      * migrates 0/1/2 to chat/sessions/settings and writes the route key. In
      * particular, legacy 2 is Settings rather than the new Workspace route.
-     * The old integer remains until the false-flag PhoneLayout is removed.
      */
     var lastRoute: String
         get() {

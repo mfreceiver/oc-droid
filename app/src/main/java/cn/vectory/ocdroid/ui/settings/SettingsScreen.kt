@@ -71,9 +71,10 @@ import kotlinx.coroutines.flow.map
  * CacheManagement popup / etc.
  *
  * The Settings top-app-bar **always** carries a back affordance (previously
- * conditional on `onBack != null` — `SettingsScreen.kt:176-180`). The Phase 1A
- * shell + the PhoneLayout fallback both supply a real [onBack]; the
- * conditional has been removed.
+ * conditional on `onBack != null` — `SettingsScreen.kt:176-180`). AppShell
+ * (the sole shell; the legacy PhoneLayout + USE_NEW_SHELL flag were removed
+ * in the redesign) always supplies a real [onBack]; the conditional has been
+ * removed.
  *
  * Sub-routes (route constants live in [NavRoute]):
  *  - [NavRoute.settingsHostsRoute]       → [SettingsHostsRoute]

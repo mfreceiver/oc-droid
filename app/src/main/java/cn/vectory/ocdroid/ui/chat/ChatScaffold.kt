@@ -184,8 +184,9 @@ fun ChatScaffold(
     // (`{ onOpenWorkspaceFiles(curSession?.directory.orEmpty()) }`) which
     // broke FilesPane.pathToShow (always null) so a tapped file path could
     // never be located. Now workdir comes from the current session and the
-    // tapped path is forwarded verbatim. AppShell / PhoneLayout build the
-    // route / overlay with both fields.
+    // tapped path is forwarded verbatim. AppShell (the sole shell; the
+    // legacy PhoneLayout was removed in the redesign) builds the route /
+    // overlay with both fields.
     val onChatFileClick: (String) -> Unit = remember(curSession, onOpenWorkspaceFiles) {
         { path -> onOpenWorkspaceFiles(curSession?.directory, path) }
     }

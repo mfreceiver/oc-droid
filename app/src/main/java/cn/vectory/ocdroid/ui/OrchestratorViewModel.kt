@@ -65,7 +65,7 @@ class OrchestratorViewModel @Inject constructor(
         core.store.mutateNav { it.copy(lastRoute = route.route, lastNavPage = clamped) }
     }
 
-    /** Called by the opt-in shell after composition; getter performs old-int migration. */
+    /** Called by AppShell (the sole shell) after composition; getter performs old-int migration. */
     fun restoreLastRoute() = setLastRoute(NavRoute.fromRouteKey(core.settingsManager.lastRoute))
 
     fun setLastRoute(route: NavRoute) {
