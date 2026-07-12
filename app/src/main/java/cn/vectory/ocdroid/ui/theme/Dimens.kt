@@ -28,6 +28,17 @@ object Dimens {
     // ── 4dp 网格间距阶梯 ───────────────────────────────────────────────
     /** 4dp — 极小间距（图标与文字、紧凑 chip 内边距等）。 */
     val spacing1: Dp = 4.dp
+    /**
+     * 6dp — 紧凑间距（B2·P2）。
+     *
+     * 角色：badge / chip 横向内边距、紧密行内状态间隔——填补现有 `spacing1`(4dp)
+     * ↔ `spacing2`(8dp) 之间的 6dp 空档。chip 内放图标+文字时，4dp 偏挤、8dp 偏松，
+     * 6dp 是视觉甜点。
+     *
+     * 命名刻意不叫 `spacing1_5`（避免暗示「半步」语义），用语义化 `spacingCompact`
+     * 表达「紧凑档」用途。
+     */
+    val spacingCompact: Dp = 6.dp
     /** 8dp — 默认小间距（同一组元素间）。 */
     val spacing2: Dp = 8.dp
     /** 12dp — 中间距（半步，常见于 card 内 padding）。 */
