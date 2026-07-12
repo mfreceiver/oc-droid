@@ -45,6 +45,25 @@ class ChatViewModel @Inject constructor(
     private val revertConversation = RevertConversation(core)
     private val revertCutoffCoordinator = RevertCutoffCoordinator(core)
 
+    /**
+     * §compact-watchdog-gen (Blocker-1 residual): monotonic generation token
+     * scoping the compact watchdog to the exact `compactSession()` invocation
+     * that armed it. Bumped:
+     *  - at the top of [compactSession] (so the new attempt gets a fresh gen
+     *    and any older still-pending watchdog now sees a mismatched gen);
+     *  - inside [clearCompacting] when it actually clears (so a watchdog
+     *    armed by the same attempt also goes stale once any clear path —
+     *    SSE idle, deterministic failure, server-reject — has run).
+     *
+     * Without this token the read-timeout watchdog was a free-floating
+     * coroutine that would happily clear a *newer* attempt's isCompacting
+     * if the older attempt had been cleared (by SSE) inside the watchdog's
+     * 180 s window — re-enabling the Composer mid-compaction. Main-thread
+     * confined (all callers run on viewModelScope's Main dispatcher), so a
+     * plain non-volatile Int is safe.
+     */
+    private var compactGeneration: Int = 0
+
     val chatFlow get() = core.chatFlow
     val sessionListFlow get() = core.sessionListFlow
     val unreadFlow get() = core.unreadFlow
@@ -169,6 +188,10 @@ class ChatViewModel @Inject constructor(
             core.effectBus.tryEmitUiEvent(UiEvent.Error(R.string.error_compact_no_model))
             return
         }
+        // §compact-watchdog-gen (Blocker-1 residual): bump on every fresh
+        // attempt so any older still-pending watchdog sees a mismatched gen
+        // and no-ops. Captured into `gen` for the new attempt's own watchdog.
+        val gen = ++compactGeneration
         core.writeChat { it.copy(isCompacting = true, compactStartedAt = System.currentTimeMillis()) }
         // §R18 Phase 3 Wave 2 (drift #6 / P1-7): user-triggered ephemeral op
         // (compact) → viewModelScope so it cancels cleanly on VM clear and the
@@ -252,9 +275,17 @@ class ChatViewModel @Inject constructor(
         // stalled and can retry. SSE-driven normal clear in ChatScaffold is
         // unaffected: if it clears the flag first, the watchdog's recheck
         // sees isCompacting=false and is a no-op.
+        //
+        // §compact-watchdog-gen (Blocker-1 residual): the recheck ALSO checks
+        // `compactGeneration == gen`. Without this guard, an older attempt's
+        // watchdog (whose 180 s window straddled an SSE clear + a new user
+        // attempt) would see isCompacting==true (the new attempt's flag) and
+        // wrongly clear it + emit a spurious timeout. The gen check pins the
+        // watchdog to its own attempt and turns every other path into a
+        // no-op, even if isCompacting is later re-set by a newer attempt.
         viewModelScope.launch {
             delay(WATCHDOG_MS)
-            if (core.store.chatFlow.value.isCompacting) {
+            if (compactGeneration == gen && core.store.chatFlow.value.isCompacting) {
                 clearCompacting()
                 core.effectBus.tryEmitUiEvent(UiEvent.Info(R.string.info_compact_timeout_retry))
             }
@@ -278,6 +309,12 @@ class ChatViewModel @Inject constructor(
 
     fun clearCompacting() {
         if (core.store.chatFlow.value.isCompacting) {
+            // §compact-watchdog-gen (Blocker-1 residual): bump the generation
+            // on every actual clear so the SAME attempt's pending watchdog
+            // (still sitting in its 180 s delay) sees a stale gen and no-ops.
+            // This covers the SSE idle hook (ChatScaffold) and every direct
+            // clearCompacting() call from the failure branches above.
+            ++compactGeneration
             core.writeChat { it.copy(isCompacting = false, compactStartedAt = 0L) }
         }
     }

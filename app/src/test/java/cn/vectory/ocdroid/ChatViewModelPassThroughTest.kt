@@ -19,6 +19,7 @@ import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
@@ -271,6 +272,95 @@ class ChatViewModelPassThroughTest : MainViewModelTestBase() {
         // Info resId is unchanged from before the watchdog fired).
         assertEquals(infoBefore, core.lastInfoEvent?.resId)
         assertFalse(core.chatFlow.value.isCompacting)
+    }
+
+    @Test
+    fun `compactSession A watchdog does not clear a later B attempt - generation guard`() = runTest {
+        // §compact-watchdog-gen (Blocker-1 residual): the watchdog must be
+        // scoped to the exact attempt that armed it via the generation token.
+        // Without the guard, this race would corrupt state:
+        //   t=0       A starts (read-timeout) → A's watchdog armed (fires at t=180 s)
+        //   t=100 s   SSE delivers A's result → ChatScaffold idle hook clears
+        //             isCompacting (bumps gen) → A's watchdog now stale
+        //   t=100 s   user starts B → B's watchdog armed (fires at t=280 s)
+        //   t=180 s   A's watchdog fires — WITHOUT the gen guard it would see
+        //             isCompacting==true (B's flag) and wrongly clear B + emit
+        //             a spurious timeout, re-enabling the Composer while B is
+        //             still compacting server-side. WITH the gen guard it sees
+        //             gen mismatch → no-op.
+        // After advancing to A's deadline, B MUST still be compacting.
+        coEvery { repository.summarizeSession(any(), any()) } returns Result.failure(
+            java.net.SocketTimeoutException("response timed out"),
+        )
+        val core = createCore()
+        val vm = ChatViewModel(core)
+        core.writeChat {
+            it.copy(
+                currentSessionId = "s1",
+                currentModel = Message.ModelInfo("p", "m"),
+            )
+        }
+
+        // ── A starts at virtual t=0 ─────────────────────────────────────────
+        vm.compactSession()
+        runCurrent()
+        assertTrue("A should be compacting", core.chatFlow.value.isCompacting)
+        val infoBeforeAdvance = core.lastInfoEvent?.resId
+
+        // ── t=100 s: A's summarize already returned (read-timeout). Simulate
+        //    the SSE-driven ChatScaffold idle hook clearing A's flag. This
+        //    bumps the generation so A's pending watchdog goes stale.
+        advanceTimeBy(100_000)
+        runCurrent()
+        vm.clearCompacting()
+        assertFalse("A cleared by SSE idle hook", core.chatFlow.value.isCompacting)
+
+        // ── t=100 s: user starts B. ++compactGeneration inside compactSession
+        //    gives B a fresh gen; B's own watchdog is armed and fires at t=280 s.
+        vm.compactSession()
+        runCurrent()
+        assertTrue("B should be compacting", core.chatFlow.value.isCompacting)
+
+        // ── Advance 80 s → virtual clock is at t=180 s = A's deadline.
+        //    A's watchdog fires here. With the gen guard it MUST no-op
+        //    (A's gen no longer matches the current gen bumped by B's start).
+        advanceTimeBy(80_000)
+        runCurrent()
+
+        // B must still be compacting — A's stale watchdog did NOT clear it.
+        assertTrue(
+            "B must still be compacting after A's stale watchdog fired (generation guard)",
+            core.chatFlow.value.isCompacting,
+        )
+        assertTrue(
+            "B's compactStartedAt must be intact",
+            core.chatFlow.value.compactStartedAt > 0L,
+        )
+        // No spurious timeout Info from A's stale watchdog — the most recent
+        // Info is still B's `info_compact_in_progress` from compactSession(B).
+        assertEquals(
+            "no info_compact_timeout_retry should be emitted by A's stale watchdog",
+            infoBeforeAdvance,
+            core.lastInfoEvent?.resId,
+        )
+        assertNotEquals(
+            "watchdog-timeout Info must NOT have been emitted by A's stale watchdog",
+            R.string.info_compact_timeout_retry,
+            core.lastInfoEvent?.resId,
+        )
+
+        // ── Sanity: advancing to B's OWN deadline (t=280 s) does clear B —
+        //    B's watchdog is correctly scoped to B's gen and fires normally.
+        advanceTimeBy(ChatViewModel.WATCHDOG_MS)
+        runCurrent()
+        assertFalse(
+            "B's own watchdog should clear B at B's deadline",
+            core.chatFlow.value.isCompacting,
+        )
+        assertEquals(
+            R.string.info_compact_timeout_retry,
+            core.lastInfoEvent?.resId,
+        )
     }
 
     @Test
