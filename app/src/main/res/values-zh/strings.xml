@@ -57,6 +57,19 @@
     <string name="settings_vcs_no_changes">无更改</string>
     <string name="settings_vcs_more_files">还有 %1$d 个</string>
     <string name="settings_vcs_load_error">加载失败：%1$s</string>
+    <!-- §B3·P1: ChangesPane WORKING_TREE 重排后的状态 pill / 分组 / header 文案。 -->
+    <string name="vcs_status_added">新增</string>
+    <string name="vcs_status_modified">修改</string>
+    <string name="vcs_status_deleted">删除</string>
+    <string name="vcs_status_renamed">重命名</string>
+    <string name="vcs_status_unknown">未知</string>
+    <string name="vcs_group_modified">修改</string>
+    <string name="vcs_group_added">新增</string>
+    <string name="vcs_group_deleted">删除</string>
+    <string name="vcs_group_renamed">重命名</string>
+    <string name="vcs_group_other">其它</string>
+    <string name="vcs_no_branch_detected">未检测到分支</string>
+    <string name="vcs_changed_files_with_count">已更改文件 · %1$d</string>
     <string name="settings_server_connection">服务器连接</string>
     <string name="settings_server_url">服务器 URL</string>
     <string name="settings_username_optional">用户名（可选）</string>

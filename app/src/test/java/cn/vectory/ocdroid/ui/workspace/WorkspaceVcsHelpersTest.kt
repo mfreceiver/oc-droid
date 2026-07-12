@@ -149,4 +149,38 @@ class WorkspaceVcsHelpersTest {
         assertEquals(SemanticColors.untrackedFile, vcsStatusColor(null))
         assertEquals(SemanticColors.untrackedFile, vcsStatusColor(""))
     }
+
+    // ── vcsStatusGroup (§B3·P1 WORKING_TREE grouping) ──────────────────
+
+    @Test
+    fun `known statuses map to their canonical group`() {
+        assertEquals(VcsStatusGroup.MODIFIED, vcsStatusGroup("modified"))
+        assertEquals(VcsStatusGroup.ADDED, vcsStatusGroup("added"))
+        assertEquals(VcsStatusGroup.DELETED, vcsStatusGroup("deleted"))
+        assertEquals(VcsStatusGroup.RENAMED, vcsStatusGroup("renamed"))
+    }
+
+    @Test
+    fun `group mapping is case-insensitive`() {
+        assertEquals(VcsStatusGroup.MODIFIED, vcsStatusGroup("Modified"))
+        assertEquals(VcsStatusGroup.ADDED, vcsStatusGroup("ADDED"))
+        assertEquals(VcsStatusGroup.DELETED, vcsStatusGroup("Deleted"))
+    }
+
+    @Test
+    fun `unknown statuses collapse to OTHER group`() {
+        assertEquals(VcsStatusGroup.OTHER, vcsStatusGroup("untracked"))
+        assertEquals(VcsStatusGroup.OTHER, vcsStatusGroup("copied"))
+        assertEquals(VcsStatusGroup.OTHER, vcsStatusGroup("typechange"))
+        assertEquals(VcsStatusGroup.OTHER, vcsStatusGroup(""))
+    }
+
+    @Test
+    fun `group ordinal pins the Modified-Added-Deleted-Renamed-Other section order`() {
+        // §B3·P1 decision 7: the WORKING_TREE list groups in exactly this order.
+        assertTrue(VcsStatusGroup.MODIFIED.ordinal < VcsStatusGroup.ADDED.ordinal)
+        assertTrue(VcsStatusGroup.ADDED.ordinal < VcsStatusGroup.DELETED.ordinal)
+        assertTrue(VcsStatusGroup.DELETED.ordinal < VcsStatusGroup.RENAMED.ordinal)
+        assertTrue(VcsStatusGroup.RENAMED.ordinal < VcsStatusGroup.OTHER.ordinal)
+    }
 }

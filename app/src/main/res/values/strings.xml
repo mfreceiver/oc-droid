@@ -63,6 +63,19 @@
     <string name="settings_vcs_no_changes">No changes</string>
     <string name="settings_vcs_more_files">+%1$d more</string>
     <string name="settings_vcs_load_error">Failed to load: %1$s</string>
+    <!-- §B3·P1: ChangesPane WORKING_TREE 重排后的状态 pill / 分组 / header 文案。 -->
+    <string name="vcs_status_added">Added</string>
+    <string name="vcs_status_modified">Modified</string>
+    <string name="vcs_status_deleted">Deleted</string>
+    <string name="vcs_status_renamed">Renamed</string>
+    <string name="vcs_status_unknown">Unknown</string>
+    <string name="vcs_group_modified">Modified</string>
+    <string name="vcs_group_added">Added</string>
+    <string name="vcs_group_deleted">Deleted</string>
+    <string name="vcs_group_renamed">Renamed</string>
+    <string name="vcs_group_other">Other</string>
+    <string name="vcs_no_branch_detected">No branch detected</string>
+    <string name="vcs_changed_files_with_count">Changed files · %1$d</string>
     <string name="settings_server_connection">Server Connection</string>
     <string name="settings_server_url">Server URL</string>
     <string name="settings_username_optional">Username (optional)</string>

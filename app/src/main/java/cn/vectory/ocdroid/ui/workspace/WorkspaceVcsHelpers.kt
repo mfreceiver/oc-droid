@@ -75,12 +75,42 @@ internal fun reduceVcsLoadState(
  *
  * Matched case-insensitively so "Modified"/"modified"/"MODIFIED" all
  * resolve to the same tone.
+ *
+ * §B3·P1: this is the canonical color mapping consumed by [StatusPill]
+ * (and the file-row trailing). Renamed / unknown / null all collapse to
+ * [SemanticColors.untrackedFile] — pinned by [WorkspaceVcsHelpersTest].
  */
 internal fun vcsStatusColor(status: String?): Color = when (status?.lowercase()) {
     "added" -> SemanticColors.addedFile
     "deleted" -> SemanticColors.deletedFile
     "modified" -> SemanticColors.modifiedFile
     else -> SemanticColors.untrackedFile
+}
+
+/**
+ * Coarse status bucket used to **group** the WORKING_TREE changed-files
+ * list (§B3·P1 decision 7: "Modified / Added / Deleted / Renamed /
+ * Other"). [ordinal] fixes the section order shown in [ChangesPane].
+ *
+ * Pure (no string lookup) so it stays unit-testable alongside
+ * [vcsStatusColor]; the localized group **label** is resolved in
+ * composition via [vcsGroupLabel].
+ */
+internal enum class VcsStatusGroup {
+    MODIFIED, ADDED, DELETED, RENAMED, OTHER;
+}
+
+/**
+ * Maps a raw VCS file-status string to its [VcsStatusGroup]. Matched
+ * case-insensitively; any value outside the known set (untracked /
+ * copied / typechange / …) collapses to [VcsStatusGroup.OTHER].
+ */
+internal fun vcsStatusGroup(status: String): VcsStatusGroup = when (status.lowercase()) {
+    "modified" -> VcsStatusGroup.MODIFIED
+    "added" -> VcsStatusGroup.ADDED
+    "deleted" -> VcsStatusGroup.DELETED
+    "renamed" -> VcsStatusGroup.RENAMED
+    else -> VcsStatusGroup.OTHER
 }
 
 /**

@@ -2,7 +2,6 @@ package cn.vectory.ocdroid.ui.workspace
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -17,9 +16,12 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.AccountTree
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.Icon
 import androidx.compose.material3.ListItem
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
@@ -37,7 +39,6 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.res.stringResource
-import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import cn.vectory.ocdroid.R
@@ -45,7 +46,9 @@ import cn.vectory.ocdroid.data.model.FileDiff
 import cn.vectory.ocdroid.data.model.VcsInfo
 import cn.vectory.ocdroid.data.model.VcsStatusEntry
 import cn.vectory.ocdroid.data.repository.OpenCodeRepository
+import cn.vectory.ocdroid.ui.theme.AppTextStyles
 import cn.vectory.ocdroid.ui.theme.BundledMonoFamily
+import cn.vectory.ocdroid.ui.theme.Dimens
 import cn.vectory.ocdroid.ui.theme.SemanticColors
 
 /**
@@ -263,30 +266,13 @@ private fun WorkingTreeLoadedBody(
     val selected = status.firstOrNull { it.file == selectedFile }
 
     Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState())) {
-        // Branch line: branch + dim "(default <defaultBranch>)" suffix when present.
-        Text(
-            text = stringResource(R.string.settings_vcs_branch),
-            style = MaterialTheme.typography.labelMedium,
-            modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp),
-        )
-        Row(
-            modifier = Modifier.padding(horizontal = 16.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            Text(
-                text = info.branch ?: "—",
-                style = MaterialTheme.typography.bodyLarge,
-                color = MaterialTheme.colorScheme.onSurface,
-            )
-            info.defaultBranch?.takeIf { it.isNotBlank() }?.let { default ->
-                Spacer(Modifier.width(8.dp))
-                Text(
-                    text = stringResource(R.string.settings_vcs_default_branch_suffix, default),
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-            }
-        }
+        // §B3·P1: Branch header block — Git icon + branch name (bodyLarge) +
+        // muted default-branch suffix on the SAME row (previously the label
+        // "分支" sat on its own line and the value on the next, which read
+        // as disjoint). 16dp horizontal / 12dp vertical padding matches the
+        // M3 list rhythm. Missing branch → explicit "未检测到分支" instead of
+        // an isolated em-dash.
+        BranchHeader(info = info)
 
         if (status.isEmpty()) {
             Spacer(Modifier.height(8.dp))
@@ -299,17 +285,24 @@ private fun WorkingTreeLoadedBody(
             return@Column
         }
 
-        Spacer(Modifier.height(8.dp))
+        // §B3·P1: Changed-files section header — labelLarge + total count
+        // ("Changed files · N"). Replaces the previous bare "Changed files"
+        // labelMedium.
         Text(
-            text = stringResource(R.string.settings_vcs_changed_files),
-            style = MaterialTheme.typography.labelMedium,
-            modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp),
+            text = stringResource(R.string.vcs_changed_files_with_count, status.size),
+            style = MaterialTheme.typography.labelLarge,
+            color = MaterialTheme.colorScheme.onSurface,
+            modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
         )
+
         // §round-B ①: cap rows so a repo with many untracked / changed files
         // doesn't compose/layout a huge list inside the verticalScroll.
-        status.take(VCS_MAX_ROWS).forEach { entry ->
-            VcsStatusRow(entry = entry, onClick = { onSelectFile(entry.file) })
-        }
+        // §B3·P1: render the capped slice grouped by status (Modified /
+        // Added / Deleted / Renamed / Other) with inset dividers between
+        // rows inside each group.
+        val capped = status.take(VCS_MAX_ROWS)
+        GroupedVcsStatusList(entries = capped, onSelectFile = onSelectFile)
+
         if (status.size > VCS_MAX_ROWS) {
             Spacer(Modifier.height(4.dp))
             Text(
@@ -333,6 +326,97 @@ private fun WorkingTreeLoadedBody(
             file = entry.file,
             onDismiss = { onSelectFile(null) },
         )
+    }
+}
+
+/**
+ * §B3·P1 Branch header — single-row Git branch presentation.
+ *
+ * `Icons.Default.AccountTree` (same vector the Git nav tab uses) + branch
+ * name in bodyLarge + muted default-branch suffix (labelMedium,
+ * onSurfaceVariant) when present. Missing branch renders an explicit
+ * "未检测到分支" instead of an isolated "—" so the row never looks broken.
+ */
+@Composable
+private fun BranchHeader(info: VcsInfo) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 16.dp, vertical = 12.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Icon(
+            imageVector = Icons.Default.AccountTree,
+            contentDescription = null,
+            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.size(Dimens.iconSm),
+        )
+        Spacer(Modifier.width(8.dp))
+        val branch = info.branch
+        if (branch.isNullOrBlank()) {
+            Text(
+                text = stringResource(R.string.vcs_no_branch_detected),
+                style = MaterialTheme.typography.bodyLarge,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        } else {
+            Text(
+                text = branch,
+                style = MaterialTheme.typography.bodyLarge,
+                color = MaterialTheme.colorScheme.onSurface,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+            info.defaultBranch?.takeIf { it.isNotBlank() }?.let { default ->
+                Spacer(Modifier.width(8.dp))
+                Text(
+                    text = stringResource(R.string.settings_vcs_default_branch_suffix, default),
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
+        }
+    }
+}
+
+/**
+ * §B3·P1 — renders the changed-file list grouped by [vcsStatusGroup]
+ * (Modified → Added → Deleted → Renamed → Other, order pinned by
+ * [VcsStatusGroup.ordinal]). Each group has a labelLarge + onSurfaceVariant
+ * header; rows inside a group are separated by an inset HorizontalDivider
+ * (start-aligned with the ListItem text at 16dp) so the eye can scan
+ * individual files. No divider between a group's last row and the next
+ * group header (the header is itself the separator).
+ */
+@Composable
+private fun GroupedVcsStatusList(
+    entries: List<VcsStatusEntry>,
+    onSelectFile: (String?) -> Unit,
+) {
+    val groups = remember(entries) {
+        entries
+            .groupBy { vcsStatusGroup(it.status) }
+            .toList()
+            .sortedBy { (group, _) -> group.ordinal }
+    }
+    groups.forEach { (group, rows) ->
+        Text(
+            text = vcsGroupLabel(group),
+            style = MaterialTheme.typography.labelLarge,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp),
+        )
+        rows.forEachIndexed { index, entry ->
+            VcsStatusRow(entry = entry, onClick = { onSelectFile(entry.file) })
+            if (index < rows.lastIndex) {
+                // Inset divider — start-aligned with the row's text (16dp),
+                // full bleed to the right edge. This is what was missing in
+                // the original flat list (rows bled into each other).
+                HorizontalDivider(modifier = Modifier.padding(start = 16.dp))
+            }
+        }
     }
 }
 
@@ -451,13 +535,16 @@ private fun DiffBottomSheet(
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
-                else -> Text(
-                    text = patch,
-                    style = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace),
+                // §B3·P1: switched the patch body from a single Text +
+                // FontFamily.Monospace inside a verticalScroll to the shared
+                // UnifiedDiffRenderer — line-level semantic coloring
+                // (+/-/hunk/header), LazyColumn row composition, and
+                // horizontal scroll for long code lines (no soft-wrap).
+                else -> UnifiedDiffRenderer(
+                    patch = patch,
                     modifier = Modifier
                         .fillMaxWidth()
-                        .heightIn(max = 480.dp)
-                        .verticalScroll(rememberScrollState()),
+                        .heightIn(max = 480.dp),
                 )
             }
         }
@@ -528,21 +615,23 @@ private fun FileDiffRow(diff: FileDiff, onClick: () -> Unit) {
 
 @Composable
 private fun VcsStatusRow(entry: VcsStatusEntry, onClick: () -> Unit) {
-    val statusColor = vcsStatusColor(entry.status)
     val basename = entry.file.substringAfterLast("/").ifEmpty { entry.file }
-    // §4.2: 同 FileDiffRow——M3 ListItem 体系，与项目主流列表对齐。
+    // §B3·P1: supporting line shows the PARENT directory only (not the full
+    // path, which already starts with the basename in the headline — showing
+    // the full path twice was the main source of "no indentation / messy"
+    // feedback). Empty parent (file at repo root) → muted "·" placeholder
+    // keeps the two-line rhythm intact instead of collapsing the row.
+    val parentDir = entry.file.substringBeforeLast("/", "").ifEmpty { "·" }
+    // §B3·P1: M3 ListItem — 56dp min height (was 48dp) gives the trailing
+    // StatusPill + mono counts breathing room. The leading 8dp color dot is
+    // GONE: StatusPill already carries the status color, and removing the
+    // dot frees the leading slot so the headline/supporting text starts at
+    // the standard 16dp inset (aligned with the inset divider at 16dp).
     ListItem(
         modifier = Modifier
             .fillMaxWidth()
-            .heightIn(min = 48.dp)
+            .heightIn(min = 56.dp)
             .clickable(onClick = onClick),
-        leadingContent = {
-            Box(
-                modifier = Modifier
-                    .size(8.dp)
-                    .background(color = statusColor, shape = CircleShape)
-            )
-        },
         headlineContent = {
             Text(
                 text = basename,
@@ -554,36 +643,41 @@ private fun VcsStatusRow(entry: VcsStatusEntry, onClick: () -> Unit) {
         },
         supportingContent = {
             Text(
-                text = entry.file,
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                text = parentDir,
+                // §B3·P1: codeBody (B2·P2) — BundledMonoFamily 12sp/16lh, so
+                // the path column-aligns with the trailing +N/−M counts and
+                // the diff body. NOT bodySmall + BundledMonoFamily cobbled
+                // together.
+                style = AppTextStyles.codeBody.copy(
+                    fontSize = MaterialTheme.typography.bodySmall.fontSize,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                ),
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
             )
         },
         trailingContent = {
+            // §B3·P1: StatusPill replaces the bare colored status text; the
+            // +N/−M counts reuse codeBody (mono) for column alignment, green
+            // via stateSuccessFg / red via colorScheme.error, omitted when 0.
             Row(verticalAlignment = Alignment.CenterVertically) {
-                Text(
-                    text = entry.status,
-                    style = MaterialTheme.typography.labelMedium,
-                    color = statusColor,
-                    modifier = Modifier.padding(end = 6.dp),
-                )
+                StatusPill(status = entry.status)
                 if (entry.additions > 0) {
+                    Spacer(Modifier.width(6.dp))
                     Text(
                         text = "+${entry.additions}",
-                        style = MaterialTheme.typography.labelMedium,
+                        style = AppTextStyles.codeBody,
                         color = SemanticColors.stateSuccessFg(),
-                        fontFamily = BundledMonoFamily,
+                        maxLines = 1,
                     )
                 }
                 if (entry.deletions > 0) {
                     Spacer(Modifier.width(4.dp))
                     Text(
-                        text = "-${entry.deletions}",
-                        style = MaterialTheme.typography.labelMedium,
+                        text = "−${entry.deletions}",
+                        style = AppTextStyles.codeBody,
                         color = MaterialTheme.colorScheme.error,
-                        fontFamily = BundledMonoFamily,
+                        maxLines = 1,
                     )
                 }
             }
