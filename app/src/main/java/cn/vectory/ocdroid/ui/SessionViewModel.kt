@@ -176,31 +176,20 @@ class SessionViewModel @Inject constructor(
         // /command) now take an explicit `directory` parameter, and the
         // composer / settingsManager state below carries the workdir forward
         // (draftWorkdir + settingsManager.currentWorkdir).
-        // §R18 Phase 2-F: chatFlow.currentSessionId (cleared in the writeChat
+        // §R18 Phase 2-F: chatFlow.currentSessionId (cleared by the dispatch
         // below) is the sole runtime source; the AppCore collector drops null,
         // so no manual SettingsManager write.
-        store.mutateChat {
-            it.copy(
-                currentSessionId = null,
-                messages = emptyList(),
-                partsByMessage = emptyMap(),
-                streamingPartTexts = emptyMap(),
-                streamingReasoningPart = null,
-            )
-        }
-        store.mutateSessionList { it.copy(sessionTodos = emptyMap()) }
-        store.mutateChat { it.copy(currentModel = null) }
-        store.mutateComposer {
-            // §1B-FIX (I4): also clear fileReferences — chips from the
-            // previous session's draft must not carry over to the new
-            // workdir.
-            it.copy(
-                inputText = "",
-                imageAttachments = emptyList(),
-                fileReferences = emptyList(),
-                draftWorkdir = workdir,
-            )
-        }
+        // §A5-3 Phase B2 (release-gate fix A): the pre-B2 sequence — mutateChat
+        // (clear chat + streaming), mutateSessionList (clear sessionTodos),
+        // mutateChat (clear currentModel), mutateComposer (clear inputText +
+        // attachments + fileReferences, set draftWorkdir) — is collapsed into
+        // ONE atomic dispatch, mirroring the effect path
+        // (AppCoreOrchestration.createSessionInWorkdirForEffect). The reducer
+        // ([AppAction.WorkdirDraftStarted]) performs exactly these writes
+        // (field parity verified against the 4 mutateXxx calls above) in a
+        // single committed aggregate state → no torn intermediates for
+        // stateFlow collectors. (groker #1: the recon missed this 5th site.)
+        store.dispatch(AppAction.WorkdirDraftStarted(workdir = workdir))
         settingsManager.currentWorkdir = workdir
         // glm-3 🟡#1: single-read fp.
         val fp = hostProfileStore.currentProfile().serverGroupFp.ifBlank { hostProfileStore.currentProfile().id }

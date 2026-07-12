@@ -165,22 +165,23 @@ internal fun reduce(state: StoreState, action: AppAction): StoreState = when (ac
     is AppAction.HostStatePurged -> {
         // §slice-only-preserve: ChatState carries three fields NOT mirrored
         // to AppState (isCompacting / compactStartedAt / refreshNonce — see
-        // HostProfileController.kt:475-479). Use .copy() on the existing
-        // ChatState so they are preserved; only the AppState-represented
-        // chat fields are reset.
+        // HostProfileController.kt:475-479). [clearSessionData] uses .copy()
+        // on the existing ChatState so they are preserved; only the per-
+        // session chat fields are reset.
         val (newChat, newSessionList, newUnread) = if (!action.preserveServerGroupData) {
             // Cross-group (异组 switch / delete active host): full purge of
             // per-server + per-profile state.
+            // §fix-leak-window (release-gate fix B): clearSessionData also
+            // resets currentModel / gapMarkers / olderMessagesCursor /
+            // hasMoreMessages / staleNotice / revertCutoffs / SSE-coalesce
+            // buffers, AND sessionList pendingPermissions/pendingQuestions are
+            // cleared — pre-B2 left all of these stale (verified via
+            // `git show e190cce^:.../HostProfileController.kt` purgePerHostState
+            // + `git show e190cce^:.../AppCoreOrchestration.kt`
+            // createSessionInWorkdirForEffect — neither cleared them). This is
+            // a deliberate IMPROVEMENT, not a missed regression.
             Triple(
-                state.chat.copy(
-                    currentSessionId = null,
-                    messages = emptyList(),
-                    partsByMessage = emptyMap(),
-                    streamingPartTexts = emptyMap(),
-                    streamingReasoningPart = null,
-                    isLoadingMessages = false,
-                    isLoadingMoreMessages = false,
-                ),
+                state.chat.clearSessionData(),
                 state.sessionList.copy(
                     sessions = emptyList(),
                     directorySessions = emptyMap(),
@@ -188,6 +189,11 @@ internal fun reduce(state: StoreState, action: AppAction): StoreState = when (ac
                     sessionStatuses = emptyMap(),
                     sessionTodos = emptyMap(),
                     sessionDiffs = emptyMap(),
+                    // §fix-leak-window (fix B): pending permission / question
+                    // requests belong to the prior host's sessions — must NOT
+                    // survive a cross-group switch.
+                    pendingPermissions = emptyList(),
+                    pendingQuestions = emptyList(),
                 ),
                 state.unread.copy(
                     unreadSessions = emptySet(),
@@ -222,18 +228,12 @@ internal fun reduce(state: StoreState, action: AppAction): StoreState = when (ac
     }
 
     is AppAction.WorkdirDraftStarted -> state.copy(
-        chat = state.chat.copy(
-            currentSessionId = null,
-            messages = emptyList(),
-            partsByMessage = emptyMap(),
-            streamingPartTexts = emptyMap(),
-            streamingReasoningPart = null,
-            // §fix-draft-model-leak: clear currentModel so the prior session's
-            // inferred model does NOT leak into the draft picker (the original
-            // site did this as a SEPARATE writeChat after the first — folded
-            // into one commit here).
-            currentModel = null,
-        ),
+        // §fix-leak-window (release-gate fix B): full per-session clear via
+        // clearSessionData — closes the draft leak window consistently with
+        // the cross-host purge (currentModel / gapMarkers / cursor / etc. all
+        // reset; pre-B2 left them stale). The 3 chrome fields are preserved
+        // via .copy() inside clearSessionData.
+        chat = state.chat.clearSessionData(),
         sessionList = state.sessionList.copy(
             sessionTodos = emptyMap(),
         ),
@@ -248,3 +248,43 @@ internal fun reduce(state: StoreState, action: AppAction): StoreState = when (ac
         ),
     )
 }
+
+/**
+ * §fix-leak-window (release-gate fix B): reset ALL per-session [ChatState]
+ * fields, preserving only the 3 chrome fields (isCompacting /
+ * compactStartedAt / refreshNonce — NOT per-session; they survive a host
+ * purge / draft reset and are documented at HostProfileController.kt:475-479).
+ *
+ * Closes the cross-host / draft leak window: pre-B2
+ * `purgePerHostState` (cross-group) + `createSessionInWorkdir*` left
+ * `currentModel` / `gapMarkers` / `olderMessagesCursor` / `hasMoreMessages`
+ * / `staleNotice` / `revertCutoffs` / `deltaBuffer` / `fullTextBuffer` /
+ * `pendingFlushPartIds` stale — verified via
+ * `git show e190cce^:app/src/main/java/cn/vectory/ocdroid/ui/controller/HostProfileController.kt`
+ * (purgePerHostState) and
+ * `git show e190cce^:app/src/main/java/cn/vectory/ocdroid/ui/AppCoreOrchestration.kt`
+ * (createSessionInWorkdirForEffect): NEITHER cleared these fields. Fix B is
+ * therefore a deliberate IMPROVEMENT, not a missed regression — a stale
+ * model / cursor / gap-set from the prior host or session no longer bleeds
+ * into the new view. Uses `.copy()` so the 3 chrome fields are preserved.
+ */
+private fun ChatState.clearSessionData(): ChatState = copy(
+    currentSessionId = null,
+    messages = emptyList(),
+    revertCutoffs = emptyMap(),
+    partsByMessage = emptyMap(),
+    streamingPartTexts = emptyMap(),
+    streamingReasoningPart = null,
+    olderMessagesCursor = null,
+    hasMoreMessages = false,
+    isLoadingMessages = false,
+    isLoadingMoreMessages = false,
+    gapMarkers = emptyList(),
+    staleNotice = false,
+    currentModel = null,
+    deltaBuffer = emptyMap(),
+    fullTextBuffer = emptyMap(),
+    pendingFlushPartIds = emptySet(),
+    // PRESERVED (chrome, NOT per-session — kept via .copy() above):
+    // isCompacting, compactStartedAt, refreshNonce.
+)

@@ -62,6 +62,17 @@
 # --- kotlinx-serialization Retrofit converter: does generic Type reflection ---
 -keep class com.jakewharton.retrofit2.** { *; }
 
+# --- StatusSlot AnimatedContent contentKey={it::class}: keep each sealed subclass
+# distinct (release-gate fix C / opuser #4). R8 horizontal class merging would
+# otherwise collapse the 5 object variants (None/Connecting/Running/Compacting/
+# Retry) into one class, making it::class equal between them → AnimatedContent
+# loses transitions between object variants in the MINIFIED release build. The
+# Question/Permission data classes carry distinct payload types so they are not
+# merged, but the rule keeps the whole sealed hierarchy uniform + future-proof.
+# (Note: the class lives in the .ui.chat package, not .ui.)
+-keep class cn.vectory.ocdroid.ui.chat.StatusSlotContent { *; }
+-keep class cn.vectory.ocdroid.ui.chat.StatusSlotContent$* { *; }
+
 # R-20 Phase 0: SQLCipher (net.zetetic:sqlcipher-android 4.16.0) — its AAR
 # ships a consumer-rules.pro that R8 auto-applies, keeping
 # net.zetetic.database.** (native loader + SQLiteDatabase descriptor). Do NOT

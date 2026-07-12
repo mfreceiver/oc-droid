@@ -1,8 +1,16 @@
 package cn.vectory.ocdroid.ui
 
 import cn.vectory.ocdroid.data.api.CommandInfo
+import cn.vectory.ocdroid.data.cache.contract.GapFillState
+import cn.vectory.ocdroid.data.cache.contract.GapMarker
 import cn.vectory.ocdroid.data.model.Message
 import cn.vectory.ocdroid.data.model.Part
+import cn.vectory.ocdroid.data.model.PermissionRequest
+import cn.vectory.ocdroid.data.model.QuestionInfo
+import cn.vectory.ocdroid.data.model.QuestionOption
+import cn.vectory.ocdroid.data.model.QuestionRequest
+import cn.vectory.ocdroid.data.model.RevertCutoff
+import cn.vectory.ocdroid.data.model.RevertCutoffState
 import cn.vectory.ocdroid.data.model.Session
 import cn.vectory.ocdroid.data.model.TodoItem
 import cn.vectory.ocdroid.ui.controller.SeedFixture
@@ -225,6 +233,18 @@ class AppActionReducerTest {
                 streamingReasoningPart = Part(id = "p1", type = "reasoning", text = "r"),
                 isLoadingMessages = true,
                 isLoadingMoreMessages = true,
+                // §fix-leak-window (fix B): the per-session fields pre-B2 left
+                // stale — seeded non-default so the assertions below prove the
+                // reducer actually clears them (not just that they defaulted).
+                currentModel = Message.ModelInfo("openai", "gpt-5"),
+                olderMessagesCursor = "cursor-old",
+                hasMoreMessages = true,
+                staleNotice = true,
+                gapMarkers = listOf(GapMarker("g1", "lo", "hi", null, GapFillState.Idle)),
+                revertCutoffs = mapOf("m1" to RevertCutoff("sess-old", "m1", RevertCutoffState.PendingFetch)),
+                deltaBuffer = mapOf("p1" to "buf"),
+                fullTextBuffer = mapOf("p2" to "full"),
+                pendingFlushPartIds = setOf("p3"),
                 // The 3 chat-only fields — MUST be preserved.
                 isCompacting = true,
                 compactStartedAt = 42L,
@@ -242,6 +262,16 @@ class AppActionReducerTest {
         assertNull(out.chat.streamingReasoningPart)
         assertFalse(out.chat.isLoadingMessages)
         assertFalse(out.chat.isLoadingMoreMessages)
+        // §fix-leak-window (fix B): newly-cleared per-session fields.
+        assertNull("currentModel cleared cross-host", out.chat.currentModel)
+        assertNull("olderMessagesCursor cleared cross-host", out.chat.olderMessagesCursor)
+        assertFalse("hasMoreMessages cleared cross-host", out.chat.hasMoreMessages)
+        assertFalse("staleNotice cleared cross-host", out.chat.staleNotice)
+        assertTrue("gapMarkers cleared cross-host", out.chat.gapMarkers.isEmpty())
+        assertTrue("revertCutoffs cleared cross-host", out.chat.revertCutoffs.isEmpty())
+        assertTrue("deltaBuffer cleared cross-host", out.chat.deltaBuffer.isEmpty())
+        assertTrue("fullTextBuffer cleared cross-host", out.chat.fullTextBuffer.isEmpty())
+        assertTrue("pendingFlushPartIds cleared cross-host", out.chat.pendingFlushPartIds.isEmpty())
         // PRESERVED (the 3 chat-only fields):
         assertTrue(out.chat.isCompacting)
         assertEquals(42L, out.chat.compactStartedAt)
@@ -258,6 +288,17 @@ class AppActionReducerTest {
                 sessionStatuses = mapOf("s1" to cn.vectory.ocdroid.data.model.SessionStatus("idle")),
                 sessionTodos = mapOf("s1" to listOf(TodoItem(content = "t", status = "pending", priority = "normal", id = "t1"))),
                 sessionDiffs = mapOf("s1" to emptyList()),
+                // §fix-leak-window (fix B): pending permission/question requests
+                // belong to the prior host's sessions — seeded non-default so the
+                // assertions prove the reducer clears them cross-group (pre-B2 left
+                // them stale).
+                pendingPermissions = listOf(PermissionRequest(id = "perm1", sessionId = "s1")),
+                pendingQuestions = listOf(
+                    QuestionRequest(
+                        id = "q1", sessionId = "s1",
+                        questions = listOf(QuestionInfo("q?", "h", listOf(QuestionOption("a", "b")))),
+                    ),
+                ),
             ),
             unread = UnreadState(
                 unreadSessions = setOf("s1"),
@@ -278,6 +319,9 @@ class AppActionReducerTest {
         assertTrue(out.sessionList.sessionStatuses.isEmpty())
         assertTrue(out.sessionList.sessionTodos.isEmpty())
         assertTrue(out.sessionList.sessionDiffs.isEmpty())
+        // §fix-leak-window (fix B): pending requests cleared cross-group.
+        assertTrue("pendingPermissions cleared cross-host", out.sessionList.pendingPermissions.isEmpty())
+        assertTrue("pendingQuestions cleared cross-host", out.sessionList.pendingQuestions.isEmpty())
         // unread fully cleared.
         assertTrue(out.unread.unreadSessions.isEmpty())
         assertTrue(out.unread.tempClearedUnread.isEmpty())
@@ -360,6 +404,9 @@ class AppActionReducerTest {
     fun `reduce WorkdirDraftStarted clears chat fields and currentModel`() {
         // §fix-draft-model-leak: currentModel MUST be cleared so the prior session's
         // model does not leak into the draft picker.
+        // §fix-leak-window (fix B): the FULL per-session clear now also resets
+        // gapMarkers / cursor / hasMoreMessages / staleNotice / etc. — seeded
+        // non-default so the assertions prove the reducer clears them.
         val prior = StoreState.initial().copy(
             chat = ChatState(
                 currentSessionId = "old",
@@ -368,6 +415,14 @@ class AppActionReducerTest {
                 streamingPartTexts = mapOf("p1" to "delta"),
                 streamingReasoningPart = Part(id = "p1", type = "reasoning", text = "r"),
                 currentModel = Message.ModelInfo("openai", "gpt-5"),
+                olderMessagesCursor = "cursor-old",
+                hasMoreMessages = true,
+                staleNotice = true,
+                gapMarkers = listOf(GapMarker("g1", "lo", "hi", null, GapFillState.Idle)),
+                revertCutoffs = mapOf("m1" to RevertCutoff("old", "m1", RevertCutoffState.PendingFetch)),
+                deltaBuffer = mapOf("p1" to "buf"),
+                fullTextBuffer = mapOf("p2" to "full"),
+                pendingFlushPartIds = setOf("p3"),
                 // chat-only fields — PRESERVED (same .copy() contract).
                 isCompacting = true,
                 refreshNonce = 9L,
@@ -382,6 +437,15 @@ class AppActionReducerTest {
         assertTrue(out.chat.streamingPartTexts.isEmpty())
         assertNull(out.chat.streamingReasoningPart)
         assertNull("currentModel cleared (fix-draft-model-leak)", out.chat.currentModel)
+        // §fix-leak-window (fix B): full per-session clear.
+        assertNull("olderMessagesCursor cleared on draft-start", out.chat.olderMessagesCursor)
+        assertFalse("hasMoreMessages cleared on draft-start", out.chat.hasMoreMessages)
+        assertFalse("staleNotice cleared on draft-start", out.chat.staleNotice)
+        assertTrue("gapMarkers cleared on draft-start", out.chat.gapMarkers.isEmpty())
+        assertTrue("revertCutoffs cleared on draft-start", out.chat.revertCutoffs.isEmpty())
+        assertTrue("deltaBuffer cleared on draft-start", out.chat.deltaBuffer.isEmpty())
+        assertTrue("fullTextBuffer cleared on draft-start", out.chat.fullTextBuffer.isEmpty())
+        assertTrue("pendingFlushPartIds cleared on draft-start", out.chat.pendingFlushPartIds.isEmpty())
         // chat-only fields preserved.
         assertTrue(out.chat.isCompacting)
         assertEquals(9L, out.chat.refreshNonce)
