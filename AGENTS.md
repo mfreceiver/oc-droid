@@ -10,8 +10,8 @@
 | 任务 | 入口 | 规则 / 细节 |
 |---|---|---|
 | 改动后校验（替代 LSP，必做） | `./scripts/check.sh` | `.opencode/policies/build-signing.md`「改动校验」 |
-| 发版（出包 + commit + tag） | `./scripts/release.sh <patch\|minor\|major>` | `.opencode/policies/build-signing.md`、`.opencode/policies/versioning.md` |
-| bump 版本号 | `./scripts/release.sh` 内部调用，**禁止手改** `app/build.gradle.kts` | `.opencode/policies/versioning.md` |
+| 发版（出包 + tag，版本由 git 派生，无 commit） | `./scripts/release.sh <patch\|minor\|major>` | `.opencode/policies/build-signing.md`、`.opencode/policies/versioning.md` |
+| 版本号来源 | git 派生（`versionName`=git describe、`versionCode`=commit count），无 bump 脚本 | `.opencode/policies/versioning.md` |
 | 构建环境 export | `source ./scripts/env.sh` | `scripts/env.sh` |
 | 模拟器调试（启停/集成测试） | `./scripts/emulator.sh {status\|start\|stop\|restart}` | `docs/emulator-debug.md` |
 | 发版前评审（产物归档） | `.opencode/runs/reviews/<YYYY-MM-DD>/<reviewer>_<scope>.json` | `.opencode/policies/review-gate.md` |
@@ -24,7 +24,7 @@
 - **设备安全**：不得在物理 Android 手机上跑 `connectedDebugAndroidTest`、安装或启动 debug 构建，**除非用户明确要求**。UI/插桩测试与安装**仅用模拟器**。若同时连了真机和模拟器，用 `ANDROID_SERIAL=<模拟器id>` 明确指定。
 - **模拟器占用纪律**：模拟器是本机共享资源。使用前必须 `./scripts/emulator.sh status` 确认「未运行」（=没人在用）再 `start`；已在运行时**不得抢占**（他人会话）。用完**必须 `stop`** 清理环境。详见 `docs/emulator-debug.md`。
 - **Git 分支**：单一主线分支 `main`，在此分支工作与出包。
-- **版本号**：禁止手改 `app/build.gradle.kts` 的 `versionCode`/`versionName`，必须经脚本（见 `versioning.md`）。
+- **版本号**：由 git 派生（`versionName`=`git describe`、`versionCode`=commit count），`app/build.gradle.kts` 无硬编码值，禁止手改；里程碑发版走 `release.sh`（只打 tag），tag 后小修复直接重建（见 `versioning.md`）。
 
 ## 构建/发版/测试细节
 
@@ -43,7 +43,7 @@
 source ./scripts/env.sh                # 导出 JAVA_HOME / ANDROID_HOME（构建前必做，或写 ~/.zshrc）
 ./scripts/check.sh                     # 编译 + 单测（每次改动必跑）
 ./scripts/check.sh --full              # + lint + 覆盖率
-./scripts/release.sh patch             # 发版（唯一入口；内部已做 bump/构建/tag）
+./scripts/release.sh patch             # 发版（唯一入口；打 tag；版本由 git 派生，无 bump）
 ./scripts/emulator.sh status           # 用前确认模拟器未运行（没人在用）
 ./scripts/emulator.sh start            # 启动模拟器（headless，等开机完成）
 ./scripts/emulator.sh stop             # 用完必关，清理环境

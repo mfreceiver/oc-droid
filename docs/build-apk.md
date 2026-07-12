@@ -90,59 +90,65 @@ Release 签名已在 `app/build.gradle.kts` 配置完毕：
 
 ## 5. 版本号管理
 
-权威规则见 `.opencode/policies/versioning.md`，脚本入口 `scripts/bump-version.sh`（**禁止手改** `app/build.gradle.kts` 的 `version*` 字段）：
+权威规则见 `.opencode/policies/versioning.md`。ocdroid 采用 **go-around 模式**：**不在源码里写版本号**，`app/build.gradle.kts` 的 `versionCode`/`versionName` 在 Gradle 配置期由 git 派生——
 
-```bash
-./scripts/bump-version.sh patch   # patch | minor | major
-```
+| 字段 | 来源 | 形态 |
+|---|---|---|
+| `versionName` | `git describe --tags --always --dirty`（去 `v` 前缀） | `0.8.1`（干净 tag）/ `0.8.1-3-gd5e1311`（tag 后 N 提交）/ `dev`（非 git） |
+| `versionCode` | `git rev-list --count HEAD` | 单调递增整数，每 commit +1 |
 
-`app/build.gradle.kts` 维护两个字段（`versionCode` 单调递增 +1，`versionName` 语义化 MAJOR.MINOR.PATCH）：
+`app/build.gradle.kts` 里**没有**硬编码的 `versionCode = N` / `versionName = "x.y.z"`——那两行是 `versionCode = gitVersionCode` / `versionName = gitVersionName`。**禁止手改**（手写会被下次构建的派生值取代）。
 
-```kotlin
-versionCode = 9
-versionName = "0.2.4"     // 当前版本
-```
+里程碑发版（新 semver tag）走 `release.sh`；tag 后的小修复直接重建即可（见 §6.1）。
 
 ---
 
 ## 6. 发版产物与 Gitea Release
 
-### 6.1 发版流程（单一入口）
+### 6.1 发版流程
 
-发版走 `scripts/release.sh`（详见 `.opencode/policies/build-signing.md`），内部已依次执行：
+ocdroid 有两类发版（详见 `.opencode/policies/versioning.md`）：
 
-1. 分支=main、工作区干净校验。
-2. 质量门禁：`scripts/check.sh`（编译 + 单测全绿）。
-3. bump 版本号：`scripts/bump-version.sh`。
-4. `./gradlew assembleRelease` 产出签名 APK。
-5. 产物归档到 `APK/oc-droid-<versionName>.apk`。
-6. **生成 changelog**：从上个 tag 到 HEAD 的 conventional commits 按 `feat/fix/docs/test/...` 分组，写入 `APK/oc-droid-<versionName>.md`。
-7. `commit` + 打 tag `v<versionName>`（tag 注释用该 changelog）。
+**A. 里程碑发版**（新 semver，单一入口 `scripts/release.sh`）：
 
 ```bash
-./scripts/release.sh patch       # patch | minor | major
+./scripts/release.sh patch   # patch | minor | major
 ```
 
-`git push` 与 Gitea release 上传 **不自动执行**（对外发布需人工确认），脚本会打印命令。
+内部依次：
 
-> 发版前的多 agent 评审（如 `glmer` + `gpter`）按评审意见修订；评审产物按 `.opencode/policies/review-gate.md` 归档到 `.opencode/runs/reviews/`。
+1. 校验分支=main、工作区干净（已跟踪文件）。
+2. 质量门禁：`scripts/check.sh`。
+3. 由最新 git tag 推算下一版本（patch|minor|major）。
+4. `./gradlew assembleRelease archiveReleaseApk -PreleaseVersion=<tag>` → 产物 `APK/oc-droid-<tag>.apk`（versionCode 自动 = commit count）。
+5. 生成 changelog（上个 tag..HEAD 的 conventional commits 分组）→ `APK/oc-droid-<tag>.md`。
+6. 创建 annotated tag `v<tag>`（注释 = changelog）。**不 commit 任何版本文件**（无版本文件可 commit）。
+
+`git push` 与 Gitea release 上传 **不自动执行**，脚本会打印命令。
+
+**B. 同族小修复**（不加新 tag）——go-around 模式的核心收益：
+
+```bash
+# 修完 bug、commit 之后：
+./gradlew assembleRelease archiveReleaseApk
+# → APK/oc-droid-<tag>-N-g<hash>.apk（versionName 自带 commit 锚点，versionCode 更高 → 可装升级）
+```
+
+无需 bump semver，重建即得可追溯、可升级的 APK。
+
+> 发版前的多 agent 评审按 `.opencode/policies/review-gate.md` 归档到 `.opencode/runs/reviews/`。
 
 ### 6.2 发布产物约定
 
-所有发布的 APK 放到**项目根目录的 `APK/` 文件夹**（已被 `.gitignore` 忽略，不入库），按 **`oc-droid-<versionName>.apk`** 命名：
+所有发布的 APK 放到**项目根目录的 `APK/` 文件夹**（已被 `.gitignore` 忽略，不入库），按 **`oc-droid-<versionName>.apk`** 命名（`<versionName>` = git 派生值）：
 
 ```
 APK/
-└── oc-droid-0.2.3.apk
+├── oc-droid-0.8.1.apk              ← 里程碑发版（release.sh）
+└── oc-droid-0.8.1-1-gabc1234.apk   ← 同族小修复（直接重建）
 ```
 
-一键产出（从构建产物拷贝并命名）：
-
-```bash
-mkdir -p APK
-VERSION=$(grep 'versionName' app/build.gradle.kts | head -1 | sed 's/.*"\([^"]*\)".*/\1/')
-cp app/build/outputs/apk/release/app-release.apk "APK/oc-droid-$VERSION.apk"
-```
+归档由 gradle `archiveReleaseApk` task 自动命名（`release.sh` 与手动重建都走它），无需手 grep `versionName`。
 
 ### 6.3 发版到自建 Gitea（git push + curl REST API）
 
@@ -151,7 +157,7 @@ cp app/build/outputs/apk/release/app-release.apk "APK/oc-droid-$VERSION.apk"
 **前提**：Gitea token 可从两处取（脚本自动）：① 环境变量 `GITEA_TOKEN`；② 本机 `~/.config/tea/config.yml`（tea 登录残留，仅读 token，不调 tea）。
 
 ```bash
-VERSION="0.5.0"   # versionName，与 release.sh bump 出的一致
+VERSION="0.5.0"   # versionName，与 release.sh 打的 tag 一致
 TAG="v$VERSION"
 
 # 1) push main + tag（Gitea 收到 tag 后自动建 release 占位）

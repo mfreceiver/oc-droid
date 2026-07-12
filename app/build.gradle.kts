@@ -1,5 +1,6 @@
 import java.util.Base64
 import java.util.Properties
+import org.gradle.api.tasks.Copy
 
 // Load .env for integration test credentials (not checked in)
 val envFile = rootProject.file(".env")
@@ -21,6 +22,32 @@ plugins {
     alias(libs.plugins.kover)
 }
 
+// === Version from git (go-around pattern; see .opencode/policies/versioning.md) ===
+// No hand-maintained version fields. Both values are derived from git at config time:
+//   versionName = git describe --tags --always --dirty  (leading "v" stripped)
+//     → "0.8.1" at a clean tag commit, "0.8.1-3-gd5e1311" past it, "dev" if not a git repo.
+//   versionCode = git rev-list --count HEAD  (monotonic int, auto-increments per commit;
+//     strictly greater than every historical hand-bumped code, which maxed at 64).
+// release.sh passes -PreleaseVersion=<tag> so the release APK shows the clean about-to-
+// be-created tag instead of <prev>-N-gHASH. Rebuilding after a post-tag fix (without
+// -PreleaseVersion) yields a shippable, traceable <tag>-N-gHASH APK under the same version
+// family (higher versionCode → installable upgrade). Do NOT hand-edit these two fields.
+fun gitOut(vararg args: String): String = try {
+    val proc = ProcessBuilder("git", *args)
+        .directory(rootProject.projectDir)
+        .redirectError(ProcessBuilder.Redirect.DISCARD)
+        .start()
+    val out = proc.inputStream.bufferedReader().readText().trim()
+    proc.waitFor()
+    out
+} catch (e: Exception) { "" }
+
+val releaseVersionOverride = providers.gradleProperty("releaseVersion").orNull?.trim()?.orEmpty()
+val gitVersionName: String = (releaseVersionOverride?.takeIf { it.isNotEmpty() }
+    ?: gitOut("describe", "--tags", "--always", "--dirty").removePrefix("v"))
+    .ifEmpty { "dev" }
+val gitVersionCode: Int = gitOut("rev-list", "--count", "HEAD").toIntOrNull()?.coerceAtLeast(1) ?: 1
+
 android {
     namespace = "cn.vectory.ocdroid"
     compileSdk = 35
@@ -29,8 +56,8 @@ android {
         applicationId = "cn.vectory.ocdroid"
         minSdk = 34
         targetSdk = 34
-        versionCode = 64
-        versionName = "0.8.0"
+        versionCode = gitVersionCode
+        versionName = gitVersionName
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         // Integration test credentials from .env (dynamic, not in code)
@@ -127,6 +154,18 @@ android {
         // 终审：此前仅默认 warning，与注释"重新启用强制"不一致）。
         error += setOf("HardcodedText", "MissingTranslation")
     }
+}
+
+// Archive the release APK to APK/oc-droid-<versionName>.apk.
+//   release.sh:  ./gradlew assembleRelease archiveReleaseApk -PreleaseVersion=<tag>
+//                → versionName = clean tag (e.g. 0.8.1) → APK/oc-droid-0.8.1.apk
+//   snapshot:    ./gradlew assembleRelease archiveReleaseApk   (no override)
+//                → versionName = git describe (e.g. 0.8.1-1-gabc1234) → APK/oc-droid-0.8.1-1-gabc1234.apk
+tasks.register<Copy>("archiveReleaseApk") {
+    dependsOn("assembleRelease")
+    from(layout.buildDirectory.dir("outputs/apk/release/app-release.apk"))
+    into(rootProject.layout.projectDirectory.dir("APK"))
+    rename { "oc-droid-$gitVersionName.apk" }
 }
 
 // R-20 Phase 0：Room schema 导出目录（exportSchema=true 要求 KSP arg）。
