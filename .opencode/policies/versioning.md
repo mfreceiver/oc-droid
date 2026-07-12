@@ -10,20 +10,17 @@ ocdroid **不在源码里写版本号**。`app/build.gradle.kts` 的 `versionCod
 
 | 字段 | 来源 | 形态 |
 |---|---|---|
-| `versionName` | `git describe --tags --always --dirty`（去前导 `v`） | 干净 tag 提交=`0.8.1`；tag 后 N 个提交=`0.8.1-3-gd5e1311`；脏树=`…-dirty`；非 git 仓库=`dev` |
+| `versionName` | `<nearest-tag>-<short-hash>[-dirty]`（tag 去 `v`，hash = `git rev-parse --short`） | 始终带 commit 锚点：`0.8.2-5f5f243`（tag 提交与其后的任意提交同形）；脏树=`…-dirty`；非 git 仓库=`dev` |
 | `versionCode` | `git rev-list --count HEAD` | 单调递增整数，每 commit +1，永不回退、永不复用（远大于历史手 bump 的最大值 64） |
 
-唯一例外：`release.sh` 构建时传 `-PreleaseVersion=<tag>`，让 release APK 的 `versionName`
-显示**即将创建的干净 tag 名**（而非 `<prev>-N-gHASH`）。tag 创建后，任何人从该 tag 提交重建
-（不带 `-PreleaseVersion`），`git describe` 自然返回干净 tag 名，二者一致。**人不需要、也不应该
-手写版本号到任何地方。**
+`release.sh` 构建时传 `-PreleaseVersion=<新tag>`，仅覆盖 tag 部分（否则 `git describe` 会取上一个旧 tag）；hash 部分始终反映真实 HEAD。tag 创建后从该 tag 提交重建（不带 `-PreleaseVersion`），tag 部分自然就是该 tag 名，二者一致。**人不需要、也不应该手写版本号到任何地方。**
 
 ## 两类发版
 
 | 场景 | 做法 | 产物 versionName | versionCode |
 |---|---|---|---|
-| **里程碑发版**（新 semver） | `./scripts/release.sh <patch\|minor\|major>`：门禁 → 推算下一 tag → assembleRelease+归档（注入 tag）→ changelog → 打 annotated tag | 干净 `<tag>`（如 `0.8.1`） | 该提交的 commit count |
-| **同族小修复**（不加新 tag） | 修 bug → commit → `./gradlew assembleRelease archiveReleaseApk`（**不带** `-PreleaseVersion`）→ 直接发 `APK/oc-droid-<tag>-N-g<hash>.apk` | `<tag>-N-g<hash>`（如 `0.8.1-1-gabc`） | 更高（新 commit count）→ 可装升级 |
+| **里程碑发版**（新 semver） | `./scripts/release.sh <patch\|minor\|major>`：门禁 → 推算下一 tag → assembleRelease+归档（注入 tag）→ changelog → 打 annotated tag | `<tag>-<hash>`（如 `0.8.2-3b3f662`；hash = tag 提交） | 该提交的 commit count |
+| **同族小修复**（不加新 tag） | 修 bug → commit → `./gradlew assembleRelease archiveReleaseApk`（**不带** `-PreleaseVersion`）→ 直接发 `APK/oc-droid-<tag>-<hash>.apk` | `<tag>-<hash>`（如 `0.8.1-abc1234`） | 更高（新 commit count）→ 可装升级 |
 
 > 这是 go-around 模式的核心收益：**tag 后的小修无需 bump 新 semver**，重建即得一个可追溯、可升级的 APK（versionName 自带 commit 锚点，versionCode 自动更高）。
 

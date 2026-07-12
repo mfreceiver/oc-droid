@@ -63,18 +63,22 @@ case "$TYPE" in
 esac
 VERSION="$MAJOR.$MINOR.$PATCH"
 TAG="v$VERSION"
-echo "==> 版本：$PREV_TAG → $TAG"
+# 短 hash = release 构建嵌入 versionName + APK 文件名的 commit 锚点（与 gradle
+# archiveReleaseApk 一致：二者都取 HEAD 的 git rev-parse --short）。
+SHORT=$(git rev-parse --short HEAD)
+FULL_VERSION="$VERSION-$SHORT"
+echo "==> 版本：$PREV_TAG → $TAG（versionName=$FULL_VERSION）"
 
-# --- 4. release 构建 + 归档（注入干净 tag 名）---
-echo "==> assembleRelease + archiveReleaseApk（versionName=$VERSION）"
+# --- 4. release 构建 + 归档（-PreleaseVersion 覆盖 tag 部分；hash 自动来自 HEAD）---
+echo "==> assembleRelease + archiveReleaseApk（versionName=$FULL_VERSION）"
 ./gradlew --no-daemon assembleRelease archiveReleaseApk -PreleaseVersion="$VERSION"
 
-APK_DST="APK/oc-droid-$VERSION.apk"
+APK_DST="APK/oc-droid-$FULL_VERSION.apk"
 [[ -f "$APK_DST" ]] || { echo "❌ 归档产物 $APK_DST 不存在"; exit 1; }
 echo "✅ 产物: $APK_DST"
 
 # --- 5. changelog（上个 tag..HEAD 的 conventional commits 分组）---
-NOTE_FILE="APK/oc-droid-$VERSION.md"
+NOTE_FILE="APK/oc-droid-$FULL_VERSION.md"
 CL_RANGE="$PREV_TAG..HEAD"
 FEATS=""; FIXES=""; DOCS=""; TESTS=""; REFACTORS=""; PERFS=""; MISC=""
 cc_re='^([a-zA-Z]+)(\([^)]*\))?!?:[[:space:]](.+)$'

@@ -9,14 +9,20 @@
 #   - APK/oc-droid-<versionName>.apk + APK/oc-droid-<versionName>.md 已由 release.sh 生成
 set -euo pipefail
 
-VERSION="${1:?用法: upload-release.sh <versionName>}"
+VERSION="${1:?用法: upload-release.sh <versionName>}"  # 基础版本，如 0.8.2（不含 hash）
 TAG="v$VERSION"
 REPO="mfreceiver/oc-droid"
 GITEA_URL="${GITEA_URL:-https://git.vectory.cn:18443}"
-APK_FILE="APK/oc-droid-$VERSION.apk"
-NOTE_FILE="APK/oc-droid-$VERSION.md"
 
 cd "$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
+
+# APK 文件名带 commit 短 hash（与 release.sh 一致）：oc-droid-<ver>-<shorthash>.apk。
+# 从 tag 反解 commit 短 hash（annotated tag 用 ^{commit} 解引用到提交）。
+SHORT=$(git rev-parse --short "$TAG^{commit}" 2>/dev/null || true)
+[[ -n "$SHORT" ]] || { echo "❌ 无法解析 $TAG 的 commit（tag 未创建或未 fetch？）"; exit 1; }
+FULL_VERSION="$VERSION-$SHORT"
+APK_FILE="APK/oc-droid-$FULL_VERSION.apk"
+NOTE_FILE="APK/oc-droid-$FULL_VERSION.md"
 
 [[ -f "$APK_FILE" ]] || { echo "❌ APK $APK_FILE 不存在（先跑 release.sh）"; exit 1; }
 [[ -f "$NOTE_FILE" ]] || { echo "❌ Notes $NOTE_FILE 不存在（先跑 release.sh）"; exit 1; }

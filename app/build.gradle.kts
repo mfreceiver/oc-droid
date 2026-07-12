@@ -24,14 +24,16 @@ plugins {
 
 // === Version from git (go-around pattern; see .opencode/policies/versioning.md) ===
 // No hand-maintained version fields. Both values are derived from git at config time:
-//   versionName = git describe --tags --always --dirty  (leading "v" stripped)
-//     → "0.8.1" at a clean tag commit, "0.8.1-3-gd5e1311" past it, "dev" if not a git repo.
+//   versionName = <nearest-tag>-<short-hash>[-dirty]  (leading "v" stripped from tag)
+//     → always carries the commit anchor: "0.8.2-5f5f243" at/after the tag, "-dirty" if the
+//       working tree is unclean, "dev" if not a git repo. release.sh overrides only the tag
+//       portion (-PreleaseVersion=<new tag>); the hash always reflects the real HEAD.
 //   versionCode = git rev-list --count HEAD  (monotonic int, auto-increments per commit;
 //     strictly greater than every historical hand-bumped code, which maxed at 64).
-// release.sh passes -PreleaseVersion=<tag> so the release APK shows the clean about-to-
-// be-created tag instead of <prev>-N-gHASH. Rebuilding after a post-tag fix (without
-// -PreleaseVersion) yields a shippable, traceable <tag>-N-gHASH APK under the same version
-// family (higher versionCode → installable upgrade). Do NOT hand-edit these two fields.
+// release.sh passes -PreleaseVersion=<new tag> so the tag portion is the about-to-be-created
+// tag (otherwise git describe would name the previous tag). Rebuilding after a post-tag fix
+// (without -PreleaseVersion) yields a shippable, traceable <tag>-<hash> APK under the same
+// version family (higher versionCode → installable upgrade). Do NOT hand-edit these two fields.
 fun gitOut(vararg args: String): String = try {
     val proc = ProcessBuilder("git", *args)
         .directory(rootProject.projectDir)
@@ -43,9 +45,19 @@ fun gitOut(vararg args: String): String = try {
 } catch (e: Exception) { "" }
 
 val releaseVersionOverride = providers.gradleProperty("releaseVersion").orNull?.trim()?.orEmpty()
-val gitVersionName: String = (releaseVersionOverride?.takeIf { it.isNotEmpty() }
-    ?: gitOut("describe", "--tags", "--always", "--dirty").removePrefix("v"))
-    .ifEmpty { "dev" }
+val gitVersionName: String = run {
+    // <nearest-tag>-<short-hash>[-dirty] — always shows the exact commit, even at a clean
+    // tag release (e.g. 0.8.2-5f5f243). release.sh overrides only the tag portion.
+    val nearestTag = gitOut("describe", "--tags", "--abbrev=0").removePrefix("v")
+    val tagPart = releaseVersionOverride?.takeIf { it.isNotEmpty() } ?: nearestTag
+    val shortHash = gitOut("rev-parse", "--short", "HEAD")
+    val dirty = if (gitOut("status", "--porcelain").isEmpty()) "" else "-dirty"
+    when {
+        tagPart.isEmpty() && shortHash.isEmpty() -> "dev"
+        tagPart.isEmpty() -> "$shortHash$dirty"
+        else -> "$tagPart-$shortHash$dirty"
+    }
+}
 val gitVersionCode: Int = gitOut("rev-list", "--count", "HEAD").toIntOrNull()?.coerceAtLeast(1) ?: 1
 
 android {
@@ -160,7 +172,7 @@ android {
 //   release.sh:  ./gradlew assembleRelease archiveReleaseApk -PreleaseVersion=<tag>
 //                → versionName = clean tag (e.g. 0.8.1) → APK/oc-droid-0.8.1.apk
 //   snapshot:    ./gradlew assembleRelease archiveReleaseApk   (no override)
-//                → versionName = git describe (e.g. 0.8.1-1-gabc1234) → APK/oc-droid-0.8.1-1-gabc1234.apk
+//                → versionName = git describe (e.g. 0.8.1-abc1234) → APK/oc-droid-0.8.1-abc1234.apk
 tasks.register<Copy>("archiveReleaseApk") {
     dependsOn("assembleRelease")
     from(layout.buildDirectory.dir("outputs/apk/release/app-release.apk"))

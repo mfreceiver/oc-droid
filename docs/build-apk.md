@@ -94,7 +94,7 @@ Release 签名已在 `app/build.gradle.kts` 配置完毕：
 
 | 字段 | 来源 | 形态 |
 |---|---|---|
-| `versionName` | `git describe --tags --always --dirty`（去 `v` 前缀） | `0.8.1`（干净 tag）/ `0.8.1-3-gd5e1311`（tag 后 N 提交）/ `dev`（非 git） |
+| `versionName` | `<nearest-tag>-<short-hash>[-dirty]`（tag 去 `v` 前缀，hash = `git rev-parse --short`） | `0.8.2-5f5f243`（始终带 commit 锚点）/ `-dirty`（脏树）/ `dev`（非 git） |
 | `versionCode` | `git rev-list --count HEAD` | 单调递增整数，每 commit +1 |
 
 `app/build.gradle.kts` 里**没有**硬编码的 `versionCode = N` / `versionName = "x.y.z"`——那两行是 `versionCode = gitVersionCode` / `versionName = gitVersionName`。**禁止手改**（手写会被下次构建的派生值取代）。
@@ -120,8 +120,8 @@ ocdroid 有两类发版（详见 `.opencode/policies/versioning.md`）：
 1. 校验分支=main、工作区干净（已跟踪文件）。
 2. 质量门禁：`scripts/check.sh`。
 3. 由最新 git tag 推算下一版本（patch|minor|major）。
-4. `./gradlew assembleRelease archiveReleaseApk -PreleaseVersion=<tag>` → 产物 `APK/oc-droid-<tag>.apk`（versionCode 自动 = commit count）。
-5. 生成 changelog（上个 tag..HEAD 的 conventional commits 分组）→ `APK/oc-droid-<tag>.md`。
+4. `./gradlew assembleRelease archiveReleaseApk -PreleaseVersion=<tag>` → 产物 `APK/oc-droid-<tag>-<hash>.apk`（versionName 自动带 commit 锚点，versionCode = commit count）。
+5. 生成 changelog（上个 tag..HEAD 的 conventional commits 分组）→ `APK/oc-droid-<tag>-<hash>.md`。
 6. 创建 annotated tag `v<tag>`（注释 = changelog）。**不 commit 任何版本文件**（无版本文件可 commit）。
 
 `git push` 与 Gitea release 上传 **不自动执行**，脚本会打印命令。
@@ -131,7 +131,7 @@ ocdroid 有两类发版（详见 `.opencode/policies/versioning.md`）：
 ```bash
 # 修完 bug、commit 之后：
 ./gradlew assembleRelease archiveReleaseApk
-# → APK/oc-droid-<tag>-N-g<hash>.apk（versionName 自带 commit 锚点，versionCode 更高 → 可装升级）
+# → APK/oc-droid-<tag>-<hash>.apk（versionName 自带 commit 锚点，versionCode 更高 → 可装升级）
 ```
 
 无需 bump semver，重建即得可追溯、可升级的 APK。
@@ -144,8 +144,8 @@ ocdroid 有两类发版（详见 `.opencode/policies/versioning.md`）：
 
 ```
 APK/
-├── oc-droid-0.8.1.apk              ← 里程碑发版（release.sh）
-└── oc-droid-0.8.1-1-gabc1234.apk   ← 同族小修复（直接重建）
+├── oc-droid-0.8.2-3b3f662.apk        ← 里程碑发版（release.sh；hash = tag 提交）
+└── oc-droid-0.8.2-40a0be2.apk        ← 同族小修复（直接重建；hash = 修复提交）
 ```
 
 归档由 gradle `archiveReleaseApk` task 自动命名（`release.sh` 与手动重建都走它），无需手 grep `versionName`。
