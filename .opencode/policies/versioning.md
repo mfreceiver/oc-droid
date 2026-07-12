@@ -43,6 +43,7 @@ ocdroid **不在源码里写版本号**。`app/build.gradle.kts` 的 `versionCod
 - **禁止手动 `git tag`** 做里程碑发版。必须经 `./scripts/release.sh <type>`（内部推算 + 构建 + 打 tag）。
 - **禁止复用已 push 的 tag**（`release.sh` 不会覆盖；误打则本地删重建，已 push 的不要强推，用下一 patch 修正）。
 - tag 必须打在 `main` 分支的提交上（`release.sh` 已强校验）。
+- **versionCode 单调性仅对 main 上的 release 升级链保证**：`git rev-list --count HEAD` 是分支相对值——worktree（feature 分支）的 count 跨分支不唯一、也不保证比 main 高。worktree 构建仅供开发期 debug 验证（且为 debug 签名，与 release 签名分属不同安装域）；**勿用 release 签名对外分发未合并的 worktree 状态**（其 count 可能高于未来某 main release → 已装用户被 Android 判降级拒装）。worktree 成果须先 ff-merge / rebase 回 main，再由 main 发版。
 
 ## 禁止
 
