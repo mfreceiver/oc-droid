@@ -3,7 +3,7 @@ package cn.vectory.ocdroid.ui.workspace
 import cn.vectory.ocdroid.data.model.FileDiff
 
 /**
- * Ephemeral Workspace selection. It is deliberately scoped to one host.
+ * Ephemeral Git selection. It is deliberately scoped to one host.
  *
  * §phase2-isolation: the [workdir] field carries the workdir identity the
  * state was constructed against. [matches] now does STRICT identity
@@ -35,7 +35,7 @@ data class WorkspaceState(
 }
 
 /**
- * §B1-fix: the pure state-resolution pipeline used by [WorkspaceScaffold].
+ * The pure state-resolution pipeline used by GitScreen.
  *
  * Mirrors EXACTLY what the composable does on each (host, session, workdir)
  * change: build the state from the persisted SavedStateHandle slots, run it
@@ -64,7 +64,7 @@ internal fun resolveWorkspaceState(
 ).forHost(activeHost).copy(sessionId = activeSession, workdir = workdir)
 
 /**
- * §B1-fix: the combined visibleDiffs decision used by [WorkspaceScaffold].
+ * The combined visibleDiffs decision used by GitScreen.
  *
  * Returns the session diffs for [activeSession] ONLY when the resolved state
  * matches (host, session, AND workdir identity); otherwise empty (fail-closed

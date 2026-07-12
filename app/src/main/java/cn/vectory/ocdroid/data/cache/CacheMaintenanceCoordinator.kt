@@ -4,6 +4,7 @@ import cn.vectory.ocdroid.data.repository.OpenCodeRepository
 import cn.vectory.ocdroid.util.DebugLog
 import cn.vectory.ocdroid.util.SettingsManager
 import javax.inject.Inject
+import javax.inject.Named
 import javax.inject.Singleton
 
 /**
@@ -51,7 +52,8 @@ import javax.inject.Singleton
 class CacheMaintenanceCoordinator @Inject constructor(
     private val cache: CacheRepository,
     private val repo: OpenCodeRepository,
-    private val settings: SettingsManager
+    private val settings: SettingsManager,
+    @Named("currentServerGroupFp") private val currentServerGroupFp: () -> String,
 ) {
     /**
      * Run the daily sweep for [serverGroupFp] if it has not already run today
@@ -119,6 +121,20 @@ class CacheMaintenanceCoordinator @Inject constructor(
                     it
                 )
             }
+
+        // The injected repository is connected to exactly one server group.
+        // Never use its alive set for another fp: that would let sessions from
+        // the connected server evict valid cache rows belonging to a different
+        // server. Local LRU/age eviction above is fp-scoped and remains safe.
+        if (serverGroupFp != currentServerGroupFp()) {
+            return DailySweepReport(
+                serverGroupFp = serverGroupFp,
+                completeness = AliveCompleteness.Incomplete,
+                verifiedAliveCount = 0,
+                evictedSessionIds = emptyList(),
+                suspiciousSessionIds = emptyList(),
+            )
+        }
 
         // ── Step 2: enumerate the alive set + sweep or mark ─────────────────
         val alive = enumerateCompleteAliveSet(serverGroupFp)

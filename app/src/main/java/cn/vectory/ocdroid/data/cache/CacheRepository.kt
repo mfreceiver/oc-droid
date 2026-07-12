@@ -321,6 +321,14 @@ interface CacheRepository {
      * button that calls [clearAll].
      */
     suspend fun evictWorkdirInGroup(serverGroupFp: String, workdir: String)
+
+    /**
+     * §P5b-B (Q8): total byte size of all cached message payloads (the `parts`
+     * JSON blobs — the dominant content). Used by the 清除数据 section to show
+     * "已缓存数据 XXX MB" alongside the 清除缓存 button. Returns 0 when no
+     * messages are cached.
+     */
+    suspend fun totalCachedPayloadBytes(): Long
 }
 
 /**
@@ -961,6 +969,8 @@ class CacheRepositoryImpl @Inject constructor(
             }
         }
     }
+
+    override suspend fun totalCachedPayloadBytes(): Long = dao.totalPayloadBytes()
 
     // ─────────── helpers ──────────────────────────────────────────────────
 

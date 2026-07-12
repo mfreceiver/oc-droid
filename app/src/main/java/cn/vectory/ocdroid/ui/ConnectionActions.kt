@@ -130,6 +130,10 @@ internal fun applySavedSettings(
         it.copy(
             selectedAgentName = seedAgent,
             themeMode = settingsManager.themeMode,
+            // §P5a (Q5): seed the persisted language mode so the Appearance
+            // SegmentedButton reflects the user's choice on cold start. The
+            // locale itself is applied at process startup (OpenCodeApp.onCreate).
+            localeMode = settingsManager.localeMode,
             markdownFontSizes = settingsManager.markdownFontSizes,
             disabledModels = seedDisabledModels,
             // §ui-scale: seed the persisted UI scale factors so OpenCodeTheme

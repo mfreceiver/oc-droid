@@ -28,13 +28,8 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Checklist
-import androidx.compose.material.icons.filled.Compress
-import androidx.compose.material.icons.filled.DonutLarge
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
@@ -103,29 +98,18 @@ fun ChatScaffold(
     sessionVM: SessionViewModel,
     hostVM: HostViewModel,
     orchestratorVM: OrchestratorViewModel,
-    /**
-     * §round-B ② (D.5): the active host's recent workdirs. Fed into
-     * [ContextSelectorSheet] (replaces the previous
-     * `sessionList.sessions.map { it.directory }` source — recent_workdirs
-     * is the single source of truth for "connected" and includes workdirs
-     * the user has connected to but not yet opened a session in).
-     */
-    recentWorkdirs: List<String> = emptyList(),
-    /** §round-B ② (D.5): "Manage hosts" entry handler — routes to
-     *  Settings → Hosts (ServerManagement parity). */
-    onManageHosts: () -> Unit = {},
     onNavigateToSettings: () -> Unit = {},
     @Suppress("UNUSED_PARAMETER") onNavigateToSessions: () -> Unit = {},
     /**
-     * §phase2-unbreak: open Workspace Files at the current session's workdir,
+     * Opens the Chat-stack file preview at the current session's workdir,
      * locating the specific tapped file path when present. ChatScaffold
      * derives workdir from the current session and passes BOTH down — the
      * previous fix-6 shape dropped the path and passed only the session
      * directory, which broke file-path navigation (FilesPane.pathToShow was
      * always null).
      */
-    onOpenWorkspaceFiles: (workdir: String?, path: String?) -> Unit = { _, _ -> },
-    onOpenWorkspaceChanges: (String) -> Unit = {},
+    onOpenChatFilePreview: (workdir: String?, path: String?) -> Unit = { _, _ -> },
+    onOpenGitChanges: (String) -> Unit = {},
 ) {
     // §PARITY (verbatim from ChatScreen): all six slice reads survive the
     // chrome swap. The streaming / settings / host / unread / traffic reads
@@ -142,9 +126,20 @@ fun ChatScaffold(
     val host by orchestratorVM.hostFlow.collectAsStateWithLifecycle()
 
     // ── Chrome-only state (new for Phase 1B) ─────────────────────────────
-    var showSessionPicker by rememberSaveable { mutableStateOf(false) }
-    var showContextSelector by rememberSaveable { mutableStateOf(false) }
-    var showOverflow by remember { mutableStateOf(false) }
+    // §0.8.2 P2: showSessionPicker / showContextSelector / showOverflow are
+    // GONE — the nav-icon workdir initial is non-clickable (P2.1), the
+    // ContextCueChip + server-status IconButton are removed (P2.2), and the
+    // overflow DropdownMenu is co-located with its ContextUsageRing trigger
+    // inside ChatTopBar (P2.3 — the fix for the top-left popup bug). The
+    // AgentPickerSheet + ModelPickerSheet triggers also moved into the
+    // overflow menu (the Composer's Agent/Model chips were deleted in P2.5);
+    // their sheet state lives HERE (ChatScaffold) because ChatTopBar only
+    // fires the open-callback, and the sheets need slice reads (settingsFlow
+    // for agents/providers; chatFlow for currentModel) that ChatScaffold
+    // already subscribes to. The picker composables themselves stay in
+    // Composer.kt (now `internal` so this file can call them).
+    var showAgentPicker by rememberSaveable { mutableStateOf(false) }
+    var showModelPicker by rememberSaveable { mutableStateOf(false) }
     var errorDetail by remember { mutableStateOf<String?>(null) }
     var pendingExit by remember { mutableStateOf(false) }
     // §1B-FIX (I6): dialog-state for the parity overflow entries (Todo +
@@ -179,16 +174,11 @@ fun ChatScaffold(
     // (`currentSession` / `currentSessionStatus` / `computeContextUsage` /
     // `visibleMessages` / `currentSessionActivity`).
     val curSession = currentSession(sessionList.sessions, chat.currentSessionId)
-    // §phase2-unbreak: file-path tap passes the ACTUAL tapped path through to
-    // the Workspace Files route — the previous fix-6 code discarded the path
-    // (`{ onOpenWorkspaceFiles(curSession?.directory.orEmpty()) }`) which
-    // broke FilesPane.pathToShow (always null) so a tapped file path could
-    // never be located. Now workdir comes from the current session and the
-    // tapped path is forwarded verbatim. AppShell (the sole shell; the
-    // legacy PhoneLayout was removed in the redesign) builds the route /
-    // overlay with both fields.
-    val onChatFileClick: (String) -> Unit = remember(curSession, onOpenWorkspaceFiles) {
-        { path -> onOpenWorkspaceFiles(curSession?.directory, path) }
+    // A file-path tap passes the actual tapped path through to the Chat-stack
+    // preview. The prior route dropped that path, so the preview could not
+    // locate the selected file. AppShell receives both route fields.
+    val onChatFileClick: (String) -> Unit = remember(curSession, onOpenChatFilePreview) {
+        { path -> onOpenChatFilePreview(curSession?.directory, path) }
     }
     val curCutoff = chat.currentSessionId?.let(chat.revertCutoffs::get)
     val curRevertMessageId = if (curSession != null) curSession.revert?.messageId else curCutoff?.messageId
@@ -409,26 +399,25 @@ fun ChatScaffold(
     }
     val topBarActions = remember(
         sessionVM,
-        composerVM,
-        connectionVM,
-        onNavigateToSettings,
+        chatVM,
     ) {
+        // §0.8.2 P2.3: the new overflow menu (Compress / Context / Todo /
+        // Agent / Model) lives inside ChatTopBar; its open-callbacks fire
+        // the local sheet/dialog state hoisted in this composable. The
+        // pickers' slice reads (agents / providers / currentModel / disabled
+        // models) are sourced below from the already-subscribed settings +
+        // chat slices, so opening a sheet does not trigger a fresh
+        // subscription. The AgentPickerSheet / ModelPickerSheet composables
+        // stay defined in Composer.kt (now `internal`).
         ChatTopBarActions(
             onSelectSession = sessionVM::selectSession,
-            onCloseSession = sessionVM::closeSession,
-            onSelectAgent = composerVM::selectAgent,
-            onNavigateToSettings = onNavigateToSettings,
-            onOpenSessionPicker = { showSessionPicker = true },
-            onOpenContextSelector = { showContextSelector = true },
-            onOpenOverflow = { showOverflow = true },
-            onRefreshMessages = { chatVM.refreshCurrentSession() },
-            onRefreshTrafficStats = connectionVM::refreshTrafficStats,
-            onSelectHost = { hostVM.selectHostProfile(it) },
-            onActivateTunnel = { hostVM.activateTunnelForCurrentHost() },
-            onSwitchModel = { providerId, modelId -> composerVM.switchSessionModel(providerId, modelId) },
+            onCompact = { chatVM.compactSession() },
+            onOpenContextDialog = { showContextDialog = true },
+            onOpenTodoDialog = { showTodoDialog = true },
+            onOpenAgentPicker = { showAgentPicker = true },
+            onOpenModelPicker = { showModelPicker = true },
         )
     }
-    val onContextCompact = remember(chatVM) { { chatVM.compactSession() } }
 
     Column(modifier = Modifier.fillMaxSize()) {
         ChatTopBar(
@@ -439,7 +428,6 @@ fun ChatScaffold(
             // but the callback is a no-op stub.
             tabVisible = true,
             onTabVisibilityChange = { /* no second-row strip in 1B */ },
-            onContextCompact = onContextCompact,
         )
 
         // §PARITY: wide-screen card wrap mirrors ChatScreen 10/§B3. Phase 1B
@@ -490,8 +478,16 @@ fun ChatScaffold(
                             chatVM = chatVM,
                             composerVM = composerVM,
                             sessionVM = sessionVM,
+                            // §0.8.2 P2.6: orchestratorVM is needed inside
+                            // ChatMessageList to collect reselectFlow
+                            // (filtered to NavRoute.Chat) — on each emission
+                            // the list scrolls to the latest. Pop-to-root-
+                            // session on reselect is the shell's job (AppShell
+                            // owns the back stack); this composable only does
+                            // the scroll-to-latest half of the Q4 contract.
+                            orchestratorVM = orchestratorVM,
                             onFileClick = onChatFileClick,
-                            onOpenChanges = onOpenWorkspaceChanges,
+                            onOpenChanges = onOpenGitChanges,
                             onTabVisibilityChange = { /* no second-row strip */ },
                             savedPositions = savedPositions,
                             accessOrder = accessOrder,
@@ -664,116 +660,48 @@ fun ChatScaffold(
 
     // ── Phase 1B sheets / overflows / dialogs (new) ──────────────────────
 
-    if (showSessionPicker) {
-        // §1B: the ModalBottomSheet session picker (D.4). Receives the same
-        // sessionList shape the old SessionTabStrip used, plus the unread /
-        // pending-question set for the per-row indicators. Selection goes
-        // through `sessionVM.selectSession` (same domain path the old
-        // SessionTabStrip used). Archive / unarchive is wired through
-        // `sessionVM.archiveSession` / `restoreSession` (P4-4 — replaces the
-        // old long-press gesture with an explicit overflow menu).
-        SessionPickerSheet(
-            sessions = sessionList.sessions,
-            sessionStatuses = sessionList.sessionStatuses,
-            currentSessionId = chat.currentSessionId,
-            unreadSessions = unread.unreadSessions,
-            questionSessionIds = sessionList.pendingQuestions.map { it.sessionId }.toSet(),
-            onSelect = { id ->
-                showSessionPicker = false
-                sessionVM.selectSession(id)
-            },
-            onArchive = { id ->
-                showSessionPicker = false
-                sessionVM.archiveSession(id)
-            },
-            onUnarchive = { id ->
-                showSessionPicker = false
-                sessionVM.restoreSession(id)
-            },
-            // §1B-FIX (B2): the "New session" FAB used to no-op whenever
-            // `composer.draftWorkdir == null` (the normal state — only draft
-            // mode sets the field). Fall back to the persisted
-            // `settingsManager.currentWorkdir` so the FAB always creates a
-            // session in some workdir, matching the legacy ChatInputBar /
-            // "new session" affordance. If neither is set we still no-op
-            // (nothing to materialize against).
-            onNewSession = {
-                showSessionPicker = false
-                val targetWorkdir = composer.draftWorkdir
-                    ?: orchestratorVM.core.settingsManager.currentWorkdir
-                targetWorkdir?.let { sessionVM.createSessionInWorkdir(it) }
-            },
-            onDismiss = { showSessionPicker = false }
+    // §0.8.2 P2.3: AgentPickerSheet. Trigger moved from the Composer's Agent
+    // AssistChip (deleted in P2.5) to the overflow menu's "Agent" item. The
+    // sheet body composable stays defined in Composer.kt (now `internal`).
+    // Slice reads: agents + selectedAgentName come from the already-
+    // subscribed settings slice (filtered to visible agents — same filter
+    // the old chip Row used). onPick routes to composerVM.selectAgent (the
+    // identical domain path the Composer's sheet used).
+    if (showAgentPicker) {
+        AgentPickerSheet(
+            agents = settings.agents.filter { it.isVisible },
+            selectedAgentName = settings.selectedAgentName,
+            onPick = { name -> composerVM.selectAgent(name); showAgentPicker = false },
+            onDismiss = { showAgentPicker = false },
         )
     }
 
-    if (showContextSelector) {
-        ContextSelectorSheet(
-            profiles = host.hostProfiles,
-            currentProfileId = host.currentHostProfileId,
-            recentWorkdirs = recentWorkdirs,
-            currentWorkdir = curSession?.directory ?: composer.draftWorkdir,
-            onSelectHost = { id ->
-                showContextSelector = false
-                hostVM.selectHostProfile(id)
+    // §0.8.2 P2.3: ModelPickerSheet. Trigger moved from the Composer's Model
+    // AssistChip (deleted in P2.5) to the overflow menu's "Model" item. The
+    // sheet body composable stays defined in Composer.kt (now `internal`).
+    // Slice reads: providers + disabledModels come from the settings slice;
+    // currentModel comes from the chat slice (cachedContextUsage is sourced
+    // from the same slice). onSwitch routes to composerVM.switchSessionModel
+    // (V1-per-prompt, identical domain path the Composer's sheet used).
+    if (showModelPicker) {
+        ModelPickerSheet(
+            providers = settings.providers,
+            disabledModels = settings.disabledModels,
+            currentModel = chat.currentModel,
+            onSwitch = { providerId, modelId ->
+                composerVM.switchSessionModel(providerId, modelId)
+                showModelPicker = false
             },
-            onSelectWorkdir = { directory ->
-                showContextSelector = false
-                // §round-B ② (scheme D.5): explicit PRESERVE_CURRENT vs
-                // MATERIALIZE_DRAFT decision — the previous shell picked
-                // the FIRST session in the directory (arbitrary sibling),
-                // which broke session scoping by silently swapping the
-                // current conversation. The pure helper centralizes the
-                // rule (also unit-tested).
-                when (resolveWorkdirSelection(curSession?.directory, directory)) {
-                    WorkdirAction.PRESERVE_CURRENT -> Unit // already scoped — no-op
-                    WorkdirAction.MATERIALIZE_DRAFT -> sessionVM.createSessionInWorkdir(directory)
-                }
-            },
-            onManageHosts = {
-                showContextSelector = false
-                onNavigateToSettings()
-                onManageHosts()
-            },
-            onDismiss = { showContextSelector = false },
-        )
-    }
-
-    if (showOverflow) {
-        // §1B-FIX (I6): the conversation overflow restores the three
-        // parity entry points that the old ChatTopBar had via the
-        // ContextMenuButton (folded out in Phase 1B) — Compact / Todo /
-        // Context-usage. All three wire to existing handlers / dialogs
-        // (no new business logic): Compact → chatVM.compactSession, Todo →
-        // the existing TodoListPanel via ChatTopBar's showTodoDialog,
-        // Context-usage → the existing ContextUsageDialog. The
-        // destructive "Archive" action stays at the bottom of the
-        // overflow (P4-4 — destructive actions last, in error colour).
-        ConversationOverflowMenu(
-            expanded = showOverflow,
-            onDismiss = { showOverflow = false },
-            onOpenTodo = {
-                showOverflow = false
-                showTodoDialog = true
-            },
-            onOpenContext = {
-                showOverflow = false
-                showContextDialog = true
-            },
-            onCompact = {
-                showOverflow = false
-                onContextCompact()
-            },
-            onArchive = {
-                showOverflow = false
-                curSession?.id?.let(sessionVM::archiveSession)
-            },
+            onDismiss = { showModelPicker = false },
         )
     }
 
     // §1B-FIX (I6): the three parity dialogs (Todo / Context-usage) live
     // here in ChatScaffold so the overflow can open them. The dialog body
     // is unchanged from the old ChatTopBar.kt — only the owner moved.
+    // §0.8.2 P2.3: the open-triggers now fire from ChatTopBar's overflow
+    // menu (onOpenTodoDialog / onOpenContextDialog) instead of the remote
+    // ConversationOverflowMenu.
     if (showTodoDialog) {
         AlertDialog(
             onDismissRequest = { showTodoDialog = false },
@@ -798,7 +726,7 @@ fun ChatScaffold(
             onDismiss = { showContextDialog = false },
             onCompact = {
                 showContextDialog = false
-                onContextCompact()
+                chatVM.compactSession()
             },
         )
     }
@@ -839,69 +767,10 @@ fun ChatScaffold(
     }
 }
 
-// Phase 1B (D.5): the conversation overflow menu surfaced from the new
-// TopAppBar. §1B-FIX (I6): the three parity entry points (Compact /
-// Todo / Context-usage) are restored here — each wires to an existing
-// handler / dialog the old ChatTopBar had. "Archive" stays at the
-// bottom in error colour (P4-4 — destructive actions last). The
-// destructive operations never live alongside the agent / model pickers
-// in the same menu (those live in the composer's chips), so the
-// conversation-level overflow stays focused on session-wide actions.
-@OptIn(ExperimentalMaterial3Api::class)
-@Composable
-private fun ConversationOverflowMenu(
-    expanded: Boolean,
-    onDismiss: () -> Unit,
-    onOpenTodo: () -> Unit,
-    onOpenContext: () -> Unit,
-    onCompact: () -> Unit,
-    onArchive: () -> Unit,
-) {
-    androidx.compose.material3.DropdownMenu(
-        expanded = expanded,
-        onDismissRequest = onDismiss
-    ) {
-        androidx.compose.material3.DropdownMenuItem(
-            text = { Text(stringResource(R.string.chat_compact_session)) },
-            leadingIcon = {
-                Icon(
-                    Icons.Default.Compress,
-                    contentDescription = null,
-                    modifier = Modifier.size(18.dp)
-                )
-            },
-            onClick = onCompact,
-        )
-        androidx.compose.material3.DropdownMenuItem(
-            text = { Text(stringResource(R.string.chat_todo)) },
-            leadingIcon = {
-                Icon(
-                    Icons.Default.Checklist,
-                    contentDescription = null,
-                    modifier = Modifier.size(18.dp)
-                )
-            },
-            onClick = onOpenTodo,
-        )
-        androidx.compose.material3.DropdownMenuItem(
-            text = { Text(stringResource(R.string.chat_context)) },
-            leadingIcon = {
-                Icon(
-                    Icons.Default.DonutLarge,
-                    contentDescription = null,
-                    modifier = Modifier.size(18.dp)
-                )
-            },
-            onClick = onOpenContext,
-        )
-        androidx.compose.material3.DropdownMenuItem(
-            text = {
-                Text(
-                    stringResource(R.string.sessions_archive),
-                    color = MaterialTheme.colorScheme.error
-                )
-            },
-            onClick = onArchive,
-        )
-    }
-}
+// §0.8.2 P2.3: the standalone `ConversationOverflowMenu` composable that
+// used to live here is REMOVED. The overflow DropdownMenu is now co-located
+// with its ContextUsageRing trigger inside ChatTopBar (the fix for the
+// top-left popup bug — the prior remote menu had no tight Box anchor). The
+// 5 items (Compress / Context / Todo / Agent / Model) are composed inline
+// in `ContextMenuCluster` (ChatTopBar.kt). Archive was dropped (the
+// destructive affordance moves to the Sessions screen long-press).

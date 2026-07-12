@@ -181,13 +181,20 @@ class SettingsManager @Inject constructor(
      * legacy PhoneLayout + USE_NEW_SHELL flag were removed in the redesign).
      *
      * Existing installations have only [KEY_LAST_NAV_PAGE]. The first read
-     * migrates 0/1/2 to chat/sessions/settings and writes the route key. In
-     * particular, legacy 2 is Settings rather than the new Workspace route.
+     * migrates 0/1/2 to chat/sessions/settings and writes the route key.
+     * The removed `workspace` route is explicitly migrated to Files.
      */
     var lastRoute: String
         get() {
-            encryptedPrefs.getString(KEY_LAST_ROUTE, null)?.let { stored ->
+            val stored = encryptedPrefs.getString(KEY_LAST_ROUTE, null)
+            if (stored == "workspace") {
+                encryptedPrefs.edit().putString(KEY_LAST_ROUTE, ROUTE_FILES).apply()
+                return ROUTE_FILES
+            }
+            if (stored != null) {
                 if (stored in TOP_LEVEL_ROUTE_KEYS) return stored
+                encryptedPrefs.edit().putString(KEY_LAST_ROUTE, ROUTE_CHAT).apply()
+                return ROUTE_CHAT
             }
             val migrated = when (encryptedPrefs.getInt(KEY_LAST_NAV_PAGE, 0)) {
                 1 -> ROUTE_SESSIONS
@@ -213,10 +220,17 @@ class SettingsManager @Inject constructor(
         set(value) {
             encryptedPrefs.edit().putString(KEY_CURRENT_WORKDIR, value).apply()
             // §reactive-workdir: keep the flow mirror in sync so the
-            // Workspace → Changes pane (and any other collector) reacts to
+            // Git → Changes pane (and any other collector) reacts to
             // workdir changes without manual refresh.
             _currentWorkdirFlow.value = value
         }
+
+    /** §Q2: last workdir the user explicitly browsed in Files/Git. Default-
+     *  fallback when Chat has no session. Switching workdir in Files/Git does
+     *  NOT mutate the Chat session (local browsing context only). */
+    var filesLastWorkdir: String?
+        get() = encryptedPrefs.getString(KEY_FILES_LAST_WORKDIR, null)
+        set(value) { encryptedPrefs.edit().putString(KEY_FILES_LAST_WORKDIR, value).apply() }
 
     /**
      * R-20 Phase 5: the set of workdirs the user has recently connected to
@@ -362,6 +376,24 @@ class SettingsManager @Inject constructor(
     var themeMode: ThemeMode
         get() = ThemeMode.valueOf(encryptedPrefs.getString(KEY_THEME, ThemeMode.SYSTEM.name) ?: ThemeMode.SYSTEM.name)
         set(value) = encryptedPrefs.edit().putString(KEY_THEME, value.name).apply()
+
+    /**
+     * §P5a (Q5): user-facing language preference. SYSTEM = follow the real
+     * system locale (zh→zh, en→en, anything else→zh via AppLocaleController);
+     * ZH/EN = force that language. First-launch default = SYSTEM (null in ESP
+     * → SYSTEM). Applied at process startup in OpenCodeApp.onCreate before
+     * the first Activity frame, and re-applied on every setLocaleMode via
+     * [cn.vectory.ocdroid.util.AppLocaleController.apply].
+     *
+     * NOT in the [clearAllLocalData] preserved-keys whitelist — a full data
+     * reset returns the language to SYSTEM (the comment in that method notes
+     * KEY_LOCALE is intentionally wiped alongside theme/font prefs).
+     */
+    var localeMode: LocaleMode
+        get() = encryptedPrefs.getString(KEY_LOCALE, null)?.let {
+            runCatching { LocaleMode.valueOf(it) }.getOrNull()
+        } ?: LocaleMode.SYSTEM
+        set(value) = encryptedPrefs.edit().putString(KEY_LOCALE, value.name).apply()
 
     /**
      * §ui-scale: user-adjustable UI scale factors (M3 canonical pattern —
@@ -840,6 +872,11 @@ class SettingsManager @Inject constructor(
      * per-session models, current session/workdir, nav page, theme + font
      * preferences, traffic counters — everything not listed above.
      *
+     * §P5a (Q5): [KEY_LOCALE] (language preference) is INTENTIONALLY NOT in
+     * [preservedKeys] — a full data reset returns the language to SYSTEM
+     * (first-launch default), alongside the theme/font prefs. This keeps
+     * "Clear all local data" a true return-to-defaults for appearance.
+     *
      * Implementation iterates the live key set and `.remove()`s each non-
      * preserved key in a single batched edit. This deliberately avoids
      * `.clear()` (which would also nuke the connection keys) and never touches
@@ -906,16 +943,20 @@ class SettingsManager @Inject constructor(
         private const val KEY_LAST_ROUTE = "last_route"
         private const val ROUTE_CHAT = "chat"
         private const val ROUTE_SESSIONS = "sessions"
-        private const val ROUTE_WORKSPACE = "workspace"
+        private const val ROUTE_FILES = "files"
+        private const val ROUTE_GIT = "git"
         private const val ROUTE_SETTINGS = "settings"
         private val TOP_LEVEL_ROUTE_KEYS = setOf(
             ROUTE_CHAT,
             ROUTE_SESSIONS,
-            ROUTE_WORKSPACE,
+            ROUTE_FILES,
+            ROUTE_GIT,
             ROUTE_SETTINGS,
         )
         private const val KEY_CURRENT_WORKDIR = "current_workdir"
         private const val KEY_RECENT_WORKDIRS = "recent_workdirs"
+        /** §Q2: last workdir explicitly browsed in Files/Git (fallback when Chat has no session). */
+        private const val KEY_FILES_LAST_WORKDIR = "files_last_workdir"
         /**
          * Cap for [recentWorkdirs] — bounds cold-start directory-fetch fan-out.
          *
@@ -928,6 +969,8 @@ class SettingsManager @Inject constructor(
         private const val MAX_RECENT_WORKDIRS = 30
         private const val KEY_AGENT_NAME = "agent_name"
         private const val KEY_THEME = "theme"
+        /** §P5a (Q5): persisted [LocaleMode] (language preference). Default null → SYSTEM. */
+        private const val KEY_LOCALE = "locale"
         private const val KEY_UI_FONT_SCALE = "ui_font_scale"
         private const val KEY_UI_CONTENT_SCALE = "ui_content_scale"
         /** §ui-scale: clamp range for both font + content scale sliders. */
@@ -1030,4 +1073,19 @@ class SettingsManager @Inject constructor(
 
 enum class ThemeMode {
     LIGHT, DARK, SYSTEM
+}
+
+/**
+ * §P5a (Q5): user-facing language preference. Mirrors [ThemeMode]'s shape
+ * (top-level enum persisted by name in EncryptedSharedPreferences).
+ *
+ *  - [SYSTEM]: follow the real system locale. zh→zh, en→en, any other (or
+ *    undetermined) → zh ("跟不上系统时选中文"). The real system locale is read
+ *    via [androidx.core.os.LocaleManagerCompat.getSystemLocales] — NEVER
+ *    `Locale.getDefault()` (that reports the app override after the first apply).
+ *  - [ZH]: force Chinese.
+ *  - [EN]: force English.
+ */
+enum class LocaleMode {
+    SYSTEM, ZH, EN
 }

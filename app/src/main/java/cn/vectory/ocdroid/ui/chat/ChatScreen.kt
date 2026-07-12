@@ -55,32 +55,17 @@ fun ChatScreen(
     sessionVM: SessionViewModel,
     hostVM: HostViewModel,
     orchestratorVM: OrchestratorViewModel,
-    /**
-     * §round-B ② (D.5): the active host's recent workdirs, sourced from
-     * [cn.vectory.ocdroid.ui.SettingsViewModel.recentWorkdirs] at the call
-     * site. Fed into [ContextSelectorSheet] so the workdir list matches the
-     * SessionsScreen "Connected projects" gate (recent_workdirs is the
-     * single source of truth for "connected"). Defaults to empty for the
-     * legacy wiring paths that don't supply it.
-     */
-    recentWorkdirs: List<String> = emptyList(),
-    /**
-     * §round-B ② (D.5): open the Settings → Hosts management surface from
-     * the ContextSelectorSheet ("Manage hosts" entry). ServerManagement
-     * parity (connect / refresh / tunnel / switch host) lives there.
-     */
-    onManageHosts: () -> Unit = {},
     onNavigateToSettings: () -> Unit = {},
     onNavigateToSessions: () -> Unit = {},
     /**
-     * §phase2-unbreak: open Workspace Files. The workdir is the current
+     * Opens the Chat-stack file preview. The workdir is the current
      * session's directory; the path is the specific file the user tapped in a
      * message (may be null when no specific file is targeted). ChatScaffold's
      * onChatFileClick passes the ACTUAL tapped path (not the session directory
      * — that was the §phase2 fix-6 regression that dropped the path).
      */
-    onOpenWorkspaceFiles: (workdir: String?, path: String?) -> Unit = { _, _ -> },
-    onOpenWorkspaceChanges: (String) -> Unit = {},
+    onOpenChatFilePreview: (workdir: String?, path: String?) -> Unit = { _, _ -> },
+    onOpenGitChanges: (String) -> Unit = {},
 ) {
     ChatScaffold(
         chatVM = chatVM,
@@ -89,12 +74,10 @@ fun ChatScreen(
         sessionVM = sessionVM,
         hostVM = hostVM,
         orchestratorVM = orchestratorVM,
-        recentWorkdirs = recentWorkdirs,
-        onManageHosts = onManageHosts,
         onNavigateToSettings = onNavigateToSettings,
         onNavigateToSessions = onNavigateToSessions,
-        onOpenWorkspaceFiles = onOpenWorkspaceFiles,
-        onOpenWorkspaceChanges = onOpenWorkspaceChanges,
+        onOpenChatFilePreview = onOpenChatFilePreview,
+        onOpenGitChanges = onOpenGitChanges,
     )
 }
 

@@ -16,7 +16,6 @@ import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.ContentPaste
 import androidx.compose.material.icons.filled.Delete
-import androidx.compose.material.icons.filled.Dns
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.ExpandLess
 import androidx.compose.material.icons.filled.ExpandMore
@@ -35,7 +34,6 @@ import androidx.compose.material3.ExposedDropdownMenuDefaults
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.ListItem
-import androidx.compose.material3.ListItemDefaults
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.RadioButton
@@ -67,9 +65,42 @@ import cn.vectory.ocdroid.R
 import cn.vectory.ocdroid.data.model.HostProfile
 import cn.vectory.ocdroid.ui.ConnectionViewModel
 import cn.vectory.ocdroid.ui.HostViewModel
+import cn.vectory.ocdroid.util.SettingsManager
+import dagger.hilt.EntryPoint
+import dagger.hilt.InstallIn
+import dagger.hilt.android.EntryPointAccessors
+import dagger.hilt.components.SingletonComponent
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
+
+/**
+ * §P5b-A / Q7: Hilt EntryPoint that exposes the [SettingsManager] singleton
+ * to non-Hilt Compose code. Used by [HostProfilesManagerScreen] to wire the
+ * [ModelManagementSection] toggle callbacks (setModelDisabled /
+ * setDisabledModels) without taking a ComposerViewModel parameter — the
+ * AppShell call site to [SettingsHostsRoute] is left unchanged. Mirrors the
+ * pattern in [cn.vectory.ocdroid.ui.theme.SettingsManagerEntryPoint].
+ */
+@EntryPoint
+@InstallIn(SingletonComponent::class)
+interface HostSettingsManagerEntryPoint {
+    fun settingsManager(): SettingsManager
+}
+
+@Composable
+private fun rememberSettingsManager(): SettingsManager {
+    val context = LocalContext.current
+    return remember(context) {
+        EntryPointAccessors.fromApplication(
+            context.applicationContext,
+            HostSettingsManagerEntryPoint::class.java,
+        ).settingsManager()
+    }
+}
 
 /**
  * HostProfile management sub-screen and its supporting composables: the
@@ -77,6 +108,14 @@ import kotlinx.coroutines.withContext
  * ([HostProfileDetailDialog]), and the full editor form
  * ([HostProfileEditorDialog]). Reached from [SettingsScreen] via the
  * "manage profiles" action.
+ *
+ * §P5b-A / Q7: this screen is now the 服务器管理 hub — in addition to the
+ * host list (服务器配置) it also carries 流量统计 (moved from settings/storage)
+ * and 模型管理 ([ModelManagementSection], moved from the removed top-level
+ * 模型 Settings entry). The model-management subscriptions
+ * (providers + disabledModels) are read off [HostViewModel.settingsFlow];
+ * toggle actions go through [rememberSettingsManager] so the AppShell call
+ * signature stays unchanged.
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -89,12 +128,30 @@ internal fun HostProfilesManagerScreen(
 ) {
     var editingProfile by remember { mutableStateOf<HostProfile?>(null) }
     var error by remember { mutableStateOf<String?>(null) }
-    var detailProfile by remember { mutableStateOf<HostProfile?>(null) }
     val deleteFailedText = stringResource(R.string.host_profile_delete_failed)
+
+    // §P5b-A / Q7: 流量统计 subscriptions — moved verbatim from the old
+    // settings/storage route. The TrafficSection composable + reset path
+    // are unchanged.
+    val traffic by connectionVM.trafficFlow.collectAsStateWithLifecycle()
+    LaunchedEffect(Unit) { connectionVM.refreshTrafficStats() }
+
+    // §P5b-A / Q7: 模型管理 subscriptions — providers + disabledModels live
+    // on the settings slice, which HostViewModel already exposes (same store
+    // as SettingsViewModel; distinctUntilChanged keeps this screen from
+    // recomposing on unrelated settings churn).
+    val providers by remember { viewModel.settingsFlow.map { it.providers }.distinctUntilChanged() }
+        .collectAsStateWithLifecycle(initialValue = null)
+    val disabledModels by remember { viewModel.settingsFlow.map { it.disabledModels }.distinctUntilChanged() }
+        .collectAsStateWithLifecycle(initialValue = emptySet())
+    val settingsManager = rememberSettingsManager()
 
     Column(modifier = Modifier.fillMaxSize()) {
         TopAppBar(
-            title = { Text(stringResource(R.string.host_profiles_title)) },
+            // §P5b-A / Q7: title reused from the Settings list entry
+            // (`settings_section_hosts` value is now 服务器管理 / Server
+            // Management in both locales).
+            title = { Text(stringResource(R.string.settings_section_hosts)) },
             navigationIcon = {
                 IconButton(onClick = onBack) {
                     Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = stringResource(R.string.common_back))
@@ -117,16 +174,67 @@ internal fun HostProfilesManagerScreen(
                 Text(it, color = MaterialTheme.colorScheme.error)
                 Spacer(modifier = Modifier.height(12.dp))
             }
+
+            // §P5b-A / Q7: 说明文本 at top of the screen.
+            Text(
+                stringResource(R.string.settings_server_management_desc),
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Spacer(modifier = Modifier.height(16.dp))
+
+            // ── §P5b-A / Q7 Section 1: 服务器配置 ──
+            SectionHeader(title = stringResource(R.string.host_profiles_title))
             profiles.forEach { profile ->
                 HostProfileRow(
                     profile = profile,
                     selected = profile.id == currentProfileId,
-                    onOpen = { detailProfile = profile },
                     onSelect = { viewModel.selectHostProfile(profile.id) },
                     onEdit = { editingProfile = profile }
                 )
                 Spacer(modifier = Modifier.height(8.dp))
             }
+            Spacer(modifier = Modifier.height(16.dp))
+
+            // ── §P5b-A / Q7 Section 2: 流量统计 (moved from settings/storage) ──
+            SectionHeader(title = stringResource(R.string.settings_traffic))
+            TrafficSection(
+                sent = traffic.trafficSent,
+                received = traffic.trafficReceived,
+                onReset = connectionVM::resetTrafficStats,
+                hideHeader = true,
+            )
+            Spacer(modifier = Modifier.height(16.dp))
+
+            // ── §P5b-A / Q7 Section 3: 模型管理 (moved from removed top-level 模型) ──
+            // The fp for the disabled-models persistence layer is derived
+            // from the current host profile (matches ComposerViewModel's
+            // resolution: serverGroupFp.ifBlank { id }).
+            val currentFp = remember(profiles, currentProfileId) {
+                val fp = profiles.firstOrNull { it.id == currentProfileId }?.serverGroupFp
+                fp?.ifBlank { currentProfileId }
+            }
+            ModelManagementSection(
+                providers = providers,
+                disabledModels = disabledModels,
+                onToggleModelDisabled = { providerId, modelId ->
+                    val fp = currentFp ?: return@ModelManagementSection
+                    val key = "$providerId/$modelId"
+                    val currentlyDisabled = key in disabledModels
+                    settingsManager.setModelDisabled(fp, providerId, modelId, disabled = !currentlyDisabled)
+                },
+                onSetProviderModelsEnabled = { providerId, enabled ->
+                    val fp = currentFp ?: return@ModelManagementSection
+                    val catalog = providers?.providers.orEmpty()
+                    val provider = catalog.firstOrNull { it.id == providerId } ?: return@ModelManagementSection
+                    val current = disabledModels.toMutableSet()
+                    provider.models.keys.forEach { mid ->
+                        val key = "$providerId/$mid"
+                        if (enabled) current.remove(key) else current.add(key)
+                    }
+                    settingsManager.setDisabledModels(fp, current)
+                },
+            )
         }
     }
 
@@ -218,49 +326,36 @@ internal fun HostProfilesManagerScreen(
         )
     }
 
-    detailProfile?.let { profile ->
-        HostProfileDetailDialog(
-            profile = profile,
-            isCurrent = profile.id == currentProfileId,
-            onDismiss = { detailProfile = null },
-            onUse = {
-                viewModel.selectHostProfile(profile.id)
-                detailProfile = null
-            },
-            onEdit = {
-                editingProfile = profile
-                detailProfile = null
-            }
-        )
-    }
+    // §P5b-A / Q7: the row-click detail popup (HostProfileDetailDialog) is no
+    // longer invoked from the row — selection moved to the leading RadioButton
+    // and editing to the trailing Edit IconButton. The composable definition
+    // is retained below because [SettingsSectionsInstrumentedTest] still
+    // references it.
 }
 
 @Composable
 internal fun HostProfileRow(
     profile: HostProfile,
     selected: Boolean,
-    onOpen: () -> Unit,
     onSelect: () -> Unit,
     onEdit: () -> Unit
 ) {
-    // A3: collapsed the hand-rolled Surface + Row layout onto the M3 ListItem
-    // template (leadingContent = host icon, headlineContent = name,
-    // supportingContent = server URL, trailingContent = the existing
-    // RadioButton + edit affordance). The RadioButton control itself and all
-    // click handlers are preserved verbatim; only the container changed.
+    // §P5b-A / Q7 refactor: RadioButton moved to leadingContent (was
+    // trailing), the surfaceVariant containerColor is dropped (default
+    // container), the leading Dns icon is removed (RadioButton takes the
+    // leading slot), and the whole-row clickable{ onOpen() } is removed
+    // (the row is no longer clickable — selection happens via the RadioButton,
+    // editing via the trailing Edit IconButton). The headline (display name)
+    // + supporting (server URL) texts are kept so the user still sees which
+    // server a radio selects.
     ListItem(
         modifier = Modifier
             .fillMaxWidth()
-            .clickable { onOpen() }
             .testTag("host.profile.row.${profile.id}"),
-        colors = ListItemDefaults.colors(
-            containerColor = MaterialTheme.colorScheme.surfaceVariant
-        ),
         leadingContent = {
-            Icon(
-                Icons.Default.Dns,
-                contentDescription = null,
-                tint = MaterialTheme.colorScheme.primary
+            RadioButton(
+                selected = selected,
+                onClick = onSelect,
             )
         },
         headlineContent = {
@@ -279,19 +374,12 @@ internal fun HostProfileRow(
             )
         },
         trailingContent = {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                RadioButton(
-                    selected = selected,
-                    onClick = onSelect
+            // Edit: opens the editor dialog.
+            IconButton(onClick = onEdit) {
+                Icon(
+                    Icons.Default.Edit,
+                    contentDescription = stringResource(R.string.host_profile_edit_icon)
                 )
-                // Edit: opens the editor dialog. IconButton consumes the click
-                // so it does not bubble up to the row's onOpen handler.
-                IconButton(onClick = onEdit) {
-                    Icon(
-                        Icons.Default.Edit,
-                        contentDescription = stringResource(R.string.host_profile_edit_icon)
-                    )
-                }
             }
         }
     )

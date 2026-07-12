@@ -6,9 +6,9 @@ import cn.vectory.ocdroid.data.model.VcsStatusEntry
 import cn.vectory.ocdroid.ui.theme.SemanticColors
 
 /**
- * §round-B ① (D.7b): pure helpers backing the Workspace → Changes pane's
+ * §round-B ① (D.7b): pure helpers backing the Git → Changes pane's
  * VCS surface. Extracted from the (now-deleted) SettingsScreen VcsSection
- * so the Workspace owns VCS presentation (scheme: "Workspace → Changes
+ * so the Git tab owns VCS presentation (scheme: "Git → Changes
  * owns diff + VCS; chat card is a deep link").
  *
  * The Composable-heavy [ChangesPane] body lives in `ChangesPaneKt` (which
@@ -19,7 +19,7 @@ import cn.vectory.ocdroid.ui.theme.SemanticColors
 /**
  * Load state for the "Working tree" segment of [ChangesPane]. Mirrors the
  * old Settings VcsSection states (Loading / NoWorkdir / NoGit / Error /
- * Loaded) so the Workspace surface preserves every first-class VCS
+ * Loaded) so the Git surface preserves every first-class VCS
  * presentation the Settings panel used to render. See scheme D.7b.
  */
 internal sealed interface VcsLoadState {
@@ -69,7 +69,7 @@ internal fun reduceVcsLoadState(
 /**
  * File-status → semantic color. Mirrors the mapping that lived in the
  * deleted SettingsScreen vcsStatusColor (which in turn mirrored
- * SessionDiffCard.statusColor) so the Workspace Changes list uses the same
+ * SessionDiffCard.statusColor) so the Git Changes list uses the same
  * visual language as the chat SessionDiffCard. Local because that helper
  * is private to the chat package.
  *

@@ -1,37 +1,37 @@
 package cn.vectory.ocdroid.ui.chat
 
-import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.offset
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.widthIn
-import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Dns
-import androidx.compose.material.icons.filled.Menu
-import androidx.compose.material.icons.filled.MoreVert
-import androidx.compose.material3.AssistChip
-import androidx.compose.material3.AssistChipDefaults
+import androidx.compose.material.icons.filled.Checklist
+import androidx.compose.material.icons.filled.DonutLarge
+import androidx.compose.material.icons.filled.SmartToy
+import androidx.compose.material.icons.outlined.Memory
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import cn.vectory.ocdroid.R
@@ -46,7 +46,7 @@ import cn.vectory.ocdroid.ui.ContextUsage
 import cn.vectory.ocdroid.ui.ConnectionPhase
 import cn.vectory.ocdroid.ui.TunnelActivationState
 import cn.vectory.ocdroid.ui.resolveModelDisplayName
-import cn.vectory.ocdroid.ui.theme.SemanticColors
+import cn.vectory.ocdroid.ui.theme.Dimens
 
 internal data class ChatTopBarState(
     val sessions: List<Session>,
@@ -130,8 +130,8 @@ internal data class ChatTopBarState(
 
 internal data class ChatTopBarActions(
     val onSelectSession: (String) -> Unit,
-    val onCloseSession: (String) -> Unit,
-    val onSelectAgent: (String?) -> Unit,
+    val onCloseSession: (String) -> Unit = {},
+    val onSelectAgent: (String?) -> Unit = {},
     val onNavigateToSettings: () -> Unit = {},
     val onSelectHost: (String) -> Unit = {},
     val onActivateTunnel: () -> Unit = {},
@@ -149,18 +149,21 @@ internal data class ChatTopBarActions(
      */
     val onRefreshTrafficStats: () -> Unit = {},
     /**
-     * §1B (D.4): open the [SessionPickerSheet] from the navigation icon
-     * (left of the title). Replaces the old onNavigateToSessions / nav-icon
-     * flow (which routed to the legacy Sessions destination); session
-     * switching is now a sheet instead of a separate page.
+     * §1B (D.4): formerly opened the [SessionPickerSheet] from the
+     * navigation icon. §0.8.2 P2.1: the icon was replaced with a non-
+     * clickable workdir initial; this callback is no longer invoked from
+     * the top bar (kept on the data class so existing callers / tests
+     * keep compiling — the SessionPickerSheet itself is now orphaned).
      */
     val onOpenSessionPicker: () -> Unit = {},
     /**
-     * §1B (D.5): open the conversation overflow menu (rename / archive
-     * actions) from the actions cluster's trailing IconButton.
+     * §1B (D.5): formerly opened the conversation overflow menu. §0.8.2
+     * P2.3: the overflow DropdownMenu is now co-located with its
+     * ContextUsageRing trigger inside this composable (the fix for the
+     * top-left popup bug); this remote-trigger callback is no longer
+     * invoked. Kept on the data class for back-compat with callers/tests.
      */
     val onOpenOverflow: () -> Unit = {},
-    val onOpenContextSelector: () -> Unit = {},
     /**
      * §model-selection (V1-per-prompt): switch the current session to the model
      * identified by `(providerId, modelId)`. Wired to
@@ -172,17 +175,43 @@ internal data class ChatTopBarActions(
      * there is NO server-side switch call.
      */
     val onSwitchModel: (providerId: String, modelId: String) -> Unit = { _, _ -> },
+    /**
+     * §0.8.2 P2.3: trigger context compaction for the current session
+     * (chatVM.compactSession). Surfaced as the FIRST overflow menu item
+     * (text-only, no leading icon — distinct from the four icon-led
+     * entries below it).
+     */
+    val onCompact: () -> Unit = {},
+    /**
+     * §0.8.2 P2.3: open the [ContextUsageDialog] (ModalBottomSheet) from
+     * the overflow menu's "Context" item. The dialog body is unchanged;
+     * only its trigger moved from the remote DropdownMenu (ChatScaffold)
+     * to here.
+     */
+    val onOpenContextDialog: () -> Unit = {},
+    /**
+     * §0.8.2 P2.3: open the Todo dialog ([TodoListPanel] inside an
+     * AlertDialog) from the overflow menu's "Todo" item.
+     */
+    val onOpenTodoDialog: () -> Unit = {},
+    /**
+     * §0.8.2 P2.3: open the [AgentPickerSheet] from the overflow menu's
+     * "Agent" item. Replaces the Composer's Agent AssistChip trigger
+     * (the chip Row above the input was deleted in the same phase).
+     */
+    val onOpenAgentPicker: () -> Unit = {},
+    /**
+     * §0.8.2 P2.3: open the [ModelPickerSheet] from the overflow menu's
+     * "Model" item. Replaces the Composer's Model AssistChip trigger.
+     */
+    val onOpenModelPicker: () -> Unit = {},
 )
 
 /**
  * Max width for the title-slot content (current session title, §8 breadcrumb,
  * or draft workdir basename). The M3 [TopAppBar] title slot is not a
  * [RowScope], so [Modifier.weight] has no effect there; this cap keeps the
- * title from pushing the actions cluster. §1B: the second-row session tab
- * strip was removed in Phase 1B; the title slot now carries the session
- * title alone (the workdir moved into the [ContextSelectorSheet] entry
- * point — Phase 1B renders the chip echo via a context-cue in the actions
- * cluster).
+ * title from pushing the actions cluster.
  */
 private val TITLE_SLOT_MAX_WIDTH = 340.dp
 
@@ -198,45 +227,55 @@ internal fun ChatTopBar(
     @Suppress("UNUSED_PARAMETER") tabVisible: Boolean = true,
     @Suppress("UNUSED_PARAMETER") onTabVisibilityChange: (Boolean) -> Unit = {},
     /**
-     * §context-compact: optional callback wired through to the context-usage
-     * dialog's "压缩" button. Null by default so existing call sites (and
-     * ChatScreen.kt) keep compiling unchanged.
+     * §context-compact: optional callback formerly wired through to the
+     * ServerManagementDialog's "压缩" button. §0.8.2 P2 removed that dialog
+     * from this composable; the param is retained (suppressed) so the
+     * ChatScaffold call site continues to compile. The live compact trigger
+     * is [ChatTopBarActions.onCompact] (fired from the overflow menu's
+     * "Compress context" item).
      */
-    onContextCompact: (() -> Unit)? = null
+    @Suppress("UNUSED_PARAMETER") onContextCompact: (() -> Unit)? = null,
 ) {
     val currentSession = state.sessions.find { it.id == state.currentSessionId }
-    // §1B-FIX (I6): the Todo / Context-usage dialogs moved to
-    // ChatScaffold.kt (their `showTodoDialog` / `showContextDialog`
-    // state lives in the new overflow menu there). The local state
-    // + dialog-rendering blocks for those two are gone; only the
-    // server-management dialog stays in this file because its entry
-    // point (the Dns IconButton) is still in the TopAppBar.
-    var showServerDialog by remember { mutableStateOf(false) }
-    // §model-selection: friendly name shown in the context chip.
+    // §0.8.2 P2.1: hash-color workdir initial for the nav-icon slot.
+    // NON-CLICKABLE — purely a scope cue. Sourced from the same place the
+    // title reads (currentSession.directory, falling back to draftWorkdir).
+    // basename = substringAfterLast('/').ifBlank { directory }; initial =
+    // the uppercase first character. Renders a neutral placeholder when no
+    // workdir is set (no session + no draft).
+    val directory: String? = currentSession?.directory ?: state.draftWorkdir
+    val workdirBasename: String? = directory
+        ?.substringAfterLast('/')
+        ?.ifBlank { directory }
+    val workdirInitial: String? = workdirBasename
+        ?.firstOrNull()
+        ?.uppercaseChar()
+        ?.toString()
+    // §0.8.2 P2.3: model display name for the overflow menu's Model item.
     val currentModelName = resolveModelDisplayName(state.currentModel, state.providers)
-
-    // Refresh traffic stats when the server popup opens so the dialog shows
-    // live sent/received bytes instead of stale `0 B` (refresh is otherwise
-    // only triggered from SettingsScreen).
-    LaunchedEffect(showServerDialog) {
-        if (showServerDialog) actions.onRefreshTrafficStats()
-    }
+    // §0.8.2 P2.3: overflow menu expanded state. Owned HERE so the
+    // DropdownMenu can be co-located with its ContextUsageRing trigger
+    // inside a single tightly-wrapping Box — the sibling relationship
+    // inside that Box is what makes the popup anchor below the trigger.
+    // The prior remote DropdownMenu (composed at ChatScaffold with no
+    // tight Box parent) anchored to the window's top-left corner — the
+    // bug this phase fixes.
+    var overflowExpanded by remember { mutableStateOf(false) }
 
     TopAppBar(
         modifier = modifier,
         windowInsets = TopAppBarDefaults.windowInsets,
         navigationIcon = {
-            // §1B (D.4): the session-history IconButton. The icon is the
-            // hamburger Menu (visually symmetric, RTL-mirroring moot).
-            // Tapping opens the SessionPickerSheet — replaces the old
-            // "open the Sessions page" nav flow.
-            IconButton(onClick = actions.onOpenSessionPicker) {
-                Icon(
-                    Icons.Filled.Menu,
-                    contentDescription = stringResource(R.string.chat_action_sessions),
-                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-            }
+            // §0.8.2 P2.1: hash-color UPPERCASE workdir initial. Replaces the
+            // hamburger Menu IconButton (which opened SessionPickerSheet).
+            // The picker is no longer reachable from the top bar; this
+            // affordance is non-clickable. Sized at Dimens.iconLg (28dp),
+            // centered inside the navigationIcon slot's natural padding.
+            WorkdirInitial(
+                initial = workdirInitial,
+                directory = directory,
+                modifier = Modifier.size(Dimens.iconLg),
+            )
         },
         title = {
             when {
@@ -301,15 +340,11 @@ internal fun ChatTopBar(
 
                 else -> {
                     if (currentSession != null) {
-                        // §1B: title slot is the session display name only;
-                        // the workdir moved out of the subtitle and into the
-                        // context cue in the actions cluster (the context-chip
-                        // pattern from D.5 — §B1-fix⑥: the chip is now wired
-                        // to onOpenContextSelector, opening the Phase 2
-                        // ContextSelectorSheet; the actions cluster also carries
-                        // the server-status dot + the conversation overflow).
-                        // The session title stays exactly as the old
-                        // subtitle-less title.
+                        // §0.8.2 P2: title slot is the session display name
+                        // only. The workdir moved into the nav-icon initial
+                        // (P2.1); the actions slot now carries only the
+                        // overflow cluster (P2.3 — ContextUsageRing trigger
+                        // + DropdownMenu with 5 items).
                         Text(
                             text = currentSession.displayName,
                             style = MaterialTheme.typography.titleLarge,
@@ -332,132 +367,224 @@ internal fun ChatTopBar(
             }
         },
         actions = {
-            // §1B (D.5): context cue — an AssistChip carrying the host name
-            // + workdir basename. onClick = onOpenContextSelector opens the
-            // ContextSelectorSheet (Phase 2 G.2 surface). Renders "Host →
-            // Workdir" at a glance so users see the active scope without
-            // opening the sheet.
-            ContextCueChip(
-                hostName = state.hostName,
-                workdir = currentSession?.directory ?: state.draftWorkdir,
-                onClick = actions.onOpenContextSelector,
+            // §0.8.2 P2.3: the overflow cluster. The ContextUsageRing is the
+            // trigger; the DropdownMenu is its sibling inside the same Box
+            // — that sibling relationship is what anchors the popup below
+            // the trigger (the prior remote DropdownMenu at ChatScaffold
+            // popped to the top-left because it had no tight Box anchor).
+            // The 5 items (top→bottom): Compress context (text-only),
+            // Context, Todo, Agent, Model. Archive was removed.
+            ContextMenuCluster(
+                usage = state.contextUsage,
+                todos = state.sessionTodos,
+                selectedAgentName = state.selectedAgentName,
+                currentModelName = currentModelName,
+                expanded = overflowExpanded,
+                onToggleExpand = { overflowExpanded = !overflowExpanded },
+                onDismiss = { overflowExpanded = false },
+                onCompact = {
+                    overflowExpanded = false
+                    actions.onCompact()
+                },
+                onOpenContext = {
+                    overflowExpanded = false
+                    actions.onOpenContextDialog()
+                },
+                onOpenTodo = {
+                    overflowExpanded = false
+                    actions.onOpenTodoDialog()
+                },
+                onOpenAgent = {
+                    overflowExpanded = false
+                    actions.onOpenAgentPicker()
+                },
+                onOpenModel = {
+                    overflowExpanded = false
+                    actions.onOpenModelPicker()
+                },
             )
-
-            // Server status indicator: an IconButton (Icons.Default.Dns)
-            // that is always grey (onSurfaceVariant); a small coloured dot
-            // at the icon's top-end corner reflects the live connection
-            // state. Tapping opens the existing ServerManagementDialog
-            // (host picker + refresh + tunnel + the "System Settings"
-            // navigation entry). Kept from the old ChatTopBar — the
-            // connection UX is unchanged in 1B.
-            val badgeColor = when {
-                state.isConnected -> SemanticColors.stateSuccessFg()
-                state.isConnecting -> SemanticColors.stateInfoFg()
-                state.connectionPhase is ConnectionPhase.Idle -> null
-                else -> null
-            }
-            IconButton(onClick = { showServerDialog = true }) {
-                val serverIcon: @Composable () -> Unit = {
-                    Icon(
-                        Icons.Default.Dns,
-                        contentDescription = stringResource(R.string.chat_action_server),
-                        tint = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                }
-                if (badgeColor != null) {
-                    Box {
-                        serverIcon()
-                        Box(
-                            Modifier
-                                .align(Alignment.TopEnd)
-                                .offset(x = 2.dp, y = (-4).dp)
-                                .size(8.dp)
-                                .background(badgeColor, CircleShape)
-                        )
-                    }
-                } else {
-                    serverIcon()
-                }
-            }
-
-            // §1B (D.5): conversation overflow. Tap → DropdownMenu with
-            // Archive (the only Phase 1B entry; Rename + Copy link are
-            // Phase 1C follow-ups — message-row overflow is the canonical
-            // edit / fork / revert surface).
-            IconButton(onClick = actions.onOpenOverflow) {
-                Icon(
-                    Icons.Filled.MoreVert,
-                    contentDescription = stringResource(R.string.chat_action_overflow),
-                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-            }
         }
     )
+}
 
-    // §1B-FIX (I6): the Todo / Context-usage AlertDialogs that used to
-    // be gated by the local `showTodoDialog` / `showContextDialog`
-    // state moved to ChatScaffold.kt — the new overflow menu opens
-    // them there, owning the local state alongside the dialog body.
-    // Only the server-management dialog stays in this file (its entry
-    // point is the Dns IconButton in the TopAppBar).
-
-    if (showServerDialog) {
-        ServerManagementDialog(
-            hostProfiles = state.hostProfiles,
-            currentHostProfileId = state.currentHostProfileId,
-            tunnelActivationState = state.tunnelActivationState,
-            showTunnelAuth = state.showTunnelAuth,
-            trafficSent = state.trafficSent,
-            trafficReceived = state.trafficReceived,
-            serverVersion = state.serverVersion,
-            onSelectHost = { profileId ->
-                actions.onSelectHost(profileId)
-                showServerDialog = false
-            },
-            onRefresh = { actions.onRefreshMessages() },
-            onActivateTunnel = { actions.onActivateTunnel() },
-            onNavigateToSettings = {
-                showServerDialog = false
-                actions.onNavigateToSettings()
-            },
-            onDismiss = { showServerDialog = false }
-        )
+/**
+ * §0.8.2 P2.1: the non-clickable hash-color workdir initial rendered in the
+ * navigationIcon slot. Reads the FIRST character of the workdir basename
+ * (uppercase) and tints it with [workdirTone] so the user has an at-a-glance
+ * scope cue. When [initial] is null (no session + no draft) the slot renders
+ * a transparent placeholder so the title alignment stays stable.
+ *
+ * Sized via [Dimens.iconLg] (28dp) per the spec — large enough to legibly
+ * carry a single glyph, small enough to leave the title slot's breathing
+ * room intact. NON-CLICKABLE: no onClick, no ripple, no combinedClickable.
+ */
+@Composable
+private fun WorkdirInitial(
+    initial: String?,
+    directory: String?,
+    modifier: Modifier = Modifier,
+) {
+    Box(
+        modifier = modifier,
+        contentAlignment = Alignment.Center,
+    ) {
+        if (initial != null && directory != null) {
+            Text(
+                text = initial,
+                style = MaterialTheme.typography.titleMedium,
+                color = workdirTone(directory),
+                fontWeight = FontWeight.SemiBold,
+                maxLines = 1,
+            )
+        }
+        // else: render nothing (transparent placeholder — the Box reserves
+        // the slot so the title alignment is stable across sessions with
+        // and without a workdir).
     }
 }
 
 /**
- * §1B (D.5): the context cue chip rendered in the actions cluster. Echoes
- * the current "Host → Workdir" pair at a glance. onClick is wired to
- * [ChatTopBarActions.onOpenContextSelector], which opens the
- * ContextSelectorSheet (Phase 2 G.2 surface). The long paths ellipsize via
- * TextOverflow.Ellipsis. The chip is M3 AssistChip (48dp touch target) and
- * the leading Dns icon matches the old DNS server popover affordance —
- * same family, different surface.
+ * §0.8.2 P2.3: the trigger + DropdownMenu cluster rendered in the actions
+ * slot. Mirrors the v0.7.6 `ContextMenuButton` pattern
+ * (ChatSessionTabStrip.kt:458): a 44dp transparent Surface wraps the live
+ * [ContextUsageRing] (WCAG 2.5.5 touch target while keeping the ring visual
+ * at its tuned size); the [DropdownMenu] is a sibling inside the same Box
+ * so it anchors below the trigger.
+ *
+ * Menu items (top→bottom), per the P2 spec:
+ *   1. Compress context — TEXT ONLY (no leading icon). → onCompact.
+ *   2. Context          — Icons.Default.DonutLarge. Text = "{pct}%
+ *                         {total/1000}/{limit/1000}" or the label
+ *                         "Context" when usage is null. → onOpenContext.
+ *   3. Todo             — Icons.Default.Checklist. Text = "{completed}/
+ *                         {total}" (always shown incl. 0/0). → onOpenTodo.
+ *   4. Agent            — Icons.Default.SmartToy. Text = selected agent
+ *                         name (or "Default"). → onOpenAgent.
+ *   5. Model            — Icons.Outlined.Memory. Text = current model
+ *                         display name (or "Select model"). → onOpenModel.
+ *
+ * Archive was REMOVED (the prior remote menu's last item).
+ *
+ * Leading-icon size = [Dimens.iconSm] (18dp, the M3 DropdownMenuItem default
+ * tier); the workdir initial in the nav-icon slot uses [Dimens.iconLg] (28dp).
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun ContextCueChip(hostName: String, workdir: String?, onClick: () -> Unit) {
-    val workdirBase = workdir?.split("/")?.filter { it.isNotEmpty() }?.lastOrNull() ?: "—"
-    AssistChip(
-        onClick = onClick,
-        label = {
-            Text(
-                text = "$hostName → $workdirBase",
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
+private fun ContextMenuCluster(
+    usage: ContextUsage?,
+    todos: List<TodoItem>,
+    selectedAgentName: String?,
+    currentModelName: String,
+    expanded: Boolean,
+    onToggleExpand: () -> Unit,
+    onDismiss: () -> Unit,
+    onCompact: () -> Unit,
+    onOpenContext: () -> Unit,
+    onOpenTodo: () -> Unit,
+    onOpenAgent: () -> Unit,
+    onOpenModel: () -> Unit,
+) {
+    Box {
+        // §v0.7-pattern (ChatSessionTabStrip.kt:458): the ring is the
+        // trigger; enlarge the click target to 44dp (WCAG 2.5.5 AAA) while
+        // keeping the ring visual at its tuned 28dp size (ChatUiTuning).
+        // The ring is centered inside the larger transparent Surface so the
+        // visual density of the actions cluster is unchanged.
+        Surface(
+            onClick = onToggleExpand,
+            shape = RoundedCornerShape(50),
+            color = Color.Transparent,
+            modifier = Modifier.size(44.dp),
+        ) {
+            Box(
+                modifier = Modifier.fillMaxSize(),
+                contentAlignment = Alignment.Center,
+            ) {
+                ContextUsageRing(usage = usage)
+            }
+        }
+        // The DropdownMenu MUST be a sibling of the trigger inside this Box
+        // — that's what makes it anchor below the trigger (a remote menu
+        // with no tight Box parent anchors to the window's top-left).
+        DropdownMenu(
+            expanded = expanded,
+            onDismissRequest = { if (expanded) onDismiss() },
+        ) {
+            // 1. Compress context — TEXT ONLY (no leading icon).
+            DropdownMenuItem(
+                text = { Text(stringResource(R.string.chat_compact_session)) },
+                onClick = onCompact,
             )
-        },
-        leadingIcon = {
-            Icon(
-                Icons.Default.Dns,
-                contentDescription = null,
-                modifier = Modifier.size(16.dp),
+            // 2. Context — "{pct}% {totalTokens/1000}/{contextLimit/1000}"
+            //    or the label "Context" when usage is null.
+            DropdownMenuItem(
+                text = {
+                    Text(
+                        if (usage != null) {
+                            val pct = (usage.percentage * 100).toInt()
+                            "$pct% ${usage.totalTokens / 1000}/${usage.contextLimit / 1000}"
+                        } else {
+                            stringResource(R.string.chat_context)
+                        }
+                    )
+                },
+                leadingIcon = {
+                    Icon(
+                        Icons.Default.DonutLarge,
+                        contentDescription = null,
+                        modifier = Modifier.size(Dimens.iconSm),
+                    )
+                },
+                onClick = onOpenContext,
             )
-        },
-        colors = AssistChipDefaults.assistChipColors(
-            labelColor = MaterialTheme.colorScheme.onSurface,
-        ),
-    )
+            // 3. Todo — "{completed}/{total}", always shown (including 0/0).
+            DropdownMenuItem(
+                text = {
+                    val completed = todos.count { it.isCompleted }
+                    val total = todos.size
+                    Text("$completed/$total")
+                },
+                leadingIcon = {
+                    Icon(
+                        Icons.Default.Checklist,
+                        contentDescription = null,
+                        modifier = Modifier.size(Dimens.iconSm),
+                    )
+                },
+                onClick = onOpenTodo,
+            )
+            // 4. Agent — selected agent name (or "Default").
+            DropdownMenuItem(
+                text = {
+                    Text(selectedAgentName ?: stringResource(R.string.agent_default_label))
+                },
+                leadingIcon = {
+                    Icon(
+                        Icons.Default.SmartToy,
+                        contentDescription = null,
+                        modifier = Modifier.size(Dimens.iconSm),
+                    )
+                },
+                onClick = onOpenAgent,
+            )
+            // 5. Model — current model display name (or "Select model").
+            DropdownMenuItem(
+                text = {
+                    Text(
+                        currentModelName.ifEmpty { stringResource(R.string.chat_model_picker_title) }
+                    )
+                },
+                leadingIcon = {
+                    Icon(
+                        Icons.Outlined.Memory,
+                        contentDescription = null,
+                        modifier = Modifier.size(Dimens.iconSm),
+                    )
+                },
+                onClick = onOpenModel,
+            )
+        }
+    }
 }
 
 /**
@@ -469,7 +596,9 @@ private fun ContextCueChip(hostName: String, workdir: String?, onClick: () -> Un
  * The new ModelPickerSheet in Composer.kt calls `visiblePickerProviders(...)`
  * directly (same package, no import needed).
  *
- * §1B: the old AlertDialog-wrapped ModelPickerDialog was folded into
- * Composer.kt's ModelPickerSheet. Kept the §R18 documentation comment so
- * future readers can find the migration trail; the dialog itself is gone.
+ * §0.8.2 P2: the host chip / server-status IconButton / ServerManagementDialog
+ * were removed from this file. The ServerManagementDialog composable file
+ * (ChatServerManagementDialog.kt) is intentionally retained but no longer
+ * invoked from the top bar. The ContextCueChip composable was deleted
+ * entirely (it had no other consumer).
  */

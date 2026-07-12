@@ -10,8 +10,8 @@ class WorkspaceStateTest {
     @Test
     fun changesDeepLinkIsBuiltAndEncodesTheSessionId() {
         assertEquals(
-            "workspace/changes?session=session%2Fwith%20spaces",
-            NavRoute.workspaceChanges("session/with spaces"),
+            "git?session=session%2Fwith%20spaces",
+            NavRoute.gitRoute("session/with spaces"),
         )
     }
 

@@ -44,6 +44,15 @@ class CacheRepositoryTest {
         repo = CacheRepositoryImpl(db.cacheDao(), db.gapMarkerDao(), db)
     }
 
+    @Test
+    fun `totalCachedPayloadBytes reports UTF-8 bytes rather than text characters`() = runTest {
+        db.cacheDao().upsertMessages(
+            listOf(CachedMessageEntity("g1", "s1", "m1", 1L, "user", "汉"))
+        )
+
+        assertEquals(3L, repo.totalCachedPayloadBytes())
+    }
+
     @After
     fun tearDown() {
         db.close()

@@ -1,6 +1,7 @@
 package cn.vectory.ocdroid.util
 
 import android.app.Application
+import android.content.Context
 import androidx.test.core.app.ApplicationProvider
 import org.junit.After
 import org.junit.Assert.assertNotNull
@@ -14,71 +15,74 @@ import androidx.appcompat.app.AppCompatDelegate
 import androidx.core.os.LocaleListCompat
 
 /**
- * R18 Phase 5++ coverage: [AppLocaleController] — applies the app's locale
- * policy once at startup. Coverage gap before this file: 0/1 class, 0/1
- * method, 0/4 lines, 0/13 instructions.
+ * R18 Phase 5++ / §P5a (Q5) coverage: [AppLocaleController] — applies the
+ * user's persisted [LocaleMode] via [AppCompatDelegate.setApplicationLocales].
  *
- * Rule: follow the system locale, EXCEPT that any non-English system locale
- * is forced to Chinese. We pin `Locale.getDefault()` for each test (saving
- * + restoring the prior default) and assert that
- * [AppCompatDelegate.setApplicationLocales] ends up with the expected
- * [LocaleListCompat] via reading it back through the same delegate.
+ * Coverage goal: the three [AppLocaleController.apply] branches (ZH / EN /
+ * SYSTEM) + the [LocaleManagerCompat.getSystemLocales]-based SYSTEM
+ * resolution. Robolectric's AppCompatDelegate shadow does not persist the
+ * applied value across a get, so (mirroring the original test) we assert the
+ * call returns without throwing and the delegate's locale list is non-null;
+ * the branch coverage is the goal.
  */
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [34], application = Application::class)
 class AppLocaleControllerTest {
 
-    private var savedLocale: Locale? = null
+    private lateinit var context: Context
 
     @Before
-    fun saveLocale() {
+    fun setUp() {
         // §note: see SettingsManagerTest — Robolectric boots the real OpenCodeApp
         // whose Hilt graph needs AndroidKeyStore.
         FakeAndroidKeyStoreProvider.install()
-        savedLocale = Locale.getDefault()
+        context = ApplicationProvider.getApplicationContext()
     }
 
     @After
-    fun restoreLocale() {
-        savedLocale?.let { Locale.setDefault(it) }
+    fun tearDown() {
         // Reset the delegate to follow system (empty list).
         AppCompatDelegate.setApplicationLocales(LocaleListCompat.getEmptyLocaleList())
     }
 
     @Test
-    fun `applySystemLocale with English system sets empty locale list (follow system)`() {
-        Locale.setDefault(Locale.ENGLISH)
-
-        // The body calls AppCompatDelegate.setApplicationLocales(getEmptyLocaleList())
-        // and returns. Under Robolectric the call is a shadow no-op but the
-        // coverage lands; we just verify no exception escapes.
-        AppLocaleController.applySystemLocale()
+    fun `apply with ZH forces Chinese`() {
+        AppLocaleController.apply(context, LocaleMode.ZH)
 
         val applied = AppCompatDelegate.getApplicationLocales()
         assertNotNull(applied)
     }
 
     @Test
-    fun `applySystemLocale with Chinese system forces Chinese`() {
-        Locale.setDefault(Locale.SIMPLIFIED_CHINESE)
+    fun `apply with EN forces English`() {
+        AppLocaleController.apply(context, LocaleMode.EN)
 
-        AppLocaleController.applySystemLocale()
-
-        // Robolectric's AppCompatDelegate shadow does not persist the call,
-        // so we cannot assert the applied locale value. The branch coverage
-        // is the goal (the else branch of the language check).
         val applied = AppCompatDelegate.getApplicationLocales()
         assertNotNull(applied)
     }
 
     @Test
-    fun `applySystemLocale with other non-English system forces Chinese`() {
-        // French system → forced to Chinese (no French localization exists).
-        Locale.setDefault(Locale.FRENCH)
-
-        AppLocaleController.applySystemLocale()
+    fun `apply with SYSTEM follows the real system locale`() {
+        // SYSTEM mode resolves the real system locale via
+        // LocaleManagerCompat.getSystemLocales(context); under Robolectric the
+        // default system locale is used. zh→zh, en→en, any other→zh. The call
+        // must not throw and must land a non-null locale list.
+        AppLocaleController.apply(context, LocaleMode.SYSTEM)
 
         val applied = AppCompatDelegate.getApplicationLocales()
         assertNotNull(applied)
+    }
+
+    @Test
+    fun `applyPersisted delegates to the SettingsManager locale`() {
+        // Build a real SettingsManager (Robolectric + FakeAndroidKeyStoreProvider
+        // backs the EncryptedSharedPreferences); default localeMode is SYSTEM
+        // (first-launch). applyPersisted must not throw.
+        val sm = SettingsManager(context)
+        AppLocaleController.applyPersisted(context, sm)
+
+        assertNotNull(AppCompatDelegate.getApplicationLocales())
+        // Sanity: default LocaleMode is SYSTEM.
+        assert(sm.localeMode == LocaleMode.SYSTEM)
     }
 }

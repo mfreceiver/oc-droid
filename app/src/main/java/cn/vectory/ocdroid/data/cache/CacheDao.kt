@@ -266,6 +266,16 @@ interface CacheDao {
      */
     @Query("SELECT DISTINCT workdir FROM cached_session WHERE server_group_fp = :fp AND workdir != ''")
     suspend fun workdirsInGroup(fp: String): List<String>
+
+    /**
+     * §P5b-B (Q8): total byte size of all cached message `parts` JSON blobs —
+     * the dominant content payload. Used by the 清除数据 section to show
+     * "已缓存数据 XXX MB". COALESCE ensures 0 (not NULL) when the table is
+     * empty. Casting to BLOB makes LENGTH count the UTF-8 bytes SQLite stores,
+     * rather than Unicode characters.
+     */
+    @Query("SELECT COALESCE(SUM(LENGTH(CAST(parts AS BLOB))), 0) FROM cached_message")
+    suspend fun totalPayloadBytes(): Long
 }
 
 data class CachedSessionWithMessageCount(

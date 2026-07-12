@@ -5,6 +5,7 @@ import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithText
+import androidx.test.platform.app.InstrumentationRegistry
 import cn.vectory.ocdroid.data.model.HostProfile
 import cn.vectory.ocdroid.ui.settings.AboutSection
 import cn.vectory.ocdroid.ui.settings.HostProfileDetailDialog
@@ -56,7 +57,9 @@ class SettingsSectionsInstrumentedTest {
             }
         }
 
-        composeRule.onNodeWithText("Use This Host").assertIsDisplayed()
+        val useCurrentServerLabel = InstrumentationRegistry.getInstrumentation()
+            .targetContext.getString(R.string.host_profile_use_this_host)
+        composeRule.onNodeWithText(useCurrentServerLabel).assertIsDisplayed()
     }
 
     @Test

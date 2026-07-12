@@ -1,5 +1,6 @@
 package cn.vectory.ocdroid.ui.sessions
 
+import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
@@ -16,8 +17,6 @@ import androidx.compose.material.icons.filled.AddComment
 import androidx.compose.material.icons.filled.Archive
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.CreateNewFolder
-import androidx.compose.material.icons.filled.FolderOpen
-import androidx.compose.material.icons.filled.Forum
 import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.Inbox
 import androidx.compose.material.icons.filled.KeyboardArrowDown
@@ -39,13 +38,16 @@ import cn.vectory.ocdroid.data.model.Session
 import cn.vectory.ocdroid.data.model.SessionStatus
 import cn.vectory.ocdroid.data.repository.OpenCodeRepository
 import cn.vectory.ocdroid.ui.ComposerViewModel
+import cn.vectory.ocdroid.ui.NavRoute
 import cn.vectory.ocdroid.ui.OrchestratorViewModel
 import cn.vectory.ocdroid.ui.SessionViewModel
 import cn.vectory.ocdroid.ui.SettingsViewModel
 import cn.vectory.ocdroid.ui.chat.workdirTone
+import cn.vectory.ocdroid.ui.theme.Dimens
 import cn.vectory.ocdroid.util.DebugLog
 import cn.vectory.ocdroid.util.WorkdirPaths
 import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.filter
 import kotlinx.coroutines.flow.map
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -65,17 +67,28 @@ fun SessionsScreen(
     repository: OpenCodeRepository,
     onSwitchToChat: () -> Unit = {},
     /**
-     * §phase2-unbreak: open the file browser / Workspace Files destination.
+     * Opens the Files destination.
      * Carries the tapped workdir (non-null here — the folder button is per-
      * workdir) and an optional specific file path (null from Sessions; only
      * chat file-path taps carry a path). Two-param signature so the new-shell
      * AppShell can build a typed route with both fields.
+     *
+     * §0.8.2 P3.5: the per-workdir "browse files" (FolderOpen) IconButton that
+     * was the only call site here has been REMOVED — browsing is the Files tab
+     * now. The param is KEPT in the signature so AppShell's call site stays
+     * unchanged; it is simply no longer invoked from this composable.
      */
-    onOpenWorkspaceFiles: (workdir: String, path: String?) -> Unit = { _, _ -> },
+    onOpenFiles: (workdir: String, path: String?) -> Unit = { _, _ -> },
     /**
      * Phase 7：横屏左 1/3 面板内渲染时设 false，隐藏 TopAppBar 的 navigationIcon
      * （面板始终与 chat pane 并列，无需"返回 chat"——onSwitchToChat 在面板内为 no-op）。
      * 竖屏全屏渲染时默认 true。
+     *
+     * §0.8.2 P3.1: Sessions is now a top-level tab — the top-left `Forum`
+     * navigationIcon has been removed. This param is no longer read here, but
+     * is KEPT in the signature to avoid touching the AppShell call site
+     * (which still passes it). `onSwitchToChat` is still used after selecting
+     * / creating a session.
      */
     showBackNavigation: Boolean = true
 ) {
@@ -108,7 +121,13 @@ fun SessionsScreen(
     var pendingArchiveSession by remember { mutableStateOf<Session?>(null) }
     // §round-B ③ (Phase 2 G.2 step 1): search query for the SessionsScreen
     // SearchBar. Empty query ⇒ no filter (matches the pre-search render).
+    // §0.8.2 P3.2: rememberSaveable so the query survives tab save/restore.
     var searchQuery by rememberSaveable { mutableStateOf("") }
+    // §0.8.2 P3.2: search is now a top-right IconButton that opens the M3
+    // SearchBar as a full-screen overlay. rememberSaveable so the open state
+    // survives tab save/restore. (Intentionally NOT reset on tab reselect —
+    // the reselect-event mechanism isn't built yet; deferred to integration.)
+    var searchExpanded by rememberSaveable { mutableStateOf(false) }
 
     // Derive recent sessions (root sessions: parentId == null, by time.updated desc, top 5).
     // Source merges the global sessions list with directorySessions (#10: prior
@@ -183,78 +202,90 @@ fun SessionsScreen(
     // item lambdas (recent + workdir session cards) capture this snapshot value
     // directly.
 
+    // §0.8.2 P3.2: flat filtered-results list for the SearchBar overlay.
+    // Same merge+dedupe+root+non-archived candidate set as recentSessions but
+    // WITHOUT the take(5) cap, so the overlay surfaces every match (the
+    // docked list is capped to 5; the overlay is the exhaustive view).
+    // derivedStateOf → only recomputed when an input slice / the query changes,
+    // and only READ when the overlay is composed (collapsed ⇒ not read).
+    val searchResults by remember {
+        derivedStateOf {
+            val candidates = (sessionListState.sessions + sessionListState.directorySessions.values.flatten())
+                .distinctBy { it.id }
+                .filter { it.parentId == null && !it.isArchived }
+            filterSessionsByQuery(candidates, searchQuery)
+                .sortedByDescending { it.time?.updated ?: 0L }
+        }
+    }
+
+    // §0.8.2 P3.2: back closes the search overlay before the system back
+    // navigates away from the Sessions tab. The SearchBar's own scrim
+    // dismissal also flips searchExpanded to false via onExpandedChange.
+    BackHandler(enabled = searchExpanded) { searchExpanded = false }
+
+    // §Q10 (P4b-B): reselect subscription — a second tap on the Sessions tab
+    // collapses the search overlay and clears the query, returning the user
+    // to the clean session list.
+    LaunchedEffect(orchestratorVM) {
+        orchestratorVM.reselectFlow
+            .filter { it == NavRoute.Sessions }
+            .collect {
+                searchExpanded = false
+                searchQuery = ""
+            }
+    }
+
     // Navigate to Chat tab after selecting a session
     fun onSessionClick(sessionId: String) {
         viewModel.selectSession(sessionId)
         onSwitchToChat()
     }
 
-    Scaffold(
-        topBar = {
-            TopAppBar(
-                title = {
-                    Text(stringResource(R.string.nav_sessions))
-                },
-                navigationIcon = {
-                    if (showBackNavigation) {
-                        // Back to Chat (the destination-aware entry point). The
-                        // Sessions screen is no longer swipe-reachable — this is
-                        // the primary way back to the conversation.
-                        IconButton(onClick = onSwitchToChat) {
+    Box(modifier = Modifier.fillMaxSize()) {
+        Scaffold(
+            topBar = {
+                TopAppBar(
+                    title = {
+                        Text(stringResource(R.string.nav_sessions))
+                    },
+                    // §0.8.2 P3.1: top-left navigationIcon removed — Sessions
+                    // is a top-level tab now (no back arrow). The
+                    // showBackNavigation param is retained in the signature
+                    // but no longer read here (see param doc above).
+                    actions = {
+                        // §0.8.2 P3.2: search affordance moved here from the
+                        // docked LazyColumn SearchBar item. Tapping opens the
+                        // full-screen M3 SearchBar overlay (sibling below).
+                        IconButton(onClick = { searchExpanded = true }) {
                             Icon(
-                                Icons.Default.Forum,
-                                contentDescription = stringResource(R.string.common_back)
+                                Icons.Default.Search,
+                                contentDescription = stringResource(R.string.sessions_action_search),
                             )
                         }
                     }
-                }
-            )
-        }
-    ) { padding ->
-        LazyColumn(
-            modifier = Modifier
-                .fillMaxSize()
-                .padding(padding),
-            contentPadding = PaddingValues(vertical = 8.dp),
-            verticalArrangement = Arrangement.spacedBy(2.dp)
-        ) {
-            // --- §round-B ③ (Phase 2 G.2 step 1): SearchBar row ---
-            // Covers both the "Recent" and "Connected projects" groups
-            // (the query is applied to both derivations above). Docked
-            // style — the LazyColumn item gives it full row width + lets
-            // the list scroll underneath the bar (M3 SearchBar defaults to
-            // a TextField-shaped surface; we keep active=false so it never
-            // expands into the IME-search-overlay mode — the list filters
-            // live as the user types).
-            item(key = "search_bar") {
-                androidx.compose.material3.SearchBar(
-                    query = searchQuery,
-                    onQueryChange = { searchQuery = it },
-                    onSearch = { /* live filter — no explicit submit needed */ },
-                    active = false,
-                    onActiveChange = { /* docked — never enters overlay mode */ },
-                    placeholder = { Text(stringResource(R.string.sessions_search_hint)) },
-                    leadingIcon = {
-                        Icon(
-                            Icons.Default.Search,
-                            contentDescription = null,
-                        )
-                    },
-                    trailingIcon = {
-                        if (searchQuery.isNotEmpty()) {
-                            IconButton(onClick = { searchQuery = "" }) {
-                                Icon(
-                                    Icons.Default.Close,
-                                    contentDescription = stringResource(R.string.common_close),
-                                )
-                            }
-                        }
-                    },
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(horizontal = 16.dp, vertical = 4.dp),
-                ) {}
+                )
             }
+        ) { padding ->
+            LazyColumn(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(padding),
+                // §0.8.2 P3.3 / Q9: no extra TOP contentPadding — the title↔
+                // first-item gap was inflated by the now-removed docked
+                // SearchBar item + the previous vertical=8dp top pad. The
+                // first SectionHeader already carries its own vertical=12dp
+                // internal padding, so 0 top here keeps a clean gap. Bottom
+                // pad retained for scroll comfort.
+                contentPadding = PaddingValues(bottom = Dimens.spacing2),
+                // §0.8.2 P3.3: tighten inter-item gap (was 2.dp); combined
+                // with SessionCard's vertical=0 padding → ~1dp between cards.
+                verticalArrangement = Arrangement.spacedBy(Dimens.hairline)
+            ) {
+            // --- §0.8.2 P3.2: docked SearchBar LazyColumn item REMOVED. ---
+            // Search is now a top-right IconButton in the TopAppBar actions
+            // that opens the M3 SearchBar as a full-screen overlay (rendered
+            // as a sibling of this Scaffold below). Removing this item also
+            // eliminates the title↔first-item gap it inflated (see Q9).
 
             // --- Recent Sessions Section ---
             item(key = "recent_header") {
@@ -408,24 +439,13 @@ fun SessionsScreen(
                             },
                             trailingContent = {
                                 Row(verticalAlignment = Alignment.CenterVertically) {
-                                    // Browse files for this project (Bug3: relocated
-                                    // from the chat tab strip). Scopes the repository
-                                    // to this workdir and opens the file-browser overlay.
-                                    // R-12 (WCAG 2.5.5): no explicit size override, so
-                                    // the IconButton falls back to its 48dp default touch
-                                    // target (the former 32dp was below the minimum).
-                                    IconButton(
-                                        onClick = {
-                                            onOpenWorkspaceFiles(workdir, null)
-                                        }
-                                    ) {
-                                        Icon(
-                                            Icons.Default.FolderOpen,
-                                            contentDescription = stringResource(R.string.nav_files),
-                                            modifier = Modifier.size(18.dp),
-                                            tint = MaterialTheme.colorScheme.onSurfaceVariant
-                                        )
-                                    }
+                                    // §0.8.2 P3.5: the per-workdir "browse files"
+                                    // (FolderOpen) IconButton that used to live here has
+                                    // been REMOVED — browsing is the Files top-level tab
+                                    // now (redundant with it). The onOpenWorkspaceFiles
+                                    // param is retained in the signature (see doc above)
+                                    // but no longer invoked here.
+                                    //
                                     // Create-session affordance for this workdir. Tapping
                                     // it opens a fresh draft against this directory AND
                                     // jumps to Chat so the user lands in the composer
@@ -443,7 +463,7 @@ fun SessionsScreen(
                                         Icon(
                                             Icons.Default.AddComment,
                                             contentDescription = stringResource(R.string.sessions_tab_create_session),
-                                            modifier = Modifier.size(18.dp)
+                                            modifier = Modifier.size(Dimens.iconSm)
                                         )
                                     }
                                 }
@@ -485,6 +505,74 @@ fun SessionsScreen(
                 }
             }
         }
+    }
+
+    // §0.8.2 P3.2: full-screen M3 SearchBar overlay — a top-level sibling
+    // of the Scaffold (inside this Box) so it gets the full screen, not the
+    // TopAppBar.actions-constrained height. Conditionally composed: when
+    // searchExpanded=false the SearchBar is absent entirely, so its
+    // collapsed docked pill does NOT render over the TopAppBar (the app-bar
+    // IconButton is the only collapsed affordance). Uses the current
+    // `inputField` + `expanded` API (NOT the deprecated query/active
+    // overload). Dismissing the scrim / pressing the input's back arrow
+    // fires onExpandedChange(false); the BackHandler above also closes on
+    // system back before nav proceeds.
+    if (searchExpanded) {
+        SearchBar(
+            inputField = {
+                SearchBarDefaults.InputField(
+                    query = searchQuery,
+                    onQueryChange = { searchQuery = it },
+                    onSearch = { /* live filter — no explicit submit needed */ },
+                    expanded = searchExpanded,
+                    onExpandedChange = { searchExpanded = it },
+                    placeholder = { Text(stringResource(R.string.sessions_search_hint)) },
+                    leadingIcon = {
+                        Icon(Icons.Default.Search, contentDescription = null)
+                    },
+                    trailingIcon = {
+                        if (searchQuery.isNotEmpty()) {
+                            IconButton(onClick = { searchQuery = "" }) {
+                                Icon(
+                                    Icons.Default.Close,
+                                    contentDescription = stringResource(R.string.common_close),
+                                )
+                            }
+                        }
+                    },
+                )
+            },
+            expanded = searchExpanded,
+            onExpandedChange = { searchExpanded = it },
+        ) {
+            // Filtered results — reuse the searchResults derivedStateOf
+            // (filterSessionsByQuery over the full root+non-archived set,
+            // uncapped — unlike the docked recent list's take(5)) + the
+            // existing SessionCard. Selecting a result closes the overlay
+            // before navigating to Chat.
+            LazyColumn {
+                if (searchResults.isEmpty()) {
+                    item(key = "search_empty") {
+                        EmptyRow(stringResource(R.string.sessions_search_no_results))
+                    }
+                } else {
+                    items(searchResults, key = { it.id }) { session ->
+                        SessionCard(
+                            session = session,
+                            isUnread = session.id in unreadSessions,
+                            status = sessionListState.sessionStatuses[session.id],
+                            onClick = {
+                                searchExpanded = false
+                                onSessionClick(session.id)
+                            },
+                            onLongClick = { pendingArchiveSession = session },
+                            onArchive = { pendingArchiveSession = session },
+                        )
+                    }
+                }
+            }
+        }
+    }
     }
 
     // --- Disconnect workdir confirmation dialog (persistent disconnect) ---
@@ -574,7 +662,7 @@ private fun SectionHeader(
         Icon(
             icon,
             contentDescription = null,
-            modifier = Modifier.size(20.dp),
+            modifier = Modifier.size(Dimens.iconSm),
             tint = MaterialTheme.colorScheme.onSurfaceVariant
         )
         Spacer(modifier = Modifier.width(8.dp))
@@ -627,7 +715,11 @@ private fun SessionCard(
     Surface(
         modifier = Modifier
             .fillMaxWidth()
-            .padding(horizontal = 8.dp, vertical = 2.dp)
+            // §0.8.2 P3.3: vertical padding 2.dp → 0.dp (horizontal kept).
+            // Combined with the LazyColumn's spacedBy(Dimens.hairline) this
+            // yields a tight ~1dp inter-card gap (was ~6dp). Card internal
+            // layout untouched.
+            .padding(horizontal = 8.dp, vertical = 0.dp)
             .combinedClickable(
                 onClick = onClick,
                 onLongClick = onLongClick
@@ -664,7 +756,7 @@ private fun SessionCard(
                     Icons.AutoMirrored.Filled.Chat,
                     contentDescription = null,
                     tint = workdirTone(session.directory),
-                    modifier = Modifier.size(20.dp)
+                    modifier = Modifier.size(Dimens.iconSm)
                 )
             },
             trailingContent = {
@@ -693,11 +785,14 @@ private fun SessionCard(
                     // list); omitted from the top "recent sessions" list.
                     // IconButton gives a 48dp touch target (R-12) in a compact
                     // right-edge footprint.
+                    // §0.8.2 P3.4: icon size 24dp (default) → Dimens.iconSm (18)
+                    // to match the workdir-header AddComment icon.
                     if (onArchive != null) {
                         IconButton(onClick = onArchive) {
                             Icon(
                                 Icons.Default.Archive,
-                                contentDescription = stringResource(R.string.sessions_archive)
+                                contentDescription = stringResource(R.string.sessions_archive),
+                                modifier = Modifier.size(Dimens.iconSm)
                             )
                         }
                     }
@@ -735,7 +830,7 @@ private fun EmptyWorkdirPlaceholder(onClick: () -> Unit) {
             Icon(
                 Icons.Default.AddComment,
                 contentDescription = null,
-                modifier = Modifier.size(18.dp),
+                modifier = Modifier.size(Dimens.iconSm),
                 tint = MaterialTheme.colorScheme.onSurfaceVariant
             )
         }

@@ -72,7 +72,7 @@ class CacheMaintenanceCoordinatorTest {
         // what the test seeds into the cache).
         coEvery { repo.getSessions(any()) } returns Result.success(emptyList())
         coEvery { repo.getSessionsForDirectory(any(), any()) } returns Result.success(emptyList())
-        coordinator = CacheMaintenanceCoordinator(cache, repo, settings)
+        coordinator = CacheMaintenanceCoordinator(cache, repo, settings) { "g1" }
     }
 
     @After
@@ -408,7 +408,7 @@ class CacheMaintenanceCoordinatorTest {
         coEvery {
             failingCache.sweepOrphansWithCompleteAliveSet(any(), any())
         } returns EvictionReport(0, 0, emptyList())
-        val failingCoordinator = CacheMaintenanceCoordinator(failingCache, repo, settings)
+        val failingCoordinator = CacheMaintenanceCoordinator(failingCache, repo, settings) { "g1" }
 
         val report = failingCoordinator.dailySweepIfNeeded("g1")
 
@@ -420,6 +420,40 @@ class CacheMaintenanceCoordinatorTest {
         coVerify(exactly = 1) { settings.setLastSweepEpochDay(eq("g1"), any()) }
         // Report reflects the alive sweep outcome.
         assertEquals(AliveCompleteness.Complete, report.completeness)
+    }
+
+    @Test
+    fun `dailySweepIfNeeded for a non-connected group only applies local eviction`() = runTest {
+        val isolatedCache = mockk<CacheRepository>(relaxed = true)
+        val isolatedRepo = mockk<OpenCodeRepository>(relaxed = true)
+        val isolatedSettings = mockk<SettingsManager>(relaxed = true)
+        every { isolatedSettings.getLastSweepEpochDay("other-group") } returns null
+        coEvery { isolatedCache.applyEvictionPolicy("other-group") } returns EvictionReport(0, 0, emptyList())
+        coEvery { isolatedRepo.getSessions(any()) } returns Result.success(emptyList())
+        coEvery { isolatedRepo.getSessionsForDirectory(any(), any()) } returns Result.success(emptyList())
+        coEvery {
+            isolatedCache.sweepOrphansWithCompleteAliveSet(any(), any())
+        } returns EvictionReport(0, 0, emptyList())
+        val isolatedCoordinator = CacheMaintenanceCoordinator(
+            isolatedCache,
+            isolatedRepo,
+            isolatedSettings,
+        ) { "connected-group" }
+
+        val report = isolatedCoordinator.dailySweepIfNeeded("other-group", force = true)
+
+        coVerify(exactly = 1) { isolatedCache.applyEvictionPolicy("other-group") }
+        coVerify(exactly = 0) {
+            isolatedCache.sweepOrphansWithCompleteAliveSet(any(), any())
+        }
+        coVerify(exactly = 0) { isolatedCache.markSeenAliveOnly(any(), any()) }
+        coVerify(exactly = 0) { isolatedRepo.getSessions(any()) }
+        coVerify(exactly = 0) { isolatedRepo.getSessionsForDirectory(any(), any()) }
+        coVerify(exactly = 0) { isolatedSettings.setLastSweepEpochDay(any(), any()) }
+        assertEquals(AliveCompleteness.Incomplete, report.completeness)
+        assertEquals(0, report.verifiedAliveCount)
+        assertTrue(report.evictedSessionIds.isEmpty())
+        assertTrue(report.suspiciousSessionIds.isEmpty())
     }
 
     // ─────────── helpers ────────────────────────────────────────────────────

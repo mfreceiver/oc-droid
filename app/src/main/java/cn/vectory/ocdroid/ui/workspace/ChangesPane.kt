@@ -49,7 +49,7 @@ import cn.vectory.ocdroid.ui.theme.BundledMonoFamily
 import cn.vectory.ocdroid.ui.theme.SemanticColors
 
 /**
- * §round-B ① (scheme D.7b): Workspace → Changes pane.
+ * §round-B ① (scheme D.7b): Git → Changes pane.
  *
  * Two EXPLICITLY-separated views (no `ifEmpty { fallback }` — the previous
  * implicit fallback broke session-scoping semantics by surfacing workdir-
@@ -346,13 +346,36 @@ private fun VcsDiffSheet(
     var patchState by remember(file, workdir) {
         mutableStateOf<DiffPatchState>(DiffPatchState.Loading)
     }
+    // §4.6 (P4b-B): resolve the no-workdir message at composition scope so the
+    // LaunchedEffect below can capture it without calling stringResource inside
+    // the coroutine body.
+    val noWorkdirMessage = stringResource(R.string.files_workdir_none)
     LaunchedEffect(file, workdir) {
+        // §4.6 (P4b-B) defensive guard: mirror the pane's own data-load guard
+        // (ChangesPane LaunchedEffect ~L91-112). When workdir is null/blank,
+        // GET /vcs/diff?mode=working_tree (no `directory` query) → HTTP 400.
+        // Bail into an error state instead of issuing the request. NOTE: in
+        // the normal flow workdir is non-blank here (the working-tree status
+        // list only loads when workdir is present), so a 400 observed in
+        // normal use points to a server-side param issue, not this guard —
+        // runtime reproduction on the emulator is needed to confirm root cause.
+        if (workdir.isNullOrBlank()) {
+            patchState = DiffPatchState.Error(noWorkdirMessage)
+            return@LaunchedEffect
+        }
         patchState = try {
             // §B1-fix④ (gpter 🟠): getOrThrow (NOT getOrDefault) so a diff fetch
             // failure propagates to the catch → DiffPatchState.Error (shown as an
             // error message in the sheet). The previous getOrDefault(emptyList())
             // swallowed the error → no match → DiffPatchState.Loaded(null) → the
             // sheet showed "no unified diff" instead of the actual error.
+            //
+            // §4.6 (P4b-B): the request this produces is:
+            //   GET /vcs/diff?mode=working_tree&directory=<workdir>
+            // (Retrofit URL-encodes the directory query value). When workdir is
+            // non-null but the server still 400's, the likely cause is a server-
+            // side param mismatch (e.g. it expects a trailing slash, a different
+            // mode spelling, or rejects URL-encoded slashes). Do NOT fix blind.
             val diffs = repository.getVcsDiff("working_tree", workdir).getOrThrow()
             val match = diffs.firstOrNull { it.file == file }
             if (match != null) DiffPatchState.Loaded(match.patch)

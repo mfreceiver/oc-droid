@@ -1,36 +1,35 @@
-// CacheManagementSection.kt — R-20 Phase 4 (plan §3) storage-management UI.
+// CacheManagementSection.kt — §P5b-B (Q8) storage-management UI (缓存管理).
 //
-// Lists every cached chat session (grouped by serverGroupFp), surfaces the
-// degraded-cache warning + offline-sweep hint, and exposes the manual
-// actions (clear session / clear project / sweep now / clear all / copy-on-split).
+// Renders a 3-level tree: server group/standalone → project (workdir,
+// collapsible) → session (bullet + full name + indented 最新消息/最近校验
+// timestamps, 清除 button spanning the two time rows).
 //
-// The Composable resolves [CacheRepository] + [CacheMaintenanceCoordinator]
-// via a Hilt @EntryPoint (mirrors DebugLogSection's pattern for Composables
-// that live outside any @HiltViewModel scope), but mutations are routed
-// through the [SettingsViewModel] callbacks so SettingsViewModelTest can
-// verify each action reaches the underlying Repository/Coordinator.
+// The top-level action and the connected group's "清除失联会话" action are destructive sweeps
+// (scan + delete orphans via [CacheMaintenanceCoordinator.dailySweepIfNeeded],
+// which deletes orphaned sessions when the alive set is complete). The result
+// is reported via a 3s snackbar ("已清除 N 个失联会话").
+//
+// Mutations are routed through [SettingsViewModel] callbacks so
+// SettingsViewModelTest can verify each action reaches the underlying
+// Repository/Coordinator.
 
 package cn.vectory.ocdroid.ui.settings
 
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.CleaningServices
-import androidx.compose.material.icons.filled.Delete
-import androidx.compose.material.icons.filled.DeleteSweep
-import androidx.compose.material.icons.filled.FolderOff
+import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.Warning
-import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
@@ -39,8 +38,8 @@ import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -49,7 +48,6 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -59,7 +57,10 @@ import cn.vectory.ocdroid.data.cache.CacheRepository
 import cn.vectory.ocdroid.ui.CacheGroupListing
 import cn.vectory.ocdroid.ui.CacheListingState
 import cn.vectory.ocdroid.ui.SettingsViewModel
+import cn.vectory.ocdroid.ui.showTimed
 import cn.vectory.ocdroid.ui.theme.BundledMonoFamily
+import cn.vectory.ocdroid.ui.theme.Dimens
+import cn.vectory.ocdroid.util.WorkdirPaths
 import dagger.hilt.EntryPoint
 import dagger.hilt.InstallIn
 import dagger.hilt.android.EntryPointAccessors
@@ -69,83 +70,79 @@ import java.util.Date
 import java.util.Locale
 
 /**
- * R-20 Phase 4 (plan §3): the cache-management section. Renders one card per
- * `server_group_fp` (with each profile still pointing at it for the copy-on-
- * split row action), each card listing its cached sessions (newest-first).
+ * §P5b-B (Q8): the 缓存管理 section. Renders a 3-level tree (group/standalone
+ * → project/workdir → session) with destructive "清除失联会话" sweep actions
+ * (top-level + per-group) whose results surface via a 3s snackbar.
  *
- * The section is hosted inside SettingsScreen's verticalScroll Column; the
- * per-group LazyColumn is capped at 320.dp so it does not crash against the
- * infinite max-height constraint from the outer scroll (same load-bearing
- * cap DebugLogSection uses).
- *
- * Mutations are routed through [vm] (SettingsViewModel owns the action
- * methods); the @EntryPoint here exists only so future read-only polling
- * helpers can reach [CacheRepository] without a VM round-trip — Phase 4
- * does not need this yet, but the entry point is cheap to declare and
- * matches the DebugLogSection precedent.
+ * The section is hosted inside [SettingsScreen]'s vertically-scrolling Column.
+ * The per-group tree renders as a plain Column (NOT a LazyColumn) so it fully
+ * expands — the parent scroll handles overflow (no heightIn cap needed).
  *
  * @param vm the Settings-domain VM (owns the cache listing state + the
  *   mutation methods).
- * @param hideHeader when true, the section omits its own [SectionHeader]
- *   (used when the section is grouped under a shared header in
- *   SettingsScreen — same pattern as ConnectionProfileSection).
+ * @param snackbarHostState the host for the 3s sweep-result snackbar. Owned
+ *   by [cn.vectory.ocdroid.ui.settings.SettingsStorageRoute]'s Scaffold.
+ * @param hideHeader when true, the section omits its own [SectionHeader].
  */
 @Composable
 internal fun CacheManagementSection(
     vm: SettingsViewModel,
+    snackbarHostState: SnackbarHostState,
     hideHeader: Boolean = false,
 ) {
     if (!hideHeader) {
         SectionHeader(title = stringResource(R.string.settings_section_cache))
     }
 
-    // ── Initial + on-enter refresh: the listing is empty until the first
-    // refreshCacheListing() round-trip lands. Idempotent — safe to call on
-    // every recomposition because refreshCacheListing is itself idempotent
-    // (it overwrites the StateFlow rather than accumulating). The
-    // LaunchedEffect(Unit) ensures it fires ONCE per Settings screen entry.
     LaunchedEffect(Unit) { vm.refreshCacheListing() }
 
     val listing by vm.cacheListing.collectAsStateWithLifecycle()
     val lastSweep by vm.lastSweep.collectAsStateWithLifecycle()
     val isOnline = vm.isOnline
+    val currentServerGroupFp = vm.currentServerGroupFp
     val isDegraded = vm.isCacheDegraded
 
-    // ── Degraded-cache warning (dser I-1 / plan §3): the persistent store
-    // could not be opened and the cache fell back to an in-memory substitute.
-    // Surfacing this here is the explicit Phase 4 deliverable for the flag.
-    if (isDegraded) {
-        DegradedCacheWarning()
-        Spacer(modifier = Modifier.height(12.dp))
+    // §P5b-B (Q8): resolve the snackbar template in the composable body
+    // (stringResource — the Compose-canonical way, so locale changes
+    // invalidate correctly). The count is filled inside the LaunchedEffect
+    // via String.format because it depends on lastSweep (dynamic).
+    val clearResultTemplate = stringResource(R.string.cache_clear_lost_sessions_result)
+
+    // §P5b-B (Q8): 3s snackbar reporting the destructive sweep result. Fires
+    // whenever lastSweep changes to a non-null report — each sweep produces a
+    // new DailySweepReport, so the effect re-triggers per sweep (top-level or
+    // per-group). The evicted count comes from report.evictedSessionIds
+    // (orphan sessions that were scan+deleted).
+    LaunchedEffect(lastSweep) {
+        val report = lastSweep ?: return@LaunchedEffect
+        val count = report.evictedSessionIds.size
+        snackbarHostState.showTimed(clearResultTemplate.format(count))
     }
 
-    // ── Clear-all (the only cache-busting action that crosses server-group
-    // boundaries) is gated behind a confirmation dialog — same destructive-
-    // action pattern DangerZoneSection uses.
-    var showClearAllConfirm by remember { mutableStateOf(false) }
+    if (isDegraded) {
+        DegradedCacheWarning()
+        Spacer(modifier = Modifier.height(Dimens.spacing3))
+    }
 
     Card(
         modifier = Modifier.fillMaxWidth(),
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
     ) {
-        Column(modifier = Modifier.padding(16.dp)) {
-            // ── §grouping-rewrite 项 3: "Sweep all groups" — the popup's
-            // primary action. Fanned out across every distinct fp via
-            // [SettingsViewModel.sweepAllGroups]; disabled offline for the
-            // same reason the per-group sweep button is (a sweep without a
-            // live connection cannot enumerate the alive set).
+        Column(modifier = Modifier.padding(Dimens.spacing4)) {
+            // ── Top-level "清除失联会话" — fully sweeps the connected group;
+            // other groups receive only their safe local eviction pass.
             Button(
                 onClick = { vm.sweepAllGroups() },
                 enabled = isOnline,
                 modifier = Modifier.fillMaxWidth()
             ) {
-                Icon(Icons.Default.CleaningServices, contentDescription = null, modifier = Modifier.size(16.dp))
-                Spacer(modifier = Modifier.width(4.dp))
+                Icon(Icons.Default.CleaningServices, contentDescription = null, modifier = Modifier.size(Dimens.iconXs))
+                Spacer(modifier = Modifier.width(Dimens.spacing1))
                 Text(stringResource(R.string.cache_management_sweep_all))
             }
 
             if (!isOnline) {
-                Spacer(modifier = Modifier.height(4.dp))
+                Spacer(modifier = Modifier.height(Dimens.spacing1))
                 Text(
                     stringResource(R.string.cache_management_offline_hint),
                     style = MaterialTheme.typography.labelSmall,
@@ -153,30 +150,7 @@ internal fun CacheManagementSection(
                 )
             }
 
-            Spacer(modifier = Modifier.height(12.dp))
-
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Text(
-                    stringResource(R.string.cache_management_title),
-                    style = MaterialTheme.typography.titleMedium
-                )
-                OutlinedButton(
-                    onClick = { showClearAllConfirm = true },
-                    colors = ButtonDefaults.outlinedButtonColors(
-                        contentColor = MaterialTheme.colorScheme.error
-                    )
-                ) {
-                    Icon(Icons.Default.DeleteSweep, contentDescription = null, modifier = Modifier.size(16.dp))
-                    Spacer(modifier = Modifier.width(4.dp))
-                    Text(stringResource(R.string.cache_management_action_clear_all))
-                }
-            }
-
-            Spacer(modifier = Modifier.height(8.dp))
+            Spacer(modifier = Modifier.height(Dimens.spacing3))
 
             when (val state = listing) {
                 CacheListingState.Loading -> Text(
@@ -202,176 +176,183 @@ internal fun CacheManagementSection(
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
                     } else {
-                        // §scroll-safety: the per-group LazyColumn lives
-                        // inside SettingsScreen's verticalScroll Column
-                        // (infinite max-height constraint). Without the
-                        // heightIn cap it would crash the same way an
-                        // uncapped DebugLogSection LazyColumn would.
-                        LazyColumn(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .heightIn(max = 320.dp)
-                        ) {
-                            items(
-                                items = state.groups,
-                                key = { group -> group.serverGroupFp }
-                            ) { group ->
-                                CacheGroupCard(
-                                    group = group,
-                                    isOnline = isOnline,
-                                    onClearSession = { sid ->
-                                        vm.clearSession(group.serverGroupFp, sid)
-                                    },
-                                    onClearProject = { workdir ->
-                                        vm.clearProject(group.serverGroupFp, workdir)
-                                    },
-                                    onSweep = { vm.sweepNow(group.serverGroupFp) }
-                                )
-                                HorizontalDivider()
-                            }
+                        // §P5b-B (Q8): plain Column (NOT LazyColumn) — no
+                        // heightIn cap. The parent verticalScroll handles
+                        // overflow; groups + projects + sessions fully expand.
+                        state.groups.forEach { group ->
+                            CacheGroupCard(
+                                group = group,
+                                isOnline = isOnline,
+                                isCurrentServerGroup = group.serverGroupFp == currentServerGroupFp,
+                                onClearSession = { sid ->
+                                    vm.clearSession(group.serverGroupFp, sid)
+                                },
+                                onSweep = { vm.sweepNow(group.serverGroupFp) }
+                            )
+                            HorizontalDivider()
                         }
                     }
                 }
             }
-
-            // ── Last sweep outcome (surfaces what got evicted / marked).
-            lastSweep?.let { report ->
-                Spacer(modifier = Modifier.height(8.dp))
-                SweepResultLine(report)
-            }
         }
-    }
-
-    if (showClearAllConfirm) {
-        AlertDialog(
-            onDismissRequest = { showClearAllConfirm = false },
-            title = { Text(stringResource(R.string.cache_management_clear_all_title)) },
-            text = {
-                Text(
-                    stringResource(R.string.cache_management_clear_all_body),
-                    style = MaterialTheme.typography.bodyMedium
-                )
-            },
-            confirmButton = {
-                TextButton(
-                    onClick = {
-                        showClearAllConfirm = false
-                        vm.clearAll()
-                    },
-                    colors = ButtonDefaults.textButtonColors(
-                        contentColor = MaterialTheme.colorScheme.error
-                    )
-                ) { Text(stringResource(R.string.cache_management_clear_all_confirm)) }
-            },
-            dismissButton = {
-                TextButton(onClick = { showClearAllConfirm = false }) {
-                    Text(stringResource(R.string.common_cancel))
-                }
-            }
-        )
     }
 }
 
-// ─────────── Per-group card ─────────────────────────────────────────────
+// ─────────── Level 1: per-group card (3-level tree root) ─────────────────
 
 /**
- * One server-group's section: header (fp + member counts) + sweep
- * row actions + the cached-session list. Each row carries its own clear-
- * session + clear-project buttons.
+ * One server-group's section: 2-line header (fp + member counts) with a
+ * trailing "清除失联会话" button (enabled only for the connected group), followed by
+ * the project → session 3-level tree.
  */
 @Composable
 private fun CacheGroupCard(
     group: CacheGroupListing,
     isOnline: Boolean,
+    isCurrentServerGroup: Boolean,
     onClearSession: (String) -> Unit,
-    onClearProject: (String) -> Unit,
     onSweep: () -> Unit,
 ) {
-    Column(modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp)) {
-        Text(
-            stringResource(R.string.cache_management_group_header, group.serverGroupFp),
-            style = MaterialTheme.typography.titleSmall,
-            fontWeight = FontWeight.Medium,
-            fontFamily = BundledMonoFamily
-        )
-        Text(
-            stringResource(
-                R.string.cache_management_group_member_count,
-                group.sessions.size,
-                group.profiles.size
-            ),
-            style = MaterialTheme.typography.labelSmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant
-        )
-
-        Spacer(modifier = Modifier.height(8.dp))
-
-        // ── Group-level action: sweep now (offline-disabled).
+    Column(modifier = Modifier.fillMaxWidth().padding(vertical = Dimens.spacing2)) {
+        // Level 1: group title (2-line) + trailing sweep button.
         Row(
             modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.spacedBy(8.dp)
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
         ) {
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    stringResource(R.string.cache_management_group_header, group.serverGroupFp),
+                    style = MaterialTheme.typography.titleSmall,
+                    fontWeight = FontWeight.Medium,
+                    fontFamily = BundledMonoFamily
+                )
+                Text(
+                    stringResource(
+                        R.string.cache_management_group_member_count,
+                        group.sessions.size,
+                        group.profiles.size
+                    ),
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
             OutlinedButton(
                 onClick = onSweep,
-                enabled = isOnline,
-                modifier = Modifier.weight(1f)
+                enabled = isOnline && isCurrentServerGroup
             ) {
-                Icon(Icons.Default.CleaningServices, contentDescription = null, modifier = Modifier.size(16.dp))
-                Spacer(modifier = Modifier.width(4.dp))
+                Icon(Icons.Default.CleaningServices, contentDescription = null, modifier = Modifier.size(Dimens.iconXs))
+                Spacer(modifier = Modifier.width(Dimens.spacing1))
                 Text(stringResource(R.string.cache_management_action_sweep))
             }
         }
 
-        if (!isOnline) {
-            Spacer(modifier = Modifier.height(4.dp))
+        if (!isOnline || !isCurrentServerGroup) {
+            Spacer(modifier = Modifier.height(Dimens.spacing1))
             Text(
-                stringResource(R.string.cache_management_offline_hint),
+                stringResource(
+                    if (!isOnline) R.string.cache_management_offline_hint
+                    else R.string.cache_management_non_current_group_hint
+                ),
                 style = MaterialTheme.typography.labelSmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
         }
 
-        Spacer(modifier = Modifier.height(8.dp))
+        Spacer(modifier = Modifier.height(Dimens.spacing2))
 
-        // ── Per-session rows.
-        group.sessions.forEach { row ->
-            CachedSessionRowItem(
-                row = row,
-                onClearSession = { onClearSession(row.sessionId) },
-                onClearProject = { onClearProject(row.workdir) }
+        // Level 2 + 3: sessions grouped by workdir (normalized), each project
+        // is a collapsible row; sessions render indented under their project.
+        val projects = remember(group.sessions) {
+            CacheRowPresentation.groupByNormalizedWorkdir(group.sessions)
+        }
+
+        projects.forEach { project ->
+            ProjectSessionTree(
+                project = project,
+                onClearSession = onClearSession
             )
-            Spacer(modifier = Modifier.height(4.dp))
         }
     }
 }
 
-// ─────────── Per-session row ────────────────────────────────────────────
+// ─────────── Level 2: collapsible project (workdir) row ──────────────────
 
 /**
- * One cached-session row. Renders workdir + sessionId abbrev + the three
- * timestamps + clear-session / clear-project buttons. Marks rows red when
- * lastVerifiedAt > 7d ("疑似废弃") + flags exhausted gaps.
+ * One project (workdir) row: a collapsible header showing ONLY the workdir
+ * directory path (no 清除项目 button — removed per §P5b-B). Tapping toggles
+ * collapse; collapsing hides all sessions under that workdir.
  *
- * Pure presentation only — the threshold logic lives in
- * [CacheRowPresentation.isSuspectAbandoned] (testable).
+ * @param project the workdir bucket (displayWorkdir null = 未知项目).
+ */
+@Composable
+private fun ProjectSessionTree(
+    project: CacheProjectBucket,
+    onClearSession: (String) -> Unit,
+) {
+    // Default expanded — the user sees their sessions on first render.
+    var expanded by remember(project.normalizedWorkdir) { mutableStateOf(true) }
+
+    Column(modifier = Modifier.fillMaxWidth()) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clickable { expanded = !expanded }
+                .padding(vertical = Dimens.spacing1),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Icon(
+                if (expanded) Icons.Default.KeyboardArrowDown
+                else Icons.AutoMirrored.Filled.KeyboardArrowRight,
+                contentDescription = null,
+                modifier = Modifier.size(Dimens.iconXs),
+                tint = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            Spacer(modifier = Modifier.width(Dimens.spacing1))
+            Text(
+                project.displayWorkdir
+                    ?: stringResource(R.string.cache_unknown_project),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                fontFamily = BundledMonoFamily
+            )
+        }
+
+        if (expanded) {
+            project.sessions.forEach { row ->
+                CachedSessionRowItem(
+                    row = row,
+                    onClearSession = { onClearSession(row.sessionId) }
+                )
+            }
+        }
+    }
+}
+
+// ─────────── Level 3: per-session row ────────────────────────────────────
+
+/**
+ * One cached-session row, indented relative to its project. Renders:
+ *  - A bullet "•" + the FULL session name (sessionId — not truncated; the
+ *    cache does not store a separate session title, so the id IS the name).
+ *  - Below the name, further indented: 最新消息 + 最近校验 (two lines).
+ *  - The 清除 button on the RIGHT, vertically centered across the two time
+ *    rows (Row: times Column weight=1 + button).
+ *
+ * The 缓存时间 (createdAt) row is removed per §P5b-B. The 疑似废弃
+ * (stale >7d) red marker is kept. The 清除项目 button is removed.
  */
 @Composable
 private fun CachedSessionRowItem(
     row: CacheRepository.CachedSessionRow,
     onClearSession: () -> Unit,
-    onClearProject: () -> Unit,
 ) {
     val now = remember { System.currentTimeMillis() }
     val suspect = remember(row.messageCount, row.lastVerifiedAt, now) {
         CacheRowPresentation.isSuspectAbandoned(row.messageCount, row.lastVerifiedAt, now)
     }
-    val exhausted = row.hasExhaustedGap
-    val rowColor = if (suspect) MaterialTheme.colorScheme.error
-                   else MaterialTheme.colorScheme.onSurface
 
     val dateFormatter = remember { SimpleDateFormat("yyyy-MM-dd HH:mm", Locale.getDefault()) }
-    val createdAtText = row.createdAt?.let { dateFormatter.format(Date(it)) }
-        ?: stringResource(R.string.cache_management_unknown_time)
     val newestText = dateFormatter.format(Date(row.newestCachedAt))
     val verifiedText = if (row.lastVerifiedAt <= 0L) {
         stringResource(R.string.cache_management_never_verified)
@@ -379,80 +360,68 @@ private fun CachedSessionRowItem(
         dateFormatter.format(Date(row.lastVerifiedAt))
     }
 
-    Column(modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp)) {
-        Text(
-            stringResource(
-                R.string.cache_management_row_workdir,
-                row.workdir.ifBlank { stringResource(R.string.cache_management_row_workdir_unknown) }
-            ),
-            style = MaterialTheme.typography.bodySmall,
-            color = rowColor
-        )
-        Text(
-            stringResource(R.string.cache_management_row_session_id, abbreviateSessionId(row.sessionId)),
-            style = MaterialTheme.typography.labelSmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-            fontFamily = BundledMonoFamily
-        )
-        Text(
-            stringResource(R.string.cache_management_row_created_at, createdAtText),
-            style = MaterialTheme.typography.labelSmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant
-        )
-        Text(
-            stringResource(R.string.cache_management_row_newest_at, newestText),
-            style = MaterialTheme.typography.labelSmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant
-        )
-        Text(
-            stringResource(R.string.cache_management_row_verified_at, verifiedText),
-            style = MaterialTheme.typography.labelSmall,
-            color = if (suspect) MaterialTheme.colorScheme.error
-                    else MaterialTheme.colorScheme.onSurfaceVariant
-        )
-
-        if (suspect) {
+    // Indented relative to the project row (start padding).
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(start = Dimens.spacing6, top = Dimens.spacing1, bottom = Dimens.spacing1)
+    ) {
+        // Name line: bullet + full session id (NOT truncated — maxLines
+        // defaults to Int.MAX_VALUE, so the full id shows, wrapping if needed).
+        Row(verticalAlignment = Alignment.Top) {
             Text(
-                stringResource(R.string.cache_management_row_suspect),
-                style = MaterialTheme.typography.labelSmall,
-                color = MaterialTheme.colorScheme.error
+                "•",
+                style = MaterialTheme.typography.bodySmall,
+                color = if (suspect) MaterialTheme.colorScheme.error
+                        else MaterialTheme.colorScheme.onSurface
             )
-        }
-        if (exhausted) {
+            Spacer(modifier = Modifier.width(Dimens.spacing1))
             Text(
-                stringResource(R.string.cache_management_row_exhausted),
-                style = MaterialTheme.typography.labelSmall,
-                color = MaterialTheme.colorScheme.error
+                row.sessionId,
+                style = MaterialTheme.typography.bodySmall,
+                color = if (suspect) MaterialTheme.colorScheme.error
+                        else MaterialTheme.colorScheme.onSurface,
+                fontFamily = BundledMonoFamily
             )
         }
 
-        Spacer(modifier = Modifier.height(4.dp))
+        // Time rows + clear button: button spans the two time rows
+        // (vertically centered across both lines). Times are indented
+        // further than the name (extra start padding).
         Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.spacedBy(8.dp)
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(start = Dimens.spacing3, top = Dimens.spacing1),
+            verticalAlignment = Alignment.CenterVertically
         ) {
-            OutlinedButton(
-                onClick = onClearSession,
-                modifier = Modifier.weight(1f)
-            ) {
-                Icon(Icons.Default.Delete, contentDescription = null, modifier = Modifier.size(14.dp))
-                Spacer(modifier = Modifier.width(4.dp))
-                Text(stringResource(R.string.cache_management_action_clear_session))
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    stringResource(R.string.cache_management_row_newest_at, newestText),
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Text(
+                    stringResource(R.string.cache_management_row_verified_at, verifiedText),
+                    style = MaterialTheme.typography.labelSmall,
+                    color = if (suspect) MaterialTheme.colorScheme.error
+                            else MaterialTheme.colorScheme.onSurfaceVariant
+                )
             }
-            OutlinedButton(
-                onClick = onClearProject,
-                enabled = row.workdir.isNotBlank(),
-                modifier = Modifier.weight(1f)
-            ) {
-                Icon(Icons.Default.FolderOff, contentDescription = null, modifier = Modifier.size(14.dp))
-                Spacer(modifier = Modifier.width(4.dp))
-                Text(stringResource(R.string.cache_management_action_clear_project))
+            OutlinedButton(onClick = onClearSession) {
+                Text(stringResource(R.string.cache_management_action_clear_session))
             }
         }
     }
 }
 
 // ─────────── Auxiliary presentational helpers ───────────────────────────
+
+/** One normalized project bucket rendered by the cache-management tree. */
+internal data class CacheProjectBucket(
+    val normalizedWorkdir: String,
+    val displayWorkdir: String?,
+    val sessions: List<CacheRepository.CachedSessionRow>,
+)
 
 @Composable
 private fun DegradedCacheWarning() {
@@ -461,7 +430,7 @@ private fun DegradedCacheWarning() {
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.errorContainer)
     ) {
         Row(
-            modifier = Modifier.fillMaxWidth().padding(16.dp),
+            modifier = Modifier.fillMaxWidth().padding(Dimens.spacing4),
             verticalAlignment = Alignment.CenterVertically
         ) {
             Icon(
@@ -469,7 +438,7 @@ private fun DegradedCacheWarning() {
                 contentDescription = null,
                 tint = MaterialTheme.colorScheme.onErrorContainer
             )
-            Spacer(modifier = Modifier.width(12.dp))
+            Spacer(modifier = Modifier.width(Dimens.spacing3))
             Text(
                 stringResource(R.string.cache_management_degraded_warning),
                 style = MaterialTheme.typography.bodySmall,
@@ -478,36 +447,6 @@ private fun DegradedCacheWarning() {
         }
     }
 }
-
-@Composable
-private fun SweepResultLine(report: cn.vectory.ocdroid.data.cache.DailySweepReport) {
-    val text = when (report.completeness) {
-        cn.vectory.ocdroid.data.cache.AliveCompleteness.Complete ->
-            stringResource(
-                R.string.cache_management_sweep_result_complete,
-                report.verifiedAliveCount,
-                report.evictedSessionIds.size
-            )
-        cn.vectory.ocdroid.data.cache.AliveCompleteness.Incomplete ->
-            stringResource(
-                R.string.cache_management_sweep_result_incomplete,
-                report.verifiedAliveCount
-            )
-    }
-    Text(
-        text,
-        style = MaterialTheme.typography.labelSmall,
-        color = MaterialTheme.colorScheme.onSurfaceVariant
-    )
-}
-
-/**
- * Trim a `ses_xxxx…` branded session id to its first 12 chars for display
- * (the full id is shown via long-press in a future iteration; for now the
- * abbreviation is enough to distinguish rows in the same workdir).
- */
-internal fun abbreviateSessionId(sessionId: String): String =
-    if (sessionId.length <= 12) sessionId else sessionId.substring(0, 12) + "…"
 
 // ─────────── Pure presentation logic (testable without Compose) ──────────
 
@@ -530,22 +469,25 @@ internal object CacheRowPresentation {
         messageCount > 0 && (lastVerifiedAt <= 0L || (now - lastVerifiedAt) > SEVEN_DAYS_MS)
 
     /**
-     * Group a flat session list by `serverGroupFp`, preserving the order
-     * each fp first appears in. Used by the section to render one card per
-     * group without relying on a Map iteration order the caller cannot
-     * predict.
+     * Groups rows by [WorkdirPaths.normalize] for the project level of the
+     * tree. Non-empty project keys are sorted lexically; the missing-workdir
+     * bucket follows them and is rendered as "Unknown project" by Compose.
+     * Rows within a bucket retain their repository order (newest first).
      */
-    fun groupByFp(
-        rows: List<CacheRepository.CachedSessionRow>
-    ): List<List<CacheRepository.CachedSessionRow>> {
-        val order = LinkedHashSet<String>()
-        val byFp = LinkedHashMap<String, MutableList<CacheRepository.CachedSessionRow>>()
-        for (row in rows) {
-            order.add(row.serverGroupFp)
-            byFp.getOrPut(row.serverGroupFp) { mutableListOf() }.add(row)
+    fun groupByNormalizedWorkdir(
+        rows: List<CacheRepository.CachedSessionRow>,
+    ): List<CacheProjectBucket> = rows
+        .groupBy { WorkdirPaths.normalize(it.workdir) }
+        .entries
+        .sortedWith(compareBy<Map.Entry<String, List<CacheRepository.CachedSessionRow>>> { it.key.isEmpty() }
+            .thenBy { it.key })
+        .map { (normalizedWorkdir, sessions) ->
+            CacheProjectBucket(
+                normalizedWorkdir = normalizedWorkdir,
+                displayWorkdir = sessions.first().workdir.takeIf { normalizedWorkdir.isNotEmpty() },
+                sessions = sessions,
+            )
         }
-        return order.map { fp -> byFp.getValue(fp) }
-    }
 }
 
 // ─────────── Hilt @EntryPoint (precedent: DebugLogSection) ───────────────
@@ -634,7 +576,6 @@ private fun CacheManagementSectionPopulatedPreview() {
                 )
             )
         ),
-        lastSweep = null,
         isOnline = true,
         isDegraded = false
     )
@@ -648,7 +589,6 @@ private fun CacheManagementSectionPopulatedPreview() {
 private fun CacheManagementSectionEmptyPreview() {
     CacheManagementSectionPreviewHost(
         state = CacheListingState.Empty,
-        lastSweep = null,
         isOnline = true,
         isDegraded = false
     )
@@ -662,45 +602,8 @@ private fun CacheManagementSectionEmptyPreview() {
 private fun CacheManagementSectionDegradedPreview() {
     CacheManagementSectionPreviewHost(
         state = CacheListingState.Loading,
-        lastSweep = null,
         isOnline = false,
         isDegraded = true
-    )
-}
-
-@androidx.compose.ui.tooling.preview.Preview(
-    name = "Cache management — single suspect row",
-    showBackground = true
-)
-@Composable
-private fun CacheManagementSectionSuspectPreview() {
-    CacheManagementSectionPreviewHost(
-        state = CacheListingState.Loaded(
-            groups = listOf(
-                CacheGroupListing(
-                    serverGroupFp = "fp-suspect",
-                    profiles = listOf(previewProfile("only")),
-                    sessions = listOf(
-                        previewRow(
-                            fp = "fp-suspect",
-                            sid = "ses_old",
-                            workdir = "/home/me/old",
-                            newest = System.currentTimeMillis() - 60 * 24 * 3_600_000L,
-                            verified = System.currentTimeMillis() - 12 * 24 * 3_600_000L
-                        )
-                    )
-                )
-            )
-        ),
-        lastSweep = cn.vectory.ocdroid.data.cache.DailySweepReport(
-            serverGroupFp = "fp-suspect",
-            completeness = cn.vectory.ocdroid.data.cache.AliveCompleteness.Complete,
-            verifiedAliveCount = 0,
-            evictedSessionIds = listOf("ses_old"),
-            suspiciousSessionIds = emptyList()
-        ),
-        isOnline = true,
-        isDegraded = false
     )
 }
 
@@ -709,57 +612,36 @@ private fun CacheManagementSectionSuspectPreview() {
  * without requiring a real [SettingsViewModel]. The previews above route
  * their data through this; production code goes through [CacheManagementSection].
  *
- * The render is identical because the body only reads:
- *  - cacheListing / lastSweep StateFlows (preview substitutes static values)
- *  - isOnline / isDegraded booleans
- *  - 5 mutation callbacks (preview passes no-ops)
+ * §P5b-B (Q8): the host mirrors the new structure (no 已缓存的对话 row, no
+ * clear-all dialog, no maxHeight, 3-level tree via [CacheGroupCard]).
  */
 @Composable
 private fun CacheManagementSectionPreviewHost(
     state: CacheListingState,
-    lastSweep: cn.vectory.ocdroid.data.cache.DailySweepReport?,
     isOnline: Boolean,
     isDegraded: Boolean,
 ) {
     if (isDegraded) {
         DegradedCacheWarning()
-        Spacer(modifier = Modifier.height(12.dp))
+        Spacer(modifier = Modifier.height(Dimens.spacing3))
     }
 
     Card(
         modifier = Modifier.fillMaxWidth(),
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
     ) {
-        Column(modifier = Modifier.padding(16.dp)) {
-            // §grouping-rewrite 项 3: primary "Sweep all groups" action
-            // (disabled in the preview host — the host has no VM to invoke).
+        Column(modifier = Modifier.padding(Dimens.spacing4)) {
             Button(
                 onClick = {},
                 enabled = isOnline,
                 modifier = Modifier.fillMaxWidth()
             ) {
-                Icon(Icons.Default.CleaningServices, contentDescription = null, modifier = Modifier.size(16.dp))
-                Spacer(modifier = Modifier.width(4.dp))
-                Text("Sweep all groups")
-            }
-            Spacer(modifier = Modifier.height(12.dp))
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Text(
-                    "Cached chat sessions",
-                    style = MaterialTheme.typography.titleMedium
-                )
-                OutlinedButton(onClick = {}, enabled = false) {
-                    Icon(Icons.Default.DeleteSweep, contentDescription = null, modifier = Modifier.size(16.dp))
-                    Spacer(modifier = Modifier.width(4.dp))
-                    Text("Clear all cached sessions")
-                }
+                Icon(Icons.Default.CleaningServices, contentDescription = null, modifier = Modifier.size(Dimens.iconXs))
+                Spacer(modifier = Modifier.width(Dimens.spacing1))
+                Text("Clear lost sessions")
             }
 
-            Spacer(modifier = Modifier.height(8.dp))
+            Spacer(modifier = Modifier.height(Dimens.spacing3))
 
             when (state) {
                 CacheListingState.Loading -> Text(
@@ -785,32 +667,18 @@ private fun CacheManagementSectionPreviewHost(
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
                     } else {
-                        LazyColumn(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .heightIn(max = 320.dp)
-                        ) {
-                            items(
-                                items = state.groups,
-                                key = { group -> group.serverGroupFp }
-                            ) { group ->
-                                CacheGroupCard(
-                                    group = group,
-                                    isOnline = isOnline,
-                                    onClearSession = {},
-                                    onClearProject = {},
-                                    onSweep = {}
-                                )
-                                HorizontalDivider()
-                            }
+                        state.groups.forEach { group ->
+                            CacheGroupCard(
+                                group = group,
+                                isOnline = isOnline,
+                                isCurrentServerGroup = group.serverGroupFp == "fp-aaa-111",
+                                onClearSession = {},
+                                onSweep = {}
+                            )
+                            HorizontalDivider()
                         }
                     }
                 }
-            }
-
-            lastSweep?.let { report ->
-                Spacer(modifier = Modifier.height(8.dp))
-                SweepResultLine(report)
             }
         }
     }

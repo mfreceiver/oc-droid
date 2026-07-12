@@ -21,8 +21,10 @@ import cn.vectory.ocdroid.ui.chat.LocalWindowSizeClass
 import cn.vectory.ocdroid.ui.shell.AppShell
 import cn.vectory.ocdroid.ui.theme.OpenCodeTheme
 import cn.vectory.ocdroid.util.AppLocaleController
+import cn.vectory.ocdroid.util.SettingsManager
 import cn.vectory.ocdroid.util.ThemeMode
 import dagger.hilt.android.AndroidEntryPoint
+import javax.inject.Inject
 
 // Debug-only Intent extra keys for injecting connection credentials at launch,
 // so automated UI tests can connect to a server without driving the Settings UI.
@@ -36,6 +38,14 @@ private const val EXTRA_TEST_PASSWORD = "test_password"
 class MainActivity : AppCompatActivity() {
 
     /**
+     * §P5a (Q5): SettingsManager for the warm-recreate locale re-apply in
+     * [onCreate]. Injected by Hilt (@AndroidEntryPoint field injection,
+     * populated before onCreate returns from super).
+     */
+    @Inject
+    lateinit var settingsManager: SettingsManager
+
+    /**
      * Reference to the Activity-scoped [OrchestratorViewModel], populated inside
      * [onCreate]'s `setContent` block once Hilt constructs it. Held so that
      * [onNewIntent] (which fires on warm-start deep links from §18
@@ -46,13 +56,17 @@ class MainActivity : AppCompatActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        // Re-apply the locale policy (en→follow system, non-en→zh) before the
-        // first frame is composed AND on every Activity recreate, so a system
-        // language change while the app is backgrounded is reflected on the
-        // next onCreate. AppCompatDelegate is idempotent (no-op/recreate only
-        // when the locale actually changes), so this is safe to call every
-        // time. OpenCodeApp.onCreate also calls it for process start.
-        AppLocaleController.applySystemLocale()
+        // §P5a (Q5): re-apply the persisted locale on every Activity create.
+        // The authoritative cold-start point is OpenCodeApp.onCreate (runs
+        // once per process, before the first frame); this warm-recreate call
+        // catches a SYSTEM-locale change that happened while the process was
+        // alive (system locale change triggers an Activity recreate WITHOUT
+        // re-running Application.onCreate, so the SYSTEM-mode re-resolution
+        // here is what keeps "Follow System" honest across a backgrounded
+        // system-language change). AppCompatDelegate is idempotent (no-op
+        // when the resolved locale list is unchanged), so calling this every
+        // time is safe.
+        AppLocaleController.applyPersisted(this, settingsManager)
         enableEdgeToEdge()
         setContent {
             val viewModel: OrchestratorViewModel = hiltViewModel()
@@ -123,8 +137,8 @@ class MainActivity : AppCompatActivity() {
                     // single shell. The legacy PhoneLayout + Screen enum +
                     // USE_NEW_SHELL flag have been physically deleted after the
                     // four-judge gate + emulator regression (USE_NEW_SHELL=true,
-                    // 36/38) passed. Chat / Sessions / Workspace (Files |
-                    // Changes) / Settings (with sub-routes) / ContextSelector /
+                    // 36/38) passed. Chat / Files / Git / Sessions / Settings
+                    // (with sub-routes) /
                     // Search / Revert are all reachable via AppShell's NavHost
                     // (see ui/shell/AppShell.kt).
                     AppShell(orchestratorVM = viewModel)

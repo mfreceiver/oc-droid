@@ -24,7 +24,6 @@ import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.Dns
 import androidx.compose.material.icons.filled.Info
-import androidx.compose.material.icons.filled.Memory
 import androidx.compose.material.icons.filled.Notifications
 import androidx.compose.material.icons.filled.Palette
 import androidx.compose.material.icons.filled.Storage
@@ -35,11 +34,12 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.ListItem
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.SnackbarHost
+import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -57,6 +57,7 @@ import cn.vectory.ocdroid.ui.ConnectionViewModel
 import cn.vectory.ocdroid.ui.HostViewModel
 import cn.vectory.ocdroid.ui.NavRoute
 import cn.vectory.ocdroid.ui.SettingsViewModel
+import cn.vectory.ocdroid.ui.util.formatBytes
 import cn.vectory.ocdroid.util.ThemeMode
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.map
@@ -98,18 +99,13 @@ fun SettingsScreen(
     onBack: () -> Unit,
     onNavigateSection: (String) -> Unit,
 ) {
+    // §P5b-A (5.1): Settings is now a top-level screen — no back affordance
+    // on its TopAppBar. The `onBack` param stays in the signature so the
+    // AppShell call site is unchanged, but is no longer rendered here.
     Scaffold(
         topBar = {
             TopAppBar(
                 title = { Text(stringResource(R.string.settings_title)) },
-                navigationIcon = {
-                    IconButton(onClick = onBack) {
-                        Icon(
-                            Icons.AutoMirrored.Filled.ArrowBack,
-                            contentDescription = stringResource(R.string.common_back),
-                        )
-                    }
-                },
             )
         },
     ) { padding ->
@@ -121,10 +117,11 @@ fun SettingsScreen(
                 .padding(padding)
                 .statusBarsPadding(),
         ) {
-            settingsSections().forEachIndexed { index, sec ->
+            // §P5b-A (5.1): dividers dropped — the slim list is title-only rows
+            // separated by default ListItem spacing.
+            settingsSections().forEach { sec ->
                 item(key = sec.route) {
                     SettingsSectionRow(section = sec, onClick = { onNavigateSection(sec.route) })
-                    if (index < settingsSections().lastIndex) HorizontalDivider()
                 }
             }
         }
@@ -135,15 +132,25 @@ fun SettingsScreen(
 private data class SettingsSectionEntry(
     val route: String,
     val titleRes: Int,
-    val subtitleRes: Int,
+    // §P5b-A (5.1): the row is now title-only — `subtitleRes` is no longer
+    // rendered by [SettingsSectionRow]. The field is kept on the data class
+    // to avoid a ripple through call sites; new sections can leave it 0.
+    @Suppress("unused") val subtitleRes: Int,
     val icon: ImageVector,
 )
 
-/** Single source of truth for the slim list ordering + route key + label. */
+/**
+ * Single source of truth for the slim list ordering + route key + label.
+ *
+ * §P5b-A (5.3): the top-level "模型" entry was removed — its content
+ * ([ModelManagementSection]) now lives inside 服务器管理 (see
+ * [HostProfilesManagerScreen]). The `settingsModelsRoute` destination is
+ * retained as a compatible direct destination in AppShell, but is no longer
+ * listed at the Settings root.
+ */
 private fun settingsSections(): List<SettingsSectionEntry> = listOf(
     SettingsSectionEntry(NavRoute.settingsHostsRoute, R.string.settings_section_hosts, R.string.settings_section_hosts_subtitle, Icons.Default.Dns),
     SettingsSectionEntry(NavRoute.settingsAppearanceRoute, R.string.settings_section_appearance, R.string.settings_section_appearance_subtitle, Icons.Default.Palette),
-    SettingsSectionEntry(NavRoute.settingsModelsRoute, R.string.settings_section_models, R.string.settings_section_models_subtitle, Icons.Default.Memory),
     SettingsSectionEntry(NavRoute.settingsNotificationsRoute, R.string.settings_section_notifications, R.string.settings_section_notifications_subtitle, Icons.Default.Notifications),
     SettingsSectionEntry(NavRoute.settingsStorageRoute, R.string.settings_section_storage, R.string.settings_section_storage_subtitle, Icons.Default.Storage),
     SettingsSectionEntry(NavRoute.settingsAboutRoute, R.string.settings_section_about, R.string.settings_section_about_subtitle, Icons.Default.Info),
@@ -152,12 +159,12 @@ private fun settingsSections(): List<SettingsSectionEntry> = listOf(
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun SettingsSectionRow(section: SettingsSectionEntry, onClick: () -> Unit) {
+    // §P5b-A (5.1): title-only — no supportingContent (subtitle) is rendered.
     // M3 ListItem has no onClick overload in the bundled version; clickability
-    // is wired by `Modifier.clickable` on the row. All six slim-list rows
-    // share this single click pattern.
+    // is wired by `Modifier.clickable` on the row. All slim-list rows share
+    // this single click pattern.
     ListItem(
         headlineContent = { Text(stringResource(section.titleRes)) },
-        supportingContent = { Text(stringResource(section.subtitleRes)) },
         leadingContent = {
             Icon(section.icon, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
         },
@@ -188,12 +195,17 @@ private fun SettingsSectionRow(section: SettingsSectionEntry, onClick: () -> Uni
  * Shared TopAppBar shell for every Settings sub-route. Always renders a back
  * arrow wired to [onBack] (Phase 3 / G.3 step 2: the Settings top bar carries
  * back unconditionally on every sub-page).
+ *
+ * §P5b-B (Q8): [snackbarHost] defaults to empty (no host); the storage route
+ * passes a real [SnackbarHostState] so [CacheManagementSection] can surface
+ * the 3s sweep-result snackbar.
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun SettingsSubRouteScaffold(
     titleRes: Int,
     onBack: () -> Unit,
+    snackbarHost: @Composable (() -> Unit) = {},
     actions: @Composable RowScope.() -> Unit = {},
     content: @Composable (Modifier) -> Unit,
 ) {
@@ -212,6 +224,7 @@ private fun SettingsSubRouteScaffold(
                 actions = actions,
             )
         },
+        snackbarHost = snackbarHost,
     ) { padding ->
         content(
             Modifier
@@ -224,10 +237,16 @@ private fun SettingsSubRouteScaffold(
 
 /**
  * settings/hosts — wraps the existing [HostProfilesManagerScreen]. The manager
- * screen already supplies its own TopAppBar + back, so we delegate to it
- * directly. The previous inline [ConnectionProfileSection] header is dropped:
- * the manager IS the list, and tapping a row opens the same detail/edit
- * dialogs the inline card surfaced.
+ * screen is the 服务器管理 hub (§P5b-A / Q7): it carries the host list plus
+ * the traffic stats section (moved here from settings/storage) and the model
+ * management section (moved here from the removed top-level 模型 entry). The
+ * manager supplies its own TopAppBar + back, so we delegate to it directly.
+ *
+ * §P5b-A / Q7: the model-management subscriptions (providers + disabledModels
+ * live on the settings slice, which [HostViewModel.settingsFlow] already
+ * exposes) and the toggle actions (resolved via a Hilt SettingsManager
+ * EntryPoint inside [HostProfilesManagerScreen]) are kept on the host VM /
+ * EntryPoint so the AppShell call signature is unchanged.
  */
 @Composable
 fun SettingsHostsRoute(
@@ -261,6 +280,9 @@ fun SettingsAppearanceRoute(
 ) {
     val themeMode by remember { settingsVM.settingsFlow.map { it.themeMode }.distinctUntilChanged() }
         .collectAsStateWithLifecycle(initialValue = ThemeMode.SYSTEM)
+    // §P5a (Q5): language preference (Follow System / 中文 / English).
+    val localeMode by remember { settingsVM.settingsFlow.map { it.localeMode }.distinctUntilChanged() }
+        .collectAsStateWithLifecycle(initialValue = cn.vectory.ocdroid.util.LocaleMode.SYSTEM)
     val uiFontScale by remember { settingsVM.settingsFlow.map { it.uiFontScale }.distinctUntilChanged() }
         .collectAsStateWithLifecycle(initialValue = 1f)
     val uiContentScale by remember { settingsVM.settingsFlow.map { it.uiContentScale }.distinctUntilChanged() }
@@ -275,6 +297,8 @@ fun SettingsAppearanceRoute(
             AppearanceSection(
                 themeMode = themeMode,
                 onThemeSelected = settingsVM::setThemeMode,
+                localeMode = localeMode,
+                onLocaleSelected = settingsVM::setLocaleMode,
                 uiFontScale = uiFontScale,
                 uiContentScale = uiContentScale,
                 onFontScaleChange = settingsVM::setUiFontScale,
@@ -391,44 +415,63 @@ fun SettingsNotificationsRoute(onBack: () -> Unit) {
 }
 
 /**
- * settings/storage — wraps [TrafficSection] + [CacheManagementSection] +
- * [DangerZoneSection]. The previous modal-popup chrome (Dialog + Surface
- * wrapper around CacheManagementSection) is collapsed back to an inline
- * section — the sub-route's own Scaffold provides the framing.
+ * settings/storage — wraps [DangerZoneSection] (清除数据) + [CacheManagementSection]
+ * (缓存管理). The previous modal-popup chrome (Dialog + Surface wrapper around
+ * CacheManagementSection) is collapsed back to an inline section — the
+ * sub-route's own Scaffold provides the framing.
+ *
+ * §P5b-A / Q7: [TrafficSection] moved from here to 服务器管理
+ * ([HostProfilesManagerScreen]) — traffic is conceptually per-server, so it
+ * lives with the host list now.
+ *
+ * §P5b-B / Q8: the page now has TWO sections in this order:
+ *  ① 清除数据 (was Danger Zone) — flat, single row "已缓存数据 XXX MB" + 清除缓存
+ *     button (destructive: resetLocalDataAndResync, confirmation dialog).
+ *  ② 缓存管理 (was 缓存与维护) — 3-level tree (group → workdir → session) with
+ *     destructive 清除失联会话 sweeps whose results surface via a 3s snackbar.
+ * The Scaffold carries a [SnackbarHost] for the sweep-result snackbar.
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun SettingsStorageRoute(
     viewModel: HostViewModel,
-    connectionVM: ConnectionViewModel,
+    @Suppress("UNUSED_PARAMETER") connectionVM: ConnectionViewModel,
     settingsVM: SettingsViewModel,
     onBack: () -> Unit,
 ) {
-    val traffic by connectionVM.trafficFlow.collectAsStateWithLifecycle()
-    LaunchedEffect(Unit) { connectionVM.refreshTrafficStats() }
+    // §P5b-A / Q7: `connectionVM` is kept in the signature so the AppShell
+    // call site is unchanged (traffic stats moved to 服务器管理).
 
-    SettingsSubRouteScaffold(titleRes = R.string.settings_section_storage, onBack = onBack) { mod ->
+    // §P5b-B / Q8: SnackbarHost for the 缓存管理 sweep-result snackbar.
+    val snackbarHostState = remember { SnackbarHostState() }
+    // §P5b-B / Q8: cached-data payload size for the 清除数据 row.
+    val cachedBytes by settingsVM.cachedDataBytes.collectAsStateWithLifecycle()
+    val cachedDataSize = formatBytes(cachedBytes)
+
+    SettingsSubRouteScaffold(
+        titleRes = R.string.settings_section_storage,
+        onBack = onBack,
+        snackbarHost = { SnackbarHost(snackbarHostState) },
+    ) { mod ->
         Column(
             modifier = mod
                 .verticalScroll(rememberScrollState())
                 .padding(16.dp),
         ) {
-            SectionHeader(title = stringResource(R.string.settings_traffic))
-            TrafficSection(
-                sent = traffic.trafficSent,
-                received = traffic.trafficReceived,
-                onReset = connectionVM::resetTrafficStats,
+            // ① 清除数据 (first, flat).
+            SectionHeader(title = stringResource(R.string.settings_danger_zone))
+            DangerZoneSection(
+                cachedDataSize = cachedDataSize,
+                onClearLocalData = viewModel::resetLocalDataAndResync,
                 hideHeader = true,
             )
             Spacer(modifier = Modifier.height(24.dp))
 
+            // ② 缓存管理 (3-level tree + destructive sweeps + 3s snackbar).
             SectionHeader(title = stringResource(R.string.cache_management_popup_title))
-            CacheManagementSection(vm = settingsVM, hideHeader = true)
-            Spacer(modifier = Modifier.height(24.dp))
-
-            SectionHeader(title = stringResource(R.string.settings_danger_zone))
-            DangerZoneSection(
-                onClearLocalData = viewModel::resetLocalDataAndResync,
+            CacheManagementSection(
+                vm = settingsVM,
+                snackbarHostState = snackbarHostState,
                 hideHeader = true,
             )
         }

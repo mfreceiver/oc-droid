@@ -44,14 +44,23 @@ object Dimens {
     val spacing8: Dp = 48.dp
 
     // ── 组件尺寸 ───────────────────────────────────────────────────────
-    /** Material 推荐的最小可点击目标尺寸（无障碍标准）。 */
+    /** Material 推荐的最小可点击目标尺寸（无障碍标准；底栏 item 等需保证）。 */
     val touchTargetMin: Dp = 48.dp
-    /** 标准图标尺寸（Icons.Default 视觉等高）。 */
-    val iconStd: Dp = 24.dp
-    /** 小图标尺寸（toolbar 内、行内图标）。 */
-    val iconSmall: Dp = 20.dp
-    /** 极小图标尺寸（行内 inline 状态指示）。 */
+
+    // ── 图标尺寸阶梯（M3 对齐；UI 代码一律走这些 token，禁散落字面量）─────
+    // 14 / 18 / 24 / 28 / 32 五档。历史散落的 16→iconSm(18)、20→iconSm(18)、
+    // 22→iconStd(24)、28→iconLg、32→iconXl、36→iconXl(32)，视觉略收紧。
+    /** 极小图标（行内状态指示、badge 点）。 */
     val iconXs: Dp = 14.dp
+    /** 小图标（菜单 leading、列表 trailing、密集行内）。M3 DropdownMenuItem leading 默认档。 */
+    val iconSm: Dp = 18.dp
+    /** 标准图标（IconButton 内容）。Icons.Default 视觉等高。 */
+    val iconStd: Dp = 24.dp
+    /** 大图标（强调，如 context ring）。 */
+    val iconLg: Dp = 28.dp
+    /** 超大图标（强强调，如头像/大动作）。 */
+    val iconXl: Dp = 32.dp
+
     /** 1dp 边框 / 分隔线粗细。 */
     val hairline: Dp = 1.dp
 }

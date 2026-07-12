@@ -6,6 +6,10 @@ import cn.vectory.ocdroid.R
 import cn.vectory.ocdroid.data.model.PermissionResponse
 import cn.vectory.ocdroid.util.DebugLog
 import dagger.hilt.android.lifecycle.HiltViewModel
+import kotlinx.coroutines.channels.BufferOverflow
+import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.flow.SharedFlow
+import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.launch
 import javax.inject.Inject
 
@@ -54,6 +58,18 @@ class OrchestratorViewModel @Inject constructor(
     val hostFlow get() = core.hostFlow
     val connectionFlow get() = core.connectionFlow
 
+    private val _reselectFlow = MutableSharedFlow<NavRoute>(
+        replay = 0,
+        extraBufferCapacity = 1,
+        onBufferOverflow = BufferOverflow.DROP_OLDEST,
+    )
+
+    /**
+     * Screens subscribe to reselectFlow filtered to their route to run per-tab
+     * resets; emitted alongside popBackStack on same-tab tap.
+     */
+    val reselectFlow: SharedFlow<NavRoute> = _reselectFlow.asSharedFlow()
+
     // ── Nav ─────────────────────────────────────────────────────────────────
 
     fun setLastNavPage(page: Int) {
@@ -73,6 +89,11 @@ class OrchestratorViewModel @Inject constructor(
         if (state.lastRoute == route.route && state.lastNavPage == route.legacyPage) return
         core.settingsManager.lastRoute = route.route
         core.store.mutateNav { it.copy(lastRoute = route.route, lastNavPage = route.legacyPage) }
+    }
+
+    /** Emits a same-tab selection without mutating persisted navigation state. */
+    fun emitReselect(route: NavRoute) {
+        _reselectFlow.tryEmit(route)
     }
 
     // ── Permission / Question responses (orchestrator-domain) ───────────────

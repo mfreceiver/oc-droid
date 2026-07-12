@@ -113,7 +113,9 @@ internal fun FilePreviewPane(
         }
     }
     val imagePayload = (imageState as? ImageLoadState.Loaded)?.payload
-    var markdownPreviewMode by remember(path) { mutableStateOf(MarkdownPreviewMode.Web) }
+    // §Q10 (P4b-B): default to Native preview — lighter than the WebView-based
+    // Web preview and renders instantly for typical markdown files.
+    var markdownPreviewMode by remember(path) { mutableStateOf(MarkdownPreviewMode.Native) }
     var modeMenuExpanded by remember { mutableStateOf(false) }
 
     Column(modifier = Modifier.fillMaxSize()) {
@@ -136,7 +138,13 @@ internal fun FilePreviewPane(
                             expanded = modeMenuExpanded,
                             onDismissRequest = { modeMenuExpanded = false }
                         ) {
-                            MarkdownPreviewMode.entries.forEach { mode ->
+                            // §Q10 (P4b-B): explicit order Native (default) → Web → Source
+                            // instead of enum declaration order (Web/Native/Source).
+                            listOf(
+                                MarkdownPreviewMode.Native,
+                                MarkdownPreviewMode.Web,
+                                MarkdownPreviewMode.Source,
+                            ).forEach { mode ->
                                 DropdownMenuItem(
                                     text = {
                                         Text(
@@ -156,9 +164,14 @@ internal fun FilePreviewPane(
                         }
                     }
                 }
-                // §F5: md 预览右上角去掉刷新按钮——内容在打开时已加载，刷新冗余。
-                // 其它预览（图片/文本）保留刷新以便重取/重解码。
-                if (previewKind != FilePreviewUtils.PreviewContentKind.MARKDOWN) {
+                // §Q10 (P4b-B): refresh only for IMAGE / BINARY previews (re-decode /
+                // re-fetch). Markdown was already excluded (content loaded on open);
+                // TEXT is now also excluded — a plain-text file has no decode step and
+                // its content is fetched once on open, so the refresh button was
+                // misleading noise for the most common non-md preview kind.
+                if (previewKind == FilePreviewUtils.PreviewContentKind.IMAGE ||
+                    previewKind == FilePreviewUtils.PreviewContentKind.BINARY
+                ) {
                     IconButton(onClick = onRefresh, enabled = !isRefreshing) {
                         Icon(Icons.Default.Refresh, contentDescription = stringResource(R.string.common_refresh))
                     }

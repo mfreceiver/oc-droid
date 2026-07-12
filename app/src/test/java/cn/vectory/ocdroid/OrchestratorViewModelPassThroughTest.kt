@@ -7,6 +7,7 @@ import cn.vectory.ocdroid.data.model.QuestionInfo
 import cn.vectory.ocdroid.data.model.QuestionRequest
 import cn.vectory.ocdroid.data.model.Session
 import cn.vectory.ocdroid.ui.OrchestratorViewModel
+import cn.vectory.ocdroid.ui.NavRoute
 import io.mockk.coEvery
 import io.mockk.coVerify
 import io.mockk.every
@@ -16,7 +17,10 @@ import io.mockk.runs
 import io.mockk.verify
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.test.advanceUntilIdle
+import kotlinx.coroutines.test.UnconfinedTestDispatcher
 import kotlinx.coroutines.test.runTest
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.async
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
@@ -84,6 +88,19 @@ class OrchestratorViewModelPassThroughTest : MainViewModelTestBase() {
 
         // No setter call when value already matches.
         verify(exactly = 0) { settingsManager.lastNavPage = any() }
+    }
+
+    @Test
+    fun `emitReselect publishes route without mutating nav state`() = runTest {
+        val core = createCore()
+        val vm = OrchestratorViewModel(core)
+        val before = core.navFlow.value
+        val emitted = async(UnconfinedTestDispatcher(testScheduler)) { vm.reselectFlow.first() }
+
+        vm.emitReselect(NavRoute.Files)
+
+        assertEquals(NavRoute.Files, emitted.await())
+        assertEquals(before, core.navFlow.value)
     }
 
     // ── Permission ──────────────────────────────────────────────────────────

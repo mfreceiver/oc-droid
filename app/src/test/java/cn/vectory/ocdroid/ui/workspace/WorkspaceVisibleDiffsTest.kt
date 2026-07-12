@@ -7,7 +7,7 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
- * §B1-fix: combination tests for the WorkspaceScaffold visibleDiffs pipeline.
+ * §B1-fix: combination tests for the GitScreen visibleDiffs pipeline.
  *
  * The ship-breaker (glmer 🔴): on first visit to `workspace/changes?session=X`,
  * savedStateHandle[*] are all null. The old code did

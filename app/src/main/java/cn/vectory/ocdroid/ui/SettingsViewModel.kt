@@ -1,5 +1,6 @@
 package cn.vectory.ocdroid.ui
 
+import android.content.Context
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import cn.vectory.ocdroid.data.cache.CacheMaintenanceCoordinator
@@ -7,11 +8,14 @@ import cn.vectory.ocdroid.data.cache.CacheRepository
 import cn.vectory.ocdroid.data.cache.DailySweepReport
 import cn.vectory.ocdroid.data.repository.HostProfileStore
 import cn.vectory.ocdroid.di.UiApplicationScope
+import cn.vectory.ocdroid.util.AppLocaleController
 import cn.vectory.ocdroid.util.DebugLog
+import cn.vectory.ocdroid.util.LocaleMode
 import cn.vectory.ocdroid.util.MarkdownFontSizes
 import cn.vectory.ocdroid.util.SettingsManager
 import cn.vectory.ocdroid.util.ThemeMode
 import dagger.hilt.android.lifecycle.HiltViewModel
+import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -85,6 +89,15 @@ class SettingsViewModel @Inject constructor(
      * Surfaces as a "cache degraded" warning in CacheManagementSection.
      */
     @Named("cacheDegraded") private val cacheDegraded: Boolean,
+    @Named("currentServerGroupFp") private val currentServerGroupFpProvider: () -> String,
+    /**
+     * §P5a (Q5): application Context for [setLocaleMode] →
+     * [AppLocaleController.apply] (needed to resolve the real system locale
+     * in SYSTEM mode via LocaleManagerCompat). Precise-injected (Hilt
+     * @ApplicationContext) — the canonical Hilt pattern for VMs that need a
+     * Context handle.
+     */
+    @ApplicationContext private val appContext: Context,
 ) : ViewModel() {
 
     /**
@@ -106,10 +119,17 @@ class SettingsViewModel @Inject constructor(
         core.store,
         core.settingsManager,
         core.cacheRepository,
-        CacheMaintenanceCoordinator(core.cacheRepository, core.repository, core.settingsManager),
+        CacheMaintenanceCoordinator(
+            core.cacheRepository,
+            core.repository,
+            core.settingsManager,
+            core.currentServerGroupFp,
+        ),
         core.hostProfileStore,
         core.appScope,
         false,
+        core.currentServerGroupFp,
+        core.appContext,
     )
 
     /** Read accessor — same authoritative slice [OrchestratorViewModel] and
@@ -117,6 +137,9 @@ class SettingsViewModel @Inject constructor(
      *  here so SettingsScreen can read settings off its own VM without
      *  reaching into another domain. */
     val settingsFlow get() = store.settingsFlow
+
+    /** The group served by the currently-connected repository. */
+    val currentServerGroupFp: String get() = currentServerGroupFpProvider()
 
     /**
      * §vcs-section: read-only accessor for the current workdir (the absolute
@@ -138,6 +161,21 @@ class SettingsViewModel @Inject constructor(
      * radius); new reactive consumers collect this.
      */
     val currentWorkdirFlow: StateFlow<String?> = settingsManager.currentWorkdirFlow
+
+    /**
+     * §Q2: read accessor for the last workdir the user explicitly browsed in
+     * Files/Git. Used as the default-fallback when Chat has no session.
+     */
+    val filesLastWorkdir: String? get() = settingsManager.filesLastWorkdir
+
+    /**
+     * §Q2: persist the workdir the user explicitly picked in Files/Git. Does
+     * NOT mutate the Chat session (local browsing context only). Wired from
+     * AppShell's Files/Git destinations via the WorkdirControl onSelect.
+     */
+    fun setFilesLastWorkdir(workdir: String) {
+        settingsManager.filesLastWorkdir = workdir
+    }
 
     /**
      * §grouping-rewrite Round-2 C1: disconnect reactivity trigger.
@@ -206,6 +244,19 @@ class SettingsViewModel @Inject constructor(
         store.mutateSettings { it.copy(themeMode = mode) }
     }
 
+    /**
+     * §P5a (Q5): persist the user's language choice + apply it immediately
+     * via [AppLocaleController.apply] (AppCompatDelegate → MainActivity
+     * recreate, since `locale` is not in MainActivity's configChanges →
+     * instant effect). SYSTEM mode re-resolves the real system locale at
+     * apply time (zh→zh, en→en, other→zh).
+     */
+    fun setLocaleMode(mode: LocaleMode) {
+        settingsManager.localeMode = mode
+        store.mutateSettings { it.copy(localeMode = mode) }
+        AppLocaleController.apply(appContext, mode)
+    }
+
     fun setMarkdownFontSizes(sizes: MarkdownFontSizes) {
         settingsManager.markdownFontSizes = sizes
         store.mutateSettings { it.copy(markdownFontSizes = sizes) }
@@ -256,6 +307,14 @@ class SettingsViewModel @Inject constructor(
     val lastSweep: StateFlow<DailySweepReport?> = _lastSweep.asStateFlow()
 
     /**
+     * §P5b-B (Q8): total byte size of all cached message payloads. Surfaced
+     * in the 清除数据 section as "已缓存数据 XXX MB". Refreshed alongside
+     * [cacheListing] by [refreshCacheListing]; 0 until the first refresh.
+     */
+    private val _cachedDataBytes = MutableStateFlow(0L)
+    val cachedDataBytes: StateFlow<Long> = _cachedDataBytes.asStateFlow()
+
+    /**
      * Refresh the cache listing from the persistent store. Idempotent —
      * safe to call on Settings screen enter + after every mutation. Runs on
      * [appScope] (Main.immediate) so the StateFlow write lands on the same
@@ -287,6 +346,13 @@ class SettingsViewModel @Inject constructor(
                 CacheListingState.Error(it.message ?: it::class.simpleName.orEmpty())
             }
             _cacheListing.value = state
+            // §P5b-B (Q8): best-effort refresh of the cached-data byte total
+            // (used by the 清除数据 section). A failure here does NOT affect
+            // the listing — the section falls back to "0 B".
+            val bytes = runCatching { cacheRepository.totalCachedPayloadBytes() }
+                .onFailure { DebugLog.e(TAG, "totalCachedPayloadBytes failed", it) }
+                .getOrDefault(0L)
+            _cachedDataBytes.value = bytes
         }
     }
 
@@ -362,8 +428,10 @@ class SettingsViewModel @Inject constructor(
     }
 
     /**
-     * §grouping-rewrite 项 3: "Sweep all groups" — fan out a [sweepNow] across
-     * every distinct fp currently in use. Derived from the UNION of:
+     * §grouping-rewrite 项 3: "Sweep all groups" — fan out a safe maintenance
+     * pass across every distinct fp currently in use. The coordinator fully
+     * sweeps only the connected group; every other group receives fp-scoped
+     * local LRU/age eviction only. Derived from the UNION of:
      *  - profile-derived fps ([hostProfileStore.profiles] → distinct
      *    `serverGroupFp`), so an fp with profiles but no cached sessions still
      *    gets its LRU/age pass; AND
@@ -391,14 +459,26 @@ class SettingsViewModel @Inject constructor(
                 .getOrDefault(emptyList())
                 .toSet()
             val fps = (profileFps + cacheFps).distinct()
-            var lastReport: DailySweepReport? = null
+            val reports = mutableListOf<DailySweepReport>()
             for (fp in fps) {
                 val report = runCatching {
                     cacheMaintenanceCoordinator.dailySweepIfNeeded(fp, force = true)
                 }.onFailure { DebugLog.e(TAG, "sweepAllGroups failed fp=$fp", it) }.getOrNull()
-                if (report != null) lastReport = report
+                if (report != null) reports += report
             }
-            if (lastReport != null) _lastSweep.value = lastReport
+            if (reports.isNotEmpty()) {
+                _lastSweep.value = DailySweepReport(
+                    serverGroupFp = "",
+                    completeness = if (reports.all { it.completeness == cn.vectory.ocdroid.data.cache.AliveCompleteness.Complete }) {
+                        cn.vectory.ocdroid.data.cache.AliveCompleteness.Complete
+                    } else {
+                        cn.vectory.ocdroid.data.cache.AliveCompleteness.Incomplete
+                    },
+                    verifiedAliveCount = reports.sumOf { it.verifiedAliveCount },
+                    evictedSessionIds = reports.flatMap { it.evictedSessionIds },
+                    suspiciousSessionIds = reports.flatMap { it.suspiciousSessionIds },
+                )
+            }
             refreshCacheListing()
         }
     }

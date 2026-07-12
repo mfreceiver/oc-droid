@@ -1,7 +1,7 @@
 // Composer.kt — Phase 1B composer. Replaces the old `ChatInputBar.kt` with
 // the new M3-native surface (D.3): Agent/Model AssistChips above the input
 // row, an Add-menu ModalBottomSheet (Photos only in Phase 1B; "Reference
-// workspace file" and "Commands" are stubs / Phase 2), and a file-reference
+// file" and "Commands" are stubs / Phase 2), and a file-reference
 // chip strip driven by the new additive `ComposerState.fileReferences` slice
 // field (F.4). Slash-command autocomplete continues to work inline via the
 // existing `CommandSuggestionsPanel`. Send/Stop is a 48dp M3 IconButton.
@@ -43,8 +43,6 @@ import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material.icons.filled.Terminal
 import androidx.compose.material.icons.outlined.Memory
 import androidx.compose.material3.AlertDialog
-import androidx.compose.material3.AssistChip
-import androidx.compose.material3.AssistChipDefaults
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -70,7 +68,6 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.RectangleShape
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.res.stringResource
-import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import cn.vectory.ocdroid.R
@@ -80,7 +77,7 @@ import cn.vectory.ocdroid.ui.ChatViewModel
 import cn.vectory.ocdroid.ui.ComposerFileReference
 import cn.vectory.ocdroid.ui.ComposerViewModel
 import cn.vectory.ocdroid.ui.OrchestratorViewModel
-import cn.vectory.ocdroid.ui.resolveModelDisplayName
+import cn.vectory.ocdroid.ui.theme.Dimens
 import kotlinx.coroutines.launch
 
 /**
@@ -127,28 +124,19 @@ fun Composer(
     // settingsFlow) — this is the parity boundary, do NOT widen it.
     val composerState by composerVM.composerFlow.collectAsStateWithLifecycle()
     val settingsState by composerVM.settingsFlow.collectAsStateWithLifecycle()
-    // §1B-FIX (I5): narrow currentModel projection. Without this the
-    // Composer would subscribe to chatFlow directly and recompose on
-    // every SSE streaming delta (the chatFlow StateFlow mutates
-    // streamingPartTexts on each token). The narrow projection emits
-    // only when the model field actually changes.
-    //
-    // The initial value is captured in a separate non-composable
-    // remember block so the StateFlow.value read does NOT happen inside
-    // the @Composable body (Compose lints StateFlow.value calls in
-    // composition as error-prone).
-    val currentModelInitial = remember(chatVM) { chatVM.chatFlow.value.currentModel }
-    val currentModel by remember(chatVM) { chatVM.currentModelFlow }
-        .collectAsStateWithLifecycle(initialValue = currentModelInitial)
+    // §0.8.2 P2.5: the narrow currentModelFlow projection + the chip-
+    // related locals (agents / selectedAgentName / providers /
+    // disabledModels / currentModelName) are GONE — the Agent/Model chip
+    // Row that consumed them was deleted (the selectors moved to the top-
+    // bar overflow menu, P2.3). The picker sheets are now triggered from
+    // ChatScaffold and source their own slice reads there. Removing the
+    // chatVM.currentModelFlow subscription restores the §1B-FIX (I5)
+    // parity boundary ("Composer must NOT subscribe to unrelated slices")
+    // — the projection existed solely to feed the chips.
     val text = composerState.inputText
     val imageAttachments = composerState.imageAttachments
     val fileReferences = composerState.fileReferences
     val availableCommands = settingsState.availableCommands
-    val agents = settingsState.agents.filter { it.isVisible }
-    val selectedAgentName = settingsState.selectedAgentName
-    val providers = settingsState.providers
-    val disabledModels = settingsState.disabledModels
-    val currentModelName = resolveModelDisplayName(currentModel, providers)
 
     val onTextChange = composerVM::setInputText
     val onSend = chatVM::sendMessage
@@ -180,9 +168,12 @@ fun Composer(
     // §1B: state lives in the composer (the pickers are opened from the
     // chips rendered here). `rememberSaveable` keeps the sheet state across
     // rotation / process restore (P5-6 Sheet rotation risk).
+    // §0.8.2 P2.5: showAgentPicker / showModelPicker are GONE from here —
+    // the chip Row that triggered them was deleted (the selectors moved
+    // into the top-bar overflow menu, P2.3). The picker sheet composables
+    // are now triggered from ChatScaffold (where the overflow menu's open-
+    // callbacks fire). Only the Add-menu + stop-confirm state remain here.
     var showAdd by rememberSaveable { mutableStateOf(false) }
-    var showAgentPicker by rememberSaveable { mutableStateOf(false) }
-    var showModelPicker by rememberSaveable { mutableStateOf(false) }
     var showStopConfirm by rememberSaveable { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
 
@@ -222,66 +213,27 @@ fun Composer(
                 )
             }
 
-            // §1B (D.3): Agent + Model chips. Tap → ModalBottomSheet picker
-            // (no Search yet — Phase 2). Chips are 48dp touch targets
-            // (M3 default), bright on the composer's surfaceContainerLow
-            // background.
-            Row(
-                modifier = Modifier.fillMaxWidth().padding(top = 6.dp, bottom = 2.dp),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-            ) {
-                AssistChip(
-                    onClick = { showAgentPicker = true },
-                    label = {
-                        Text(
-                            text = selectedAgentName ?: stringResource(R.string.agent_default_label),
-                            maxLines = 1,
-                            overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
-                        )
-                    },
-                    leadingIcon = {
-                        Icon(
-                            Icons.Default.SmartToy,
-                            contentDescription = null,
-                            modifier = Modifier.size(18.dp),
-                        )
-                    },
-                    enabled = !questionPending,
-                    colors = AssistChipDefaults.assistChipColors(
-                        labelColor = MaterialTheme.colorScheme.onSurface,
-                    ),
-                )
-                AssistChip(
-                    onClick = { showModelPicker = true },
-                    label = {
-                        Text(
-                            text = currentModelName.ifEmpty { stringResource(R.string.chat_model_picker_title) },
-                            maxLines = 1,
-                            overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
-                        )
-                    },
-                    leadingIcon = {
-                        Icon(
-                            Icons.Outlined.Memory,
-                            contentDescription = null,
-                            modifier = Modifier.size(18.dp),
-                        )
-                    },
-                    enabled = !questionPending,
-                    colors = AssistChipDefaults.assistChipColors(
-                        labelColor = MaterialTheme.colorScheme.onSurface,
-                    ),
-                )
-            }
+            // §0.8.2 P2.5: the Agent + Model AssistChip Row that used to
+            // live here is REMOVED. The two selectors moved into the top-
+            // bar overflow menu (P2.3 — Agent / Model items); the picker
+            // sheets (AgentPickerSheet / ModelPickerSheet) are now triggered
+            // from ChatScaffold (where the menu's open-callbacks fire). The
+            // sheet composables themselves stay defined below in this file
+            // (now `internal` so ChatScaffold can call them).
 
             // §PARITY: editor row — [+] [input weight=1f] [send/stop].
             // The Add button is now an M3 IconButton (48dp) opening the
             // ModalBottomSheet. The send/stop button is also an M3
             // IconButton (48dp). Both replace the old Box+clickable
             // wrappers.
+            // §0.8.2 P2.5: vertical padding tightened from 8dp to
+            // Dimens.spacing1 (4dp) — the user-reported "input box top/
+            // bottom space is too large" came from the now-removed chip
+            // Row's top padding (6dp) plus this Row's vertical=8dp. With
+            // the chips gone, 4dp keeps the editor readable without the
+            // airy gap.
             Row(
-                modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp),
+                modifier = Modifier.fillMaxWidth().padding(vertical = Dimens.spacing1),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 IconButton(
@@ -363,14 +315,14 @@ fun Composer(
                 showAdd = false
                 onAddImages()
             },
-            // §1B: "Reference workspace file" is a Phase 2 entry. Rendered
+            // §1B: "Reference file" is a Phase 2 entry. Rendered
             // as a disabled row so the user sees the menu shape that will
             // land in Phase 2.
             onFileRef = {
                 showAdd = false
                 scope.launch {
                     // No-op in Phase 1B — wired in Phase 2 via
-                    // orchestratorVM.requestPickFileForComposer → workspace/files
+                    // orchestratorVM.requestPickFileForComposer → Files
                     // round-trip.
                 }
             },
@@ -381,27 +333,11 @@ fun Composer(
         )
     }
 
-    if (showAgentPicker) {
-        AgentPickerSheet(
-            agents = agents,
-            selectedAgentName = selectedAgentName,
-            onPick = { name -> composerVM.selectAgent(name); showAgentPicker = false },
-            onDismiss = { showAgentPicker = false },
-        )
-    }
-
-    if (showModelPicker) {
-        ModelPickerSheet(
-            providers = providers,
-            disabledModels = disabledModels,
-            currentModel = currentModel,
-            onSwitch = { providerId, modelId ->
-                composerVM.switchSessionModel(providerId, modelId)
-                showModelPicker = false
-            },
-            onDismiss = { showModelPicker = false },
-        )
-    }
+    // §0.8.2 P2.5: the AgentPickerSheet / ModelPickerSheet invocations that
+    // used to live here are REMOVED — the chip Row that opened them was
+    // deleted (selectors moved to the top-bar overflow menu, P2.3). The
+    // sheet composables stay defined below (now `internal`) and are
+    // invoked from ChatScaffold.kt.
 
     if (showStopConfirm) {
         AlertDialog(
@@ -528,7 +464,7 @@ private fun AddMenuSheet(
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun AgentPickerSheet(
+internal fun AgentPickerSheet(
     agents: List<AgentInfo>,
     selectedAgentName: String?,
     onPick: (String?) -> Unit,
@@ -599,7 +535,7 @@ private fun AgentPickerSheet(
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun ModelPickerSheet(
+internal fun ModelPickerSheet(
     providers: ProvidersResponse?,
     disabledModels: Set<String>,
     currentModel: cn.vectory.ocdroid.data.model.Message.ModelInfo?,

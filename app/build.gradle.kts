@@ -283,7 +283,6 @@ kover {
                     // pure helpers in WorkspaceVcsHelpersKt remain in the
                     // coverage set — same extraction pattern as SessionsScreen).
                     "cn.vectory.ocdroid.ui.workspace.ChangesPaneKt",
-                    "cn.vectory.ocdroid.ui.workspace.WorkspaceScaffoldKt",
                     "cn.vectory.ocdroid.ui.workspace.FilesPaneKt",
                     // §round-B ②: ContextSelectorSheet is a @Composable-only
                     // file (the workdir-selection rule lives in the pure,

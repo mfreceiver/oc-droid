@@ -195,106 +195,111 @@ internal fun MessageCard(
             )
         }
 
-        // Top-end overflow trigger. Aligned to the end of the row and
-        // shifted down by 4dp so it doesn't overlap the role / time line
-        // of the message (the role is the message header line that
-        // MessageRow's own `MessageDecoration` renders; we sit on top
-        // of the message so the MoreVert button is the single entry
-        // point to destructive actions, matching scheme D.6).
-        IconButton(
-            onClick = { overflowOpen = true },
+        // §0.8.2 P2.4: anchor-fix for the per-message "…" menu. The
+        // DropdownMenu MUST be a sibling of the IconButton inside a tight
+        // dedicated Box (aligned TopEnd) so the popup anchors below the
+        // trigger. The prior layout composed the DropdownMenu OUTSIDE the
+        // parent Box (a remote menu with no tight anchor), which caused
+        // the popup to attach to the window's top-left corner — the bug
+        // this phase fixes. Mirrors the same anchor pattern used by the
+        // top-bar ContextMenuCluster (P2.3). The previous fillMaxWidth()
+        // Box was a poor anchor (its width = the whole row); this small
+        // Box wraps only the trigger, so the menu's start offset is the
+        // trigger's end edge.
+        Box(
             modifier = Modifier
                 .align(androidx.compose.ui.Alignment.TopEnd)
                 .padding(top = 4.dp, end = 4.dp),
         ) {
-            Icon(
-                imageVector = Icons.Filled.MoreVert,
-                contentDescription = stringResource(R.string.message_actions_menu),
-                tint = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-        }
-    }
-
-    if (overflowOpen) {
-        DropdownMenu(
-            expanded = overflowOpen,
-            onDismissRequest = { overflowOpen = false },
-        ) {
-            if (canCopy) {
-                DropdownMenuItem(
-                    text = { Text(stringResource(R.string.message_action_copy)) },
-                    leadingIcon = {
-                        Icon(
-                            imageVector = Icons.Filled.ContentCopy,
-                            contentDescription = null,
-                        )
-                    },
-                    onClick = {
-                        overflowOpen = false
-                        // Default Copy semantics: concatenate every text part
-                        // (in order) and put it in the system clipboard. The
-                        // extracted text matches what the user sees in the
-                        // transcript — non-text parts (tools / patches / images
-                        // / reasoning) are intentionally excluded (no
-                        // human-readable surface for the recipient).
-                        onCopy(collectMessageText(parts, streamingPartTexts, context))
-                    },
+            IconButton(
+                onClick = { overflowOpen = true },
+            ) {
+                Icon(
+                    imageVector = Icons.Filled.MoreVert,
+                    contentDescription = stringResource(R.string.message_actions_menu),
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
-            // §1C-DEV-NOTE: only user-typed messages expose the destructive
-            // entry. The use case (RevertConversation) rejects non-user
-            // message ids, so offering the menu item on assistant rows
-            // would be a misleading dead-end. Fork + Copy are non-destructive
-            // and stay on every row.
-            if (message.isUser) {
-                DropdownMenuItem(
-                    text = { Text(stringResource(R.string.message_action_edit_rerun)) },
-                    leadingIcon = {
-                        Icon(
-                            imageVector = Icons.Filled.Edit,
-                            contentDescription = null,
-                        )
-                    },
-                    // §1C-FIX-②: the menu-item enablement uses the
-                    // PURE [canEditAndRerun] predicate. The caller
-                    // (ChatMessageContent.kt's MessageCard wrap)
-                    // computes the [DestructiveGateInputs] from the
-                    // canonical slices — busy / retry / sending /
-                    // streamingPartTexts / streamingReasoningPart /
-                    // isUser. Mirrors RevertConversation's own
-                    // intercept set; the predicate is a faithful
-                    // double-insurance alongside the use case.
-                    enabled = canEditAndRerun,
-                    onClick = {
-                        // §1C-FIX-③/④: the menu tap dispatches the
-                        // pure [confirmOnMenuTap] state-machine
-                        // transition. The destructive callback NEVER
-                        // fires from the menu tap — only from the
-                        // confirm dialog's confirm button (see below).
-                        // Closing the menu and opening the dialog
-                        // happen via the state machine; the visual
-                        // surface (DropdownMenu + AlertDialog) is
-                        // driven by the state, not by a separate
-                        // boolean.
-                        overflowOpen = false
-                        confirmState = confirmOnMenuTap(confirmState)
-                    },
-                )
-            }
-            if (canFork) {
-                DropdownMenuItem(
-                    text = { Text(stringResource(R.string.message_action_fork)) },
-                    leadingIcon = {
-                        Icon(
-                            imageVector = Icons.Filled.Edit,
-                            contentDescription = null,
-                        )
-                    },
-                    onClick = {
-                        overflowOpen = false
-                        onFork(message.id)
-                    },
-                )
+            DropdownMenu(
+                expanded = overflowOpen,
+                onDismissRequest = { overflowOpen = false },
+            ) {
+                if (canCopy) {
+                    DropdownMenuItem(
+                        text = { Text(stringResource(R.string.message_action_copy)) },
+                        leadingIcon = {
+                            Icon(
+                                imageVector = Icons.Filled.ContentCopy,
+                                contentDescription = null,
+                            )
+                        },
+                        onClick = {
+                            overflowOpen = false
+                            // Default Copy semantics: concatenate every text part
+                            // (in order) and put it in the system clipboard. The
+                            // extracted text matches what the user sees in the
+                            // transcript — non-text parts (tools / patches / images
+                            // / reasoning) are intentionally excluded (no
+                            // human-readable surface for the recipient).
+                            onCopy(collectMessageText(parts, streamingPartTexts, context))
+                        },
+                    )
+                }
+                // §1C-DEV-NOTE: only user-typed messages expose the destructive
+                // entry. The use case (RevertConversation) rejects non-user
+                // message ids, so offering the menu item on assistant rows
+                // would be a misleading dead-end. Fork + Copy are non-destructive
+                // and stay on every row.
+                if (message.isUser) {
+                    DropdownMenuItem(
+                        text = { Text(stringResource(R.string.message_action_edit_rerun)) },
+                        leadingIcon = {
+                            Icon(
+                                imageVector = Icons.Filled.Edit,
+                                contentDescription = null,
+                            )
+                        },
+                        // §1C-FIX-②: the menu-item enablement uses the
+                        // PURE [canEditAndRerun] predicate. The caller
+                        // (ChatMessageContent.kt's MessageCard wrap)
+                        // computes the [DestructiveGateInputs] from the
+                        // canonical slices — busy / retry / sending /
+                        // streamingPartTexts / streamingReasoningPart /
+                        // isUser. Mirrors RevertConversation's own
+                        // intercept set; the predicate is a faithful
+                        // double-insurance alongside the use case.
+                        enabled = canEditAndRerun,
+                        onClick = {
+                            // §1C-FIX-③/④: the menu tap dispatches the
+                            // pure [confirmOnMenuTap] state-machine
+                            // transition. The destructive callback NEVER
+                            // fires from the menu tap — only from the
+                            // confirm dialog's confirm button (see below).
+                            // Closing the menu and opening the dialog
+                            // happen via the state machine; the visual
+                            // surface (DropdownMenu + AlertDialog) is
+                            // driven by the state, not by a separate
+                            // boolean.
+                            overflowOpen = false
+                            confirmState = confirmOnMenuTap(confirmState)
+                        },
+                    )
+                }
+                if (canFork) {
+                    DropdownMenuItem(
+                        text = { Text(stringResource(R.string.message_action_fork)) },
+                        leadingIcon = {
+                            Icon(
+                                imageVector = Icons.Filled.Edit,
+                                contentDescription = null,
+                            )
+                        },
+                        onClick = {
+                            overflowOpen = false
+                            onFork(message.id)
+                        },
+                    )
+                }
             }
         }
     }

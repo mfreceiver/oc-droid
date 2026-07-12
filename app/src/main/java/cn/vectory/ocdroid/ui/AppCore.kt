@@ -95,7 +95,7 @@ class AppCore @Inject constructor(
      *  notification body needs a real String). Composable collectors
      *  resolve via [LocalContext] instead; this Context serves only the
      *  app-lifetime notification path that has no Composition available. */
-    @ApplicationContext private val appContext: Context,
+    @ApplicationContext internal val appContext: Context,
     /** R-19 Sprint 3 P2-5: the 5 application-scoped controllers are now
      *  Hilt-injected (@Singleton via [cn.vectory.ocdroid.di.ControllerModule])
      *  instead of being constructed inline here. This lets the per-domain

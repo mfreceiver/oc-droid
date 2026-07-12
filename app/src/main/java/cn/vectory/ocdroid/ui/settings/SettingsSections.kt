@@ -1,5 +1,6 @@
 package cn.vectory.ocdroid.ui.settings
 
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -10,17 +11,16 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.DeleteSweep
 import androidx.compose.material.icons.outlined.Refresh
 import androidx.compose.material3.AlertDialog
-import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
-import androidx.compose.material3.Card
-import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.ListItem
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.SegmentedButton
 import androidx.compose.material3.SegmentedButtonDefaults
 import androidx.compose.material3.SingleChoiceSegmentedButtonRow
@@ -38,6 +38,7 @@ import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import cn.vectory.ocdroid.R
 import cn.vectory.ocdroid.ui.util.formatBytes
+import cn.vectory.ocdroid.util.LocaleMode
 import cn.vectory.ocdroid.util.SettingsManager
 import cn.vectory.ocdroid.util.ThemeMode
 
@@ -62,6 +63,13 @@ internal val NamedGroupLabels: List<String> = listOf("A", "B", "C", "D")
 internal fun AppearanceSection(
     themeMode: ThemeMode,
     onThemeSelected: (ThemeMode) -> Unit,
+    /**
+     * §P5a (Q5): user-facing language preference (Follow System / 中文 /
+     * English). Parallel to [themeMode]; applied via AppLocaleController
+     * → AppCompatDelegate → MainActivity recreate.
+     */
+    localeMode: LocaleMode = LocaleMode.SYSTEM,
+    onLocaleSelected: (LocaleMode) -> Unit = {},
     /**
      * §ui-scale: the two M3-canonical scale axes (font-only + content/density).
      * Applied via LocalDensity override in OpenCodeTheme. Range clamped at the
@@ -103,6 +111,45 @@ internal fun AppearanceSection(
                         ThemeMode.LIGHT -> stringResource(R.string.settings_theme_light)
                         ThemeMode.DARK -> stringResource(R.string.settings_theme_dark)
                         ThemeMode.SYSTEM -> stringResource(R.string.settings_follow_system)
+                    }
+                )
+            }
+        }
+    }
+
+    Spacer(modifier = Modifier.height(20.dp))
+
+    // §P5a (Q5): language SegmentedButton — parallel to the Theme row above.
+    // Follow System re-resolves the real system locale (zh→zh, en→en, other→zh).
+    val locales = listOf(LocaleMode.SYSTEM, LocaleMode.ZH, LocaleMode.EN)
+    Text(stringResource(R.string.settings_language), style = MaterialTheme.typography.labelMedium)
+    Spacer(modifier = Modifier.height(8.dp))
+    SingleChoiceSegmentedButtonRow(
+        modifier = Modifier.fillMaxWidth()
+    ) {
+        locales.forEachIndexed { index, mode ->
+            SegmentedButton(
+                selected = localeMode == mode,
+                onClick = { onLocaleSelected(mode) },
+                shape = SegmentedButtonDefaults.itemShape(
+                    index = index,
+                    count = locales.size
+                ),
+                icon = {},
+                colors = SegmentedButtonDefaults.colors(
+                    activeContainerColor = MaterialTheme.colorScheme.primary,
+                    activeContentColor = MaterialTheme.colorScheme.onPrimary,
+                    activeBorderColor = MaterialTheme.colorScheme.primary,
+                    inactiveContainerColor = MaterialTheme.colorScheme.surface,
+                    inactiveContentColor = MaterialTheme.colorScheme.onSurfaceVariant,
+                    inactiveBorderColor = MaterialTheme.colorScheme.outline
+                )
+            ) {
+                Text(
+                    when (mode) {
+                        LocaleMode.SYSTEM -> stringResource(R.string.settings_follow_system)
+                        LocaleMode.ZH -> stringResource(R.string.settings_language_chinese)
+                        LocaleMode.EN -> stringResource(R.string.settings_language_english)
                     }
                 )
             }
@@ -195,46 +242,57 @@ internal fun TrafficSection(
 }
 
 /**
- * Danger zone: hard-reset ALL local data (open tabs, session cache, drafts,
- * current session/workdir, theme/font prefs, traffic stats) while preserving
- * server connection info and tunnel passwords, then trigger a reconnect +
- * server re-fetch via [cn.vectory.ocdroid.ui.MainViewModel.resetLocalDataAndResync].
+ * §P5b-B (Q8): 清除数据 section (was Danger Zone). Renders FLAT (no tinted
+ * Card) as a single row: left = "消息缓存占用 XXX MB" (the message-cache
+ * payload size, computed by [SettingsViewModel.cachedDataBytes] →
+ * [cn.vectory.ocdroid.ui.util.formatBytes]); right = the 清除缓存 button.
  *
- * The button uses destructive (error-color) styling and gates the action
- * behind a confirmation [AlertDialog] that spells out exactly what is kept vs
- * cleared, since the wipe is irreversible.
+ * The button keeps the existing destructive behavior
+ * ([cn.vectory.ocdroid.ui.MainViewModel.resetLocalDataAndResync] — wipe +
+ * re-fetch) and its confirmation [AlertDialog] (irreversible warning). Only
+ * the action is honestly labelled "重置本地数据" (the section title is
+ * "清除数据" via [R.string.settings_danger_zone]).
+ *
+ * @param cachedDataSize pre-formatted human-readable size string (e.g.
+ *   "12.3 MB") for the message-cache portion. Computed by the caller off
+ *   [SettingsViewModel.cachedDataBytes]; passed as a String so this
+ *   composable stays free of the formatBytes dependency.
  */
 @Composable
-internal fun DangerZoneSection(onClearLocalData: () -> Unit, hideHeader: Boolean = false) {
+internal fun DangerZoneSection(
+    cachedDataSize: String,
+    onClearLocalData: () -> Unit,
+    hideHeader: Boolean = false,
+) {
     var showConfirm by remember { mutableStateOf(false) }
 
     if (!hideHeader) {
         SectionHeader(title = stringResource(R.string.settings_danger_zone))
     }
 
-    Card(
+    // §P5b-B (Q8): flat single row — no tinted Card. The left text shows the
+    // total cached-data size; the right button triggers the destructive wipe
+    // (gated by the confirmation dialog below). Same Row so the user sees the
+    // cost + the action together.
+    Row(
         modifier = Modifier.fillMaxWidth(),
-        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.CenterVertically
     ) {
-        Column(modifier = Modifier.padding(16.dp)) {
-            Text(
-                stringResource(R.string.settings_clear_local_data_warning),
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
+        Text(
+            stringResource(R.string.cache_cached_data_size, cachedDataSize),
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+        OutlinedButton(
+            onClick = { showConfirm = true },
+            colors = ButtonDefaults.outlinedButtonColors(
+                contentColor = MaterialTheme.colorScheme.error
             )
-            Spacer(modifier = Modifier.height(16.dp))
-            Button(
-                onClick = { showConfirm = true },
-                modifier = Modifier.fillMaxWidth(),
-                colors = ButtonDefaults.buttonColors(
-                    containerColor = MaterialTheme.colorScheme.errorContainer,
-                    contentColor = MaterialTheme.colorScheme.onErrorContainer
-                )
-            ) {
-                Icon(Icons.Default.Delete, contentDescription = null, modifier = Modifier.size(18.dp))
-                Spacer(modifier = Modifier.width(8.dp))
-                Text(stringResource(R.string.settings_clear_local_data))
-            }
+        ) {
+            Icon(Icons.Default.DeleteSweep, contentDescription = null, modifier = Modifier.size(18.dp))
+            Spacer(modifier = Modifier.width(8.dp))
+            Text(stringResource(R.string.cache_clear_cache))
         }
     }
 
@@ -271,7 +329,7 @@ internal fun DangerZoneSection(onClearLocalData: () -> Unit, hideHeader: Boolean
                     colors = ButtonDefaults.textButtonColors(
                         contentColor = MaterialTheme.colorScheme.error
                     )
-                ) { Text(stringResource(R.string.settings_clear_local_data)) }
+                ) { Text(stringResource(R.string.cache_clear_cache)) }
             },
             dismissButton = {
                 TextButton(onClick = { showConfirm = false }) {

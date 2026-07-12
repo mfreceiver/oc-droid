@@ -5,6 +5,7 @@
     <string name="chat_title_app_version">%1$s v%2$s</string>
     <string name="nav_chat">Chat</string>
     <string name="nav_files">Files</string>
+    <string name="nav_git">Git</string>
     <string name="nav_sessions">Sessions</string>
     <string name="nav_settings">Settings</string>
     <string name="settings_title">Settings</string>
@@ -29,12 +30,18 @@
     <string name="settings_section_debug">Debug</string>
     <!-- §phase3 (G.3 / D.8): slim Settings section labels + subtitles for
          the LazyColumn-of-ListItem root. Each pushes a sub-route. -->
-    <string name="settings_section_hosts">Hosts &amp; security</string>
-    <string name="settings_section_hosts_subtitle">Add, switch, or remove OpenCode hosts</string>
+    <!-- §P5b-A / Q7: "主机与安全" renamed to "Server Management" — the entry
+         now routes to the 服务器管理 hub (host list + traffic stats + model
+         management). The settings_section_hosts key is reused so callers
+         don't change. -->
+    <string name="settings_section_hosts">Server Management</string>
+    <string name="settings_section_hosts_subtitle">Add, switch, or remove OpenCode servers</string>
+    <!-- §P5b-A / Q7: 服务器管理 screen — short description rendered above
+         the three sections (服务器配置 / 流量统计 / 模型管理). -->
+    <string name="settings_server_management_desc">Manage this server (group).</string>
     <string name="settings_section_appearance">Appearance</string>
     <string name="settings_section_appearance_subtitle">Theme, font, display size</string>
     <string name="settings_section_models">Models</string>
-    <string name="settings_section_models_subtitle">Per-host model visibility</string>
     <string name="settings_section_notifications">Notifications</string>
     <string name="settings_section_notifications_subtitle">Alerts for completions and errors</string>
     <string name="settings_section_storage">Storage</string>
@@ -73,7 +80,7 @@
     <string name="host_profile_edit_icon">Edit</string>
     <string name="host_profile_test_icon">Test connection</string>
     <string name="host_profile_delete_confirm_title">Delete profile</string>
-    <string name="host_profile_delete_confirm_message">Delete this host profile? This cannot be undone.</string>
+    <string name="host_profile_delete_confirm_message">Delete this server profile? This cannot be undone.</string>
     <string name="host_profile_test_success">Connected%1$s</string>
     <string name="host_profile_test_failed">Connection failed</string>
     <string name="common_back">Back</string>
@@ -136,17 +143,11 @@
     <string name="chat_context_no_cost">No cost data</string>
     <string name="chat_context_unknown">Unknown</string>
     <string name="chat_context_compact">Compact</string>
-    <!-- §round-B ② (D.5): ContextSelectorSheet host/workdir entries. -->
-    <string name="context_selector_title">Context</string>
-    <string name="context_selector_hosts">Host</string>
-    <string name="context_selector_workdirs">Workdir</string>
-    <string name="context_selector_manage_hosts">Manage hosts</string>
-    <string name="context_selector_no_host">No host</string>
-    <string name="context_selector_no_workdir">No workdir</string>
-    <string name="context_selector_search_hint">Search host or workdir</string>
     <!-- §round-B ③: SessionsScreen SearchBar. -->
     <string name="sessions_search_hint">Search by title or directory</string>
     <string name="sessions_search_no_results">No matching sessions</string>
+    <!-- §0.8.2 P3.2: contentDescription for the TopAppBar search action button. -->
+    <string name="sessions_action_search">Search</string>
     <string name="chat_add_image">Add image</string>
     <string name="chat_remove_image">Remove image</string>
     <string name="chat_send">Send</string>
@@ -198,17 +199,24 @@
     <string name="files_share">Share</string>
     <string name="files_show_in_files">Show in Files</string>
     <string name="files_markdown_large_warning">This Markdown file is large. Web Preview may be slow or memory-heavy.</string>
-    <string name="files_open_web_preview">Open Web Preview</string>
-    <string name="files_open_native_preview">Open Native Preview</string>
-    <string name="files_open_markdown_source">Open Markdown Source</string>
-    <string name="host_profiles_title">Host Profiles</string>
-    <string name="host_profile_add">Add host profile</string>
-    <string name="host_profile_use_this_host">Use This Host</string>
+    <string name="files_open_web_preview">Web Preview</string>
+    <string name="files_open_native_preview">Native Preview</string>
+    <string name="files_open_markdown_source">Markdown Source</string>
+    <!-- §Q2 (P4b-A): Files/Git Workdir control strings. -->
+    <string name="files_workdir_none">No workdir</string>
+    <string name="files_workdir_none_connected">No connected projects</string>
+    <string name="files_workdir_switch">Switch workdir</string>
+    <!-- §P5b-A / Q7: visible "Host" terminology renamed to "Server" for the
+         strings surfaced by the 服务器管理 screen (host list, + button,
+         editor dialog title, delete-confirm copy). -->
+    <string name="host_profiles_title">Server Profiles</string>
+    <string name="host_profile_add">Add server profile</string>
+    <string name="host_profile_use_this_host">Use This Server</string>
     <string name="host_profile_status">Status: %1$s</string>
     <string name="host_profile_current">Current</string>
     <string name="host_profile_saved">Saved profile</string>
-    <string name="host_profile_add_title">Add Host Profile</string>
-    <string name="host_profile_edit_title">Edit Host Profile</string>
+    <string name="host_profile_add_title">Add Server Profile</string>
+    <string name="host_profile_edit_title">Edit Server Profile</string>
     <string name="host_profile_name">Profile name</string>
     <string name="host_profile_basic_auth_username">Basic Auth username (optional)</string>
     <string name="host_profile_basic_auth_password">Basic Auth password (optional)</string>
@@ -324,12 +332,12 @@
     <string name="server_dialog_system_settings">System Settings</string>
     <string name="task_completed">Task completed</string>
     <string name="task_failed">Task failed</string>
-    <string name="settings_danger_zone">Danger Zone</string>
+    <string name="settings_danger_zone">Clear Data</string>
     <string name="settings_clear_local_data">Clear all local data</string>
     <string name="settings_clear_local_data_title">Clear all local data?</string>
     <string name="settings_clear_local_data_warning">Wipes local data and re-fetches from the server. Connection info and tunnel passwords are preserved.</string>
     <string name="settings_clear_local_data_keeps">Kept: server connection info, host profiles, tunnel passwords.</string>
-    <string name="settings_clear_local_data_clears">Clears: open tabs, session cache, unsent drafts, current session/project, theme &amp; font preferences, traffic stats.</string>
+    <string name="settings_clear_local_data_clears">Clears all local data and re-syncs: drafts, model/agent preferences, current session and working directory, navigation and UI state, theme, language, traffic counters, and cached messages.</string>
     <string name="settings_clear_local_data_irreversible">This action cannot be undone.</string>
     <string name="chat_model_picker_title">Select model</string>
     <string name="chat_model_picker_empty">No models available</string>
@@ -472,22 +480,16 @@
     <string name="cache_management_error">Failed to read cache: %1$s</string>
     <string name="cache_management_degraded_warning">Cache is degraded — the encrypted store could not be opened, so the cache will be lost on restart.</string>
     <string name="cache_management_offline_hint">Connect to the server before running a sweep — the orphan scan needs the live session list.</string>
+    <string name="cache_management_non_current_group_hint">Connect to this server group before running a sweep — the orphan scan only uses the connected server.</string>
     <string name="cache_management_group_header">Server group: %1$s</string>
     <string name="cache_management_group_member_count">%1$d session(s), %2$d profile(s)</string>
     <string name="cache_management_row_workdir">Workdir: %1$s</string>
     <string name="cache_management_row_workdir_unknown">(unknown workdir)</string>
     <string name="cache_management_row_session_id">Session: %1$s</string>
-    <string name="cache_management_row_created_at">Cached: %1$s</string>
-    <string name="cache_management_row_newest_at">Newest message: %1$s</string>
+    <string name="cache_management_row_newest_at">Latest message: %1$s</string>
     <string name="cache_management_row_verified_at">Last verified: %1$s</string>
-    <string name="cache_management_row_suspect">Possibly abandoned (last verified &gt; 7 days ago)</string>
-    <string name="cache_management_row_exhausted">Has an unfillable gap</string>
-    <string name="cache_management_action_clear_session">Clear session</string>
-    <string name="cache_management_action_clear_project">Clear project</string>
-    <string name="cache_management_action_sweep">Scan for orphans now</string>
-    <string name="cache_management_action_clear_all">Clear all cached sessions</string>
-    <string name="cache_management_clear_all_title">Clear ALL cached sessions?</string>
-    <string name="cache_management_clear_all_body">This wipes every cached session across every server group (messages, parts, gap markers). Host profiles, connection info, and tunnel passwords are preserved. The cache rebuilds from the server as you re-open sessions.</string>
+    <string name="cache_management_action_clear_session">Clear</string>
+    <string name="cache_management_action_sweep">Clear lost sessions</string>
     <string name="cache_management_clear_all_confirm">Clear all</string>
     <string name="cache_management_sweep_result_complete">Sweep complete: verified %1$d, evicted %2$d.</string>
     <string name="cache_management_sweep_result_incomplete">Sweep degraded (alive set incomplete): verified %1$d, nothing evicted.</string>
@@ -501,11 +503,20 @@
     <string name="host_group_warning">Profiles in the same group share cached chat history, drafts, model preferences, and recent directories. Choosing the wrong group will mix or strand this data; only \"Clear all local data\" can recover it.</string>
     <string name="group_stats_named">%1$s · %2$d connection(s) · %3$d cached session(s)</string>
     <string name="group_stats_solo">Standalone · 1 connection · %1$d cached session(s)</string>
-    <string name="cache_management_popup_title">Cache &amp; maintenance</string>
-    <string name="cache_management_sweep_all">Sweep all groups</string>
+    <string name="cache_management_popup_title">Cache Management</string>
+    <string name="cache_management_sweep_all">Clear lost sessions</string>
+    <!-- §P5b-B (Q8): 清除数据 section + 缓存管理 3-level tree strings. -->
+    <string name="cache_clear_cache">Reset local data</string>
+    <string name="cache_cached_data_size">Message cache %1$s</string>
+    <string name="cache_unknown_project">Unknown project</string>
+    <string name="cache_clear_lost_sessions_result">Cleared %1$d lost sessions for the connected server</string>
     <string name="command_submitted_processing">Command submitted, processing…</string>
     <string name="workdir_disconnect_title">Disconnect this project?</string>
     <string name="workdir_disconnect_message">It will be removed from the list and this project\'s local cache will be cleared. This cannot be undone.</string>
     <string name="workdir_disconnect_confirm">Disconnect</string>
     <string name="workdir_empty_placeholder">No active sessions — tap to create one</string>
+    <!-- §B2: locally-generated fallback strings for ChatFilePreviewScreen.
+         Server-provided error.message stays as-is per existing policy. -->
+    <string name="chat_preview_no_path">No file path or working directory available.</string>
+    <string name="chat_preview_load_failed">Failed to load file.</string>
 </resources>

@@ -332,6 +332,43 @@ class SettingsManagerTest {
         assertEquals(0, settings.lastNavPage)
     }
 
+    @Test
+    fun `lastRoute migrates persisted workspace to files and writes it back`() {
+        rawEncryptedPrefs().edit().putString("last_route", "workspace").commit()
+
+        assertEquals("files", settings.lastRoute)
+        assertEquals("files", rawEncryptedPrefs().getString("last_route", null))
+    }
+
+    @Test
+    fun `lastRoute accepts files and git`() {
+        settings.lastRoute = "files"
+        assertEquals("files", settings.lastRoute)
+        settings.lastRoute = "git"
+        assertEquals("git", settings.lastRoute)
+    }
+
+    @Test
+    fun `lastRoute setter rejects unknown route to chat`() {
+        settings.lastRoute = "unknown"
+        assertEquals("chat", settings.lastRoute)
+    }
+
+    @Test
+    fun `lastRoute getter quarantines non-null invalid route to chat instead of legacy page`() {
+        rawEncryptedPrefs().edit()
+            .putString("last_route", "unknown")
+            .putInt("last_nav_page", 2)
+            .commit()
+
+        assertEquals("chat", settings.lastRoute)
+        assertEquals("chat", rawEncryptedPrefs().getString("last_route", null))
+    }
+
+    private fun rawEncryptedPrefs(): android.content.SharedPreferences =
+        SettingsManager::class.java.getDeclaredField("encryptedPrefs").apply { isAccessible = true }
+            .get(settings) as android.content.SharedPreferences
+
     // ───────────────── per-host / per-session 字典字段 ─────────────────
 
     @Test

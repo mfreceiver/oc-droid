@@ -4,6 +4,7 @@
     <string name="chat_title_app_version">%1$s v%2$s</string>
     <string name="nav_chat">聊天</string>
     <string name="nav_files">文件</string>
+    <string name="nav_git">Git</string>
     <string name="nav_sessions">会话</string>
     <string name="nav_settings">设置</string>
     <string name="settings_title">设置</string>
@@ -27,12 +28,16 @@
     <string name="settings_section_connections">连接管理</string>
     <string name="settings_section_debug">调试</string>
     <!-- §phase3 (G.3 / D.8): 精简 Settings 分区标题与副标题。 -->
-    <string name="settings_section_hosts">主机与安全</string>
-    <string name="settings_section_hosts_subtitle">添加、切换或移除 OpenCode 主机</string>
+    <!-- §P5b-A / Q7: 「主机与安全」改名为「服务器管理」——该入口现在通向
+         服务器管理 hub（服务器列表 + 流量统计 + 模型管理）。复用
+         settings_section_hosts key，调用方无需改动。 -->
+    <string name="settings_section_hosts">服务器管理</string>
+    <string name="settings_section_hosts_subtitle">添加、切换或移除 OpenCode 服务器</string>
+    <!-- §P5b-A / Q7: 服务器管理屏顶部说明文本（三个分区：服务器配置 / 流量统计 / 模型管理）。 -->
+    <string name="settings_server_management_desc">维护该服务器（组）。</string>
     <string name="settings_section_appearance">外观</string>
     <string name="settings_section_appearance_subtitle">主题、字体、显示尺寸</string>
     <string name="settings_section_models">模型</string>
-    <string name="settings_section_models_subtitle">每主机的模型可见性</string>
     <string name="settings_section_notifications">通知</string>
     <string name="settings_section_notifications_subtitle">完成与错误提醒</string>
     <string name="settings_section_storage">存储</string>
@@ -68,7 +73,7 @@
     <string name="host_profile_edit_icon">编辑</string>
     <string name="host_profile_test_icon">测试连接</string>
     <string name="host_profile_delete_confirm_title">删除配置</string>
-    <string name="host_profile_delete_confirm_message">确定删除此主机配置？此操作不可恢复。</string>
+    <string name="host_profile_delete_confirm_message">确定删除此服务器配置？此操作不可恢复。</string>
     <string name="host_profile_test_success">已连接%1$s</string>
     <string name="host_profile_test_failed">连接失败</string>
     <string name="common_back">返回</string>
@@ -80,6 +85,8 @@
     <string name="common_delete">删除</string>
     <string name="common_refresh">刷新</string>
     <string name="common_ok">OK</string>
+    <!-- §P5a: common_loading is referenced by ChangesPane (zh translation was missing → MissingTranslation lint error). -->
+    <string name="common_loading">加载中…</string>
     <string name="sessions_title">会话</string>
     <string name="sessions_active">近期会话</string>
     <string name="sessions_archived">已归档</string>
@@ -142,6 +149,10 @@
     <string name="chat_context_no_cost">没有费用数据</string>
     <string name="chat_context_unknown">未知</string>
     <string name="chat_context_compact">压缩</string>
+    <!-- §round-B ③ / §0.8.2 P3.2: SessionsScreen 搜索（补齐 zh 对齐）。 -->
+    <string name="sessions_search_hint">按标题或目录搜索</string>
+    <string name="sessions_search_no_results">没有匹配的会话</string>
+    <string name="sessions_action_search">搜索</string>
     <string name="chat_add_image">添加图片</string>
     <string name="chat_remove_image">移除图片</string>
     <string name="chat_send">发送</string>
@@ -176,17 +187,23 @@
     <string name="files_share">分享</string>
     <string name="files_show_in_files">在文件中显示</string>
     <string name="files_markdown_large_warning">这个 Markdown 文件较大，Web 预览可能较慢或占用较多内存。</string>
-    <string name="files_open_web_preview">打开 Web 预览</string>
-    <string name="files_open_native_preview">打开原生预览</string>
-    <string name="files_open_markdown_source">打开 Markdown 源码</string>
-    <string name="host_profiles_title">主机配置</string>
-    <string name="host_profile_add">添加主机配置</string>
-    <string name="host_profile_use_this_host">使用这个主机</string>
+    <string name="files_open_web_preview">Web 预览</string>
+    <string name="files_open_native_preview">原生预览</string>
+    <string name="files_open_markdown_source">Markdown 源码</string>
+    <!-- §Q2 (P4b-A): 文件/Git 工作目录控件字符串。 -->
+    <string name="files_workdir_none">无工作目录</string>
+    <string name="files_workdir_none_connected">没有已连接的项目</string>
+    <string name="files_workdir_switch">切换工作目录</string>
+    <!-- §P5b-A / Q7: 服务器管理屏可见的「主机」文案统一改为「服务器」
+         （列表标题、+ 按钮、编辑对话框标题、删除确认提示）。 -->
+    <string name="host_profiles_title">服务器配置</string>
+    <string name="host_profile_add">添加服务器配置</string>
+    <string name="host_profile_use_this_host">使用这个服务器</string>
     <string name="host_profile_status">状态：%1$s</string>
     <string name="host_profile_current">当前</string>
     <string name="host_profile_saved">已保存配置</string>
-    <string name="host_profile_add_title">添加主机配置</string>
-    <string name="host_profile_edit_title">编辑主机配置</string>
+    <string name="host_profile_add_title">添加服务器配置</string>
+    <string name="host_profile_edit_title">编辑服务器配置</string>
     <string name="host_profile_name">配置名称</string>
     <string name="host_profile_basic_auth_username">Basic Auth 用户名（可选）</string>
     <string name="host_profile_basic_auth_password">Basic Auth 密码（可选）</string>
@@ -297,15 +314,17 @@
     <string name="server_dialog_system_settings">系统设置</string>
     <string name="task_completed">子任务已完成</string>
     <string name="task_failed">子任务出错</string>
-    <string name="settings_danger_zone">危险操作</string>
+    <string name="settings_danger_zone">清除数据</string>
     <string name="settings_clear_local_data">清除全部本地数据</string>
     <string name="settings_clear_local_data_title">清除全部本地数据？</string>
     <string name="settings_clear_local_data_warning">将清除本地数据并从服务器重新拉取。仅保留服务器连接信息和隧道口令。</string>
     <string name="settings_clear_local_data_keeps">保留：服务器连接信息、主机配置、隧道口令。</string>
-    <string name="settings_clear_local_data_clears">将清除：打开的标签页、会话缓存、未发送草稿、当前会话/项目、主题与字体偏好、流量统计。</string>
+    <string name="settings_clear_local_data_clears">将清除本地全部数据并重新同步：草稿、模型/Agent 偏好、当前会话与工作目录、导航与界面状态、主题、语言、流量统计，以及已缓存的消息。</string>
     <string name="settings_clear_local_data_irreversible">操作不可撤销。</string>
     <string name="chat_model_picker_title">选择模型</string>
     <string name="chat_model_picker_empty">当前服务器没有可用的模型</string>
+    <!-- §P5a: chat_no_unified_diff is referenced by ChangesPane (zh translation was missing → MissingTranslation lint error). -->
+    <string name="chat_no_unified_diff">无 unified diff 可用</string>
     <string name="settings_model_management">模型管理</string>
     <string name="settings_model_management_hint">禁用的模型不会出现在快速切换中。设置按服务器保存。</string>
     <string name="settings_model_management_edit">编辑模型清单</string>
@@ -431,22 +450,16 @@
     <string name="cache_management_error">读取缓存失败：%1$s</string>
     <string name="cache_management_degraded_warning">缓存已降级——加密存储无法打开，重启后缓存会丢失。</string>
     <string name="cache_management_offline_hint">请先连接服务器再执行扫描——孤儿扫描需要服务器端的实时会话列表。</string>
+    <string name="cache_management_non_current_group_hint">请先连接到此服务器分组再执行扫描——孤儿扫描只使用当前已连接服务器。</string>
     <string name="cache_management_group_header">服务器分组：%1$s</string>
     <string name="cache_management_group_member_count">%1$d 个会话，%2$d 个接入点</string>
     <string name="cache_management_row_workdir">项目目录：%1$s</string>
     <string name="cache_management_row_workdir_unknown">（未知项目目录）</string>
     <string name="cache_management_row_session_id">会话：%1$s</string>
-    <string name="cache_management_row_created_at">缓存时间：%1$s</string>
     <string name="cache_management_row_newest_at">最新消息：%1$s</string>
     <string name="cache_management_row_verified_at">最近校验：%1$s</string>
-    <string name="cache_management_row_suspect">疑似废弃（最近校验已超过 7 天）</string>
-    <string name="cache_management_row_exhausted">存在无法补齐的间隔</string>
-    <string name="cache_management_action_clear_session">清除会话</string>
-    <string name="cache_management_action_clear_project">清除项目</string>
-    <string name="cache_management_action_sweep">立即扫描孤儿</string>
-    <string name="cache_management_action_clear_all">清除全部缓存</string>
-    <string name="cache_management_clear_all_title">清除全部缓存会话？</string>
-    <string name="cache_management_clear_all_body">将清除所有服务器分组下的全部缓存会话（消息、parts、间隔标记）。接入点、连接信息、隧道口令会保留。重新打开会话时缓存会从服务器重新拉取。</string>
+    <string name="cache_management_action_clear_session">清除</string>
+    <string name="cache_management_action_sweep">清除失联会话</string>
     <string name="cache_management_clear_all_confirm">全部清除</string>
     <string name="cache_management_sweep_result_complete">扫描完成：已校验 %1$d 个，已清除 %2$d 个。</string>
     <string name="cache_management_sweep_result_incomplete">扫描降级（实时会话集不完整）：已校验 %1$d 个，未清除任何会话。</string>
@@ -460,11 +473,19 @@
     <string name="host_group_warning">同组 profile 共享：聊天历史、草稿、模型偏好、最近目录。选错组会导致这些数据串台或搁浅，仅可用「清除全部数据」恢复。</string>
     <string name="group_stats_named">%1$s · %2$d 个连接 · %3$d 条缓存会话</string>
     <string name="group_stats_solo">独立 · 1 个连接 · %1$d 条缓存会话</string>
-    <string name="cache_management_popup_title">缓存与维护</string>
-    <string name="cache_management_sweep_all">扫所有分组</string>
+    <string name="cache_management_popup_title">缓存管理</string>
+    <string name="cache_management_sweep_all">清除失联会话</string>
+    <!-- §P5b-B (Q8)：清除数据 section + 缓存管理 3-level tree 字符串。 -->
+    <string name="cache_clear_cache">重置本地数据</string>
+    <string name="cache_cached_data_size">消息缓存占用 %1$s</string>
+    <string name="cache_unknown_project">未知项目</string>
+    <string name="cache_clear_lost_sessions_result">已为当前已连接服务器清除 %1$d 个失联会话</string>
     <string name="command_submitted_processing">命令已提交，处理中…</string>
     <string name="workdir_disconnect_title">断开此项目？</string>
     <string name="workdir_disconnect_message">将从列表移除并清除该项目的本地缓存，无法恢复。</string>
     <string name="workdir_disconnect_confirm">断开</string>
     <string name="workdir_empty_placeholder">无活跃会话，点此新建</string>
+    <!-- §B2: ChatFilePreviewScreen 本地生成的回退文案（与服务端 error.message 区分）。 -->
+    <string name="chat_preview_no_path">缺少文件路径或工作目录。</string>
+    <string name="chat_preview_load_failed">加载文件失败。</string>
 </resources>

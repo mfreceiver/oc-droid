@@ -32,6 +32,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.runtime.snapshots.SnapshotStateList
@@ -52,6 +53,8 @@ import cn.vectory.ocdroid.data.repository.OpenCodeRepository
 import cn.vectory.ocdroid.ui.ChatViewModel
 import cn.vectory.ocdroid.ui.ComposerViewModel
 import cn.vectory.ocdroid.ui.SessionViewModel
+import cn.vectory.ocdroid.ui.OrchestratorViewModel
+import cn.vectory.ocdroid.ui.NavRoute
 import cn.vectory.ocdroid.ui.METADATA_MARKER_ROLES
 import cn.vectory.ocdroid.ui.currentSessionStatus
 import cn.vectory.ocdroid.ui.filterBeforeRevert
@@ -63,6 +66,7 @@ import cn.vectory.ocdroid.util.flickerFilterOutCount
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.flow.drop
+import kotlinx.coroutines.flow.filter
 
 // ── Chat message list container ──────────────────────────────────────────
 // The top-level scrollable list of chat turns. Owns the per-session scroll
@@ -75,6 +79,15 @@ internal fun ChatMessageList(
     chatVM: ChatViewModel,
     composerVM: ComposerViewModel,
     sessionVM: SessionViewModel,
+    /**
+     * §0.8.2 P2.6: orchestratorVM is needed inside ChatMessageList to
+     * collect [OrchestratorViewModel.reselectFlow] (filtered to
+     * [NavRoute.Chat]). On each emission the list scrolls to the latest
+     * (the Q4 contract's scroll-to-latest half — the pop-to-root-session
+     * half is shell-level, owned by AppShell's back stack). Threaded from
+     * ChatScaffold (which already has orchestratorVM).
+     */
+    orchestratorVM: OrchestratorViewModel,
     onFileClick: (String) -> Unit,
     onOpenChanges: (String) -> Unit = {},
     onTabVisibilityChange: (Boolean) -> Unit = {},
@@ -225,8 +238,18 @@ internal fun ChatMessageList(
     // §flicker-fix (Issue 1): key the LazyListState by sessionId so a fresh
     // state is created on session change. Without the key, the pager reusing
     // a slot for a different session kept the old scroll offset for one frame.
-    val listState = remember(sessionId) { LazyListState() }
-    var followBottom by remember { mutableStateOf(true) }
+    // Additive to the hoisted per-session LRU: SaveableStateHolder owned by the
+    // Chat NavBackStackEntry restores the exact viewport after chat/preview pops.
+    val listState = rememberSaveable(sessionId, saver = LazyListState.Saver) { LazyListState() }
+    // §B1: followBottom is per-session saveable so it survives Chat→preview→back.
+    // A REAL sessionId change re-runs the initializer (default true); a re-entry
+    // with the SAME sessionId (e.g. returning from a file preview) restores the
+    // saved value (possibly false = the user was reading history). Previously a
+    // plain `remember`, which recreated true on every re-entry → returning from
+    // a preview yanked a history-reading user back to latest, defeating the
+    // saveable LazyListState above. The reselect path + NavFab onJump still
+    // explicitly set followBottom=true on a deliberate "go to latest" intent.
+    var followBottom by rememberSaveable(sessionId) { mutableStateOf(true) }
     // §navfab-redesign: 单键"跳到最新"按钮的可见性。仅在用户"向新滑动"（从历史
     // 往最新方向滚）时浮现；按一次、到底部、或静置 3s 后隐藏（见下方各 effect）。
     var navFabVisible by remember { mutableStateOf(false) }
@@ -239,9 +262,12 @@ internal fun ChatMessageList(
     // ChatScreen (above the HorizontalPager) so the pager disposing this
     // composable on a currentSessionId flip no longer drops the cache. The
     // `savedPositions` map + `accessOrder` LRU ledger are received as params.
-    // Before opening a sub-session the user's last scroll offset in the
-    // parent is recorded via the mirror effect below; returning to the parent
-    // restores it instead of jumping to the latest message.
+    // The mirror effect below continuously records the user's scroll offset
+    // against the active sessionId. NOTE (§B1): the restore CONSUMER was
+    // removed — savedPositions/accessOrder are currently WRITE-ONLY (kept for
+    // the upcoming cross-session restore; cleanup is out of scope here). The
+    // saveable LazyListState + saveable followBottom above now carry the
+    // preview-return position-preservation contract instead.
     //
     // 🟡 Lifecycle constraint (glmer 🟡-6) — RESOLVED by hoisting: the cache
     // used to be bound to ChatMessageList's composition, so navigation away
@@ -261,12 +287,11 @@ internal fun ChatMessageList(
     // restore-read of a sessionId moves its id to the tail; eviction pops from
     // the head. This gives true LRU semantics.
     //
-    // pendingRestoreSession is the only piece of scroll state that stays
-    // LOCAL to ChatMessageList: it tracks "we owe the user a programmatic
-    // scroll-to-saved-position once this session's messages materialise",
-    // which is per-composable-instance (a fresh ChatMessageList instance
-    // starts with no restore pending; the LaunchedEffect(sessionId) below
-    // queues one from the hoisted savedPositions if a saved entry exists).
+    // pendingRestoreSession is a legacy guard flag retained because the mirror
+    // + direction-detector effects below still key their programmatic-scroll
+    // suppression on it. With the restore consumer gone it is effectively
+    // always null; the writes/reads here are no-ops but kept to avoid
+    // disturbing those guards (cleanup is out of scope for §B1).
     var pendingRestoreSession by remember { mutableStateOf<String?>(null) }
     val contentVersion = remember(messages, partsByMessage, streamingPartTexts, streamingReasoningPart, isLoading) {
         messages.size +
@@ -445,16 +470,18 @@ internal fun ChatMessageList(
         }
     }
 
-    // #3 — on session enter, always follow-bottom (jump to latest). The previous
-    // design restored a saved scroll position, but that restore ran ~250ms after
-    // the first frame (via the contentVersion effect), causing a visible scroll
-    // jump = the horizontal-swipe tab flicker. Saved-position restore is now
-    // removed entirely; every tab switch lands on the latest message. Only the
-    // synchronous state writes happen here; the actual scroll is deferred to the
-    // contentVersion effect so it runs against a populated message list.
+    // §B1: on session enter we NO LONGER force followBottom=true here. With
+    // followBottom now rememberSaveable(sessionId), the per-session default is
+    // owned by the saver: a fresh sessionId re-runs the initializer (true), and
+    // a re-entry with the SAME sessionId (preview return) restores the saved
+    // value (possibly false). Forcing followBottom=true on every composition
+    // restart would defeat the saveable LazyListState by yanking a history-
+    // reading user back to latest on every preview return. Only the OTHER
+    // synchronous resets remain here — they are plain `remember` state, already
+    // fresh on re-entry, so re-stating them is harmless. The actual auto-follow
+    // scroll is deferred to the contentVersion effect (gated on followBottom).
     LaunchedEffect(sessionId) {
         pendingRestoreSession = null
-        followBottom = true
         // §navfab-redesign: 会话切换隐藏"跳到最新"按钮（新会话从默认跟底状态开始）。
         navFabVisible = false
         // §navfab-guard (gpter 🟡): 防御性重置程序化滚动守卫——兜底任何未预见的
@@ -462,10 +489,37 @@ internal fun ChatMessageList(
         navJumping = false
     }
 
+    // §0.8.2 P2.6: Chat reselect → scroll to latest. The bottom nav's Chat
+    // tab emits NavRoute.Chat on `orchestratorVM.reselectFlow` when the user
+    // taps Chat while already on Chat. The Q4 contract for Chat reselect =
+    // "close preview + pop to root session + scroll latest". Closing
+    // preview + pop-to-root-session are nav-level (AppShell owns the back
+    // stack via popBackStack — the shell handles those halves elsewhere);
+    // THIS composable only does the SCROLL-to-latest half. On each emission
+    // we set followBottom=true (so subsequent content-version ticks stick
+    // to the bottom) and jump the list to item 0 (the latest, since the
+    // LazyColumn is reverseLayout). Use instantaneous scrollToItem (not
+    // animateScrollToItem) so the reselect feedback is immediate — the
+    // animateScroll path is reserved for content-version driven follow.
+    LaunchedEffect(orchestratorVM) {
+        orchestratorVM.reselectFlow
+            .filter { it == NavRoute.Chat }
+            .collect {
+                followBottom = true
+                navFabVisible = false
+                if (listState.layoutInfo.totalItemsCount > 0) {
+                    listState.scrollToItem(0)
+                }
+            }
+    }
+
     LaunchedEffect(contentVersion) {
-        // §flicker-fix: saved-position restore removed — always follow-bottom to
-        // the latest message. (pendingRestoreSession is always null now; the
-        // restore branch that used to live here is intentionally gone.)
+        // §flicker-fix + §B1: saved-position restore removed; auto-follow-to-
+        // latest is GATED on followBottom. With followBottom now saveable per
+        // sessionId, a preview return restores the user's prior viewport (and
+        // followBottom=false if they were reading history) → this branch skips
+        // and the user stays on history. (pendingRestoreSession is always null
+        // now; the restore branch that used to live here is intentionally gone.)
         // §symptom3-fix: when the user expands the in-progress streaming
         // reasoning card (to read the chain-of-thought from its beginning),
         // pause the bottom-pinning auto-follow. Otherwise the per-token

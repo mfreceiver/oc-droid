@@ -64,46 +64,20 @@ class CacheManagementSectionPureTest {
     }
 
     @Test
-    fun `groupByFp preserves first-appearance order`() {
-        val rows = listOf(
-            row(fp = "fp-b", sid = "s1"),
-            row(fp = "fp-a", sid = "s2"),
-            row(fp = "fp-b", sid = "s3"),
-            row(fp = "fp-c", sid = "s4"),
-            row(fp = "fp-a", sid = "s5")
+    fun `groupByNormalizedWorkdir merges path variants sorts projects and buckets blank paths`() {
+        val projects = CacheRowPresentation.groupByNormalizedWorkdir(
+            listOf(
+                row(fp = "fp", sid = "z", workdir = " /beta/ "),
+                row(fp = "fp", sid = "a", workdir = "/alpha"),
+                row(fp = "fp", sid = "b", workdir = "alpha/"),
+                row(fp = "fp", sid = "unknown", workdir = "   "),
+            )
         )
-        val grouped = CacheRowPresentation.groupByFp(rows)
-        // First-appearance order: fp-b, fp-a, fp-c.
-        assertEquals(listOf("fp-b", "fp-a", "fp-c"), grouped.map { it.first().serverGroupFp })
-        // Rows inside each group preserve input order (stable).
-        assertEquals(listOf("s1", "s3"), grouped[0].map { it.sessionId })
-        assertEquals(listOf("s2", "s5"), grouped[1].map { it.sessionId })
-        assertEquals(listOf("s4"), grouped[2].map { it.sessionId })
-    }
 
-    @Test
-    fun `groupByFp on empty list returns empty`() {
-        assertTrue(CacheRowPresentation.groupByFp(emptyList()).isEmpty())
-    }
-
-    @Test
-    fun `groupByFp on single fp returns one group`() {
-        val rows = listOf(row(fp = "only", sid = "a"), row(fp = "only", sid = "b"))
-        val grouped = CacheRowPresentation.groupByFp(rows)
-        assertEquals(1, grouped.size)
-        assertEquals(listOf("a", "b"), grouped[0].map { it.sessionId })
-    }
-
-    @Test
-    fun `abbreviateSessionId truncates long ids to 12 chars + ellipsis`() {
-        // "ses_1234567890abcdef" is 18 chars; substring(0, 12) = "ses_12345678".
-        assertEquals("ses_12345678…", abbreviateSessionId("ses_1234567890abcdef"))
-    }
-
-    @Test
-    fun `abbreviateSessionId passes 12-char ids through unchanged`() {
-        // Boundary: 12 chars exactly is NOT truncated (no ellipsis added).
-        assertEquals("ses_12chars_", abbreviateSessionId("ses_12chars_"))
+        assertEquals(listOf("alpha", "beta", ""), projects.map { it.normalizedWorkdir })
+        assertEquals("/alpha", projects[0].displayWorkdir)
+        assertEquals(listOf("a", "b"), projects[0].sessions.map { it.sessionId })
+        assertEquals(null, projects[2].displayWorkdir)
     }
 
     private fun row(

@@ -31,10 +31,15 @@ class OpenCodeApp : Application() {
         // is persisted to a retrievable file (see CrashLogger). Must precede
         // any code that could throw.
         CrashLogger.install(this)
-        // Apply the app's locale policy synchronously at Application onCreate
-        // (before any Activity frame), so non-English devices do not flash the
-        // default locale for one frame. See AppLocaleController for the policy.
-        AppLocaleController.applySystemLocale()
+        // §P5a (Q5): apply the user's persisted language preference (Follow
+        // System / 中文 / English) BEFORE the first Activity frame. This is the
+        // authoritative cold-start application point — OpenCodeApp.onCreate
+        // runs once per process launch, before any Activity is constructed, so
+        // the correct locale is in place with no English flash on non-EN
+        // devices. MainActivity.onCreate re-applies on warm recreates to catch
+        // a SYSTEM-locale change that happened while the process was alive.
+        // SettingsManager is available here via the Hilt-injected appCore.
+        AppLocaleController.applyPersisted(this, appCore.settingsManager)
         // §18.1: create the two notification channels up front (idempotent,
         // wrapped in try/catch inside createChannels). Required before any
         // notify() call, otherwise notifications silently no-op on API 26+.

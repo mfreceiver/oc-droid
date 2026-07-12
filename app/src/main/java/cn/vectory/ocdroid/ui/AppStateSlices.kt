@@ -13,6 +13,7 @@ import cn.vectory.ocdroid.data.model.Session
 import cn.vectory.ocdroid.data.model.SessionStatus
 import cn.vectory.ocdroid.data.model.TodoItem
 import cn.vectory.ocdroid.data.cache.contract.GapMarker
+import cn.vectory.ocdroid.util.LocaleMode
 import cn.vectory.ocdroid.util.MarkdownFontSizes
 import cn.vectory.ocdroid.util.ThemeMode
 import kotlinx.coroutines.flow.StateFlow
@@ -154,7 +155,7 @@ data class ComposerState(
      * §1B (F.4): file references attached to the composer (Phase 1B renders
      * the chip strip; the writer-side add/remove lives on
      * [cn.vectory.ocdroid.ui.controller.ComposerController]; the Add-menu
-     * "Reference workspace file" entry is still a Phase 2 deliverable so the
+     * "Reference file" entry is still a Phase 2 deliverable so the
      * list stays empty in normal flow until then). Additive — no existing
      * writer reads it yet.
      */
@@ -186,6 +187,15 @@ data class FileState(
  */
 data class SettingsState(
     val themeMode: ThemeMode = ThemeMode.SYSTEM,
+    /**
+     * §P5a (Q5): user-facing language preference. Seeded from
+     * [cn.vectory.ocdroid.util.SettingsManager.localeMode] at cold-start
+     * (ConnectionActions) and mutated by [cn.vectory.ocdroid.ui.SettingsViewModel.setLocaleMode].
+     * The locale itself is applied via [cn.vectory.ocdroid.util.AppLocaleController]
+     * (AppCompatDelegate); this field is the reactive UI mirror so the
+     * Appearance SegmentedButton shows the right selection.
+     */
+    val localeMode: LocaleMode = LocaleMode.SYSTEM,
     val markdownFontSizes: MarkdownFontSizes = MarkdownFontSizes(),
     // §agent-default: null = 用服务端默认 agent（编排+glm-5.2 等），不强制 build。
     val selectedAgentName: String? = null,

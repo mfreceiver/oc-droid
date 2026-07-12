@@ -17,7 +17,10 @@ import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.res.stringResource
@@ -25,14 +28,24 @@ import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import cn.vectory.ocdroid.R
+import cn.vectory.ocdroid.ui.NavRoute
+import cn.vectory.ocdroid.ui.OrchestratorViewModel
 import cn.vectory.ocdroid.ui.showTimed
+import kotlinx.coroutines.flow.filter
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun FilesScreen(
     viewModel: FilesViewModel = hiltViewModel(),
+    orchestratorVM: OrchestratorViewModel,
     pathToShow: String? = null,
     sessionDirectory: String? = null,
+    // §Q2 (P4b-A): the current host's connected workdirs (MRU) for the
+    // WorkdirControl switcher. Sourced from settingsVM.recentWorkdirs.
+    recentWorkdirs: List<String> = emptyList(),
+    // §Q2: invoked when the user picks a workdir in the WorkdirControl.
+    // AppShell wires this to persist settingsManager.filesLastWorkdir.
+    onWorkdirSelected: (String) -> Unit = {},
     onCloseFile: () -> Unit = {},
     onFileClick: (String) -> Unit = {},
     // §F5b-back: invoked when system back fires while a preview is open.
@@ -41,6 +54,14 @@ fun FilesScreen(
     onExit: () -> Unit = {}
 ) {
     val state by viewModel.state.collectAsStateWithLifecycle()
+
+    // §Q2: local workdir override. sessionDirectory is the resolved default
+    // (explicit route workdir ?: Chat session workdir ?: filesLastWorkdir —
+    // resolved by AppShell). The user's WorkdirControl pick overrides it
+    // locally WITHOUT mutating the Chat session. rememberSaveable keyed on
+    // sessionDirectory so it re-defaults only when the incoming default
+    // actually changes (Chat session switch).
+    var localWorkdir by rememberSaveable(sessionDirectory) { mutableStateOf(sessionDirectory) }
 
     // C1: error feedback via a 3s Snackbar (replaces the former AppToast top
     // overlay; previously used the M3 default duration).
@@ -60,12 +81,29 @@ fun FilesScreen(
     // §R-17 batch4: bind the browser's directory context to the host session
     // (chat current-session directory OR sessions-tab fileBrowserWorkdir).
     // Re-binds + refreshes whenever the host passes a different workdir.
-    LaunchedEffect(sessionDirectory) {
-        viewModel.bindWorkdir(sessionDirectory)
+    // §Q2: uses localWorkdir so the WorkdirControl pick takes effect.
+    LaunchedEffect(localWorkdir) {
+        viewModel.bindWorkdir(localWorkdir)
     }
 
-    LaunchedEffect(pathToShow, sessionDirectory) {
-        viewModel.syncPathToShow(pathToShow, sessionDirectory)
+    LaunchedEffect(pathToShow, localWorkdir) {
+        viewModel.syncPathToShow(pathToShow, localWorkdir)
+    }
+
+    // §Q10 (P4b-B): reselect subscription — a second tap on the Files tab
+    // closes any open preview and returns the browser to the workdir root.
+    // Reads viewModel.state.value (not the composed `state` delegate) inside
+    // the collect lambda so the freshest StateFlow value is used regardless
+    // of when the reselect emission arrives.
+    LaunchedEffect(orchestratorVM) {
+        orchestratorVM.reselectFlow
+            .filter { it == NavRoute.Files }
+            .collect {
+                if (viewModel.state.value.selectedFilePath != null) {
+                    viewModel.closePreview()
+                }
+                viewModel.popToRoot()
+            }
     }
 
     // §F5b-back: preview open → back exits the whole FilesScreen overlay (via
@@ -104,6 +142,17 @@ fun FilesScreen(
                         }
                     },
                     actions = {
+                        // §Q2: WorkdirControl is the leading action (hash-color
+                        // chip showing the current workdir basename + a
+                        // bottom-sheet switcher). Refresh stays as an icon.
+                        WorkdirControl(
+                            currentWorkdir = localWorkdir,
+                            recentWorkdirs = recentWorkdirs,
+                            onSelect = { wd ->
+                                localWorkdir = wd
+                                onWorkdirSelected(wd)
+                            },
+                        )
                         IconButton(onClick = viewModel::refresh) {
                             Icon(Icons.Default.Refresh, contentDescription = stringResource(R.string.common_refresh))
                         }
@@ -117,9 +166,9 @@ fun FilesScreen(
                         path = state.selectedFilePath!!,
                         fileContent = state.selectedFileContent!!,
                         repository = viewModel.repository,
-                        sessionDirectory = sessionDirectory,
+                        sessionDirectory = localWorkdir,
                         isRefreshing = state.isPreviewRefreshing,
-                        onRefresh = { viewModel.refreshPreview(sessionDirectory) },
+                        onRefresh = { viewModel.refreshPreview(localWorkdir) },
                         onClose = {
                             viewModel.closePreview()
                             onCloseFile()

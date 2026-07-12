@@ -104,6 +104,21 @@ class FilesViewModel @Inject constructor(
         loadFiles(parentPath, dir, gen)
     }
 
+    /**
+     * §Q10 (P4b-B): resets the browser to the workdir root (currentPath = "")
+     * and re-loads the top-level file tree. Used by the Files-tab reselect
+     * subscription (reselectFlow == NavRoute.Files) so a second tap on the
+     * Files tab returns the user to the workdir root from any nested depth.
+     * No-op if already at root or no workdir is bound.
+     */
+    fun popToRoot() {
+        val dir = _state.value.workdir ?: return
+        if (_state.value.currentPath.isEmpty()) return  // already at root
+        val gen = requestGeneration.incrementAndGet()
+        _state.update { it.copy(currentPath = "") }
+        loadFiles("", dir, gen)
+    }
+
     fun selectFile(file: FileNode, onFileClick: (String) -> Unit = {}) {
         val dir = _state.value.workdir ?: return
         val gen = requestGeneration.incrementAndGet()
