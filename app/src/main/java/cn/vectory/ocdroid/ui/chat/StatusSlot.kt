@@ -105,6 +105,31 @@ internal enum class StatusSlotPriority {
 }
 
 /**
+ * The payload each AnimatedContent branch needs, carried IN the targetState so the
+ * exiting branch (during Question→None / Permission→None transitions) reads the value
+ * captured when its state became active — NOT the outer parameter that has since
+ * recomposed to null. Fix for the stale-closure NPE: a pending Question cleared on
+ * reply success dropped priority Question→None; the exiting Question branch re-ran
+ * the shared content lambda which read the outer `question = null`, and
+ * `question!!.id` threw.
+ *
+ * `StatusSlotPriority` (the enum + `pick()`) stays the priority/decision API
+ * (consumed by StatusSlotPriorityTest); this sealed type is ONLY the AnimatedContent
+ * payload. Only Question and Permission carry data (the two branches that `!!` a
+ * nullable outer param); the other variants are objects because their branches
+ * already tolerate nulls (`.orEmpty()` / `.takeIf {}` / non-null params).
+ */
+internal sealed class StatusSlotContent {
+    object None : StatusSlotContent()
+    object Connecting : StatusSlotContent()
+    object Running : StatusSlotContent()
+    object Compacting : StatusSlotContent()
+    object Retry : StatusSlotContent()
+    data class Question(val question: QuestionRequest) : StatusSlotContent()
+    data class Permission(val permission: PermissionRequest) : StatusSlotContent()
+}
+
+/**
  * §1C: the single status slot. The only thing it does is pick the
  * highest-priority active surface and render it inside an AnimatedContent.
  * All five pre-existing surfaces (SessionRetryCard, Compacting capsule,
@@ -172,21 +197,37 @@ internal fun BoxScope.StatusSlot(
         isConnecting = isConnecting,
     )
 
-    // AnimatedContent keyed on the priority class: a priority swap cross-
-    // fades + slides the old surface out and the new one in. The body
-    // composable is a single `when` over the priority enum — exactly one
-    // branch runs per frame, so the four states are mutually exclusive by
-    // construction (the AnimatedContent target is one of six values; the
-    // `when` is exhaustive; only one of its branches paints).
+    // §crash-fix: carry the Question/Permission DATA in the AnimatedContent
+    // targetState so the exiting branch (during a Question→None / Permission→None
+    // transition) reads the value captured when the state became active, not the
+    // outer parameter that has since recomposed to null. (AnimatedContent shares
+    // one content lambda across entering+exiting children and re-invokes it with
+    // the latest closure — so branches MUST read from `active`, not outer scope.)
+    val content: StatusSlotContent = when (priority) {
+        StatusSlotPriority.Permission ->
+            permission?.let { StatusSlotContent.Permission(it) } ?: StatusSlotContent.None
+        StatusSlotPriority.Question ->
+            question?.let { StatusSlotContent.Question(it) } ?: StatusSlotContent.None
+        StatusSlotPriority.Retry -> StatusSlotContent.Retry
+        StatusSlotPriority.Compacting -> StatusSlotContent.Compacting
+        StatusSlotPriority.Running -> StatusSlotContent.Running
+        StatusSlotPriority.Connecting -> StatusSlotContent.Connecting
+        StatusSlotPriority.None -> StatusSlotContent.None
+    }
+
+    // AnimatedContent carrying the per-branch payload (StatusSlotContent). A variant
+    // CHANGE (e.g. Permission preempts Question, or a pending question is cleared on
+    // reply → Question→None) cross-fades + slides the old surface out and the new one
+    // in. `contentKey = { it::class }` (variant class, not data) ensures a SAME-variant
+    // data change (q1→q2, p1→p2, same-id re-emit) updates IN PLACE rather than spawning
+    // a second child — so there's never a duplicate SaveableStateProvider(question.id)
+    // overlap, and the exiting branch reads its captured payload (active.question /
+    // active.permission) instead of the recomposed-to-null outer param (the stale-
+    // closure NPE fix). The body `when` is exhaustive over the sealed StatusSlotContent;
+    // exactly one branch paints per child.
     //
-    // The branches that need a BoxScope receiver (SessionRetryCard
-    // declares itself as `fun BoxScope.SessionRetryCard(...)`) get the
-    // outer BoxScope this composable is bound to — we do NOT wrap in a
-    // nested non-BoxScope Box, because then the BoxScope-receiver
-    // children (RetryCard's AnimatedVisibility) would not compile.
-    // Children that don't need BoxScope (ChatPermissionCard,
-    // QuestionCardView, ThinkingCapsule) use Modifier.fillMaxWidth()
-    // and the @Composable receiver to render normally.
+    // BoxScope threading unchanged from before: branches needing a BoxScope receiver
+    // (SessionRetryCard) resolve to this composable's enclosing BoxScope.
     val compactingText = stringResource(R.string.chat_compacting)
     val connectingText = stringResource(R.string.chat_connecting_status)
     // §1C-FIX-⑥: a SaveableStateHolder is created at this scope so
@@ -204,7 +245,7 @@ internal fun BoxScope.StatusSlot(
     // leaves composition).
     val saveableStateHolder = rememberSaveableStateHolder()
     AnimatedContent(
-        targetState = priority,
+        targetState = content,
         transitionSpec = {
             (fadeIn(animationSpec = tween(150)) +
                 slideInVertically(animationSpec = tween(150)) { -it / 4 })
@@ -214,60 +255,61 @@ internal fun BoxScope.StatusSlot(
                 )
         },
         label = "statusSlot",
+        // §oracle-fix: contentKey by sealed-variant CLASS (not the data payload) so a
+        // variant change (Question↔None, Question↔Permission, ...) triggers a transition
+        // (exiting child retains its captured payload → no stale-closure NPE), while a
+        // same-variant data change (q1→q2, p1→p2, same-id changed content) updates IN
+        // PLACE (no transition → no two concurrent SaveableStateProvider(question.id)
+        // with the same key → no duplicate-key crash; no overlapping interactive cards
+        // → no wrong-response on the exiting card).
+        contentKey = { it::class },
         modifier = modifier
             .fillMaxWidth()
             .align(Alignment.TopCenter),
     ) { active ->
         when (active) {
-            StatusSlotPriority.Permission -> {
+            is StatusSlotContent.Permission -> {
                 // Caller guarantees permission.sessionId == currentSessionId
-                // (status-slot contract). ChatPermissionCard is a
-                // non-BoxScope composable, so it renders inside this
-                // AnimatedContent's slot — its own Surface wraps its
-                // body with the required padding / shape.
+                // (status-slot contract). ChatPermissionCard is a non-BoxScope
+                // composable, so it renders inside this AnimatedContent's slot.
+                // §crash-fix: read permission from `active` (the value captured
+                // when this state became active), not the outer param (which may
+                // have recomposed to null during the exit transition).
                 ChatPermissionCard(
-                    permission = permission!!,
+                    permission = active.permission,
                     metadata = permissionMetadata,
                     onRespond = onRespondPermission,
                 )
             }
-            StatusSlotPriority.Question -> {
-                // §1C-FIX-⑥: scope the QuestionCardView in a
-                // SaveableStateProvider keyed on the question id.
-                // When the slot's priority flips to Permission (and
-                // back), or to another question id, the holder
-                // keeps this question's answer state alive; the
-                // composable re-enters with the same answer / custom
-                // text / current tab / expanded state instead of
-                // resetting. Critical for the destructive
-                // (Permission-preempted) case where the user has
-                // been mid-answer and the agent's permission
-                // request suddenly takes the slot.
-                saveableStateHolder.SaveableStateProvider(question!!.id) {
+            is StatusSlotContent.Question -> {
+                // §1C-FIX-⑥: scope the QuestionCardView in a SaveableStateProvider
+                // keyed on the question id. When the slot's priority flips to
+                // Permission (and back), or to another question id, the holder
+                // keeps this question's answer state alive. §crash-fix: read the
+                // question from `active` (captured when Question became active) so
+                // the exiting branch during Question→None still has the non-null
+                // question instead of the recomposed-to-null outer param.
+                saveableStateHolder.SaveableStateProvider(active.question.id) {
                     QuestionCardView(
-                        question = question,
+                        question = active.question,
                         queuePosition = questionQueuePosition,
                         queueTotal = questionQueueTotal,
                         onReply = { answers, onError ->
-                            onReplyQuestion(question.id, answers, onError)
+                            onReplyQuestion(active.question.id, answers, onError)
                         },
-                        onReject = { onError -> onRejectQuestion(question.id, onError) },
+                        onReject = { onError -> onRejectQuestion(active.question.id, onError) },
                     )
                 }
             }
-            StatusSlotPriority.Retry -> {
-                // status != null when isRetry is true (see pick()).
-                // SessionRetryCard is a BoxScope-receiver composable;
-                // because this composable's enclosing scope is a
-                // BoxScope, the call resolves correctly.
+            StatusSlotContent.Retry -> {
+                // status != null when isRetry is true (see pick()). SessionRetryCard
+                // is a BoxScope-receiver composable; resolves to this composable's
+                // enclosing BoxScope.
                 SessionRetryCard(status = sessionStatus)
             }
-            StatusSlotPriority.Compacting -> {
-                // §1C-FIX-⑤: thread compactStartedAt through so the
-                // capsule shows the elapsed compaction timer (parity
-                // with the pre-1C ChatScreen which set the same field).
-                // Null when not started (e.g. the slot is mid-transition
-                // and the slice was read before the start ms was set).
+            StatusSlotContent.Compacting -> {
+                // §1C-FIX-⑤: thread compactStartedAt through for the elapsed
+                // compaction timer. Null when not started.
                 ThinkingCapsule(
                     text = compactingText,
                     startedAtMillis = compactStartedAt.takeIf { it > 0L },
@@ -275,14 +317,9 @@ internal fun BoxScope.StatusSlot(
                     showAbort = false,
                 )
             }
-            StatusSlotPriority.Running -> {
-                // §1C-FIX-⑤: thread the activity's startedAtMillis
-                // through so the running capsule shows the elapsed
-                // timer. The value comes from
-                // [currentSessionActivity] which sources it from the
-                // latest user message's time.created — exactly the
-                // field the pre-1C ChatScreen's ThinkingCapsuleOverlay
-                // used to read.
+            StatusSlotContent.Running -> {
+                // §1C-FIX-⑤: thread the activity's startedAtMillis through for the
+                // running capsule elapsed timer.
                 ThinkingCapsule(
                     text = currentActivityText.orEmpty(),
                     startedAtMillis = currentActivityStartedAtMillis,
@@ -290,10 +327,8 @@ internal fun BoxScope.StatusSlot(
                     showAbort = true,
                 )
             }
-            StatusSlotPriority.Connecting -> {
-                // No timer for the connecting capsule (the legacy
-                // overlay passed null too — the connecting state is
-                // transitional and the timer was not displayed).
+            StatusSlotContent.Connecting -> {
+                // No timer for the connecting capsule (transitional state).
                 ThinkingCapsule(
                     text = connectingText,
                     startedAtMillis = null,
@@ -301,11 +336,9 @@ internal fun BoxScope.StatusSlot(
                     showAbort = false,
                 )
             }
-            StatusSlotPriority.None -> {
-                // No surface — render nothing. The AnimatedContent
-                // keeps a stable slot during the enter/exit animation
-                // (its size is determined by the largest branch that
-                // has been on screen), so an empty branch is fine.
+            StatusSlotContent.None -> {
+                // No surface — render nothing. The AnimatedContent keeps a stable
+                // slot during enter/exit animation.
             }
         }
     }
