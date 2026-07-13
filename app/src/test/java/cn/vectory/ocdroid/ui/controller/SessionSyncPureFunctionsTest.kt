@@ -1220,6 +1220,41 @@ class SessionSyncPureFunctionsTest {
         assertTrue(next.pendingFlushPartIds.contains("p1"))
     }
 
+    // FIX-B (review-blocker, groker B3): applyArchivedChatClear must ALSO wipe
+    // pendingJumpToLatest so a one-shot jump intent does not survive an
+    // archive (the session id it references is being cleared). clearSessionData
+    // already clears it, but the archive-clear path was missed.
+
+    @Test
+    fun `FIX-B applyArchivedChatClear wipes pendingJumpToLatest intent`() {
+        val state = ChatState(
+            currentSessionId = "s1",
+            messages = listOf(Message(id = "m1", role = "user")),
+            pendingJumpToLatest = "s1",
+        )
+
+        val (next, _) = state.applyArchivedChatClear()
+
+        assertNull(
+            "FIX-B: pendingJumpToLatest must be wiped so the intent does not survive archive",
+            next.pendingJumpToLatest,
+        )
+        assertNull(next.currentSessionId)
+        assertTrue(next.messages.isEmpty())
+    }
+
+    @Test
+    fun `FIX-B applyArchivedChatClear wipes pendingJumpToLatest even when already null`() {
+        val state = ChatState(
+            currentSessionId = "s1",
+            pendingJumpToLatest = null,
+        )
+
+        val (next, _) = state.applyArchivedChatClear()
+
+        assertNull(next.pendingJumpToLatest)
+    }
+
     // === applySessionStatus: every status type branch ====================
 
     @Test

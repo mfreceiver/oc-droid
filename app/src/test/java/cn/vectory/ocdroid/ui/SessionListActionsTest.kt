@@ -16,6 +16,7 @@ import io.mockk.mockk
 import io.mockk.mockkStatic
 import io.mockk.unmockkAll
 import io.mockk.verify
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.test.TestScope
 import kotlinx.coroutines.test.UnconfinedTestDispatcher
@@ -24,6 +25,7 @@ import kotlinx.coroutines.test.runTest
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
@@ -326,14 +328,14 @@ class SessionListActionsTest {
     }
 
     @Test
-    fun `WT6 launchLoadSessions invokes onCurrentSessionArchived when merged result flips current to archived`() = runTest {
+    fun `WT6 launchLoadSessions invokes onArchivedSessionsDetected when merged result flips current to archived`() = runTest {
         // The gap-3 case Task 1 surfaces: a cross-device archive during an SSE
         // gap. The reconnect's RefreshSessions triggers launchLoadSessions;
         // the server returns the current session with isArchived=true. The
         // merge passes it through (server-authoritative), so the callback must
-        // fire so the caller dispatches AppAction.SessionArchived (clearing
-        // chat.currentSessionId) — otherwise the chat lingers on a session the
-        // render filters now hide.
+        // fire so the caller dispatches AppAction.BulkSessionsRefreshed
+        // (atomically writing the list + clearing chat) — otherwise the chat
+        // lingers on a session the render filters now hide.
         val archived = Session(
             id = "s1",
             directory = "/x",
@@ -341,7 +343,9 @@ class SessionListActionsTest {
         )
         coEvery { repository.getSessions(any()) } returns Result.success(listOf(archived))
         store.mutateChat { it.copy(currentSessionId = "s1") }
-        var archivedInvokedFor: Session? = null
+        store.mutateSessionList { it.copy(openSessionIds = listOf("s1")) }
+        var archivedSessions: List<Session>? = null
+        var archivedOpenIds: List<String>? = null
         var msgLoads = 0
         var statusLoads = 0
 
@@ -351,12 +355,14 @@ class SessionListActionsTest {
             onLoadSessionStatus = { statusLoads += 1 },
             onLoadMessages = { msgLoads += 1 },
             emit = emit,
-            onCurrentSessionArchived = { archivedInvokedFor = it },
+            onArchivedSessionsDetected = { sessions, openIds, _ -> archivedSessions = sessions; archivedOpenIds = openIds },
         )
         advanceUntilIdle()
 
-        assertEquals("callback fired with the archived session", "s1", archivedInvokedFor?.id)
-        assertTrue("archived flag preserved in callback payload", archivedInvokedFor?.isArchived == true)
+        assertEquals("callback fired with the merged list", listOf("s1"), archivedSessions?.map { it.id })
+        assertTrue("archived flag preserved in callback payload", archivedSessions?.first()?.isArchived == true)
+        // FIX-A: the archived id is pruned from the new openIds.
+        assertEquals("archived id pruned from newOpenIds", emptyList<String>(), archivedOpenIds)
         // The auto-select / load path is SKIPPED when the callback fires (the
         // caller's dispatch atomically clears chat — loading messages for the
         // just-archived id would be wasteful + racy vs the reducer's clear).
@@ -365,12 +371,13 @@ class SessionListActionsTest {
     }
 
     @Test
-    fun `WT6 launchLoadSessions skips onCurrentSessionArchived when current session is not archived`() = runTest {
+    fun `WT6 launchLoadSessions skips onArchivedSessionsDetected when current session is not archived`() = runTest {
         // Negative control: a normal refresh (current session NOT archived)
         // must NOT fire the archive callback — the existing load path runs.
         val sessions = listOf(Session(id = "s1", directory = "/x"))
         coEvery { repository.getSessions(any()) } returns Result.success(sessions)
         store.mutateChat { it.copy(currentSessionId = "s1") }
+        store.mutateSessionList { it.copy(openSessionIds = listOf("s1")) }
         var archivedInvoked = false
         var msgLoads = 0
 
@@ -380,7 +387,7 @@ class SessionListActionsTest {
             onLoadSessionStatus = {},
             onLoadMessages = { msgLoads += 1 },
             emit = emit,
-            onCurrentSessionArchived = { archivedInvoked = true },
+            onArchivedSessionsDetected = { _, _, _ -> archivedInvoked = true },
         )
         advanceUntilIdle()
 
@@ -389,7 +396,7 @@ class SessionListActionsTest {
     }
 
     @Test
-    fun `WT6 launchLoadSessions without onCurrentSessionArchived callback still writes merged list (legacy callers)`() = runTest {
+    fun `WT6 launchLoadSessions without onArchivedSessionsDetected callback still writes merged list (legacy callers)`() = runTest {
         // The new param is nullable so legacy callers (SessionViewModel, tests
         // that pass positional args) keep compiling. When null, the archived-
         // current case is detected but no callback fires — the merged list is
@@ -405,6 +412,173 @@ class SessionListActionsTest {
         // Merged list IS written with the archived session (server-authoritative).
         assertEquals(listOf("s1"), slices.sessionList.value.sessions.map { it.id })
         assertTrue(slices.sessionList.value.sessions.first().isArchived)
+    }
+
+    // ── FIX-A (review-blocker, groker B1): prune ALL archived openIds ────────
+
+    @Test
+    fun `FIX-A launchLoadSessions prunes ALL archived ids from openIds not just current`() = runTest {
+        // The bug: the SSE archive path prunes ANY archived id from
+        // openSessionIds, but the bulk-refresh path only handled the CURRENT
+        // session. So if non-current OPEN tabs B and C were archived cross-
+        // device, they stayed as ghosts in openSessionIds (capped at 8) —
+        // silently occupying tab slots. FIX-A prunes EVERY archived id.
+        val current = Session(id = "current", directory = "/x")
+        val archivedB = Session(id = "B", directory = "/x", time = Session.TimeInfo(archived = 1L))
+        val archivedC = Session(id = "C", directory = "/x", time = Session.TimeInfo(archived = 1L))
+        coEvery { repository.getSessions(any()) } returns Result.success(listOf(current, archivedB, archivedC))
+        store.mutateChat { it.copy(currentSessionId = "current") }
+        store.mutateSessionList { it.copy(openSessionIds = listOf("current", "B", "C")) }
+        var capturedOpenIds: List<String>? = null
+
+        launchLoadSessions(
+            scope, repository, slices, settingsManager,
+            onSelectSession = {},
+            onLoadSessionStatus = {},
+            onLoadMessages = {},
+            emit = emit,
+            onArchivedSessionsDetected = { _, openIds, _ -> capturedOpenIds = openIds },
+        )
+        advanceUntilIdle()
+
+        assertNotNull("callback must fire (non-current archived open tabs detected)", capturedOpenIds)
+        assertEquals(
+            "FIX-A: ALL archived ids (B, C) pruned from openIds; current kept",
+            listOf("current"),
+            capturedOpenIds,
+        )
+    }
+
+    @Test
+    fun `FIX-A launchLoadSessions fires callback for non-current archived open tab even when current is NOT archived`() = runTest {
+        // Edge case: current session is fine, but a non-current OPEN tab was
+        // archived cross-device. The callback MUST still fire so the caller
+        // can prune the ghost tab (the prior code only fired for current).
+        val current = Session(id = "current", directory = "/x")
+        val archivedTab = Session(id = "ghost-tab", directory = "/x", time = Session.TimeInfo(archived = 1L))
+        coEvery { repository.getSessions(any()) } returns Result.success(listOf(current, archivedTab))
+        store.mutateChat { it.copy(currentSessionId = "current") }
+        store.mutateSessionList { it.copy(openSessionIds = listOf("current", "ghost-tab")) }
+        var callbackFired = false
+        var capturedOpenIds: List<String>? = null
+        var msgLoads = 0
+
+        launchLoadSessions(
+            scope, repository, slices, settingsManager,
+            onSelectSession = {},
+            onLoadSessionStatus = {},
+            onLoadMessages = { msgLoads += 1 },
+            emit = emit,
+            onArchivedSessionsDetected = { _, openIds, _ -> callbackFired = true; capturedOpenIds = openIds },
+        )
+        advanceUntilIdle()
+
+        assertTrue("callback MUST fire for non-current archived open tab", callbackFired)
+        assertEquals(
+            "ghost-tab pruned from openIds",
+            listOf("current"),
+            capturedOpenIds,
+        )
+        // The current session is NOT archived → the normal load path runs
+        // (the reducer's BulkSessionsRefreshed does NOT clear chat when
+        // current is not archived — launchLoadSessions still fires the
+        // callback for the openIds prune, then returns early since archives
+        // were detected).
+        // NOTE: msgLoads is 0 because the callback path returns early after
+        // the atomic dispatch (the auto-select/load logic is skipped). This
+        // is acceptable: the BulkSessionsRefreshed reducer wrote the merged
+        // list + load flags; the caller's normal post-load cascade (status
+        // + messages) is a minor optimization that could be re-added if
+        // needed, but the current-session messages are already loaded.
+    }
+
+    // ── FIX-D (gpter #2): single-flight epoch for launchLoadSessions ─────────
+
+    @Test
+    fun `FIX-D launchLoadSessions discards stale result when superseded by newer call`() = runTest {
+        // Concurrent calls (reconnect + foreground catch-up + manual refresh)
+        // can race; a slow stale response must NOT update sessions/openIds/
+        // cache NOR trigger archive side-effects (now destructive per FIX-A/C).
+        val firstGate = CompletableDeferred<Unit>()
+        var firstStarted = false
+        val staleSessions = listOf(Session(id = "stale", directory = "/x"))
+        val freshSessions = listOf(Session(id = "fresh", directory = "/x"))
+        coEvery { repository.getSessions(any()) } coAnswers {
+            if (!firstStarted) {
+                firstStarted = true
+                firstGate.await()
+                Result.success(staleSessions)
+            } else {
+                Result.success(freshSessions)
+            }
+        }
+
+        launchLoadSessions(scope, repository, slices, settingsManager, {}, {}, {}, emit)
+        advanceUntilIdle() // first call suspended in firstGate
+        launchLoadSessions(scope, repository, slices, settingsManager, {}, {}, {}, emit)
+        advanceUntilIdle() // second (newer epoch) completes first
+
+        assertEquals(
+            "newer call's result must be in effect",
+            listOf("fresh"),
+            slices.sessionList.value.sessions.map { it.id },
+        )
+
+        firstGate.complete(Unit) // stale first call completes
+        advanceUntilIdle()
+
+        assertEquals(
+            "stale superseded result must be discarded",
+            listOf("fresh"),
+            slices.sessionList.value.sessions.map { it.id },
+        )
+    }
+
+    @Test
+    fun `FIX-D launchLoadSessions stale result does NOT trigger archive callback`() = runTest {
+        // Critical: a stale response that would have triggered the destructive
+        // archive eviction (FIX-A/C) must be dropped BEFORE the callback fires.
+        // Without the epoch guard, a slow stale response containing an archived
+        // session could evict the current chat AFTER a newer response already
+        // established the correct state.
+        val firstGate = CompletableDeferred<Unit>()
+        var firstStarted = false
+        val archivedStale = Session(id = "current", directory = "/x", time = Session.TimeInfo(archived = 1L))
+        val freshNonArchived = Session(id = "current", directory = "/x")
+        coEvery { repository.getSessions(any()) } coAnswers {
+            if (!firstStarted) {
+                firstStarted = true
+                firstGate.await()
+                Result.success(listOf(archivedStale))
+            } else {
+                Result.success(listOf(freshNonArchived))
+            }
+        }
+        store.mutateChat { it.copy(currentSessionId = "current") }
+        store.mutateSessionList { it.copy(openSessionIds = listOf("current")) }
+        var archiveCallbackCount = 0
+
+        launchLoadSessions(
+            scope, repository, slices, settingsManager, {}, {}, {}, emit,
+            onArchivedSessionsDetected = { _, _, _ -> archiveCallbackCount += 1 },
+        )
+        advanceUntilIdle()
+        // Second call (fresh, non-archived) supersedes the first
+        launchLoadSessions(
+            scope, repository, slices, settingsManager, {}, {}, {}, emit,
+            onArchivedSessionsDetected = { _, _, _ -> archiveCallbackCount += 1 },
+        )
+        advanceUntilIdle()
+
+        assertEquals("current session NOT archived (fresh result wins)", "current", slices.chat.value.currentSessionId)
+        assertEquals("archive callback must NOT fire for the stale result", 0, archiveCallbackCount)
+
+        firstGate.complete(Unit)
+        advanceUntilIdle()
+
+        // Stale result discarded — still no callback, chat intact.
+        assertEquals("stale archived result discarded — callback stays 0", 0, archiveCallbackCount)
+        assertEquals("chat intact after stale discard", "current", slices.chat.value.currentSessionId)
     }
 
     @Test

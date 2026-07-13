@@ -144,6 +144,37 @@ internal sealed interface AppAction {
     data class PendingJumpToLatestSet(
         val sessionId: String?,
     ) : AppAction
+
+    /**
+     * FIX-A/C (archive-sync, review-blocker): atomic bulk-refresh commit.
+     * Replaces the torn two-step (`mutateSessionList` then
+     * `onCurrentSessionArchived` → separate dispatch) with a SINGLE dispatch
+     * that writes the merged session list AND prunes [openSessionIds] of EVERY
+     * archived id (FIX-A — not just current) AND — if the current session is
+     * among the archived — clears chat via [applyArchivedChatClear] + does
+     * unread/pending-question subtree cleanup (mirrors [SessionArchived]'s
+     * cleanup for the current session). All in one committed aggregate state
+     * so no collector ever observes the torn intermediate
+     * "sessions[current].isArchived == true AND chat.currentSessionId == current".
+     *
+     * Non-current archived ids: the [openSessionIds] prune alone is sufficient
+     * (SSE parity — the SSE path's observable effect for non-current archived
+     * sessions is the openIds prune; the per-session unread/questions cleanup
+     * there is defensive and the bulk path's prune closes the ghost-tab hole).
+     *
+     * Carries:
+     *  - [sessions]: the full merged refresh result (server-authoritative;
+     *    includes archived sessions with isArchived == true).
+     *  - [openSessionIds]: the NEW open-tabs list with ALL archived ids pruned
+     *    (caller computes + persists; reducer just stores it).
+     *  - [hasMoreSessions]: the pagination flag (mirrors the mutateSessionList
+     *    field the non-archive path writes).
+     */
+    data class BulkSessionsRefreshed(
+        val sessions: List<Session>,
+        val openSessionIds: List<String>,
+        val hasMoreSessions: Boolean,
+    ) : AppAction
 }
 
 /**
@@ -298,6 +329,51 @@ internal fun reduce(state: StoreState, action: AppAction): StoreState = when (ac
         // §WT2-taskB: single-field write. No cross-slice concerns.
         chat = state.chat.copy(pendingJumpToLatest = action.sessionId),
     )
+
+    is AppAction.BulkSessionsRefreshed -> {
+        // FIX-A/C (archive-sync, review-blocker): atomic bulk-refresh commit.
+        // Writes the merged list + pruned openIds + load flags in ONE step.
+        // If the current session is among the archived, ALSO clears chat
+        // (applyArchivedChatClear, which per FIX-B wipes pendingJumpToLatest)
+        // + unread/questions subtree cleanup — mirroring SessionArchived's
+        // current-session cleanup. Non-current archived ids get the openIds
+        // prune alone (SSE parity). No torn intermediate is observable.
+        val archivedIds = action.sessions
+            .filter { it.isArchived }
+            .map { it.id }
+            .toSet()
+        val currentId = state.chat.currentSessionId
+        val isCurrentArchived = currentId != null && currentId in archivedIds
+        val newSessionList = state.sessionList.copy(
+            sessions = action.sessions,
+            openSessionIds = action.openSessionIds,
+            hasMoreSessions = action.hasMoreSessions,
+            isLoadingMoreSessions = false,
+            isRefreshingSessions = false,
+        )
+        if (isCurrentArchived && currentId != null) {
+            // Mirror SessionArchived's chat-clear + subtree cleanup for the
+            // archived current session. The subtree is computed from the
+            // freshly-merged sessions (authoritative) + the existing directory
+            // / child maps (not overwritten by this action).
+            val subtree = subtreeIds(
+                currentId,
+                action.sessions,
+                newSessionList.directorySessions,
+                newSessionList.childSessions,
+            )
+            val cleanedQuestions = newSessionList.pendingQuestions
+                .filter { it.sessionId !in subtree }
+            val newUnread = state.unread.removeSessions(subtree)
+            state.copy(
+                sessionList = newSessionList.copy(pendingQuestions = cleanedQuestions),
+                chat = state.chat.applyArchivedChatClear().first,
+                unread = newUnread,
+            )
+        } else {
+            state.copy(sessionList = newSessionList)
+        }
+    }
 }
 
 /**

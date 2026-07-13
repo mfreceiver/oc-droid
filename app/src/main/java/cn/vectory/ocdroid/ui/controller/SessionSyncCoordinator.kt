@@ -1386,11 +1386,20 @@ internal fun SessionListState.applyArchiveEviction(
  * The chat-side archive clear when the archived session IS the currently-open
  * one: drop currentSessionId + messages + partsByMessage so the chat view
  * falls back to the empty state. Pure; effects empty.
+ *
+ * FIX-B (review-blocker, groker B3): also clears [pendingJumpToLatest] (added
+ * by WT2). The clearSessionData path already clears it, but this archive-clear
+ * path was missed → a one-shot "jump to latest" intent could stick if the
+ * session was archived between the intent being set and consumed. Now the
+ * intent is wiped atomically with the rest of the chat clear (one committed
+ * state, no torn "session archived but jump intent still references it").
  */
 internal fun ChatState.applyArchivedChatClear(): Pair<ChatState, List<SseSideEffect>> = copy(
     currentSessionId = null,
     messages = emptyList(),
-    partsByMessage = emptyMap()
+    partsByMessage = emptyMap(),
+    // FIX-B: clear the jump intent so it does not survive the archive.
+    pendingJumpToLatest = null,
 ) to emptyList()
 
 /**
