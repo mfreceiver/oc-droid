@@ -60,6 +60,7 @@ import cn.vectory.ocdroid.ui.CacheGroupListing
 import cn.vectory.ocdroid.ui.CacheListingState
 import cn.vectory.ocdroid.ui.SettingsViewModel
 import cn.vectory.ocdroid.ui.showTimed
+import cn.vectory.ocdroid.ui.theme.AppSectionHeader
 import cn.vectory.ocdroid.ui.theme.BundledMonoFamily
 import cn.vectory.ocdroid.ui.theme.Dimens
 import cn.vectory.ocdroid.util.WorkdirPaths
@@ -93,7 +94,7 @@ internal fun CacheManagementSection(
     hideHeader: Boolean = false,
 ) {
     if (!hideHeader) {
-        SectionHeader(title = stringResource(R.string.settings_section_cache))
+        AppSectionHeader(text = stringResource(R.string.settings_section_cache))
     }
 
     LaunchedEffect(Unit) { vm.refreshCacheListing() }
