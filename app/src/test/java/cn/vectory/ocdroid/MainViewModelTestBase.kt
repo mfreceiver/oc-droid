@@ -208,6 +208,9 @@ abstract class MainViewModelTestBase {
             effects = effectBus,
             serverCompatProfile = cn.vectory.ocdroid.data.repository.ServerCompatProfile(),
             identityStore = identityStore,
+            // CP2 (notify Phase-0): delegate TOFU state to the shared bootstrap
+            // coordinator so the delegation is exercised in tests too.
+            bootstrapCoordinator = cn.vectory.ocdroid.service.bootstrap.ConnectionBootstrapCoordinator(),
         )
         val fpProvider: () -> String = { hostProfileStore.currentProfile().serverGroupFp.ifBlank { hostProfileStore.currentProfile().id } }
         // R-20 Phase 2: gap-fill coordinator (real instance; the relaxed-mock

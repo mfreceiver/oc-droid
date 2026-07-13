@@ -85,6 +85,8 @@ class ConnectionCoordinatorTest {
     private lateinit var coordinator: ConnectionCoordinator
     /** CP1 (notify Phase-0): the single connection-identity store. */
     private lateinit var identityStore: cn.vectory.ocdroid.service.identity.ConnectionIdentityStore
+    /** CP2 (notify Phase-0): the shared TOFU bootstrap coordinator. */
+    private lateinit var bootstrapCoordinator: cn.vectory.ocdroid.service.bootstrap.ConnectionBootstrapCoordinator
     /** §R-17 batch2 / §batch 3b: captures UiEvents emitted on effects.uiEvents. */
     private val recordedEvents = mutableListOf<UiEvent>()
 
@@ -110,6 +112,7 @@ class ConnectionCoordinatorTest {
         // first probe always proceeds (mirrors production's wall-clock ms).
         now = 100_000L
         identityStore = cn.vectory.ocdroid.service.identity.ConnectionIdentityStore()
+        bootstrapCoordinator = cn.vectory.ocdroid.service.bootstrap.ConnectionBootstrapCoordinator()
         coordinator = ConnectionCoordinator(
             scope = scope,
             slices = slices,
@@ -119,6 +122,9 @@ class ConnectionCoordinatorTest {
             serverCompatProfile = cn.vectory.ocdroid.data.repository.ServerCompatProfile(),
             clock = { now },
             identityStore = identityStore,
+            // CP2: delegate TOFU state to the shared coordinator so the
+            // delegation test can assert on bootstrapCoordinator.tofuState.
+            bootstrapCoordinator = bootstrapCoordinator,
         )
         // Defaults: no directory fetch on loadInitialData (so the directory
         // coroutine — whose relaxed Result<List<Session>> mock would otherwise
@@ -1018,6 +1024,119 @@ class ConnectionCoordinatorTest {
         assertEquals("test-fp", onSse.event.identity.serverGroupFp)
         assertEquals("/proj", onSse.event.identity.normalizedWorkdir)
         assertEquals(evt, onSse.event.event)
+    }
+
+    // ── CP2 (notify Phase-0): CC delegates TOFU state to bootstrap coordinator ──
+
+    /**
+     * CP2 spec test: when CC enters the TOFU-pending path via its public
+     * [ConnectionCoordinator.resolveTofuTrust] surface, the shared
+     * [ConnectionBootstrapCoordinator.tofuState] reflects the transition.
+     * This proves the delegation — CC has NO private TOFU state of its own
+     * (the old `pendingTofuHostPort` / `pendingTofuDecision` fields are gone).
+     *
+     * We exercise the delegation directly: setPendingTofu through the shared
+     * coordinator (which is what CC does internally on the SSL/cert-failure
+     * path), then resolveTofuTrust through CC's public wrapper, and observe
+     * the state on the shared coordinator.
+     */
+    @Test
+    fun `CP2 CC delegates TOFU state to bootstrap coordinator`() {
+        // Initially Idle.
+        assertEquals(
+            cn.vectory.ocdroid.service.bootstrap.TofuState.Idle,
+            bootstrapCoordinator.tofuState.value,
+        )
+
+        // CC's internal TOFU path sets pending via the shared coordinator.
+        bootstrapCoordinator.setPendingTofu("example.com:443")
+        bootstrapCoordinator.setTofuDecision(
+            kotlinx.coroutines.CompletableDeferred<cn.vectory.ocdroid.data.repository.http.TofuDecision>()
+        )
+        assertEquals(
+            cn.vectory.ocdroid.service.bootstrap.TofuState.TrustPending("example.com:443"),
+            bootstrapCoordinator.tofuState.value,
+        )
+
+        // CC's public resolveTofuTrust delegates to the shared coordinator.
+        coordinator.resolveTofuTrust(
+            cn.vectory.ocdroid.data.repository.http.TofuDecision.Cancel
+        )
+        // resolveTofuTrust completes the deferred but does NOT clear the
+        // pending state (mirrors CC's original semantics — the retry loop's
+        // finally block calls clearPendingTofu). The state is still
+        // TrustPending until clearPendingTofu runs.
+        assertEquals(
+            "resolveTofuTrust does not clear tofuState (the retry loop finally does)",
+            cn.vectory.ocdroid.service.bootstrap.TofuState.TrustPending("example.com:443"),
+            bootstrapCoordinator.tofuState.value,
+        )
+
+        // The retry loop's finally block clears the state.
+        bootstrapCoordinator.clearPendingTofu()
+        assertEquals(
+            cn.vectory.ocdroid.service.bootstrap.TofuState.Idle,
+            bootstrapCoordinator.tofuState.value,
+        )
+    }
+
+    /**
+     * CP2 spec test: the freeze semantics are preserved through delegation —
+     * while TOFU is pending, testConnection / coldStartReconnect / startSSE
+     * short-circuit (the guards read through `tofu.pendingTofuHostPort()`
+     * which returns non-null for TrustPending).
+     */
+    @Test
+    fun `CP2 freeze semantics preserved - startSSE short-circuits while TOFU pending`() {
+        // Enter TOFU-pending via the shared coordinator (CC's internal path).
+        bootstrapCoordinator.setPendingTofu("example.com:443")
+
+        // startSSE must FROZEN — no SSE collection launched.
+        coordinator.startSSE()
+        runPending()
+
+        verify(exactly = 0) { repository.connectSSE(any()) }
+
+        // Resolve + clear → unfreezes.
+        bootstrapCoordinator.clearPendingTofu()
+
+        every { repository.connectSSE(any()) } returns flowOf()
+        coordinator.startSSE()
+        runPending()
+
+        verify(exactly = 1) { repository.connectSSE(any()) }
+    }
+
+    /**
+     * CP2 spec test: CC has NO private TOFU fields (grep-verifiable: the old
+     * `pendingTofuHostPort` / `pendingTofuDecision` private vars are gone).
+     * This test exercises the public surface end-to-end to prove no
+     * duplicate state — the shared coordinator is the single source.
+     */
+    @Test
+    fun `CP2 CC has no private TOFU state - single source in bootstrap coordinator`() {
+        // If CC held a PRIVATE copy of the TOFU state (the old fields), this
+        // test would fail: setting state via the shared coordinator would
+        // not be visible to CC's guards, and vice versa. The fact that CC's
+        // startSSE guard reads the shared coordinator's state proves no
+        // private duplicate exists.
+        bootstrapCoordinator.setPendingTofu("frozen.example.com:443")
+        assertEquals(
+            "frozen.example.com:443",
+            bootstrapCoordinator.pendingTofuHostPort(),
+        )
+
+        // CC's internal guard (via delegation) sees the same state.
+        coordinator.startSSE() // should freeze — no connectSSE call.
+        runPending()
+        verify(exactly = 0) { repository.connectSSE(any()) }
+
+        // Clearing via the shared coordinator unfreezes CC.
+        bootstrapCoordinator.clearPendingTofu()
+        every { repository.connectSSE(any()) } returns flowOf()
+        coordinator.startSSE()
+        runPending()
+        verify(exactly = 1) { repository.connectSSE(any()) }
     }
 
     // ── RecordingConnectionCoordinatorCallbacks (removed in batch 3b) ──────

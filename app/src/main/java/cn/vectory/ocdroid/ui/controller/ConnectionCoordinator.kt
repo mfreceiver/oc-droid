@@ -10,6 +10,7 @@ import cn.vectory.ocdroid.data.repository.OpenCodeRepository
 import cn.vectory.ocdroid.data.repository.ServerCompatProfile
 import cn.vectory.ocdroid.data.repository.http.TofuDecision
 import cn.vectory.ocdroid.data.repository.http.hostPortFromUrl
+import cn.vectory.ocdroid.service.bootstrap.ConnectionBootstrapCoordinator
 import cn.vectory.ocdroid.service.events.IdentifiedSseEvent
 import cn.vectory.ocdroid.service.identity.ConnectionIdentityStore
 import cn.vectory.ocdroid.ui.ConnectionPhase
@@ -117,24 +118,34 @@ class ConnectionCoordinator(
      * coordinator falls back to unconditional forwarding (no identity gate).
      */
     private val identityStore: ConnectionIdentityStore? = null,
+    /**
+     * CP2 (notify Phase-0): the application-level shared TOFU bootstrap
+     * coordinator. CC DELEGATES its TOFU state here (FGS spec §10 — TOFU
+     * state is extracted so the future SessionStreamingService shares the
+     * same single source and the bootstrap cannot fork into two TLS/SSE
+     * state machines). CC's public TOFU surface ([resolveTofuTrust] + the
+     * freeze guards on testConnection/coldStartReconnect/startSSE) is
+     * preserved verbatim — callers (ConnectionViewModel) see no change.
+     *
+     * `null` for legacy/test construction that doesn't exercise the TOFU
+     * path — CC constructs a private fallback so the guards work even
+     * without Hilt wiring (mirrors the pre-extraction private fields).
+     */
+    private val bootstrapCoordinator: ConnectionBootstrapCoordinator? = null,
 ) {
     private var sseJob: Job? = null
     private var lastHealthCheckTime = 0L
 
     /**
-     * §tofu R2: pending-trust state — non-null hostPort means a TOFU trust
-     * dialog is showing for this endpoint and the [testConnection] retry loop
-     * is SUSPENDED on [pendingTofuDecision].await(). Three guards read this:
-     *  1. The retry loop itself (no retries burn while waiting).
-     *  2. [coldStartReconnect] / [startSSE] early-return while frozen so a
-     *     tunnel/reset path or foreground catch-up cannot race the decision.
-     *  3. [resolveTofuTrust] is the ONLY writer (completes the deferred +
-     *     clears both fields + applies the decision to the pin store).
+     * CP2 (notify Phase-0): TOFU state single source. CC delegates to the
+     * injected [bootstrapCoordinator] (production: Hilt @Singleton shared
+     * with the future SessionStreamingService). The lazy fallback preserves
+     * the pre-CP2 behavior for legacy/test construction that passes
+     * `bootstrapCoordinator = null`.
      */
-    @Volatile
-    private var pendingTofuHostPort: String? = null
-    @Volatile
-    private var pendingTofuDecision: kotlinx.coroutines.CompletableDeferred<TofuDecision>? = null
+    private val tofu: ConnectionBootstrapCoordinator by lazy {
+        bootstrapCoordinator ?: ConnectionBootstrapCoordinator()
+    }
 
     // ── State sync helpers (mirror orchestrator.writeConnection) ──
 
@@ -180,10 +191,11 @@ class ConnectionCoordinator(
         lastHealthCheckTime = now
         // §tofu R2 round-1 fix (cgpt B3/opuser): 待 TOFU 决策期间不并发探测——pending
         // 流程负责 settle；并行 testConnection（弹窗期间的 ForceReconnect）否则可能在
-        // 弹窗仍显示时写 Disconnected。入口守卫 + 下面 pendingTofuHostPort==null 检查
+        // 弹窗仍显示时写 Disconnected。入口守卫 + 下面 pendingTofuHostPort()==null 检查
         // + coldStart/startSSE 早退共同保证 single-flight。
-        if (pendingTofuHostPort != null) {
-            DebugLog.i(TAG, "testConnection: TOFU trust pending for $pendingTofuHostPort — deferring")
+        // CP2: TOFU state is delegated to [tofu] (ConnectionBootstrapCoordinator).
+        if (tofu.pendingTofuHostPort() != null) {
+            DebugLog.i(TAG, "testConnection: TOFU trust pending for ${tofu.pendingTofuHostPort()} — deferring")
             return
         }
         scope.launch {
@@ -225,8 +237,8 @@ class ConnectionCoordinator(
                     // §tofu R2 round-2 fix (cgpt): 并发连接 job 在 TOFU 待决期间 defer——
                     // 不探/不烧重试/不写终态；待决的 job 独占 settle。入口守卫只挡"新调用"，
                     // 此处挡"已 launch 但 pending 尚未置位时入队的并发 job"的迭代。
-                    if (pendingTofuHostPort != null) {
-                        DebugLog.i(TAG, "testConnection: deferring loop — TOFU pending for $pendingTofuHostPort")
+                    if (tofu.pendingTofuHostPort() != null) {
+                        DebugLog.i(TAG, "testConnection: deferring loop — TOFU pending for ${tofu.pendingTofuHostPort()}")
                         return@launch
                     }
                     attempt++
@@ -319,16 +331,17 @@ class ConnectionCoordinator(
                     val hostPort = hostPortFromUrl(baseUrl)
                     if (rootCause != null && hostPort != null &&
                         repository.pinnedSpkiFor(hostPort) == null &&
-                        pendingTofuHostPort == null &&
+                        tofu.pendingTofuHostPort() == null &&
                         // §tofu fix: mTLS 主机不进 TOFU——mTLS 优先级会忽略 TOFU pin，
                         // 弹"信任"无效且误导；mTLS 服务器证书失败应直接作连接错误呈现。
                         !repository.isMutualTlsActive()
                     ) {
                         // §tofu R2 round-1 fix (cgpt B3/opuser): 在 capture 探测【之前】
                         // 占住 pending（single-flight）。并发的 ForceReconnect 驱动的
-                        // testConnection 会因入口守卫 + 此处的 pendingTofuHostPort==null
+                        // testConnection 会因入口守卫 + 此处的 pendingTofuHostPort()==null
                         // 检查而 defer，不再二次 capture 覆盖本循环的 deferred 致其孤儿。
-                        pendingTofuHostPort = hostPort
+                        // CP2: delegated to [tofu] (ConnectionBootstrapCoordinator).
+                        tofu.setPendingTofu(hostPort)
                         try {
                             val capture = repository.captureServerCert(baseUrl, hostPort, clientCert = null)
                             if (capture != null) {
@@ -337,7 +350,7 @@ class ConnectionCoordinator(
                                 // While pending, the freeze guards in [coldStartReconnect] /
                                 // [startSSE] + the testConnection entry guard early-return.
                                 val deferred = kotlinx.coroutines.CompletableDeferred<TofuDecision>()
-                                pendingTofuDecision = deferred
+                                tofu.setTofuDecision(deferred)
                                 writeConnection {
                                     it.copy(
                                         connectionPhase = ConnectionPhase.AwaitingTofuTrust,
@@ -380,7 +393,8 @@ class ConnectionCoordinator(
                                     // §tofu R2 round-1 fix (opuser): 每条路径都清弹窗 + decision
                                     // 引用——决策完成 OR 协程在 await 期间被取消（外层 finally 清
                                     // pendingTofuHostPort，防 coldStart/startSSE 永久冻结）。
-                                    pendingTofuDecision = null
+                                    // CP2: delegated to [tofu].
+                                    tofu.setTofuDecision(null)
                                     writeConnection { it.copy(pendingTofuCapture = null) }
                                 }
                             }
@@ -388,14 +402,15 @@ class ConnectionCoordinator(
                             // fall through to the normal failure path below — the
                             // original SSLHandshakeException is surfaced verbatim.
                         } finally {
-                            pendingTofuHostPort = null
+                            // CP2: delegated full reset to [tofu] (clears hostPort + decision).
+                            tofu.clearPendingTofu()
                         }
                     }
                     if (attempt >= maxAttempts || !isActive) {
                         // §tofu R2 round-2 fix (cgpt): 另一个 job 正在 await TOFU 决策时，
                         // 不宣布终态 Disconnected（否则弹窗仍显示却已断开，UI 不一致）——defer。
-                        if (pendingTofuHostPort != null) {
-                            DebugLog.i(TAG, "testConnection: deferring terminal — TOFU pending for $pendingTofuHostPort")
+                        if (tofu.pendingTofuHostPort() != null) {
+                            DebugLog.i(TAG, "testConnection: deferring terminal — TOFU pending for ${tofu.pendingTofuHostPort()}")
                             return@launch
                         }
                         // §R-17 batch2: error is now a one-shot UiEvent on
@@ -448,8 +463,8 @@ class ConnectionCoordinator(
      * state and the loop re-probes; cold-start then proceeds naturally.
      */
     fun coldStartReconnect() {
-        if (pendingTofuHostPort != null) {
-            DebugLog.i(TAG, "coldStartReconnect: frozen — TOFU trust pending for $pendingTofuHostPort")
+        if (tofu.pendingTofuHostPort() != null) {
+            DebugLog.i(TAG, "coldStartReconnect: frozen — TOFU trust pending for ${tofu.pendingTofuHostPort()}")
             return
         }
         testConnection(force = true, retries = 3)
@@ -668,8 +683,9 @@ class ConnectionCoordinator(
         // way (the pin isn't written until the user decides). Wait for
         // [resolveTofuTrust]; the connect retry loop calls startSSE itself
         // once the pin is in place.
-        if (pendingTofuHostPort != null) {
-            DebugLog.i(TAG, "startSSE: frozen — TOFU trust pending for $pendingTofuHostPort")
+        // CP2: TOFU state delegated to [tofu] (ConnectionBootstrapCoordinator).
+        if (tofu.pendingTofuHostPort() != null) {
+            DebugLog.i(TAG, "startSSE: frozen — TOFU trust pending for ${tofu.pendingTofuHostPort()}")
             return
         }
         DebugLog.i("SSE", "startSSE")
@@ -685,9 +701,20 @@ class ConnectionCoordinator(
      * loop then writes the pin (Accept/Trust) and re-probes, or settles false
      * (Cancel). No-op when no TOFU prompt is pending.
      */
+    /**
+     * §tofu R2: applies the user's TOFU trust decision for the pending
+     * endpoint. Called by the UI (via [cn.vectory.ocdroid.ui.ConnectionViewModel])
+     * when the user taps Accept once / Trust / Cancel in [cn.vectory.ocdroid.ui.settings.TofuTrustDialog].
+     * Completes the deferred the [testConnection] retry loop is awaiting; the
+     * loop then writes the pin (Accept/Trust) and re-probes, or settles false
+     * (Cancel). No-op when no TOFU prompt is pending.
+     *
+     * CP2 (notify Phase-0): delegates to [ConnectionBootstrapCoordinator.
+     * resolveTofuTrust] (FGS spec §10). CC's public surface is unchanged —
+     * ConnectionViewModel / external callers see the same signature + behavior.
+     */
     fun resolveTofuTrust(decision: TofuDecision) {
-        pendingTofuDecision?.complete(decision)
-            ?: DebugLog.w(TAG, "resolveTofuTrust: no pending TOFU decision — ignoring $decision")
+        tofu.resolveTofuTrust(decision)
     }
 
     /**

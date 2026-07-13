@@ -187,6 +187,7 @@ object ControllerModule {
         cacheMaintenanceCoordinator: cn.vectory.ocdroid.data.cache.CacheMaintenanceCoordinator,
         @Named("currentServerGroupFp") currentServerGroupFp: () -> String,
         identityStore: cn.vectory.ocdroid.service.identity.ConnectionIdentityStore,
+        bootstrapCoordinator: cn.vectory.ocdroid.service.bootstrap.ConnectionBootstrapCoordinator,
     ): ConnectionCoordinator = ConnectionCoordinator(
         scope = appScope,
         slices = store.slices,
@@ -197,5 +198,8 @@ object ControllerModule {
         cacheMaintenanceCoordinator = cacheMaintenanceCoordinator,
         currentServerGroupFp = currentServerGroupFp,
         identityStore = identityStore,
+        // CP2 (notify Phase-0): delegate TOFU state to the shared bootstrap
+        // coordinator (FGS spec §10). CC's public TOFU surface is unchanged.
+        bootstrapCoordinator = bootstrapCoordinator,
     )
 }
