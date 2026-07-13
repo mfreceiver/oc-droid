@@ -89,7 +89,23 @@ class AppLifecycleMonitor @Inject constructor(
     // global currentDirectory before; that fallback is being phased out).
     private val settingsManager: SettingsManager
 ) {
-    private val _isInForeground = MutableStateFlow(true)
+    /**
+     * §4.3 foreground truth-source.
+     *
+     * **Default `false`** (CP8): a sticky-rebuilt process with no started
+     * Activity is **background**, NOT foreground. The previous `true` default
+     * caused the §4.3 bug — a Service-only sticky rebuild (the OS restarted
+     * `SessionStreamingService` after process death without bringing any
+     * Activity back up) misreported foreground, which would have routed the
+     * §5 bootstrap through the L1 (foreground) decision branch instead of
+     * the L2 (background) one and tripped a wrong-state teardown on the
+     * subsequent onActivityStarted→0 transition.
+     *
+     * The `onActivityStarted` 0→1 transition below still flips this to `true`
+     * on the first real Activity start, so the foreground UX is unchanged;
+     * only the "no Activity yet" window is now correctly treated as background.
+     */
+    private val _isInForeground = MutableStateFlow(false)
     val isInForeground: StateFlow<Boolean> = _isInForeground.asStateFlow()
 
     /**
@@ -325,6 +341,20 @@ class AppLifecycleMonitor @Inject constructor(
         const val CHANNEL_DECISIONS = "ocdroid.decisions"
         const val CHANNEL_ERRORS = "ocdroid.errors"
 
+        /**
+         * Ongoing session-status channel id (FGS spec §7 channel matrix /
+         * dev-design P1.4). IMPORTANCE_LOW. Used by
+         * [cn.vectory.ocdroid.service.SessionStreamingService] for the
+         * ongoing FGS notification.
+         *
+         * **Single-source rule**: this is the one canonical home for the
+         * channel id. The Service references `AppLifecycleMonitor.CHANNEL_SESSION_STATUS`
+         * rather than keeping its own copy. (Pre-CP8 the Service held its
+         * own const as a placeholder; CP8 moves the source here because
+         * `createChannels` — which uses the id — lives in this companion.)
+         */
+        const val CHANNEL_SESSION_STATUS = "ocdroid.session_status"
+
         /** Background polling interval per §18.1 (R-A, D1). */
         private const val POLL_INTERVAL_MS = 30_000L
 
@@ -332,10 +362,13 @@ class AppLifecycleMonitor @Inject constructor(
         private const val ERROR_NOTIFICATION_ID = 4242
 
         /**
-         * Creates the two notification channels required by §18.1. Wrapped in
-         * try/catch and only invoked on API 26+ (NotificationChannel was added
-         * in O). Channels are idempotent — re-creating with the same ID is a
-         * no-op. Called from [cn.vectory.ocdroid.OpenCodeApp.onCreate].
+         * Creates the notification channels required by §18.1 + §7. Wrapped
+         * in try/catch and only invoked on API 26+ (NotificationChannel was
+         * added in O). Channels are idempotent — re-creating with the same
+         * ID is a no-op. Called from [cn.vectory.ocdroid.OpenCodeApp.onCreate].
+         *
+         * CP8: adds [CHANNEL_SESSION_STATUS] (FGS spec §7 IMPORTANCE_LOW)
+         * alongside the existing [CHANNEL_DECISIONS] / [CHANNEL_ERRORS].
          */
         fun createChannels(context: Context) {
             if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
@@ -355,7 +388,14 @@ class AppLifecycleMonitor @Inject constructor(
                 ).apply {
                     description = CHANNEL_ERRORS_DESC
                 }
-                manager.createNotificationChannels(listOf(decisions, errors))
+                val sessionStatus = NotificationChannel(
+                    CHANNEL_SESSION_STATUS,
+                    CHANNEL_SESSION_STATUS_NAME,
+                    NotificationManager.IMPORTANCE_LOW
+                ).apply {
+                    description = CHANNEL_SESSION_STATUS_DESC
+                }
+                manager.createNotificationChannels(listOf(decisions, errors, sessionStatus))
             }.onFailure { Log.w(TAG, "Failed to create notification channels", it) }
         }
 
@@ -367,6 +407,9 @@ class AppLifecycleMonitor @Inject constructor(
         private const val CHANNEL_DECISIONS_DESC = "Permission and question prompts from opencode sessions"
         private const val CHANNEL_ERRORS_NAME = "opencode errors"
         private const val CHANNEL_ERRORS_DESC = "Connection and runtime errors from opencode"
+        private const val CHANNEL_SESSION_STATUS_NAME = "opencode session status"
+        private const val CHANNEL_SESSION_STATUS_DESC =
+            "Ongoing session-status notifications while opencode is connected in the background"
         const val NOTIF_PERMISSION_TITLE = "Permission required"
         const val NOTIF_QUESTION_TITLE = "Question from agent"
         const val NOTIF_DECISION_BODY = "Open the session to review"

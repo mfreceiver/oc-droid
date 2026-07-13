@@ -565,4 +565,11 @@
     <string name="notify_session_idle_monitoring">Idle monitoring</string>
     <string name="notify_session_degraded_title">Server trust required</string>
     <string name="notify_session_degraded_content">Open the app to confirm server trust</string>
+
+    <!-- §FGS-notify CP8 (§16-U1): ongoing FGS notifications cannot be swiped
+         by the user (Android硬性), so the ongoing notification carries a
+         Action whose label is this string and whose PendingIntent delivers
+         ACTION_CLOSE_BACKGROUND → coordinator teardown (L3). The label reads
+         as a verb phrase the user taps to deliberately stop background work. -->
+    <string name="notify_close_background">Stop background</string>
 </resources>

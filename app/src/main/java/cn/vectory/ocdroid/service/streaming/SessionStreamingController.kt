@@ -287,6 +287,33 @@ class SessionStreamingController(
         pollerJob = null
     }
 
+    /**
+     * §4.1 platform dataSync time-limit callback routed through the
+     * controller for testability (the Service's `onTimeout(startId)` is a
+     * single-line forwarder; routing through here lets the pure-JVM test
+     * fixture verify the wiring end-to-end without Robolectric).
+     *
+     * Forwards to [StreamingLifecycleCoordinator.onTimeout] → L3 teardown
+     * (no auto-recovery).
+     */
+    fun onServiceTimeout() {
+        DebugLog.i(TAG, "onServiceTimeout (§4.1 dataSync platform timeout)")
+        coordinator.onTimeout()
+    }
+
+    /**
+     * §16-U1 user-explicit-close entry routed through the controller for
+     * testability (the Service's `onStartCommand` ACTION_CLOSE_BACKGROUND
+     * branch is a single-line forwarder). Forwards to
+     * [StreamingLifecycleCoordinator.requestUserClose] → L3 teardown
+     * (`stopForeground` + `stopSelf` + `cancelSse` + arm poller + dismiss
+     * ongoing).
+     */
+    fun requestUserClose() {
+        DebugLog.i(TAG, "requestUserClose (§16-U1 user-explicit close)")
+        coordinator.requestUserClose()
+    }
+
     companion object {
         private const val TAG = "SessionStreamingCtrl"
 

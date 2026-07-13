@@ -1,6 +1,7 @@
 package cn.vectory.ocdroid.service
 
 import android.app.Notification
+import android.app.PendingIntent
 import android.app.Service
 import android.content.Intent
 import android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC
@@ -70,9 +71,12 @@ import javax.inject.Inject
  * [FOREGROUND_SERVICE_TYPE_DATA_SYNC] so the API 34+ typed overload matches
  * the manifest declaration.
  *
- * **Channels**: NOT created here. `AppLifecycleMonitor` owns channel creation
- * for `ocdroid.decisions` / `ocdroid.errors`; `ocdroid.session_status` is
- * created alongside at CP8. CP5-7 references the channel id only.
+ * **Channels**: NOT created here. `AppLifecycleMonitor` owns channel
+ * creation for `ocdroid.decisions` / `ocdroid.errors` /
+ * `ocdroid.session_status` (CP8 — all three live in
+ * [AppLifecycleMonitor.createChannels]); this service references the
+ * channel id only via [AppLifecycleMonitor.CHANNEL_SESSION_STATUS]
+ * (single source — no duplicate const here).
  */
 @AndroidEntryPoint
 class SessionStreamingService : Service() {
@@ -206,9 +210,16 @@ class SessionStreamingService : Service() {
     }
 
     /**
-     * FGS spec §5 / §4.3: null Intent = sticky rebuild = legal FGS-start
-     * context. The service performs the same bootstrap regardless of whether
-     * the launch came from the app, an FGS promotion, or a system restart.
+     * FGS spec §5 / §4.3 / §16-U1.
+     *
+     * Intent-action routing (CP8 §16-U1):
+     *  - [ACTION_CLOSE_BACKGROUND] → §16-U1 user-explicit close. Forwards to
+     *    [SessionStreamingController.requestUserClose] → coordinator teardown
+     *    (L3: `stopForeground` + `stopSelf` + `cancelSse` + arm poller +
+     *    dismiss ongoing). Returns [START_STICKY]; does NOT re-bootstrap.
+     *  - null/other → §5 START_STICKY bootstrap path (unchanged from CP5-7).
+     *
+     * The §5 bootstrap path:
      *
      * Order (strictly §5):
      *  1. **Synchronously** read minimal persisted config (host url). No host
@@ -230,6 +241,21 @@ class SessionStreamingService : Service() {
      * survive force-stop).
      */
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        // §16-U1: branch on the close-background action BEFORE the §5 bootstrap
+        // path. The close action is delivered by the ongoing-notification
+        // Action PendingIntent (CP8 §16-U1 wiring) — never via sticky rebuild.
+        // Routing logic lives in [StartCommandRouter] so it is pure-JVM
+        // unit-testable without a real Android Intent.
+        when (val route = StartCommandRouter.routeFor(intent?.action)) {
+            StartCommandRouter.Route.CloseBackground -> {
+                DebugLog.i(TAG, "onStartCommand: ACTION_CLOSE_BACKGROUND (§16-U1 user-explicit close)")
+                controller?.requestUserClose()
+                return START_STICKY
+            }
+            StartCommandRouter.Route.Bootstrap -> {
+                // fall through to the §5 bootstrap body below.
+            }
+        }
         DebugLog.i(TAG, "onStartCommand: intent=$intent (null=sticky rebuild, §5)")
         // §5 step 1: synchronous minimal persisted-config read.
         val hasValidHost = settingsManager.serverUrl.isNotBlank()
@@ -244,6 +270,24 @@ class SessionStreamingService : Service() {
         // onStartCommand fires multiple times (sticky rebuild).
         scope.launch { controller?.bootstrapAsync() }
         return START_STICKY
+    }
+
+    /**
+     * FGS spec §4.1 dataSync platform time-limit callback (API 34+,
+     * targetSdk 34 — single-arg overload; NOT the API 35 two-arg
+     * `onTimeout(startId, fgsType)` since targetSdk=34).
+     *
+     * Fires when the platform's dataSync FGS budget expires (6h cumulative /
+     * 24h rolling window). The service has no way to extend this — we route
+     * the signal to [SessionStreamingController.onServiceTimeout] →
+     * [StreamingLifecycleCoordinator.onTimeout] → L3 teardown
+     * (`stopForeground` + `stopSelf` + `cancelSse` + arm poller + dismiss
+     * ongoing). No automatic recovery is attempted (§4.1: legal recovery
+     * entries only — user reopens app / notification action / system restart).
+     */
+    override fun onTimeout(startId: Int) {
+        DebugLog.i(TAG, "onTimeout(startId=$startId) — §4.1 dataSync platform timeout → L3")
+        controller?.onServiceTimeout()
     }
 
     /**
@@ -277,19 +321,28 @@ class SessionStreamingService : Service() {
 
     /**
      * Translates a pure-JVM [NotificationSpec] into a [Notification]. Channel
-     * = [CHANNEL_SESSION_STATUS] (created by AppLifecycleMonitor alongside
-     * the decisions/errors channels at CP8 — for CP5-7 the channel is
-     * referenced by id only).
+     * = [AppLifecycleMonitor.CHANNEL_SESSION_STATUS] (created by
+     * [AppLifecycleMonitor.createChannels] at CP8 alongside the
+     * decisions/errors channels — single source, referenced by id only).
      *
      * §16-U1 「关闭后台」Action wiring + chronometer base conversion
-     * (wall-clock → elapsedRealtime) are landed as `// CP8/U1:` markers — the
-     * [NotificationSpec] already carries the decision bits
-     * ([NotificationSpec.showCloseAction], [NotificationSpec.showChronometer],
-     * [NotificationSpec.chronometerBaseMs]) so this builder just needs the
-     * PendingIntent + receiver at CP8.
+     * (wall-clock → elapsedRealtime) per [NotificationSpec]:
+     *  - [NotificationSpec.showCloseAction] → NotificationCompat.Action whose
+     *    PendingIntent is [buildCloseBackgroundPendingIntent] (this Service
+     *    as the target — `PendingIntent.getService`, ACTION_CLOSE_BACKGROUND).
+     *    Per §16-U1 the close Action is attached on every ongoing sub-state
+     *    that holds an FGS slot (L1-busy / L2-active / L2-idle / degraded);
+     *    NOT on the L1-idle 「已连接」 optional surface or the L3 non-ongoing
+     *    (already torn down). The [SessionStatusNotifier] carries the
+     *    decision bit so this builder just attaches the real PendingIntent.
+     *  - [NotificationSpec.showChronometer] → wall-clock `chronometerBaseMs`
+     *    is converted to elapsedRealtime base as
+     *    `SystemClock.elapsedRealtime() - (now - busySinceMs)`.
+     *  - [NotificationSpec.degraded] → setContentIntent points at MainActivity
+     *    so the user can resolve TOFU.
      */
     private fun buildNotification(spec: NotificationSpec): Notification =
-        NotificationCompat.Builder(this, CHANNEL_SESSION_STATUS)
+        NotificationCompat.Builder(this, AppLifecycleMonitor.CHANNEL_SESSION_STATUS)
             .setSmallIcon(R.mipmap.ic_launcher)
             .setContentTitle(spec.title)
             .setContentText(spec.content)
@@ -297,25 +350,75 @@ class SessionStreamingService : Service() {
             .setOngoing(spec.ongoing)
             .apply {
                 if (spec.showChronometer && spec.chronometerBaseMs != null) {
-                    // CP8/U1: convert wall-clock busySinceMs to elapsedRealtime
-                    // base (SystemClock.elapsedRealtime() - (now - busySinceMs)).
-                    // For CP5-7 we wire the flags only; the chronometer base
-                    // will be transformed in the CP8 notification-helper pass.
+                    // §7: convert wall-clock busySinceMs to elapsedRealtime
+                    // base. The notifier stays clock-agnostic (pure JVM); the
+                    // Android side owns the platform clock.
+                    val nowWall = System.currentTimeMillis()
+                    val nowElapsed = android.os.SystemClock.elapsedRealtime()
+                    val base = nowElapsed - (nowWall - spec.chronometerBaseMs)
                     setUsesChronometer(true)
                     setShowWhen(true)
-                    setWhen(spec.chronometerBaseMs)
+                    setWhen(base)
                 }
                 if (spec.showCloseAction) {
-                    // CP8/U1: .addAction(closeActionPendingIntent) — wired when
-                    // the close-action BroadcastReceiver + manifest entry land.
-                    // The CP5 spec carries the bit so the decision is complete.
+                    // §16-U1: ongoing FGS notification Action 「关闭后台」
+                    // → ACTION_CLOSE_BACKGROUND → controller.requestUserClose
+                    // → coordinator teardown (L3). The Action is reachable
+                    // because ongoing FGS notifications cannot be swiped by
+                    // the user; the Action is the only exit.
+                    addAction(
+                        NotificationCompat.Action.Builder(
+                            R.mipmap.ic_launcher,
+                            getString(R.string.notify_close_background),
+                            buildCloseBackgroundPendingIntent(),
+                        ).build()
+                    )
                 }
                 if (spec.degraded) {
-                    // CP8/U1: setContentIntent(openActivityPendingIntent) — wired
-                    // alongside the close-action pass.
+                    // §5 degraded: deep-link to MainActivity so the user can
+                    // resolve the TOFU prompt. Non-degraded notifications do
+                    // NOT set a contentIntent (no U3 deep-link yet — that is
+                    // Phase-1).
+                    setContentIntent(buildOpenActivityPendingIntent())
                 }
             }
             .build()
+
+    /**
+     * §16-U1 close-action target. Delivers ACTION_CLOSE_BACKGROUND to this
+     * Service via `PendingIntent.getService` (FLAG_IMMUTABLE because the
+     * carried intent carries no extras the trigger needs to mutate;
+     * FLAG_UPDATE_CURRENT so a subsequent rebuild of the ongoing notification
+     * with a fresh spec does not orphan the prior PendingIntent).
+     */
+    private fun buildCloseBackgroundPendingIntent(): PendingIntent {
+        val intent = Intent(this, SessionStreamingService::class.java).apply {
+            action = ACTION_CLOSE_BACKGROUND
+        }
+        return PendingIntent.getService(
+            this,
+            CLOSE_BACKGROUND_REQUEST_CODE,
+            intent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+        )
+    }
+
+    /**
+     * §5 degraded contentIntent: opens MainActivity so the user can resolve
+     * the TOFU prompt. Mirrors [AppLifecycleMonitor.buildContentIntent] but
+     * without a session id (degraded is host-wide, not per-session).
+     */
+    private fun buildOpenActivityPendingIntent(): PendingIntent {
+        val intent = Intent(this, cn.vectory.ocdroid.MainActivity::class.java).apply {
+            flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
+        }
+        return PendingIntent.getActivity(
+            this,
+            DEGRADED_CONTENT_REQUEST_CODE,
+            intent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+        )
+    }
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -338,10 +441,30 @@ class SessionStreamingService : Service() {
         const val SESSION_STATUS_NOTIFICATION_ID = 4241
 
         /**
-         * Ongoing session-status channel id (FGS spec §7 channel matrix /
-         * dev-design P1.4). IMPORTANCE_LOW. Created by
-         * `AppLifecycleMonitor` (CP8) — NOT created in this service.
+         * §16-U1 ongoing-notification 「关闭后台」Action target. Delivered to
+         * [onStartCommand] via a PendingIntent that points back at this
+         * Service; the Service routes it to
+         * [SessionStreamingController.requestUserClose] →
+         * [StreamingLifecycleCoordinator.requestUserClose] (L3 teardown).
+         *
+         * Declared `const val` so the test fixture can reference the literal
+         * without going through the Service class.
          */
-        const val CHANNEL_SESSION_STATUS = "ocdroid.session_status"
+        const val ACTION_CLOSE_BACKGROUND = "cn.vectory.ocdroid.action.CLOSE_BACKGROUND"
+
+        /**
+         * Request code for the §16-U1 close-action PendingIntent. Stable so
+         * FLAG_UPDATE_CURRENT can refresh the same slot across notification
+         * rebuilds (the spec carries new copy each rebuild but the Action
+         * PendingIntent is identity-stable).
+         */
+        private const val CLOSE_BACKGROUND_REQUEST_CODE = 42410
+
+        /**
+         * Request code for the §5 degraded contentIntent (open Activity).
+         * Distinct from the close-action slot so the two PendingIntents do
+         * not collide under FLAG_UPDATE_CURRENT.
+         */
+        private const val DEGRADED_CONTENT_REQUEST_CODE = 42411
     }
 }
