@@ -83,19 +83,20 @@ import androidx.compose.ui.window.DialogProperties
  *
  * @param onDismissRequest scrim / 返回键 / 点击外部关闭时的回调。
  * @param title 可选标题。null 时不渲染标题行。
- * @param content 表单内容槽（[ColumnScope]）。任意的 `Switch` / `TextField` /
- *   `ListItem` 等都可放入——触摸事件由 [BasicAlertDialog] 透传，不会被吞。
  * @param confirmButton 可选的 confirm 按钮槽（右对齐）。null 时不渲染。
  * @param dismissButton 可选的 dismiss 按钮槽（confirm 左侧）。null 时不渲染。
+ * @param content 表单内容槽（[ColumnScope]），放在最后一个参数以支持尾随 lambda。
+ *   任意的 `Switch` / `TextField` / `ListItem` 等都可放入——触摸事件由
+ *   [BasicAlertDialog] 透传，不会被吞。
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun AppFormDialog(
     onDismissRequest: () -> Unit,
     title: String? = null,
-    content: @Composable ColumnScope.() -> Unit,
     confirmButton: @Composable (() -> Unit)? = null,
     dismissButton: @Composable (() -> Unit)? = null,
+    content: @Composable ColumnScope.() -> Unit,
 ) {
     BasicAlertDialog(
         onDismissRequest = onDismissRequest,
