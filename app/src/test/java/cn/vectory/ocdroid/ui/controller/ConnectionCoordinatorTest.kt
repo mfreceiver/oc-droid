@@ -83,6 +83,8 @@ class ConnectionCoordinatorTest {
     private lateinit var scope: TestScope
     private var now: Long = 0L
     private lateinit var coordinator: ConnectionCoordinator
+    /** CP1 (notify Phase-0): the single connection-identity store. */
+    private lateinit var identityStore: cn.vectory.ocdroid.service.identity.ConnectionIdentityStore
     /** §R-17 batch2 / §batch 3b: captures UiEvents emitted on effects.uiEvents. */
     private val recordedEvents = mutableListOf<UiEvent>()
 
@@ -107,6 +109,7 @@ class ConnectionCoordinatorTest {
         // Baseline clock well past the 30s throttle window from epoch 0 so the
         // first probe always proceeds (mirrors production's wall-clock ms).
         now = 100_000L
+        identityStore = cn.vectory.ocdroid.service.identity.ConnectionIdentityStore()
         coordinator = ConnectionCoordinator(
             scope = scope,
             slices = slices,
@@ -114,7 +117,8 @@ class ConnectionCoordinatorTest {
             settingsManager = settingsManager,
             effects = effects,
             serverCompatProfile = cn.vectory.ocdroid.data.repository.ServerCompatProfile(),
-            clock = { now }
+            clock = { now },
+            identityStore = identityStore,
         )
         // Defaults: no directory fetch on loadInitialData (so the directory
         // coroutine — whose relaxed Result<List<Session>> mock would otherwise
@@ -497,6 +501,9 @@ class ConnectionCoordinatorTest {
         // pollute the NEW host's directorySessions. The fan-out here (up to 8
         // launches) amplifies the in-flight window, so the generation check
         // gates every onSuccess write.
+        // CP1: bind an identity first so loadInitialData has a non-null
+        // capture; cancelSseForReconfigure → beginReconfigure invalidates it.
+        identityStore.bind("test-fp", "/proj", "test-endpoint")
         every { settingsManager.currentWorkdir } returns "/proj"
         every { settingsManager.getRecentWorkdirs(any()) } returns listOf("/proj")
         coEvery { repository.getCommands() } returns Result.success(emptyList())
@@ -612,9 +619,11 @@ class ConnectionCoordinatorTest {
     // ── SSE lifecycle ──────────────────────────────────────────────────────
 
     /** §batch 3b helper: extracts every SSE event the coordinator forwarded as
-     *  a [ControllerEffect.OnSseEvent]. */
+     *  a [ControllerEffect.OnSseEvent]. CP1: OnSseEvent now wraps
+     *  [cn.vectory.ocdroid.service.events.IdentifiedSseEvent] — unwrap to the
+     *  raw [SSEEvent] for the existing assertions. */
     private fun forwardedSseEvents(): List<SSEEvent> =
-        collectedEffects.filterIsInstance<ControllerEffect.OnSseEvent>().map { it.event }
+        collectedEffects.filterIsInstance<ControllerEffect.OnSseEvent>().map { it.event.event }
 
     @Test
     fun `startSSE forwards each successful SSE event to the onSseEvent callback`() {
@@ -708,14 +717,19 @@ class ConnectionCoordinatorTest {
         feed.tryEmit(Result.success(evt)) // cancelled → ignored
         runPending()
 
-        assertEquals(1, collectedEffects.filterIsInstance<ControllerEffect.HostReconfigured>().size)
+        // CP1: HostReconfigured now carries the new epoch (data class, not object).
+        val reconfigured = collectedEffects.filterIsInstance<ControllerEffect.HostReconfigured>()
+        assertEquals(1, reconfigured.size)
+        assertTrue("HostReconfigured epoch must be > 0 after beginReconfigure", reconfigured[0].epoch > 0L)
         assertTrue(forwardedSseEvents().isEmpty())
     }
 
     @Test
     fun `cancelSseForReconfigure fires onHostReconfigured even with no active feed`() {
         coordinator.cancelSseForReconfigure()
-        assertEquals(1, collectedEffects.filterIsInstance<ControllerEffect.HostReconfigured>().size)
+        val reconfigured = collectedEffects.filterIsInstance<ControllerEffect.HostReconfigured>()
+        assertEquals(1, reconfigured.size)
+        assertTrue("HostReconfigured epoch must be > 0 after beginReconfigure", reconfigured[0].epoch > 0L)
     }
 
     // ── loadInitialData (§best-effort: directory onFailure is non-fatal) ───
@@ -754,6 +768,8 @@ class ConnectionCoordinatorTest {
     fun `loadInitialData directory fetch failure after reconfigure is silently dropped`() {
         // §generation-guard × onFailure: a directory fetch that fails AFTER a
         // host switch must not even log — the error belongs to the stale host.
+        // CP1: bind an identity first so the guard is active.
+        identityStore.bind("test-fp", "/proj", "test-endpoint")
         every { settingsManager.currentWorkdir } returns "/proj"
         every { settingsManager.getRecentWorkdirs(any()) } returns listOf("/proj")
         coEvery { repository.getCommands() } returns Result.success(emptyList())
@@ -909,6 +925,99 @@ class ConnectionCoordinatorTest {
         // Total connectSSE calls: 2 (one per connect cycle). No phantom third
         // collector from a stale captured workdir.
         verify(exactly = 2) { repository.connectSSE(any()) }
+    }
+
+    // ── CP1 (notify Phase-0): identity-guarded SSE forwarding ──────────────
+
+    /**
+     * CP1 spec test: a stale-identity SSE collector frame (captured under an
+     * epoch that was subsequently bumped by beginReconfigure) is dropped at
+     * CC's forwarding layer — it never becomes a [ControllerEffect.OnSseEvent]
+     * and carries the correct (capture-time) identity when forwarded.
+     */
+    @Test
+    fun `CP1 stale-identity collector frame after beginReconfigure is dropped at CC forwarding`() {
+        // Bind the initial identity.
+        identityStore.bind("test-fp", "/proj", "test-endpoint")
+        val feed = MutableSharedFlow<Result<SSEEvent>>(extraBufferCapacity = 8)
+        every { repository.connectSSE(any()) } returns feed.asSharedFlow()
+
+        coordinator.startSSE()
+        runPending()
+
+        // Event #1 (current identity) is forwarded as OnSseEvent(IdentifiedSseEvent).
+        val evt1 = SSEEvent(payload = cn.vectory.ocdroid.data.model.SSEPayload(type = "evt1"))
+        feed.tryEmit(Result.success(evt1))
+        runPending()
+        assertEquals("current-identity event forwarded", listOf(evt1), forwardedSseEvents())
+
+        // Reconfigure invalidates the identity (epoch bump + null currentIdentity).
+        coordinator.cancelSseForReconfigure()
+
+        // Stale event #2 from the OLD collector — must NOT be forwarded.
+        val staleEvt = SSEEvent(payload = cn.vectory.ocdroid.data.model.SSEPayload(type = "stale"))
+        feed.tryEmit(Result.success(staleEvt))
+        runPending()
+
+        assertEquals(
+            "stale-identity event dropped at CC forwarding",
+            listOf(evt1),
+            forwardedSseEvents(),
+        )
+    }
+
+    /**
+     * CP1 spec test: stale directory-fetch response (old epoch) is dropped via
+     * the same epoch check. Explicitly asserts the identityStore-based guard
+     * (complement of the adapted existing generation-guard test).
+     */
+    @Test
+    fun `CP1 stale directory-fetch response is dropped via identity epoch check`() {
+        identityStore.bind("test-fp", "/proj", "test-endpoint")
+        every { settingsManager.currentWorkdir } returns "/proj"
+        every { settingsManager.getRecentWorkdirs(any()) } returns listOf("/proj")
+        coEvery { repository.getCommands() } returns Result.success(emptyList())
+        val pending = CompletableDeferred<Result<List<Session>>>()
+        coEvery { repository.getSessionsForDirectory("/proj") } coAnswers { pending.await() }
+
+        coordinator.loadInitialData()
+        runPending()
+
+        // beginReconfigure invalidates the identity → epoch bump.
+        identityStore.beginReconfigure()
+
+        // Stale-host result arrives.
+        pending.complete(Result.success(listOf(Session(id = "stale", directory = "/proj"))))
+        runPending()
+
+        assertFalse(
+            "stale-identity directory result dropped",
+            slices.sessionList.value.directorySessions.containsKey("/proj"),
+        )
+    }
+
+    /**
+     * CP1 spec test: forwarded SSE events carry the capture-time
+     * [cn.vectory.ocdroid.service.events.IdentifiedSseEvent] (not just the raw
+     * SSEEvent), so downstream consumers can validate identity.
+     */
+    @Test
+    fun `CP1 forwarded SSE events carry IdentifiedSseEvent with capture-time identity`() {
+        identityStore.bind("test-fp", "/proj", "test-endpoint")
+        val feed = MutableSharedFlow<Result<SSEEvent>>(extraBufferCapacity = 8)
+        every { repository.connectSSE(any()) } returns feed.asSharedFlow()
+
+        coordinator.startSSE()
+        runPending()
+
+        val evt = SSEEvent(payload = cn.vectory.ocdroid.data.model.SSEPayload(type = "test"))
+        feed.tryEmit(Result.success(evt))
+        runPending()
+
+        val onSse = collectedEffects.filterIsInstance<ControllerEffect.OnSseEvent>().single()
+        assertEquals("test-fp", onSse.event.identity.serverGroupFp)
+        assertEquals("/proj", onSse.event.identity.normalizedWorkdir)
+        assertEquals(evt, onSse.event.event)
     }
 
     // ── RecordingConnectionCoordinatorCallbacks (removed in batch 3b) ──────

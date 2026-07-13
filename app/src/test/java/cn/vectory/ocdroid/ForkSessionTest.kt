@@ -138,6 +138,8 @@ class ForkSessionTest {
             currentServerGroupFp = { "test-fp" },
         )
         val cacheRepository = io.mockk.mockk<cn.vectory.ocdroid.data.cache.CacheRepository>(relaxed = true)
+        // CP1 (notify Phase-0): single connection-identity store.
+        val identityStore = cn.vectory.ocdroid.service.identity.ConnectionIdentityStore()
         // R-20 Phase 1: stub verifyAndLoad to a non-null default — relaxed
         // mockk returns null for sealed-interface return types, which crashes
         // AppCore's VerifyAndHydrate handler `when`.
@@ -158,6 +160,7 @@ class ForkSessionTest {
             currentServerGroupFp = { "test-fp" },
             appContext = appContext,
             cacheRepository = cacheRepository,
+            identityStore = identityStore,
         )
         val sessionSyncCoordinator = cn.vectory.ocdroid.ui.controller.SessionSyncCoordinator(
             scope = appScope,
@@ -165,6 +168,7 @@ class ForkSessionTest {
             settingsManager = settingsManager,
             effects = effectBus,
             currentServerGroupFp = { "test-fp" },
+            identityStore = identityStore,
         )
         val connectionCoordinator = cn.vectory.ocdroid.ui.controller.ConnectionCoordinator(
             scope = appScope,
@@ -173,6 +177,7 @@ class ForkSessionTest {
             settingsManager = settingsManager,
             effects = effectBus,
             serverCompatProfile = cn.vectory.ocdroid.data.repository.ServerCompatProfile(),
+            identityStore = identityStore,
         )
         val gapFillCoordinator = cn.vectory.ocdroid.ui.chat.GapFillCoordinator(
             repository = repository,
@@ -199,6 +204,8 @@ class ForkSessionTest {
             // §review-fix #1: fp provider (same as MainViewModelTestBase).
             { hostProfileStore.currentProfile().serverGroupFp.ifBlank { hostProfileStore.currentProfile().id } },
             appScope,
+            // CP1 (notify Phase-0): single connection-identity store.
+            identityStore,
         )
     }
 

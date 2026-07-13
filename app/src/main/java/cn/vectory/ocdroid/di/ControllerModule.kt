@@ -137,6 +137,7 @@ object ControllerModule {
         effectBus: SharedEffectBus,
         cacheRepository: cn.vectory.ocdroid.data.cache.CacheRepository,
         @Named("currentServerGroupFp") currentServerGroupFp: () -> String,
+        identityStore: cn.vectory.ocdroid.service.identity.ConnectionIdentityStore,
     ): HostProfileController = HostProfileController(
         scope = appScope,
         slices = store.slices,
@@ -148,6 +149,7 @@ object ControllerModule {
         currentServerGroupFp = currentServerGroupFp,
         appContext = appContext,
         cacheRepository = cacheRepository,
+        identityStore = identityStore,
     )
 
     @Provides
@@ -159,6 +161,7 @@ object ControllerModule {
         effectBus: SharedEffectBus,
         cacheRepository: cn.vectory.ocdroid.data.cache.CacheRepository,
         @Named("currentServerGroupFp") currentServerGroupFp: () -> String,
+        identityStore: cn.vectory.ocdroid.service.identity.ConnectionIdentityStore,
     ): SessionSyncCoordinator = SessionSyncCoordinator(
         scope = appScope,
         slices = store.slices,
@@ -168,6 +171,8 @@ object ControllerModule {
         // R-20 Phase 1 (C4): persistent cache for the message.updated
         // new-insert append path (maxer I11).
         cacheRepository = cacheRepository,
+        // CP1 (notify Phase-0): single connection-identity store.
+        identityStore = identityStore,
     )
 
     @Provides
@@ -181,6 +186,7 @@ object ControllerModule {
         serverCompatProfile: ServerCompatProfile,
         cacheMaintenanceCoordinator: cn.vectory.ocdroid.data.cache.CacheMaintenanceCoordinator,
         @Named("currentServerGroupFp") currentServerGroupFp: () -> String,
+        identityStore: cn.vectory.ocdroid.service.identity.ConnectionIdentityStore,
     ): ConnectionCoordinator = ConnectionCoordinator(
         scope = appScope,
         slices = store.slices,
@@ -190,5 +196,6 @@ object ControllerModule {
         serverCompatProfile = serverCompatProfile,
         cacheMaintenanceCoordinator = cacheMaintenanceCoordinator,
         currentServerGroupFp = currentServerGroupFp,
+        identityStore = identityStore,
     )
 }

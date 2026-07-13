@@ -9,6 +9,7 @@ import cn.vectory.ocdroid.data.repository.HostProfileStore
 import cn.vectory.ocdroid.data.repository.OpenCodeRepository
 import cn.vectory.ocdroid.di.AppLifecycleMonitor
 import cn.vectory.ocdroid.di.UiApplicationScope
+import cn.vectory.ocdroid.service.identity.ConnectionIdentityStore
 import cn.vectory.ocdroid.util.DebugLog
 import cn.vectory.ocdroid.util.SettingsManager
 import cn.vectory.ocdroid.util.TrafficTracker
@@ -142,6 +143,14 @@ class AppCore @Inject constructor(
      *  R-19-P2-2 dispatch helpers (in this file) and the AppCoreOrchestration
      *  extensions reach `appScope` directly. */
     @UiApplicationScope internal val appScope: CoroutineScope,
+    /**
+     * CP1 (notify Phase-0): the single connection-identity store. Injected
+     * here so the test hook [handleSSEEvent] can auto-wrap raw SSEEvent with
+     * the current identity (production goes through CC.launchSseCollection
+     * which captures the identity at collection start). Hilt auto-provides
+     * the @Singleton instance (same one CC / SSC / HPC inject).
+     */
+    internal val identityStore: ConnectionIdentityStore,
 ) {
 
     // ── Slice accessors (delegate to SharedStateStore) ──────────────────────
@@ -594,6 +603,10 @@ class AppCore @Inject constructor(
     /** ConnectionCoordinator-owned effects. */
     internal fun dispatchConnectionEffect(effect: ControllerEffect): Boolean = when (effect) {
         is ControllerEffect.HostReconfigured -> {
+            // CP1: HostReconfigured carries the new epoch. Reset the
+            // foreground catch-up state machine (idempotent) — SSC's init
+            // collector independently reads effect.epoch to reset its overlay
+            // to this exact generation.
             foregroundCatchUpController.onHostReconfigured()
             true
         }
@@ -616,6 +629,11 @@ class AppCore @Inject constructor(
             true
         }
         is ControllerEffect.OnSseEvent -> {
+            // CP1: route through the identity-checked entry point.
+            // SSC.handleEvent(IdentifiedSseEvent) validates
+            // identityStore.isCurrent BEFORE any fold/state mutation — a
+            // stale-identity frame (captured under a pre-reconfigure epoch)
+            // is dropped silently.
             sessionSyncCoordinator.handleEvent(effect.event)
             true
         }
@@ -645,9 +663,20 @@ class AppCore @Inject constructor(
      * [ConnectionCoordinator] (which emits [ControllerEffect.OnSseEvent] for
      * each event, dispatched back to [sessionSyncCoordinator] by
      * [dispatchEffect]).
+     *
+     * CP1: auto-wraps with the current identity (if bound) so the identity-
+     * checked path is exercised. Tests that don't bind an identity fall
+     * through to the raw [SSEEvent] dispatch (no identity gate).
      */
     internal fun handleSSEEvent(event: SSEEvent) {
-        sessionSyncCoordinator.handleEvent(event)
+        val identity = identityStore.currentIdentity.value
+        if (identity != null) {
+            sessionSyncCoordinator.handleEvent(
+                cn.vectory.ocdroid.service.events.IdentifiedSseEvent(identity, event)
+            )
+        } else {
+            sessionSyncCoordinator.handleEvent(event)
+        }
     }
 
     internal fun sessionWindowCacheSize(): Int = sessionSwitcher.sessionWindowCacheSize()

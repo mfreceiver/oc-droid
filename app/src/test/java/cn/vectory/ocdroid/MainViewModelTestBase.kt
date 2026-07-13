@@ -135,6 +135,9 @@ abstract class MainViewModelTestBase {
         // the test mock the underlying repository / settingsManager / etc.
         val store = SharedStateStore()
         val effectBus = SharedEffectBus()
+        // CP1 (notify Phase-0): the single connection-identity store, shared
+        // by CC / SSC / HPC + AppCore (same wiring as ControllerModule).
+        val identityStore = cn.vectory.ocdroid.service.identity.ConnectionIdentityStore()
         val appScope = kotlinx.coroutines.CoroutineScope(
             kotlinx.coroutines.SupervisorJob() +
                 kotlinx.coroutines.Dispatchers.Main.immediate
@@ -182,6 +185,7 @@ abstract class MainViewModelTestBase {
             currentServerGroupFp = { hostProfileStore.currentProfile().serverGroupFp.ifBlank { hostProfileStore.currentProfile().id } },
             appContext = appContext,
             cacheRepository = cacheRepository,
+            identityStore = identityStore,
         )
         val sessionSyncCoordinator = cn.vectory.ocdroid.ui.controller.SessionSyncCoordinator(
             scope = appScope,
@@ -193,6 +197,8 @@ abstract class MainViewModelTestBase {
             // insert appends reach the (relaxed) mock. Tests that need to
             // verify the append call re-stub per-test.
             cacheRepository = cacheRepository,
+            // CP1 (notify Phase-0): single connection-identity store.
+            identityStore = identityStore,
         )
         val connectionCoordinator = cn.vectory.ocdroid.ui.controller.ConnectionCoordinator(
             scope = appScope,
@@ -201,6 +207,7 @@ abstract class MainViewModelTestBase {
             settingsManager = settingsManager,
             effects = effectBus,
             serverCompatProfile = cn.vectory.ocdroid.data.repository.ServerCompatProfile(),
+            identityStore = identityStore,
         )
         val fpProvider: () -> String = { hostProfileStore.currentProfile().serverGroupFp.ifBlank { hostProfileStore.currentProfile().id } }
         // R-20 Phase 2: gap-fill coordinator (real instance; the relaxed-mock
@@ -233,6 +240,8 @@ abstract class MainViewModelTestBase {
             // §review-fix #1: same fp provider every controller uses.
             fpProvider,
             appScope,
+            // CP1 (notify Phase-0): single connection-identity store.
+            identityStore,
         )
         // §R-17 batch3e → §R18 Phase 4: side-channel Error/Success UiEvents
         // into a per-core ring buffer so tests can read the most-recent event

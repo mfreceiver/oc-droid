@@ -10,6 +10,7 @@ import cn.vectory.ocdroid.data.repository.OpenCodeRepository
 import cn.vectory.ocdroid.data.repository.http.ClientCertMaterial
 import cn.vectory.ocdroid.data.repository.http.buildMutualTlsConfig
 import cn.vectory.ocdroid.data.repository.http.hostPortFromUrl
+import cn.vectory.ocdroid.service.identity.ConnectionIdentityStore
 import cn.vectory.ocdroid.ui.ComposerState
 import cn.vectory.ocdroid.ui.ConnectionFormSettings
 import cn.vectory.ocdroid.ui.ConnectionPhase
@@ -95,6 +96,17 @@ class HostProfileController(
      *  nuke that bypasses the per-group effect and clears everything, so it
      *  calls cacheRepository directly here. */
     internal val cacheRepository: CacheRepository,
+    /**
+     * CP1 (notify Phase-0): the single connection-identity store. The
+     * reconfigure barrier origin — [configureServer] /
+     * [configureRepositoryForProfile] / [resetLocalDataAndResync] call
+     * [ConnectionIdentityStore.beginReconfigure] SYNCHRONOUSLY BEFORE
+     * `repository.configure()` so the epoch bump is guaranteed to precede
+     * any client rebuild. The async effect-bus emission
+     * (CancelSseForReconfigure → CC.cancelSseForReconfigure) does NOT
+     * guarantee this ordering — that was the bug being fixed (FGS spec §2).
+     */
+    internal val identityStore: ConnectionIdentityStore? = null,
 ) {
     // ── Public accessors ───────────────────────────────────────────────────
 
@@ -570,6 +582,12 @@ class HostProfileController(
     fun configureServer(url: String, username: String? = null, password: String? = null) {
         val oldUrl = settingsManager.serverUrl
         val urlChanging = oldUrl != url
+        // CP1 (notify Phase-0) §2 step 1: SYNCHRONOUSLY bump the epoch AND
+        // invalidate the old identity BEFORE repository.configure() runs.
+        // The async CancelSseForReconfigure effect emission below does NOT
+        // guarantee the epoch bump lands before the client rebuild — this
+        // synchronous barrier does. FGS spec §2 «reconfigure 严格顺序».
+        identityStore?.beginReconfigure()
         if (urlChanging) {
             // §bug5 / R-20 Phase 5: manual URL change also clears model data
             // so the disable set does not orphan against an identity the user
@@ -622,6 +640,12 @@ class HostProfileController(
      * host switch by the caller (see resetLocalDataAndResync).
      */
     internal fun configureRepositoryForProfile(profile: HostProfile) {
+        // CP1 (notify Phase-0) §2 step 1: SYNCHRONOUSLY bump the epoch AND
+        // invalidate the old identity BEFORE repository.configure() runs.
+        // The async CancelSseForReconfigure effect emission below does NOT
+        // guarantee the epoch bump lands before the client rebuild — this
+        // synchronous barrier does. FGS spec §2 «reconfigure 严格顺序».
+        identityStore?.beginReconfigure()
         // §R18 Phase 3 Wave 1 (P1-3 B 类): 单发非 suspend (configureRepositoryForProfile 可能被 C 类路径调用，但本处只是一次 emit) → tryEmitEffect。
         effects.tryEmitEffect(ControllerEffect.CancelSseForReconfigure)
         val password = profile.basicAuth?.passwordId?.let { settingsManager.basicAuthPassword(it) }
@@ -768,6 +792,12 @@ class HostProfileController(
      * loadInitialData on a healthy connection.
      */
     fun resetLocalDataAndResync() {
+        // CP1 (notify Phase-0) §2 step 1: SYNCHRONOUSLY bump the epoch AND
+        // invalidate the old identity BEFORE any reset/reconnect runs. The
+        // full-data reset is a reconfigure (the SSE collector + all caches
+        // are torn down); the epoch bump ensures any in-flight collector /
+        // directory fetch from the pre-reset state is dropped.
+        identityStore?.beginReconfigure()
         // R-20 Phase 1 (dser I-2, maxer B1): wipe the cache DB FIRST (before
         // clearAllLocalData) so the cache_db_key preserved-key has nothing to
         // unlock. deleteDatabase removes the .db + -wal + -shm sidecars;

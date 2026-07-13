@@ -13,6 +13,8 @@ import cn.vectory.ocdroid.data.model.SessionStatus
 import cn.vectory.ocdroid.data.model.QuestionRequest
 import cn.vectory.ocdroid.data.model.TodoItem
 import cn.vectory.ocdroid.data.repository.OpenCodeRepository
+import cn.vectory.ocdroid.service.events.IdentifiedSseEvent
+import cn.vectory.ocdroid.service.identity.ConnectionIdentityStore
 import cn.vectory.ocdroid.ui.ChatState
 import cn.vectory.ocdroid.ui.SessionListState
 import cn.vectory.ocdroid.ui.SharedEffectBus
@@ -113,6 +115,18 @@ class SessionSyncCoordinator(
      * blocked (plan §5 不崩).
      */
     internal val cacheRepository: CacheRepository? = null,
+    /**
+     * CP1 (notify Phase-0): the single source of truth for the connection
+     * epoch. Replaces the private [hostGeneration] AtomicLong — the epoch
+     * now comes from [ConnectionIdentityStore.currentEpoch] (guarded by
+     * [ConnectionIdentityStore.beginReconfigure] at the reconfigure barrier
+     * origin in HostProfileController). FGS spec §2 «关键约束»: no second
+     * private generation.
+     *
+     * The [handleEvent]/[handleEvent] identified overload validates
+     * [ConnectionIdentityStore.isCurrent] BEFORE any fold/state mutation.
+     */
+    internal val identityStore: ConnectionIdentityStore? = null,
 ) {
     /** Tag for [reportNonFatalIssue]; mirrors the original MainViewModel TAG. */
     private val tag: String = "SessionSyncCoordinator"
@@ -165,23 +179,13 @@ class SessionSyncCoordinator(
     private var sseSyncState: SseSyncState = SseSyncState()
 
     /**
-     * §P1-10 generation counter, bumped on every observed
-     * [ControllerEffect.HostReconfigured]. §R-19 fix Blocker 1: this is the
-     * **defensive second line** — the production-grade stale-host guard is
-     * [ConnectionCoordinator]'s per-event generation check in
-     * `launchSseCollection` (which drops stale events BEFORE they are
-     * forwarded as [ControllerEffect.OnSseEvent]s, so this coordinator never
-     * sees them). This local counter is kept in lock-step with CC's
-     * `directoryFetchGeneration` via the HostReconfigured effect (CC bumps
-     * its counter synchronously in `cancelSseForReconfigure` BEFORE emitting
-     * the effect; this init collector bumps this counter when the effect
-     * arrives). It exists so the pure [reconcileGap] function can encode the
-     * generation guard as an explicit invariant (testable in isolation) and
-     * as forward-safety if a future code path routes SSE events to this
-     * coordinator bypassing CC's check. Reads/writes are main-thread
-     * confined; AtomicLong is belt-and-suspenders.
+     * CP1 (notify Phase-0): the generation counter has been REMOVED. The
+     * private `hostGeneration: AtomicLong` that used to live here is gone —
+     * it was a second generation that could drift apart from CC's
+     * `directoryFetchGeneration` (which itself is now also gone, replaced by
+     * [ConnectionIdentityStore]). The epoch is sourced from
+     * [ConnectionIdentityStore.currentEpoch] via [currentEpoch].
      */
-    private val hostGeneration = java.util.concurrent.atomic.AtomicLong(0L)
 
     /**
      * §P1-10: diagnostic + test hook — snapshot of the current overlay state.
@@ -190,6 +194,19 @@ class SessionSyncCoordinator(
      * cases and future debug surfaces.
      */
     internal fun sseSyncStateSnapshot(): SseSyncState = sseSyncState
+
+    /**
+     * CP1 (notify Phase-0): the current connection epoch, sourced from the
+     * single [ConnectionIdentityStore]. Replaces the private [hostGeneration]
+     * AtomicLong that was kept in lock-step with CC's generation via the
+     * HostReconfigured effect. FGS spec §2 «关键约束»: no second private
+     * generation — the epoch comes from the store.
+     *
+     * Returns 0 when no [identityStore] is wired (legacy/test construction)
+     * so the pure [reconcileGap] function's generation guard still has a
+     * stable value to compare against.
+     */
+    private fun currentEpoch(): Long = identityStore?.currentEpoch() ?: 0L
 
     /**
      * R-20 Phase 2 (G6): mark [sessionId] as having an established cold-snapshot
@@ -236,24 +253,64 @@ class SessionSyncCoordinator(
                         // potentially stale (the user was watching it). Mark
                         // dirty + stamp the disconnect time so the next
                         // `server.connected` reconciles.
-                        val gen = hostGeneration.get()
+                        val gen = currentEpoch()
                         val now = System.currentTimeMillis()
                         val dirty = listOfNotNull(slices.chat.value.currentSessionId).toSet()
                         val trigger = SseReconnectTrigger.Disconnected(now, dirty, gen)
                         sseSyncState = reconcileGap(sseSyncState, trigger).first
                     }
                     is ControllerEffect.HostReconfigured -> {
-                        // §P1-10 scenario 4: bump generation so any in-flight
-                        // ServerConnected from the PREVIOUS host's cancelled
-                        // SSE job becomes a stale-trigger no-op.
-                        val newGen = hostGeneration.incrementAndGet()
-                        val trigger = SseReconnectTrigger.HostReconfigured(newGen)
+                        // §P1-10 scenario 4 + CP1: the epoch carried on the
+                        // effect IS the new generation (bumped synchronously
+                        // by ConnectionIdentityStore.beginReconfigure at the
+                        // HostProfileController barrier origin). Reset the
+                        // overlay to a fresh cold-start under this epoch so
+                        // any in-flight ServerConnected from the PREVIOUS
+                        // host's cancelled SSE job becomes a stale-trigger
+                        // no-op.
+                        val trigger = SseReconnectTrigger.HostReconfigured(effect.epoch)
                         sseSyncState = reconcileGap(sseSyncState, trigger).first
                     }
                     else -> {}
                 }
             }
         }
+    }
+
+    /**
+     * CP1 (notify Phase-0) identity-checked entry point. Validates
+     * [identified.identity] against [ConnectionIdentityStore.isCurrent]
+     * BEFORE any fold/state mutation — a stale-identity frame (captured under
+     * a pre-reconfigure epoch) is dropped silently here so it cannot pollute
+     * the new host's state. This is the production path:
+     * ConnectionCoordinator.launchSseCollection captures the identity at
+     * collection start, wraps each event as [IdentifiedSseEvent], and emits
+     * [ControllerEffect.OnSseEvent]; AppCore.dispatchConnectionEffect routes
+     * it here.
+     *
+     * FGS spec §1 «identity 不得在 fold 前被剥掉»: the identity is carried on
+     * the event container (NOT stripped at the bridge) so this second-stage
+     * validation is possible without trusting the bridge alone.
+     *
+     * When no [identityStore] is wired (legacy/test construction that bypasses
+     * the store), the frame is dispatched WITHOUT the identity gate (backward
+     * compat for tests that drive [handleEvent] directly with raw SSEEvent).
+     */
+    fun handleEvent(identified: IdentifiedSseEvent) {
+        val store = identityStore
+        if (store != null && !store.isCurrent(identified.identity)) {
+            // Drop stale-identity frame BEFORE any side effect. Keep the
+            // existing stale-host logging pattern (DebugLog.i, not Log.w —
+            // this is an expected race window during reconfigure, not a bug).
+            DebugLog.i(
+                "Sync",
+                "drop stale-identity SSE event " +
+                    "(epoch=${identified.identity.epoch} current=${store.currentEpoch()} " +
+                    "type=${identified.event.payload.type})"
+            )
+            return
+        }
+        handleEvent(identified.event)
     }
 
     /**
@@ -267,6 +324,10 @@ class SessionSyncCoordinator(
      * sseHasConnectedOnce state machine lives in [ForegroundCatchUpController]
      * (R-16 M1); it calls back into the catch-up probe via
      * [ForegroundCatchUpCallbacks] when a probe is actually warranted.
+     *
+     * CP1: the generation value for the reconcile trigger now comes from
+     * [ConnectionIdentityStore.currentEpoch] (via [currentEpoch]) instead of
+     * the removed private AtomicLong — single epoch source, FGS spec §2.
      */
     fun handleEvent(event: SSEEvent) {
         if (event.payload.type == "server.connected") {
@@ -282,7 +343,7 @@ class SessionSyncCoordinator(
             // currentSessionId is captured at event-arrival time so scenario 3
             // (user switched sessions mid-disconnect) targets the NEW session.
             val currentSessionId = slices.chat.value.currentSessionId
-            val gen = hostGeneration.get()
+            val gen = currentEpoch()
             val trigger = SseReconnectTrigger.ServerConnected(currentSessionId, gen)
             val (nextState, decisions) = reconcileGap(sseSyncState, trigger)
             sseSyncState = nextState

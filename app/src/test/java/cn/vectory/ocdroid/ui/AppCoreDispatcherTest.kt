@@ -302,8 +302,18 @@ class AppCoreDispatcherTest : MainViewModelTestBase() {
     fun `dispatchConnectionEffect handles OnSseEvent by forwarding to SessionSyncCoordinator`() = runTest {
         val core = newCore()
         val event = SSEEvent(payload = SSEPayload(type = "server.connected"))
+        // CP1: OnSseEvent now wraps IdentifiedSseEvent. Use a zero-epoch
+        // identity — SSC's identity gate is skipped when no identity is bound
+        // (test cold-start, identityStore.currentIdentity == null), so the
+        // raw dispatch path runs.
+        val identified = cn.vectory.ocdroid.service.events.IdentifiedSseEvent(
+            cn.vectory.ocdroid.service.identity.ConnectionIdentity(
+                epoch = 0L, serverGroupFp = "", normalizedWorkdir = "", endpointFp = ""
+            ),
+            event,
+        )
 
-        val handled = core.dispatchConnectionEffect(ControllerEffect.OnSseEvent(event))
+        val handled = core.dispatchConnectionEffect(ControllerEffect.OnSseEvent(identified))
         advanceUntilIdle()
 
         assertTrue(handled)
@@ -390,12 +400,19 @@ class AppCoreDispatcherTest : MainViewModelTestBase() {
             ControllerEffect.ResetLocalDataAndResync,
             ControllerEffect.ClearSessionWindowCache,
             // Connection
-            ControllerEffect.HostReconfigured,
+            ControllerEffect.HostReconfigured(epoch = 0L),
             ControllerEffect.LoadSessions,
             ControllerEffect.LoadAgents,
             ControllerEffect.LoadProviders,
             ControllerEffect.LoadPendingPermissions,
-            ControllerEffect.OnSseEvent(SSEEvent(payload = SSEPayload(type = "server.connected"))),
+            ControllerEffect.OnSseEvent(
+                cn.vectory.ocdroid.service.events.IdentifiedSseEvent(
+                    cn.vectory.ocdroid.service.identity.ConnectionIdentity(
+                        epoch = 0L, serverGroupFp = "", normalizedWorkdir = "", endpointFp = ""
+                    ),
+                    SSEEvent(payload = SSEPayload(type = "server.connected")),
+                )
+            ),
             // SessionSync
             ControllerEffect.ServerConnected,
             ControllerEffect.RefreshSessions,

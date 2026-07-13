@@ -10,6 +10,8 @@ import cn.vectory.ocdroid.data.repository.OpenCodeRepository
 import cn.vectory.ocdroid.data.repository.ServerCompatProfile
 import cn.vectory.ocdroid.data.repository.http.TofuDecision
 import cn.vectory.ocdroid.data.repository.http.hostPortFromUrl
+import cn.vectory.ocdroid.service.events.IdentifiedSseEvent
+import cn.vectory.ocdroid.service.identity.ConnectionIdentityStore
 import cn.vectory.ocdroid.ui.ConnectionPhase
 import cn.vectory.ocdroid.ui.ConnectionState
 import cn.vectory.ocdroid.ui.SharedEffectBus
@@ -103,7 +105,18 @@ class ConnectionCoordinator(
     // testable without depending on wall-clock latency. Defaults to
     // System::currentTimeMillis in production (preserves the exact pre-extraction
     // behaviour — the original `testConnection` called System.currentTimeMillis()).
-    private val clock: () -> Long = { System.currentTimeMillis() }
+    private val clock: () -> Long = { System.currentTimeMillis() },
+    /**
+     * CP1 (notify Phase-0): the single connection-identity store. Replaces
+     * the private [directoryFetchGeneration] AtomicLong. Guards BOTH the SSE
+     * collector (per-event identity check in [launchSseCollection]) AND the
+     * directory-fetch fan-out in [loadInitialData]. FGS spec §2 «关键约束»:
+     * no second private generation.
+     *
+     * `null` for legacy/test construction that doesn't wire the store — the
+     * coordinator falls back to unconditional forwarding (no identity gate).
+     */
+    private val identityStore: ConnectionIdentityStore? = null,
 ) {
     private var sseJob: Job? = null
     private var lastHealthCheckTime = 0L
@@ -122,32 +135,6 @@ class ConnectionCoordinator(
     private var pendingTofuHostPort: String? = null
     @Volatile
     private var pendingTofuDecision: kotlinx.coroutines.CompletableDeferred<TofuDecision>? = null
-
-    /**
-     * §generation-guard: bumped on every [cancelSseForReconfigure] (host/profile
-     * switch or manual reconfigure). Two consumers:
-     *
-     *  1. [loadInitialData] captures this value and discards directory-fetch
-     *     results that return AFTER a reconfigure — their sessions belong to
-     *     the previous host and would otherwise pollute the new host's
-     *     directorySessions. The fan-out in [loadInitialData] (up to one
-     *     launch per recent workdir) amplifies this in-flight window, hence
-     *     the explicit guard.
-     *
-     *  2. §R-19 Sprint 1 Lane A (P1-10 fix Blocker 1): [launchSseCollection]
-     *     captures this value at coroutine start ([sseGenAtStart]) and
-     *     re-checks per collected event. A mismatch means the host was
-     *     reconfigured away mid-collection; further events from THIS job
-     *     belong to the previous host and are dropped at the forwarding layer
-     *     (never become [ControllerEffect.OnSseEvent]s). This is the
-     *     production-grade stale-host guard that closes the race the
-     *     SessionSyncCoordinator's own trigger-stamped generation could not.
-     *
-     * Reads/writes are on the main thread (reconfigure + loadInitialData +
-     * launchSseCollection's collect lambda all run there); AtomicLong is
-     * belt-and-suspenders.
-     */
-    private val directoryFetchGeneration = java.util.concurrent.atomic.AtomicLong(0L)
 
     // ── State sync helpers (mirror orchestrator.writeConnection) ──
 
@@ -264,6 +251,19 @@ class ConnectionCoordinator(
                                     connectionPhase = ConnectionPhase.Connected
                                 )
                             }
+                            // CP1 (notify Phase-0): bind the connection identity
+                            // at the current epoch so loadInitialData's directory
+                            // fan-out AND launchSseCollection's collector share
+                            // the SAME identity guard. FGS spec §2 step 5: bind
+                            // new collector to new identity. The epoch was
+                            // settled by beginReconfigure (called synchronously
+                            // at the HostProfileController barrier) or is 0 on
+                            // the very first cold start.
+                            identityStore?.bind(
+                                serverGroupFp = currentServerGroupFp(),
+                                normalizedWorkdir = settingsManager.currentWorkdir ?: "",
+                                endpointFp = settingsManager.serverUrl,
+                            )
                             loadInitialData()
                             startSSE()
                             // R-20 Phase 3 (plan §3): fire-and-forget the daily
@@ -486,10 +486,15 @@ class ConnectionCoordinator(
         effects.tryEmitEffect(ControllerEffect.LoadPendingPermissions)
         // Same-domain inline: slash commands merged with client-side commands.
         loadCommands()
-        // §generation-guard: capture the current generation so directory fetches
-        // that return AFTER a host reconfigure (cancelSseForReconfigure bumps
-        // this) are dropped — their sessions belong to the previous host.
-        val generation = directoryFetchGeneration.get()
+        // CP1 (notify Phase-0): capture the current identity so directory
+        // fetches that return AFTER a host reconfigure
+        // (cancelSseForReconfigure → identityStore.beginReconfigure bumps the
+        // epoch AND nulls currentIdentity) are dropped — their sessions belong
+        // to the previous host. FGS spec §2: the SAME epoch guards both the
+        // SSE collector AND the directory fan-out (no private second
+        // generation — the removed `directoryFetchGeneration` is now the
+        // identityStore's epoch).
+        val fetchIdentity = identityStore?.currentIdentity?.value
         // Re-fetch directory-scoped sessions for EVERY known workdir (the
         // persisted recentWorkdirs set + currentWorkdir) so each connected
         // project's sessions reappear after restart. directorySessions is
@@ -521,7 +526,10 @@ class ConnectionCoordinator(
                         // Drop stale-host results: a host/profile switch between
                         // dispatch and return would otherwise write the previous
                         // host's sessions into the new host's directorySessions.
-                        if (generation != directoryFetchGeneration.get()) return@launch
+                        // CP1: identityStore.isCurrent checks epoch + fp fields.
+                        if (fetchIdentity != null && identityStore != null &&
+                            !identityStore.isCurrent(fetchIdentity)
+                        ) return@launch
                         appendDirectorySessions(workdir, sessions)
                     }
                     .onFailure { error ->
@@ -531,7 +539,9 @@ class ConnectionCoordinator(
                         // user-initiated refreshDirectorySessions are the
                         // fallbacks. Log for diagnosability without surfacing
                         // a user-facing error.
-                        if (generation == directoryFetchGeneration.get()) {
+                        if (fetchIdentity == null || identityStore == null ||
+                            identityStore.isCurrent(fetchIdentity)
+                        ) {
                             reportNonFatalIssue(TAG, "directory restore failed for $workdir", error)
                         }
                     }
@@ -718,29 +728,43 @@ class ConnectionCoordinator(
             // workdir switch + new startSSE() retargets the feed (no cached
             // value to drift across reconnect).
             //
-            // §R-19 P1-10 Blocker 1 fix: capture the generation at coroutine
-            // start so per-event re-check can detect a host reconfigure that
-            // happened mid-collection.
-            val sseGenAtStart = directoryFetchGeneration.get()
+            // CP1 (notify Phase-0): capture the identity bound by testConnection
+            // (or lazy-bind if startSSE was called directly without a healthy
+            // connect). Each emitted event carries this identity so downstream
+            // consumers (SSC.handleEvent(IdentifiedSseEvent)) can validate it
+            // via identityStore.isCurrent BEFORE any fold. A frame is stale iff
+            // its capture-time identity != current — which isCurrent checks.
+            val sseIdentityAtStart = identityStore?.let { store ->
+                store.currentIdentity.value ?: store.bind(
+                    serverGroupFp = currentServerGroupFp(),
+                    normalizedWorkdir = settingsManager.currentWorkdir ?: "",
+                    endpointFp = settingsManager.serverUrl,
+                )
+            }
             repository.connectSSE(settingsManager.currentWorkdir)
                 .catch { error ->
                     Log.e("OC_ERROR", "SSE collection failed", error)
                     effects.tryEmitUiEvent(UiEvent.Error(R.string.error_sse_failed, listOf(error.message ?: "unknown error")))
                 }
                 .collect { result ->
-                    // §R-19 P1-10 Blocker 1 fix: drop stale-host events BEFORE
-                    // they're forwarded. The cancellation triggered by
+                    // CP1: drop stale-identity events BEFORE they're forwarded.
+                    // A host reconfigure (cancelSseForReconfigure →
+                    // identityStore.beginReconfigure bumps epoch + nulls
+                    // currentIdentity) invalidates this collector's capture-time
+                    // identity. The cancellation triggered by
                     // cancelSseForReconfigure is async; a frame already in the
                     // Flow's buffer (or mid-flight in the collector) could be
                     // delivered to this lambda before cancellation propagates.
                     // Without this check that frame would be forwarded as an
-                    // OnSseEvent and pollute the new host's state (a late
-                    // `server.connected` from the previous host would land in
-                    // SessionSyncCoordinator.handleEvent and flip
-                    // connectedOnce=true for the new host's cold-start, or
-                    // worse, fire a ReloadSession of the wrong session).
-                    if (sseGenAtStart != directoryFetchGeneration.get()) {
-                        DebugLog.i("SSE", "drop stale-host SSE event (gen $sseGenAtStart → ${directoryFetchGeneration.get()})")
+                    // OnSseEvent and pollute the new host's state.
+                    if (sseIdentityAtStart != null && identityStore != null &&
+                        !identityStore.isCurrent(sseIdentityAtStart)
+                    ) {
+                        DebugLog.i(
+                            "SSE",
+                            "drop stale-identity SSE event " +
+                                "(epoch=${sseIdentityAtStart.epoch} → current=${identityStore.currentEpoch()})"
+                        )
                         return@collect
                     }
                     result.onSuccess { event ->
@@ -759,7 +783,28 @@ class ConnectionCoordinator(
                             )
                         }
                         // §R18 Phase 3 Wave 1 (P1-3 A 类): launchSseCollection 内 SSE collect 回调是 suspend 上下文 → suspend emitEffect。
-                        effects.emitEffect(ControllerEffect.OnSseEvent(event))
+                        // CP1: wrap the event with the capture-time identity so
+                        // SSC's fold can validate it (FGS spec §1: identity
+                        // must not be stripped before the fold).
+                        val identified = if (sseIdentityAtStart != null) {
+                            IdentifiedSseEvent(sseIdentityAtStart, event)
+                        } else {
+                            // Legacy/test path with no identityStore wired —
+                            // synthesize a zero-epoch identity so the effect
+                            // type (OnSseEvent(IdentifiedSseEvent)) resolves.
+                            // SSC's identity gate is skipped when no store is
+                            // wired (handleEvent falls through to raw dispatch).
+                            IdentifiedSseEvent(
+                                cn.vectory.ocdroid.service.identity.ConnectionIdentity(
+                                    epoch = 0L,
+                                    serverGroupFp = "",
+                                    normalizedWorkdir = "",
+                                    endpointFp = "",
+                                ),
+                                event,
+                            )
+                        }
+                        effects.emitEffect(ControllerEffect.OnSseEvent(identified))
                     }
                         .onFailure { error ->
                             Log.e("OC_ERROR", "SSE event failed", error)
@@ -794,15 +839,23 @@ class ConnectionCoordinator(
         DebugLog.i("SSE", "cancelSse (reconfigure)")
         sseJob?.cancel()
         sseJob = null
-        // §generation-guard: a host/profile switch invalidates every in-flight
-        // directory fetch from the previous host. Bump so loadInitialData's
-        // late-returning onSuccess blocks drop their (stale-host) results.
-        directoryFetchGeneration.incrementAndGet()
+        // CP1 (notify Phase-0): bump the epoch AND invalidate the old identity
+        // via the single store. This replaces the removed private
+        // `directoryFetchGeneration.incrementAndGet()` — the SAME epoch now
+        // guards both the SSE collector AND the directory-fetch fan-out (FGS
+        // spec §2 «关键约束»: no second private generation). HostProfileController
+        // ALSO calls beginReconfigure() synchronously BEFORE repository.configure()
+        // (the true barrier origin); this defensive call covers standalone /
+        // non-HPC reconfigure entry points (and tests that drive
+        // cancelSseForReconfigure directly).
+        val newEpoch = identityStore?.beginReconfigure() ?: 0L
         // §Phase1E: a host/profile switch is a fresh server — treat the next
         // connect as a cold start (skip catch-up, the reconfigure path loads
         // sessions/messages itself). Routed to the catch-up controller.
         // §R18 Phase 3 Wave 1 (P1-3 B 类): 单发非 suspend → tryEmitEffect。
-        effects.tryEmitEffect(ControllerEffect.HostReconfigured)
+        // CP1: carry the new epoch so SSC's overlay resets to this exact
+        // generation (SseSyncState.hostGeneration = effect.epoch).
+        effects.tryEmitEffect(ControllerEffect.HostReconfigured(newEpoch))
     }
 
     companion object {
