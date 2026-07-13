@@ -4,6 +4,8 @@ package cn.vectory.ocdroid.ui.theme
 
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ColumnScope
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -15,6 +17,7 @@ import androidx.compose.material3.SheetState
 import androidx.compose.material3.Text
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.Dp
@@ -167,6 +170,11 @@ import androidx.compose.ui.unit.dp
  * @param containerColor 默认 [MaterialTheme.colorScheme.surfaceContainerLow]（配方固化点②）。
  * @param title 可选标题文本。非 null 时渲染 `titleLarge` + 水平 24dp/垂直 8dp padding
  *   （配方固化点③）。传 null 则不渲染标题行（调用方可在 [content] 里自定义标题）。
+ * @param titleTrailing 可选的标题行右侧槽（[RowScope]）。非 null 且 [title] 也非 null
+ *   时，标题行渲染为 `Row { Text(weight(1f)) + trailing() }`——用于放 close 按钮、
+ *   操作 chip 等。null（默认）时标题行退化为纯 `Text`（向后兼容现网 4 个调用点）。
+ *   注意：trailing 内容的垂直对齐为 `CenterVertically`；其水平 padding 由 scaffold 统一
+ *   在标题行外层加（h=24dp, v=8dp），调用方**不要**再自带外层 padding。
  *
  *   titleLarge 变更注：B4 迁移会让 sheet 标题从现网 `titleMedium`(16sp) 升级到
  *   `titleLarge`(18sp)，属 oracle A4 统一口径。**B4 需视觉走查**确认紧凑 sheet
@@ -192,6 +200,7 @@ fun AppBottomSheet(
     sheetState: SheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
     containerColor: Color = MaterialTheme.colorScheme.surfaceContainerLow,
     title: String? = null,
+    titleTrailing: (@Composable RowScope.() -> Unit)? = null,
     footer: (@Composable ColumnScope.() -> Unit)? = null,
     bottomContentPadding: Dp = 16.dp,
     content: @Composable ColumnScope.() -> Unit,
@@ -204,16 +213,38 @@ fun AppBottomSheet(
     ) {
         Column(modifier = Modifier.fillMaxWidth()) {
             // ③ title 行（仅当提供）。titleLarge + 水平 24dp / 垂直 8dp。
+            // titleTrailing 非 null 时把 title 包进 Row，让 trailing 贴右——
+            // 否则纯 Text（向后兼容：4 个现网调用点都不传 titleTrailing）。
             if (title != null) {
-                Text(
-                    text = title,
-                    style = MaterialTheme.typography.titleLarge,
-                    color = MaterialTheme.colorScheme.onSurface,
-                    modifier = Modifier.padding(
-                        horizontal = Dimens.spacing6,  // 24dp
-                        vertical = Dimens.spacing2,   // 8dp
-                    ),
-                )
+                if (titleTrailing == null) {
+                    Text(
+                        text = title,
+                        style = MaterialTheme.typography.titleLarge,
+                        color = MaterialTheme.colorScheme.onSurface,
+                        modifier = Modifier.padding(
+                            horizontal = Dimens.spacing6,  // 24dp
+                            vertical = Dimens.spacing2,   // 8dp
+                        ),
+                    )
+                } else {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(
+                                horizontal = Dimens.spacing6,
+                                vertical = Dimens.spacing2,
+                            ),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Text(
+                            text = title,
+                            style = MaterialTheme.typography.titleLarge,
+                            color = MaterialTheme.colorScheme.onSurface,
+                            modifier = Modifier.weight(1f),
+                        )
+                        titleTrailing()
+                    }
+                }
             }
 
             // content 槽：自然高度，调用方管滚动/封顶/水平 padding。
