@@ -37,6 +37,8 @@ import cn.vectory.ocdroid.util.SettingsManager
 import cn.vectory.ocdroid.util.STREAMING_FLICKER_DEBUG
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.serialization.json.Json
@@ -1223,18 +1225,45 @@ class SessionSyncCoordinator(
         // §Phase1a instrumentation (Issue 1): the full workdir SET being fanned out.
         DebugLog.d("Question", "loadPendingQuestionsAllWorkdirs fanOut=${workdirs.size} workdirs=$workdirs")
         if (workdirs.isEmpty()) return
-        workdirs.forEach { dir ->
-            scope.launch {
-                repository.getPendingQuestions(dir)
-                    .onSuccess { questions ->
-                        // §Phase1a instrumentation (Issue 1): per-workdir count returned.
-                        DebugLog.d("Question", "loadPendingQuestionsAllWorkdirs dir=$dir count=${questions.size}")
-                        mergePendingQuestionsById(slices::mutateSessionList, questions)
-                    }
-                    .onFailure { error ->
-                        DebugLog.w(tag, "fan-out getPendingQuestions failed for $dir: ${error.message}")
-                    }
+        // §badge-stale-fix: fan out to EVERY known workdir in parallel, then
+        // reconcile AUTHORITATIVELY (server is source of truth). Unlike the
+        // single-workdir optimistic path [launchLoadPendingQuestions] — which
+        // keeps locally-held questions to avoid flicker — this sweep covers the
+        // full known-workdir set at once, so its union is authoritative. A
+        // question the server no longer returns (resolved without the client
+        // receiving the resolve event, e.g. a missed SSE gap while backgrounded)
+        // is dropped here instead of lingering as a ghost that keeps the
+        // Sessions nav badge lit forever. Matches launchLoadPendingPermissions
+        // (full replace) semantics.
+        //
+        // Race-safety: a question.asked SSE event that lands DURING the fan-out
+        // (after the start snapshot, not yet in any in-flight GET response) is
+        // preserved — only questions present at start AND absent from the server
+        // response are treated as resolved-and-dropped.
+        scope.launch {
+            val startIds = slices.sessionList.value.pendingQuestions
+                .mapTo(mutableSetOf()) { it.id }
+            val fetched = workdirs.map { dir ->
+                async {
+                    repository.getPendingQuestions(dir)
+                        .onSuccess { questions ->
+                            DebugLog.d("Question", "loadPendingQuestionsAllWorkdirs dir=$dir count=${questions.size}")
+                        }
+                        .onFailure { error ->
+                            DebugLog.w(tag, "fan-out getPendingQuestions failed for $dir: ${error.message}")
+                        }
+                        .getOrDefault(emptyList())
+                }
+            }.awaitAll()
+            val fetchedIds = mutableSetOf<String>()
+            val authoritative = buildList {
+                fetched.flatten().forEach { if (fetchedIds.add(it.id)) add(it) }
+                slices.sessionList.value.pendingQuestions.forEach { q ->
+                    if (q.id !in fetchedIds && q.id !in startIds) add(q)
+                }
             }
+            slices.mutateSessionList { it.copy(pendingQuestions = authoritative) }
+            DebugLog.d("Question", "loadPendingQuestionsAllWorkdirs authoritative reconcile total=${authoritative.size} (had ${startIds.size} before)")
         }
     }
 

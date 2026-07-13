@@ -2,6 +2,7 @@ package cn.vectory.ocdroid.ui.shell
 
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
@@ -14,8 +15,10 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.isImeVisible
 import androidx.compose.foundation.layout.navigationBars
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.selection.selectable
 import androidx.compose.material.icons.Icons
@@ -24,7 +27,6 @@ import androidx.compose.material.icons.filled.AccountTree
 import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.Settings
-import androidx.compose.material3.Badge
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
@@ -99,8 +101,19 @@ fun AppShell(orchestratorVM: OrchestratorViewModel, navBarBottomDp: Dp = 0.dp) {
     val requestedRoute = NavRoute.fromRouteKey(navState.lastRoute)
     val sessionListState by sessionVM.sessionListFlow.collectAsStateWithLifecycle()
     val chatState by chatVM.chatFlow.collectAsStateWithLifecycle()
+    val unreadState by sessionVM.unreadFlow.collectAsStateWithLifecycle()
     val crossSessionPendingCount =
         crossSessionPendingCount(sessionListState, chatState.currentSessionId)
+    // §sessux-badge: the Sessions nav dot signals "attention needed elsewhere".
+    // It lights when ANY session other than the current one has a pending
+    // permission/question OR unread out-of-band activity. Pending and unread in
+    // the CURRENT session are already surfaced in-chat (StatusSlot / message
+    // list), so they must not re-light the nav dot — that double-signal was the
+    // source of user confusion ("I cleared every unread dot, why is the badge
+    // still on?"). The dot is binary (no count); count is visible on the cards.
+    val sessionsBadgeVisible =
+        crossSessionPendingCount > 0 ||
+            unreadState.unreadSessions.any { it != chatState.currentSessionId }
 
     fun navigateTopLevel(route: NavRoute) {
         navController.navigate(route.route) {
@@ -130,7 +143,7 @@ fun AppShell(orchestratorVM: OrchestratorViewModel, navBarBottomDp: Dp = 0.dp) {
             if (!WindowInsets.isImeVisible) {
                 CompactBottomBar(
                     currentRoute = currentRoute,
-                    crossSessionPendingCount = crossSessionPendingCount,
+                    sessionsBadgeVisible = sessionsBadgeVisible,
                     navBarBottomDp = navBarBottomDp,
                     onSelect = { route ->
                         if (route == currentRoute) {
@@ -300,7 +313,7 @@ fun AppShell(orchestratorVM: OrchestratorViewModel, navBarBottomDp: Dp = 0.dp) {
 @Composable
 private fun CompactBottomBar(
     currentRoute: NavRoute,
-    crossSessionPendingCount: Int,
+    sessionsBadgeVisible: Boolean,
     navBarBottomDp: androidx.compose.ui.unit.Dp,
     onSelect: (NavRoute) -> Unit,
     modifier: Modifier = Modifier,
@@ -359,10 +372,27 @@ private fun CompactBottomBar(
                             // it shifted inward when the pill rendered.
                             Box {
                                 NavIcon(route, selected)
-                                if (route == NavRoute.Sessions && crossSessionPendingCount > 0) {
-                                    Badge(modifier = Modifier.align(Alignment.TopEnd)) {
-                                        Text(crossSessionPendingCount.coerceAtMost(99).toString())
-                                    }
+                                if (route == NavRoute.Sessions && sessionsBadgeVisible) {
+                                    // §sessux-badge: small attention dot anchored to
+                                    // the icon's top-end corner, nudged past it so it
+                                    // reads as a separate marker (not a number — just
+                                    // "something needs you elsewhere"). The surface-
+                                    // colored ring separates it from the icon glyph.
+                                    Box(
+                                        Modifier
+                                            .align(Alignment.TopEnd)
+                                            .offset(x = 3.dp, y = (-3).dp)
+                                            .size(8.dp)
+                                            .background(
+                                                MaterialTheme.colorScheme.error,
+                                                CircleShape,
+                                            )
+                                            .border(
+                                                width = 1.5.dp,
+                                                color = MaterialTheme.colorScheme.surface,
+                                                shape = CircleShape,
+                                            ),
+                                    )
                                 }
                             }
                         }

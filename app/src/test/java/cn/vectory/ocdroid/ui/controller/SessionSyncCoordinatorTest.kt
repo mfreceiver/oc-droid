@@ -1409,12 +1409,17 @@ class SessionSyncCoordinatorTest {
 
     // §issue-1 Phase 2a Fix B: fan-out site (1) now INCLUDES per-fp recent_workdirs
     // (flipped green from the Phase 1b characterization that asserted their absence).
+    // §badge-stale-fix: behavior changed from optimistic keep-existing merge to
+    // AUTHORITATIVE reconcile — the fan-out covers every known workdir at once, so
+    // its union is the server's source of truth; a question the server no longer
+    // reports (resolved without the client receiving the resolve event) is DROPPED
+    // instead of lingering as a ghost that keeps the Sessions nav badge lit.
     @Test
-    fun `loadPendingQuestionsAllWorkdirs fans out across directorySessions keys plus currentWorkdir plus recent_workdirs and merges by id`() {
+    fun `loadPendingQuestionsAllWorkdirs fans out across directorySessions keys plus currentWorkdir plus recent_workdirs and reconciles authoritatively`() {
         // §P1-9: the single-workdir AppCore dispatch path polls only
         // currentWorkdir; background workdirs' questions vanish. The fan-out
         // here queries EVERY known directory + currentWorkdir + recent_workdirs
-        // (per-fp) and merges by id.
+        // (per-fp) and reconciles authoritatively.
         seed {
             it.copy(
                 directorySessions = mapOf(
@@ -1455,11 +1460,12 @@ class SessionSyncCoordinatorTest {
         scope.testScheduler.advanceUntilIdle()
 
         val ids = slices.sessionList.value.pendingQuestions.map { it.id }.toSet()
-        // byGet wins, existing fills gaps — merge keeps all 4 ids.
+        // Authoritative reconcile: server result wins; the locally-held ghost
+        // (present at fan-out start, absent from every server response) is dropped.
         assertTrue("qa from /proj-a", "qa" in ids)
         assertTrue("qb from /proj-b", "qb" in ids)
         assertTrue("qc from /current", "qc" in ids)
-        assertTrue("existing-not-on-server preserved (gap-fill)", "existing-not-on-server" in ids)
+        assertFalse("existing-not-on-server dropped (ghost no longer reported by server)", "existing-not-on-server" in ids)
         // §issue-1 Fix B: exact workdir SET = directorySessions.keys + currentWorkdir
         // + recent_workdirs (per-fp). Each queried exactly once (distinct). The
         // recent workdirs contribute no questions here (else-branch → empty) but
