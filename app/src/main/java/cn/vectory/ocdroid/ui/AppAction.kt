@@ -333,11 +333,16 @@ internal fun reduce(state: StoreState, action: AppAction): StoreState = when (ac
     is AppAction.BulkSessionsRefreshed -> {
         // FIX-A/C (archive-sync, review-blocker): atomic bulk-refresh commit.
         // Writes the merged list + pruned openIds + load flags in ONE step.
-        // If the current session is among the archived, ALSO clears chat
-        // (applyArchivedChatClear, which per FIX-B wipes pendingJumpToLatest)
-        // + unread/questions subtree cleanup — mirroring SessionArchived's
-        // current-session cleanup. Non-current archived ids get the openIds
-        // prune alone (SSE parity). No torn intermediate is observable.
+        //
+        // gro-2 Blocker 1 (round-2): subtree / unread / pendingQuestions
+        // cleanup now runs UNCONDITIONALLY over ALL archived ids (not just
+        // the current session) — mirroring SessionArchived's unconditional
+        // subtree cleanup. Previously the else-branch (non-current archived)
+        // skipped cleanup entirely, leaking stale unread badges +
+        // pendingQuestions for non-current archived open tabs (inflating
+        // crossSessionPendingCount). The CHAT-CLEAR remains current-only:
+        // only the archived CURRENT session's chat is wiped (non-current
+        // archived ids have no active chat window to clear).
         val archivedIds = action.sessions
             .filter { it.isArchived }
             .map { it.id }
@@ -351,28 +356,33 @@ internal fun reduce(state: StoreState, action: AppAction): StoreState = when (ac
             isLoadingMoreSessions = false,
             isRefreshingSessions = false,
         )
-        if (isCurrentArchived && currentId != null) {
-            // Mirror SessionArchived's chat-clear + subtree cleanup for the
-            // archived current session. The subtree is computed from the
-            // freshly-merged sessions (authoritative) + the existing directory
-            // / child maps (not overwritten by this action).
-            val subtree = subtreeIds(
-                currentId,
+        // Compute the subtree UNION over ALL archived ids. Each archived root
+        // may have descendants that did NOT get their own archive event —
+        // defensive subtree cleanup (mirrors SessionArchived's logic).
+        val allArchivedSubtree = archivedIds.flatMap { archivedId ->
+            subtreeIds(
+                archivedId,
                 action.sessions,
                 newSessionList.directorySessions,
                 newSessionList.childSessions,
             )
-            val cleanedQuestions = newSessionList.pendingQuestions
-                .filter { it.sessionId !in subtree }
-            val newUnread = state.unread.removeSessions(subtree)
-            state.copy(
-                sessionList = newSessionList.copy(pendingQuestions = cleanedQuestions),
-                chat = state.chat.applyArchivedChatClear().first,
-                unread = newUnread,
-            )
+        }.toSet()
+        val cleanedQuestions = newSessionList.pendingQuestions
+            .filter { it.sessionId !in allArchivedSubtree }
+        val newUnread = state.unread.removeSessions(allArchivedSubtree)
+        // Chat-clear is CURRENT-ONLY (non-current archived ids have no active
+        // chat window). applyArchivedChatClear also wipes pendingJumpToLatest
+        // (FIX-B).
+        val newChat = if (isCurrentArchived) {
+            state.chat.applyArchivedChatClear().first
         } else {
-            state.copy(sessionList = newSessionList)
+            state.chat
         }
+        state.copy(
+            sessionList = newSessionList.copy(pendingQuestions = cleanedQuestions),
+            chat = newChat,
+            unread = newUnread,
+        )
     }
 }
 

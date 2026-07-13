@@ -294,7 +294,21 @@ internal fun launchLoadSessions(
                     // has been chosen but no session created yet): selecting a
                     // session would discard the draft's repository workdir and
                     // hijack the empty chat page the user is composing into.
-                    currentSessionId == null && slices.composer.value.draftWorkdir == null && refreshedSessions.isNotEmpty() -> onSelectSession(refreshedSessions.first().id)
+                    //
+                    // gro-2 Blocker 2b: select the first NON-archived session.
+                    // If the server returns an archived session first (e.g.
+                    // after a bulk-archive nulled currentSessionId), we must
+                    // NOT resurrect it as current. If ALL candidates are
+                    // archived (or the list is empty), fall through to the
+                    // chat-clear — never select an archived session.
+                    currentSessionId == null && slices.composer.value.draftWorkdir == null -> {
+                        val candidate = refreshedSessions.firstOrNull { !it.isArchived }
+                        if (candidate != null) {
+                            onSelectSession(candidate.id)
+                        } else {
+                            slices.mutateChat { c -> c.copy(currentSessionId = null, messages = emptyList(), partsByMessage = emptyMap()) }
+                        }
+                    }
                     // currentId is set: keep it. Even when the session is
                     // temporarily absent from the refreshed list (e.g. just
                     // created, or a directory session), tolerate it — reload
@@ -323,8 +337,12 @@ internal fun launchLoadSessions(
                                 // first-select path so the user lands on a
                                 // valid session instead of the empty state
                                 // (mirrors the cold-start UX).
-                                if (slices.composer.value.draftWorkdir == null && refreshedSessions.isNotEmpty()) {
-                                    onSelectSession(refreshedSessions.first().id)
+                                //
+                                // gro-2 Blocker 2b: select the first NON-
+                                // archived session — never resurrect an
+                                // archived session via re-select.
+                                if (slices.composer.value.draftWorkdir == null) {
+                                    refreshedSessions.firstOrNull { !it.isArchived }?.let { onSelectSession(it.id) }
                                 }
                             } else {
                                 onLoadSessionStatus()

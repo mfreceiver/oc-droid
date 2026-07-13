@@ -293,6 +293,40 @@ class SessionListActionsTest {
         assertEquals("first", selected)
     }
 
+    // ── gro-2 Blocker 2b: auto-select must skip archived sessions ────────────
+
+    @Test
+    fun `gro-2 Blocker 2b - auto-select skips archived session and selects first live one`() = runTest {
+        // If the server returns an archived session first (e.g. after a bulk-
+        // archive nulled currentSessionId), the auto-select must NOT resurrect
+        // it — select the first NON-archived session instead.
+        val archivedA = Session(id = "archived-A", directory = "/x", time = Session.TimeInfo(archived = 1L))
+        val liveB = Session(id = "live-B", directory = "/x")
+        coEvery { repository.getSessions(any()) } returns Result.success(listOf(archivedA, liveB))
+        var selected: String? = null
+
+        launchLoadSessions(scope, repository, slices, settingsManager, { selected = it }, {}, {}, emit)
+        advanceUntilIdle()
+
+        assertEquals("must select live-B, NOT archived-A", "live-B", selected)
+    }
+
+    @Test
+    fun `gro-2 Blocker 2b - auto-select clears chat when ALL candidates are archived`() = runTest {
+        // If every session in the refresh result is archived, do NOT select
+        // any — fall through to the chat-clear (empty state).
+        val archivedA = Session(id = "archived-A", directory = "/x", time = Session.TimeInfo(archived = 1L))
+        val archivedC = Session(id = "archived-C", directory = "/x", time = Session.TimeInfo(archived = 2L))
+        coEvery { repository.getSessions(any()) } returns Result.success(listOf(archivedA, archivedC))
+        var selected: String? = null
+
+        launchLoadSessions(scope, repository, slices, settingsManager, { selected = it }, {}, {}, emit)
+        advanceUntilIdle()
+
+        assertNull("no archived session selected", selected)
+        assertNull("chat cleared (empty state)", slices.chat.value.currentSessionId)
+    }
+
     @Test
     fun `launchLoadSessions skips auto-select when composer is mid-draft`() = runTest {
         val sessions = listOf(Session(id = "first", directory = "/x"))

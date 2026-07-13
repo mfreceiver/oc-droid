@@ -1049,4 +1049,119 @@ class AppActionReducerTest {
         }
         job.cancel()
     }
+
+    // ── gro-2 Blocker 1: non-current archived subtree cleanup ──────────────
+
+    @Test
+    fun `gro-2 Blocker 1 - BulkSessionsRefreshed cleans subtree unread + pendingQuestions for non-current archived open tab`() {
+        // The bug: the reducer's else-branch (non-current archived) skipped
+        // subtree/unread/questions cleanup entirely. So a non-current archived
+        // OPEN tab's unread badge + pendingQuestions leaked — inflating
+        // crossSessionPendingCount and leaving dead badges.
+        // Fix: subtree cleanup now runs UNCONDITIONALLY over ALL archived ids.
+        val archivedRoot = Session(id = "archived-root", directory = "/p", time = Session.TimeInfo(archived = 1L))
+        val archivedChild = Session(id = "archived-child", directory = "/p", parentId = "archived-root")
+        val archivedGrandchild = Session(id = "archived-gc", directory = "/p", parentId = "archived-child")
+        val liveCurrent = Session(id = "live-cur", directory = "/p")
+        val prior = StoreState.initial().copy(
+            chat = ChatState(currentSessionId = "live-cur"),
+            sessionList = SessionListState(
+                sessions = listOf(liveCurrent, archivedRoot, archivedChild, archivedGrandchild),
+                openSessionIds = listOf("live-cur", "archived-root"),
+                pendingQuestions = listOf(
+                    QuestionRequest(id = "q-root", sessionId = "archived-root", questions = emptyList()),
+                    QuestionRequest(id = "q-child", sessionId = "archived-child", questions = emptyList()),
+                    QuestionRequest(id = "q-gc", sessionId = "archived-gc", questions = emptyList()),
+                    // A question bound to the LIVE current session MUST survive.
+                    QuestionRequest(id = "q-live", sessionId = "live-cur", questions = emptyList()),
+                ),
+            ),
+            unread = UnreadState(
+                unreadSessions = setOf("archived-root", "archived-child", "archived-gc", "live-cur"),
+                lastViewedTime = mapOf(
+                    "archived-root" to 1L, "archived-child" to 2L, "archived-gc" to 3L, "live-cur" to 4L,
+                ),
+            ),
+        )
+
+        val out = reduce(
+            prior,
+            AppAction.BulkSessionsRefreshed(
+                sessions = listOf(liveCurrent, archivedRoot, archivedChild, archivedGrandchild),
+                openSessionIds = listOf("live-cur"),  // archived-root pruned
+                hasMoreSessions = false,
+            ),
+        )
+
+        // The non-current archived subtree (root + child + grandchild) is
+        // cleaned from unread + pendingQuestions — even though chat was NOT
+        // cleared (non-current).
+        assertFalse("archived root removed from unread", "archived-root" in out.unread.unreadSessions)
+        assertFalse("archived child removed from unread", "archived-child" in out.unread.unreadSessions)
+        assertFalse("archived grandchild removed from unread", "archived-gc" in out.unread.unreadSessions)
+        assertTrue("live current session unread preserved", "live-cur" in out.unread.unreadSessions)
+        // lastViewedTime orphans dropped for the subtree only.
+        assertFalse("archived root lastViewed cleared", "archived-root" in out.unread.lastViewedTime)
+        assertFalse("archived child lastViewed cleared", "archived-child" in out.unread.lastViewedTime)
+        assertEquals(4L, out.unread.lastViewedTime["live-cur"])
+        // Subtree questions removed; live current's question survives.
+        assertTrue(
+            "archived subtree questions removed",
+            out.sessionList.pendingQuestions.none { it.sessionId in setOf("archived-root", "archived-child", "archived-gc") },
+        )
+        assertTrue(
+            "live current question preserved",
+            out.sessionList.pendingQuestions.any { it.sessionId == "live-cur" },
+        )
+        // Chat is NOT cleared for the non-current archived session.
+        assertEquals("chat NOT cleared (current is live)", "live-cur", out.chat.currentSessionId)
+        // openIds pruned of the archived id.
+        assertEquals(listOf("live-cur"), out.sessionList.openSessionIds)
+    }
+
+    @Test
+    fun `gro-2 Blocker 1 regression - BulkSessionsRefreshed current-archived STILL clears chat + subtree`() {
+        // Regression guard: the current-archived case must STILL clear chat +
+        // subtree cleanup (the fix broadened cleanup to ALL archived ids, but
+        // the chat-clear must remain current-only and still fire).
+        val archivedCurrent = Session(id = "cur", directory = "/p", time = Session.TimeInfo(archived = 1L))
+        val archivedChild = Session(id = "child", directory = "/p", parentId = "cur")
+        val prior = StoreState.initial().copy(
+            chat = ChatState(
+                currentSessionId = "cur",
+                messages = listOf(Message(id = "m1", role = "user")),
+                pendingJumpToLatest = "cur",
+            ),
+            sessionList = SessionListState(
+                sessions = listOf(archivedCurrent, archivedChild),
+                openSessionIds = listOf("cur"),
+                pendingQuestions = listOf(
+                    QuestionRequest(id = "q-cur", sessionId = "cur", questions = emptyList()),
+                    QuestionRequest(id = "q-child", sessionId = "child", questions = emptyList()),
+                ),
+            ),
+            unread = UnreadState(
+                unreadSessions = setOf("cur", "child"),
+                lastViewedTime = mapOf("cur" to 1L, "child" to 2L),
+            ),
+        )
+
+        val out = reduce(
+            prior,
+            AppAction.BulkSessionsRefreshed(
+                sessions = listOf(archivedCurrent, archivedChild),
+                openSessionIds = emptyList(),
+                hasMoreSessions = false,
+            ),
+        )
+
+        // Chat cleared (current IS archived).
+        assertNull("chat cleared for archived current", out.chat.currentSessionId)
+        assertTrue("messages cleared", out.chat.messages.isEmpty())
+        assertNull("pendingJumpToLatest cleared (FIX-B)", out.chat.pendingJumpToLatest)
+        // Full subtree cleaned.
+        assertFalse("cur removed from unread", "cur" in out.unread.unreadSessions)
+        assertFalse("child removed from unread", "child" in out.unread.unreadSessions)
+        assertTrue("all subtree questions removed", out.sessionList.pendingQuestions.isEmpty())
+    }
 }

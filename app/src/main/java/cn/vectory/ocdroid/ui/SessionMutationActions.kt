@@ -15,6 +15,7 @@ import cn.vectory.ocdroid.data.repository.OpenCodeRepository
 import cn.vectory.ocdroid.ui.controller.ControllerEffect
 import cn.vectory.ocdroid.ui.controller.removeSessions
 import cn.vectory.ocdroid.ui.controller.subtreeIds
+import cn.vectory.ocdroid.util.DebugLog
 import cn.vectory.ocdroid.util.SettingsManager
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.launch
@@ -294,6 +295,28 @@ internal fun launchSendMessage(
     scope.launch {
         repository.sendMessage(sessionId, text, agent, model, attachments = attachments)
             .onSuccess {
+                // gro-2 Blocker 2a: if the session was archived mid-send (e.g.
+                // cross-device archive during the prompt_async window), do NOT
+                // resurrect it as ghost-busy. Check whether the session is
+                // EXPLICITLY archived in the list — bail ONLY if it is present
+                // AND archived. If it is absent (not yet loaded / cold-start
+                // window), be lenient and proceed (the session was valid at
+                // dispatch time; absence ≠ archived). This correctly handles:
+                //  (a) archived mid-flight → present + isArchived → skip;
+                //  (b) user merely switched away to a non-archived session →
+                //      present + !isArchived → proceed (bump the sent-to
+                //      session). Do NOT gate purely on
+                //      sessionId == currentSessionId (that breaks the legit
+                //      switch-away case — the sent-to session deserves its
+                //      bump regardless of which session is currently open).
+                val sessionInList = slices.sessionList.value.sessions.firstOrNull { it.id == sessionId }
+                if (sessionInList != null && sessionInList.isArchived) {
+                    DebugLog.i("Sync", "launchSendMessage: session $sessionId archived at success time → skipping bump/refresh (no ghost-busy)")
+                    // Do NOT call onComplete here — the outer onComplete?.invoke()
+                    // below (after .onFailure) ALWAYS runs (it is the "finally"
+                    // equivalent). Just bail out of onSuccess.
+                    return@onSuccess
+                }
                 // §R-17 batch2 step e final: slice-only reads.
                 val currentSessions = slices.sessionList.value.sessions
                 val currentStatuses = slices.sessionList.value.sessionStatuses
