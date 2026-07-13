@@ -349,10 +349,20 @@ private fun CompactBottomBar(
                                         ),
                                 )
                             }
-                            NavIcon(route, selected)
-                            if (route == NavRoute.Sessions && crossSessionPendingCount > 0) {
-                                Badge(modifier = Modifier.align(Alignment.TopEnd)) {
-                                    Text(crossSessionPendingCount.coerceAtMost(99).toString())
+                            // §sessux #4: wrap NavIcon in its own Box so the
+                            // pending-count Badge anchors to the ICON's bounds
+                            // (icon-sized, fixed) rather than the outer Box
+                            // (which grows to the 40×32 selected-pill when
+                            // active but shrinks to just the icon when not).
+                            // Anchoring on the icon keeps the badge at the
+                            // same screen position in both states — previously
+                            // it shifted inward when the pill rendered.
+                            Box {
+                                NavIcon(route, selected)
+                                if (route == NavRoute.Sessions && crossSessionPendingCount > 0) {
+                                    Badge(modifier = Modifier.align(Alignment.TopEnd)) {
+                                        Text(crossSessionPendingCount.coerceAtMost(99).toString())
+                                    }
                                 }
                             }
                         }

@@ -115,6 +115,16 @@
     <string name="sessions_new_session">新建会话</string>
     <!-- 导航改造：Sessions 标签的 new-session FAB（扁平列表，无项目分组）。 -->
     <string name="sessions_new_session_fab">新建会话</string>
+    <!-- UX 批次 (2026-07-13)：新建会话顶栏入口 + 空态 + 卡片标记。 -->
+    <string name="sessions_new_session_no_projects">先连接一个项目</string>
+    <string name="sessions_pick_workdir_title">选择项目</string>
+    <string name="sessions_empty_hint">连接到项目目录或新建对话</string>
+    <string name="cd_unread_marker">未读</string>
+    <string name="cd_question_marker">待回答</string>
+    <string name="cd_permission_marker">待授权</string>
+    <string name="chat_empty_no_tab">在会话页面选择或新建对话</string>
+    <string name="git_no_workdir">未选取工作目录</string>
+    <string name="cache_management_clear_session_cd">清除会话缓存</string>
     <string name="sessions_recent_section">最近</string>
     <string name="sessions_by_workdir_section">按工作目录</string>
     <string name="chat_session_overflow">会话操作</string>
@@ -507,4 +517,8 @@
     <!-- §B2: ChatFilePreviewScreen 本地生成的回退文案（与服务端 error.message 区分）。 -->
     <string name="chat_preview_no_path">缺少文件路径或工作目录。</string>
     <string name="chat_preview_load_failed">加载文件失败。</string>
+
+    <!-- §setux #new4: Settings 列表入口（服务器管理 hub）。hub 自身的 TopAppBar
+         仍用 settings_section_hosts（「服务器管理」）；此短文案仅用于列表行。 -->
+    <string name="setux_settings_hosts_entry">服务器</string>
 </resources>

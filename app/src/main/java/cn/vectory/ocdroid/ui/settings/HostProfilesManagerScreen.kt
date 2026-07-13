@@ -176,6 +176,8 @@ internal fun HostProfilesManagerScreen(
             }
 
             // ── §P5b-A / Q7 Section 1: 服务器配置 ──
+            // §setux #5: 已配置服务器列表项间距压缩——ListItem 自带 padding，
+            // 再叠 8dp Spacer 过松；降到 2dp 让列表更紧凑。
             SectionHeader(title = stringResource(R.string.host_profiles_title))
             profiles.forEach { profile ->
                 HostProfileRow(
@@ -184,7 +186,7 @@ internal fun HostProfilesManagerScreen(
                     onSelect = { viewModel.selectHostProfile(profile.id) },
                     onEdit = { editingProfile = profile }
                 )
-                Spacer(modifier = Modifier.height(8.dp))
+                Spacer(modifier = Modifier.height(2.dp))
             }
             Spacer(modifier = Modifier.height(16.dp))
 

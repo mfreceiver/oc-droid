@@ -18,6 +18,7 @@ package cn.vectory.ocdroid.ui.settings
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -28,6 +29,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.CleaningServices
+import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.Button
@@ -47,6 +49,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.RectangleShape
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -112,10 +115,22 @@ internal fun CacheManagementSection(
     // new DailySweepReport, so the effect re-triggers per sweep (top-level or
     // per-group). The evicted count comes from report.evictedSessionIds
     // (orphan sessions that were scan+deleted).
+    // §setux #7: consume lastSweep right after showing the snackbar so a
+    // composition re-entry (nav back-and-forth, rotation) does NOT re-fire
+    // this effect and re-show the snackbar. Without the clear, lastSweep
+    // stays non-null in the VM and the next time the storage sub-route
+    // enters composition the LaunchedEffect re-runs.
     LaunchedEffect(lastSweep) {
         val report = lastSweep ?: return@LaunchedEffect
         val count = report.evictedSessionIds.size
-        snackbarHostState.showTimed(clearResultTemplate.format(count))
+        // §review-fix (groker MINOR4): consume in try/finally so a thrown
+        // showTimed (e.g. host disposed mid-show) still clears lastSweep —
+        // otherwise the stale report would re-fire on next composition entry.
+        try {
+            snackbarHostState.showTimed(clearResultTemplate.format(count))
+        } finally {
+            vm.clearLastSweep()
+        }
     }
 
     if (isDegraded) {
@@ -405,8 +420,23 @@ private fun CachedSessionRowItem(
                             else MaterialTheme.colorScheme.onSurfaceVariant
                 )
             }
-            OutlinedButton(onClick = onClearSession) {
-                Text(stringResource(R.string.cache_management_action_clear_session))
+            // §setux #8: 清除按钮改为无圆角矩形 + 主题深色填充 + Delete 图标，
+            // 无文字。紧凑 36dp 方形，contentDescription 走专用无障碍 key
+            // (cache_management_clear_session_cd)。
+            Button(
+                onClick = onClearSession,
+                shape = RectangleShape,
+                colors = ButtonDefaults.buttonColors(
+                    containerColor = MaterialTheme.colorScheme.primary
+                ),
+                contentPadding = PaddingValues(0.dp),
+                modifier = Modifier.size(36.dp)
+            ) {
+                Icon(
+                    Icons.Default.Delete,
+                    contentDescription = stringResource(R.string.cache_management_clear_session_cd),
+                    modifier = Modifier.size(Dimens.iconXs)
+                )
             }
         }
     }

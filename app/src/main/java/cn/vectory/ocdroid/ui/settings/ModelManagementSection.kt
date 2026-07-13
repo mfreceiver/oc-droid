@@ -5,6 +5,7 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
@@ -12,12 +13,12 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.ChevronRight
-import androidx.compose.material3.AlertDialog
-import androidx.compose.material3.Icon
+import androidx.compose.material3.AlertDialogDefaults
+import androidx.compose.material3.BasicAlertDialog
+import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.ListItem
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -30,9 +31,11 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.window.DialogProperties
 import cn.vectory.ocdroid.R
 import cn.vectory.ocdroid.data.model.ConfigProvider
 import cn.vectory.ocdroid.data.model.ProvidersResponse
@@ -85,6 +88,8 @@ internal fun ModelManagementSection(
     }
 
     var showDialog by rememberSaveable { mutableStateOf(false) }
+    // §setux #new4: 移除右侧 `>` chevron 指示符（trailingContent），保留
+    // clickable 行为。
     ListItem(
         modifier = Modifier
             .fillMaxWidth()
@@ -105,13 +110,6 @@ internal fun ModelManagementSection(
                 overflow = TextOverflow.Ellipsis
             )
         },
-        trailingContent = {
-            Icon(
-                Icons.Default.ChevronRight,
-                contentDescription = null,
-                tint = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-        }
     )
 
     if (showDialog) {
@@ -125,6 +123,7 @@ internal fun ModelManagementSection(
     }
 }
 
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun ModelManagementDialog(
     providers: ProvidersResponse?,
@@ -134,46 +133,82 @@ private fun ModelManagementDialog(
     onDismiss: () -> Unit
 ) {
     val catalog = providers?.providers.orEmpty().filter { it.models.isNotEmpty() }
-    AlertDialog(
+    // §setux #6: 改为 BasicAlertDialog + Surface 容器。原实现用 AlertDialog 的
+    // text 槽承载 verticalScroll 列表，Switch 触摸事件被 AlertDialog 的内部
+    // scroll/layout 消化导致「无法点击」。BasicAlertDialog 把内容完全交给
+    // 调用方，Switch 在普通 Column 里——触摸路由恢复正常。title / Done 按钮 /
+    // scroll / providers 遍历 / ProviderBlock / ModelRow / 接线全部保留。
+    BasicAlertDialog(
         onDismissRequest = onDismiss,
-        title = {
-            Column {
-                Text(stringResource(R.string.settings_model_management))
-                Text(
-                    text = stringResource(R.string.settings_model_management_hint),
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    modifier = Modifier.padding(top = 4.dp)
-                )
-            }
-        },
-        text = {
-            Column(
-                modifier = Modifier
-                    .heightIn(max = 480.dp)
-                    .verticalScroll(rememberScrollState())
-            ) {
-                catalog.forEachIndexed { providerIndex, provider ->
-                    if (providerIndex > 0) {
-                        Spacer(modifier = Modifier.height(12.dp))
-                        Spacer(modifier = Modifier.height(8.dp))
-                        Spacer(modifier = Modifier.height(12.dp))
-                    }
-                    ProviderBlock(
-                        provider = provider,
-                        disabledModels = disabledModels,
-                        onToggleModelDisabled = onToggleModelDisabled,
-                        onSetProviderModelsEnabled = onSetProviderModelsEnabled
+        properties = DialogProperties(
+            usePlatformDefaultWidth = false,
+            dismissOnBackPress = true,
+            dismissOnClickOutside = true,
+        ),
+    ) {
+        Surface(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 16.dp)
+                // §review-fix (gpter M2): cap the dialog at ~85% of the screen
+                // height so the Done button stays reachable on small / landscape
+                // / split-screen (the old fixed heightIn(max=480) list + title
+                // + spacers + Done could exceed the viewport and clip Done).
+                .heightIn(max = LocalConfiguration.current.screenHeightDp.dp * 0.85f),
+            shape = AlertDialogDefaults.shape,
+            tonalElevation = AlertDialogDefaults.TonalElevation,
+            color = AlertDialogDefaults.containerColor,
+        ) {
+            Column(modifier = Modifier.fillMaxHeight().padding(24.dp)) {
+                // title (含 hint 副标题) — 保留原 AlertDialog.title 内容。
+                Column {
+                    Text(stringResource(R.string.settings_model_management))
+                    Text(
+                        text = stringResource(R.string.settings_model_management_hint),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(top = 4.dp)
                     )
                 }
-            }
-        },
-        confirmButton = {
-            TextButton(onClick = onDismiss) {
-                Text(stringResource(R.string.common_done))
+                Spacer(modifier = Modifier.height(16.dp))
+
+                // 滚动内容（providers + 每个 ProviderBlock 的 Switch + 每个
+                // ModelRow 的 Switch）。现在这些 Switch 在普通 Column（非
+                // AlertDialog.text 槽），触摸事件正常派发。weight(1f) 让列表
+                // 消费 title/Done 之外的剩余高度并在溢出时滚动。
+                Column(
+                    modifier = Modifier
+                        .weight(1f)
+                        .verticalScroll(rememberScrollState())
+                ) {
+                    catalog.forEachIndexed { providerIndex, provider ->
+                        if (providerIndex > 0) {
+                            Spacer(modifier = Modifier.height(12.dp))
+                            Spacer(modifier = Modifier.height(8.dp))
+                            Spacer(modifier = Modifier.height(12.dp))
+                        }
+                        ProviderBlock(
+                            provider = provider,
+                            disabledModels = disabledModels,
+                            onToggleModelDisabled = onToggleModelDisabled,
+                            onSetProviderModelsEnabled = onSetProviderModelsEnabled
+                        )
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(24.dp))
+                // confirmButton (Done) — 右对齐，保留原 TextButton。
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.End
+                ) {
+                    TextButton(onClick = onDismiss) {
+                        Text(stringResource(R.string.common_done))
+                    }
+                }
             }
         }
-    )
+    }
 }
 
 @Composable

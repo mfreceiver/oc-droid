@@ -254,6 +254,69 @@ class SessionsScreenTest {
 
     // ─────────── fixtures ──────────────────────────────────────────────────
 
+    // ─────────── §sessux #4: rootHasPending (pending → root aggregation) ───
+    // Pins the contract that a pending question/permission on a sub-agent
+    // (reachable only via the parentId chain, and present in `childSessions`
+    // not `sessions`/`directorySessions`) surfaces on its ROOT session card —
+    // so the bottom-tab crossSessionPendingCount badge can be traced to a card.
+
+    @Test
+    fun `rootHasPending — root itself pending returns true`() {
+        val root = session(id = "root", dir = "/p")
+        val byId = listOf(root).associateBy { it.id }
+        assertTrue(rootHasPending("root", byId, setOf("root")))
+    }
+
+    @Test
+    fun `rootHasPending — direct child pending aggregates to root`() {
+        val root = session(id = "root", dir = "/p")
+        val child = session(id = "child", dir = "/p", parentId = "root")
+        val byId = listOf(root, child).associateBy { it.id }
+        assertTrue(rootHasPending("root", byId, setOf("child")))
+    }
+
+    @Test
+    fun `rootHasPending — grandchild multi-level chain aggregates to root`() {
+        val root = session(id = "root", dir = "/p")
+        val mid = session(id = "mid", dir = "/p", parentId = "root")
+        val leaf = session(id = "leaf", dir = "/p", parentId = "mid")
+        val byId = listOf(root, mid, leaf).associateBy { it.id }
+        assertTrue(rootHasPending("root", byId, setOf("leaf")))
+    }
+
+    @Test
+    fun `rootHasPending — parentId cycle terminates without infinite loop`() {
+        val a = session(id = "a", dir = "/p", parentId = "b")
+        val b = session(id = "b", dir = "/p", parentId = "a")
+        val byId = listOf(a, b).associateBy { it.id }
+        // 'a' is pending but its cycle never reaches the unrelated 'root'.
+        assertFalse(rootHasPending("root", byId, setOf("a")))
+    }
+
+    @Test
+    fun `rootHasPending — unrelated tree pending does not flag this root`() {
+        val rootA = session(id = "rootA", dir = "/pa")
+        val childA = session(id = "childA", dir = "/pa", parentId = "rootA")
+        val rootB = session(id = "rootB", dir = "/pb")
+        val byId = listOf(rootA, childA, rootB).associateBy { it.id }
+        assertFalse(rootHasPending("rootB", byId, setOf("childA")))
+        assertTrue(rootHasPending("rootA", byId, setOf("childA")))
+    }
+
+    @Test
+    fun `rootHasPending — pending id absent from map is ignored without crashing`() {
+        val root = session(id = "root", dir = "/p")
+        val byId = listOf(root).associateBy { it.id }
+        assertFalse(rootHasPending("root", byId, setOf("ghost-session")))
+    }
+
+    @Test
+    fun `rootHasPending — empty pending set short-circuits false`() {
+        val root = session(id = "root", dir = "/p")
+        val byId = listOf(root).associateBy { it.id }
+        assertFalse(rootHasPending("root", byId, emptySet()))
+    }
+
     private fun session(
         id: String,
         dir: String,

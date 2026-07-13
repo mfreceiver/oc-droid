@@ -120,6 +120,16 @@
     <string name="sessions_new_session">New session</string>
     <!-- Nav redesign: Sessions tab new-session FAB (flat list, no workdir groups). -->
     <string name="sessions_new_session_fab">New session</string>
+    <!-- UX batch (2026-07-13): new-session top-bar action + empty states + card markers. -->
+    <string name="sessions_new_session_no_projects">Connect a project first</string>
+    <string name="sessions_pick_workdir_title">Choose a project</string>
+    <string name="sessions_empty_hint">Connect a project or start a new conversation</string>
+    <string name="cd_unread_marker">Unread</string>
+    <string name="cd_question_marker">Pending question</string>
+    <string name="cd_permission_marker">Pending permission</string>
+    <string name="chat_empty_no_tab">Pick or start a conversation from Sessions</string>
+    <string name="git_no_workdir">No workdir selected</string>
+    <string name="cache_management_clear_session_cd">Clear session cache</string>
     <string name="sessions_recent_section">Recent</string>
     <string name="sessions_by_workdir_section">By workdir</string>
     <string name="chat_session_overflow">Session actions</string>
@@ -537,4 +547,10 @@
          Server-provided error.message stays as-is per existing policy. -->
     <string name="chat_preview_no_path">No file path or working directory available.</string>
     <string name="chat_preview_load_failed">Failed to load file.</string>
+
+    <!-- §setux #new4: Settings slim-list entry for the 服务器管理 hub. The
+         hub's own TopAppBar keeps settings_section_hosts ("Server
+         Management"); this shorter label is the list-row affordance only
+         (key added because settings_section_hosts is reused). -->
+    <string name="setux_settings_hosts_entry">Server</string>
 </resources>

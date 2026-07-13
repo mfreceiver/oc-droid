@@ -13,13 +13,15 @@ import androidx.compose.material.icons.automirrored.filled.Chat
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.AddComment
 import androidx.compose.material.icons.filled.Archive
-import androidx.compose.material.icons.filled.History
+import androidx.compose.material.icons.filled.Inbox
+import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.RectangleShape
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import cn.vectory.ocdroid.R
@@ -47,13 +49,18 @@ fun SessionsScreen(
     /**
      * Nav redesign: SessionsScreen is now the flat session-history tab. The
      * "Connected projects" block moved to the Files tab (project-centric
-     * workspace), so the composer / settings / repository slices that fed it
-     * are no longer consumed here. The params are KEPT in the signature so
-     * AppShell's call site stays unchanged; they are simply no longer read.
+     * workspace), so the composer / repository slices that fed it are no
+     * longer consumed here. The params are KEPT in the signature so AppShell's
+     * call site stays unchanged; they are simply no longer read.
+     *
+     * settingsVM is now CONSUMED again — the new-session affordance (TopAppBar
+     * action + empty state) branches on the connected-workdir count from
+     * [SettingsViewModel.recentWorkdirs] (0 → disabled, 1 → direct create,
+     * ≥2 → workdir picker dialog).
      */
     @Suppress("UNUSED_PARAMETER") composerVM: ComposerViewModel,
     @Suppress("UNUSED_PARAMETER") orchestratorVM: OrchestratorViewModel,
-    @Suppress("UNUSED_PARAMETER") settingsVM: SettingsViewModel,
+    settingsVM: SettingsViewModel,
     /** §R-17 batch3e: repository for the DirectoryPickerSheet (was
      *  `viewModel.core.repository`). Injected via the activity-scoped
      *  [FilesViewModel] at the call site; passed in directly here so this
@@ -104,8 +111,14 @@ fun SessionsScreen(
     // session history — it only needs the session list + unread badges.
     val unreadSessions by remember { viewModel.unreadFlow.map { it.unreadSessions }.distinctUntilChanged() }
         .collectAsStateWithLifecycle(initialValue = emptySet())
+    // §sessux #3: recentWorkdirs drives the new-session affordance (TopAppBar
+    // action + empty state): 0 → disabled, 1 → direct create, ≥2 → picker.
+    val recentWorkdirs by settingsVM.recentWorkdirs.collectAsStateWithLifecycle()
     // M7: long-press a session card → archive confirmation dialog. Null = hidden.
     var pendingArchiveSession by remember { mutableStateOf<Session?>(null) }
+    // §sessux #3: workdir picker dialog state. Set when the user taps the
+    // new-session action with ≥2 connected workdirs.
+    var pendingWorkdirPick by remember { mutableStateOf(false) }
     // Derive the FLAT session list: ALL root sessions (parentId == null,
     // non-archived) across every connected project, by time.updated desc.
     // Nav redesign: the old `.take(5)` "recent" cap is removed — the Sessions
@@ -119,6 +132,35 @@ fun SessionsScreen(
                 .filter { it.parentId == null && !it.isArchived }
                 .sortedByDescending { it.time?.updated ?: 0L }
         }
+    }
+    // §sessux #4: pending (question / permission) aggregation to ROOT cards.
+    // The pending session may be a sub-agent (parentId != null); its marker
+    // should surface on the root card so the user sees "this conversation
+    // tree needs you". rootHasPending walks the parentId chain from each
+    // pending session up to its root and matches the card's session id.
+    //
+    // §review-fix (gpter MAJOR#1): the ancestor graph MUST include
+    // `childSessions` — sub-agents live there (NOT in `sessions` /
+    // `directorySessions`), so omitting it silently dropped the most important
+    // case (a sub-agent's pending question/permission → its root card).
+    // Building the id→Session map once per recomposition (not per-card, not
+    // per-pending-set) also removes the O(n) associateBy from each call.
+    val sessionsById = remember(
+        sessionListState.sessions,
+        sessionListState.directorySessions,
+        sessionListState.childSessions,
+    ) {
+        (
+            sessionListState.sessions +
+                sessionListState.directorySessions.values.flatten() +
+                sessionListState.childSessions.values.flatten()
+            ).distinctBy { it.id }.associateBy { it.id }
+    }
+    val pendingQuestionSessionIds = remember(sessionListState.pendingQuestions) {
+        sessionListState.pendingQuestions.map { it.sessionId }.toSet()
+    }
+    val pendingPermissionSessionIds = remember(sessionListState.pendingPermissions) {
+        sessionListState.pendingPermissions.map { it.sessionId }.toSet()
     }
 
     // Nav redesign: the "Connected projects" workdir-groups section moved to
@@ -137,31 +179,62 @@ fun SessionsScreen(
         onSwitchToChat()
     }
 
+    // §sessux #3 / #new3: shared new-session flow. 0 connected workdirs → the
+    // entry is disabled in the TopAppBar (so this path is unreachable from
+    // there), but the empty-state button is always clickable; with 0 workdirs
+    // the flow is an intentional no-op (the title-hint + disabled action
+    // signal the precondition). 1 workdir → direct create. ≥2 → picker dialog.
+    val onStartNewSession: () -> Unit = {
+        when {
+            recentWorkdirs.isEmpty() -> Unit
+            recentWorkdirs.size == 1 -> {
+                viewModel.createSessionInWorkdir(recentWorkdirs.single())
+                onSwitchToChat()
+            }
+            else -> pendingWorkdirPick = true
+        }
+    }
+
     Box(modifier = Modifier.fillMaxSize()) {
         Scaffold(
             topBar = {
                 TopAppBar(
                     title = {
-                        Text(stringResource(R.string.nav_sessions))
+                        // §sessux #3: when 0 workdirs are connected, the
+                        // new-session action is disabled and a small hint is
+                        // shown beneath the title so the user understands why
+                        // (mirrors the supporting-text pattern; kept compact).
+                        Column {
+                            Text(stringResource(R.string.nav_sessions))
+                            if (recentWorkdirs.isEmpty()) {
+                                Text(
+                                    text = stringResource(R.string.sessions_new_session_no_projects),
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                )
+                            }
+                        }
                     },
                     // §0.8.2 P3.1: top-left navigationIcon removed — Sessions
                     // is a top-level tab now (no back arrow). The
                     // showBackNavigation param is retained in the signature
                     // but no longer read here (see param doc above).
-                )
-            },
-            // Nav redesign: new-session FAB. Mirrors SessionPickerSheet's
-            // onNewSession semantic — starts a fresh draft against the current
-            // workdir (viewModel.createSession) and jumps to Chat so the user
-            // lands in the composer for the new (draft) session.
-            floatingActionButton = {
-                ExtendedFloatingActionButton(
-                    onClick = {
-                        viewModel.createSession()
-                        onSwitchToChat()
-                    },
-                    icon = { Icon(Icons.Default.Add, contentDescription = null) },
-                    text = { Text(stringResource(R.string.sessions_new_session_fab)) },
+                    actions = {
+                        // §sessux #3: new-session IconButton. Disabled (greyed
+                        // out) when no workdir is connected; the title-hint
+                        // above explains the precondition. With exactly one
+                        // workdir it starts a draft there directly; with ≥2
+                        // it opens the workdir picker dialog.
+                        IconButton(
+                            onClick = onStartNewSession,
+                            enabled = recentWorkdirs.isNotEmpty(),
+                        ) {
+                            Icon(
+                                Icons.Default.Add,
+                                contentDescription = stringResource(R.string.sessions_new_session_fab),
+                            )
+                        }
+                    }
                 )
             }
         ) { padding ->
@@ -172,9 +245,8 @@ fun SessionsScreen(
                 // §0.8.2 P3.3 / Q9: no extra TOP contentPadding — the title↔
                 // first-item gap was inflated by the now-removed docked
                 // SearchBar item + the previous vertical=8dp top pad. The
-                // first SectionHeader already carries its own vertical=12dp
-                // internal padding, so 0 top here keeps a clean gap. Bottom
-                // pad retained for scroll comfort.
+                // first card already has its own padding, so 0 top here keeps
+                // a clean gap. Bottom pad retained for scroll comfort.
                 contentPadding = PaddingValues(bottom = Dimens.spacing2),
                 // §0.8.2 P3.3 / B6·P5: items flush (was hairline=1dp seam —
                 // hairline is a divider-thickness token, not list spacing).
@@ -182,40 +254,95 @@ fun SessionsScreen(
                 // grouping without a 1dp gap.
                 verticalArrangement = Arrangement.spacedBy(0.dp)
             ) {
-            // --- Recent Sessions Section ---
-            item(key = "recent_header") {
-                SectionHeader(
-                    icon = Icons.Default.History,
-                    title = stringResource(R.string.sessions_tab_recent)
-                )
-            }
+                // §sessux #1: no section header — the whole screen is the
+                // session history now (the "Recent Sessions" header was
+                // redundant after the workdir-groups block moved to Files).
 
-            if (recentSessions.isEmpty()) {
-                item(key = "recent_empty") {
-                    EmptyRow(
-                        text = stringResource(R.string.sessions_tab_no_sessions)
-                    )
+                if (recentSessions.isEmpty()) {
+                    // §sessux #new3: clickable empty state. Triggers the same
+                    // shared new-session flow as the TopAppBar action above
+                    // (per-spec: ONE lambda, two entry points).
+                    item(key = "recent_empty") {
+                        SessionsEmptyState(
+                            modifier = Modifier.fillParentMaxSize(),
+                            onClick = onStartNewSession,
+                        )
+                    }
+                } else {
+                    items(recentSessions, key = { it.id }) { session ->
+                        // §sessux #4: aggregate pending (question/permission)
+                        // from any descendant up to this root card so the
+                        // marker always surfaces on the conversation tree's
+                        // root entry (matches the AppShell tab badge count).
+                        val hasPendingQuestion = rootHasPending(
+                            rootId = session.id,
+                            sessionsById = sessionsById,
+                            pendingSessionIds = pendingQuestionSessionIds,
+                        )
+                        val hasPendingPermission = rootHasPending(
+                            rootId = session.id,
+                            sessionsById = sessionsById,
+                            pendingSessionIds = pendingPermissionSessionIds,
+                        )
+                        SessionCard(
+                            session = session,
+                            isUnread = session.id in unreadSessions,
+                            status = sessionListState.sessionStatuses[session.id],
+                            hasPendingQuestion = hasPendingQuestion,
+                            hasPendingPermission = hasPendingPermission,
+                            onClick = { onSessionClick(session.id) },
+                            onLongClick = { pendingArchiveSession = session }
+                        )
+                    }
                 }
-            } else {
-                items(recentSessions, key = { it.id }) { session ->
-                    SessionCard(
-                        session = session,
-                        isUnread = session.id in unreadSessions,
-                        status = sessionListState.sessionStatuses[session.id],
-                        onClick = { onSessionClick(session.id) },
-                        onLongClick = { pendingArchiveSession = session }
-                    )
-                }
-            }
 
-            // Nav redesign: the "Connected projects" workdir-groups section
-            // moved to the Files tab (project-centric workspace). SessionsScreen
-            // is now the flat session-history tab — only the Recent section
-            // above is rendered. buildWorkdirGroups (the pure derivation,
-            // still defined + unit-tested in this file) is consumed by
-            // FilesScreen via the `cn.vectory.ocdroid.ui.sessions` import.
+                // Nav redesign: the "Connected projects" workdir-groups section
+                // moved to the Files tab (project-centric workspace). SessionsScreen
+                // is now the flat session-history tab — only the section above
+                // is rendered. buildWorkdirGroups (the pure derivation,
+                // still defined + unit-tested in this file) is consumed by
+                // FilesScreen via the `cn.vectory.ocdroid.ui.sessions` import.
             }
         }
+    }
+
+    // §sessux #3: workdir picker dialog (≥2 connected workdirs). Each row is
+    // the workdir's basename; selecting one starts a draft there + jumps to
+    // Chat (same as the single-workdir direct path).
+    if (pendingWorkdirPick) {
+        AlertDialog(
+            onDismissRequest = { pendingWorkdirPick = false },
+            title = { Text(stringResource(R.string.sessions_pick_workdir_title)) },
+            text = {
+                Column {
+                    recentWorkdirs.forEach { workdir ->
+                        val basename = workdir.split("/")
+                            .filter { it.isNotEmpty() }
+                            .lastOrNull() ?: workdir
+                        TextButton(
+                            onClick = {
+                                pendingWorkdirPick = false
+                                viewModel.createSessionInWorkdir(workdir)
+                                onSwitchToChat()
+                            },
+                            modifier = Modifier.fillMaxWidth(),
+                        ) {
+                            Text(
+                                text = basename,
+                                modifier = Modifier.fillMaxWidth(),
+                                color = MaterialTheme.colorScheme.onSurface,
+                            )
+                        }
+                    }
+                }
+            },
+            confirmButton = {},
+            dismissButton = {
+                TextButton(onClick = { pendingWorkdirPick = false }) {
+                    Text(stringResource(R.string.common_cancel))
+                }
+            }
+        )
     }
 
     // --- M7: Archive session confirmation dialog ---
@@ -224,12 +351,22 @@ fun SessionsScreen(
     // timestamp. The server-returned Session (time.archived > 0 ⇒ isArchived)
     // replaces the local copy, so the derivedStateOf filters (!it.isArchived)
     // in recentSessions drop it from the list automatically.
+    // §sessux #2: session display name rendered Bold so the user can clearly
+    // see WHICH conversation they are about to archive (the prior plain-text
+    // run-on made the boundary between prompt and name hard to scan).
     pendingArchiveSession?.let { session ->
         AlertDialog(
             onDismissRequest = { pendingArchiveSession = null },
             title = { Text(stringResource(R.string.sessions_archive)) },
             text = {
-                Text(stringResource(R.string.sessions_archive_confirm) + "\n\n" + session.displayName)
+                Column {
+                    Text(stringResource(R.string.sessions_archive_confirm))
+                    Spacer(modifier = Modifier.height(Dimens.spacing2))
+                    Text(
+                        text = session.displayName,
+                        fontWeight = FontWeight.Bold,
+                    )
+                }
             },
             confirmButton = {
                 TextButton(
@@ -251,37 +388,84 @@ fun SessionsScreen(
 }
 
 @Composable
-private fun SectionHeader(
-    icon: androidx.compose.ui.graphics.vector.ImageVector,
-    title: String,
-    trailing: @Composable (() -> Unit)? = null,
-) {
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(horizontal = Dimens.spacing4, vertical = Dimens.spacing3),
-        verticalAlignment = Alignment.CenterVertically
+private fun SessionsEmptyState(modifier: Modifier = Modifier, onClick: () -> Unit) {
+    // §sessux #new3: clickable empty state. Mirrors the ChatEmptyState style
+    // (centered Column, large outline icon, bodyLarge hint). Inbox icon = the
+    // pre-redesign "Connected projects" header icon (familiar to existing
+    // users). Tapping triggers the same shared new-session flow as the
+    // TopAppBar action (per-spec: ONE lambda, two entry points).
+    // §review-fix (gpter MINOR#1 / groker M3): fillParentMaxSize spans the
+    // viewport (a LazyColumn item has no bounded max height → fillMaxSize
+    // squashes it). fillParentMaxSize is a LazyItemScope extension, so the
+    // CALLER (inside `item {}`) passes Modifier.fillParentMaxSize(); this
+    // composable just applies the supplied modifier + the click target.
+    Box(
+        modifier = modifier.clickable(onClick = onClick),
+        contentAlignment = Alignment.Center,
     ) {
-        Icon(
-            icon,
-            contentDescription = null,
-            modifier = Modifier.size(Dimens.iconSm),
-            tint = MaterialTheme.colorScheme.onSurfaceVariant
-        )
-        Spacer(modifier = Modifier.width(Dimens.spacing2))
-        Text(
-            text = title,
-            style = MaterialTheme.typography.labelLarge,
-            color = MaterialTheme.colorScheme.onSurface
-        )
-        // §entry-relocate: 把"连接新项目"入口从 TopAppBar 移到"已连接的项目"
-        // 标题行尾部，语义更清晰（紧邻它所作用的对象）。trailing 槽可选，其它
-        // SectionHeader 不传 → 行为不变。
-        if (trailing != null) {
-            Spacer(modifier = Modifier.weight(1f))
-            trailing()
+        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+            Icon(
+                Icons.Default.Inbox,
+                contentDescription = null,
+                modifier = Modifier.size(64.dp),
+                tint = MaterialTheme.colorScheme.outline,
+            )
+            Spacer(modifier = Modifier.height(Dimens.spacing4))
+            Text(
+                text = stringResource(R.string.sessions_empty_hint),
+                style = MaterialTheme.typography.bodyLarge,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
         }
     }
+}
+
+/**
+ * §sessux #4: pure helper that decides whether a ROOT session card should
+ * show a pending marker (question / permission). A pending event may live on
+ * a sub-agent (parentId != null) deep in the conversation tree; the user
+ * wants the marker on the root card they can see in the flat Sessions list,
+ * not hidden on a child they would have to drill into. This helper walks the
+ * `parentId` chain from every pending session up to its root and reports
+ * whether [rootId] is on any of those root paths.
+ *
+ * Concretely: returns true iff [rootId] itself is pending OR some session in
+ * [allSessions] whose ancestor chain (following `parentId`) terminates at
+ * [rootId] is in [pendingSessionIds]. Cycle-safe via a visited set (defensive
+ * against malformed parentId loops).
+ *
+ * Extracted as a pure top-level function so the ancestor-walk contract is
+ * unit-testable (cf. [SessionsScreenTest]).
+ *
+ * @param rootId            the candidate root session id (a card in the list).
+ * @param allSessions       every session the UI currently knows about
+ *                          (sessions + directorySessions, deduplicated by id
+ *                          by the caller — this function does NOT dedupe).
+ * @param pendingSessionIds session ids that carry a pending question OR a
+ *                          pending permission (caller pre-defines which kind).
+ */
+internal fun rootHasPending(
+    rootId: String,
+    sessionsById: Map<String, Session>,
+    pendingSessionIds: Set<String>,
+): Boolean {
+    if (rootId in pendingSessionIds) return true
+    if (pendingSessionIds.isEmpty()) return false
+    // Walk each pending session's parentId chain up to its root; cycle-safe
+    // via `seen`. The caller pre-builds `sessionsById` (including sub-agents
+    // from childSessions) once per recomposition.
+    val seen = HashSet<String>()
+    for (pendingId in pendingSessionIds) {
+        seen.clear()
+        var current = sessionsById[pendingId] ?: continue
+        while (current.id !in seen) {
+            if (current.id == rootId) return true
+            seen.add(current.id)
+            val parentId = current.parentId ?: break
+            current = sessionsById[parentId] ?: break
+        }
+    }
+    return false
 }
 
 @Composable
@@ -289,6 +473,13 @@ internal fun SessionCard(
     session: Session,
     isUnread: Boolean = false,
     status: SessionStatus? = null,
+    // §sessux #4: root-aggregated pending markers. The Sessions screen
+    // pre-computes these via [rootHasPending] (any descendant along the
+    // parentId chain has a pending question/permission → flag the root card).
+    // Defaults false so call sites that don't care (e.g. FilesScreen's
+    // expanded workdir list) keep their existing simpler rendering.
+    hasPendingQuestion: Boolean = false,
+    hasPendingPermission: Boolean = false,
     onClick: () -> Unit,
     onLongClick: () -> Unit = {},
     onArchive: (() -> Unit)? = null,
@@ -364,6 +555,34 @@ internal fun SessionCard(
             },
             trailingContent = {
                 Row(verticalAlignment = Alignment.CenterVertically) {
+                    // §sessux #4: pending-question marker. Rendered as a "?" in
+                    // the session's own workdir-hash colour so the per-tree
+                    // tint stays consistent with the leading icon + tab strip.
+                    // Sibling to the unread dot — question is higher-priority
+                    // (it blocks the agent) but they don't both fire for the
+                    // same session (a pending question precludes new unread).
+                    if (hasPendingQuestion) {
+                        Text(
+                            text = "?",
+                            color = workdirTone(session.directory),
+                            fontWeight = FontWeight.Bold,
+                            modifier = Modifier.padding(end = Dimens.spacing2),
+                        )
+                    }
+                    // §sessux #4: pending-permission marker (small lock).
+                    // Indicates the conversation tree is blocked on a tool-
+                    // use authorisation. Uses onSurfaceVariant (muted) so it
+                    // does not compete with the louder "?" / status dot.
+                    if (hasPendingPermission) {
+                        Icon(
+                            Icons.Default.Lock,
+                            contentDescription = stringResource(R.string.cd_permission_marker),
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier
+                                .padding(end = Dimens.spacing2)
+                                .size(Dimens.iconSm),
+                        )
+                    }
                     // M6: status indicator. retry → solid red dot;
                     // busy / idle / null → nothing (busy dot removed per §user-req;
                     // a running session is already signalled elsewhere).
@@ -403,16 +622,6 @@ internal fun SessionCard(
             }
         )
     }
-}
-
-@Composable
-private fun EmptyRow(text: String) {
-    Text(
-        text = text,
-        style = MaterialTheme.typography.bodySmall,
-        color = MaterialTheme.colorScheme.onSurfaceVariant,
-        modifier = Modifier.padding(horizontal = Dimens.spacing6, vertical = Dimens.spacing3)
-    )
 }
 
 @Composable

@@ -1,10 +1,11 @@
-// ChatEmptyState.kt — the empty-state placeholder shown by ChatScreen when
+// ChatEmptyState.kt — the empty-state placeholder shown by ChatScaffold when
 // there is no active session or the server connection is down/in-flight.
 // Pure relocation from ChatTopBar.kt; visibility stays `internal` (used by
-// ChatScreen).
+// ChatScaffold).
 
 package cn.vectory.ocdroid.ui.chat
 
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Spacer
@@ -14,6 +15,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Chat
+import androidx.compose.material.icons.filled.Forum
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
@@ -23,6 +25,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import cn.vectory.ocdroid.R
 import cn.vectory.ocdroid.ui.ConnectionPhase
@@ -33,7 +36,17 @@ internal fun ChatEmptyState(
     onConnect: () -> Unit,
     isConnecting: Boolean = false,
     connectionPhase: ConnectionPhase = ConnectionPhase.Idle,
-    hostName: String = ""
+    hostName: String = "",
+    /**
+     * §new2 (2026-07-13): one-tap deep-link to the Sessions screen, fired by
+     * tapping anywhere on the "all tabs closed" empty-state body. The
+     * callback is sourced from [ChatScaffold]'s `onNavigateToSessions`
+     * parameter (which AppShell wires to
+     * `orchestratorVM.setLastRoute(NavRoute.Sessions)`). Only consumed by
+     * the "connected + idle" branch below — the connecting / disconnected
+     * branches keep their own primary affordance (spinner / Connect button).
+     */
+    onNavigateToSessions: () -> Unit = {},
 ) {
     Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
         Column(horizontalAlignment = Alignment.CenterHorizontally) {
@@ -61,6 +74,36 @@ internal fun ChatEmptyState(
                     style = MaterialTheme.typography.bodyLarge,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
+            } else if (isConnected) {
+                // §new2 (2026-07-13): connected + idle + no open tabs —
+                // show the "Pick or start a conversation from Sessions"
+                // hint with a Forum affordance, the entire Column is
+                // tappable and routes to the Sessions screen. This is the
+                // recovery path from "all tabs closed" — the user closed
+                // every chat tab and needs a one-tap way back into the
+                // conversation list (the title's tap-target opens the
+                // SessionPicker sheet, but the empty body is the more
+                // discoverable affordance for a blank canvas).
+                Column(
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    modifier = Modifier
+                        .clickable(onClick = onNavigateToSessions)
+                        .padding(horizontal = 24.dp, vertical = 16.dp),
+                ) {
+                    Icon(
+                        Icons.Default.Forum,
+                        contentDescription = null,
+                        modifier = Modifier.size(64.dp),
+                        tint = MaterialTheme.colorScheme.outline,
+                    )
+                    Spacer(modifier = Modifier.height(16.dp))
+                    Text(
+                        text = stringResource(R.string.chat_empty_no_tab),
+                        style = MaterialTheme.typography.bodyLarge,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        textAlign = TextAlign.Center,
+                    )
+                }
             } else {
                 Icon(
                     Icons.AutoMirrored.Filled.Chat,
@@ -70,17 +113,15 @@ internal fun ChatEmptyState(
                 )
                 Spacer(modifier = Modifier.height(16.dp))
                 Text(
-                    if (isConnected) stringResource(R.string.chat_select_or_create_session) else stringResource(R.string.chat_connect_to_server),
+                    stringResource(R.string.chat_connect_to_server),
                     style = MaterialTheme.typography.bodyLarge
                 )
                 Spacer(modifier = Modifier.height(8.dp))
-                if (!isConnected) {
-                    Button(
-                        onClick = onConnect,
-                        modifier = Modifier.padding(horizontal = 24.dp, vertical = 12.dp)
-                    ) {
-                        Text(stringResource(R.string.chat_connect))
-                    }
+                Button(
+                    onClick = onConnect,
+                    modifier = Modifier.padding(horizontal = 24.dp, vertical = 12.dp)
+                ) {
+                    Text(stringResource(R.string.chat_connect))
                 }
             }
         }

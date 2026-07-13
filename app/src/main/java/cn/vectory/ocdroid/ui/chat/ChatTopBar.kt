@@ -30,6 +30,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -233,6 +234,21 @@ internal fun ChatTopBar(
     @Suppress("UNUSED_PARAMETER") onContextCompact: (() -> Unit)? = null,
 ) {
     val currentSession = state.sessions.find { it.id == state.currentSessionId }
+    // §new2 (2026-07-13): cache the package's versionName once per composition
+    // ( PackageManager.getPackageInfo is a binder call; wrap in remember so a
+    // recomposition does NOT re-query ). Used by the title slot's "no current
+    // session" branch to render `"${app_name} v${versionName}"`. The version
+    // string from gradle may carry a git-hash suffix (e.g. `0.9.2-fb2fdff`) —
+    // we display it verbatim. Falls back to null when PackageManager throws
+    // (test harness / stripped package) so the title degrades to app_name only.
+    val context = LocalContext.current
+    val versionName by remember(context) {
+        mutableStateOf(
+            runCatching {
+                context.packageManager.getPackageInfo(context.packageName, 0).versionName
+            }.getOrNull()
+        )
+    }
     // §0.8.2 P2.3: model display name for the overflow menu's Model item.
     val currentModelName = resolveModelDisplayName(state.currentModel, state.providers)
     // §0.8.2 P2.3: overflow menu expanded state. Owned HERE so the
@@ -324,10 +340,22 @@ internal fun ChatTopBar(
                             modifier = Modifier.clickable(onClick = onTitleClick),
                         )
                     } else {
-                        // §F1: 所有会话 tab 已关闭、无当前会话时，顶栏显示
-                        // 应用名占位（不再附带版本号）。
+                        // §new2 (2026-07-13): all chat tabs closed
+                        // (currentSessionId == null, no parent, no draft) —
+                        // show "app_name vX.Y" so the top bar carries useful
+                        // identity instead of a bare app_name placeholder.
+                        // versionName is remembered above (one binder call per
+                        // composition); the format mirrors the Cold-start /
+                        // About surfaces (`versionName` may include a git-hash
+                        // suffix like `0.9.2-fb2fdff`, displayed verbatim).
+                        val appName = stringResource(R.string.app_name)
+                        val titleText = if (versionName != null) {
+                            "$appName v$versionName"
+                        } else {
+                            appName
+                        }
                         Text(
-                            text = stringResource(R.string.app_name),
+                            text = titleText,
                             style = MaterialTheme.typography.titleLarge,
                             color = MaterialTheme.colorScheme.onSurface,
                             maxLines = 1,
@@ -338,41 +366,40 @@ internal fun ChatTopBar(
             }
         },
         actions = {
-            // §0.8.2 P2.3: the overflow cluster. The ContextUsageRing is the
-            // trigger; the DropdownMenu is its sibling inside the same Box
-            // — that sibling relationship is what anchors the popup below
-            // the trigger (the prior remote DropdownMenu at ChatScaffold
-            // popped to the top-left because it had no tight Box anchor).
-            // §dead-onCompact-cleanup: there is NO standalone "Compress"
-            // item here. The 4 items (top→bottom): Context, Todo, Agent,
-            // Model. Compaction is triggered via the ContextUsageDialog's
-            // own "Compress context" button (opened from the Context item).
-            // Archive was removed.
-            ContextMenuCluster(
-                usage = state.contextUsage,
-                todos = state.sessionTodos,
-                selectedAgentName = state.selectedAgentName,
-                currentModelName = currentModelName,
-                expanded = overflowExpanded,
-                onToggleExpand = { overflowExpanded = !overflowExpanded },
-                onDismiss = { overflowExpanded = false },
-                onOpenContext = {
-                    overflowExpanded = false
-                    actions.onOpenContextDialog()
-                },
-                onOpenTodo = {
-                    overflowExpanded = false
-                    actions.onOpenTodoDialog()
-                },
-                onOpenAgent = {
-                    overflowExpanded = false
-                    actions.onOpenAgentPicker()
-                },
-                onOpenModel = {
-                    overflowExpanded = false
-                    actions.onOpenModelPicker()
-                },
-            )
+            // §new2 (2026-07-13): when there is no currentSession (and no
+            // parent / draft — same condition as the title branch above),
+            // hide the ContextUsageRing trigger + its overflow menu. The
+            // cluster is session-scoped (context usage / todos / agent /
+            // model are all per-session); rendering it without a session
+            // surfaces stale data and a non-functional menu. The slot stays
+            // empty — no placeholder — so the title can take the full width.
+            if (currentSession != null) {
+                ContextMenuCluster(
+                    usage = state.contextUsage,
+                    todos = state.sessionTodos,
+                    selectedAgentName = state.selectedAgentName,
+                    currentModelName = currentModelName,
+                    expanded = overflowExpanded,
+                    onToggleExpand = { overflowExpanded = !overflowExpanded },
+                    onDismiss = { overflowExpanded = false },
+                    onOpenContext = {
+                        overflowExpanded = false
+                        actions.onOpenContextDialog()
+                    },
+                    onOpenTodo = {
+                        overflowExpanded = false
+                        actions.onOpenTodoDialog()
+                    },
+                    onOpenAgent = {
+                        overflowExpanded = false
+                        actions.onOpenAgentPicker()
+                    },
+                    onOpenModel = {
+                        overflowExpanded = false
+                        actions.onOpenModelPicker()
+                    },
+                )
+            }
         }
     )
 }

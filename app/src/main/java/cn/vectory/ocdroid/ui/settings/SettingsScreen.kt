@@ -21,7 +21,6 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
-import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.Dns
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.Notifications
@@ -156,7 +155,9 @@ private data class SettingsSectionEntry(
  * listed at the Settings root.
  */
 private fun settingsSections(): List<SettingsSectionEntry> = listOf(
-    SettingsSectionEntry(NavRoute.settingsHostsRoute, R.string.settings_section_hosts, R.string.settings_section_hosts_subtitle, Icons.Default.Dns),
+    // §setux #new4: 服务器入口用专用短文案 key（「服务器」/「Server」）。
+    // settings_section_hosts（「服务器管理」）仍由 hub TopAppBar 使用。
+    SettingsSectionEntry(NavRoute.settingsHostsRoute, R.string.setux_settings_hosts_entry, R.string.settings_section_hosts_subtitle, Icons.Default.Dns),
     SettingsSectionEntry(NavRoute.settingsAppearanceRoute, R.string.settings_section_appearance, R.string.settings_section_appearance_subtitle, Icons.Default.Palette),
     SettingsSectionEntry(NavRoute.settingsNotificationsRoute, R.string.settings_section_notifications, R.string.settings_section_notifications_subtitle, Icons.Default.Notifications),
     SettingsSectionEntry(NavRoute.settingsStorageRoute, R.string.settings_section_storage, R.string.settings_section_storage_subtitle, Icons.Default.Storage),
@@ -170,17 +171,12 @@ private fun SettingsSectionRow(section: SettingsSectionEntry, onClick: () -> Uni
     // M3 ListItem has no onClick overload in the bundled version; clickability
     // is wired by `Modifier.clickable` on the row. All slim-list rows share
     // this single click pattern.
+    // §setux #new4: 移除右侧 `>` chevron 指示符（trailingContent），保留
+    // clickable 行为。
     ListItem(
         headlineContent = { Text(stringResource(section.titleRes)) },
         leadingContent = {
             Icon(section.icon, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
-        },
-        trailingContent = {
-            Icon(
-                Icons.AutoMirrored.Filled.KeyboardArrowRight,
-                contentDescription = null,
-                tint = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
         },
         modifier = Modifier
             .fillMaxWidth()
@@ -385,6 +381,9 @@ fun SettingsNotificationsRoute(onBack: () -> Unit) {
                 .padding(horizontal = Dimens.spacing4),
         ) {
             SectionHeader(title = stringResource(R.string.settings_section_notifications))
+            // §setux #new5: 移除 leadingContent icon，与其它 settings item
+            // 风格一致（无 leading icon 的标准 ListItem）。颜色态在
+            // supportingContent 文案里仍可读。
             ListItem(
                 headlineContent = {
                     Text(
@@ -394,14 +393,6 @@ fun SettingsNotificationsRoute(onBack: () -> Unit) {
                 },
                 supportingContent = {
                     Text(stringResource(R.string.settings_notifications_completion_channel_desc))
-                },
-                leadingContent = {
-                    Icon(
-                        Icons.Default.Notifications,
-                        contentDescription = null,
-                        tint = if (granted) MaterialTheme.colorScheme.primary
-                        else MaterialTheme.colorScheme.error,
-                    )
                 },
             )
             // The grant button is shown only when blocked AND API 33+ (the OS

@@ -294,9 +294,24 @@ class SettingsViewModel @Inject constructor(
     /**
      * Last sweep outcome (null until the first [sweepNow] completes). The UI
      * surfaces the report inline so the user sees what got evicted / marked.
+     *
+     * §setux #7: this state is consumed (reset to null) by [clearLastSweep]
+     * after the UI has shown the snackbar — otherwise re-entering the
+     * composition (rotation, nav back-and-forth) re-fires the
+     * `LaunchedEffect(lastSweep)` and re-shows the snackbar.
      */
     private val _lastSweep = MutableStateFlow<DailySweepReport?>(null)
     val lastSweep: StateFlow<DailySweepReport?> = _lastSweep.asStateFlow()
+
+    /**
+     * §setux #7: consume the last sweep report so a re-entry into the
+     * storage sub-route does not re-fire the result snackbar. Called by
+     * [CacheManagementSection] right after `snackbarHostState.showTimed(...)`
+     * — once the message has been shown, the one-shot report is cleared.
+     */
+    fun clearLastSweep() {
+        _lastSweep.value = null
+    }
 
     /**
      * §P5b-B (Q8): total byte size of all cached message payloads. Surfaced

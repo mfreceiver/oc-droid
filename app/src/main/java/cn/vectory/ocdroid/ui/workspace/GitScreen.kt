@@ -6,6 +6,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
@@ -115,12 +116,26 @@ fun GitScreen(
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Text(stringResource(R.string.nav_git))
                         Spacer(Modifier.width(8.dp))
-                        WorkdirControl(
-                            currentWorkdir = effectiveWorkdir,
-                            recentWorkdirs = emptyList(),
-                            onSelect = {},
-                            readOnly = true,
-                        )
+                        // §sessux Git: when no workdir is bound (no active
+                        // session or the session's directory is null), show
+                        // the explicit "No workdir selected" hint instead of
+                        // the WorkdirControl's muted default placeholder —
+                        // clearer signal that the pane is empty until a
+                        // session is opened.
+                        if (effectiveWorkdir == null) {
+                            Text(
+                                text = stringResource(R.string.git_no_workdir),
+                                style = MaterialTheme.typography.labelMedium,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        } else {
+                            WorkdirControl(
+                                currentWorkdir = effectiveWorkdir,
+                                recentWorkdirs = emptyList(),
+                                onSelect = {},
+                                readOnly = true,
+                            )
+                        }
                     }
                 },
             )
