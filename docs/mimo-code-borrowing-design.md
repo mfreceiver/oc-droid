@@ -10,6 +10,18 @@
 >
 > A/B/C/D 节保留作分析背景，**结论性内容以 E 节为准**。
 
+> ⚠️ **v3 勘误（2026-07-13，ocmar 全量实施 + Stage 6 实战后，以此为准）**
+>
+> v2/F 节的 8 Stage 计划已**全部执行完成**（Stage 1–6 实施 + Stage 7 schedule resume dry 验证 + Stage 8 本文档收口）。关键结论修正与固化：
+>
+> 1. **ocmar 已落地**：10 个 `ocmar-*` skill 安装到 `~/.config/opencode/skills/`，deepwork 归档到 `archive/deepwork-retired/` + OMO 双重禁用（`disabled_skills:["deepwork"]` + orchestrator `skills:["*","!deepwork"]`）防 auto-update 复活。回滚快照在 `archive/pre-ocmar/`。
+> 2. **F.2 六大风险点全部解决并验证**：①Git 不自动 commit（ocmar 默认 record diff）②task 无 model 参数 + 角色路由（fixer/oracle/explorer/librarian）③GLM 计费 → brief/report/diff 文件交接 + small-task 单 oracle 双 verdict ④fresh verifier 跑项目校验命令 ⑤using-superpowers 触发收紧 ⑥脚本 `.ocmar` + 可移植。
+> 3. **Stage 6 实战证明 review 非走过场**：sync-player 真实任务（VideoUtils+FormatUtils 测试）跑完整流程，**final whole-branch review 抓到 per-task review 漏的真实 bug**（一个额外测试 codifies 了 `formatFileSize` >TB 产线缺陷）→ fix → re-review pass。证明两阶段评审（per-task + whole-branch）的独立价值。详见 [F.6](#f6-stage-6-实战证据sync-player2026-07-13)。
+> 4. **持久 ledger 状态机验证**：三态 `implementing→reviewed→verified` + 内容级 content-fingerprint（plan-hash/base/fingerprint 三校验）+ owner-session + Stage 7 resume dry 全通过。schedule_task `mode=existing` 注入 → conductor resume 链路设计可行。
+> 5. **改进点（留持续优化）**：final verifier 命中 gradle `UP-TO-DATE` 从 JUnit XML 读结果（有效但非 live rerun），verifier prompt 可加 `--rerun-tasks` 消除缓存疑虑。
+>
+> 结论性内容：**F 节（含 F.6 实战证据 + F.7 回滚 runbook）为最权威**。
+
 > 对比源：`opencode-src/mimo-code/`（v0.1.5，fork 自 anomalyco/opencode 旧大单体分支）
 > 基准：`opencode-src/v1.17.18/`（上游 sst/opencode）
 > 落点：用户运行时 = **上游 opencode 1.17.9 + oh-my-opencode-slim (OMO)**（见 `~/.config/opencode/package.json`）
@@ -845,13 +857,13 @@ oracle 给出三方案对比，**推荐 (b) kebab-case 本机名**：
 | Stage | 做什么 | 验证 | 状态 |
 |---|---|---|:---:|
 | **1 冻结来源** | pin SHA + 整目录 vendor + task smoke test | SHA/清单/smoke test | ✅ |
-| **2 离线构建 ocmar bundle** | staging 改 name/去 `superpowers:*`/适配 fixer-oracle-explorer/去自动 commit/`.superpowers`→`.ocmar`/description 策略 | grep 无残留旧 namespace；agent 路由正确 | ⏳ |
-| **3 闭环 dry-run** | 隔离 test：plan→fixer→oracle→verifier→finish 非破坏流程 | `opencode debug skill` 见全部名称；内部 skill 可精确调 | ⏸ |
-| **4 原子安装 ocmar** | 整目录装到 `~/.config/opencode/skills/`；加 `.ocmar/` ignore 规则 | 新进程 debug skill；名称唯一 | ⏸ |
-| **5 切换引用 + 替换 deepwork** | 改 writing-plans/brainstorming/oh-my-opencode-slim；加 `!deepwork`；归档 deepwork | 全局 grep 无功能性 deepwork 引用 | ⏸ |
-| **6 真实小任务验收** | 低风险任务跑完整 ocmar 流程 | 项目校验命令通过；主会话只留摘要 | ⏸ |
-| **7 无人值守协同** | schedule/nighty-night 标准 prompt 模板 | 同 slug 不重复执行；恢复从首个未完成任务 | ⏸ |
-| **8 文档收口** | v3 勘误 + 名称映射 + 回滚方式 | 文档名称逐一可被 debug skill 找到 | ⏸ |
+| **2 离线构建 ocmar bundle** | staging 改 name/去 `superpowers:*`/适配 fixer-oracle-explorer/去自动 commit/`.superpowers`→`.ocmar`/description 策略 | grep 无残留旧 namespace；agent 路由正确 | ✅ |
+| **3 闭环 dry-run** | 隔离 test：plan→fixer→oracle→verifier→finish 非破坏流程 | oracle/glmer 门控 9.5 通过 | ✅ |
+| **4 原子安装 ocmar** | 整目录装到 `~/.config/opencode/skills/`；加 `.ocmar/` ignore 规则 | 新进程 debug skill；名称唯一 | ✅ |
+| **5 切换引用 + 替换 deepwork** | 改 writing-plans/brainstorming/oh-my-opencode-slim；加 `!deepwork`；归档 deepwork | 全局 grep 无功能性 deepwork 引用 | ✅ |
+| **6 真实小任务验收** | sync-player VideoUtils+FormatUtils 测试跑完整 ocmar 流程 | 97/97 全绿；final review 抓到 per-task 漏（9PB codify-bug）；见 F.6 | ✅ |
+| **7 无人值守协同** | schedule_task + ledger resume dry 验证（不测 nighty） | plan-hash/base/fingerprint 三校验 + skip-verified 通过 | ✅ |
+| **8 文档收口** | v3 勘误 + F.6 实战证据 + F.7 回滚 runbook | 本文档 | ✅ |
 
 ## F.5 14 skill 的 ocmar 落地映射
 
@@ -873,6 +885,94 @@ oracle 给出三方案对比，**推荐 (b) kebab-case 本机名**：
 | writing-skills | `ocmar-writing-skills` | 下载 | ✅ |
 
 可见性：`✅`=保留 description 进 available list；`❌`=省略 description 不进 list 但可 `skill({name})` 精确调（替代无效的 hidden）。
+
+---
+
+## F.6 Stage 6 实战证据（sync-player，2026-07-13）
+
+首个真实 ocmar 任务：为 sync-player 的 `VideoUtils` + `FormatUtils` 补单元测试（AGENTS 要求高覆盖，原 4/5 函数 + 整文件零测）。
+
+**流程**（10 个角色 dispatch，全 fresh session）：
+plan → Task1(fixer implement) → Task1(oracle review) → Task2(fixer) → Task2(oracle review) → final(oracle whole-branch) → fix(fixer，复用 T2 session) → re-review(oracle，复用 session) → verifier(fresh fixer) → finishing(single-main keep)
+
+**产出**：VideoUtilsTest +29 测试（保留原 4）、FormatUtilsTest 24 测试，97/97 全绿，working tree preserved（未 commit，符合 ocmar 默认）。ledger 在 sync-player `.ocmar/workflows/sync-player-test-coverage/progress.md`。
+
+**验证的关键机制**：
+
+| 机制 | 实战表现 |
+|---|---|
+| fixer/oracle 角色路由 | 10 dispatch 全正确（无 model 参数） |
+| 文件交接（brief/report/review-package） | 主会话只持路径 + 摘要，未污染 |
+| ledger 三态 | implementing→reviewed→verified 正确流转 |
+| content-fingerprint | 每次 task 状态变更刷新；Stage 7 resume dry 三校验全 match |
+| small-task optimization | 单 oracle 返 spec+quality 双 verdict（≤2 文件任务） |
+| fresh verifier | 独立 fixer 跑 `testDebugUnitTest`，exit 0 + JUnit XML 证据 |
+| single-main finishing | Step 2b 检测 master + normal repo → 2-option keep |
+
+**证明 review 非走过场的真实发现**：
+
+1. **Task1 reviewer 的 plan-mandated finding**（individual vs wildcard import）→ controller 用真实代码裁决为 **plan 笔误**（现有代码本就用 individual import，fixer 跟随惯例正确），不 dispatch fix。体现 controller 持 cross-task/真实代码知识裁决 reviewer 的 plan-mandated finding。
+2. **Task2 的额外 cap test 被 per-task reviewer 接受，但 final whole-branch reviewer 从整体视角抓出它 codifies 了 `formatFileSize` >TB 产线 bug**（9PB→"8.0 TB"）→ fix 移除该测试 + 加 1_000_000 bps 边界测试 → re-review pass。**印证 per-task + whole-branch 两阶段评审的独立价值**。
+
+**Follow-up**（out-of-scope，记录）：`FormatUtils.formatFileSize` 对 >TB 输入有真实产线 bug（用未 capping exponent 除、只 cap unit label），test-only scope 未修，留单独产线修复。
+
+**gpter should-fix 实测**（Stage 3 门控时的待验项，Stage 6 验证）：
+
+- **#8 多任务累计 diff**：Task2 reviewer 看到 Task1 改动，dispatch 明确 scope 聚焦 → reviewer 未困惑 ✓
+- **#9 verifier failure count**：用 JUnit XML 提取（97/0/0/0）✓
+- **#10 重复 check.sh 成本**：verifier 命中 gradle `UP-TO-DATE`（缓存有效，XML 反映 fix 后代码），但**改进点**：verifier prompt 加 `--rerun-tasks` 消除缓存疑虑（留持续优化）
+
+## F.7 回滚 runbook
+
+ocmar 全量替换了 deepwork。如需回滚到 ocmar 前状态：
+
+**回滚快照位置**：`~/.config/opencode/archive/pre-ocmar/`
+- `writing-plans.SKILL.md`（原版，引用 `superpowers:*`）
+- `brainstorming.SKILL.md`（原版）
+- `oh-my-opencode-slim.json`（原版，无 `disabled_skills` / `!deepwork`）
+- `deepwork/`（完整目录，归档在 `archive/deepwork-retired/`）
+
+**回滚步骤**：
+
+```bash
+CD=~/.config/opencode
+# 1. 恢复 writing-plans / brainstorming 原文
+cp $CD/archive/pre-ocmar/writing-plans.SKILL.md   $CD/skills/writing-plans/SKILL.md
+cp $CD/archive/pre-ocmar/brainstorming.SKILL.md   $CD/skills/brainstorming/SKILL.md
+# 2. 恢复 OMO 配置（去 disabled_skills + !deepwork）
+cp $CD/archive/pre-ocmar/oh-my-opencode-slim.json $CD/oh-my-opencode-slim.json
+# 3. 恢复 deepwork
+mv $CD/archive/deepwork-retired/deepwork          $CD/skills/deepwork
+# 4. 移除 ocmar skill
+rm -rf $CD/skills/ocmar-*
+# 5. 重启 opencode 服务（~/.opencode/bin/opencode serve --port 4096）
+```
+
+**验证回滚**：新 session 的 available skills 含 `deepwork`、无 `ocmar-*`；`writing-plans` 引用恢复 `superpowers:*`（断链状态，即 ocmar 前原样）。
+
+**注意**：回滚后 writing-plans 的 `superpowers:*` 断链会恢复（ocmar 前的已知问题）。如只想回滚单个 skill，从 `/tmp/opencode/ocmar-vendor/`（obra 原文，SHA `d884ae04`）或 staging `/tmp/opencode/ocmar-build/` 取。
+
+---
+
+## F.8 可借鉴条目实现状态（ocmar 全量实施后）
+
+ocmar 项目（Stage 1–8）实现了 superpowers 工作链（A1 的等价）+ B5 的 verifier 门禁替代。MiMo 的其他可借鉴条目状态如下：
+
+| 条目 | 原优先级 | ocmar 后状态 | 说明 |
+|---|---|---|---|
+| **A1 compose:plan（替换 writing-plans）** | ★★★ | ✅ **ocmar 等价实现** | writing-plans 引用改 `ocmar-*`；Step 5 Commit→Record diff；与 ocmar-subagent-driven-development 闭环 |
+| **A1 compose:tdd/verify/review** | ★★☆ | ✅ **ocmar 等价实现** | `ocmar-verification-before-completion`（fresh verifier）+ `ocmar-requesting-code-review`（per-task + final oracle 两阶段评审）|
+| **A1 compose:subagent（完整）** | ★☆☆ | ✅ **ocmar 等价实现** | `ocmar-subagent-driven-development`（主 conductor，task 工具 + fixer/oracle 路由），Stage 6 实战验证（97/97 全绿） |
+| **A3 skill-creator** | ★★★ | ⚠️ **部分替代** | ocmar 用 `ocmar-writing-skills`（superpowers 源）；未做 A3 的 frontmatter 静态审计（E5 方法论，留独立任务）|
+| **A2 design-blueprint** | ★★☆ | ⏸ 未涉及 | ocmar 范围外（视觉设计方法论）；需要时复制即可 |
+| **B4 三件套 withGuard** | ★★☆ | ⏸ 未涉及 | ocmar 是 skill 层，不涉及 plugin hook；写 hook 时仍需自实现 withGuard |
+| **B5 preStop/postStop → Goal** | ★★☆（D6 上调）| 🔄 **ocmar 等价替代** | ocmar 用 fresh verifier（Final Verification Gate）+ ledger resume 替代 Goal 完成度验证；非 preStop hook 但达"未过校验不放行"效果。原生 preStop 仍需换运行时 |
+| **强化 reflect 成 distill** | ★★☆（D6 新增）| ⏸ 未涉及 | reflect skill 已存在；强化为周期 distill 留独立任务 |
+| **codemode 调研** | ★★★（D6 新增）| ⏸ 未涉及 | D4 确认 anomalyco codemode 仅基础沙箱无 `agent()` 原语；prompt 编排（ocmar）仍是当前主线 |
+
+**小结**：ocmar 实现了 **A1（fresh-worker 闭环）+ B5 的等价替代（verifier 门禁）**。其余条目（A2 视觉 / A3 frontmatter 审计 / B4 hook 防护 / D3 记忆 / D4 codemode / D5 Dream-Distill）在 ocmar 范围外，状态不变，按需推进。
+
+> 完整项目文档（思路/机制/实现/案例/反思/改进）见 `~/opencode_wd/ocmar工作流完整项目文档.md`。
 
 ---
 
