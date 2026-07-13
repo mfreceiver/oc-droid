@@ -54,6 +54,7 @@ import cn.vectory.ocdroid.ui.ConnectionViewModel
 import cn.vectory.ocdroid.ui.HostViewModel
 import cn.vectory.ocdroid.ui.NavRoute
 import cn.vectory.ocdroid.ui.SettingsViewModel
+import cn.vectory.ocdroid.ui.theme.AppSectionHeader
 import cn.vectory.ocdroid.ui.theme.Dimens
 import cn.vectory.ocdroid.ui.util.formatBytes
 import cn.vectory.ocdroid.util.ThemeMode
@@ -205,7 +206,7 @@ private fun SettingsSectionRow(section: SettingsSectionEntry, onClick: () -> Uni
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun SettingsSubRouteScaffold(
+internal fun SettingsSubRouteScaffold(
     titleRes: Int,
     onBack: () -> Unit,
     snackbarHost: @Composable (() -> Unit) = {},
@@ -380,7 +381,7 @@ fun SettingsNotificationsRoute(onBack: () -> Unit) {
                 .verticalScroll(rememberScrollState())
                 .padding(horizontal = Dimens.spacing4),
         ) {
-            SectionHeader(title = stringResource(R.string.settings_section_notifications))
+            AppSectionHeader(text = stringResource(R.string.settings_section_notifications))
             // §setux #new5: 移除 leadingContent icon，与其它 settings item
             // 风格一致（无 leading icon 的标准 ListItem）。颜色态在
             // supportingContent 文案里仍可读。
@@ -460,7 +461,7 @@ fun SettingsStorageRoute(
                 .padding(horizontal = Dimens.spacing4),
         ) {
             // ① 清除数据 (first, flat).
-            SectionHeader(title = stringResource(R.string.settings_danger_zone))
+            AppSectionHeader(text = stringResource(R.string.settings_danger_zone))
             DangerZoneSection(
                 cachedDataSize = cachedDataSize,
                 onClearLocalData = viewModel::resetLocalDataAndResync,
@@ -469,7 +470,7 @@ fun SettingsStorageRoute(
             Spacer(modifier = Modifier.height(Dimens.spacing6))
 
             // ② 缓存管理 (3-level tree + destructive sweeps + 3s snackbar).
-            SectionHeader(title = stringResource(R.string.cache_management_popup_title))
+            AppSectionHeader(text = stringResource(R.string.cache_management_popup_title))
             CacheManagementSection(
                 vm = settingsVM,
                 snackbarHostState = snackbarHostState,
@@ -505,7 +506,7 @@ fun SettingsAboutRoute(
             AboutSection()
             Spacer(modifier = Modifier.height(Dimens.spacing6))
 
-            SectionHeader(title = stringResource(R.string.settings_section_debug))
+            AppSectionHeader(text = stringResource(R.string.settings_section_debug))
             DebugLogSection(hideHeader = true)
         }
     }

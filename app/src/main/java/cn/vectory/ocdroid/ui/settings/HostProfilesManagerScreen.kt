@@ -11,7 +11,6 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.ContentPaste
@@ -25,7 +24,6 @@ import androidx.compose.material.icons.filled.VisibilityOff
 import androidx.compose.material.icons.outlined.Info
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
-import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -39,7 +37,6 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
-import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
@@ -65,6 +62,10 @@ import cn.vectory.ocdroid.R
 import cn.vectory.ocdroid.data.model.HostProfile
 import cn.vectory.ocdroid.ui.ConnectionViewModel
 import cn.vectory.ocdroid.ui.HostViewModel
+import cn.vectory.ocdroid.ui.theme.AppConfirmDialog
+import cn.vectory.ocdroid.ui.theme.AppFormDialog
+import cn.vectory.ocdroid.ui.theme.AppSectionHeader
+import cn.vectory.ocdroid.ui.theme.Dimens
 import cn.vectory.ocdroid.util.SettingsManager
 import dagger.hilt.EntryPoint
 import dagger.hilt.InstallIn
@@ -146,39 +147,37 @@ internal fun HostProfilesManagerScreen(
         .collectAsStateWithLifecycle(initialValue = emptySet())
     val settingsManager = rememberSettingsManager()
 
-    Column(modifier = Modifier.fillMaxSize()) {
-        TopAppBar(
-            // §P5b-A / Q7: title reused from the Settings list entry
-            // (`settings_section_hosts` value is now 服务器管理 / Server
-            // Management in both locales).
-            title = { Text(stringResource(R.string.settings_section_hosts)) },
-            navigationIcon = {
-                IconButton(onClick = onBack) {
-                    Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = stringResource(R.string.common_back))
-                }
-            },
-            actions = {
-                IconButton(onClick = { editingProfile = newDirectProfile() }) {
-                    Icon(Icons.Default.Add, contentDescription = stringResource(R.string.host_profile_add))
-                }
+    // §WT5: the host manager screen now uses the shared SettingsSubRouteScaffold
+    // (same shell as every other settings sub-route) instead of a hand-rolled
+    // Column+TopAppBar. The add-host IconButton is preserved via the scaffold's
+    // `actions` slot. The list Column keeps its verticalScroll + testTag.
+    SettingsSubRouteScaffold(
+        titleRes = R.string.settings_section_hosts,
+        onBack = onBack,
+        actions = {
+            IconButton(onClick = { editingProfile = newDirectProfile() }) {
+                Icon(Icons.Default.Add, contentDescription = stringResource(R.string.host_profile_add))
             }
-        )
+        },
+    ) { scaffoldMod ->
         Column(
-            modifier = Modifier
-                .weight(1f)
+            modifier = scaffoldMod
                 .verticalScroll(rememberScrollState())
-                .padding(16.dp)
+                .padding(Dimens.spacing4)
                 .testTag("host.profile.list")
         ) {
             error?.let {
                 Text(it, color = MaterialTheme.colorScheme.error)
-                Spacer(modifier = Modifier.height(12.dp))
+                Spacer(modifier = Modifier.height(Dimens.spacing3))
             }
 
             // ── §P5b-A / Q7 Section 1: 服务器配置 ──
             // §setux #5: 已配置服务器列表项间距压缩——ListItem 自带 padding，
             // 再叠 8dp Spacer 过松；降到 2dp 让列表更紧凑。
-            SectionHeader(title = stringResource(R.string.host_profiles_title))
+            // §WT5: header now uses AppSectionHeader (titleSmall + onSurfaceVariant,
+            // canonical per docs/ui-style-spec.md §2). HostProfileRow itself is
+            // untouched — its RadioButton+Edit affordances stay distinct.
+            AppSectionHeader(text = stringResource(R.string.host_profiles_title))
             profiles.forEach { profile ->
                 HostProfileRow(
                     profile = profile,
@@ -186,19 +185,23 @@ internal fun HostProfilesManagerScreen(
                     onSelect = { viewModel.selectHostProfile(profile.id) },
                     onEdit = { editingProfile = profile }
                 )
+                // §setux #5: 2dp tighter inter-row gap (no Dimens token for 2dp;
+                // spec §3 tolerates this one-off literal with a written reason).
                 Spacer(modifier = Modifier.height(2.dp))
             }
-            Spacer(modifier = Modifier.height(16.dp))
+            Spacer(modifier = Modifier.height(Dimens.spacing4))
 
             // ── §P5b-A / Q7 Section 2: 流量统计 (moved from settings/storage) ──
-            SectionHeader(title = stringResource(R.string.settings_traffic))
+            // §WT5: header migrated to AppSectionHeader; TrafficSection's row
+            // headline was promoted bodyMedium → bodyLarge (see SettingsSections.kt).
+            AppSectionHeader(text = stringResource(R.string.settings_traffic))
             TrafficSection(
                 sent = traffic.trafficSent,
                 received = traffic.trafficReceived,
                 onReset = connectionVM::resetTrafficStats,
                 hideHeader = true,
             )
-            Spacer(modifier = Modifier.height(16.dp))
+            Spacer(modifier = Modifier.height(Dimens.spacing4))
 
             // ── §P5b-A / Q7 Section 3: 模型管理 (moved from removed top-level 模型) ──
             // The fp for the disabled-models persistence layer is derived
@@ -706,309 +709,31 @@ internal fun HostProfileEditorDialog(
         }
     }
 
-    AlertDialog(
+    // §WT5: editor dialog consolidated onto the shared `AppFormDialog` primitive
+    // (BasicAlertDialog + Surface + AlertDialogDefaults + verticalScroll +
+    // heightIn(max=screen*0.85f)). Previously this was an `AlertDialog` with a
+    // hand-rolled `text={ Column{ verticalScroll + heightIn(max=560.dp) {...} } }`
+    // — AppFormDialog now provides the scrollable container once. Per
+    // `AppFormDialog.kt` file header, the BasicAlertDialog route (not AlertDialog)
+    // is mandatory when the body holds interactive controls — but this editor's
+    // body is all OutlinedTextField / CollapsibleSection / Switch which AlertDialog
+    // handles fine; the migration is for visual / structural consistency with the
+    // rest of the settings dialogs, and to retire the bespoke heightIn(560.dp).
+    //
+    // Field logic is preserved verbatim — only the outer dialog shell changes.
+    // The complex action Row (Test IconButton + Delete IconButton + Cancel +
+    // Save Button) is forwarded as a single `confirmButton` slot; AppFormDialog
+    // wraps it in Row(Arrangement.End), but the inner Row is fillMaxWidth +
+    // SpaceBetween so it consumes the full width and the layout is preserved.
+    AppFormDialog(
         onDismissRequest = onDismiss,
-        title = { Text(if (initial.name.isBlank()) stringResource(R.string.host_profile_add_title) else stringResource(R.string.host_profile_edit_title)) },
-        text = {
-            // §issue-6: 内容列加 verticalScroll + heightIn 兜底——编辑表单在小屏 /
-            // 大字号 / 键盘弹起时不再被裁切。叠加下述 label 槽化 + 分组/测试改造，
-            // 常规尺寸下整体高度也显著下降。
-            Column(
-                modifier = Modifier
-                    .heightIn(max = 560.dp)
-                    .verticalScroll(rememberScrollState())
-            ) {
-                // 配置名 (required) — label 槽替代上方独立 Text（M3 idiom + 省 1 行，§issue-6）
-                OutlinedTextField(
-                    value = name,
-                    onValueChange = { name = it },
-                    label = { Text(stringResource(R.string.host_profile_name)) },
-                    singleLine = true,
-                    modifier = Modifier.fillMaxWidth()
-                )
-                Spacer(modifier = Modifier.height(6.dp))
-                // 服务器地址 (required) — label 槽（§issue-6）
-                OutlinedTextField(
-                    value = serverUrl,
-                    onValueChange = { serverUrl = it },
-                    label = { Text(stringResource(R.string.settings_server_url)) },
-                    placeholder = { Text(stringResource(R.string.host_profile_url_placeholder)) },
-                    singleLine = true,
-                    modifier = Modifier.fillMaxWidth()
-                )
-                Spacer(modifier = Modifier.height(12.dp))
-                // §mtls-clipboard / §design E: 三个凭据区折叠——新 profile 全 false，
-                // 既有 profile 按是否配置种子。关则隐藏内容，保存时清空对应凭据。
-                CollapsibleSection(
-                    title = stringResource(R.string.host_section_basic_auth_title),
-                    subtitle = stringResource(R.string.host_section_basic_auth_sub),
-                    checked = basicAuthEnabled,
-                    onCheckedChange = { basicAuthEnabled = it },
-                ) {
-                    // Username (optional) — label 槽（§issue-6）
-                    OutlinedTextField(
-                        value = authUsername,
-                        onValueChange = { authUsername = it },
-                        label = { Text(stringResource(R.string.host_profile_basic_auth_username)) },
-                        placeholder = { Text(stringResource(R.string.common_optional)) },
-                        singleLine = true,
-                        modifier = Modifier.fillMaxWidth()
-                    )
-                    Spacer(modifier = Modifier.height(6.dp))
-                    // Password (optional, masked) — label 槽（§issue-6）
-                    OutlinedTextField(
-                        value = authPassword,
-                        onValueChange = {
-                            passwordEdited = true
-                            authPassword = it
-                        },
-                        label = { Text(stringResource(R.string.host_profile_basic_auth_password)) },
-                        placeholder = {
-                            // Mirror the tunnel-password field: the password is
-                            // write-only (never echoed back), but show masked dots
-                            // when a password is already stored so reopening the
-                            // editor doesn't look like the credential vanished.
-                            Text(
-                                if (initial.basicAuth != null && !passwordEdited) stringResource(R.string.host_profile_password_masked_placeholder)
-                                else stringResource(R.string.common_optional)
-                            )
-                        },
-                        singleLine = true,
-                        modifier = Modifier.fillMaxWidth(),
-                        visualTransformation = if (showBasicPassword) VisualTransformation.None else PasswordVisualTransformation(),
-                        trailingIcon = {
-                            IconButton(onClick = { showBasicPassword = !showBasicPassword }) {
-                                Icon(
-                                    if (showBasicPassword) Icons.Default.VisibilityOff else Icons.Default.Visibility,
-                                    contentDescription = if (showBasicPassword) stringResource(R.string.settings_hide_password) else stringResource(R.string.settings_show_password)
-                                )
-                            }
-                        }
-                    )
-                }
-                Spacer(modifier = Modifier.height(8.dp))
-                // §profile-cleanup R1: hide Tunnel password behind an Advanced expander.
-                // Default expanded when an existing tunnel is configured so the
-                // credential stays discoverable; collapsed for new profiles.
-                var advancedExpanded by remember(initial.id) { mutableStateOf(initial.tunnelPasswordId != null) }
-                val advancedExpandedDesc = stringResource(R.string.common_collapse)
-                val advancedCollapsedDesc = stringResource(R.string.common_expand)
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .heightIn(min = 48.dp)
-                        .clickable(role = Role.Button) { advancedExpanded = !advancedExpanded }
-                        .semantics(mergeDescendants = true) {
-                            stateDescription = if (advancedExpanded) advancedExpandedDesc else advancedCollapsedDesc
-                        }
-                        .padding(vertical = 4.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.SpaceBetween
-                ) {
-                    Text(
-                        stringResource(R.string.host_advanced),
-                        style = MaterialTheme.typography.titleSmall
-                    )
-                    Icon(
-                        imageVector = if (advancedExpanded) Icons.Default.ExpandLess else Icons.Default.ExpandMore,
-                        contentDescription = null
-                    )
-                }
-                AnimatedVisibility(
-                    visible = advancedExpanded,
-                    enter = expandVertically() + fadeIn(),
-                    exit = shrinkVertically() + fadeOut()
-                ) {
-                    CollapsibleSection(
-                        title = stringResource(R.string.host_section_tunnel_title),
-                        subtitle = stringResource(R.string.host_section_tunnel_sub),
-                        checked = tunnelEnabled,
-                        onCheckedChange = { tunnelEnabled = it },
-                    ) {
-                        // Tunnel auth (optional, masked) — label 槽（§issue-6）
-                        OutlinedTextField(
-                            value = tunnelPassword,
-                            onValueChange = {
-                                tunnelEdited = true
-                                tunnelPassword = it
-                            },
-                            label = { Text(stringResource(R.string.host_profile_tunnel_password_label)) },
-                            placeholder = {
-                                // When a tunnel password is already stored for this host
-                                // (and the user hasn't started editing), show masked dots
-                                // so reopening the editor doesn't look like the credential
-                                // vanished. The field stays write-only (the actual password
-                                // is never echoed back), but the dots signal "data present".
-                                Text(
-                                    if (initial.tunnelPasswordId != null && !tunnelEdited) stringResource(R.string.host_profile_password_masked_placeholder)
-                                    else stringResource(R.string.common_optional)
-                                )
-                            },
-                            singleLine = true,
-                            modifier = Modifier.fillMaxWidth(),
-                            visualTransformation = if (showTunnelPassword) VisualTransformation.None else PasswordVisualTransformation(),
-                            trailingIcon = {
-                                IconButton(onClick = { showTunnelPassword = !showTunnelPassword }) {
-                                    Icon(
-                                        if (showTunnelPassword) Icons.Default.VisibilityOff else Icons.Default.Visibility,
-                                        contentDescription = if (showTunnelPassword) stringResource(R.string.settings_hide_password) else stringResource(R.string.settings_show_password)
-                                    )
-                                }
-                            }
-                        )
-                    }
-                }
-                Spacer(modifier = Modifier.height(12.dp))
-                // §profile-cleanup R1: group selector as an M3 dropdown on the same
-                // row as the title + info icon (replaces the 5-segment bar).
-                var groupExpanded by remember(initial.id) { mutableStateOf(false) }
-                val groupOptions = listOf<Pair<String?, String>>(
-                    null to stringResource(R.string.host_group_none),
-                    "A" to "A",
-                    "B" to "B",
-                    "C" to "C",
-                    "D" to "D"
-                )
-                val selectedGroupLabel = groupOptions.find { it.first == selectedGroup }?.second
-                    ?: stringResource(R.string.host_group_none)
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Text(
-                        stringResource(R.string.host_group_label),
-                        style = MaterialTheme.typography.labelMedium,
-                    )
-                    IconButton(onClick = { showGroupInfo = true }) {
-                        Icon(
-                            Icons.Outlined.Info,
-                            contentDescription = stringResource(R.string.host_group_info),
-                            tint = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                    }
-                    Spacer(modifier = Modifier.width(8.dp))
-                    ExposedDropdownMenuBox(
-                        expanded = groupExpanded,
-                        onExpandedChange = { groupExpanded = it },
-                        modifier = Modifier.weight(1f)
-                    ) {
-                        OutlinedTextField(
-                            value = selectedGroupLabel,
-                            onValueChange = {},
-                            readOnly = true,
-                            singleLine = true,
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .menuAnchor(),
-                            trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = groupExpanded) }
-                        )
-                        ExposedDropdownMenu(
-                            expanded = groupExpanded,
-                            onDismissRequest = { groupExpanded = false }
-                        ) {
-                            groupOptions.forEach { (value, label) ->
-                                DropdownMenuItem(
-                                    text = { Text(label) },
-                                    onClick = {
-                                        selectedGroup = value
-                                        groupExpanded = false
-                                    }
-                                )
-                            }
-                        }
-                    }
-                }
-                Spacer(modifier = Modifier.height(12.dp))
-                // §tofu R2: the legacy "Insecure HTTPS" toggle Row is REMOVED.
-                // Self-signed / unknown-issuer endpoints now surface a TOFU
-                // trust dialog at first connect (Accept once / Trust / Cancel),
-                // keyed by host:port. No editor affordance needed — the user
-                // trusts at runtime when the actual cert is in hand, not in
-                // the abstract per-profile. The strings
-                // host_allow_insecure_title / host_allow_insecure_summary
-                // are dropped from both locales (see strings.xml).
-                Spacer(modifier = Modifier.height(12.dp))
-                // §mtls-clipboard: mTLS 区块——折叠区容器（与 Basic Auth / 隧道一致），
-                // 内容为客户端证书 + CA 两个剪贴板导入槽。
-                // §tofu R2: 与原 allowInsecure 的互斥（开 mTLS 强制重置 allowInsecure）
-                // 已无意义——allowInsecure 字段已删；mTLS 不再需要重置它。
-                CollapsibleSection(
-                    title = stringResource(R.string.host_mtls_title),
-                    subtitle = stringResource(R.string.host_mtls_summary),
-                    checked = mtlsEnabled,
-                    onCheckedChange = {
-                        mtlsEnabled = it
-                    },
-                ) {
-                    // §mtls-clipboard: 降级 banner（缺失/损坏 或粘贴解析错误）。
-                    val mtlsBanner = mtlsErrorHint ?: mtlsImportError
-                    if (mtlsBanner != null) {
-                        Text(
-                            mtlsBanner,
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.error,
-                            modifier = Modifier.padding(bottom = 6.dp)
-                        )
-                    }
-                    // §review-r4 (gpter R4 #1): mTLS on but no usable client-cert
-                    // material (new profile never pasted, or existing cert removed
-                    // via clientCleared). Surface the reason inline here so the
-                    // disabled Save button is never a mystery — mirrors the
-                    // mtlsBanner/mtlsImportError style above.
-                    if (mtlsEnabled && !hasMaterial) {
-                        Text(
-                            stringResource(R.string.host_mtls_missing_client_cert),
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.error,
-                            modifier = Modifier.padding(bottom = 6.dp)
-                        )
-                    }
-                    // §profile-cleanup R1: compact mTLS cert status row.
-                    // Shows icon-only status for client + CA and a single trash
-                    // affordance that clears both and disables mTLS.
-                    CompactCertStatusRow(
-                        clientStatus = clientSlotStatus,
-                        caStatus = caSlotStatus,
-                        clientLabel = stringResource(R.string.host_cert_compact_client),
-                        caLabel = stringResource(R.string.host_cert_compact_ca),
-                        clientPasteLabel = pasteClientLabel,
-                        caPasteLabel = pasteCaLabel,
-                        onImportClient = { triggerClientPaste() },
-                        onImportCa = { triggerCaPaste() },
-                        onClearAll = {
-                            clientEdited = true
-                            caEdited = true
-                            clientCleared = true
-                            mtlsEnabled = false
-                            stagedP12 = null
-                            clientSlotStatus = CertSlotStatus.Empty
-                            caStage = CaStage.Clear
-                            caSlotStatus = CertSlotStatus.Empty
-                            mtlsImportError = null
-                        },
-                        enabled = !isConverting,
-                    )
-                }
-                // §issue-5: 全宽"测试连接"按钮已移除——触发器移入底部 action 行的
-                // test icon（见 confirmButton）。此处仅保留结果回显（成功/失败小字），
-                // 测试进行中由 icon 内的进度圈表达。
-                testStatus?.let { (success, msg) ->
-                    Text(
-                        text = msg,
-                        style = MaterialTheme.typography.bodySmall,
-                        color = if (success) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.error,
-                        modifier = Modifier.padding(top = 4.dp)
-                    )
-                }
-                // §fix-401: 旧提示"编辑已有配置时请重新输入密码后再测试"已移除——
-                // 现在 VM 会在未编辑密码时自动回退已保存密码，无需用户重输。
-            }
-        },
-        // Bottom action row: [Test][Delete] ... [Cancel] [Save].
-        // §issue-5: 测试连接从表单全宽按钮迁来此处的 test icon（NetworkCheck；
-        // 测试中换进度圈、URL 空或测试中禁用）。删除键改为 icon-only（去文字标签），
-        // 保留 error 着色 + contentDescription 供无障碍。两 icon 组成左簇。
+        title = if (initial.name.isBlank()) stringResource(R.string.host_profile_add_title)
+                else stringResource(R.string.host_profile_edit_title),
         confirmButton = {
+            // Bottom action row: [Test][Delete] ... [Cancel] [Save].
+            // §issue-5: 测试连接从表单全宽按钮迁来此处的 test icon（NetworkCheck；
+            // 测试中换进度圈、URL 空或测试中禁用）。删除键改为 icon-only（去文字标签），
+            // 保留 error 着色 + contentDescription 供无障碍。两 icon 组成左簇。
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceBetween,
@@ -1021,7 +746,8 @@ internal fun HostProfileEditorDialog(
                     ) {
                         if (isTesting || isConverting) {
                             CircularProgressIndicator(
-                                modifier = Modifier.size(18.dp),
+                                modifier = Modifier.size(Dimens.iconSm),
+                                // §stroke: 2dp indicator stroke (no Dimens token).
                                 strokeWidth = 2.dp
                             )
                         } else {
@@ -1042,7 +768,7 @@ internal fun HostProfileEditorDialog(
                         }
                     }
                 }
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Row(horizontalArrangement = Arrangement.spacedBy(Dimens.spacing2)) {
                     TextButton(onClick = onDismiss) { Text(stringResource(R.string.common_cancel)) }
                     // §item7 (glm#4): Save 同时受 isTesting 门控——防测试进行中点 Save
                     //   取消在飞的测试协程。
@@ -1100,7 +826,7 @@ internal fun HostProfileEditorDialog(
                     ) {
                         if (isConverting) {
                             CircularProgressIndicator(
-                                modifier = Modifier.size(18.dp),
+                                modifier = Modifier.size(Dimens.iconSm),
                                 strokeWidth = 2.dp
                             )
                         } else {
@@ -1109,28 +835,316 @@ internal fun HostProfileEditorDialog(
                     }
                 }
             }
+        },
+        content = {
+            // §WT5: form content emitted directly into AppFormDialog's ColumnScope.
+            // The previous AlertDialog.text Column wrapper (heightIn(max=560.dp) +
+            // verticalScroll) is retired — AppFormDialog provides the scrollable
+            // container with a screenHeight*0.85f cap.
+            //
+            // 配置名 (required) — label 槽替代上方独立 Text（M3 idiom + 省 1 行，§issue-6）
+        OutlinedTextField(
+            value = name,
+            onValueChange = { name = it },
+            label = { Text(stringResource(R.string.host_profile_name)) },
+            singleLine = true,
+            modifier = Modifier.fillMaxWidth()
+        )
+        Spacer(modifier = Modifier.height(Dimens.spacingCompact))
+        // 服务器地址 (required) — label 槽（§issue-6）
+        OutlinedTextField(
+            value = serverUrl,
+            onValueChange = { serverUrl = it },
+            label = { Text(stringResource(R.string.settings_server_url)) },
+            placeholder = { Text(stringResource(R.string.host_profile_url_placeholder)) },
+            singleLine = true,
+            modifier = Modifier.fillMaxWidth()
+        )
+        Spacer(modifier = Modifier.height(Dimens.spacing3))
+        // §mtls-clipboard / §design E: 三个凭据区折叠——新 profile 全 false，
+        // 既有 profile 按是否配置种子。关则隐藏内容，保存时清空对应凭据。
+        CollapsibleSection(
+            title = stringResource(R.string.host_section_basic_auth_title),
+            subtitle = stringResource(R.string.host_section_basic_auth_sub),
+            checked = basicAuthEnabled,
+            onCheckedChange = { basicAuthEnabled = it },
+        ) {
+            // Username (optional) — label 槽（§issue-6）
+            OutlinedTextField(
+                value = authUsername,
+                onValueChange = { authUsername = it },
+                label = { Text(stringResource(R.string.host_profile_basic_auth_username)) },
+                placeholder = { Text(stringResource(R.string.common_optional)) },
+                singleLine = true,
+                modifier = Modifier.fillMaxWidth()
+            )
+            Spacer(modifier = Modifier.height(Dimens.spacingCompact))
+            // Password (optional, masked) — label 槽（§issue-6）
+            OutlinedTextField(
+                value = authPassword,
+                onValueChange = {
+                    passwordEdited = true
+                    authPassword = it
+                },
+                label = { Text(stringResource(R.string.host_profile_basic_auth_password)) },
+                placeholder = {
+                    // Mirror the tunnel-password field: the password is
+                    // write-only (never echoed back), but show masked dots
+                    // when a password is already stored so reopening the
+                    // editor doesn't look like the credential vanished.
+                    Text(
+                        if (initial.basicAuth != null && !passwordEdited) stringResource(R.string.host_profile_password_masked_placeholder)
+                        else stringResource(R.string.common_optional)
+                    )
+                },
+                singleLine = true,
+                modifier = Modifier.fillMaxWidth(),
+                visualTransformation = if (showBasicPassword) VisualTransformation.None else PasswordVisualTransformation(),
+                trailingIcon = {
+                    IconButton(onClick = { showBasicPassword = !showBasicPassword }) {
+                        Icon(
+                            if (showBasicPassword) Icons.Default.VisibilityOff else Icons.Default.Visibility,
+                            contentDescription = if (showBasicPassword) stringResource(R.string.settings_hide_password) else stringResource(R.string.settings_show_password)
+                        )
+                    }
+                }
+            )
+        }
+        Spacer(modifier = Modifier.height(Dimens.spacing2))
+        // §profile-cleanup R1: hide Tunnel password behind an Advanced expander.
+        // Default expanded when an existing tunnel is configured so the
+        // credential stays discoverable; collapsed for new profiles.
+        var advancedExpanded by remember(initial.id) { mutableStateOf(initial.tunnelPasswordId != null) }
+        val advancedExpandedDesc = stringResource(R.string.common_collapse)
+        val advancedCollapsedDesc = stringResource(R.string.common_expand)
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .heightIn(min = Dimens.touchTargetMin)
+                .clickable(role = Role.Button) { advancedExpanded = !advancedExpanded }
+                .semantics(mergeDescendants = true) {
+                    stateDescription = if (advancedExpanded) advancedExpandedDesc else advancedCollapsedDesc
+                }
+                .padding(vertical = Dimens.spacing1),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.SpaceBetween
+        ) {
+            Text(
+                stringResource(R.string.host_advanced),
+                style = MaterialTheme.typography.titleSmall
+            )
+            Icon(
+                imageVector = if (advancedExpanded) Icons.Default.ExpandLess else Icons.Default.ExpandMore,
+                contentDescription = null
+            )
+        }
+        AnimatedVisibility(
+            visible = advancedExpanded,
+            enter = expandVertically() + fadeIn(),
+            exit = shrinkVertically() + fadeOut()
+        ) {
+            CollapsibleSection(
+                title = stringResource(R.string.host_section_tunnel_title),
+                subtitle = stringResource(R.string.host_section_tunnel_sub),
+                checked = tunnelEnabled,
+                onCheckedChange = { tunnelEnabled = it },
+            ) {
+                // Tunnel auth (optional, masked) — label 槽（§issue-6）
+                OutlinedTextField(
+                    value = tunnelPassword,
+                    onValueChange = {
+                        tunnelEdited = true
+                        tunnelPassword = it
+                    },
+                    label = { Text(stringResource(R.string.host_profile_tunnel_password_label)) },
+                    placeholder = {
+                        // When a tunnel password is already stored for this host
+                        // (and the user hasn't started editing), show masked dots
+                        // so reopening the editor doesn't look like the credential
+                        // vanished. The field stays write-only (the actual password
+                        // is never echoed back), but the dots signal "data present".
+                        Text(
+                            if (initial.tunnelPasswordId != null && !tunnelEdited) stringResource(R.string.host_profile_password_masked_placeholder)
+                            else stringResource(R.string.common_optional)
+                        )
+                    },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth(),
+                    visualTransformation = if (showTunnelPassword) VisualTransformation.None else PasswordVisualTransformation(),
+                    trailingIcon = {
+                        IconButton(onClick = { showTunnelPassword = !showTunnelPassword }) {
+                            Icon(
+                                if (showTunnelPassword) Icons.Default.VisibilityOff else Icons.Default.Visibility,
+                                contentDescription = if (showTunnelPassword) stringResource(R.string.settings_hide_password) else stringResource(R.string.settings_show_password)
+                            )
+                        }
+                    }
+                )
+            }
+        }
+        Spacer(modifier = Modifier.height(Dimens.spacing3))
+        // §profile-cleanup R1: group selector as an M3 dropdown on the same
+        // row as the title + info icon (replaces the 5-segment bar).
+        var groupExpanded by remember(initial.id) { mutableStateOf(false) }
+        val groupOptions = listOf<Pair<String?, String>>(
+            null to stringResource(R.string.host_group_none),
+            "A" to "A",
+            "B" to "B",
+            "C" to "C",
+            "D" to "D"
+        )
+        val selectedGroupLabel = groupOptions.find { it.first == selectedGroup }?.second
+            ?: stringResource(R.string.host_group_none)
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text(
+                stringResource(R.string.host_group_label),
+                style = MaterialTheme.typography.labelMedium,
+            )
+            IconButton(onClick = { showGroupInfo = true }) {
+                Icon(
+                    Icons.Outlined.Info,
+                    contentDescription = stringResource(R.string.host_group_info),
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+            Spacer(modifier = Modifier.width(Dimens.spacing2))
+            ExposedDropdownMenuBox(
+                expanded = groupExpanded,
+                onExpandedChange = { groupExpanded = it },
+                modifier = Modifier.weight(1f)
+            ) {
+                OutlinedTextField(
+                    value = selectedGroupLabel,
+                    onValueChange = {},
+                    readOnly = true,
+                    singleLine = true,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .menuAnchor(),
+                    trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = groupExpanded) }
+                )
+                ExposedDropdownMenu(
+                    expanded = groupExpanded,
+                    onDismissRequest = { groupExpanded = false }
+                ) {
+                    groupOptions.forEach { (value, label) ->
+                        DropdownMenuItem(
+                            text = { Text(label) },
+                            onClick = {
+                                selectedGroup = value
+                                groupExpanded = false
+                            }
+                        )
+                    }
+                }
+            }
+        }
+        Spacer(modifier = Modifier.height(Dimens.spacing3))
+        // §tofu R2: the legacy "Insecure HTTPS" toggle Row is REMOVED.
+        // Self-signed / unknown-issuer endpoints now surface a TOFU
+        // trust dialog at first connect (Accept once / Trust / Cancel),
+        // keyed by host:port. No editor affordance needed — the user
+        // trusts at runtime when the actual cert is in hand, not in
+        // the abstract per-profile. The strings
+        // host_allow_insecure_title / host_allow_insecure_summary
+        // are dropped from both locales (see strings.xml).
+        Spacer(modifier = Modifier.height(Dimens.spacing3))
+        // §mtls-clipboard: mTLS 区块——折叠区容器（与 Basic Auth / 隧道一致），
+        // 内容为客户端证书 + CA 两个剪贴板导入槽。
+        // §tofu R2: 与原 allowInsecure 的互斥（开 mTLS 强制重置 allowInsecure）
+        // 已无意义——allowInsecure 字段已删；mTLS 不再需要重置它。
+        CollapsibleSection(
+            title = stringResource(R.string.host_mtls_title),
+            subtitle = stringResource(R.string.host_mtls_summary),
+            checked = mtlsEnabled,
+            onCheckedChange = {
+                mtlsEnabled = it
+            },
+        ) {
+            // §mtls-clipboard: 降级 banner（缺失/损坏 或粘贴解析错误）。
+            val mtlsBanner = mtlsErrorHint ?: mtlsImportError
+            if (mtlsBanner != null) {
+                Text(
+                    mtlsBanner,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.error,
+                    modifier = Modifier.padding(bottom = Dimens.spacingCompact)
+                )
+            }
+            // §review-r4 (gpter R4 #1): mTLS on but no usable client-cert
+            // material (new profile never pasted, or existing cert removed
+            // via clientCleared). Surface the reason inline here so the
+            // disabled Save button is never a mystery — mirrors the
+            // mtlsBanner/mtlsImportError style above.
+            if (mtlsEnabled && !hasMaterial) {
+                Text(
+                    stringResource(R.string.host_mtls_missing_client_cert),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.error,
+                    modifier = Modifier.padding(bottom = Dimens.spacingCompact)
+                )
+            }
+            // §profile-cleanup R1: compact mTLS cert status row.
+            // Shows icon-only status for client + CA and a single trash
+            // affordance that clears both and disables mTLS.
+            CompactCertStatusRow(
+                clientStatus = clientSlotStatus,
+                caStatus = caSlotStatus,
+                clientLabel = stringResource(R.string.host_cert_compact_client),
+                caLabel = stringResource(R.string.host_cert_compact_ca),
+                clientPasteLabel = pasteClientLabel,
+                caPasteLabel = pasteCaLabel,
+                onImportClient = { triggerClientPaste() },
+                onImportCa = { triggerCaPaste() },
+                onClearAll = {
+                    clientEdited = true
+                    caEdited = true
+                    clientCleared = true
+                    mtlsEnabled = false
+                    stagedP12 = null
+                    clientSlotStatus = CertSlotStatus.Empty
+                    caStage = CaStage.Clear
+                    caSlotStatus = CertSlotStatus.Empty
+                    mtlsImportError = null
+                },
+                enabled = !isConverting,
+            )
+        }
+        // §issue-5: 全宽"测试连接"按钮已移除——触发器移入底部 action 行的
+        // test icon（见 confirmButton）。此处仅保留结果回显（成功/失败小字），
+        // 测试进行中由 icon 内的进度圈表达。
+        testStatus?.let { (success, msg) ->
+            Text(
+                text = msg,
+                style = MaterialTheme.typography.bodySmall,
+                color = if (success) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.error,
+                modifier = Modifier.padding(top = Dimens.spacing1)
+            )
+        }
+        // §fix-401: 旧提示"编辑已有配置时请重新输入密码后再测试"已移除——
+        // 现在 VM 会在未编辑密码时自动回退已保存密码，无需用户重输。
         }
     )
 
     if (showDeleteConfirm) {
-        AlertDialog(
-            onDismissRequest = { showDeleteConfirm = false },
-            title = { Text(stringResource(R.string.host_profile_delete_confirm_title)) },
-            text = { Text(stringResource(R.string.host_profile_delete_confirm_message)) },
-            confirmButton = {
-                TextButton(
-                    onClick = {
-                        showDeleteConfirm = false
-                        onDelete()
-                    },
-                    colors = ButtonDefaults.textButtonColors(
-                        contentColor = MaterialTheme.colorScheme.error
-                    )
-                ) { Text(stringResource(R.string.common_delete)) }
+        // §WT5: host-profile delete confirm consolidated onto AppConfirmDialog
+        // (was a hand-rolled AlertDialog with error-tinted confirm TextButton).
+        // Callbacks + messages preserved verbatim; destructive=true restores
+        // the error-colored confirm button.
+        AppConfirmDialog(
+            title = stringResource(R.string.host_profile_delete_confirm_title),
+            body = stringResource(R.string.host_profile_delete_confirm_message),
+            confirmText = stringResource(R.string.common_delete),
+            onConfirm = {
+                showDeleteConfirm = false
+                onDelete()
             },
-            dismissButton = {
-                TextButton(onClick = { showDeleteConfirm = false }) { Text(stringResource(R.string.common_cancel)) }
-            }
+            dismissText = stringResource(R.string.common_cancel),
+            onDismiss = { showDeleteConfirm = false },
+            destructive = true,
         )
     }
 

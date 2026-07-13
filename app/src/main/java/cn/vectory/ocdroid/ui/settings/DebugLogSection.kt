@@ -51,6 +51,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
 import cn.vectory.ocdroid.R
+import cn.vectory.ocdroid.ui.theme.AppSectionHeader
 import cn.vectory.ocdroid.ui.theme.BundledMonoFamily
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -88,7 +89,7 @@ internal fun DebugLogSection(hideHeader: Boolean = false) {
     }
 
     if (!hideHeader) {
-        SectionHeader(title = stringResource(R.string.debug_log_title))
+        AppSectionHeader(text = stringResource(R.string.debug_log_title))
     }
 
     Card(
