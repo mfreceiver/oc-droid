@@ -20,10 +20,8 @@ import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.ListItem
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
-import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -40,6 +38,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import cn.vectory.ocdroid.R
 import cn.vectory.ocdroid.ui.chat.workdirTone
+import cn.vectory.ocdroid.ui.theme.AppBottomSheet
 import cn.vectory.ocdroid.ui.theme.Dimens
 import cn.vectory.ocdroid.util.WorkdirPaths
 
@@ -146,10 +145,12 @@ fun WorkdirControl(
     }
 
     if (showSheet) {
-        val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
-        ModalBottomSheet(
+        // §WT0: 迁移到 AppBottomSheet（统一容器色 / sheetState / title / 底部
+        // 16dp Spacer）。原 `ModalBottomSheet { ... }` + `rememberModalBottomSheetState`
+        // 由 scaffold 接管；title 来自 files_workdir_switch；content 不变。
+        AppBottomSheet(
             onDismissRequest = { showSheet = false },
-            sheetState = sheetState,
+            title = switchDesc,
         ) {
             WorkdirSwitcherBody(
                 currentWorkdir = currentWorkdir,
@@ -186,9 +187,11 @@ private fun WorkdirSwitcherBody(
         modifier = Modifier
             .fillMaxWidth()
             .heightIn(max = 600.dp)
-            .verticalScroll(rememberScrollState())
-            .padding(bottom = Dimens.spacing4),
+            .verticalScroll(rememberScrollState()),
     ) {
+        // §WT0: 原 `.padding(bottom = Dimens.spacing4)` 删除——AppBottomSheet
+        // scaffold 已在底部统一加 16dp Spacer（见 SheetRecipe.kt:60-63 双重
+        // padding 警示）。
         if (distinctWorkdirs.isEmpty()) {
             ListItem(
                 headlineContent = { Text(stringResource(R.string.files_workdir_none_connected)) },
