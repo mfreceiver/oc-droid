@@ -55,6 +55,7 @@ class SessionMutationActionsTest {
     fun setUp() {
         mockkStatic(Log::class)
         every { Log.d(any<String>(), any<String>()) } returns 0
+        every { Log.i(any<String>(), any<String>()) } returns 0
         every { Log.w(any<String>(), any<String>()) } returns 0
         every { Log.e(any<String>(), any<String>()) } returns 0
         every { Log.e(any<String>(), any<String>(), any<Throwable>()) } returns 0
@@ -732,6 +733,122 @@ class SessionMutationActionsTest {
         assertEquals(1, refreshSessions)
         assertEquals(1, successCalled)
         assertEquals(1, completeCalled)
+    }
+
+    // ── gro-2 Blocker 2a: send-success resurrects archived session guard ─────
+
+    @Test
+    fun `gro-2 Blocker 2a - launchSendMessage skips bump and refresh when session archived mid-send`() = runTest {
+        // If the session was archived/evicted mid-send (cross-device archive
+        // during prompt_async), onSuccess must NOT bump time.updated, write
+        // sessionStatuses[busy], or fire onRefreshSessions/onRefreshMessages —
+        // that would resurrect a dead session as ghost-busy.
+        val archived = Session(id = "s1", directory = "/x", time = Session.TimeInfo(archived = 1L))
+        store.mutateSessionList { it.copy(sessions = listOf(archived)) }
+        coEvery { repository.sendMessage(any(), any(), any(), any(), any()) } returns Result.success(Unit)
+        var refreshMsg = 0
+        var refreshSessions = 0
+        var successCalled = 0
+        var completeCalled = 0
+
+        launchSendMessage(
+            scope = scope,
+            repository = repository,
+            slices = slices,
+            sessionId = "s1",
+            text = "hello",
+            agent = "build",
+            model = null,
+            onRefreshMessages = { _, _ -> refreshMsg += 1 },
+            onRefreshSessions = { refreshSessions += 1 },
+            onSuccess = { successCalled += 1 },
+            onComplete = { completeCalled += 1 },
+            emit = emit,
+        )
+        advanceUntilIdle()
+
+        // No ghost-busy: sessionStatuses NOT written.
+        assertNull("no busy status written for archived session", slices.sessionList.value.sessionStatuses["s1"])
+        // No refresh triggered.
+        assertEquals("onRefreshMessages NOT called for archived session", 0, refreshMsg)
+        assertEquals("onRefreshSessions NOT called for archived session", 0, refreshSessions)
+        // onSuccess NOT called (the session is dead — no success side-effects).
+        assertEquals("onSuccess NOT called for archived session", 0, successCalled)
+        // onComplete IS called (the outer onComplete?.invoke() always fires
+        // after the Result block — it is the "finally" equivalent).
+        assertEquals("onComplete called (cleanup)", 1, completeCalled)
+    }
+
+    @Test
+    fun `gro-2 Blocker 2a - launchSendMessage proceeds normally when session absent from list (not yet loaded)`() = runTest {
+        // A session that is absent from sessionList.sessions (not yet loaded /
+        // cold-start window) is NOT the same as archived. The guard bails ONLY
+        // when the session is explicitly present AND archived — absence is
+        // treated leniently (the session was valid at dispatch time).
+        store.mutateSessionList { it.copy(sessions = emptyList()) }
+        coEvery { repository.sendMessage(any(), any(), any(), any(), any()) } returns Result.success(Unit)
+        var refreshMsg = 0
+        var refreshSessions = 0
+        var successCalled = 0
+
+        launchSendMessage(
+            scope = scope,
+            repository = repository,
+            slices = slices,
+            sessionId = "not-loaded-yet",
+            text = "hello",
+            agent = "build",
+            model = null,
+            onRefreshMessages = { _, _ -> refreshMsg += 1 },
+            onRefreshSessions = { refreshSessions += 1 },
+            onSuccess = { successCalled += 1 },
+            emit = emit,
+        )
+        advanceUntilIdle()
+
+        // Absent ≠ archived → normal path proceeds (lenient).
+        assertEquals("busy status written (absent is not archived)", "busy", slices.sessionList.value.sessionStatuses["not-loaded-yet"]?.type)
+        assertEquals("onRefreshMessages called", 1, refreshMsg)
+        assertEquals("onRefreshSessions called", 1, refreshSessions)
+        assertEquals("onSuccess called", 1, successCalled)
+    }
+
+    @Test
+    fun `gro-2 Blocker 2a - launchSendMessage proceeds normally when user switched away to non-archived session`() = runTest {
+        // Critical regression guard: the guard must NOT break the legitimate
+        // "user switched away mid-send" case. The sent-to session is still
+        // alive (present + not archived) — just not current anymore. The bump
+        // + busy status + refresh MUST fire normally (the sent-to session
+        // deserves its activity bump regardless of which session is open).
+        val sentTo = Session(id = "s1", directory = "/x")
+        val switchedTo = Session(id = "s2", directory = "/y")
+        store.mutateSessionList { it.copy(sessions = listOf(sentTo, switchedTo)) }
+        store.mutateChat { it.copy(currentSessionId = "s2") }  // user switched to s2
+        coEvery { repository.sendMessage(any(), any(), any(), any(), any()) } returns Result.success(Unit)
+        var refreshMsg = 0
+        var refreshSessions = 0
+        var successCalled = 0
+
+        launchSendMessage(
+            scope = scope,
+            repository = repository,
+            slices = slices,
+            sessionId = "s1",  // sent to s1 (not current, but alive)
+            text = "hello",
+            agent = "build",
+            model = null,
+            onRefreshMessages = { _, _ -> refreshMsg += 1 },
+            onRefreshSessions = { refreshSessions += 1 },
+            onSuccess = { successCalled += 1 },
+            emit = emit,
+        )
+        advanceUntilIdle()
+
+        // Normal path: bump + busy + refresh all fire for s1 (stillAlive).
+        assertEquals("busy status written for sent-to session", "busy", slices.sessionList.value.sessionStatuses["s1"]?.type)
+        assertEquals("onRefreshMessages called", 1, refreshMsg)
+        assertEquals("onRefreshSessions called", 1, refreshSessions)
+        assertEquals("onSuccess called", 1, successCalled)
     }
 
     @Test
