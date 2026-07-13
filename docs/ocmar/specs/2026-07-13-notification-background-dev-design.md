@@ -3,6 +3,7 @@
 > 状态：**开发设计文档（面向实现）**。
 > **不重写 spec**：本文件**仅一句话引用** [FGS spec](./2026-07-13-notification-background-fgs-design.md)（`2026-07-13-notification-background-fgs-design.md`，已过 gpter/groker 双 9.5 门）为权威设计源，并给出**实施视角的落地指南**——按 Phase 列任务清单、补足通知卡片视觉设计（FGS spec 中偏略的部分）、明确与现有 channel 的关系、给出 IslandNotifier decorator pipeline 的接口草图。
 > 配套：[需求文档](./2026-07-13-notification-background-requirements.md)、[代码调研文档](./2026-07-13-notification-background-code-research.md)。
+> **新接手 agent 先读**：[`2026-07-13-notification-background-execution.md`](./2026-07-13-notification-background-execution.md)（执行入口：阅读顺序 / 硬约束 / 本次范围 / 风险分级 / 已核验代码锚点截至 v0.9.4 / 交接提示词）。本文件的行号为 v0.9.3 撰写时快照，Phase 0 触及文件经核验仍准确，仍以实际文件为准。
 
 ---
 
