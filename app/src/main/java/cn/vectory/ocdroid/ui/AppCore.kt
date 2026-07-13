@@ -9,6 +9,8 @@ import cn.vectory.ocdroid.data.repository.HostProfileStore
 import cn.vectory.ocdroid.data.repository.OpenCodeRepository
 import cn.vectory.ocdroid.di.AppLifecycleMonitor
 import cn.vectory.ocdroid.di.UiApplicationScope
+import cn.vectory.ocdroid.service.bridge.SseEventBridge
+import cn.vectory.ocdroid.service.events.SseEventStream
 import cn.vectory.ocdroid.service.identity.ConnectionIdentityStore
 import cn.vectory.ocdroid.util.DebugLog
 import cn.vectory.ocdroid.util.SettingsManager
@@ -151,6 +153,20 @@ class AppCore @Inject constructor(
      * the @Singleton instance (same one CC / SSC / HPC inject).
      */
     internal val identityStore: ConnectionIdentityStore,
+    /**
+     * CP3 (notify Phase-0): the process-wide SSE event stream. CC publishes
+     * each [cn.vectory.ocdroid.service.events.IdentifiedSseEvent] here (CP3
+     * replaced the direct ControllerEffect.OnSseEvent emission). Injected
+     * here so AppCore can pass it to the bridge.
+     */
+    internal val sseEventStream: SseEventStream,
+    /**
+     * CP3 (notify Phase-0): the identity-checked SSE event bridge. Subscribes
+     * to [sseEventStream.events], validates epoch (§2), routes to the §11
+     * control/delta dual-channel. AppCore collects both channels and re-emits
+     * them as [ControllerEffect.OnSseEvent] for SSC's identity-checked fold.
+     */
+    internal val sseEventBridge: SseEventBridge,
 ) {
 
     // ── Slice accessors (delegate to SharedStateStore) ──────────────────────
@@ -258,6 +274,53 @@ class AppCore @Inject constructor(
         // registered synchronously here, before the constructor returns.
         appScope.launch(start = CoroutineStart.UNDISPATCHED) {
             effectBus.effects.collect { effect -> dispatchEffect(effect) }
+        }
+
+        // CP3 (notify Phase-0): eagerly start the SSE event bridge so it is
+        // subscribed to [sseEventStream.events] BEFORE any producer emits.
+        // The bridge performs the §2 epoch guard (drops stale-identity frames)
+        // and routes fresh frames to the §11 control/delta dual-channel.
+        // currentEpoch is read fresh per frame from the single identity store.
+        sseEventBridge.start(sseEventStream.events) { identityStore.currentEpoch() }
+
+        // CP3: collect the bridge's control + delta channels and re-emit each
+        // validated [IdentifiedSseEvent] as [ControllerEffect.OnSseEvent] so
+        // SSC's identity-checked [handleEvent(IdentifiedSseEvent)] fold runs
+        // exactly as it did pre-CP3 (when CC emitted OnSseEvent directly).
+        // The OnSseEvent type + the fold path are unchanged; only the producer
+        // moved (CC → stream → bridge → AppCore → OnSseEvent → SSC).
+        appScope.launch(start = CoroutineStart.UNDISPATCHED) {
+            sseEventBridge.controlEvents.collect { identified ->
+                dispatchEffect(ControllerEffect.OnSseEvent(identified))
+            }
+        }
+        appScope.launch(start = CoroutineStart.UNDISPATCHED) {
+            sseEventBridge.deltaEvents.collect { identified ->
+                dispatchEffect(ControllerEffect.OnSseEvent(identified))
+            }
+        }
+
+        // CP3 §11 overflow recovery: when delta overflow marks sessions dirty,
+        // drain the set and drive a REST reconcile for each dirty session via
+        // the existing LoadMessages effect (resetLimit=true forces a full
+        // window reload from the server). The dirtySessions StateFlow starts
+        // empty; we only react when it transitions to non-empty.
+        appScope.launch(start = CoroutineStart.UNDISPATCHED) {
+            sseEventBridge.dirtySessions.filter { it.isNotEmpty() }.collect { _ ->
+                    val sessions = sseEventBridge.consumeDirty()
+                    for (sid in sessions) {
+                        // Skip the bridge's "__unknown__" placeholder + blanks —
+                        // those have no session-scoped reload target.
+                        if (sid.isBlank() || sid.startsWith("__")) continue
+                        DebugLog.i(
+                            TAG,
+                            "§11 delta overflow reconcile: reloading session $sid"
+                        )
+                        effectBus.tryEmitEffect(
+                            ControllerEffect.LoadMessages(sid, resetLimit = true)
+                        )
+                    }
+                }
         }
 
         // §R18 Phase 2-F: currentSessionId convergence. ChatState

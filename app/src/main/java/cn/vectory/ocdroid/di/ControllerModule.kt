@@ -188,6 +188,7 @@ object ControllerModule {
         @Named("currentServerGroupFp") currentServerGroupFp: () -> String,
         identityStore: cn.vectory.ocdroid.service.identity.ConnectionIdentityStore,
         bootstrapCoordinator: cn.vectory.ocdroid.service.bootstrap.ConnectionBootstrapCoordinator,
+        sseEventStream: cn.vectory.ocdroid.service.events.SseEventStream,
     ): ConnectionCoordinator = ConnectionCoordinator(
         scope = appScope,
         slices = store.slices,
@@ -201,5 +202,8 @@ object ControllerModule {
         // CP2 (notify Phase-0): delegate TOFU state to the shared bootstrap
         // coordinator (FGS spec §10). CC's public TOFU surface is unchanged.
         bootstrapCoordinator = bootstrapCoordinator,
+        // CP3 (notify Phase-0): publish SSE events into the process-wide
+        // stream so the SseEventBridge routes them.
+        sseEventStream = sseEventStream,
     )
 }

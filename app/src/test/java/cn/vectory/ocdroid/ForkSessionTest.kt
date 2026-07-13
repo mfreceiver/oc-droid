@@ -140,6 +140,9 @@ class ForkSessionTest {
         val cacheRepository = io.mockk.mockk<cn.vectory.ocdroid.data.cache.CacheRepository>(relaxed = true)
         // CP1 (notify Phase-0): single connection-identity store.
         val identityStore = cn.vectory.ocdroid.service.identity.ConnectionIdentityStore()
+        // CP3 (notify Phase-0): SSE event stream + bridge.
+        val sseEventStream = cn.vectory.ocdroid.service.events.SseEventStream()
+        val sseEventBridge = cn.vectory.ocdroid.service.bridge.SseEventBridge(appScope)
         // R-20 Phase 1: stub verifyAndLoad to a non-null default — relaxed
         // mockk returns null for sealed-interface return types, which crashes
         // AppCore's VerifyAndHydrate handler `when`.
@@ -180,6 +183,8 @@ class ForkSessionTest {
             identityStore = identityStore,
             // CP2 (notify Phase-0): delegate TOFU state.
             bootstrapCoordinator = cn.vectory.ocdroid.service.bootstrap.ConnectionBootstrapCoordinator(),
+            // CP3 (notify Phase-0): publish into the SSE event stream.
+            sseEventStream = sseEventStream,
         )
         val gapFillCoordinator = cn.vectory.ocdroid.ui.chat.GapFillCoordinator(
             repository = repository,
@@ -208,6 +213,9 @@ class ForkSessionTest {
             appScope,
             // CP1 (notify Phase-0): single connection-identity store.
             identityStore,
+            // CP3 (notify Phase-0): SSE event stream + bridge.
+            sseEventStream,
+            sseEventBridge,
         )
     }
 

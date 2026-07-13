@@ -93,9 +93,30 @@ class SseEventBridge @Inject constructor(
      * Sessions that observed delta overflow since the last reconcile. The
      * dispatcher / `SessionSyncCoordinator` consumes this to trigger a
      * forced REST reconcile (§11). Switch-over seam.
+     *
+     * CP3: drain via [consumeDirty] — a grow-only set is insufficient because
+     * callers must be able to clear the set after triggering a REST reconcile
+     * (otherwise the same sessions would be redundantly reconciled on every
+     * overflow check). [consumeDirty] atomically returns + clears.
      */
     private val _dirtySessions = MutableStateFlow<Set<String>>(emptySet())
     val dirtySessions: StateFlow<Set<String>> = _dirtySessions.asStateFlow()
+
+    /**
+     * §11 overflow recovery drain: atomically returns the current
+     * [dirtySessions] AND clears the set. Callers (AppCore's overflow watcher)
+     * use this to trigger a forced REST reconcile for the dirty sessions
+     * (reload their message windows from the server) and then clear the set
+     * so subsequent overflows start fresh.
+     *
+     * Returns the snapshot of dirty session ids at the call instant; an empty
+     * set means no overflow was observed since the last drain.
+     */
+    fun consumeDirty(): Set<String> {
+        val snapshot = _dirtySessions.value
+        _dirtySessions.value = emptySet()
+        return snapshot
+    }
 
     private var collectionJob: Job? = null
     private var droppedDeltaCount: Long = 0L

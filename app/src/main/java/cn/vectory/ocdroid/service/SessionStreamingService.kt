@@ -9,6 +9,7 @@ import androidx.core.app.NotificationCompat
 import androidx.core.app.ServiceCompat
 import cn.vectory.ocdroid.R
 import cn.vectory.ocdroid.service.events.IdentifiedSseEvent
+import cn.vectory.ocdroid.service.events.SseEventStream
 import cn.vectory.ocdroid.service.identity.ConnectionIdentity
 import cn.vectory.ocdroid.util.DebugLog
 import cn.vectory.ocdroid.util.SettingsManager
@@ -16,9 +17,7 @@ import dagger.hilt.android.AndroidEntryPoint
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.MainScope
 import kotlinx.coroutines.cancel
-import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.SharedFlow
-import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.launch
 import javax.inject.Inject
 
@@ -75,6 +74,17 @@ class SessionStreamingService : Service() {
     lateinit var settingsManager: SettingsManager
 
     /**
+     * CP3 (notify Phase-0): the process-wide SSE event stream. The Service
+     * delegates its [events] surface to this stream — so when the Service IS
+     * started (CP5+), its `events` field IS the same stream the
+     * [cn.vectory.ocdroid.service.bridge.SseEventBridge] subscribes to.
+     * Today (CP3) the producer is `ConnectionCoordinator.launchSseCollection`;
+     * the Service remains inert / not-started.
+     */
+    @Inject
+    lateinit var sseEventStream: SseEventStream
+
+    /**
      * Service-lifetime [CoroutineScope] bound to [MainScope] (Main thread).
      * `startForeground` / `stopForeground` / notification updates MUST be
      * invoked on the main thread; the async bootstrap runs here too so every
@@ -87,6 +97,13 @@ class SessionStreamingService : Service() {
     /**
      * Process-level SSE event surface (FGS spec §1 / dev-design P0.1).
      *
+     * CP3 (notify Phase-0): delegates to [sseEventStream.events] — the single
+     * process-wide stream. The producer today (CP3) is
+     * `ConnectionCoordinator.launchSseCollection`; when the SSE ownership
+     * migrates here (CP5/CP9), [connectSse] will publish into the same stream
+     * via [SseEventStream.emit], and the bridge + downstream fold path stay
+     * unchanged.
+     *
      * Carries [Result] so transport-level failures reach the
      * [cn.vectory.ocdroid.service.bridge.SseEventBridge] and the
      * `SessionSyncCoordinator` fold path exactly as they do today on
@@ -94,15 +111,8 @@ class SessionStreamingService : Service() {
      * an [IdentifiedSseEvent] carrying the [ConnectionIdentity] of the
      * collector it arrived on (FGS spec §2 / gpter-MAJOR#2: identity must not
      * be stripped before the fold).
-     *
-     * **Switch-over seam**: the collector that feeds this flow (today
-     * `repository.connectSSE(workdir)` collected in
-     * `ConnectionCoordinator.launchSseCollection`) moves into [connectSse] in
-     * the switch-over lane. Lane C ships the surface only.
      */
-    private val _events: MutableSharedFlow<Result<IdentifiedSseEvent>> =
-        MutableSharedFlow(extraBufferCapacity = SSE_EVENT_BUFFER_CAPACITY)
-    val events: SharedFlow<Result<IdentifiedSseEvent>> = _events.asSharedFlow()
+    val events: SharedFlow<Result<IdentifiedSseEvent>> get() = sseEventStream.events
 
     /**
      * FGS spec §5 / §4.3: null Intent = sticky rebuild = legal FGS-start
@@ -175,7 +185,7 @@ class SessionStreamingService : Service() {
      */
     fun connectSse(identity: ConnectionIdentity) {
         DebugLog.i(TAG, "connectSse: identity epoch=${identity.epoch} (Lane C structure — switch-over wires collector)")
-        // Switch-over: scope.launch { repository.connectSSE(workdir).collect { ... _events.emit(...) } }
+        // Switch-over: scope.launch { repository.connectSSE(workdir).collect { ... sseEventStream.emit(...) } }
     }
 
     /**
@@ -249,14 +259,6 @@ class SessionStreamingService : Service() {
          * dev-design P1.4). IMPORTANCE_LOW. Created by
          * `AppLifecycleMonitor` (Phase 1) — NOT created in this service.
          */
-        const val CHANNEL_SESSION_STATUS = "ocdroid.session_status"
-
-        /**
-         * Buffer capacity for the [events] SharedFlow. Generous so transient
-         * collector-side stalls do not drop frames; the §11 control/delta
-         * split happens downstream in
-         * [cn.vectory.ocdroid.service.bridge.SseEventBridge].
-         */
-        private const val SSE_EVENT_BUFFER_CAPACITY = 256
+         const val CHANNEL_SESSION_STATUS = "ocdroid.session_status"
     }
 }

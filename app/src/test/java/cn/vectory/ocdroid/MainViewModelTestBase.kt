@@ -142,6 +142,9 @@ abstract class MainViewModelTestBase {
             kotlinx.coroutines.SupervisorJob() +
                 kotlinx.coroutines.Dispatchers.Main.immediate
         )
+        // CP3 (notify Phase-0): the process-wide SSE event stream + bridge.
+        val sseEventStream = cn.vectory.ocdroid.service.events.SseEventStream()
+        val sseEventBridge = cn.vectory.ocdroid.service.bridge.SseEventBridge(appScope)
         val foregroundCatchUpController = cn.vectory.ocdroid.ui.controller.ForegroundCatchUpController(
             appLifecycleMonitor = appLifecycleMonitor,
             scope = appScope,
@@ -211,6 +214,9 @@ abstract class MainViewModelTestBase {
             // CP2 (notify Phase-0): delegate TOFU state to the shared bootstrap
             // coordinator so the delegation is exercised in tests too.
             bootstrapCoordinator = cn.vectory.ocdroid.service.bootstrap.ConnectionBootstrapCoordinator(),
+            // CP3 (notify Phase-0): publish SSE events into the process-wide
+            // stream so the bridge routes them.
+            sseEventStream = sseEventStream,
         )
         val fpProvider: () -> String = { hostProfileStore.currentProfile().serverGroupFp.ifBlank { hostProfileStore.currentProfile().id } }
         // R-20 Phase 2: gap-fill coordinator (real instance; the relaxed-mock
@@ -245,6 +251,9 @@ abstract class MainViewModelTestBase {
             appScope,
             // CP1 (notify Phase-0): single connection-identity store.
             identityStore,
+            // CP3 (notify Phase-0): SSE event stream + bridge.
+            sseEventStream,
+            sseEventBridge,
         )
         // §R-17 batch3e → §R18 Phase 4: side-channel Error/Success UiEvents
         // into a per-core ring buffer so tests can read the most-recent event

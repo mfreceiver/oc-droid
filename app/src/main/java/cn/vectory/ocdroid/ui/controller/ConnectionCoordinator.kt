@@ -12,6 +12,7 @@ import cn.vectory.ocdroid.data.repository.http.TofuDecision
 import cn.vectory.ocdroid.data.repository.http.hostPortFromUrl
 import cn.vectory.ocdroid.service.bootstrap.ConnectionBootstrapCoordinator
 import cn.vectory.ocdroid.service.events.IdentifiedSseEvent
+import cn.vectory.ocdroid.service.events.SseEventStream
 import cn.vectory.ocdroid.service.identity.ConnectionIdentityStore
 import cn.vectory.ocdroid.ui.ConnectionPhase
 import cn.vectory.ocdroid.ui.ConnectionState
@@ -132,6 +133,20 @@ class ConnectionCoordinator(
      * without Hilt wiring (mirrors the pre-extraction private fields).
      */
     private val bootstrapCoordinator: ConnectionBootstrapCoordinator? = null,
+    /**
+     * CP3 (notify Phase-0): the process-wide SSE event stream. CC's
+     * collector publishes each [IdentifiedSseEvent] here INSTEAD of emitting
+     * [ControllerEffect.OnSseEvent] directly. The
+     * [cn.vectory.ocdroid.service.bridge.SseEventBridge] (subscribed eagerly
+     * from AppCore) consumes the stream, validates identity (§2 epoch guard),
+     * routes to the §11 control/delta dual-channel, and AppCore re-emits the
+     * validated frames as [ControllerEffect.OnSseEvent] for SSC's fold.
+     *
+     * `null` for legacy/test construction — CC falls back to direct
+     * [ControllerEffect.OnSseEvent] emission (pre-CP3 path) so existing
+     * tests that assert on the effect bus keep working without the bridge.
+     */
+    private val sseEventStream: SseEventStream? = null,
 ) {
     private var sseJob: Job? = null
     private var lastHealthCheckTime = 0L
@@ -809,10 +824,14 @@ class ConnectionCoordinator(
                                 connectionPhase = ConnectionPhase.Connected
                             )
                         }
-                        // §R18 Phase 3 Wave 1 (P1-3 A 类): launchSseCollection 内 SSE collect 回调是 suspend 上下文 → suspend emitEffect。
-                        // CP1: wrap the event with the capture-time identity so
-                        // SSC's fold can validate it (FGS spec §1: identity
-                        // must not be stripped before the fold).
+                        // CP3 (notify Phase-0): publish the event into the
+                        // process-wide SseEventStream INSTEAD of emitting
+                        // ControllerEffect.OnSseEvent directly. The bridge
+                        // (SseEventBridge, eagerly started from AppCore) consumes
+                        // the stream, performs the §2 epoch guard, routes to the
+                        // §11 control/delta dual-channel, and AppCore re-emits
+                        // the validated frames as OnSseEvent for SSC's fold.
+                        // CP1: the event carries the capture-time identity.
                         val identified = if (sseIdentityAtStart != null) {
                             IdentifiedSseEvent(sseIdentityAtStart, event)
                         } else {
@@ -831,7 +850,15 @@ class ConnectionCoordinator(
                                 event,
                             )
                         }
-                        effects.emitEffect(ControllerEffect.OnSseEvent(identified))
+                        val stream = sseEventStream
+                        if (stream != null) {
+                            // CP3: bridge path — non-lossy suspend emit.
+                            stream.emit(Result.success(identified))
+                        } else {
+                            // Legacy/test fallback (no stream wired) — direct
+                            // effect emission, pre-CP3 behavior.
+                            effects.emitEffect(ControllerEffect.OnSseEvent(identified))
+                        }
                     }
                         .onFailure { error ->
                             Log.e("OC_ERROR", "SSE event failed", error)
