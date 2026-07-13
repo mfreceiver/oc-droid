@@ -339,7 +339,6 @@
     <string name="chat_click_to_view">Tap to view</string>
     <string name="chat_files_changed">%1$d files changed</string>
     <string name="host_profile_delete_failed">Delete failed</string>
-    <string name="sessions_draft_badge">Draft</string>
     <string name="sessions_connect_new_action">Connect a new project</string>
     <string name="chat_command_section">Commands</string>
     <string name="chat_command_clear">Start a new session</string>

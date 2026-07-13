@@ -590,28 +590,6 @@ private fun WorkdirRow(
                         ),
                         color = MaterialTheme.colorScheme.onSurface,
                     )
-                    if (sessionsInWorkdir.isEmpty()) {
-                        // Match the SessionsScreen draft-badge shape: a low-
-                        // contrast chip on the right of the title for workdirs
-                        // with no live sessions (the just-connected placeholder
-                        // case). Renders for both "draft" and "empty project"
-                        // — both are visually equivalent ("nothing here yet").
-                        Spacer(modifier = Modifier.width(Dimens.spacingCompact))
-                        Text(
-                            text = stringResource(R.string.sessions_draft_badge),
-                            style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            modifier = Modifier
-                                .clip(MaterialTheme.shapes.extraSmall)
-                                .background(
-                                    MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.12f)
-                                )
-                                .padding(
-                                    horizontal = Dimens.spacingCompact,
-                                    vertical = Dimens.hairline,
-                                ),
-                        )
-                    }
                 }
             },
             supportingContent = {
