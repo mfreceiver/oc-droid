@@ -74,10 +74,17 @@ import androidx.compose.ui.window.DialogProperties
  *  - 外层 `Surface`（`heightIn(max = screenHeight*0.85f)` 封顶）内是一个
  *    **不滚动**的外层 `Column`，依次为：[title] → 滚动的 [content] → 按钮行。
  *  - [title] 与 confirm/dismiss 按钮恒可见（钉在外层 Column 头尾）；只有
- *    [content] 包在 `Column(Modifier.weight(1f).verticalScroll(...))` 里滚动。
+ *    [content] 包在 `Column(Modifier.weight(1f, fill = false).verticalScroll(...))` 里滚动。
  *  - 把按钮挪出滚动区后，`weight(1f)` 重新合法（外层 Column 无 `verticalScroll`）；
  *    长表单（Host 编辑器 mTLS+Advanced、Model 管理）的 Save/Done/Test 按钮不再
  *    被滚出视野，恢复了固定 action bar 的体验。
+ *  - **§glm-2 🟡-1（review-round-2 fix）**：`fill = false` 是关键——`weight(1f)`
+ *    默认 `fill = true` 会把 content Column **强制撑满**其分配高度，使短表单
+ *    （如 Model 管理 provider 较少时）也渲染到 ~85% 屏高、content 与钉底按钮间
+ *    出现大块空白。`fill = false` 把分配高度降级为**上限**而非强制填充：短表单
+ *    → content 取自然高度 → Surface wrap → dialog 紧凑；长表单 → content 触顶
+ *    并 `verticalScroll` 滚动 → footer 仍钉底。footer 的空间在外层 Column 的
+ *    weight 算法中始终被预留（content 是唯一的 weighted child），故不会滚走。
  *
  * @param onDismissRequest scrim / 返回键 / 点击外部关闭时的回调。
  * @param title 可选标题。null 时不渲染标题行。
@@ -134,11 +141,13 @@ fun AppFormDialog(
                     Spacer(modifier = Modifier.height(Dimens.spacing4))
                 }
 
-                // 滚动区——仅中间 content 滚动。weight(1f) 在外层非滚动
-                // Column 下合法，吃满 title 与按钮之间的剩余高度。
+                // 滚动区——仅中间 content 滚动。weight(1f, fill = false) 在外层
+                // 非滚动 Column 下合法：把 title 与按钮之间的剩余高度作为**上限**
+                // 而非强制填充（见文件头 §glm-2 🟡-1）——短表单保持紧凑，长表单
+                // 触顶后自行滚动；footer 空间由 weight 算法预留故恒可见。
                 Column(
                     modifier = Modifier
-                        .weight(1f)
+                        .weight(1f, fill = false)
                         .verticalScroll(rememberScrollState()),
                 ) {
                     content()
