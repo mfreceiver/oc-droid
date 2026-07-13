@@ -490,6 +490,40 @@ internal fun ChatMessageList(
         navJumping = false
     }
 
+    // §WT2-taskB (Q6 locked): Sessions-page entry → jump to latest. When the
+    // user taps a session in the Sessions list, SessionsScreen sets
+    // chatState.pendingJumpToLatest = sessionId BEFORE selectSession (and
+    // SessionSwitcher.switchTo keeps the intent only when the incoming id
+    // matches). This composable consumes that intent exactly once: after the
+    // session's messages are loaded, it OVERRIDES the saveable
+    // LazyListState.Saver restore (which would have replayed the last
+    // viewport) by jumping to item 0 (reverseLayout ⇒ index 0 is the newest /
+    // visual bottom), arms followBottom so subsequent streaming sticks to the
+    // bottom, hides the NavFab (already at bottom → no target), then CLEARS
+    // the intent via chatVM so it does not fire again on a recompose / preview
+    // return for the same session.
+    //
+    // Why `messages.isEmpty()` is a key: it flips true→false exactly once per
+    // session load. The effect re-launches at that flip (the "messages just
+    // landed" moment) and performs the jump. Subsequent message arrivals
+    // (streaming deltas / new turns) leave isEmpty() at false → no re-launch.
+    // The other keys (sessionId, pendingJumpToLatest) cover the "intent set"
+    // and "session changed" restarts. The horizontal-swipe path + tab-strip
+    // tap + SessionPickerSheet + Chat reselect do NOT set pendingJumpToLatest
+    // → this effect returns early → their saveable scroll restore is preserved.
+    val pendingJumpToLatest = chatState.pendingJumpToLatest
+    LaunchedEffect(sessionId, pendingJumpToLatest, messages.isEmpty()) {
+        if (sessionId == null || pendingJumpToLatest == null) return@LaunchedEffect
+        if (sessionId != pendingJumpToLatest) return@LaunchedEffect
+        if (messages.isEmpty()) return@LaunchedEffect  // wait for the load
+        // Override saveable scroll restore: jump to newest (reverseLayout ⇒ 0).
+        listState.scrollToItem(0)
+        followBottom = true
+        navFabVisible = false
+        // Clear the intent so it fires exactly once per Sessions-page entry.
+        chatVM.clearPendingJumpToLatest()
+    }
+
     // §0.8.2 P2.6: Chat reselect → scroll to latest. The bottom nav's Chat
     // tab emits NavRoute.Chat on `orchestratorVM.reselectFlow` when the user
     // taps Chat while already on Chat. The Q4 contract for Chat reselect =
@@ -627,7 +661,20 @@ internal fun ChatMessageList(
     }
 
     // §Phase8-nav: Box 包裹 LazyColumn + 导航 FAB overlay（右侧中下）。
-    Box(modifier = Modifier.fillMaxSize()) {
+    //
+    // §WT2-taskA (Q9 locked): the OUTER container is the single source of
+    // the conversation area's 8dp top/bottom breathing space. The previous
+    // `LazyColumn.contentPadding = PaddingValues(vertical = 8.dp)` moved
+    // INSIDE the list (scrollable padding) is removed in favour of an
+    // explicit `Modifier.padding(vertical = 8.dp)` HERE so the conversation
+    // REGION as a whole carries the 8dp T/B margin (½ × the 16dp L/R row
+    // padding). Result: T/B = 8dp (outer), L/R = 16dp (per-row horizontal
+    // padding in MessageRow / ToolRun / Fold / GapDivider / load-more /
+    // empty / loading rows — all carry `padding(horizontal = 16.dp, …)`).
+    // first/last-item spacing is unchanged: previously (list-pad 8dp +
+    // row-pad 4dp = 12dp) ↔ now (outer 8dp + row-pad 4dp = 12dp).
+    // reverseLayout=true semantics + streaming auto-follow are untouched.
+    Box(modifier = Modifier.fillMaxSize().padding(vertical = 8.dp)) {
         // §watermark-B5: 大字号水平水印（去旋转），stamped BEHIND the message
         // list — replaces the old top-bar workdir-initial icon (see ChatTopBar)
         // AND the prior 45°-tilted displaySmall(24sp) watermark. Renders the
@@ -697,7 +744,11 @@ internal fun ChatMessageList(
             modifier = Modifier.fillMaxSize(),
         reverseLayout = true,
         verticalArrangement = Arrangement.Top,
-        contentPadding = androidx.compose.foundation.layout.PaddingValues(vertical = 8.dp)
+        // §WT2-taskA: horizontal-only (effectively zero) — the 8dp T/B is
+        // now on the outer Box (see root container doc above). Rows carry
+        // their own `padding(horizontal = 16.dp, …)`, so no list-level
+        // horizontal padding is needed either.
+        contentPadding = androidx.compose.foundation.layout.PaddingValues(0.dp)
     ) {
         if (streamingReasoningPart != null) {
             val streamingKey = streamingReasoningPart.id

@@ -825,7 +825,82 @@ class AppActionReducerTest {
         reduce(prior, AppAction.HostStatePurged(preserveServerGroupData = false))
         reduce(prior, AppAction.HostStatePurged(preserveServerGroupData = true))
         reduce(prior, AppAction.WorkdirDraftStarted(workdir = "/w"))
+        reduce(prior, AppAction.PendingJumpToLatestSet(sessionId = "x"))
+        reduce(prior, AppAction.PendingJumpToLatestSet(sessionId = null))
         // No exception thrown == each when-branch is total. The concrete field-by-field
         // assertions live in the dedicated tests above.
+    }
+
+    // ── PendingJumpToLatestSet (§WT2-taskB / Q6 locked) ────────────────────
+    //
+    // The "Sessions page entry → jump to latest" intent. Verifies the pure
+    // reducer writes/clears the field and that clearSessionData (used by
+    // HostStatePurged cross-group + WorkdirDraftStarted) also wipes it so a
+    // stale intent cannot survive a draft-create or host purge.
+
+    @Test
+    fun `reduce PendingJumpToLatestSet with non-null id sets chat pendingJumpToLatest`() {
+        val prior = StoreState.initial().copy(
+            chat = ChatState(currentSessionId = "old", pendingJumpToLatest = null),
+        )
+
+        val out = reduce(prior, AppAction.PendingJumpToLatestSet(sessionId = "target"))
+
+        assertEquals("target", out.chat.pendingJumpToLatest)
+        // No other chat field changes (single-field write).
+        assertEquals("old", out.chat.currentSessionId)
+    }
+
+    @Test
+    fun `reduce PendingJumpToLatestSet with null id clears chat pendingJumpToLatest`() {
+        val prior = StoreState.initial().copy(
+            chat = ChatState(pendingJumpToLatest = "stale"),
+        )
+
+        val out = reduce(prior, AppAction.PendingJumpToLatestSet(sessionId = null))
+
+        assertNull(out.chat.pendingJumpToLatest)
+    }
+
+    @Test
+    fun `reduce WorkdirDraftStarted clears a stale pendingJumpToLatest via clearSessionData`() {
+        val prior = StoreState.initial().copy(
+            chat = ChatState(pendingJumpToLatest = "abandoned-by-draft"),
+        )
+
+        val out = reduce(prior, AppAction.WorkdirDraftStarted(workdir = "/w"))
+
+        assertNull(
+            "draft-create must wipe a stale jump intent (references a session id that is being cleared)",
+            out.chat.pendingJumpToLatest,
+        )
+    }
+
+    @Test
+    fun `reduce HostStatePurged cross-group clears a stale pendingJumpToLatest via clearSessionData`() {
+        val prior = StoreState.initial().copy(
+            chat = ChatState(pendingJumpToLatest = "abandoned-by-host-switch"),
+        )
+
+        val out = reduce(prior, AppAction.HostStatePurged(preserveServerGroupData = false))
+
+        assertNull(
+            "cross-group host purge must wipe a stale jump intent",
+            out.chat.pendingJumpToLatest,
+        )
+    }
+
+    @Test
+    fun `reduce HostStatePurged same-group preserves pendingJumpToLatest`() {
+        // Same-group host switch keeps the chat slice (only streaming is
+        // cleared). The jump intent references a session id that still
+        // exists on the same server → preserved.
+        val prior = StoreState.initial().copy(
+            chat = ChatState(pendingJumpToLatest = "still-valid"),
+        )
+
+        val out = reduce(prior, AppAction.HostStatePurged(preserveServerGroupData = true))
+
+        assertEquals("still-valid", out.chat.pendingJumpToLatest)
     }
 }

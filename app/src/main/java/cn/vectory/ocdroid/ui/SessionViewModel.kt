@@ -95,6 +95,20 @@ class SessionViewModel @Inject constructor(
         sessionSwitcher.switchTo(sessionId)
     }
 
+    /**
+     * §WT2-taskB (Q6 locked): set the "enter from Sessions page → jump to
+     * latest" intent for [sessionId]. SessionsScreen.onSessionClick calls
+     * this BEFORE [selectSession] so the matching switchTo keeps the intent
+     * (SessionSwitcher clears it when the incoming id does not match),
+     * and ChatMessageList consumes it exactly once the session's messages
+     * have loaded (scrollToItem(0) + followBottom=true + clear). Swipe,
+     * tab-strip tap, and SessionPickerSheet paths do NOT call this — their
+     * saveable scroll-position restore is preserved unchanged.
+     */
+    fun requestJumpToLatest(sessionId: String) {
+        store.dispatch(AppAction.PendingJumpToLatestSet(sessionId))
+    }
+
     fun openSubAgent(childSessionId: String) {
         val parentId = store.chatFlow.value.currentSessionId
         // §R18 Phase 3 Wave 2 (drift #6 / P1-7): user-triggered open-sub-agent

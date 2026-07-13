@@ -120,6 +120,30 @@ internal sealed interface AppAction {
     data class WorkdirDraftStarted(
         val workdir: String,
     ) : AppAction
+
+    /**
+     * §WT2-taskB (Q6 locked): one-shot "Sessions page entry → jump to latest"
+     * intent on [ChatState.pendingJumpToLatest]. The reducer sets
+     * `chat.pendingJumpToLatest = action.sessionId`:
+     *  - non-null [sessionId] → SET the intent (the id the user tapped in the
+     *    Sessions list). Used by
+     *    [cn.vectory.ocdroid.ui.SessionViewModel.requestJumpToLatest], which
+     *    SessionsScreen.onSessionClick fires BEFORE selectSession so the
+     *    matching switchTo keeps it and ChatMessageList consumes it once the
+     *    session's messages have loaded.
+     *  - null [sessionId] → CLEAR the intent. Used by
+     *    [cn.vectory.ocdroid.ui.ChatViewModel.clearPendingJumpToLatest] after
+     *    ChatMessageList has performed the scrollToItem(0) jump, so the intent
+     *    fires exactly once per Sessions-page entry.
+     *
+     * Single-slice / single-field write. Kept as a dispatched [AppAction]
+     * (rather than a raw `mutateChat`) per the WT2 plan ("reducer entries to
+     * set it and clear it") so the intent transition is observable on the
+     * aggregate stateFlow and unit-testable via [AppActionReducerTest].
+     */
+    data class PendingJumpToLatestSet(
+        val sessionId: String?,
+    ) : AppAction
 }
 
 /**
@@ -269,6 +293,11 @@ internal fun reduce(state: StoreState, action: AppAction): StoreState = when (ac
             draftWorkdir = action.workdir,
         ),
     )
+
+    is AppAction.PendingJumpToLatestSet -> state.copy(
+        // §WT2-taskB: single-field write. No cross-slice concerns.
+        chat = state.chat.copy(pendingJumpToLatest = action.sessionId),
+    )
 }
 
 /**
@@ -307,6 +336,9 @@ private fun ChatState.clearSessionData(): ChatState = copy(
     deltaBuffer = emptyMap(),
     fullTextBuffer = emptyMap(),
     pendingFlushPartIds = emptySet(),
+    // §WT2-taskB: clear the one-shot jump-to-latest intent too — it
+    // references a session id that is being cleared (draft / host purge).
+    pendingJumpToLatest = null,
     // PRESERVED (chrome, NOT per-session — kept via .copy() above):
     // isCompacting, compactStartedAt, refreshNonce.
 )
