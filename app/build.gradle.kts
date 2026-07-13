@@ -192,7 +192,7 @@ ksp {
 // data.model/AppCore+Actions/Repository/ui.chat 可测 helper 等）：
 //   Line 57.9% / Branch 55.1% / Instruction 54.9% / Method 56.4% / Class 56.9%
 //
-// **排除策略**（gpter Gate-5 路径 A）：filters.excludes 排除 35 个经逐文件审计确认
+// **排除策略**（gpter Gate-5 路径 A）：filters.excludes 排除 58 个经逐文件审计确认
 // 非 unit-testable 的类（纯 @Composable UI / 主题值 val / Activity·Application）。
 // 排除标准：类的所有非 Composable helper 均为 `private`（不可直接 JVM 单测）——这类
 // helper 若要单测需先提取为 `internal` 纯函数到独立文件（见下方"暂不提取"清单）。
@@ -255,6 +255,11 @@ kover {
                     // ChatTopBarKt: visiblePickerProviders 已提取到 PickerProviderFilter.kt
                     // （独立文件，保留计入覆盖）；ChatTopBarKt 剩余为纯 @Composable，排除。
                     "cn.vectory.ocdroid.ui.chat.ChatTopBarKt",
+                    // §unread-lifecycle: ChatSessionTabStripKt is a pure @Composable
+                    // (SessionTabStrip + SessionTab bodies); the shouldShowQuestionMarker
+                    // pure helper lives in SessionPickerHelpers.kt (covered). Same
+                    // exclusion rationale as ChatTopBarKt/ChatScaffoldKt above.
+                    "cn.vectory.ocdroid.ui.chat.ChatSessionTabStripKt",
                     // §1B: ChatScaffold / Composer / SessionPickerSheet are
                     // @Composable-heavy chrome surfaces — same exclusion
                     // rationale as ChatTopBarKt (kover excludes Composable
@@ -295,6 +300,48 @@ kover {
                     "cn.vectory.ocdroid.ui.settings.DebugLogSectionKt",
                     "cn.vectory.ocdroid.ui.settings.HostProfilesManagerScreenKt",
                     "cn.vectory.ocdroid.ui.chat.TodoListPanelKt",
+                    // §coverage-config (round 2): additional pure @Composable UI
+                    // surfaces that were missing from the original exclude set
+                    // (long-standing omission, not introduced by the current
+                    // refactor). Same exclusion rationale as (1) — every top-
+                    // level non-@Composable helper in these files is `private`,
+                    // so the file is NOT JVM-unit-testable and the floor must
+                    // not be charged for its uncovered Composable body. Audited
+                    // file-by-file (col-0 decls only: any public/internal non-
+                    // @Composable fun/val/class disqualifies the file).
+                    //
+                    // INTENTIONALLY KEPT in coverage (testable helper present,
+                    // excluding would falsify the floor): CacheManagementSection
+                    // (public isSuspectAbandoned / groupByNormalizedWorkdir),
+                    // StatusSlot (internal StatusSlotPriority.pick + sealed
+                    // StatusSlotContent), UnifiedDiffRenderer (internal
+                    // DiffLineKind.from — covered by UnifiedDiffRendererTest),
+                    // FileShareUtils (internal shareFileContent), CertImportSlot
+                    // (public sealed interface CertSlotStatus).
+                    //
+                    // ui.files (file-browser / preview / workdir surfaces):
+                    "cn.vectory.ocdroid.ui.files.FilesScreenKt",
+                    "cn.vectory.ocdroid.ui.files.FilePreviewPaneKt",
+                    "cn.vectory.ocdroid.ui.files.MarkdownWebPreviewPaneKt",
+                    "cn.vectory.ocdroid.ui.files.WorkdirControlKt",
+                    "cn.vectory.ocdroid.ui.files.FileBrowserPaneKt",
+                    // ui.shell (nav scaffold / bottom bar):
+                    "cn.vectory.ocdroid.ui.shell.AppShellKt",
+                    // ui.chat (tool fold bar / count summary / empty state /
+                    // in-chat file preview / session diff card):
+                    "cn.vectory.ocdroid.ui.chat.ToolCallFoldBarKt",
+                    "cn.vectory.ocdroid.ui.chat.ToolCountSummaryKt",
+                    "cn.vectory.ocdroid.ui.chat.ChatEmptyStateKt",
+                    "cn.vectory.ocdroid.ui.chat.ChatFilePreviewScreenKt",
+                    "cn.vectory.ocdroid.ui.chat.SessionDiffCardKt",
+                    // ui.settings (mTLS trust dialog — pure @Composable):
+                    "cn.vectory.ocdroid.ui.settings.TofuTrustDialogKt",
+                    // ui.workspace (vcs summary screen + status pill):
+                    "cn.vectory.ocdroid.ui.workspace.GitScreenKt",
+                    "cn.vectory.ocdroid.ui.workspace.StatusPillKt",
+                    // ui.theme (AppBottomSheet recipe — @Composable, not a pure
+                    // val theme file; same exclusion rationale as (1)):
+                    "cn.vectory.ocdroid.ui.theme.SheetRecipeKt",
                     // (2) theme value files (pure val / Typography definitions)
                     "cn.vectory.ocdroid.ui.theme.ColorKt",
                     "cn.vectory.ocdroid.ui.theme.FontsKt",

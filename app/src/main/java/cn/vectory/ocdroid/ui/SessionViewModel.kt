@@ -11,8 +11,11 @@ import cn.vectory.ocdroid.di.UiApplicationScope
 import cn.vectory.ocdroid.ui.controller.ComposerController
 import cn.vectory.ocdroid.ui.controller.ConnectionCoordinator
 import cn.vectory.ocdroid.ui.controller.SessionSwitcher
+import cn.vectory.ocdroid.ui.controller.allSessionsById
+import cn.vectory.ocdroid.ui.controller.removeSessions
 import cn.vectory.ocdroid.util.DebugLog
 import cn.vectory.ocdroid.util.SettingsManager
+import cn.vectory.ocdroid.util.WorkdirPaths
 import cn.vectory.ocdroid.util.runSuspendCatching
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.CoroutineScope
@@ -263,6 +266,40 @@ class SessionViewModel @Inject constructor(
                 .onSuccess { sessions ->
                     store.mutateSessionList { it.copy(directorySessions = it.directorySessions + (workdir to sessions)) }
                 }
+        }
+    }
+
+    /**
+     * §task5-lifecycle (final-review fix 3): drop unread badges for every
+     * session bound to [workdir]. Coordinated by
+     * [cn.vectory.ocdroid.ui.files.FilesScreen] alongside
+     * [SettingsViewModel.disconnectWorkdir]; SettingsVM does not own the
+     * sessionList slice. The id set is derived from the THREE-source session
+     * union (sessions + directorySessions + childSessions) filtered by
+     * `directory == workdir`, so a session that lives only in the global
+     * `sessions` list (e.g. directorySessions prefetch not yet complete) is
+     * still cleared — pre-fix this path only read `directorySessions[workdir]`
+     * and would leak unread for sessions missing from that single bucket.
+     *
+     * §task5-lifecycle-r2 (final-fix round 2): the workdir match goes through
+     * [WorkdirPaths.normalize] — the same key the disconnect pipeline
+     * (removeRecentWorkdir / evictWorkdirInGroup / buildWorkdirGroups) uses to
+     * decide "same workdir". Pre-fix this used the raw `directory == workdir`
+     * string compare, so `/proj-a` vs `proj-a/` vs ` proj-a ` were treated as
+     * DIFFERENT workdirs and disconnect cleared the project + cache but not
+     * the unread badges.
+     */
+    internal fun clearUnreadForWorkdir(workdir: String) {
+        val key = WorkdirPaths.normalize(workdir)
+        if (key.isEmpty()) return
+        val sl = store.sessionListFlow.value
+        val ids = allSessionsById(sl.sessions, sl.directorySessions, sl.childSessions)
+            .values
+            .filter { WorkdirPaths.normalize(it.directory) == key }
+            .map { it.id }
+            .toSet()
+        if (ids.isNotEmpty()) {
+            store.mutateUnread { it.removeSessions(ids) }
         }
     }
 

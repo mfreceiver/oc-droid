@@ -494,6 +494,14 @@ class SessionSyncCoordinator(
                 DebugLog.d("Retry", "session.status raw properties=${event.payload.properties?.toString() ?: "null"}")
                 val statusEvent = parseSessionStatusEvent(event)
                 if (statusEvent != null) {
+                    // §unread-lifecycle Task 3: snapshot the PRIOR status before
+                    // applySessionStatus overwrites it — this is the only chance
+                    // to detect a busy→idle transition. Main.immediate is serial
+                    // and there is no suspension between this read and the
+                    // subsequent writes, so no TOCTOU.
+                    val oldStatus = slices.sessionList.value.sessionStatuses[statusEvent.sessionId]
+                    val wasBusy = oldStatus?.isBusy == true
+                    val nowIdle = statusEvent.status.isIdle
                     slices.mutateSessionList {
                         it.applySessionStatus(statusEvent.sessionId, statusEvent.status).first
                     }
@@ -517,22 +525,26 @@ class SessionSyncCoordinator(
                     val statusEffects = mutableListOf<SseSideEffect>()
                     val chatSnap = slices.chat.value
                     val isCurrent = statusEvent.sessionId == chatSnap.currentSessionId
+                    // §lifecycle-unread: root session busy→idle while NOT the
+                    // current session = a task finished with results to view →
+                    // mark unread. Children (parentId != null) are excluded
+                    // (user-facing semantics: sub-agents are not surfaced as
+                    // unread). Unknown sessions (not in the merged session map)
+                    // are excluded so an unrecognized id can never be badged.
+                    if (wasBusy && nowIdle && !isCurrent) {
+                        val sessionsById = allSessionsById(
+                            slices.sessionList.value.sessions,
+                            slices.sessionList.value.directorySessions,
+                            slices.sessionList.value.childSessions,
+                        )
+                        val target = sessionsById[statusEvent.sessionId]
+                        if (target != null && target.parentId == null) {
+                            markSessionUnread(statusEvent.sessionId)
+                        }
+                    }
                     if (statusEvent.status.isBusy && isCurrent) {
                         DebugLog.i("Sync", "session.status busy (current) → reload (cross-client message sync)")
                         statusEffects.add(SseSideEffect.ReloadMessages(statusEvent.sessionId, resetLimit = true))
-                    }
-                    // When a temp-cleared session finishes its in-flight work
-                    // (busy -> idle) and is NOT the currently-open one, drop it
-                    // from tempClearedUnread: there is no longer any pending work
-                    // that would warrant re-marking it. If the session was already
-                    // re-marked unread (because the user navigated away while it
-                    // was busy), keep the badge so the user still knows there was
-                    // activity — the user opening the session will clear it.
-                    if (!statusEvent.status.isBusy &&
-                        statusEvent.sessionId != chatSnap.currentSessionId &&
-                        slices.unread.value.tempClearedUnread.contains(statusEvent.sessionId)
-                    ) {
-                        slices.mutateUnread { u -> u.dropTempCleared(statusEvent.sessionId).first }
                     }
                     // SSE-trust model: session.status (busy/idle) only updates the
                     // status badge. It does NOT reload or clear streaming buffers
@@ -573,9 +585,14 @@ class SessionSyncCoordinator(
                 // it is effectively dead code. New messages are surfaced by the
                 // message.updated insert-if-absent path above and the
                 // session.status busy reload.
+                //
+                // §unread-lifecycle Task 3: unread is produced SOLELY by the
+                // session.status root busy→idle path (lifecycle completion).
+                // This branch keeps only its time.updated bump + current-session
+                // reload for forward-compat; it no longer marks unread.
                 val sessionId = event.payload.getString("sessionID")
                 val isCurrent = sessionId != null && sessionId == slices.chat.value.currentSessionId
-                DebugLog.i("Sync", "message.created: ${if (isCurrent) "reload current" else "mark unread"}")
+                DebugLog.i("Sync", "message.created: ${if (isCurrent) "reload current" else "no-op (unread is lifecycle-driven)"}")
 
                 // §recent-sort-by-message: forward-compat parity with the
                 // message.updated branch — bump the session's time.updated to
@@ -597,14 +614,11 @@ class SessionSyncCoordinator(
                 }
 
                 // §R-19 Sprint 3 P2-4: side effects formalized as SseSideEffect list.
+                // Only the current session reloads; non-current sessions do NOT
+                // mark unread here (see the session.status busy→idle path).
                 val msgEffects = mutableListOf<SseSideEffect>()
                 if (sessionId != null && sessionId == slices.chat.value.currentSessionId) {
                     msgEffects.add(SseSideEffect.ReloadMessages(sessionId, resetLimit = true))
-                } else if (sessionId != null) {
-                    // Mark unread: an out-of-band message arrived for a session
-                    // the user is not currently viewing. (Coordinator-internal
-                    // cross-slice mutation — stays inline, not a bus effect.)
-                    markSessionUnread(sessionId)
                 }
                 applySseSideEffects(msgEffects)
             }
@@ -1256,12 +1270,25 @@ class SessionSyncCoordinator(
                 }
             }.awaitAll()
             val fetchedIds = mutableSetOf<String>()
+            // §task5-ghost (final-review fix 2): snapshot the three-source
+            // sessions map BEFORE the merge so the filter can identify
+            // archived-session questions. A question whose session is marked
+            // archived in the local snapshot is dropped here even if the server
+            // still returns it — the archive reducer already cleared it from
+            // the presentation domain, and letting it back in would relight
+            // the Sessions nav badge for a session the user cannot open.
+            val slSnap = slices.sessionList.value
+            val sessionsById = allSessionsById(
+                slSnap.sessions,
+                slSnap.directorySessions,
+                slSnap.childSessions,
+            )
             val authoritative = buildList {
                 fetched.flatten().forEach { if (fetchedIds.add(it.id)) add(it) }
-                slices.sessionList.value.pendingQuestions.forEach { q ->
+                slSnap.pendingQuestions.forEach { q ->
                     if (q.id !in fetchedIds && q.id !in startIds) add(q)
                 }
-            }
+            }.let { filterArchivedSessionQuestions(it, sessionsById) }
             slices.mutateSessionList { it.copy(pendingQuestions = authoritative) }
             DebugLog.d("Question", "loadPendingQuestionsAllWorkdirs authoritative reconcile total=${authoritative.size} (had ${startIds.size} before)")
         }
@@ -1369,9 +1396,9 @@ internal fun ChatState.applyArchivedChatClear(): Pair<ChatState, List<SseSideEff
 /**
  * session.status → upsert the [sessionId] → [status] pair into
  * [SessionListState.sessionStatuses]. Pure; effects empty — the busy-current /
- * idle-current / temp-cleared finalization side effects are computed by the
- * dispatcher (they depend on cross-slice state: chat.currentSessionId,
- * chat.streamingPartTexts, unread.tempClearedUnread).
+ * idle-current finalization side effects are computed by the dispatcher (they
+ * depend on cross-slice state: chat.currentSessionId,
+ * chat.streamingPartTexts).
  */
 internal fun SessionListState.applySessionStatus(
     sessionId: String,
@@ -1657,9 +1684,10 @@ internal fun SessionListState.applySessionDiffIfAbsent(
     else copy(sessionDiffs = sessionDiffs + (sessionId to diffs))) to emptyList()
 
 /**
- * message.created (out-of-band) → mark [sessionId] unread IF it is not the
- * currently-open session. Caller passes [currentSessionId] so this stays
- * pure (no slice read). Pure.
+ * session lifecycle completion (root busy→idle) → mark [sessionId] unread IF
+ * it is not the currently-open session. Also used as the REST reconnect
+ * backstop. Caller passes [currentSessionId] so this stays pure (no slice
+ * read). Pure.
  */
 internal fun UnreadState.applyMarkSessionUnread(
     sessionId: String,
@@ -1667,13 +1695,6 @@ internal fun UnreadState.applyMarkSessionUnread(
 ): Pair<UnreadState, List<SseSideEffect>> =
     (if (sessionId == currentSessionId) this
     else copy(unreadSessions = unreadSessions + sessionId)) to emptyList()
-
-/**
- * session.status idle finalization (non-current temp-cleared session) → drop
- * [sessionId] from [UnreadState.tempClearedUnread]. Pure.
- */
-internal fun UnreadState.dropTempCleared(sessionId: String): Pair<UnreadState, List<SseSideEffect>> =
-    copy(tempClearedUnread = tempClearedUnread - sessionId) to emptyList()
 
 // ── §streaming-render placeholder injection ────────────────
 

@@ -73,6 +73,10 @@ import cn.vectory.ocdroid.ui.computeContextUsage
 import cn.vectory.ocdroid.ui.currentHostProfile
 import cn.vectory.ocdroid.ui.currentSession
 import cn.vectory.ocdroid.ui.currentSessionStatus
+import cn.vectory.ocdroid.ui.controller.allSessionsById
+import cn.vectory.ocdroid.ui.controller.questionRootIds
+import cn.vectory.ocdroid.ui.controller.questionsInTree
+import cn.vectory.ocdroid.ui.controller.rootIdOf
 import cn.vectory.ocdroid.ui.resolveMessage
 import cn.vectory.ocdroid.ui.showTimed
 import cn.vectory.ocdroid.ui.visibleMessages
@@ -239,8 +243,25 @@ fun ChatScaffold(
             streamingPartTexts = chat.streamingPartTexts,
         )
     }
-    val matchingQuestions = remember(sessionList.pendingQuestions, chat.currentSessionId) {
-        sessionList.pendingQuestions.filter { it.sessionId == chat.currentSessionId }
+    val sessionsById = remember(
+        sessionList.sessions,
+        sessionList.directorySessions,
+        sessionList.childSessions,
+    ) {
+        allSessionsById(
+            sessionList.sessions,
+            sessionList.directorySessions,
+            sessionList.childSessions,
+        )
+    }
+    val matchingQuestions = remember(
+        sessionList.pendingQuestions,
+        chat.currentSessionId,
+        sessionsById,
+    ) {
+        val root = chat.currentSessionId?.let { rootIdOf(it, sessionsById) }
+        if (root != null) questionsInTree(root, sessionList.pendingQuestions, sessionsById)
+        else emptyList()
     }
     val pendingQuestion = matchingQuestions.firstOrNull()
     // §1C: permission session-scope filter (P5-7) — same rule the question
@@ -383,8 +404,11 @@ fun ChatScaffold(
             // the consumer too: a stale/legacy child id persisted in
             // openSessionIds must never render as a top-level tab. Associate-by
             // once for O(1) resolution (8 ids × ~500 sessions otherwise O(n×m)).
-            val sessionsById = (sessionList.sessions +
-                sessionList.directorySessions.values.flatten()).associateBy { it.id }
+            val sessionsById = allSessionsById(
+                sessionList.sessions,
+                sessionList.directorySessions,
+                sessionList.childSessions,
+            )
             val openSessions = sessionList.openSessionIds
                 .mapNotNull { sessionsById[it] }
                 .filter { it.parentId == null && !it.isArchived }
@@ -409,7 +433,7 @@ fun ChatScaffold(
                 tunnelActivationState = connection.tunnelActivationState,
                 showTunnelAuth = (curHostProfile?.tunnelPasswordId != null),
                 unreadSessions = unread.unreadSessions,
-                questionSessionIds = sessionList.pendingQuestions.map { it.sessionId }.toSet(),
+                questionSessionIds = questionRootIds(sessionList.pendingQuestions, sessionsById),
                 draftWorkdir = composer.draftWorkdir,
                 parentSessionId = curSession?.parentId,
                 parentSessionTitle = curSession?.parentId?.let { pid ->
@@ -557,10 +581,23 @@ fun ChatScaffold(
         // currentWorkdir tints the selected tab's accent bar with the
         // current session's directory hash (draftWorkdir fallback so a brand-
         // new draft tab still gets a stable colour).
+        // §task6-grandchild (final-review fix 4): resolve the FULL root of the
+        // current session via rootIdOf (not just the direct parent) and feed
+        // it to SessionTabStrip's parentSessionId slot. resolveEffectiveSelectedId
+        // alone only walks one level (direct parent), so a grandchild current
+        // session (currentSessionId=grandchild, parentSessionId=child, neither
+        // in the root-only openSessions list) returned null → no tab was
+        // selected → the root tab's "?" marker was NOT suppressed even though
+        // its question was already surfaced in the chat's QuestionCard. By
+        // passing the full root id here, the root tab reads as selected for
+        // any descendant depth. topBarState.parentSessionId (the DIRECT parent)
+        // stays untouched — ChatTopBar's breadcrumb still navigates one level
+        // up, not all the way to root.
+        val currentRootId = chat.currentSessionId?.let { rootIdOf(it, sessionsById) }
         SessionTabStrip(
             openSessions = topBarState.openSessions,
             currentSessionId = topBarState.currentSessionId,
-            parentSessionId = topBarState.parentSessionId,
+            parentSessionId = currentRootId,
             currentWorkdir = curSession?.directory ?: composer.draftWorkdir,
             unreadSessions = topBarState.unreadSessions,
             questionSessionIds = topBarState.questionSessionIds,
@@ -897,7 +934,7 @@ fun ChatScaffold(
             sessionStatuses = sessionList.sessionStatuses,
             currentSessionId = chat.currentSessionId,
             unreadSessions = unread.unreadSessions,
-            questionSessionIds = sessionList.pendingQuestions.map { it.sessionId }.toSet(),
+            questionSessionIds = questionRootIds(sessionList.pendingQuestions, sessionsById),
             onSelect = { sessionId ->
                 sessionVM.selectSession(sessionId)
                 showSessionPicker = false

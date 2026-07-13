@@ -81,11 +81,13 @@ internal data class ChatTopBarState(
      */
     val unreadSessions: Set<String> = emptySet(),
     /**
-     * item 4: session IDs that have a pending question (question.asked with no
-     * reply yet). Drives the "?" indicator on each session tab — but only for
-     * non-current sessions (the current session's question is already surfaced
-     * via QuestionCard in the chat list). Projected from
-     * [SessionListState.pendingQuestions] by the caller (sessionId set).
+     * ROOT session ids whose tree contains a pending question
+     * ([SessionListState.pendingQuestions] rolled up to each question's root
+     * via `rootIdOf`). Drives the "?" indicator on each session tab — but only
+     * for non-selected tabs (the selected root's question is already surfaced
+     * via QuestionCard in the chat list, even when the user is viewing a
+     * sub-agent of that root). Projected by the caller via
+     * `questionRootIds(pendingQuestions, sessionsById)`.
      */
     val questionSessionIds: Set<String> = emptySet(),
     /**

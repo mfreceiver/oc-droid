@@ -99,7 +99,7 @@ fun SessionsScreen(
     // used for draftWorkdir / unreadSessions: draftWorkdir lives on the
     // composer slice alongside the high-frequency inputText (mutates on every
     // keystroke), and unreadSessions lives on the unread slice alongside
-    // tempClearedUnread / lastViewedTime (mutated on session switches).
+    // lastViewedTime (mutated on session switches).
     // Projecting to the single read field means typing / session-switch no
     // longer recompose this screen. (S1 runtime impact is currently zero —
     // HorizontalPager was replaced with explicit nav so SessionsScreen is not

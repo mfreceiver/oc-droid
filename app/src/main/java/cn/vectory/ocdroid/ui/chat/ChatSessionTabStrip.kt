@@ -117,9 +117,12 @@ private val TAB_ROW_EDGE_PADDING = 8.dp
  *                         current session's directory, or the composer's draft
  *                         workdir as a fallback).
  * @param unreadSessions   session ids with unread out-of-band activity.
- * @param questionSessionIds session ids with a pending question (question.asked
- *                         with no reply yet). The "?" marker renders only on
- *                         non-current sessions.
+ * @param questionSessionIds ROOT session ids whose tree contains a pending
+ *                         question (question.asked with no reply yet). The
+ *                         "?" marker renders only on non-current sessions.
+ *                         §task6: this is now root-aggregated by the caller
+ *                         via [cn.vectory.ocdroid.ui.controller.questionRootIds]
+ *                         — a sub-agent's question surfaces on its root tab.
  * @param actions          selection + close callbacks.
  */
 @Composable
@@ -298,8 +301,11 @@ private fun SessionTab(
                 // stability. Otherwise the pre-existing 5dp unread dot (also
                 // workdir-hash coloured) is shown; nothing renders when
                 // neither applies.
-                val hasQuestion = session.id != currentSessionId &&
-                    session.id in questionSessionIds
+                val hasQuestion = shouldShowQuestionMarker(
+                    isSelected = isSelected,
+                    questionSessionIds = questionSessionIds,
+                    sessionId = session.id,
+                )
                 when {
                     hasQuestion -> {
                         Text(

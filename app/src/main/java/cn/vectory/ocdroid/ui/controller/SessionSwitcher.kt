@@ -180,7 +180,7 @@ class SessionSwitcher(
      * the original `selectSession`, with R-20 Phase 1 changes to Steps 3 + 7.
      *
      * **Steps:**
-     *  1. Capture outgoing session state (unread re-mark decision + LRU write-back).
+     *  1. Capture outgoing session for cache/delta cleanup (LRU write-back).
      *  2. selectSessionState (save old draft, set current, restore new draft,
      *     clear chat fields + streaming + gap + staleNotice).
      *  3. ~~Restore cached window from LRU~~ → **R-20 Phase 1**: emit
@@ -200,8 +200,9 @@ class SessionSwitcher(
      *     round-3: "Step 7 移除 LoadMessages — LoadMessages 由 handler 唯一
      *     调度，禁 switchTo 同步发"). Removing the synchronous LoadMessages
      *     avoids a double-load race with the handler's verify-and-then-load.
-     *  8. Update unread state machine (tempClearedUnread + re-mark busy) +
-     *     discard draft + openSessionIds prepend + persistSessionCache.
+     *  8. Update unread state machine (clear target's unread badge +
+     *     record lastViewedTime) + discard draft + openSessionIds prepend +
+     *     persistSessionCache.
      *
      * **Step 3 timing caveat**: VerifyAndHydrate needs targetSession.time.created,
      * which Step 4 looks up. We resolve targetSession BEFORE emitting the effect
@@ -219,15 +220,9 @@ class SessionSwitcher(
         if (slices.chat.value.currentSessionId == sessionId) return
         // ── Step 1: Capture outgoing session state ──────────────────────────
         // Capture the previously-selected session BEFORE overwriting
-        // currentSessionId. Used below to decide whether the session the user
-        // is leaving should be re-marked unread: if it was temp-cleared (user
-        // had viewed it) and is still busy, background activity may still
-        // produce output the user cares about — re-mark it.
+        // currentSessionId. Used below for the per-session message-cache
+        // write-back of the outgoing session's view.
         val previousSessionId = slices.chat.value.currentSessionId
-        val previousWasBusyAndCleared = previousSessionId != null &&
-            previousSessionId != sessionId &&
-            slices.unread.value.tempClearedUnread.contains(previousSessionId) &&
-            slices.sessionList.value.sessionStatuses[previousSessionId]?.isBusy == true
 
         // §Per-session message cache (write-back): snapshot the OUTGOING
         // session's currently-loaded view into the LRU before clearing it.
@@ -391,19 +386,9 @@ class SessionSwitcher(
         // ── Step 8: Unread state machine + draft discard + openSessionIds ───
         val now = clock()
         slices.mutateUnread {
-            // Re-mark the previous session as unread if it was busy when the
-            // user navigated away.
-            val withReMark = if (previousWasBusyAndCleared) {
-                it.copy(unreadSessions = it.unreadSessions + previousSessionId!!)
-            } else {
-                it
-            }
-            withReMark.copy(
-                unreadSessions = withReMark.unreadSessions - sessionId,
-                lastViewedTime = withReMark.lastViewedTime + (sessionId to now),
-                // Track the newly-selected session as "temp-cleared" so a
-                // subsequent switch away (while busy) can re-mark it.
-                tempClearedUnread = withReMark.tempClearedUnread + sessionId
+            it.copy(
+                unreadSessions = it.unreadSessions - sessionId,
+                lastViewedTime = it.lastViewedTime + (sessionId to now),
             )
         }
         // Selecting a real session discards any in-progress draft.

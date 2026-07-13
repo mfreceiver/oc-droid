@@ -177,7 +177,7 @@ class SessionSyncPureFunctionsTest {
         assertEquals("leftover", next.streamingPartTexts["p1"])
     }
 
-    // ── session.status: applySessionStatus / dropTempCleared ───────────────
+    // ── session.status: applySessionStatus ─────────────────────────────────
 
     @Test
     fun `applySessionStatus upserts the badge entry`() {
@@ -202,24 +202,6 @@ class SessionSyncPureFunctionsTest {
         assertEquals(2, next.sessionStatuses.size)
         assertEquals(SessionStatus(type = "idle"), next.sessionStatuses["s1"])
         assertEquals(SessionStatus(type = "busy"), next.sessionStatuses["s2"])
-    }
-
-    @Test
-    fun `dropTempCleared removes the id`() {
-        val state = UnreadState(tempClearedUnread = setOf("s1", "s2", "s3"))
-
-        val (next, _) = state.dropTempCleared("s2")
-
-        assertEquals(setOf("s1", "s3"), next.tempClearedUnread)
-    }
-
-    @Test
-    fun `dropTempCleared is a no-op when the id is absent`() {
-        val state = UnreadState(tempClearedUnread = setOf("s1"))
-
-        val (next, _) = state.dropTempCleared("missing")
-
-        assertEquals(setOf("s1"), next.tempClearedUnread)
     }
 
     // ── question.* / todo.updated ──────────────────────────────────────────
@@ -671,6 +653,25 @@ class SessionSyncPureFunctionsTest {
         val (next, _) = state.flushCoalesceBufferForPart("p1")
 
         assertEquals("preserved", next.streamingPartTexts["p1"])
+        assertNull(next.deltaBuffer["p1"])
+        assertFalse(next.pendingFlushPartIds.contains("p1"))
+    }
+
+    @Test
+    fun `flushCoalesceBufferForPart drops stale fullText when overlay wiped and no delta buffered`() {
+        // overlay absent + fullText buffered + delta absent → fullText is stale
+        // (overlay was wiped) and is dropped; returns early without append.
+        val state = ChatState(
+            streamingPartTexts = emptyMap(),
+            fullTextBuffer = mapOf("p1" to "stale-full"),
+            deltaBuffer = emptyMap(),
+            pendingFlushPartIds = setOf("p1")
+        )
+
+        val (next, _) = state.flushCoalesceBufferForPart("p1")
+
+        assertNull(next.streamingPartTexts["p1"])
+        assertNull(next.fullTextBuffer["p1"])
         assertNull(next.deltaBuffer["p1"])
         assertFalse(next.pendingFlushPartIds.contains("p1"))
     }
@@ -1270,35 +1271,6 @@ class SessionSyncPureFunctionsTest {
 
         assertEquals(1, next.sessionStatuses.size)
         assertEquals("idle", next.sessionStatuses["s1"]?.type)
-    }
-
-    // === dropTempCleared: boundary =======================================
-
-    @Test
-    fun `dropTempCleared on the last entry yields an empty set`() {
-        val state = UnreadState(tempClearedUnread = setOf("only"))
-
-        val (next, _) = state.dropTempCleared("only")
-
-        assertTrue(next.tempClearedUnread.isEmpty())
-    }
-
-    @Test
-    fun `dropTempCleared on an empty set is a no-op`() {
-        val state = UnreadState(tempClearedUnread = emptySet())
-
-        val (next, _) = state.dropTempCleared("anything")
-
-        assertTrue(next.tempClearedUnread.isEmpty())
-    }
-
-    @Test
-    fun `dropTempCleared is case-sensitive`() {
-        val state = UnreadState(tempClearedUnread = setOf("S1"))
-
-        val (next, _) = state.dropTempCleared("s1")
-
-        assertEquals(setOf("S1"), next.tempClearedUnread)
     }
 
     // === applyPartCreatedPlaceholder: every partType branch ==============
@@ -2390,16 +2362,6 @@ class SessionSyncPureFunctionsTest {
     }
 
     @Test
-    fun `p24 dropTempCleared returns empty effects list`() {
-        val state = UnreadState(tempClearedUnread = setOf("s1", "s2"))
-
-        val (next, effects) = state.dropTempCleared("s1")
-
-        assertEquals(setOf("s2"), next.tempClearedUnread)
-        assertTrue(effects.isEmpty())
-    }
-
-    @Test
     fun `p24 markFlushPending returns empty effects list`() {
         val state = ChatState()
 
@@ -2407,5 +2369,254 @@ class SessionSyncPureFunctionsTest {
 
         assertTrue(next.pendingFlushPartIds.contains("p1"))
         assertTrue(effects.isEmpty())
+    }
+
+    @Test
+    fun `allSessionsById_merges_three_sources_dedup`() {
+        val root = Session(id = "A", directory = "/d", parentId = null)
+        val dirChild = Session(id = "C", directory = "/d", parentId = "A")
+        val childStoreChild = Session(id = "E", directory = "/d", parentId = "A")
+        val byId = allSessionsById(
+            sessions = listOf(root),
+            directorySessions = mapOf("w" to listOf(dirChild)),
+            childSessions = mapOf("A" to listOf(childStoreChild)),
+        )
+        assertEquals(root, byId["A"])
+        assertEquals(dirChild, byId["C"])
+        assertEquals(childStoreChild, byId["E"])
+    }
+
+    @Test
+    fun `allSessionsById_dedups_when_same_id_appears_in_multiple_sources`() {
+        val primary = Session(id = "A", directory = "/d", parentId = null, title = "primary")
+        val dirDup = Session(id = "A", directory = "/d", parentId = null, title = "dirDup")
+        val childDup = Session(id = "A", directory = "/d", parentId = null, title = "childDup")
+        val byId = allSessionsById(
+            sessions = listOf(primary),
+            directorySessions = mapOf("w" to listOf(dirDup)),
+            childSessions = mapOf("A" to listOf(childDup)),
+        )
+        assertEquals(1, byId.size)
+        assertEquals("primary", byId["A"]?.title)
+    }
+
+    @Test
+    fun `rootIdOf_walks_parent_chain`() {
+        val byId = mapOf(
+            "A" to Session(id = "A", directory = "/d", parentId = null),
+            "B" to Session(id = "B", directory = "/d", parentId = "A"),
+            "C" to Session(id = "C", directory = "/d", parentId = "B"),
+        )
+        assertEquals("A", rootIdOf("C", byId))
+        assertEquals("A", rootIdOf("A", byId))
+        assertNull(rootIdOf("X", byId))
+    }
+
+    @Test
+    fun `rootIdOf_cycle_returns_null`() {
+        val byId = mapOf(
+            "A" to Session(id = "A", directory = "/d", parentId = "B"),
+            "B" to Session(id = "B", directory = "/d", parentId = "A"),
+        )
+        assertNull(rootIdOf("A", byId))
+    }
+
+    @Test
+    fun `treeIds_includes_root_and_all_descendants`() {
+        val byId = mapOf(
+            "A" to Session(id = "A", directory = "/d", parentId = null),
+            "B" to Session(id = "B", directory = "/d", parentId = "A"),
+            "C" to Session(id = "C", directory = "/d", parentId = "B"),
+            "Z" to Session(id = "Z", directory = "/d", parentId = null),
+        )
+        assertEquals(setOf("A", "B", "C"), treeIds("A", byId))
+    }
+
+    @Test
+    fun `subtreeIds_covers_three_sources`() {
+        val root = Session(id = "A", directory = "/d", parentId = null)
+        val dirChild = Session(id = "C", directory = "/d", parentId = "A")
+        val childStoreChild = Session(id = "E", directory = "/d", parentId = "A")
+        val ids = subtreeIds(
+            "A",
+            listOf(root),
+            mapOf("w" to listOf(dirChild)),
+            mapOf("A" to listOf(childStoreChild)),
+        )
+        assertEquals(setOf("A", "C", "E"), ids)
+    }
+
+    // ── §task6 question tree aggregation: questionRootIds / questionsInTree ─
+
+    @Test
+    fun `questionRootIds_aggregates_child_question_to_root`() {
+        val byId = mapOf(
+            "A" to Session(id = "A", directory = "/d", parentId = null),
+            "C" to Session(id = "C", directory = "/d", parentId = "A"),
+        )
+        val qs = listOf(QuestionRequest(id = "q1", sessionId = "C", questions = emptyList()))
+        assertEquals(setOf("A"), questionRootIds(qs, byId))
+    }
+
+    @Test
+    fun `questionRootIds_returns_one_root_per_tree_even_with_multiple_descendants`() {
+        val byId = mapOf(
+            "A" to Session(id = "A", directory = "/d", parentId = null),
+            "B" to Session(id = "B", directory = "/d", parentId = "A"),
+            "C" to Session(id = "C", directory = "/d", parentId = "A"),
+            "Z" to Session(id = "Z", directory = "/d", parentId = null),
+        )
+        val qs = listOf(
+            QuestionRequest(id = "q1", sessionId = "B", questions = emptyList()),
+            QuestionRequest(id = "q2", sessionId = "C", questions = emptyList()),
+            QuestionRequest(id = "q3", sessionId = "Z", questions = emptyList()),
+        )
+        assertEquals(setOf("A", "Z"), questionRootIds(qs, byId))
+    }
+
+    @Test
+    fun `questionRootIds_skips_questions_whose_session_is_unknown`() {
+        // rootIdOf returns null for unknown sessions → those questions drop
+        // out (no root to surface them on). The Sessions tab cannot render a
+        // marker for an unknown id, so dropping is the only sane behaviour.
+        val byId = mapOf(
+            "A" to Session(id = "A", directory = "/d", parentId = null),
+        )
+        val qs = listOf(
+            QuestionRequest(id = "q1", sessionId = "A", questions = emptyList()),
+            QuestionRequest(id = "q2", sessionId = "Ghost", questions = emptyList()),
+        )
+        assertEquals(setOf("A"), questionRootIds(qs, byId))
+    }
+
+    @Test
+    fun `questionRootIds_empty_input_returns_empty_set`() {
+        assertEquals(emptySet<String>(), questionRootIds(emptyList(), emptyMap()))
+    }
+
+    @Test
+    fun `questionsInTree_returns_child_questions_preserving_id`() {
+        val byId = mapOf(
+            "A" to Session(id = "A", directory = "/d", parentId = null),
+            "C" to Session(id = "C", directory = "/d", parentId = "A"),
+        )
+        val qs = listOf(
+            QuestionRequest(id = "q1", sessionId = "C", questions = emptyList()),
+            QuestionRequest(id = "q2", sessionId = "Z", questions = emptyList()),
+        )
+        val inTree = questionsInTree("A", qs, byId)
+        assertEquals(1, inTree.size)
+        assertEquals("q1", inTree[0].id)
+        assertEquals("C", inTree[0].sessionId)
+    }
+
+    @Test
+    fun `questionsInTree_includes_root_session_own_question`() {
+        val byId = mapOf(
+            "A" to Session(id = "A", directory = "/d", parentId = null),
+        )
+        val qs = listOf(
+            QuestionRequest(id = "q1", sessionId = "A", questions = emptyList()),
+        )
+        val inTree = questionsInTree("A", qs, byId)
+        assertEquals(1, inTree.size)
+        assertEquals("A", inTree[0].sessionId)
+    }
+
+    @Test
+    fun `questionsInTree_excludes_sibling_tree_questions`() {
+        val byId = mapOf(
+            "A" to Session(id = "A", directory = "/d", parentId = null),
+            "B" to Session(id = "B", directory = "/d", parentId = "A"),
+            "Z" to Session(id = "Z", directory = "/d", parentId = null),
+            "Y" to Session(id = "Y", directory = "/d", parentId = "Z"),
+        )
+        val qs = listOf(
+            QuestionRequest(id = "q1", sessionId = "B", questions = emptyList()),
+            QuestionRequest(id = "q2", sessionId = "Y", questions = emptyList()),
+        )
+        val inTreeA = questionsInTree("A", qs, byId)
+        assertEquals(listOf("q1"), inTreeA.map { it.id })
+        val inTreeZ = questionsInTree("Z", qs, byId)
+        assertEquals(listOf("q2"), inTreeZ.map { it.id })
+    }
+
+    @Test
+    fun `questionsInTree_empty_input_returns_empty_list`() {
+        assertEquals(
+            emptyList<QuestionRequest>(),
+            questionsInTree("A", emptyList(), emptyMap()),
+        )
+    }
+
+    // ── §task7-coverage: applyMessageTimestampBump directorySessions branch ─
+
+    @Test
+    fun `applyMessageTimestampBump bumps a session that lives only in directorySessions`() {
+        val state = SessionListState(
+            sessions = listOf(Session(id = "other", directory = "/tmp")),
+            directorySessions = mapOf("/d" to listOf(
+                Session(id = "target", directory = "/d", time = Session.TimeInfo(updated = 10L)),
+            )),
+        )
+
+        val (next, _) = state.applyMessageTimestampBump("target", 99L)
+
+        val target = next.directorySessions["/d"]!!.first { it.id == "target" }
+        assertEquals(99L, target.time?.updated)
+    }
+
+    // ── §task7-coverage: applyArchiveEviction directorySessions branch ──────
+
+    @Test
+    fun `applyArchiveEviction replaces the archived session inside directorySessions`() {
+        val original = Session(id = "s1", directory = "/d", title = "old")
+        val state = SessionListState(
+            sessions = listOf(original),
+            directorySessions = mapOf("/d" to listOf(original)),
+        )
+        val archived = original.copy(
+            time = Session.TimeInfo(archived = 1L),
+            title = "archived-title",
+        )
+
+        val (next, _) = state.applyArchiveEviction(archived, listOf("s1"))
+
+        val dirEntry = next.directorySessions["/d"]!!.first { it.id == "s1" }
+        assertTrue(dirEntry.isArchived)
+        assertEquals("archived-title", dirEntry.title)
+    }
+
+    @Test
+    fun `applyArchiveEviction leaves non-matching sessions inside directorySessions untouched`() {
+        val state = SessionListState(
+            directorySessions = mapOf("/d" to listOf(
+                Session(id = "other", directory = "/d", title = "keep-me"),
+            )),
+        )
+        val archived = Session(
+            id = "arc", directory = "/d",
+            time = Session.TimeInfo(archived = 1L),
+        )
+
+        val (next, _) = state.applyArchiveEviction(archived, emptyList())
+
+        val other = next.directorySessions["/d"]!!.first { it.id == "other" }
+        assertEquals("keep-me", other.title)
+        assertFalse(other.isArchived)
+    }
+
+    @Test
+    fun `applyMessageTimestampBump does not touch non-matching sessions in directorySessions`() {
+        val state = SessionListState(
+            directorySessions = mapOf("/d" to listOf(
+                Session(id = "unrelated", directory = "/d", time = Session.TimeInfo(updated = 50L)),
+            )),
+        )
+
+        val (next, _) = state.applyMessageTimestampBump("target", 99L)
+
+        val unrelated = next.directorySessions["/d"]!!.first { it.id == "unrelated" }
+        assertEquals(50L, unrelated.time?.updated)
     }
 }

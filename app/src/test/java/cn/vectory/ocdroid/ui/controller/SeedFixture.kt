@@ -88,7 +88,6 @@ data class SeedFixture(
     val sessionTodos: Map<String, List<TodoItem>> = emptyMap(),
     // unread-domain
     val unreadSessions: Set<String> = emptySet(),
-    val tempClearedUnread: Set<String> = emptySet(),
     val lastViewedTime: Map<String, Long> = emptyMap(),
     // host-domain
     val hostProfiles: List<HostProfile> = emptyList(),

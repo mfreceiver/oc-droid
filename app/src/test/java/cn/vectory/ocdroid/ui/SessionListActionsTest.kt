@@ -128,6 +128,102 @@ class SessionListActionsTest {
         verify { settingsManager.sessionCache = emptyList() }
     }
 
+    @Test
+    fun `persistSessionCache filters out child sessions in the workdir directory`() {
+        every { settingsManager.sessionCache = any() } returns Unit
+
+        persistSessionCache(
+            settingsManager = settingsManager,
+            sessions = listOf(
+                Session(id = "child", directory = "/workdir", parentId = "parent"),
+            ),
+            openIds = emptyList(),
+            currentId = null,
+            currentWorkdir = "/workdir",
+            revertCutoffs = emptyMap(),
+        )
+
+        verify { settingsManager.sessionCache = emptyList() }
+    }
+
+    @Test
+    fun `persistSessionCache nulls revertCreatedAtEpochMs when cutoff messageId mismatches`() {
+        every { settingsManager.sessionCache = any() } returns Unit
+
+        persistSessionCache(
+            settingsManager = settingsManager,
+            sessions = listOf(
+                Session(id = "s1", directory = "/x", revert = Session.RevertInfo("actual")),
+            ),
+            openIds = listOf("s1"),
+            currentId = null,
+            currentWorkdir = null,
+            revertCutoffs = mapOf(
+                "s1" to cn.vectory.ocdroid.data.model.RevertCutoff(
+                    "s1", "different", cn.vectory.ocdroid.data.model.RevertCutoffState.Resolved(99L)
+                )
+            ),
+        )
+
+        verify {
+            settingsManager.sessionCache = match { entries ->
+                entries.size == 1 && entries[0].revertCreatedAtEpochMs == null
+            }
+        }
+    }
+
+    @Test
+    fun `persistSessionCache nulls revertCreatedAtEpochMs when cutoff state is not Resolved`() {
+        every { settingsManager.sessionCache = any() } returns Unit
+
+        persistSessionCache(
+            settingsManager = settingsManager,
+            sessions = listOf(
+                Session(id = "s1", directory = "/x", revert = Session.RevertInfo("msg")),
+            ),
+            openIds = listOf("s1"),
+            currentId = null,
+            currentWorkdir = null,
+            revertCutoffs = mapOf(
+                "s1" to cn.vectory.ocdroid.data.model.RevertCutoff(
+                    "s1", "msg", cn.vectory.ocdroid.data.model.RevertCutoffState.PendingFetch
+                )
+            ),
+        )
+
+        verify {
+            settingsManager.sessionCache = match { entries ->
+                entries.size == 1 && entries[0].revertCreatedAtEpochMs == null
+            }
+        }
+    }
+
+    @Test
+    fun `persistSessionCache nulls revertCreatedAtEpochMs when session has no revert but cutoff exists`() {
+        every { settingsManager.sessionCache = any() } returns Unit
+
+        persistSessionCache(
+            settingsManager = settingsManager,
+            sessions = listOf(
+                Session(id = "s1", directory = "/x"),  // no revert field
+            ),
+            openIds = listOf("s1"),
+            currentId = null,
+            currentWorkdir = null,
+            revertCutoffs = mapOf(
+                "s1" to cn.vectory.ocdroid.data.model.RevertCutoff(
+                    "s1", "orphan-cutoff", cn.vectory.ocdroid.data.model.RevertCutoffState.Resolved(77L)
+                )
+            ),
+        )
+
+        verify {
+            settingsManager.sessionCache = match { entries ->
+                entries.size == 1 && entries[0].revertCreatedAtEpochMs == null
+            }
+        }
+    }
+
     // ── launchLoadSessions ────────────────────────────────────────────────────
 
     @Test
@@ -620,6 +716,115 @@ class SessionListActionsTest {
             emptyMap<String, cn.vectory.ocdroid.data.model.SessionStatus>(),
             mergeStatusSnapshot(emptyMap(), emptyMap(), emptyMap())
         )
+    }
+
+    @Test
+    fun `reconnect_known_busy_missing_in_rest_marks_unread_root_noncurrent`() = runTest {
+        // §task4-reconnect-backstop: 本地已知 root A=busy, 重连后 REST 快照缺失 A
+        // (断线期间 A 完成 busy→idle, server idle=data.delete → 条目缺失).
+        // 兜底: 补标 A 未读 (root + 非当前 + wasBusy@localBefore + REST 缺失).
+        val busy = cn.vectory.ocdroid.data.model.SessionStatus(type = "busy")
+        store.mutateSessionList {
+            it.copy(
+                sessions = listOf(Session(id = "A", directory = "/x")),
+                sessionStatuses = mapOf("A" to busy),
+            )
+        }
+        store.mutateChat { it.copy(currentSessionId = "other") }
+        coEvery { repository.getSessionStatus() } returns Result.success(emptyMap())
+
+        launchLoadSessionStatus(scope, repository, slices)
+        advanceUntilIdle()
+
+        assertTrue(
+            "busy A must be cleared from sessionStatuses (REST snapshot replaces)",
+            slices.sessionList.value.sessionStatuses.isEmpty(),
+        )
+        assertTrue(
+            "A must be marked unread on reconnect backstop",
+            slices.unread.value.unreadSessions.contains("A"),
+        )
+    }
+
+    @Test
+    fun `reconnect_first_snapshot_does_not_batch_mark`() = runTest {
+        // §task4-first-load: 首次加载 localBefore 全空 → completedRoots 自然空 → 不批量标.
+        val sessions = (1..5).map { Session(id = "s$it", directory = "/x") }
+        store.mutateSessionList {
+            it.copy(sessions = sessions, sessionStatuses = emptyMap())
+        }
+        store.mutateChat { it.copy(currentSessionId = "s1") }
+        coEvery { repository.getSessionStatus() } returns Result.success(emptyMap())
+
+        launchLoadSessionStatus(scope, repository, slices)
+        advanceUntilIdle()
+
+        assertTrue(
+            "first snapshot with empty localBefore must not batch-mark unread",
+            slices.unread.value.unreadSessions.isEmpty(),
+        )
+    }
+
+    @Test
+    fun `reconnect_busy_appeared_in_flight_via_sse_not_marked_unread`() = runTest {
+        // §task4-grilling-G1: localBefore 无 X (REST 发起时 X 非 busy). REST 在途期间
+        // SSE 把 X 推为 busy. REST 快照(更早)缺失 X. 不得误判 X 完成 → 用 localBefore
+        // 判定 wasBusy, 不用 sl.sessionStatuses (此时 sl 含 X=busy 会误标).
+        store.mutateSessionList {
+            it.copy(
+                sessions = listOf(Session(id = "X", directory = "/x")),
+                sessionStatuses = emptyMap(),
+            )
+        }
+        store.mutateChat { it.copy(currentSessionId = "other") }
+        coEvery { repository.getSessionStatus() } coAnswers {
+            slices.mutateSessionList {
+                it.copy(
+                    sessionStatuses = it.sessionStatuses +
+                        ("X" to cn.vectory.ocdroid.data.model.SessionStatus(type = "busy"))
+                )
+            }
+            Result.success(emptyMap())
+        }
+
+        launchLoadSessionStatus(scope, repository, slices)
+        advanceUntilIdle()
+
+        assertFalse(
+            "X turned busy in-flight must not be marked unread (G1: use localBefore, not sl)",
+            slices.unread.value.unreadSessions.contains("X"),
+        )
+    }
+
+    @Test
+    fun `reconnect_skips_current_session_and_child_sessions`() = runTest {
+        // §task4-scope: 补标只针对 root 非当前 session. 当前 session 不标 (applyMarkSessionUnread
+        // 短路); child session (parentId != null) 不标 (只关心 root 完成).
+        val busy = cn.vectory.ocdroid.data.model.SessionStatus(type = "busy")
+        store.mutateSessionList {
+            it.copy(
+                sessions = listOf(
+                    Session(id = "root", directory = "/x"),
+                    Session(id = "child", directory = "/x", parentId = "root"),
+                    Session(id = "cur", directory = "/x"),
+                ),
+                sessionStatuses = mapOf(
+                    "root" to busy,
+                    "child" to busy,
+                    "cur" to busy,
+                ),
+            )
+        }
+        store.mutateChat { it.copy(currentSessionId = "cur") }
+        coEvery { repository.getSessionStatus() } returns Result.success(emptyMap())
+
+        launchLoadSessionStatus(scope, repository, slices)
+        advanceUntilIdle()
+
+        val unread = slices.unread.value.unreadSessions
+        assertTrue("root (busy, non-current, parentId null) must be marked", unread.contains("root"))
+        assertFalse("child (parentId != null) must NOT be marked", unread.contains("child"))
+        assertFalse("cur (currentSessionId) must NOT be marked", unread.contains("cur"))
     }
 
     @Test

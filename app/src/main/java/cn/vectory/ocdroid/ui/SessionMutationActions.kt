@@ -13,6 +13,8 @@ import cn.vectory.ocdroid.data.model.ComposerImageAttachment
 import cn.vectory.ocdroid.data.model.Message
 import cn.vectory.ocdroid.data.repository.OpenCodeRepository
 import cn.vectory.ocdroid.ui.controller.ControllerEffect
+import cn.vectory.ocdroid.ui.controller.removeSessions
+import cn.vectory.ocdroid.ui.controller.subtreeIds
 import cn.vectory.ocdroid.util.SettingsManager
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.launch
@@ -88,7 +90,10 @@ internal fun launchSetSessionArchived(
         val archivedValue = if (archived) System.currentTimeMillis() else -1L
         // §R-17 batch2 step e final: slice-only reads (slices are the sole
         // authoritative store).
-        val ids = sessionSubtreeIds(slices.sessionList.value.sessions, sessionId, parentFirst = !archived)
+        // §task5-lifecycle: three-source subtree so descendants that only
+        // live in directorySessions / childSessions are still visited.
+        val sl = slices.sessionList.value
+        val ids = subtreeIds(sessionId, sl.sessions, sl.directorySessions, sl.childSessions).toList()
         for (id in ids) {
             repository.updateSessionArchived(id, archivedValue)
                 .onSuccess { updated ->
@@ -105,6 +110,16 @@ internal fun launchSetSessionArchived(
                     // repopulates this map on expand, but the local copy must not hold a
                     // stale unarchived version).
                     val newDirSessions = currentDirSessions.mapValues { (_, list) ->
+                        list.map { session -> if (session.id == id) updated else session }
+                    }
+                    // §task5-ghost-r2 (final-fix round 2): same sync for childSessions.
+                    // A descendant that lives only in childSessions (sub-agent surfaced
+                    // via loadChildSessions) must also be replaced with the archived
+                    // copy — otherwise the next reconcile's sessionsById snapshot still
+                    // sees it as unarchived, defeating the filterArchivedSessionQuestions
+                    // ancestor walk and letting its question ghost back.
+                    val currentChildSessions = slices.sessionList.value.childSessions
+                    val newChildSessions = currentChildSessions.mapValues { (_, list) ->
                         list.map { session -> if (session.id == id) updated else session }
                     }
                     val isArchive = archivedValue > 0
@@ -124,11 +139,23 @@ internal fun launchSetSessionArchived(
                     // collector drops null (no manual SettingsManager write).
 
                     slices.mutateSessionList {
+                        // §task5-lifecycle: per-id question filter (presentation domain).
+                        val cleanedQuestions = if (isArchive) {
+                            it.pendingQuestions.filter { q -> q.sessionId != id }
+                        } else {
+                            it.pendingQuestions
+                        }
                         it.copy(
                             sessions = newSessions,
                             directorySessions = newDirSessions,
-                            openSessionIds = newOpenIds
+                            childSessions = newChildSessions,
+                            openSessionIds = newOpenIds,
+                            pendingQuestions = cleanedQuestions,
                         )
+                    }
+                    if (isArchive) {
+                        // §task5-lifecycle: per-id unread drop.
+                        slices.mutateUnread { it.removeSessions(setOf(id)) }
                     }
                     if (clearCurrent) {
                         // Cross-slice: currentSessionId/messages/partsByMessage are
@@ -166,15 +193,6 @@ internal fun launchSetSessionArchived(
     }
 }
 
-private fun sessionSubtreeIds(sessions: List<cn.vectory.ocdroid.data.model.Session>, rootId: String, parentFirst: Boolean): List<String> {
-    val childrenByParent = sessions.groupBy { it.parentId }
-    fun collect(id: String): List<String> {
-        val children = childrenByParent[id].orEmpty().flatMap { collect(it.id) }
-        return if (parentFirst) listOf(id) + children else children + id
-    }
-    return collect(rootId)
-}
-
 internal fun launchDeleteSession(
     scope: CoroutineScope,
     repository: OpenCodeRepository,
@@ -197,9 +215,13 @@ internal fun launchDeleteSession(
 ) {
 
     scope.launch {
+        // §task5-lifecycle §delete-subtree: snapshot the full three-source
+        // subtree BEFORE the REST delete (server may cascade-delete descendants).
+        val slSnap = slices.sessionList.value
+        val removedIds = subtreeIds(sessionId, slSnap.sessions, slSnap.directorySessions, slSnap.childSessions)
         repository.deleteSession(sessionId)
             .onSuccess {
-                // Purge the deleted id from both the global sessions list AND
+                // Purge the deleted subtree from both the global sessions list AND
                 // directorySessions. If the session was originally surfaced via
                 // a connected workdir (createSessionInWorkdir's directory fetch),
                 // leaving it in directorySessions would let SessionsScreen's
@@ -208,13 +230,22 @@ internal fun launchDeleteSession(
                 // §R-17 batch2 step e final: slice-only reads.
                 val currentSessions = slices.sessionList.value.sessions
                 val currentDirSessions = slices.sessionList.value.directorySessions
-                val newSessions = currentSessions.filter { s -> s.id != sessionId }
+                val newSessions = currentSessions.filter { s -> s.id !in removedIds }
                 val newDirSessions = currentDirSessions
-                    .mapValues { (_, list) -> list.filter { s -> s.id != sessionId } }
+                    .mapValues { (_, list) -> list.filter { s -> s.id !in removedIds } }
                     .filterValues { it.isNotEmpty() }
-                slices.mutateSessionList { sl -> sl.copy(sessions = newSessions, directorySessions = newDirSessions) }
+                slices.mutateSessionList { sl ->
+                    sl.copy(
+                        sessions = newSessions,
+                        directorySessions = newDirSessions,
+                        // §task5-lifecycle: question filter for removed subtree.
+                        pendingQuestions = sl.pendingQuestions.filter { it.sessionId !in removedIds },
+                    )
+                }
+                // §task5-lifecycle: unread drop for the whole removed subtree.
+                slices.mutateUnread { it.removeSessions(removedIds) }
                 val currentId = slices.chat.value.currentSessionId
-                if (currentId == sessionId) {
+                if (currentId != null && currentId in removedIds) {
                     val newCurrent = newSessions.firstOrNull()?.id
                     if (newCurrent != null) {
                         onSelectSession(newCurrent)
@@ -231,7 +262,9 @@ internal fun launchDeleteSession(
                 // AFTER the REST delete confirmed. The eviction (memory LRU +
                 // persistent cache) is routed through AppCore.dispatchHostEffect.
                 // Emits inside onSuccess to avoid optimistic eviction on a failed
-                // delete.
+                // delete. Emitted for the user-requested id only; descendant
+                // caches are evicted by their own delete cascade (or by the
+                // server-side delete handlers).
                 if (currentServerGroupFp != null && emitEffect != null) {
                     emitEffect(ControllerEffect.EvictSession(currentServerGroupFp(), sessionId))
                 }

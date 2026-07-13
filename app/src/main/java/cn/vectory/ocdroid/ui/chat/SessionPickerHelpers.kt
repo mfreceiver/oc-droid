@@ -95,3 +95,24 @@ sealed interface SessionTabLayout {
     /** Tabs fit and should expand evenly to fill the strip with [Modifier.weight]. */
     data object FitWeighted : SessionTabLayout
 }
+
+/**
+ * Pure resolver for the session tab's pending-question ("?") marker. Returns
+ * true iff this tab is NOT the currently selected one AND its session id is in
+ * [questionSessionIds] (root-aggregated by the caller).
+ *
+ * "Current" follows the **effective-selected** semantics (i.e. the root tab
+ * that is highlighted), NOT the raw `currentSessionId`: when the user is
+ * viewing a sub-agent, the parent root tab is the selected one and its
+ * question is already surfaced in the chat's QuestionCard, so the tab marker
+ * there would be a duplicate. Suppressing via [isSelected] (= `id ==
+ * resolveEffectiveSelectedId`) handles both the root-current and child-current
+ * cases uniformly.
+ *
+ * Extracted so the child-current edge case is covered by a JVM unit test.
+ */
+internal fun shouldShowQuestionMarker(
+    isSelected: Boolean,
+    questionSessionIds: Set<String>,
+    sessionId: String,
+): Boolean = !isSelected && sessionId in questionSessionIds

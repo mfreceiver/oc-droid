@@ -195,7 +195,6 @@ class SessionSwitcherTest {
         slices.mutateUnread {
             UnreadState(
                 unreadSessions = s.unreadSessions,
-                tempClearedUnread = s.tempClearedUnread,
                 lastViewedTime = s.lastViewedTime
             )
         }
@@ -586,7 +585,7 @@ class SessionSwitcherTest {
     // ── Step 8: unread state machine ────────────────────────────────────────
 
     @Test
-    fun `switchTo marks new session as temp-cleared and removes from unread`() {
+    fun `switchTo removes target session from unread and records lastViewedTime`() {
         seed {
             it.copy(
             currentSessionId = null,
@@ -599,12 +598,33 @@ class SessionSwitcherTest {
         switcher.switchTo("s1")
 
         assertFalse("selected session removed from unread", slices.unread.value.unreadSessions.contains("s1"))
-        assertTrue("selected session added to tempClearedUnread", slices.unread.value.tempClearedUnread.contains("s1"))
         assertEquals(50_000L, slices.unread.value.lastViewedTime["s1"])
     }
 
     @Test
-    fun `switchTo re-marks previous busy+cleared session as unread`() {
+    fun `switchTo AB pingpong both clear`() {
+        val busyStatus = SessionStatus(type = "busy")
+        seed {
+            it.copy(
+                currentSessionId = null,
+                unreadSessions = setOf("A", "B"),
+                sessions = listOf(
+                    Session(id = "A", directory = "/d"),
+                    Session(id = "B", directory = "/d"),
+                ),
+                sessionStatuses = mapOf("A" to busyStatus, "B" to busyStatus),
+            )
+        }
+
+        switcher.switchTo("A")
+        assertEquals(setOf("B"), slices.unread.value.unreadSessions)
+
+        switcher.switchTo("B")
+        assertEquals(emptySet<String>(), slices.unread.value.unreadSessions)
+    }
+
+    @Test
+    fun `switchTo does NOT re-add outgoing session to unread`() {
         seed {
             it.copy(
             currentSessionId = "old-busy",
@@ -612,60 +632,15 @@ class SessionSwitcherTest {
                 Session(id = "old-busy", directory = "/d"),
                 Session(id = "new-target", directory = "/d")
             ),
-            tempClearedUnread = setOf("old-busy"),
             sessionStatuses = mapOf("old-busy" to SessionStatus(type = "busy"))
             )
         }
 
         switcher.switchTo("new-target")
 
-        assertTrue(
-            "previous busy+cleared session re-marked as unread",
+        assertFalse(
+            "outgoing session NOT re-added to unread by switchTo (Task 3 owns lifecycle)",
             slices.unread.value.unreadSessions.contains("old-busy")
-        )
-    }
-
-    @Test
-    fun `switchTo does NOT re-mark previous idle session as unread`() {
-        seed {
-            it.copy(
-            currentSessionId = "old-idle",
-            sessions = listOf(
-                Session(id = "old-idle", directory = "/d"),
-                Session(id = "new-target", directory = "/d")
-            ),
-            tempClearedUnread = setOf("old-idle"),
-            sessionStatuses = mapOf("old-idle" to SessionStatus(type = "idle"))
-            )
-        }
-
-        switcher.switchTo("new-target")
-
-        assertFalse(
-            "previous idle session NOT re-marked as unread",
-            slices.unread.value.unreadSessions.contains("old-idle")
-        )
-    }
-
-    @Test
-    fun `switchTo does NOT re-mark previous session if not temp-cleared`() {
-        seed {
-            it.copy(
-            currentSessionId = "old-not-cleared",
-            sessions = listOf(
-                Session(id = "old-not-cleared", directory = "/d"),
-                Session(id = "new-target", directory = "/d")
-            ),
-            tempClearedUnread = emptySet(),
-            sessionStatuses = mapOf("old-not-cleared" to SessionStatus(type = "busy"))
-            )
-        }
-
-        switcher.switchTo("new-target")
-
-        assertFalse(
-            "previous session without tempCleared NOT re-marked",
-            slices.unread.value.unreadSessions.contains("old-not-cleared")
         )
     }
 

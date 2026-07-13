@@ -217,6 +217,117 @@ class AppActionReducerTest {
         assertEquals(1, out.chat.partsByMessage.size)
     }
 
+    // ── §task5-lifecycle: SessionArchived clears unread + pendingQuestions ──
+
+    @Test
+    fun `reduce SessionArchived clears archived id from unread and its pendingQuestions`() {
+        // §task5-lifecycle: an archived session must NOT keep its unread badge
+        // or any pending question bound to it — otherwise the user sees a red
+        // dot / question chip for a session they can no longer open. The clean
+        // happens in the SAME committed state as the archive (single dispatch,
+        // no torn "archived but still unread" intermediate).
+        val archived = Session(id = "sess-1", directory = "/p", time = Session.TimeInfo(archived = 1L))
+        val prior = StoreState.initial().copy(
+            sessionList = SessionListState(
+                sessions = listOf(Session(id = "sess-1", directory = "/p")),
+                openSessionIds = listOf("sess-1"),
+                pendingQuestions = listOf(
+                    QuestionRequest(
+                        id = "q1", sessionId = "sess-1",
+                        questions = listOf(QuestionInfo("q?", "h", listOf(QuestionOption("a", "b")))),
+                    ),
+                    // A question bound to an unrelated session MUST survive.
+                    QuestionRequest(
+                        id = "q2", sessionId = "sess-other",
+                        questions = listOf(QuestionInfo("q?", "h", listOf(QuestionOption("a", "b")))),
+                    ),
+                ),
+            ),
+            unread = UnreadState(
+                unreadSessions = setOf("sess-1", "sess-other"),
+                lastViewedTime = mapOf("sess-1" to 1L, "sess-other" to 2L),
+            ),
+        )
+
+        val out = reduce(prior, AppAction.SessionArchived(archived, openSessionIds = emptyList()))
+
+        // Archived id removed from unread; unrelated id preserved.
+        assertFalse("archived id removed from unreadSessions", out.unread.unreadSessions.contains("sess-1"))
+        assertTrue("unrelated id preserved in unreadSessions", out.unread.unreadSessions.contains("sess-other"))
+        // lastViewedTime for the archived id also dropped (no orphan entry).
+        assertFalse("archived id removed from lastViewedTime", out.unread.lastViewedTime.containsKey("sess-1"))
+        assertEquals(2L, out.unread.lastViewedTime["sess-other"])
+        // Question bound to the archived id removed; the unrelated one survives.
+        assertTrue(
+            "archived session question removed",
+            out.sessionList.pendingQuestions.none { it.sessionId == "sess-1" },
+        )
+        assertTrue(
+            "unrelated session question preserved",
+            out.sessionList.pendingQuestions.any { it.sessionId == "sess-other" },
+        )
+    }
+
+    // ── §task5-lifecycle (final-review fix 1): SessionArchived clears WHOLE SUBTREE ──
+
+    @Test
+    fun `reduce SessionArchived clears the whole subtree unread and pendingQuestions even when only the root archive event arrives`() {
+        // §task5-lifecycle (final-review fix 1): defensive subtree cleanup.
+        // The SSE archive path is per-id, but if the server only emits the
+        // root's archive event (descendants do NOT get their own session.updated),
+        // the reducer MUST still clean descendants' unread + pending questions
+        // atomically in the same committed state — otherwise a child's badge /
+        // question survives an archived parent and the user sees a stale chip
+        // for a session that is effectively gone.
+        val archivedRoot = Session(id = "root", directory = "/p", time = Session.TimeInfo(archived = 1L))
+        val prior = StoreState.initial().copy(
+            sessionList = SessionListState(
+                sessions = listOf(
+                    Session(id = "root", directory = "/p"),
+                    Session(id = "child", directory = "/p", parentId = "root"),
+                    Session(id = "grandchild", directory = "/p", parentId = "child"),
+                    Session(id = "unrelated", directory = "/p"),
+                ),
+                openSessionIds = listOf("root"),
+                pendingQuestions = listOf(
+                    QuestionRequest(id = "q-root", sessionId = "root", questions = emptyList()),
+                    QuestionRequest(id = "q-child", sessionId = "child", questions = emptyList()),
+                    QuestionRequest(id = "q-grandchild", sessionId = "grandchild", questions = emptyList()),
+                    QuestionRequest(id = "q-unrelated", sessionId = "unrelated", questions = emptyList()),
+                ),
+            ),
+            unread = UnreadState(
+                unreadSessions = setOf("root", "child", "grandchild", "unrelated"),
+                lastViewedTime = mapOf(
+                    "root" to 1L, "child" to 2L, "grandchild" to 3L, "unrelated" to 4L,
+                ),
+            ),
+        )
+
+        val out = reduce(prior, AppAction.SessionArchived(archivedRoot, openSessionIds = emptyList()))
+
+        // Whole root subtree cleaned atomically — even though only the root
+        // archive event arrived in this action.
+        assertFalse("root cleared", "root" in out.unread.unreadSessions)
+        assertFalse("child cleared (no own archive event)", "child" in out.unread.unreadSessions)
+        assertFalse("grandchild cleared (no own archive event)", "grandchild" in out.unread.unreadSessions)
+        assertTrue("unrelated preserved", "unrelated" in out.unread.unreadSessions)
+        // lastViewedTime orphans dropped for the subtree only.
+        assertFalse("root lastViewed cleared", "root" in out.unread.lastViewedTime)
+        assertFalse("child lastViewed cleared", "child" in out.unread.lastViewedTime)
+        assertFalse("grandchild lastViewed cleared", "grandchild" in out.unread.lastViewedTime)
+        assertEquals(4L, out.unread.lastViewedTime["unrelated"])
+        // Subtree questions all removed; unrelated preserved.
+        assertTrue(
+            "subtree questions removed",
+            out.sessionList.pendingQuestions.none { it.sessionId in setOf("root", "child", "grandchild") },
+        )
+        assertTrue(
+            "unrelated question preserved",
+            out.sessionList.pendingQuestions.any { it.sessionId == "unrelated" },
+        )
+    }
+
     // ── HostStatePurged (cross-group = full purge) ─────────────────────────
 
     @Test
@@ -302,7 +413,6 @@ class AppActionReducerTest {
             ),
             unread = UnreadState(
                 unreadSessions = setOf("s1"),
-                tempClearedUnread = setOf("s1"),
                 lastViewedTime = mapOf("s1" to 1L),
             ),
             composer = ComposerState(draftWorkdir = "/old/proj"),
@@ -324,7 +434,6 @@ class AppActionReducerTest {
         assertTrue("pendingQuestions cleared cross-host", out.sessionList.pendingQuestions.isEmpty())
         // unread fully cleared.
         assertTrue(out.unread.unreadSessions.isEmpty())
-        assertTrue(out.unread.tempClearedUnread.isEmpty())
         assertTrue(out.unread.lastViewedTime.isEmpty())
         // per-profile UX always reset.
         assertNull(out.composer.draftWorkdir)

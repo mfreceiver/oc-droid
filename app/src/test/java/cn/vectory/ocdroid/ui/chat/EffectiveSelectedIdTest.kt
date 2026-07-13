@@ -1,7 +1,9 @@
 package cn.vectory.ocdroid.ui.chat
 
 import cn.vectory.ocdroid.data.model.Session
+import cn.vectory.ocdroid.ui.controller.rootIdOf
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Test
 
@@ -77,6 +79,87 @@ class EffectiveSelectedIdTest {
     fun `empty openSessions yields null regardless of ids`() {
         assertNull(
             resolveEffectiveSelectedId(emptyList(), currentSessionId = "root-1", parentSessionId = "root-1")
+        )
+    }
+
+    // ── truncateTitle §task7-coverage ──────────────────────────────────────
+
+    @Test
+    fun `truncateTitle returns the original when at or under the char cap`() {
+        assertEquals("short", truncateTitle("short"))
+        assertEquals("123456789012345", truncateTitle("123456789012345"))
+    }
+
+    @Test
+    fun `truncateTitle truncates with ellipsis when over the char cap`() {
+        val result = truncateTitle("1234567890123456")
+        assertEquals(15, result.length)
+        assertEquals("12345678901234…", result)
+    }
+
+    @Test
+    fun `truncateTitle handles empty string`() {
+        assertEquals("", truncateTitle(""))
+    }
+
+    // ── §task6-grandchild (final-review fix 4): full-root tab selection ────
+
+    @Test
+    fun `grandchild current session selects the root tab when caller resolves root via rootIdOf`() {
+        // §task6-grandchild (final-review fix 4): when currentSessionId is a
+        // multi-level descendant (grandchild), resolveEffectiveSelectedId
+        // alone walks only ONE parent level — it returns null because neither
+        // the grandchild nor its direct parent is in the root-only
+        // openSessions list. With null, no tab reads as selected → the root
+        // tab's "?" marker is NOT suppressed (its question is already
+        // surfaced in the chat's QuestionCard for the current tree, so the
+        // tab marker is a redundant duplicate the spec forbids).
+        //
+        // Plan B (chosen): the ChatScaffold caller resolves the FULL root via
+        // rootIdOf(currentSessionId, sessionsById) and feeds that root id
+        // into the parentSessionId slot of resolveEffectiveSelectedId. The
+        // root tab then reads as selected for any descendant depth, and
+        // shouldShowQuestionMarker suppresses its "?" marker.
+        val grandchild = Session(id = "grandchild", directory = "/p", parentId = "child")
+        val child = Session(id = "child", directory = "/p", parentId = "root")
+        val root = Session(id = "root", directory = "/p")
+        val sessionsById = mapOf(
+            "grandchild" to grandchild,
+            "child" to child,
+            "root" to root,
+        )
+        val openSessions = listOf(root)
+        val currentSessionId = "grandchild"
+
+        // Pre-fix premise (still pinning the helper's unchanged contract):
+        // direct-parent-only resolution yields null for a grandchild.
+        assertNull(
+            "direct-parent-only resolution still yields null for grandchild (helper unchanged)",
+            resolveEffectiveSelectedId(
+                openSessions = openSessions,
+                currentSessionId = currentSessionId,
+                parentSessionId = child.id,
+            ),
+        )
+
+        // Plan B caller-side contract: resolve full root, then feed it in.
+        val resolvedRoot = rootIdOf(currentSessionId, sessionsById)
+        assertEquals("root", resolvedRoot)
+        val effective = resolveEffectiveSelectedId(
+            openSessions = openSessions,
+            currentSessionId = currentSessionId,
+            parentSessionId = resolvedRoot,
+        )
+        assertEquals("root", effective)
+
+        // Contract: with the root tab selected, its "?" marker is suppressed.
+        assertFalse(
+            "root tab '?' marker suppressed when grandchild is current",
+            shouldShowQuestionMarker(
+                isSelected = root.id == effective,
+                questionSessionIds = setOf("root"),
+                sessionId = root.id,
+            ),
         )
     }
 }

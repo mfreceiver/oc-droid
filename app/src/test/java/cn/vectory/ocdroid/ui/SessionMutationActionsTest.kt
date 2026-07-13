@@ -4,12 +4,14 @@ import android.util.Log
 import cn.vectory.ocdroid.R
 import cn.vectory.ocdroid.data.model.ComposerImageAttachment
 import cn.vectory.ocdroid.data.model.Message
+import cn.vectory.ocdroid.data.model.QuestionInfo
+import cn.vectory.ocdroid.data.model.QuestionOption
+import cn.vectory.ocdroid.data.model.QuestionRequest
 import cn.vectory.ocdroid.data.model.Session
 import cn.vectory.ocdroid.data.repository.OpenCodeRepository
 import cn.vectory.ocdroid.util.SettingsManager
 import io.mockk.coEvery
 import io.mockk.coVerify
-import io.mockk.coVerifyOrder
 import io.mockk.every
 import io.mockk.mockk
 import io.mockk.mockkStatic
@@ -213,8 +215,9 @@ class SessionMutationActionsTest {
     }
 
     @Test
-    fun `launchSetSessionArchived archives subtree children-first`() = runTest {
-        // archive=true → parentFirst=!archived=false → children first.
+    fun `launchSetSessionArchived archives whole subtree`() = runTest {
+        // §task5-lifecycle: archive walks the whole subtree; iteration order
+        // is not significant (each id is an independent REST call).
         val parent = Session(id = "p", directory = "/x")
         val child = Session(id = "c", directory = "/x", parentId = "p")
         store.mutateSessionList { it.copy(sessions = listOf(parent, child)) }
@@ -224,10 +227,8 @@ class SessionMutationActionsTest {
         launchSetSessionArchived(scope, repository, slices, settingsManager, sessionId = "p", archived = true, emit = emit)
         advanceUntilIdle()
 
-        // Both archived.
         assertTrue(slices.sessionList.value.sessions.all { it.isArchived })
-        // Child first then parent (archive walks children before parent).
-        coVerifyOrder {
+        coVerify {
             repository.updateSessionArchived("c", any())
             repository.updateSessionArchived("p", any())
         }
@@ -243,6 +244,237 @@ class SessionMutationActionsTest {
         advanceUntilIdle()
 
         assertEquals(R.string.error_archive_session_failed, emitted.filterIsInstance<UiEvent.Error>().single().resId)
+    }
+
+    // ── §task5-lifecycle: archive / delete clear unread + pendingQuestions ──
+
+    @Test
+    fun `launchSetSessionArchived archive clears subtree unread and pendingQuestions`() = runTest {
+        // §task5-lifecycle: root A has unread; child C carries a pending
+        // question. Archiving A walks the subtree {A, C}; after the loop both
+        // the unread badge for A and the question for C must be gone.
+        val parent = Session(id = "A", directory = "/x")
+        val child = Session(id = "C", directory = "/x", parentId = "A")
+        store.mutateSessionList { it.copy(sessions = listOf(parent, child)) }
+        store.mutateUnread { it.copy(unreadSessions = setOf("A")) }
+        store.mutateSessionList {
+            it.copy(
+                pendingQuestions = listOf(
+                    QuestionRequest(
+                        id = "q1", sessionId = "C",
+                        questions = listOf(QuestionInfo("q?", "h", listOf(QuestionOption("a", "b")))),
+                    ),
+                ),
+            )
+        }
+        every { settingsManager.openSessionIds } returns emptyList()
+        coEvery { repository.updateSessionArchived("A", any()) } returns Result.success(parent.copy(time = Session.TimeInfo(archived = 1L)))
+        coEvery { repository.updateSessionArchived("C", any()) } returns Result.success(child.copy(time = Session.TimeInfo(archived = 1L)))
+
+        launchSetSessionArchived(scope, repository, slices, settingsManager, sessionId = "A", archived = true, emit = emit)
+        advanceUntilIdle()
+
+        assertFalse("archived root A removed from unread", slices.unread.value.unreadSessions.contains("A"))
+        assertTrue(
+            "child C pending question removed",
+            slices.sessionList.value.pendingQuestions.none { it.sessionId == "C" },
+        )
+    }
+
+    @Test
+    fun `launchSetSessionArchived restore leaves unread and pendingQuestions untouched`() = runTest {
+        // §task5-lifecycle: restore (archived=false) MUST NOT clear unread or
+        // questions — the user wants to see the session again. Guards the
+        // isArchive branch inside onSuccess.
+        val session = Session(id = "s1", directory = "/x", time = Session.TimeInfo(archived = 1L))
+        store.mutateSessionList { it.copy(sessions = listOf(session)) }
+        store.mutateUnread { it.copy(unreadSessions = setOf("s1")) }
+        store.mutateSessionList {
+            it.copy(
+                pendingQuestions = listOf(
+                    QuestionRequest(
+                        id = "q1", sessionId = "s1",
+                        questions = listOf(QuestionInfo("q?", "h", listOf(QuestionOption("a", "b")))),
+                    ),
+                ),
+            )
+        }
+        coEvery { repository.updateSessionArchived("s1", any()) } returns Result.success(session.copy(time = Session.TimeInfo(archived = null)))
+
+        launchSetSessionArchived(scope, repository, slices, settingsManager, sessionId = "s1", archived = false, emit = emit)
+        advanceUntilIdle()
+
+        // Unread + question survive the restore.
+        assertTrue("unread preserved on restore", slices.unread.value.unreadSessions.contains("s1"))
+        assertTrue(
+            "pending question preserved on restore",
+            slices.sessionList.value.pendingQuestions.any { it.sessionId == "s1" },
+        )
+    }
+
+    @Test
+    fun `launchDeleteSession clears subtree unread and pendingQuestions`() = runTest {
+        // §task5-lifecycle §delete-subtree: deleting a root MUST purge the
+        // whole subtree's unread + pending questions. The mock deleteSession
+        // simulates a server cascade-delete (shrinks the slice's session
+        // metadata for both root and descendant) — the snapshot taken BEFORE
+        // the REST call must still cover the whole subtree.
+        val parent = Session(id = "A", directory = "/x")
+        val child = Session(id = "C", directory = "/x", parentId = "A")
+        store.mutateSessionList { it.copy(sessions = listOf(parent, child)) }
+        store.mutateUnread { it.copy(unreadSessions = setOf("A", "C")) }
+        store.mutateSessionList {
+            it.copy(
+                pendingQuestions = listOf(
+                    QuestionRequest(
+                        id = "q1", sessionId = "C",
+                        questions = listOf(QuestionInfo("q?", "h", listOf(QuestionOption("a", "b")))),
+                    ),
+                    // Unrelated session's question must survive.
+                    QuestionRequest(
+                        id = "q2", sessionId = "Z",
+                        questions = listOf(QuestionInfo("q?", "h", listOf(QuestionOption("a", "b")))),
+                    ),
+                ),
+            )
+        }
+        // Mock simulates server cascade: deleteSession shrinks the slice's
+        // session metadata so a naive post-delete read would miss the child.
+        coEvery { repository.deleteSession(any()) } answers {
+            val id = firstArg<String>()
+            store.mutateSessionList { sl ->
+                sl.copy(sessions = sl.sessions.filter { it.id != id && it.id != "C" })
+            }
+            Result.success(Unit)
+        }
+
+        launchDeleteSession(scope, repository, slices, settingsManager, sessionId = "A", onSelectSession = {}, emit = emit)
+        advanceUntilIdle()
+
+        assertFalse("deleted root A removed from unread", slices.unread.value.unreadSessions.contains("A"))
+        assertFalse("deleted child C removed from unread", slices.unread.value.unreadSessions.contains("C"))
+        assertTrue(
+            "child C pending question removed",
+            slices.sessionList.value.pendingQuestions.none { it.sessionId == "C" },
+        )
+        assertTrue(
+            "unrelated session Z question preserved",
+            slices.sessionList.value.pendingQuestions.any { it.sessionId == "Z" },
+        )
+        // Subtree also purged from sessions / directorySessions (whole subtree).
+        assertTrue(
+            "subtree purged from sessions",
+            slices.sessionList.value.sessions.none { it.id == "A" || it.id == "C" },
+        )
+    }
+
+    @Test
+    fun `launchSetSessionArchived archive clears subtree when descendant lives only in childSessions`() = runTest {
+        // §task5-lifecycle: descendant C lives ONLY in childSessions (not in
+        // the global sessions list). The three-source subtree must still
+        // visit C so its unread + pendingQuestion are cleared on archive.
+        val parent = Session(id = "A", directory = "/x")
+        val child = Session(id = "C", directory = "/x", parentId = "A")
+        store.mutateSessionList {
+            it.copy(
+                sessions = listOf(parent),
+                childSessions = mapOf("A" to listOf(child)),
+            )
+        }
+        store.mutateUnread { it.copy(unreadSessions = setOf("A", "C")) }
+        store.mutateSessionList {
+            it.copy(
+                pendingQuestions = listOf(
+                    QuestionRequest(
+                        id = "q1", sessionId = "C",
+                        questions = listOf(QuestionInfo("q?", "h", listOf(QuestionOption("a", "b")))),
+                    ),
+                ),
+            )
+        }
+        every { settingsManager.openSessionIds } returns emptyList()
+        coEvery { repository.updateSessionArchived("A", any()) } returns Result.success(parent.copy(time = Session.TimeInfo(archived = 1L)))
+        coEvery { repository.updateSessionArchived("C", any()) } returns Result.success(child.copy(time = Session.TimeInfo(archived = 1L)))
+
+        launchSetSessionArchived(scope, repository, slices, settingsManager, sessionId = "A", archived = true, emit = emit)
+        advanceUntilIdle()
+
+        assertFalse("root A removed from unread", slices.unread.value.unreadSessions.contains("A"))
+        assertFalse(
+            "childSessions-only descendant C removed from unread (three-source coverage)",
+            slices.unread.value.unreadSessions.contains("C"),
+        )
+        assertTrue(
+            "childSessions-only descendant C pending question removed",
+            slices.sessionList.value.pendingQuestions.none { it.sessionId == "C" },
+        )
+        // Both archive REST calls fired (subtree covered C even though it is
+        // absent from the global sessions list).
+        coVerify {
+            repository.updateSessionArchived("A", any())
+            repository.updateSessionArchived("C", any())
+        }
+    }
+
+    @Test
+    fun `launchSetSessionArchived archive replaces archived session in childSessions with archived copy`() = runTest {
+        // §task5-ghost-r2 (final-fix round 2): pre-fix onSuccess only updated
+        // `sessions` + `directorySessions`, leaving a stale unarchived copy in
+        // `childSessions`. The next reconcile's allSessionsById snapshot would
+        // then see the descendant as unarchived, defeating
+        // filterArchivedSessionQuestions and letting its question ghost back.
+        // The fix syncs childSessions the same way as directorySessions.
+        val child = Session(id = "C", directory = "/x")
+        val archivedChild = child.copy(time = Session.TimeInfo(archived = 1L))
+        store.mutateSessionList {
+            it.copy(
+                // C lives ONLY in childSessions — not in the global sessions
+                // list and not in directorySessions.
+                sessions = emptyList(),
+                childSessions = mapOf("parent-key" to listOf(child)),
+            )
+        }
+        every { settingsManager.openSessionIds } returns emptyList()
+        coEvery { repository.updateSessionArchived("C", any()) } returns Result.success(archivedChild)
+
+        launchSetSessionArchived(scope, repository, slices, settingsManager, sessionId = "C", archived = true, emit = emit)
+        advanceUntilIdle()
+
+        val childEntry = slices.sessionList.value.childSessions["parent-key"]!!.single()
+        assertEquals("C", childEntry.id)
+        assertTrue(
+            "childSessions entry replaced with the archived copy (time.archived > 0)",
+            childEntry.isArchived,
+        )
+    }
+
+    @Test
+    fun `launchDeleteSession clears currentSessionId when a subtree descendant is current`() = runTest {
+        // §task5-lifecycle §delete-subtree: the current-session guard expands
+        // from `== sessionId` to `in removedIds` so deleting a parent whose
+        // child is currently open also clears chat (defensive against the
+        // server cascade-deleting the open child).
+        val parent = Session(id = "A", directory = "/x")
+        val child = Session(id = "C", directory = "/x", parentId = "A")
+        store.mutateSessionList { it.copy(sessions = listOf(parent, child)) }
+        store.mutateChat {
+            it.copy(currentSessionId = "C", messages = listOf(Message(id = "m1", role = "user")))
+        }
+        coEvery { repository.deleteSession(any()) } returns Result.success(Unit)
+
+        launchDeleteSession(scope, repository, slices, settingsManager, sessionId = "A", onSelectSession = {}, emit = emit)
+        advanceUntilIdle()
+
+        // Child was current; after deleting parent the chat MUST NOT still
+        // point at C (no remaining session → currentSessionId cleared).
+        assertNull(
+            "currentSessionId cleared when cascade-deleted child was current",
+            slices.chat.value.currentSessionId,
+        )
+        assertTrue(
+            "deleted subtree purged from sessions",
+            slices.sessionList.value.sessions.none { it.id == "A" || it.id == "C" },
+        )
     }
 
     // ── launchDeleteSession ───────────────────────────────────────────────────

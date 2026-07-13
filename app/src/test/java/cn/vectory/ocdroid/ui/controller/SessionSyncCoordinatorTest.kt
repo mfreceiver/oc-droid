@@ -1,10 +1,12 @@
 package cn.vectory.ocdroid.ui.controller
 
 import android.util.Log
+import cn.vectory.ocdroid.R
 import cn.vectory.ocdroid.data.model.Message
 import cn.vectory.ocdroid.data.model.Part
 import cn.vectory.ocdroid.data.model.QuestionRequest
 import cn.vectory.ocdroid.data.model.Session
+import cn.vectory.ocdroid.data.model.SessionStatus
 import cn.vectory.ocdroid.data.model.SSEEvent
 import cn.vectory.ocdroid.data.model.SSEPayload
 import cn.vectory.ocdroid.ui.ChatState
@@ -73,6 +75,7 @@ class SessionSyncCoordinatorTest {
     private lateinit var slices: SliceFlows
     private lateinit var effects: SharedEffectBus
     private lateinit var collectedEffects: MutableList<ControllerEffect>
+    private lateinit var recordedUiEvents: MutableList<cn.vectory.ocdroid.ui.UiEvent>
     private lateinit var settingsManager: SettingsManager
     private lateinit var scope: TestScope
     private lateinit var coordinator: SessionSyncCoordinator
@@ -106,11 +109,13 @@ class SessionSyncCoordinatorTest {
         settingsManager = mockk(relaxed = true)
         effects = SharedEffectBus()
         collectedEffects = mutableListOf()
+        recordedUiEvents = mutableListOf()
         scope = TestScope(UnconfinedTestDispatcher())
         cacheRepository = io.mockk.mockk(relaxed = true)
         // Drain every emitted effect into collectedEffects so the test bodies
         // can filter by type. Launched in scope so it auto-cancels at test end.
         scope.launch(start = kotlinx.coroutines.CoroutineStart.UNDISPATCHED) { effects.effectsConsumed.toList(collectedEffects) }
+        scope.launch(start = kotlinx.coroutines.CoroutineStart.UNDISPATCHED) { effects.uiEventsConsumed.toList(recordedUiEvents) }
         coordinator = SessionSyncCoordinator(
             scope, slices, settingsManager, effects,
             currentServerGroupFp = { "test-fp" },
@@ -213,7 +218,6 @@ class SessionSyncCoordinatorTest {
         slices.mutateUnread {
             UnreadState(
                 unreadSessions = s.unreadSessions,
-                tempClearedUnread = s.tempClearedUnread,
                 lastViewedTime = s.lastViewedTime
             )
         }
@@ -398,7 +402,7 @@ class SessionSyncCoordinatorTest {
         verify(exactly = 0) { settingsManager.openSessionIds = any() }
     }
 
-    // ── session.status (busy / idle / temp-cleared finalization) ────────────
+    // ── session.status (busy / idle) ───────────────────────────────────────
 
     @Test
     fun `session status busy updates the badge and triggers a resetLimit reload for the current session`() {
@@ -468,19 +472,6 @@ class SessionSyncCoordinatorTest {
     }
 
     @Test
-    fun `session status idle on a temp-cleared non-current session drops it from tempClearedUnread`() {
-        setCurrentSession("session-1")
-        seed { it.copy(tempClearedUnread = setOf("session-2")) }
-
-        coordinator.handleEvent(event("session.status") {
-            put("sessionID", JsonPrimitive("session-2"))
-            put("status", buildJsonObject { put("type", JsonPrimitive("idle")) })
-        })
-
-        assertFalse(slices.unread.value.tempClearedUnread.contains("session-2"))
-    }
-
-    @Test
     fun `session status with an unparseable payload fires onNonFatalIssue`() {
         coordinator.handleEvent(event("session.status") {
             put("sessionID", JsonPrimitive("session-1"))
@@ -488,6 +479,105 @@ class SessionSyncCoordinatorTest {
         })
 
         verify(exactly = 1) { Log.w(any<String>(), match<String> { it.contains("session.status") }) }
+    }
+
+    // ── §unread-lifecycle Task 3: root busy→idle drives unread ────────────
+
+    @Test
+    fun `session status busy to idle on a non-current root session marks it unread`() {
+        seed {
+            it.copy(
+                currentSessionId = "CUR",
+                sessions = listOf(
+                    Session(id = "A", directory = "/tmp", parentId = null),
+                    Session(id = "CUR", directory = "/tmp", parentId = null),
+                ),
+                sessionStatuses = mapOf("A" to SessionStatus(type = "busy")),
+            )
+        }
+
+        coordinator.handleEvent(event("session.status") {
+            put("sessionID", JsonPrimitive("A"))
+            put("status", buildJsonObject { put("type", JsonPrimitive("idle")) })
+        })
+
+        assertTrue(slices.unread.value.unreadSessions.contains("A"))
+    }
+
+    @Test
+    fun `session status busy to idle on the current session does not mark unread`() {
+        seed {
+            it.copy(
+                currentSessionId = "A",
+                sessions = listOf(Session(id = "A", directory = "/tmp", parentId = null)),
+                sessionStatuses = mapOf("A" to SessionStatus(type = "busy")),
+            )
+        }
+
+        coordinator.handleEvent(event("session.status") {
+            put("sessionID", JsonPrimitive("A"))
+            put("status", buildJsonObject { put("type", JsonPrimitive("idle")) })
+        })
+
+        assertFalse(slices.unread.value.unreadSessions.contains("A"))
+    }
+
+    @Test
+    fun `session status busy to idle on a child session does not mark unread`() {
+        seed {
+            it.copy(
+                currentSessionId = "CUR",
+                sessions = listOf(
+                    Session(id = "CHILD", directory = "/tmp", parentId = "A"),
+                    Session(id = "A", directory = "/tmp", parentId = null),
+                    Session(id = "CUR", directory = "/tmp", parentId = null),
+                ),
+                sessionStatuses = mapOf("CHILD" to SessionStatus(type = "busy")),
+            )
+        }
+
+        coordinator.handleEvent(event("session.status") {
+            put("sessionID", JsonPrimitive("CHILD"))
+            put("status", buildJsonObject { put("type", JsonPrimitive("idle")) })
+        })
+
+        assertFalse(slices.unread.value.unreadSessions.contains("CHILD"))
+    }
+
+    @Test
+    fun `session status busy to idle on an unknown session does not mark unread`() {
+        seed {
+            it.copy(
+                currentSessionId = "CUR",
+                sessions = listOf(Session(id = "CUR", directory = "/tmp", parentId = null)),
+                sessionStatuses = mapOf("GHOST" to SessionStatus(type = "busy")),
+            )
+        }
+
+        coordinator.handleEvent(event("session.status") {
+            put("sessionID", JsonPrimitive("GHOST"))
+            put("status", buildJsonObject { put("type", JsonPrimitive("idle")) })
+        })
+
+        assertFalse(slices.unread.value.unreadSessions.contains("GHOST"))
+    }
+
+    @Test
+    fun `session status idle to idle does not mark unread`() {
+        seed {
+            it.copy(
+                currentSessionId = "CUR",
+                sessions = listOf(Session(id = "A", directory = "/tmp", parentId = null)),
+                sessionStatuses = mapOf("A" to SessionStatus(type = "idle")),
+            )
+        }
+
+        coordinator.handleEvent(event("session.status") {
+            put("sessionID", JsonPrimitive("A"))
+            put("status", buildJsonObject { put("type", JsonPrimitive("idle")) })
+        })
+
+        assertFalse(slices.unread.value.unreadSessions.contains("A"))
     }
 
     // ── message.created (forward-compat branch) ────────────────────────────
@@ -508,14 +598,16 @@ class SessionSyncCoordinatorTest {
     }
 
     @Test
-    fun `message created for a non-current session marks it unread`() {
+    fun `message created for a non-current session does not mark unread`() {
+        // §unread-lifecycle Task 3: message.created no longer produces unread.
+        // The sole producer is root session busy→idle (lifecycle completion).
         setCurrentSession("session-1")
 
         coordinator.handleEvent(event("message.created") {
             put("sessionID", JsonPrimitive("session-2"))
         })
 
-        assertTrue(slices.unread.value.unreadSessions.contains("session-2"))
+        assertFalse(slices.unread.value.unreadSessions.contains("session-2"))
         assertTrue(collectedEffects.filterIsInstance<ControllerEffect.LoadMessages>().isEmpty())
     }
 
@@ -1519,5 +1611,842 @@ class SessionSyncCoordinatorTest {
         // Failure path doesn't wipe the slice — pendingQuestions stays empty
         // (its initial state) rather than being mutated by the failed fetch.
         assertTrue(slices.sessionList.value.pendingQuestions.isEmpty())
+    }
+
+    // ── §task5-ghost (final-review fix 2): archived-session question guard ──
+
+    @Test
+    fun `loadPendingQuestionsAllWorkdirs drops questions whose session is locally archived even when the server still returns them`() {
+        // §task5-ghost: an archived session's questions were cleared from the
+        // presentation domain by the archive reducer. The authoritative sweep
+        // must NOT let them ghost back when the server still includes them in
+        // its pending-questions response (e.g. race between the archive REST
+        // call and the pending-questions snapshot on the server). Unknown
+        // session ids are kept (conservative).
+        seed {
+            it.copy(
+                sessions = listOf(
+                    Session(id = "live", directory = "/p"),
+                    Session(id = "archived", directory = "/p", time = Session.TimeInfo(archived = 1L)),
+                ),
+                directorySessions = mapOf("/p" to listOf(Session(id = "live", directory = "/p"))),
+            )
+        }
+        every { settingsManager.currentWorkdir } returns "/p"
+        every { settingsManager.getRecentWorkdirs("test-fp") } returns emptyList()
+        val repository = mockk<cn.vectory.ocdroid.data.repository.OpenCodeRepository>(relaxed = true)
+        coEvery { repository.getPendingQuestions(any()) } returns Result.success(
+            listOf(
+                QuestionRequest(id = "q-live", sessionId = "live", questions = emptyList()),
+                QuestionRequest(id = "q-archived", sessionId = "archived", questions = emptyList()),
+                QuestionRequest(id = "q-unknown", sessionId = "no-such-session", questions = emptyList()),
+            )
+        )
+
+        coordinator.loadPendingQuestionsAllWorkdirs(repository)
+        scope.testScheduler.advanceUntilIdle()
+
+        val ids = slices.sessionList.value.pendingQuestions.map { it.id }.toSet()
+        assertTrue("live session question kept", "q-live" in ids)
+        assertFalse(
+            "archived session question NOT resurrected (ghost guard)",
+            "q-archived" in ids,
+        )
+        assertTrue(
+            "unknown session question kept (conservative)",
+            "q-unknown" in ids,
+        )
+    }
+
+    @Test
+    fun `loadPendingQuestionsAllWorkdirs drops questions whose ancestor session is archived - root-only archive path`() {
+        // §task5-ghost-r2 (final-fix round 2): the server archived only the
+        // root (root-only SSE archive event); the child lives in sessionsById
+        // as still-UNARCHIVED, and the server's pending-questions response
+        // still includes the child's question. The Fix-1 reducer cleared the
+        // child question locally; without the ancestor walk this reconcile
+        // would only inspect the (still-unarchived) child and let the question
+        // ghost back. The filter must walk parentId chains so an archived root
+        // drops the child's question too.
+        seed {
+            it.copy(
+                sessions = listOf(
+                    Session(id = "archived-root", directory = "/p", time = Session.TimeInfo(archived = 1L)),
+                    Session(id = "child", directory = "/p", parentId = "archived-root"),
+                ),
+            )
+        }
+        every { settingsManager.currentWorkdir } returns "/p"
+        every { settingsManager.getRecentWorkdirs("test-fp") } returns emptyList()
+        val repository = mockk<cn.vectory.ocdroid.data.repository.OpenCodeRepository>(relaxed = true)
+        coEvery { repository.getPendingQuestions(any()) } returns Result.success(
+            listOf(
+                QuestionRequest(id = "q-child", sessionId = "child", questions = emptyList()),
+            )
+        )
+
+        coordinator.loadPendingQuestionsAllWorkdirs(repository)
+        scope.testScheduler.advanceUntilIdle()
+
+        val ids = slices.sessionList.value.pendingQuestions.map { it.id }.toSet()
+        assertFalse(
+            "descendant of archived root question NOT resurrected (ancestor ghost guard)",
+            "q-child" in ids,
+        )
+    }
+
+    // ── §task7-coverage: session.error event handler ────────────────────────
+    // The session.error SSE event (rate-limit / quota / provider failures) was
+    // entirely untested — every branch in its handler (UiEvent.Error emission
+    // + chat-slice error attachment) was missed. These tests exercise both the
+    // named and unnamed error shapes, plus the current/non-current chat mutation.
+
+    @Test
+    fun `session error with name emits a named UiEvent Error`() {
+        coordinator.handleEvent(event("session.error") {
+            put("sessionID", JsonPrimitive("s1"))
+            put("error", buildJsonObject {
+                put("name", JsonPrimitive("RateLimitError"))
+                put("data", buildJsonObject {
+                    put("message", JsonPrimitive("slow down"))
+                })
+            })
+        })
+
+        val err = recordedUiEvents.filterIsInstance<cn.vectory.ocdroid.ui.UiEvent.Error>().single()
+        assertEquals(cn.vectory.ocdroid.R.string.error_session_sse_named, err.resId)
+        assertEquals("RateLimitError", err.args[0])
+        assertEquals("slow down", err.args[1])
+    }
+
+    @Test
+    fun `session error without name emits an unnamed UiEvent Error`() {
+        coordinator.handleEvent(event("session.error") {
+            put("sessionID", JsonPrimitive("s1"))
+            put("error", buildJsonObject {
+                put("data", buildJsonObject {
+                    put("message", JsonPrimitive("generic failure"))
+                })
+            })
+        })
+
+        val err = recordedUiEvents.filterIsInstance<cn.vectory.ocdroid.ui.UiEvent.Error>().single()
+        assertEquals(cn.vectory.ocdroid.R.string.error_session_sse_unnamed, err.resId)
+        assertEquals("generic failure", err.args[0])
+    }
+
+    @Test
+    fun `session error for the current session attaches error to last assistant message`() {
+        setCurrentSession("s1")
+        seed {
+            it.copy(messages = listOf(
+                Message(id = "m-user", role = "user"),
+                Message(id = "m-bot", role = "assistant"),
+            ))
+        }
+
+        coordinator.handleEvent(event("session.error") {
+            put("sessionID", JsonPrimitive("s1"))
+            put("error", buildJsonObject {
+                put("name", JsonPrimitive("ProviderError"))
+                put("data", buildJsonObject {
+                    put("message", JsonPrimitive("failed"))
+                })
+            })
+        })
+
+        val bot = slices.chat.value.messages.first { it.id == "m-bot" }
+        assertNotNull(bot.error)
+        assertEquals("ProviderError", bot.error!!.name)
+    }
+
+    @Test
+    fun `session error for current session with no assistant message does not mutate chat`() {
+        setCurrentSession("s1")
+        seed {
+            it.copy(messages = listOf(Message(id = "m-user", role = "user")))
+        }
+
+        coordinator.handleEvent(event("session.error") {
+            put("sessionID", JsonPrimitive("s1"))
+            put("error", buildJsonObject {
+                put("name", JsonPrimitive("E"))
+                put("data", buildJsonObject { put("message", JsonPrimitive("m")) })
+            })
+        })
+
+        assertTrue(slices.chat.value.messages.none { it.error != null })
+    }
+
+    @Test
+    fun `session error for current session where last assistant already has error is a no-op on chat`() {
+        setCurrentSession("s1")
+        seed {
+            it.copy(messages = listOf(
+                Message(id = "m-bot", role = "assistant", error = Message.MessageError(name = "old", data = null)),
+            ))
+        }
+
+        coordinator.handleEvent(event("session.error") {
+            put("sessionID", JsonPrimitive("s1"))
+            put("error", buildJsonObject {
+                put("name", JsonPrimitive("New"))
+                put("data", buildJsonObject { put("message", JsonPrimitive("m")) })
+            })
+        })
+
+        val bot = slices.chat.value.messages.first { it.id == "m-bot" }
+        assertEquals("old", bot.error!!.name)
+    }
+
+    @Test
+    fun `session error for a non-current session does not mutate chat`() {
+        setCurrentSession("s1")
+        seed {
+            it.copy(messages = listOf(Message(id = "m-bot", role = "assistant")))
+        }
+
+        coordinator.handleEvent(event("session.error") {
+            put("sessionID", JsonPrimitive("s2"))
+            put("error", buildJsonObject {
+                put("name", JsonPrimitive("E"))
+                put("data", buildJsonObject { put("message", JsonPrimitive("m")) })
+            })
+        })
+
+        assertTrue(slices.chat.value.messages.none { it.error != null })
+    }
+
+    // ── §task7-coverage: session.status busy→busy branch ────────────────────
+
+    @Test
+    fun `session status busy to busy does not mark unread`() {
+        // Covers the nowIdle=false branch of the compound condition at line 534.
+        seed {
+            it.copy(
+                currentSessionId = "CUR",
+                sessions = listOf(Session(id = "A", directory = "/tmp", parentId = null)),
+                sessionStatuses = mapOf("A" to SessionStatus(type = "busy")),
+            )
+        }
+
+        coordinator.handleEvent(event("session.status") {
+            put("sessionID", JsonPrimitive("A"))
+            put("status", buildJsonObject { put("type", JsonPrimitive("busy")) })
+        })
+
+        assertFalse(slices.unread.value.unreadSessions.contains("A"))
+    }
+
+    @Test
+    fun `session status idle with no prior status entry does not mark unread`() {
+        // Covers the oldStatus=null → wasBusy=false branch.
+        seed {
+            it.copy(
+                currentSessionId = "CUR",
+                sessions = listOf(
+                    Session(id = "A", directory = "/tmp", parentId = null),
+                    Session(id = "CUR", directory = "/tmp", parentId = null),
+                ),
+                sessionStatuses = emptyMap(),
+            )
+        }
+
+        coordinator.handleEvent(event("session.status") {
+            put("sessionID", JsonPrimitive("A"))
+            put("status", buildJsonObject { put("type", JsonPrimitive("idle")) })
+        })
+
+        assertFalse(slices.unread.value.unreadSessions.contains("A"))
+    }
+
+    // ── §task7-coverage: invalid payload ReportNonFatal paths ───────────────
+
+    @Test
+    fun `session created with invalid payload fires ReportNonFatal`() {
+        coordinator.handleEvent(event("session.created") {
+            put("session", JsonPrimitive("not-an-object"))
+        })
+
+        io.mockk.verify { Log.w(any<String>(), match<String> { it.contains("invalid session.created") }) }
+    }
+
+    @Test
+    fun `session updated with invalid payload fires ReportNonFatal`() {
+        coordinator.handleEvent(event("session.updated") {
+            put("info", JsonPrimitive("garbage"))
+        })
+
+        io.mockk.verify { Log.w(any<String>(), match<String> { it.contains("invalid session.updated") }) }
+    }
+
+    @Test
+    fun `session diff with invalid diff array is silently dropped`() {
+        coordinator.handleEvent(event("session.diff") {
+            put("sessionID", JsonPrimitive("s1"))
+            put("diff", JsonPrimitive("not-an-array"))
+        })
+
+        assertTrue(slices.sessionList.value.sessionDiffs.isEmpty())
+    }
+
+    @Test
+    fun `todo updated with malformed todos array is silently dropped`() {
+        coordinator.handleEvent(event("todo.updated") {
+            put("sessionID", JsonPrimitive("s1"))
+            put("todos", JsonPrimitive("not-an-array"))
+        })
+
+        assertTrue(slices.sessionList.value.sessionTodos.isEmpty())
+    }
+
+    // ── §task7-coverage: message.created forward-compat timestamp bump ─────
+
+    @Test
+    fun `message created with info time-created bumps the session timestamp`() {
+        seed {
+            it.copy(
+                currentSessionId = "s1",
+                sessions = listOf(Session(id = "s1", directory = "/tmp")),
+            )
+        }
+
+        coordinator.handleEvent(event("message.created") {
+            put("sessionID", JsonPrimitive("s1"))
+            put("info", buildJsonObject {
+                put("id", "m-new")
+                put("role", "assistant")
+                put("time", buildJsonObject {
+                    put("created", 99999L)
+                })
+            })
+        })
+
+        val session = slices.sessionList.value.sessions.first { it.id == "s1" }
+        assertEquals(99999L, session.time?.updated)
+    }
+
+    @Test
+    fun `message created for current session triggers reload`() {
+        setCurrentSession("session-1")
+
+        coordinator.handleEvent(event("message.created") {
+            put("sessionID", JsonPrimitive("session-1"))
+        })
+
+        assertEquals(
+            listOf("session-1" to true),
+            collectedEffects.filterIsInstance<ControllerEffect.LoadMessages>()
+                .map { it.sessionId to it.resetLimit }
+        )
+    }
+
+    // ── §task7-coverage: session.error data parsing branches ────────────────
+
+    @Test
+    fun `session error with data error field instead of message falls back correctly`() {
+        coordinator.handleEvent(event("session.error") {
+            put("sessionID", JsonPrimitive("s1"))
+            put("error", buildJsonObject {
+                put("name", JsonPrimitive("Err"))
+                put("data", buildJsonObject {
+                    put("error", JsonPrimitive("from-error-field"))
+                })
+            })
+        })
+
+        val err = recordedUiEvents.filterIsInstance<cn.vectory.ocdroid.ui.UiEvent.Error>().single()
+        assertEquals("from-error-field", err.args[1])
+    }
+
+    @Test
+    fun `session error with null data uses default message`() {
+        coordinator.handleEvent(event("session.error") {
+            put("sessionID", JsonPrimitive("s1"))
+            put("error", buildJsonObject {
+                put("name", JsonPrimitive("Named"))
+            })
+        })
+
+        val err = recordedUiEvents.filterIsInstance<cn.vectory.ocdroid.ui.UiEvent.Error>().single()
+        assertEquals(R.string.error_session_sse_named, err.resId)
+        assertEquals("Named", err.args[0])
+        assertEquals("Server session error", err.args[1])
+    }
+
+    @Test
+    fun `session error with null error object uses all defaults`() {
+        coordinator.handleEvent(event("session.error") {
+            put("sessionID", JsonPrimitive("s1"))
+        })
+
+        val err = recordedUiEvents.filterIsInstance<cn.vectory.ocdroid.ui.UiEvent.Error>().single()
+        assertEquals(R.string.error_session_sse_unnamed, err.resId)
+        assertEquals("Server session error", err.args[0])
+    }
+
+    @Test
+    fun `session error with blank name is treated as unnamed`() {
+        coordinator.handleEvent(event("session.error") {
+            put("sessionID", JsonPrimitive("s1"))
+            put("error", buildJsonObject {
+                put("name", JsonPrimitive("   "))
+                put("data", buildJsonObject { put("message", JsonPrimitive("m")) })
+            })
+        })
+
+        val err = recordedUiEvents.filterIsInstance<cn.vectory.ocdroid.ui.UiEvent.Error>().single()
+        assertEquals(R.string.error_session_sse_unnamed, err.resId)
+    }
+
+    // ── §task7-coverage: markSessionColdSnapshotted branches ────────────────
+
+    @Test
+    fun `markSessionColdSnapshotted with blank id is a no-op`() {
+        coordinator.markSessionColdSnapshotted("   ")
+        assertTrue(coordinator.sseSyncStateSnapshot().sessionsEverColdSnapshotted.isEmpty())
+    }
+
+    @Test
+    fun `markSessionColdSnapshotted is idempotent`() {
+        coordinator.markSessionColdSnapshotted("s1")
+        val afterFirst = coordinator.sseSyncStateSnapshot().sessionsEverColdSnapshotted
+        assertEquals(setOf("s1"), afterFirst)
+
+        coordinator.markSessionColdSnapshotted("s1")
+        val afterSecond = coordinator.sseSyncStateSnapshot().sessionsEverColdSnapshotted
+        assertEquals(afterFirst, afterSecond)
+    }
+
+    @Test
+    fun `markSessionColdSnapshotted accumulates distinct ids`() {
+        coordinator.markSessionColdSnapshotted("s1")
+        coordinator.markSessionColdSnapshotted("s2")
+        assertEquals(
+            setOf("s1", "s2"),
+            coordinator.sseSyncStateSnapshot().sessionsEverColdSnapshotted
+        )
+    }
+
+    // ── §task7-coverage: user-part guard in message.part.updated ────────────
+
+    @Test
+    fun `message part updated for a user message is silently dropped`() {
+        setCurrentSession("s1")
+        seed {
+            it.copy(messages = listOf(Message(id = "m-user", role = "user")))
+        }
+
+        coordinator.handleEvent(event("message.part.updated") {
+            put("sessionID", JsonPrimitive("s1"))
+            put("part", buildJsonObject {
+                put("messageID", JsonPrimitive("m-user"))
+                put("id", JsonPrimitive("p1"))
+                put("type", JsonPrimitive("text"))
+            })
+            put("delta", JsonPrimitive("hello"))
+        })
+
+        assertTrue(slices.chat.value.streamingPartTexts.isEmpty())
+        assertTrue(slices.chat.value.partsByMessage.isEmpty())
+    }
+
+    // ── §task7-coverage: message.updated non-current session early return ───
+
+    @Test
+    fun `message updated for a non-current session skips chat mutation but bumps time`() {
+        setCurrentSession("s1")
+        seed {
+            it.copy(
+                sessions = listOf(
+                    Session(id = "s1", directory = "/tmp"),
+                    Session(id = "s2", directory = "/tmp"),
+                ),
+            )
+        }
+
+        coordinator.handleEvent(event("message.updated") {
+            put("sessionID", JsonPrimitive("s2"))
+            put("info", buildJsonObject {
+                put("id", "m-external")
+                put("role", "user")
+                put("time", buildJsonObject {
+                    put("created", 50000L)
+                })
+            })
+        })
+
+        assertTrue(slices.chat.value.messages.none { it.id == "m-external" })
+        val s2 = slices.sessionList.value.sessions.first { it.id == "s2" }
+        assertEquals(50000L, s2.time?.updated)
+    }
+
+    @Test
+    fun `message updated with null info is a no-op on chat`() {
+        setCurrentSession("s1")
+
+        coordinator.handleEvent(event("message.updated") {
+            put("sessionID", JsonPrimitive("s1"))
+        })
+
+        assertTrue(slices.chat.value.messages.isEmpty())
+    }
+
+    // ── §task7-coverage: session.diff valid write path ──────────────────────
+
+    @Test
+    fun `session diff with valid payload writes diffs keyed by session id`() {
+        coordinator.handleEvent(event("session.diff") {
+            put("sessionID", JsonPrimitive("s1"))
+            put("diff", buildJsonArray {
+                add(buildJsonObject {
+                    put("file", "a.kt")
+                    put("additions", 3)
+                    put("deletions", 1)
+                    put("status", "modified")
+                })
+            })
+        })
+
+        assertNotNull(slices.sessionList.value.sessionDiffs["s1"])
+        assertEquals(1, slices.sessionList.value.sessionDiffs["s1"]!!.size)
+    }
+
+    // ── §task7-coverage: todo.updated valid write path ──────────────────────
+
+    @Test
+    fun `todo updated with valid payload writes todos keyed by session id`() {
+        coordinator.handleEvent(event("todo.updated") {
+            put("sessionID", JsonPrimitive("s1"))
+            put("todos", buildJsonArray {
+                add(buildJsonObject {
+                    put("content", "task")
+                    put("status", "pending")
+                    put("priority", "high")
+                })
+            })
+        })
+
+        assertNotNull(slices.sessionList.value.sessionTodos["s1"])
+        assertEquals(1, slices.sessionList.value.sessionTodos["s1"]!!.size)
+    }
+
+    // ── §task7-coverage: message.part.delta edge cases ──────────────────────
+
+    @Test
+    fun `message part delta for non-current session is dropped`() {
+        setCurrentSession("s1")
+        coordinator.handleEvent(event("message.part.delta") {
+            put("sessionID", JsonPrimitive("s2"))
+            put("messageID", JsonPrimitive("m1"))
+            put("partID", JsonPrimitive("p1"))
+            put("delta", JsonPrimitive("hello"))
+        })
+        assertTrue(slices.chat.value.streamingPartTexts.isEmpty())
+    }
+
+    @Test
+    fun `message part delta with null messageID is dropped`() {
+        setCurrentSession("s1")
+        coordinator.handleEvent(event("message.part.delta") {
+            put("sessionID", JsonPrimitive("s1"))
+            put("partID", JsonPrimitive("p1"))
+            put("delta", JsonPrimitive("hello"))
+        })
+        assertTrue(slices.chat.value.streamingPartTexts.isEmpty())
+    }
+
+    @Test
+    fun `message part delta with null partID is dropped`() {
+        setCurrentSession("s1")
+        coordinator.handleEvent(event("message.part.delta") {
+            put("sessionID", JsonPrimitive("s1"))
+            put("messageID", JsonPrimitive("m1"))
+            put("delta", JsonPrimitive("hello"))
+        })
+        assertTrue(slices.chat.value.streamingPartTexts.isEmpty())
+    }
+
+    @Test
+    fun `message part delta for a user message is dropped`() {
+        setCurrentSession("s1")
+        seed { it.copy(messages = listOf(Message(id = "m-user", role = "user"))) }
+        coordinator.handleEvent(event("message.part.delta") {
+            put("sessionID", JsonPrimitive("s1"))
+            put("messageID", JsonPrimitive("m-user"))
+            put("partID", JsonPrimitive("p1"))
+            put("delta", JsonPrimitive("hello"))
+        })
+        assertTrue(slices.chat.value.streamingPartTexts.isEmpty())
+    }
+
+    @Test
+    fun `message part delta with null or empty delta string is a no-op`() {
+        setCurrentSession("s1")
+        coordinator.handleEvent(event("message.part.delta") {
+            put("sessionID", JsonPrimitive("s1"))
+            put("messageID", JsonPrimitive("m1"))
+            put("partID", JsonPrimitive("p1"))
+        })
+        assertTrue(slices.chat.value.streamingPartTexts.isEmpty())
+    }
+
+    @Test
+    fun `message part delta with non-streamable known type is dropped`() {
+        setCurrentSession("s1")
+        seed {
+            it.copy(
+                messages = listOf(Message(id = "m1", role = "assistant")),
+                partsByMessage = mapOf("m1" to listOf(Part(id = "p1", messageId = "m1", sessionId = "s1", type = "tool"))),
+            )
+        }
+        coordinator.handleEvent(event("message.part.delta") {
+            put("sessionID", JsonPrimitive("s1"))
+            put("messageID", JsonPrimitive("m1"))
+            put("partID", JsonPrimitive("p1"))
+            put("delta", JsonPrimitive("hello"))
+        })
+        assertNull(slices.chat.value.streamingPartTexts["p1"])
+    }
+
+    @Test
+    fun `message part delta trailing delta coalesces into buffer when flush is pending`() {
+        setCurrentSession("s1")
+        seed { it.copy(messages = listOf(Message(id = "m1", role = "assistant"))) }
+
+        // First delta: leading edge
+        coordinator.handleEvent(event("message.part.delta") {
+            put("sessionID", JsonPrimitive("s1"))
+            put("messageID", JsonPrimitive("m1"))
+            put("partID", JsonPrimitive("p1"))
+            put("delta", JsonPrimitive("first"))
+        })
+        assertEquals("first", slices.chat.value.streamingPartTexts["p1"])
+
+        // Second delta without advancing the clock: trailing coalesce
+        coordinator.handleEvent(event("message.part.delta") {
+            put("sessionID", JsonPrimitive("s1"))
+            put("messageID", JsonPrimitive("m1"))
+            put("partID", JsonPrimitive("p1"))
+            put("delta", JsonPrimitive(" second"))
+        })
+        // Leading edge value stays; the trailing delta is buffered
+        assertEquals("first", slices.chat.value.streamingPartTexts["p1"])
+        assertEquals(" second", slices.chat.value.deltaBuffer["p1"])
+    }
+
+    // ── §task7-coverage: message.part.updated coalesce + status-flip paths ──
+
+    @Test
+    fun `message part updated trailing fullText coalesces into buffer when flush is pending`() {
+        setCurrentSession("s1")
+        seed { it.copy(messages = listOf(Message(id = "m1", role = "assistant"))) }
+
+        // First fullText: leading edge
+        coordinator.handleEvent(event("message.part.updated") {
+            put("sessionID", JsonPrimitive("s1"))
+            put("part", buildJsonObject {
+                put("messageID", JsonPrimitive("m1"))
+                put("id", JsonPrimitive("p1"))
+                put("type", JsonPrimitive("text"))
+                put("text", JsonPrimitive("first-full"))
+            })
+        })
+        assertEquals("first-full", slices.chat.value.streamingPartTexts["p1"])
+
+        // Second fullText without advancing: trailing coalesce → replaceFullTextBuffer
+        coordinator.handleEvent(event("message.part.updated") {
+            put("sessionID", JsonPrimitive("s1"))
+            put("part", buildJsonObject {
+                put("messageID", JsonPrimitive("m1"))
+                put("id", JsonPrimitive("p1"))
+                put("type", JsonPrimitive("text"))
+                put("text", JsonPrimitive("second-full"))
+            })
+        })
+        assertEquals("first-full", slices.chat.value.streamingPartTexts["p1"])
+        assertEquals("second-full", slices.chat.value.fullTextBuffer["p1"])
+    }
+
+    @Test
+    fun `message part updated trailing delta coalesces into buffer when flush is pending`() {
+        setCurrentSession("s1")
+        seed { it.copy(messages = listOf(Message(id = "m1", role = "assistant"))) }
+
+        // First delta: leading edge
+        coordinator.handleEvent(event("message.part.updated") {
+            put("sessionID", JsonPrimitive("s1"))
+            put("part", buildJsonObject {
+                put("messageID", JsonPrimitive("m1"))
+                put("id", JsonPrimitive("p1"))
+                put("type", JsonPrimitive("text"))
+            })
+            put("delta", JsonPrimitive("leading"))
+        })
+        assertEquals("leading", slices.chat.value.streamingPartTexts["p1"])
+
+        // Second delta without advancing: trailing coalesce → appendDeltaBuffer
+        coordinator.handleEvent(event("message.part.updated") {
+            put("sessionID", JsonPrimitive("s1"))
+            put("part", buildJsonObject {
+                put("messageID", JsonPrimitive("m1"))
+                put("id", JsonPrimitive("p1"))
+                put("type", JsonPrimitive("text"))
+            })
+            put("delta", JsonPrimitive(" trailing"))
+        })
+        assertEquals("leading", slices.chat.value.streamingPartTexts["p1"])
+        assertEquals(" trailing", slices.chat.value.deltaBuffer["p1"])
+    }
+
+    @Test
+    fun `message part updated with both text and delta null is a status-flip no-op`() {
+        setCurrentSession("s1")
+        seed { it.copy(messages = listOf(Message(id = "m1", role = "assistant"))) }
+
+        coordinator.handleEvent(event("message.part.updated") {
+            put("sessionID", JsonPrimitive("s1"))
+            put("part", buildJsonObject {
+                put("messageID", JsonPrimitive("m1"))
+                put("id", JsonPrimitive("p1"))
+                put("type", JsonPrimitive("text"))
+            })
+        })
+
+        // No streaming text, no reload effect — pure status flip
+        assertTrue(slices.chat.value.streamingPartTexts.isEmpty())
+        assertTrue(collectedEffects.filterIsInstance<ControllerEffect.LoadMessages>().isEmpty())
+    }
+
+    @Test
+    fun `message part updated for non-current session is dropped`() {
+        setCurrentSession("s1")
+        coordinator.handleEvent(event("message.part.updated") {
+            put("sessionID", JsonPrimitive("s2"))
+            put("part", buildJsonObject {
+                put("messageID", JsonPrimitive("m1"))
+                put("id", JsonPrimitive("p1"))
+                put("type", JsonPrimitive("text"))
+            })
+            put("delta", JsonPrimitive("hello"))
+        })
+        assertTrue(slices.chat.value.streamingPartTexts.isEmpty())
+    }
+
+    @Test
+    fun `message part delta with null sessionID is dropped`() {
+        setCurrentSession("s1")
+        coordinator.handleEvent(event("message.part.delta") {
+            put("messageID", JsonPrimitive("m1"))
+            put("partID", JsonPrimitive("p1"))
+            put("delta", JsonPrimitive("hello"))
+        })
+        assertTrue(slices.chat.value.streamingPartTexts.isEmpty())
+    }
+
+    // ── §task7-coverage: remaining edge cases in message.created/updated ────
+
+    @Test
+    fun `message created with info but zero time-created skips timestamp bump`() {
+        seed {
+            it.copy(
+                currentSessionId = "s1",
+                sessions = listOf(Session(id = "s1", directory = "/tmp")),
+            )
+        }
+
+        coordinator.handleEvent(event("message.created") {
+            put("sessionID", JsonPrimitive("s1"))
+            put("info", buildJsonObject {
+                put("id", "m-new")
+                put("role", "assistant")
+            })
+        })
+
+        val session = slices.sessionList.value.sessions.first { it.id == "s1" }
+        assertNull(session.time?.updated)
+    }
+
+    @Test
+    fun `message updated with zero time-created does not bump session`() {
+        setCurrentSession("s1")
+        seed {
+            it.copy(sessions = listOf(Session(id = "s1", directory = "/tmp")))
+        }
+
+        coordinator.handleEvent(event("message.updated") {
+            put("sessionID", JsonPrimitive("s1"))
+            put("info", buildJsonObject {
+                put("id", "m1")
+                put("role", "user")
+            })
+        })
+
+        val session = slices.sessionList.value.sessions.first { it.id == "s1" }
+        assertNull(session.time?.updated)
+    }
+
+    @Test
+    fun `session updated archived when session is not in openSessionIds does not persist`() {
+        seed {
+            it.copy(
+                sessions = listOf(Session(id = "keep", directory = "/tmp")),
+                openSessionIds = listOf("keep"),
+            )
+        }
+
+        coordinator.handleEvent(event("session.updated") {
+            put("info", buildJsonObject {
+                put("id", "other")
+                put("directory", "/tmp")
+                put("time", buildJsonObject {
+                    put("archived", 99999L)
+                })
+            })
+        })
+
+        io.mockk.verify(exactly = 0) { settingsManager.openSessionIds = any() }
+    }
+
+    @Test
+    fun `message part updated with already correct type skips placeholder re-injection`() {
+        setCurrentSession("s1")
+        seed {
+            it.copy(
+                messages = listOf(Message(id = "m1", role = "assistant")),
+                partsByMessage = mapOf("m1" to listOf(
+                    Part(id = "p1", messageId = "m1", sessionId = "s1", type = "text")
+                )),
+            )
+        }
+
+        coordinator.handleEvent(event("message.part.updated") {
+            put("sessionID", JsonPrimitive("s1"))
+            put("part", buildJsonObject {
+                put("messageID", JsonPrimitive("m1"))
+                put("id", JsonPrimitive("p1"))
+                put("type", JsonPrimitive("text"))
+            })
+            put("delta", JsonPrimitive("more"))
+        })
+
+        val parts = slices.chat.value.partsByMessage["m1"]!!
+        assertEquals(1, parts.size)
+        assertEquals("text", parts[0].type)
+    }
+
+    @Test
+    fun `message updated with empty message id does not mutate chat`() {
+        setCurrentSession("s1")
+
+        coordinator.handleEvent(event("message.updated") {
+            put("sessionID", JsonPrimitive("s1"))
+            put("info", buildJsonObject {
+                put("id", "")
+                put("role", "assistant")
+            })
+        })
+
+        assertTrue(slices.chat.value.messages.isEmpty())
     }
 }

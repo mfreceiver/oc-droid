@@ -429,6 +429,8 @@ fun FilesScreen(
                 TextButton(
                     onClick = {
                         settingsVM.disconnectWorkdir(workdir)
+                        // §task5-lifecycle: clear unread for this workdir's sessions.
+                        sessionVM.clearUnreadForWorkdir(workdir)
                         expandedWorkdirs = expandedWorkdirs - workdir
                         pendingDisconnectWorkdir = null
                     }

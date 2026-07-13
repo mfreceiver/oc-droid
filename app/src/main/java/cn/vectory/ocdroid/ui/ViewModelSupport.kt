@@ -7,6 +7,9 @@ import cn.vectory.ocdroid.data.model.QuestionRequest
 import cn.vectory.ocdroid.data.model.SSEEvent
 import cn.vectory.ocdroid.data.model.Session
 import cn.vectory.ocdroid.data.model.SessionStatus
+import cn.vectory.ocdroid.ui.controller.allSessionsById
+import cn.vectory.ocdroid.ui.controller.rootIdOf
+import cn.vectory.ocdroid.ui.controller.treeIds
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonPrimitive
 
@@ -237,19 +240,38 @@ internal fun nextSessionFetchLimit(current: Int, pageSize: Int = MainViewModelTi
  * session-scope filter), so the badge is the only surface for cross-session
  * pending items. Counting ALL pending here would double-count the current
  * session (its items would appear BOTH in the StatusSlot AND inflate the
- * badge). Filtering by `sessionId != currentSessionId` ensures the badge
- * reflects only OTHER sessions that need the user's attention.
+ * badge).
  *
- * Edge case: `currentSessionId == null` (no session open) counts everything
- * — nothing is shown in the StatusSlot without a current session, so all
- * pending are genuinely cross-session.
+ * §task6 tree aggregation (question only):
+ *  - **permission** keeps the precise `sessionId != currentSessionId` rule.
+ *    A sub-agent's permission is its OWN permission (the user must see the
+ *    exact session that wants to run the tool — aggregating to root would
+ *    hide which descendant needs consent).
+ *  - **question** switches to tree-aware: a question whose session is
+ *    anywhere inside the current session's ROOT tree counts as "current"
+ *    (it will surface on the current root's QuestionCard via
+ *    [cn.vectory.ocdroid.ui.controller.questionsInTree], so it must NOT
+ *    inflate the badge). Questions outside the current tree count as cross-
+ *    session.
+ *
+ * Edge case: `currentSessionId == null` (no session open) → currentTree is
+ * empty → every question is cross-session (matches the pre-tree behaviour
+ * where null excluded nothing). Unknown currentSessionId (not in byId) is
+ * treated identically: rootIdOf returns null → empty tree → all questions
+ * count, which matches the user's mental model ("I can't be looking at a
+ * session I don't know about").
  */
 internal fun crossSessionPendingCount(
     state: SessionListState,
     currentSessionId: String?
-): Int =
-    state.pendingPermissions.count { it.sessionId != currentSessionId } +
-        state.pendingQuestions.count { it.sessionId != currentSessionId }
+): Int {
+    val byId = allSessionsById(state.sessions, state.directorySessions, state.childSessions)
+    val currentRoot = currentSessionId?.let { rootIdOf(it, byId) }
+    val currentTree = currentRoot?.let { treeIds(it, byId) }.orEmpty()
+    val permissions = state.pendingPermissions.count { it.sessionId != currentSessionId }
+    val questions = state.pendingQuestions.count { it.sessionId !in currentTree }
+    return permissions + questions
+}
 
 internal fun parseSessionStatusEvent(event: SSEEvent): SessionStatusEvent? {
     val sessionId = event.payload.getString("sessionID") ?: return null

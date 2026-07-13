@@ -573,7 +573,7 @@ class SessionViewModelTest : MainViewModelTestBase() {
     }
 
     @Test
-    fun `archiveSession archives subtree children before parent`() = runTest {
+    fun `archiveSession archives whole subtree`() = runTest {
         val parent = Session(id = "parent", directory = "/tmp/project")
         val child = Session(id = "child", directory = "/tmp/project", parentId = "parent")
         coEvery { repository.updateSessionArchived("child", any()) } returns Result.success(
@@ -596,7 +596,9 @@ class SessionViewModelTest : MainViewModelTestBase() {
         sessionVM.archiveSession("parent")
         advanceUntilIdle()
 
-        coVerifyOrder {
+        // §task5-lifecycle: archive walks the whole subtree; order is not
+        // significant (each id is an independent REST call).
+        coVerify {
             repository.updateSessionArchived("child", any())
             repository.updateSessionArchived("parent", any())
         }
@@ -604,7 +606,7 @@ class SessionViewModelTest : MainViewModelTestBase() {
     }
 
     @Test
-    fun `restoreSession restores subtree parent before children`() = runTest {
+    fun `restoreSession restores whole subtree`() = runTest {
         val parent = Session(
             id = "parent",
             directory = "/tmp/project",
@@ -636,7 +638,7 @@ class SessionViewModelTest : MainViewModelTestBase() {
         sessionVM.restoreSession("parent")
         advanceUntilIdle()
 
-        coVerifyOrder {
+        coVerify {
             repository.updateSessionArchived("parent", -1L)
             repository.updateSessionArchived("child", -1L)
         }
@@ -840,6 +842,171 @@ class SessionViewModelTest : MainViewModelTestBase() {
         // render / re-select it.
         val remaining = sessionVM.sessionListFlow.value.directorySessions[workdir].orEmpty()
         assertTrue("deleted id must be purged from directorySessions", remaining.none { it.id == "dir-ghost" })
+    }
+
+    // ── §task5-lifecycle: clearUnreadForWorkdir ──────────────────────────────
+
+    @Test
+    fun `clearUnreadForWorkdir clears unread only for sessions bound to that workdir`() = runTest {
+        // §task5-lifecycle: disconnecting a workdir must drop unread badges
+        // for that workdir's sessions ONLY. Sessions in other workdirs (or in
+        // the global sessions list) must keep their badges. The workdir→ids
+        // mapping comes from sessionListFlow.directorySessions[workdir].
+        val workdir = "/home/user/project-a"
+        val inWorkdir = cn.vectory.ocdroid.data.model.Session(id = "A", directory = workdir)
+        // Z is a global session (not in directorySessions) and must survive.
+        val globalSession = cn.vectory.ocdroid.data.model.Session(id = "Z", directory = "/other")
+
+        val core = createCore()
+        val chatVM = cn.vectory.ocdroid.ui.ChatViewModel(core)
+        val sessionVM = cn.vectory.ocdroid.ui.SessionViewModel(core)
+        val connectionVM = cn.vectory.ocdroid.ui.ConnectionViewModel(core)
+        val hostVM = cn.vectory.ocdroid.ui.HostViewModel(core)
+        val composerVM = cn.vectory.ocdroid.ui.ComposerViewModel(core)
+        val orchestratorVM = cn.vectory.ocdroid.ui.OrchestratorViewModel(core)
+        val viewModel = SessionViewModel(core)  // primary VM under test
+        core.writeSessionList {
+            it.copy(
+                sessions = listOf(globalSession),
+                directorySessions = mapOf(workdir to listOf(inWorkdir)),
+            )
+        }
+        core.writeUnread { it.copy(unreadSessions = setOf("A", "Z")) }
+
+        sessionVM.clearUnreadForWorkdir(workdir)
+
+        // A cleared; Z preserved.
+        assertFalse("workdir session A unread cleared", sessionVM.unreadFlow.value.unreadSessions.contains("A"))
+        assertTrue("global session Z unread preserved", sessionVM.unreadFlow.value.unreadSessions.contains("Z"))
+    }
+
+    @Test
+    fun `clearUnreadForWorkdir is a no-op for an unknown workdir`() = runTest {
+        // §task5-lifecycle: an unknown workdir yields no ids; the unread slice
+        // MUST stay untouched (no spurious emission, no data loss).
+        val core = createCore()
+        val chatVM = cn.vectory.ocdroid.ui.ChatViewModel(core)
+        val sessionVM = cn.vectory.ocdroid.ui.SessionViewModel(core)
+        val connectionVM = cn.vectory.ocdroid.ui.ConnectionViewModel(core)
+        val hostVM = cn.vectory.ocdroid.ui.HostViewModel(core)
+        val composerVM = cn.vectory.ocdroid.ui.ComposerViewModel(core)
+        val orchestratorVM = cn.vectory.ocdroid.ui.OrchestratorViewModel(core)
+        val viewModel = SessionViewModel(core)  // primary VM under test
+        core.writeUnread { it.copy(unreadSessions = setOf("Z")) }
+
+        sessionVM.clearUnreadForWorkdir("/nonexistent")
+
+        assertEquals(setOf("Z"), sessionVM.unreadFlow.value.unreadSessions)
+    }
+
+    @Test
+    fun `clearUnreadForWorkdir clears unread for sessions bound to the workdir even when they only live in the global sessions list`() = runTest {
+        // §task5-lifecycle (final-review fix 3): pre-fix this path only read
+        // `directorySessions[workdir]` — a session that lives ONLY in the
+        // global `sessions` list (e.g. directorySessions prefetch not yet
+        // complete, or the session was surfaced via loadSessions) leaked its
+        // unread badge on disconnect. The fix derives the id set from the
+        // THREE-source union filtered by `directory == workdir`.
+        val workdir = "/home/user/project-a"
+        val globalInWorkdir = cn.vectory.ocdroid.data.model.Session(id = "G", directory = workdir)
+        // Z lives in another workdir AND only in the global sessions list —
+        // it must survive (different workdir).
+        val globalOther = cn.vectory.ocdroid.data.model.Session(id = "Z", directory = "/other")
+
+        val core = createCore()
+        val chatVM = cn.vectory.ocdroid.ui.ChatViewModel(core)
+        val sessionVM = cn.vectory.ocdroid.ui.SessionViewModel(core)
+        val connectionVM = cn.vectory.ocdroid.ui.ConnectionViewModel(core)
+        val hostVM = cn.vectory.ocdroid.ui.HostViewModel(core)
+        val composerVM = cn.vectory.ocdroid.ui.ComposerViewModel(core)
+        val orchestratorVM = cn.vectory.ocdroid.ui.OrchestratorViewModel(core)
+        val viewModel = SessionViewModel(core)  // primary VM under test
+        core.writeSessionList {
+            it.copy(
+                sessions = listOf(globalInWorkdir, globalOther),
+                // directorySessions is EMPTY — G is not pre-fetched here.
+                directorySessions = emptyMap(),
+            )
+        }
+        core.writeUnread { it.copy(unreadSessions = setOf("G", "Z")) }
+
+        sessionVM.clearUnreadForWorkdir(workdir)
+
+        // G (in workdir, only in global sessions) cleared; Z (other workdir) preserved.
+        assertFalse(
+            "global session G in this workdir cleared even without directorySessions entry",
+            sessionVM.unreadFlow.value.unreadSessions.contains("G"),
+        )
+        assertTrue(
+            "global session Z in other workdir preserved",
+            sessionVM.unreadFlow.value.unreadSessions.contains("Z"),
+        )
+    }
+
+    @Test
+    fun `clearUnreadForWorkdir normalizes workdir so trailing-slash and whitespace variants match the same sessions`() = runTest {
+        // §task5-lifecycle-r2 (final-fix round 2): the disconnect pipeline
+        // (removeRecentWorkdir / evictWorkdirInGroup / buildWorkdirGroups)
+        // matches workdirs through WorkdirPaths.normalize(). Pre-fix this
+        // function used a raw `directory == workdir` string compare, so
+        // `/proj-a` vs `proj-a/` vs ` proj-a ` were treated as DIFFERENT
+        // workdirs → disconnect cleared the project + cache but not the unread
+        // badges. The fix funnels the match through the same normalize so
+        // surrounding-slash + whitespace variants agree.
+        val storedDir = "/home/user/proj-a"
+        val inWorkdir = cn.vectory.ocdroid.data.model.Session(id = "A", directory = storedDir)
+        // Z lives in another workdir AND only in the global sessions list —
+        // it must survive (different workdir).
+        val globalOther = cn.vectory.ocdroid.data.model.Session(id = "Z", directory = "/other")
+
+        val core = createCore()
+        val chatVM = cn.vectory.ocdroid.ui.ChatViewModel(core)
+        val sessionVM = cn.vectory.ocdroid.ui.SessionViewModel(core)
+        val connectionVM = cn.vectory.ocdroid.ui.ConnectionViewModel(core)
+        val hostVM = cn.vectory.ocdroid.ui.HostViewModel(core)
+        val composerVM = cn.vectory.ocdroid.ui.ComposerViewModel(core)
+        val orchestratorVM = cn.vectory.ocdroid.ui.OrchestratorViewModel(core)
+        val viewModel = SessionViewModel(core)  // primary VM under test
+        core.writeSessionList {
+            it.copy(
+                sessions = listOf(inWorkdir, globalOther),
+                directorySessions = emptyMap(),
+            )
+        }
+        core.writeUnread { it.copy(unreadSessions = setOf("A", "Z")) }
+
+        // Disconnect with a trailing-slash + whitespace variant of the stored
+        // dir — the normalized form must still match A.
+        sessionVM.clearUnreadForWorkdir(" /home/user/proj-a/ ")
+
+        assertFalse(
+            "session A unread cleared even when disconnect workdir is a normalize-variant of its directory",
+            sessionVM.unreadFlow.value.unreadSessions.contains("A"),
+        )
+        assertTrue(
+            "global session Z in other workdir preserved",
+            sessionVM.unreadFlow.value.unreadSessions.contains("Z"),
+        )
+    }
+
+    @Test
+    fun `clearUnreadForWorkdir is a no-op when normalize yields empty`() = runTest {
+        // §task5-lifecycle-r2: a blank / whitespace-only / slash-only workdir
+        // normalizes to "" — the function must bail out early without touching
+        // the unread slice (no spurious emission, no data loss).
+        val core = createCore()
+        val chatVM = cn.vectory.ocdroid.ui.ChatViewModel(core)
+        val sessionVM = cn.vectory.ocdroid.ui.SessionViewModel(core)
+        val connectionVM = cn.vectory.ocdroid.ui.ConnectionViewModel(core)
+        val hostVM = cn.vectory.ocdroid.ui.HostViewModel(core)
+        val composerVM = cn.vectory.ocdroid.ui.ComposerViewModel(core)
+        val orchestratorVM = cn.vectory.ocdroid.ui.OrchestratorViewModel(core)
+        val viewModel = SessionViewModel(core)  // primary VM under test
+        core.writeUnread { it.copy(unreadSessions = setOf("Z")) }
+
+        sessionVM.clearUnreadForWorkdir("   /   ")
+
+        assertEquals(setOf("Z"), sessionVM.unreadFlow.value.unreadSessions)
     }
 
 }

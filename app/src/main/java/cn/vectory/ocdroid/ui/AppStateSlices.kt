@@ -357,7 +357,6 @@ data class SessionListState(
  */
 data class UnreadState(
     val unreadSessions: Set<String> = emptySet(),
-    val tempClearedUnread: Set<String> = emptySet(),
     val lastViewedTime: Map<String, Long> = emptyMap()
 )
 

@@ -3,6 +3,8 @@ package cn.vectory.ocdroid.ui
 import cn.vectory.ocdroid.data.model.Session
 import cn.vectory.ocdroid.ui.controller.applyArchiveEviction
 import cn.vectory.ocdroid.ui.controller.applyArchivedChatClear
+import cn.vectory.ocdroid.ui.controller.removeSessions
+import cn.vectory.ocdroid.ui.controller.subtreeIds
 
 /**
  * §A5-3 Phase B2: a pure-data sealed hierarchy describing the cross-slice
@@ -159,7 +161,28 @@ internal fun reduce(state: StoreState, action: AppAction): StoreState = when (ac
         val isCurrent = state.chat.currentSessionId == action.session.id
         val newSessionList = state.sessionList.applyArchiveEviction(action.session, action.openSessionIds).first
         val newChat = if (isCurrent) state.chat.applyArchivedChatClear().first else state.chat
-        state.copy(sessionList = newSessionList, chat = newChat)
+        // §task5-lifecycle (final-review fix 1): the archived session's unread
+        // badge + any pending question bound to it MUST NOT survive the archive.
+        // The cleanup is computed over the FULL three-source subtree of the
+        // archived id — defensive against a server that only emits the root
+        // archive event (descendants that did NOT get their own session.updated
+        // event still get cleaned atomically here). Done in the SAME committed
+        // state as the archive itself so collectors never observe an "archived
+        // but still unread" torn state.
+        val archivedId = action.session.id
+        val subtree = subtreeIds(
+            archivedId,
+            state.sessionList.sessions,
+            state.sessionList.directorySessions,
+            state.sessionList.childSessions,
+        )
+        val cleanedQuestions = newSessionList.pendingQuestions.filter { it.sessionId !in subtree }
+        val newUnread = state.unread.removeSessions(subtree)
+        state.copy(
+            sessionList = newSessionList.copy(pendingQuestions = cleanedQuestions),
+            chat = newChat,
+            unread = newUnread,
+        )
     }
 
     is AppAction.HostStatePurged -> {
@@ -197,7 +220,6 @@ internal fun reduce(state: StoreState, action: AppAction): StoreState = when (ac
                 ),
                 state.unread.copy(
                     unreadSessions = emptySet(),
-                    tempClearedUnread = emptySet(),
                     lastViewedTime = emptyMap(),
                 ),
             )

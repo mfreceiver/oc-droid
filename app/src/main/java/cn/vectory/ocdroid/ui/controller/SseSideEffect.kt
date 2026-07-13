@@ -16,7 +16,7 @@ package cn.vectory.ocdroid.ui.controller
  * bus boundary stay inline in the dispatcher:
  *  - `scheduleDeltaFlush` / `clearDeltaBuffers` (Job lifecycle + same-slice
  *    coalesce buffer mutation — imperative, not a bus signal).
- *  - `markSessionUnread` / `dropTempCleared` (cross-slice unread mutation —
+ *  - `markSessionUnread` (cross-slice unread mutation —
  *    routed directly via `slices.mutateUnread`).
  *
  * This keeps the sealed hierarchy small (4 cases) and focused on the

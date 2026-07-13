@@ -285,7 +285,6 @@ class HostProfileControllerTest {
         slices.mutateUnread {
             UnreadState(
                 unreadSessions = s.unreadSessions,
-                tempClearedUnread = s.tempClearedUnread,
                 lastViewedTime = s.lastViewedTime
             )
         }
