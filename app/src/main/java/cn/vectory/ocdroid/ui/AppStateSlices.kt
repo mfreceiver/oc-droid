@@ -321,7 +321,24 @@ data class ChatState(
       */
      val deltaBuffer: Map<String, String> = emptyMap(),
      val fullTextBuffer: Map<String, String> = emptyMap(),
-     val pendingFlushPartIds: Set<String> = emptySet()
+     val pendingFlushPartIds: Set<String> = emptySet(),
+     /**
+      * §WT2-taskB (Q6 locked): one-shot "enter from Sessions page → jump to
+      * latest" intent. Set by [cn.vectory.ocdroid.ui.SessionViewModel.requestJumpToLatest]
+      * (SessionsScreen.onSessionClick → requestJumpToLatest → selectSession),
+      * consumed ONCE by [cn.vectory.ocdroid.ui.chat.ChatMessageList]'s
+      * LaunchedEffect, and cleared immediately after the jump so it does not
+      * fire again. NOT set by the horizontal-swipe path, the chat tab-strip
+      * tap, the SessionPickerSheet, or the Chat reselect path — those preserve
+      * each session's saveable scroll position (see ChatMessageList's
+      * `rememberSaveable(sessionId, LazyListState.Saver)`). The intent is
+      * also cleared inside [cn.vectory.ocdroid.ui.controller.SessionSwitcher.switchTo]
+      * whenever the incoming session id does NOT match it (so a swipe away
+      * from a still-pending session — rare — does not later force a jump when
+      * the user swipes back). Lives on ChatState (not SessionListState)
+      * because it is a chat-surface intent, not a session-list attribute.
+      */
+     val pendingJumpToLatest: String? = null
  )
 
 /**
