@@ -106,16 +106,34 @@ internal fun launchLoadSessions(
      * surfaces). The caller mirrors the SSE archive eviction path
      * (AppAction.SessionArchived → applyArchiveEviction + applyArchivedChatClear)
      * so the chat does not linger on a session the render filters now hide.
-     * Null = caller has no dispatch surface (legacy / test) → the merged list
-     * is still written; only the chat-clear is skipped.
+     * Null = caller has no dispatch surface (legacy / test) → the merged list is
+     * still written; only the chat-clear is skipped.
+     *
+     * FIX-A/C (review-blocker): RENAMED + REWIDENED from
+     * `onCurrentSessionArchived((Session) -> Unit)`. The callback now fires
+     * whenever ANY session in the merged result is archived AND was in the
+     * openIds or was the current session — not just the current session. It
+     * carries the full merged list + the pruned openIds so the caller can
+     * dispatch a SINGLE atomic [AppAction.BulkSessionsRefreshed] that writes
+     * the list AND prunes openIds AND (if current is archived) clears chat,
+     * eliminating the torn intermediate the prior two-step produced. The
+     * callback is invoked BEFORE any mutateSessionList so no collector ever
+     * observes the "sessions[current].isArchived == true AND
+     * chat.currentSessionId == current" combo.
      */
-    onCurrentSessionArchived: ((Session) -> Unit)? = null,
+    onArchivedSessionsDetected: ((mergedSessions: List<Session>, newOpenIds: List<String>, hasMoreSessions: Boolean) -> Unit)? = null,
 ) {
 
     scope.launch {
         fun staleHostAfterSuspend(): Boolean = expectedServerGroupFp != null &&
             currentServerGroupFp != null &&
             expectedServerGroupFp != currentServerGroupFp()
+
+        // FIX-D (gpter #2): capture this request's epoch. If a newer
+        // launchLoadSessions call is issued while this REST is in flight,
+        // the post-suspend check will detect the supersession and drop the
+        // stale result before any write/persist/archive-callback.
+        val myEpoch = sessionListLoadEpoch.incrementAndGet()
 
         val limit = MainViewModelTimings.sessionFullLoadLimit
         slices.mutateSessionList {
@@ -128,6 +146,19 @@ internal fun launchLoadSessions(
         }
         repository.getSessions(limit)
             .onSuccess { sessions ->
+                // FIX-D (gpter #2): if a newer load was issued while this REST
+                // was in flight, drop the stale result entirely — it must NOT
+                // update sessions/openSessionIds/cache NOR trigger archive
+                // side-effects (which are now destructive per FIX-A/C). The
+                // refreshing flag is cleared optimistically (the newer request
+                // will set it back if it is still in flight).
+                if (myEpoch != sessionListLoadEpoch.get()) {
+                    DebugLog.d("Sync", "launchLoadSessions: epoch $myEpoch superseded, discarding stale snapshot")
+                    slices.mutateSessionList {
+                        it.copy(isLoadingMoreSessions = false, isRefreshingSessions = false)
+                    }
+                    return@onSuccess
+                }
                 if (staleHostAfterSuspend()) {
                     slices.mutateSessionList {
                         it.copy(isLoadingMoreSessions = false, isRefreshingSessions = false)
@@ -151,7 +182,7 @@ internal fun launchLoadSessions(
                 )
                 // Nav redesign: the initial load is a fixed full-page snapshot
                 // (sessionFullLoadLimit) with no load-more UI, so hasMore is
-                // hard-false after this load regardless of the returned size —
+                // hard-false after this load regardless of the returned size—
                 // other consumers (TopBar/Picker) must not advertise a next page
                 // that the Sessions tab will never trigger. 500 is an accepted
                 // "effectively all" product cap (per-workdir directorySessions
@@ -174,6 +205,58 @@ internal fun launchLoadSessions(
                         cacheRepository.verifyFingerprint(fp, currentSessionId, createdAt)
                     }.getOrNull()
                     if (staleHostAfterSuspend()) return@onSuccess
+                    // FIX-D (gpter #2): re-check epoch after the verifyFingerprint
+                    // suspend — a newer request may have been issued + completed
+                    // during the verify. The writes below (mutateSessionList /
+                    // persist / archive callback) must not run for a stale result.
+                    if (myEpoch != sessionListLoadEpoch.get()) {
+                        DebugLog.d("Sync", "launchLoadSessions: epoch $myEpoch superseded post-verify, discarding stale snapshot")
+                        slices.mutateSessionList {
+                            it.copy(isLoadingMoreSessions = false, isRefreshingSessions = false)
+                        }
+                        return@onSuccess
+                    }
+                }
+                // ── FIX-A/C (review-blocker): atomic bulk-archive commit ─────
+                // Detect ALL archived sessions in the merged result that are
+                // currently OPEN (in openSessionIds) or are the current chat
+                // session. If any are found AND the caller wired the callback,
+                // dispatch a SINGLE BulkSessionsRefreshed action that writes
+                // the merged list + prunes openIds + (if current is archived)
+                // clears chat — all in one committed aggregate state. This
+                // replaces the prior two-step (mutateSessionList THEN separate
+                // dispatch) which produced a torn "sessions[current].isArchived
+                // == true AND chat.currentSessionId == current" intermediate.
+                // The callback is invoked BEFORE the mutateSessionList so no
+                // collector can observe the combo.
+                val archivedIds = mergedSessions
+                    .filter { it.isArchived }
+                    .map { it.id }
+                    .toSet()
+                val newOpenIds = currentOpenIds.filter { it !in archivedIds }
+                val currentIsArchived = currentSessionId != null && currentSessionId in archivedIds
+                val anyArchivedOpen = archivedIds.isNotEmpty() &&
+                    (currentIsArchived || currentOpenIds.any { it in archivedIds })
+                if (anyArchivedOpen && onArchivedSessionsDetected != null) {
+                    // FIX-C: single atomic dispatch via the callback — writes
+                    // the list AND prunes openIds AND clears chat in ONE step.
+                    onArchivedSessionsDetected?.invoke(mergedSessions, newOpenIds, newHasMore)
+                    // Persist the PRUNED cache (FIX-A: archived ids no longer
+                    // in openSessionIds; currentId null if archived so the
+                    // cache filter drops it from the "current" slot too).
+                    persistSessionCache(
+                        settingsManager = settingsManager,
+                        sessions = mergedSessions,
+                        openIds = newOpenIds,
+                        currentId = if (currentIsArchived) null else currentSessionId,
+                        currentWorkdir = settingsManager.currentWorkdir,
+                        revertCutoffs = slices.chat.value.revertCutoffs
+                    )
+                    // Skip the auto-select / load logic below — the dispatch
+                    // atomically cleared chat if needed; loading messages for
+                    // the just-archived id is wasteful + racy vs the reducer's
+                    // clear. Non-archive path runs for sessions that survived.
+                    return@onSuccess
                 }
                 slices.mutateSessionList {
                     it.copy(
@@ -194,35 +277,18 @@ internal fun launchLoadSessions(
                 persistSessionCache(
                     settingsManager = settingsManager,
                     sessions = mergedSessions,
-                    openIds = currentOpenIds,
+                    openIds = newOpenIds,
                     currentId = currentSessionId,
                     currentWorkdir = settingsManager.currentWorkdir,
                     revertCutoffs = slices.chat.value.revertCutoffs
                 )
                 if (staleHostAfterSuspend()) return@onSuccess
-                // WT6 (archive-sync, gap-3): if the current session became
-                // archived via the bulk refresh (cross-device archive during an
-                // SSE gap that the feed did not replay — the exact case Task 1's
-                // unconditional RefreshSessions now surfaces), the SSE-only
-                // eviction path (SessionSyncCoordinator archive handler →
-                // AppAction.SessionArchived → applyArchiveEviction +
-                // applyArchivedChatClear) is NEVER invoked for this device, so
-                // chat.currentSessionId would still reference an archived
-                // session that the render filters hide from the lists, leaving
-                // the chat dangling on a hidden session. Detect it here and
-                // invoke the SAME eviction the SSE path uses (the caller's
-                // onCurrentSessionArchived hook dispatches AppAction.SessionArchived).
-                // Skip the auto-select / load logic below — the dispatch
-                // atomically clears chat (applyArchivedChatClear) + openIds +
-                // unread, so loading messages for the just-archived id is
-                // both wasteful and racy vs the reducer's clear.
-                if (currentSessionId != null && onCurrentSessionArchived != null) {
-                    val mergedCurrent = mergedSessions.firstOrNull { it.id == currentSessionId }
-                    if (mergedCurrent != null && mergedCurrent.isArchived) {
-                        onCurrentSessionArchived?.invoke(mergedCurrent)
-                        return@onSuccess
-                    }
-                }
+                // (FIX-A/C: the archived-current + non-current-open-id archive
+                // detection + atomic callback now lives ABOVE the normal
+                // mutateSessionList, before any write — see
+                // [anyArchivedOpen] / [onArchivedSessionsDetected]. This
+                // branch is reached only when no archives were detected OR
+                // the caller has no callback wired.)
                 when {
                     // Skip auto-select when the user is mid-draft (a workdir
                     // has been chosen but no session created yet): selecting a
@@ -369,6 +435,22 @@ internal fun launchLoadMoreSessions(
 // 每次发起递增 epoch; REST 返回时若 epoch 已被更新请求超越则丢弃本结果——避免后完成者
 // 把先完成者的 REST 写入误判为"SSE 在途变化"而保留(并发粘 busy 边角)。
 private val statusLoadEpoch = java.util.concurrent.atomic.AtomicLong(0)
+
+// FIX-D (gpter #2, review-blocker): single-flight epoch for the session-LIST
+// load (launchLoadSessions). Mirrors [statusLoadEpoch]'s pattern: concurrent
+// calls (reconnect + foreground catch-up + manual refresh) each increment at
+// launch; a stale response whose epoch has been superseded is dropped BEFORE
+// any write/persist/archive-callback — critical now that the archive callback
+// (FIX-A/C) is destructive (prunes openIds + clears chat). Without this, a
+// slow stale response could trigger the destructive eviction AFTER a newer
+// response already updated the state.
+//
+// Threading: all launchLoadSessions calls run on the same scope (Main.immediate,
+// serial). The epoch check at the top of onSuccess + after the verifyFingerprint
+// suspend is sufficient — the writes (mutateSessionList / persist / callback)
+// happen synchronously after the last check with no suspension in between, so
+// no TOCTOU is possible on this dispatcher.
+private val sessionListLoadEpoch = java.util.concurrent.atomic.AtomicLong(0)
 
 internal fun launchLoadSessionStatus(
     scope: CoroutineScope,
