@@ -520,4 +520,14 @@
     <!-- §setux #new4: Settings 列表入口（服务器管理 hub）。hub 自身的 TopAppBar
          仍用 settings_section_hosts（「服务器管理」）；此短文案仅用于列表行。 -->
     <string name="setux_settings_hosts_entry">服务器</string>
+
+    <!-- §FGS-notify CP5: ongoing 会话状态通知文案（channel=ocdroid.session_status,
+         IMPORTANCE_LOW per §7）。 -->
+    <string name="notify_session_restoring">正在恢复连接…</string>
+    <string name="notify_session_busy_singular">1 个任务进行中</string>
+    <string name="notify_session_busy_plural">%1$d 个任务进行中</string>
+    <string name="notify_session_connected">已连接</string>
+    <string name="notify_session_idle_monitoring">空闲监听</string>
+    <string name="notify_session_degraded_title">需要确认服务器信任</string>
+    <string name="notify_session_degraded_content">打开应用以确认服务器信任</string>
 </resources>
