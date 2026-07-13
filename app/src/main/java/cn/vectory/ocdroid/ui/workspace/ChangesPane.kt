@@ -1,8 +1,6 @@
 package cn.vectory.ocdroid.ui.workspace
 
-import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -14,7 +12,6 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.AccountTree
@@ -22,13 +19,10 @@ import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
-import androidx.compose.material3.ListItem
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.Tab
 import androidx.compose.material3.TabRow
 import androidx.compose.material3.Text
-import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -46,10 +40,8 @@ import cn.vectory.ocdroid.data.model.FileDiff
 import cn.vectory.ocdroid.data.model.VcsInfo
 import cn.vectory.ocdroid.data.model.VcsStatusEntry
 import cn.vectory.ocdroid.data.repository.OpenCodeRepository
-import cn.vectory.ocdroid.ui.theme.AppTextStyles
-import cn.vectory.ocdroid.ui.theme.BundledMonoFamily
+import cn.vectory.ocdroid.ui.theme.AppBottomSheet
 import cn.vectory.ocdroid.ui.theme.Dimens
-import cn.vectory.ocdroid.ui.theme.SemanticColors
 
 /**
  * §round-B ① (scheme D.7b): Git → Changes pane.
@@ -62,7 +54,7 @@ import cn.vectory.ocdroid.ui.theme.SemanticColors
  *    already present on the FileDiff (or fetches unified diff lazily).
  *  - [ChangesPaneMode.WORKING_TREE]: workdir-wide VCS status + branch
  *    info from /vcs + /vcs/status, with the unified patch fetched per-
- *    file via /vcs/diff?mode=working_tree on tap.
+ *    file via /vcs/diff?mode=git on tap (working-tree-vs-HEAD view).
  *
  * Each segment owns its own empty / loading / error state.
  *
@@ -165,7 +157,23 @@ private fun SessionDiffSegment(
         return
     }
     Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState())) {
-        diffs.forEach { diff -> FileDiffRow(diff = diff, onClick = { onSelectFile(diff.file) }) }
+        // §WT4: SESSION tab keeps the FLAT list (no grouping / headers /
+        // dividers / cap — session diffs are usually small). Only the row
+        // renderer was unified with WORKING_TREE via the shared [VcsFileRow].
+        // Adapter: FileDiff carries the full path in `diff.file`, nullable
+        // status, and nullable counts; extract basename + parent-dir + null-
+        // safe counts at the call site so VcsFileRow stays model-agnostic.
+        diffs.forEach { diff ->
+            val path = diff.file
+            VcsFileRow(
+                basename = path.substringAfterLast('/').ifEmpty { path },
+                parentDir = path.substringBeforeLast("/", "").ifEmpty { "·" },
+                status = diff.status,
+                additions = diff.additions ?: 0,
+                deletions = diff.deletions ?: 0,
+                onClick = { onSelectFile(diff.file) },
+            )
+        }
     }
     selected?.let { show ->
         DiffBottomSheet(
@@ -315,10 +323,10 @@ private fun WorkingTreeLoadedBody(
     }
 
     // §round-B ① unified-diff fetch: tapping a file in the Working-tree
-    // segment fetches the actual unified patch via /vcs/diff?mode=
-    // working_tree (the VcsStatusEntry itself carries no patch — only
-    // counts + status name). Fetched lazily inside the sheet so the list
-    // never blocks on N parallel diff fetches.
+    // segment fetches the actual unified patch via /vcs/diff?mode=git
+    // (the working-tree-vs-HEAD view; the VcsStatusEntry itself carries no
+    // patch — only counts + status name). Fetched lazily inside the sheet
+    // so the list never blocks on N parallel diff fetches.
     selected?.let { entry ->
         VcsDiffSheet(
             repository = repository,
@@ -409,7 +417,20 @@ private fun GroupedVcsStatusList(
             modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp),
         )
         rows.forEachIndexed { index, entry ->
-            VcsStatusRow(entry = entry, onClick = { onSelectFile(entry.file) })
+            // §WT4: WORKING_TREE keeps its grouping / section headers /
+            // inset dividers / 50-row cap — only the row renderer was
+            // unified with SESSION via the shared [VcsFileRow]. Adapter:
+            // VcsStatusEntry has non-null status + non-null counts, and
+            // its parent-dir treatment (placeholder "·" for repo-root
+            // files) is what VcsFileRow's supporting line was ratified on.
+            VcsFileRow(
+                basename = entry.file.substringAfterLast("/").ifEmpty { entry.file },
+                parentDir = entry.file.substringBeforeLast("/", "").ifEmpty { "·" },
+                status = entry.status,
+                additions = entry.additions,
+                deletions = entry.deletions,
+                onClick = { onSelectFile(entry.file) },
+            )
             if (index < rows.lastIndex) {
                 // Inset divider — start-aligned with the row's text (16dp),
                 // full bleed to the right edge. This is what was missing in
@@ -438,12 +459,12 @@ private fun VcsDiffSheet(
     LaunchedEffect(file, workdir) {
         // §4.6 (P4b-B) defensive guard: mirror the pane's own data-load guard
         // (ChangesPane LaunchedEffect ~L91-112). When workdir is null/blank,
-        // GET /vcs/diff?mode=working_tree (no `directory` query) → HTTP 400.
-        // Bail into an error state instead of issuing the request. NOTE: in
-        // the normal flow workdir is non-blank here (the working-tree status
-        // list only loads when workdir is present), so a 400 observed in
-        // normal use points to a server-side param issue, not this guard —
-        // runtime reproduction on the emulator is needed to confirm root cause.
+        // GET /vcs/diff?mode=git (no `directory` query) → HTTP 400. Bail into
+        // an error state instead of issuing the request. In the normal flow
+        // workdir is non-blank here (the working-tree status list only loads
+        // when workdir is present), so reaching this branch means the caller
+        // really had no workdir to bind — the 400 is then a client-side
+        // contract violation, not a server issue.
         if (workdir.isNullOrBlank()) {
             patchState = DiffPatchState.Error(noWorkdirMessage)
             return@LaunchedEffect
@@ -455,13 +476,16 @@ private fun VcsDiffSheet(
             // swallowed the error → no match → DiffPatchState.Loaded(null) → the
             // sheet showed "no unified diff" instead of the actual error.
             //
-            // §4.6 (P4b-B): the request this produces is:
-            //   GET /vcs/diff?mode=working_tree&directory=<workdir>
-            // (Retrofit URL-encodes the directory query value). When workdir is
-            // non-null but the server still 400's, the likely cause is a server-
-            // side param mismatch (e.g. it expects a trailing slash, a different
-            // mode spelling, or rejects URL-encoded slashes). Do NOT fix blind.
-            val diffs = repository.getVcsDiff("working_tree", workdir).getOrThrow()
+            // §WT4 (mode literal fix): the request this produces is
+            //   GET /vcs/diff?mode=git&directory=<workdir>
+            // (Retrofit URL-encodes the directory query value). The opencode
+            // server's `vcs.ts` defines `Mode = Schema.Literals(["git","branch"])`,
+            // so the old `"working_tree"` value was rejected by the schema
+            // decoder → HTTP 400 on every file tap. `"git"` is the semantically-
+            // correct value for the working-tree-vs-HEAD diff view this sheet
+            // shows. (Verified: this is the ONLY call site sending a mode literal
+            // — grep `working_tree` / `getVcsDiff` returns no other producers.)
+            val diffs = repository.getVcsDiff("git", workdir).getOrThrow()
             val match = diffs.firstOrNull { it.file == file }
             if (match != null) DiffPatchState.Loaded(match.patch)
             else DiffPatchState.Loaded(null)
@@ -495,15 +519,28 @@ private fun DiffBottomSheet(
     errorMessage: String? = null,
     onDismiss: () -> Unit,
 ) {
-    ModalBottomSheet(
+    // §WT4: migrated from a raw ModalBottomSheet + hand-rolled title to the
+    // shared [AppBottomSheet] recipe (SheetRecipe.kt) so the container color,
+    // skipPartiallyExpanded state, title typography (titleLarge) and bottom
+    // inset match every other sheet in the app.
+    //
+    // title = file basename (the meaningful identity); the full path is kept
+    // as a muted bodySmall line inside content for context (the original sheet
+    // had both lines — basename as title, path as subtitle — and AppBottomSheet
+    // renders title in titleLarge, so the basename stays prominent and the
+    // path secondary, matching the old visual hierarchy).
+    //
+    // ⚠️ Double-padding pitfall (SheetRecipe §inset-note / 双重 padding 警示):
+    // AppBottomSheet already adds a bottom `Spacer(16.dp)` for the safe-area
+    // inset. The old sheet wrapped content in `.padding(16.dp)` (all sides).
+    // We must NOT keep an outer bottom padding — only horizontal padding for
+    // the content's left/right inset. The bottom 12dp Spacer between subtitle
+    // and body is content-rhythm (kept); the bottom safe-area is the scaffold.
+    AppBottomSheet(
         onDismissRequest = onDismiss,
-        sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
+        title = file.substringAfterLast('/').ifEmpty { file },
     ) {
-        Column(Modifier.fillMaxWidth().padding(16.dp)) {
-            Text(
-                text = file.substringAfterLast('/').ifEmpty { file },
-                style = MaterialTheme.typography.titleMedium,
-            )
+        Column(Modifier.fillMaxWidth().padding(horizontal = 16.dp)) {
             Text(
                 text = file,
                 style = MaterialTheme.typography.bodySmall,
@@ -549,140 +586,6 @@ private fun DiffBottomSheet(
             }
         }
     }
-}
-
-@Composable
-private fun FileDiffRow(diff: FileDiff, onClick: () -> Unit) {
-    val statusColor = vcsStatusColor(diff.status)
-    val path = diff.file
-    // §4.2: 改用 M3 ListItem 体系——与 SessionsScreen.SessionCard / Settings
-    // TrafficSection 同构。ListItem 自带 16dp 水平内边距（与项目主流列表对齐，
-    // 不再额外套 padding），自带 ~48dp 最小行高 + 内部垂直节奏；不再用手写
-    // Row/Column + 16dp padding + 8dp vertical。
-    // 字号规范：headline=bodyMedium（文件名）、supporting=bodySmall（全路径，
-    // 替换原 labelSmall ~11sp 以对齐 Sessions 副标题）、trailing 状态/计数=
-    // labelMedium（替换原 labelSmall，与 bodySmall 视觉等高更易读）。
-    ListItem(
-        modifier = Modifier
-            .fillMaxWidth()
-            .heightIn(min = 48.dp)
-            .clickable(onClick = onClick),
-        leadingContent = {
-            Box(
-                modifier = Modifier
-                    .size(8.dp)
-                    .background(color = statusColor, shape = CircleShape)
-            )
-        },
-        headlineContent = {
-            Text(
-                text = path.substringAfterLast('/').ifEmpty { path },
-                style = MaterialTheme.typography.bodyMedium,
-                color = MaterialTheme.colorScheme.onSurface,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-            )
-        },
-        supportingContent = {
-            Text(
-                text = path,
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-            )
-        },
-        trailingContent = {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                diff.status?.takeIf { it.isNotBlank() }?.let { status ->
-                    Text(
-                        text = status,
-                        style = MaterialTheme.typography.labelMedium,
-                        color = statusColor,
-                        modifier = Modifier.padding(end = 6.dp),
-                    )
-                }
-                Text(
-                    text = "+${diff.additions ?: 0} −${diff.deletions ?: 0}",
-                    style = MaterialTheme.typography.labelMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    fontFamily = BundledMonoFamily,
-                )
-            }
-        },
-    )
-}
-
-@Composable
-private fun VcsStatusRow(entry: VcsStatusEntry, onClick: () -> Unit) {
-    val basename = entry.file.substringAfterLast("/").ifEmpty { entry.file }
-    // §B3·P1: supporting line shows the PARENT directory only (not the full
-    // path, which already starts with the basename in the headline — showing
-    // the full path twice was the main source of "no indentation / messy"
-    // feedback). Empty parent (file at repo root) → muted "·" placeholder
-    // keeps the two-line rhythm intact instead of collapsing the row.
-    val parentDir = entry.file.substringBeforeLast("/", "").ifEmpty { "·" }
-    // §B3·P1: M3 ListItem — 56dp min height (was 48dp) gives the trailing
-    // StatusPill + mono counts breathing room. The leading 8dp color dot is
-    // GONE: StatusPill already carries the status color, and removing the
-    // dot frees the leading slot so the headline/supporting text starts at
-    // the standard 16dp inset (aligned with the inset divider at 16dp).
-    ListItem(
-        modifier = Modifier
-            .fillMaxWidth()
-            .heightIn(min = 56.dp)
-            .clickable(onClick = onClick),
-        headlineContent = {
-            Text(
-                text = basename,
-                style = MaterialTheme.typography.bodyMedium,
-                color = MaterialTheme.colorScheme.onSurface,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-            )
-        },
-        supportingContent = {
-            Text(
-                text = parentDir,
-                // §B3·P1: codeBody (B2·P2) — BundledMonoFamily 12sp/16lh, so
-                // the path column-aligns with the trailing +N/−M counts and
-                // the diff body. NOT bodySmall + BundledMonoFamily cobbled
-                // together.
-                style = AppTextStyles.codeBody.copy(
-                    fontSize = MaterialTheme.typography.bodySmall.fontSize,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                ),
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-            )
-        },
-        trailingContent = {
-            // §B3·P1: StatusPill replaces the bare colored status text; the
-            // +N/−M counts reuse codeBody (mono) for column alignment, green
-            // via stateSuccessFg / red via colorScheme.error, omitted when 0.
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                StatusPill(status = entry.status)
-                if (entry.additions > 0) {
-                    Spacer(Modifier.width(6.dp))
-                    Text(
-                        text = "+${entry.additions}",
-                        style = AppTextStyles.codeBody,
-                        color = SemanticColors.stateSuccessFg(),
-                        maxLines = 1,
-                    )
-                }
-                if (entry.deletions > 0) {
-                    Spacer(Modifier.width(4.dp))
-                    Text(
-                        text = "−${entry.deletions}",
-                        style = AppTextStyles.codeBody,
-                        color = MaterialTheme.colorScheme.error,
-                        maxLines = 1,
-                    )
-                }
-            }
-        },
-    )
 }
 
 @Composable
