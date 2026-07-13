@@ -47,6 +47,9 @@ google-services.json
 *~
 .opencode/
 
+# ocmar workflow scratch (ledger / diffs / verify logs)
+.ocmar/
+
 # OS
 .DS_Store
 Thumbs.db
