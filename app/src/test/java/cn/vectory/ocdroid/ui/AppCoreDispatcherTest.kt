@@ -73,6 +73,13 @@ class AppCoreDispatcherTest : MainViewModelTestBase() {
 
     @Test
     fun `dispatchForegroundCatchUpEffect handles CancelSse and clears delta buffers`() = runTest {
+        // CP9 §D21: AppCore.dispatchForegroundCatchUpEffect(CancelSse) NO
+        // LONGER calls connectionCoordinator.cancelSse() — CancelSse is now
+        // an OBSERVED transport-disconnect signal (the producer is the
+        // Service's ServiceSseConnectionOwner.disconnect). Calling CC here
+        // would route through coordinator.onDisconnect() → redundant
+        // teardown loop. The delta-buffer clear is retained (the gap-dirty
+        // contract is still relevant).
         val core = newCore()
         // Seed an observable delta-buffer entry so ClearDeltaBuffers has
         // something to drop.
@@ -88,6 +95,12 @@ class AppCoreDispatcherTest : MainViewModelTestBase() {
             "CancelSse must clear SessionSyncCoordinator delta buffers",
             core.store.chatFlow.value.deltaBuffer.isEmpty()
         )
+        // No CC teardown recursion: cancelSse / cancelSseForReconfigure on
+        // the CC instance are no-ops in this test core
+        // (streamingLifecycleCoordinator = null). The CP9 §D21 invariant is
+        // that AppCore does not even CALL cancelSse; we verify by asserting
+        // the dispatcher returned handled=true without observable side
+        // effects beyond the buffer clear.
     }
 
     @Test
@@ -190,15 +203,25 @@ class AppCoreDispatcherTest : MainViewModelTestBase() {
 
     @Test
     fun `dispatchHostEffect handles StartSse and opens the SSE feed`() = runTest {
+        // CP9 (notify Phase-0 switchover): CC's startSSE now calls
+        // StreamingServiceLauncher.ensureStarted() instead of
+        // repository.connectSSE. The SSE collector moved to the
+        // Service-owned ServiceSseConnectionOwner; the launcher is the
+        // atomic trigger that promotes the Service to foreground.
         io.mockk.every { settingsManager.currentWorkdir } returns "/proj"
-        io.mockk.every { repository.connectSSE(any()) } returns kotlinx.coroutines.flow.emptyFlow()
         val core = newCore()
+        val callsBefore = streamingServiceLauncher.callCount
 
         val handled = core.dispatchHostEffect(ControllerEffect.StartSse)
         advanceUntilIdle()
 
         assertTrue(handled)
-        io.mockk.verify { repository.connectSSE("/proj") }
+        assertEquals(
+            "StartSse dispatches through the launcher, not repository.connectSSE",
+            callsBefore + 1,
+            streamingServiceLauncher.callCount,
+        )
+        io.mockk.verify(exactly = 0) { repository.connectSSE(any()) }
     }
 
     @Test

@@ -461,7 +461,15 @@ class AppCore @Inject constructor(
             true
         }
         is ControllerEffect.CancelSse -> {
-            connectionCoordinator.cancelSse()
+            // CP9 §D21: REMOVE `connectionCoordinator.cancelSse()` — the
+            // Service's `disconnect()` is now the producer of this effect
+            // (it is an OBSERVED transport-disconnect signal, NOT a request
+            // for CC to cancel a job; CC no longer owns a job). Calling CC
+            // here would route through coordinator.onDisconnect() →
+            // redundant teardown loop. RETAIN the delta-buffer clear (the
+            // gap-dirty contract is still relevant — SSC stamps the current
+            // session dirty + records the disconnect time so the next
+            // server.connected reconciles).
             sessionSyncCoordinator.clearDeltaBuffers()
             true
         }

@@ -58,6 +58,14 @@ abstract class MainViewModelTestBase {
     protected lateinit var trafficTracker: TrafficTracker
     protected lateinit var appLifecycleMonitor: AppLifecycleMonitor
     protected lateinit var core: AppCore
+    /**
+     * CP9 (notify Phase-0 switchover): the recording launcher wired into the
+     * core's ConnectionCoordinator. Tests assert on [RecordingStreamingServiceLauncher.callCount]
+     * instead of `repository.connectSSE` after the switchover (the SSE
+     * collector moved to the Service; CC's startSSE now calls the launcher).
+     */
+    protected var streamingServiceLauncher: RecordingStreamingServiceLauncher = RecordingStreamingServiceLauncher()
+        private set
 
     @Before
     open fun setUp() {
@@ -125,6 +133,8 @@ abstract class MainViewModelTestBase {
         // resolved text is unused; a relaxed Context mock satisfies the
         // constructor without dragging Robolectric into every test.
         val appContext = mockk<Context>(relaxed = true)
+        // CP9: each test gets a fresh recording launcher.
+        streamingServiceLauncher = RecordingStreamingServiceLauncher()
         // §R-19 Sprint 3 P2-5: AppCore's 5 controllers + the @UiApplicationScope
         // CoroutineScope are now Hilt @Provides-bound in production. In unit
         // tests (no Hilt container) we still construct AppCore directly, so
@@ -214,9 +224,16 @@ abstract class MainViewModelTestBase {
             // CP2 (notify Phase-0): delegate TOFU state to the shared bootstrap
             // coordinator so the delegation is exercised in tests too.
             bootstrapCoordinator = cn.vectory.ocdroid.service.bootstrap.ConnectionBootstrapCoordinator(),
-            // CP3 (notify Phase-0): publish SSE events into the process-wide
-            // stream so the bridge routes them.
-            sseEventStream = sseEventStream,
+            // CP9 (notify Phase-0 switchover): CC's startSSE now delegates to
+            // a fake launcher (records ensureStarted calls; tests assert on
+            // the call count instead of repository.connectSSE). The real
+            // Android impl is Hilt-bound in production.
+            streamingServiceLauncher = streamingServiceLauncher,
+            // CP9: cancelSse / cancelSseForReconfigure route through the
+            // lifecycle coordinator; pass null here (CC's delegates are
+            // no-ops without it). Tests that exercise the teardown path
+            // construct their own coordinator with a real coordinator.
+            streamingLifecycleCoordinator = null,
         )
         val fpProvider: () -> String = { hostProfileStore.currentProfile().serverGroupFp.ifBlank { hostProfileStore.currentProfile().id } }
         // R-20 Phase 2: gap-fill coordinator (real instance; the relaxed-mock

@@ -272,11 +272,16 @@ class SessionSyncCoordinator(
             effects.effects.collect { effect ->
                 when (effect) {
                     is ControllerEffect.CancelSse -> {
-                        // §P1-10: foreground backgrounding / explicit SSE
-                        // cancellation. The current session's slice is now
-                        // potentially stale (the user was watching it). Mark
-                        // dirty + stamp the disconnect time so the next
-                        // `server.connected` reconciles.
+                        // §P1-10 / CP9 §D22: an OBSERVED transport-disconnect
+                        // signal. Producer (CP9): the Service's
+                        // ServiceSseConnectionOwner emits this once when a
+                        // live collector was actually stopped (Service going
+                        // away, user explicit close, reconfigure teardown,
+                        // §4.1 timeout) — NOT FCC/CC cancelling a job (CC
+                        // no longer owns a job). The current session's slice
+                        // is now potentially stale (the user was watching
+                        // it). Mark dirty + stamp the disconnect time so the
+                        // next `server.connected` reconciles.
                         val gen = currentEpoch()
                         val now = System.currentTimeMillis()
                         val dirty = listOfNotNull(slices.chat.value.currentSessionId).toSet()

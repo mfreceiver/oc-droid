@@ -78,7 +78,6 @@ class SessionStreamingController(
     private var commandCollectorJob: Job? = null
     private var busyObserverJob: Job? = null
     private var started = false
-    private var bootstrapRan = false
 
     /**
      * Chronometer base for the 「N tasks running」 notification (§7: 起点 =
@@ -126,17 +125,14 @@ class SessionStreamingController(
     }
 
     /**
-     * §5 START_STICKY bootstrap (steps 3-6). Single-flight per controller
-     * instance — the Service's `onStartCommand` may fire multiple times
-     * (START_STICKY sticky-rebuild) but the bootstrap body runs once.
+     * §5 START_STICKY bootstrap (steps 3-6). The single-flight latch lives
+     * in the Service (CP9 §A6: `SessionStreamingService.bootstrapJob`) — a
+     * second bootstrap/start intent on the same Service instance cancels
+     * the in-flight job before launching a fresh one. CP9 removed the
+     * once-per-instance `bootstrapRan` flag here because it could strand a
+     * reconfigure race if `stopSelf()` + a new start overlapped.
      */
     suspend fun bootstrapAsync() {
-        if (bootstrapRan) {
-            DebugLog.i(TAG, "bootstrapAsync: already ran — skipping (single-flight)")
-            return
-        }
-        bootstrapRan = true
-
         var attempt = 0
         while (true) {
             attempt++
@@ -182,10 +178,13 @@ class SessionStreamingController(
                     return
                 }
                 BootstrapResult.Failed -> {
-                    // §5 step 6: bounded retry with backoff. SSE ownership stays
-                    // in ConnectionCoordinator until CP9, so SSEConnectionExhausted
-                    // isn't reachable here yet — but the retry mechanism is in
-                    // place for the bootstrap itself (network down on sticky rebuild).
+                    // §5 step 6: bounded retry with backoff. CP9: SSE
+                    // ownership lives in [ServiceSseConnectionOwner]; the
+                    // collector's collection-level failure routes through
+                    // the owner's `onTerminalExhaustion` callback
+                    // (coordinator.onDisconnect). This retry mechanism is
+                    // for the bootstrap itself (network down on sticky
+                    // rebuild / no identity bound yet).
                     if (attempt >= bootstrapMaxAttempts) {
                         DebugLog.w(TAG, "bootstrapAsync: exhausted $attempt attempts → onDisconnect")
                         coordinator.onDisconnect()
@@ -206,8 +205,9 @@ class SessionStreamingController(
      * the order received; the coordinator's emission order already encodes
      * the §4.4 "new source active BEFORE closing old" invariant.
      *
-     * SSE side ([connectSse] / [disconnectSse]) are CP9 stubs on the shell —
-     * the dispatch test still verifies the call sequence end-to-end.
+     * SSE side ([connectSse] / [disconnectSse]) is wired through to the
+     * Service's [ServiceSseConnectionOwner] (CP9) — the dispatch test
+     * verifies the call sequence end-to-end via a recording shell fake.
      */
     private fun executeCommand(cmd: LifecycleCommand) {
         when (cmd) {
@@ -224,13 +224,13 @@ class SessionStreamingController(
             LifecycleCommand.StopForeground -> shell.stopForeground()
             LifecycleCommand.StopSelf -> shell.serviceStopSelf()
             is LifecycleCommand.StartSse -> {
-                // CP9: SSE collector moves here from ConnectionCoordinator.
-                // Today the shell's body is a DEBUG log only; the dispatch
-                // test still routes through this so §4.4 ordering is verified.
+                // CP9: SSE collector is owned by the Service
+                // ([ServiceSseConnectionOwner]); the shell forwards the
+                // identity-bound StartSse command to it.
                 shell.connectSse(cmd.identity)
             }
             LifecycleCommand.StopSse -> {
-                // CP9: SSE collector teardown moves here.
+                // CP9: SSE collector teardown — shell forwards to the owner.
                 shell.disconnectSse()
             }
             LifecycleCommand.StartPoller -> {

@@ -1,19 +1,17 @@
 package cn.vectory.ocdroid.ui.controller
 
-import android.util.Log
 import cn.vectory.ocdroid.R
 import cn.vectory.ocdroid.data.api.CommandInfo
 import cn.vectory.ocdroid.data.cache.CacheMaintenanceCoordinator
-import cn.vectory.ocdroid.data.model.SSEEvent
 import cn.vectory.ocdroid.data.model.Session
 import cn.vectory.ocdroid.data.repository.OpenCodeRepository
 import cn.vectory.ocdroid.data.repository.ServerCompatProfile
 import cn.vectory.ocdroid.data.repository.http.TofuDecision
 import cn.vectory.ocdroid.data.repository.http.hostPortFromUrl
 import cn.vectory.ocdroid.service.bootstrap.ConnectionBootstrapCoordinator
-import cn.vectory.ocdroid.service.events.IdentifiedSseEvent
-import cn.vectory.ocdroid.service.events.SseEventStream
+import cn.vectory.ocdroid.service.StreamingServiceLauncher
 import cn.vectory.ocdroid.service.identity.ConnectionIdentityStore
+import cn.vectory.ocdroid.service.lifecycle.StreamingLifecycleCoordinator
 import cn.vectory.ocdroid.ui.ConnectionPhase
 import cn.vectory.ocdroid.ui.ConnectionState
 import cn.vectory.ocdroid.ui.SharedEffectBus
@@ -25,10 +23,7 @@ import cn.vectory.ocdroid.ui.reportNonFatalIssue
 import cn.vectory.ocdroid.util.DebugLog
 import cn.vectory.ocdroid.util.SettingsManager
 import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
-import kotlinx.coroutines.flow.catch
-import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import javax.net.ssl.SSLException
@@ -38,8 +33,23 @@ import java.util.Locale
 /**
  * R-16 M4 → R-17 batch3b: owns the server connection lifecycle — health-check
  * probe with exponential-backoff retry, the 30s health-check throttle,
- * initial-data load orchestration on a healthy connect, and the SSE feed's
- * start/stop.
+ * initial-data load orchestration on a healthy connect.
+ *
+ * **CP9 switchover**: the SSE feed ownership (sseJob + launchSseCollection)
+ * has been DELETED from this coordinator and moved into the Service-owned
+ * [cn.vectory.ocdroid.service.streaming.ServiceSseConnectionOwner]. The
+ * thin [startSSE] delegate is preserved (ConnectionViewModel /
+ * ControllerEffect.StartSse / tests expose it; deleting adds rollback churn)
+ * — it now calls [streamingServiceLauncher].ensureStarted() so a successful
+ * foreground health probe synchronously requests the Service before
+ * reporting success. The no-zero-time-gap guarantee (FGS spec §1) is
+ * preserved: there is NO terminal connected-without-SSE path.
+ *
+ * `cancelSse` / `cancelSseForReconfigure` remain as lifecycle-teardown
+ * delegates (still exposed for direct VM/process cleanup callers), but they
+ * no longer touch a job — they route through
+ * [StreamingLifecycleCoordinator.onDisconnect] which the Service observes
+ * (the coordinator emits StopSse → owner.disconnect).
  *
  * **Migration (batch 3b)**: the [ConnectionCoordinatorCallbacks] interface
  * was eliminated. Most of its methods either (a) had all dependencies already
@@ -56,17 +66,16 @@ import java.util.Locale
  * [effects] — UiEvents now ride [SharedEffectBus.uiEvents].
  *
  * **Moved from the orchestrator:**
- *  - `sseJob` + `lastHealthCheckTime` fields — the SSE feed Job and the
- *    throttle anchor now live here.
+ *  - `lastHealthCheckTime` field — the throttle anchor lives here.
  *  - `testConnection(force, retries)` — the full connect state machine.
  *  - `coldStartReconnect()` — `testConnection(force=true, retries=3)`.
  *  - `loadInitialData()` — sessions/agents/providers/questions/commands + the
  *    directory-sessions re-fetch for the restored workdir.
  *  - `loadCommands()` + `localCommands()` + `mergeCommands()` — slash-command
  *    merge (server list + client-side /clear /compact /undo /redo).
- *  - `startSSE()` — starts the SSE collection coroutine.
- *  - `cancelSse()` / `cancelSseForReconfigure()` — tear down the in-flight
- *    feed (reconfigure also resets the catch-up state machine via effect).
+ *  - `startSSE()` — thin delegate to [streamingServiceLauncher].
+ *  - `cancelSse()` / `cancelSseForReconfigure()` — coordinator teardown
+ *    delegates.
  *
  * The 30s throttle clock is injectable ([clock]) so the cooldown is
  * deterministically testable without wall-clock latency.
@@ -110,8 +119,7 @@ class ConnectionCoordinator(
     private val clock: () -> Long = { System.currentTimeMillis() },
     /**
      * CP1 (notify Phase-0): the single connection-identity store. Replaces
-     * the private [directoryFetchGeneration] AtomicLong. Guards BOTH the SSE
-     * collector (per-event identity check in [launchSseCollection]) AND the
+     * the private [directoryFetchGeneration] AtomicLong. Guards the
      * directory-fetch fan-out in [loadInitialData]. FGS spec §2 «关键约束»:
      * no second private generation.
      *
@@ -122,7 +130,7 @@ class ConnectionCoordinator(
     /**
      * CP2 (notify Phase-0): the application-level shared TOFU bootstrap
      * coordinator. CC DELEGATES its TOFU state here (FGS spec §10 — TOFU
-     * state is extracted so the future SessionStreamingService shares the
+     * state is extracted so the SessionStreamingService shares the
      * same single source and the bootstrap cannot fork into two TLS/SSE
      * state machines). CC's public TOFU surface ([resolveTofuTrust] + the
      * freeze guards on testConnection/coldStartReconnect/startSSE) is
@@ -134,21 +142,32 @@ class ConnectionCoordinator(
      */
     private val bootstrapCoordinator: ConnectionBootstrapCoordinator? = null,
     /**
-     * CP3 (notify Phase-0): the process-wide SSE event stream. CC's
-     * collector publishes each [IdentifiedSseEvent] here INSTEAD of emitting
-     * [ControllerEffect.OnSseEvent] directly. The
-     * [cn.vectory.ocdroid.service.bridge.SseEventBridge] (subscribed eagerly
-     * from AppCore) consumes the stream, validates identity (§2 epoch guard),
-     * routes to the §11 control/delta dual-channel, and AppCore re-emits the
-     * validated frames as [ControllerEffect.OnSseEvent] for SSC's fold.
+     * CP9 (notify Phase-0 switchover): the trigger that promotes the live
+     * SSE connection ownership into [cn.vectory.ocdroid.service.SessionStreamingService].
+     * CC's [startSSE] delegate now calls [StreamingServiceLauncher.ensureStarted]
+     * instead of `repository.connectSSE(...)`; the Service runs the §5
+     * bootstrap and the coordinator's decision matrix drives StartSse /
+     * StopSse into the new owner.
      *
-     * `null` for legacy/test construction — CC falls back to direct
-     * [ControllerEffect.OnSseEvent] emission (pre-CP3 path) so existing
-     * tests that assert on the effect bus keep working without the bridge.
+     * `null` for legacy/test construction — CC falls back to a no-op so
+     * tests that drive health probes without the launcher keep compiling.
      */
-    private val sseEventStream: SseEventStream? = null,
+    private val streamingServiceLauncher: StreamingServiceLauncher? = null,
+    /**
+     * CP9 (notify Phase-0 switchover): the lifecycle coordinator that
+     * drives the L1/L2/L3 state machine inside the Service. CC's
+     * [cancelSse] / [cancelSseForReconfigure] delegates now call
+     * [StreamingLifecycleCoordinator.onDisconnect] (the §4.1 disconnect
+     * entry → L3 teardown); the Service observes the teardown commands and
+     * disconnects its [cn.vectory.ocdroid.service.streaming.ServiceSseConnectionOwner].
+     *
+     * `null` for legacy/test construction — CC falls back to the existing
+     * HostReconfigured effect emission so tests that drive
+     * [cancelSseForReconfigure] directly keep asserting on the epoch +
+     * effect.
+     */
+    private val streamingLifecycleCoordinator: StreamingLifecycleCoordinator? = null,
 ) {
-    private var sseJob: Job? = null
     private var lastHealthCheckTime = 0L
 
     /**
@@ -645,52 +664,25 @@ class ConnectionCoordinator(
     // ── SSE lifecycle ───────────────────────────────────────────────────────
 
     /**
-     * Starts the SSE event collection feed. Cancels any in-flight feed first so
-     * reconnects / reconfigures never leave two collectors racing. Each
-     * `Result<SSEEvent>` is unpacked and forwarded to the SessionSyncCoordinator
-     * via [ControllerEffect.OnSseEvent]; collection failures emit a UiEvent.Error
-     * via [effects.uiEvents] so the UI can surface a "messages may be stale"
-     * banner.
+     * CP9 switchover: the SSE feed collector has been moved into the
+     * Service-owned [cn.vectory.ocdroid.service.streaming.ServiceSseConnectionOwner].
+     * This method is preserved as a thin compatibility delegate (VMs,
+     * [ControllerEffect.StartSse], and tests expose it; deleting adds
+     * rollback churn). It MUST NEVER call `repository.connectSSE` — the
+     * atomic capture belongs to the command identity (StartSse), not to a
+     * re-read of `SettingsManager.currentWorkdir`.
      *
-     * Verbatim move of the `startSSE` body + the inlined `launchSseCollection`
-     * free function.
+     * The shared TOFU-frozen guard is preserved verbatim — while a TOFU trust
+     * dialog is pending the launcher must NOT be invoked (the resulting
+     * Service bootstrap would try the same unpinned TLS handshake and fail
+     * the same way; the user's [resolveTofuTrust] unfreezes the retry loop
+     * which re-calls startSSE).
      *
-     * §R-19 #2 — single-SSE product decision (documented):
-     * OC Droid runs **exactly one** SSE connection at a time, bound to
-     * [SettingsManager.currentWorkdir] (see [launchSseCollection]). There is
-     * **no per-workdir SSE multiplex**. Multi-workdir correctness is recovered
-     * by catch-up instead of by parallel feeds:
-     *
-     *   (a) [SessionSyncCoordinator.loadPendingQuestionsAllWorkdirs] polls
-     *       pending questions/permissions across EVERY workdir in
-     *       `slices.sessionList.directorySessions.keys` + `currentWorkdir`,
-     *       so a `question.asked` SSE event for a non-current (background)
-     *       workdir is still surfaced (R-18 P1-9). The directory map those
-     *       keys come from is populated by THIS coordinator's [loadInitialData]
-     *       fan-out — the catch-up contract therefore depends on that fan-out
-     *       running on every healthy connect.
-     *   (b) [ForegroundCatchUpController] re-syncs the 15s/5min foreground
-     *       gap on app return (no SSE is collected while backgrounded).
-     *   (c) The session-switch path emits `LoadMessages(resetLimit=true)` to
-     *       rehydrate the freshly-selected session's history, so a workdir
-     *       that has never held the SSE feed still catches up on first view.
-     *
-     * Rationale: a multi-feed SSE redesign (one collector per
-     * [SettingsManager.recentWorkdirs]) is a large change — server-side
-     * routing, backpressure on N collectors, per-feed cancel/reconfigure
-     * fan-out, and a per-feed generation guard — for marginal benefit because
-     * the catch-up path above is already production-verified. The single-feed
-     * model keeps the connection lifecycle in one place ([sseJob] +
-     * [cancelSseForReconfigure]'s [directoryFetchGeneration] guard).
-     *
-     * **Invariant for tests**: [launchSseCollection] reads
-     * `settingsManager.currentWorkdir` **fresh** at collection start; it is
-     * NOT captured at construction or at first connect. A workdir switch must
-     * call [startSSE] again to retarget the feed — the session-switch /
-     * host-switch paths already do this. Boundary cases covered in
-     * [ConnectionCoordinatorTest]: workdir retarget on switch, background-
-     * workdir directory fan-out (the catch-up precondition), and reconnect
-     * consistency (no currentWorkdir drift across cancel → restart).
+     * §no-zero-time-gap (FGS spec §1): the Service start is asynchronous,
+     * but the start REQUEST is issued synchronously here BEFORE
+     * `onSettled(true)` returns in [testConnection]. The Service's §5
+     * bootstrap then leads to `StartSse` (the only legal L3→running entry);
+     * there is NO terminal connected-without-SSE path.
      */
     fun startSSE() {
         // §tofu R2: FROZEN while a TOFU trust dialog is pending — the SSE
@@ -703,19 +695,11 @@ class ConnectionCoordinator(
             DebugLog.i(TAG, "startSSE: frozen — TOFU trust pending for ${tofu.pendingTofuHostPort()}")
             return
         }
-        DebugLog.i("SSE", "startSSE")
-        sseJob?.cancel()
-        sseJob = launchSseCollection()
+        DebugLog.i("SSE", "startSSE → launcher.ensureStarted()")
+        // CP9 §B8: thin delegate. NEVER calls repository.connectSSE.
+        streamingServiceLauncher?.ensureStarted()
     }
 
-    /**
-     * §tofu R2: applies the user's TOFU trust decision for the pending
-     * endpoint. Called by the UI (via [cn.vectory.ocdroid.ui.ConnectionViewModel])
-     * when the user taps Accept once / Trust / Cancel in [cn.vectory.ocdroid.ui.settings.TofuTrustDialog].
-     * Completes the deferred the [testConnection] retry loop is awaiting; the
-     * loop then writes the pin (Accept/Trust) and re-probes, or settles false
-     * (Cancel). No-op when no TOFU prompt is pending.
-     */
     /**
      * §tofu R2: applies the user's TOFU trust decision for the pending
      * endpoint. Called by the UI (via [cn.vectory.ocdroid.ui.ConnectionViewModel])
@@ -733,182 +717,55 @@ class ConnectionCoordinator(
     }
 
     /**
-     * §15.1: SSE collection coroutine. Wraps [OpenCodeRepository.connectSSE] so
-     * the resulting Flow's [Result]s are unpacked and forwarded as
-     * [ControllerEffect.OnSseEvent]. Failures (including the
-     * SSEConnectionExhausted raised after the §15.3 retry budget is spent) emit
-     * a UiEvent.Error via [effects.uiEvents] so the UI can surface a
-     * "messages may be stale" banner.
-     *
-     * §R-19 Sprint 1 Lane A fix (gpter Blocker 1): the per-event
-     * [directoryFetchGeneration] check is the production-grade stale-host
-     * guard. The generation is captured at coroutine start ([sseGenAtStart])
-     * and re-checked per collected event; a mismatch means a host reconfigure
-     * ([cancelSseForReconfigure] bumped [directoryFetchGeneration]) landed
-     * while this job was still collecting — any further events from THIS job
-     * belong to the PREVIOUS host and are silently dropped (return@collect)
-     * rather than forwarded as [ControllerEffect.OnSseEvent]. This closes the
-     * race that the SessionSyncCoordinator's own generation guard could NOT
-     * close (it stamped triggers with the CURRENT generation at consume time,
-     * so a late event from the previous host arrived carrying the new
-     * generation and was treated as a cold-start of the new host).
-     *
-     * Verbatim move of the `launchSseCollection` free function, plus the
-     * per-event generation check.
-     */
-    private fun launchSseCollection(): Job {
-        return scope.launch {
-            // §R18 Phase 2-E step 1: pass the persisted workdir explicitly so
-            // SSE routes to the right InstanceState. Was the global
-            // currentDirectory before; behavior preserved (switchTo still
-            // seeds settingsManager.currentWorkdir on session select).
-            //
-            // §R-19 #2: this is the ONLY SSE connection in the app — bound to
-            // settingsManager.currentWorkdir (single-feed product decision;
-            // see [startSSE] KDoc for the multi-workdir catch-up rationale).
-            // currentWorkdir is read FRESH here on every collection start so a
-            // workdir switch + new startSSE() retargets the feed (no cached
-            // value to drift across reconnect).
-            //
-            // CP1 (notify Phase-0): capture the identity bound by testConnection
-            // (or lazy-bind if startSSE was called directly without a healthy
-            // connect). Each emitted event carries this identity so downstream
-            // consumers (SSC.handleEvent(IdentifiedSseEvent)) can validate it
-            // via identityStore.isCurrent BEFORE any fold. A frame is stale iff
-            // its capture-time identity != current — which isCurrent checks.
-            val sseIdentityAtStart = identityStore?.let { store ->
-                store.currentIdentity.value ?: store.bind(
-                    serverGroupFp = currentServerGroupFp(),
-                    normalizedWorkdir = settingsManager.currentWorkdir ?: "",
-                    endpointFp = settingsManager.serverUrl,
-                )
-            }
-            repository.connectSSE(settingsManager.currentWorkdir)
-                .catch { error ->
-                    Log.e("OC_ERROR", "SSE collection failed", error)
-                    effects.tryEmitUiEvent(UiEvent.Error(R.string.error_sse_failed, listOf(error.message ?: "unknown error")))
-                }
-                .collect { result ->
-                    // CP1: drop stale-identity events BEFORE they're forwarded.
-                    // A host reconfigure (cancelSseForReconfigure →
-                    // identityStore.beginReconfigure bumps epoch + nulls
-                    // currentIdentity) invalidates this collector's capture-time
-                    // identity. The cancellation triggered by
-                    // cancelSseForReconfigure is async; a frame already in the
-                    // Flow's buffer (or mid-flight in the collector) could be
-                    // delivered to this lambda before cancellation propagates.
-                    // Without this check that frame would be forwarded as an
-                    // OnSseEvent and pollute the new host's state.
-                    if (sseIdentityAtStart != null && identityStore != null &&
-                        !identityStore.isCurrent(sseIdentityAtStart)
-                    ) {
-                        DebugLog.i(
-                            "SSE",
-                            "drop stale-identity SSE event " +
-                                "(epoch=${sseIdentityAtStart.epoch} → current=${identityStore.currentEpoch()})"
-                        )
-                        return@collect
-                    }
-                    result.onSuccess { event ->
-                        // SSE liveness: a successful event (initial connect OR
-                        // retryWhen recovery after a network outage) proves the
-                        // server is reachable. Mirror it into ConnectionState so
-                        // the server icon flips green even when recovery happened
-                        // via the SSE auto-reconnect rather than a testConnection
-                        // health probe (which was the only place isConnected was
-                        // set true — leaving the icon red after auto-recovery).
-                        writeConnection {
-                            it.copy(
-                                isConnected = true,
-                                isConnecting = false,
-                                connectionPhase = ConnectionPhase.Connected
-                            )
-                        }
-                        // CP3 (notify Phase-0): publish the event into the
-                        // process-wide SseEventStream INSTEAD of emitting
-                        // ControllerEffect.OnSseEvent directly. The bridge
-                        // (SseEventBridge, eagerly started from AppCore) consumes
-                        // the stream, performs the §2 epoch guard, routes to the
-                        // §11 control/delta dual-channel, and AppCore re-emits
-                        // the validated frames as OnSseEvent for SSC's fold.
-                        // CP1: the event carries the capture-time identity.
-                        val identified = if (sseIdentityAtStart != null) {
-                            IdentifiedSseEvent(sseIdentityAtStart, event)
-                        } else {
-                            // Legacy/test path with no identityStore wired —
-                            // synthesize a zero-epoch identity so the effect
-                            // type (OnSseEvent(IdentifiedSseEvent)) resolves.
-                            // SSC's identity gate is skipped when no store is
-                            // wired (handleEvent falls through to raw dispatch).
-                            IdentifiedSseEvent(
-                                cn.vectory.ocdroid.service.identity.ConnectionIdentity(
-                                    epoch = 0L,
-                                    serverGroupFp = "",
-                                    normalizedWorkdir = "",
-                                    endpointFp = "",
-                                ),
-                                event,
-                            )
-                        }
-                        val stream = sseEventStream
-                        if (stream != null) {
-                            // CP3: bridge path — non-lossy suspend emit.
-                            stream.emit(Result.success(identified))
-                        } else {
-                            // Legacy/test fallback (no stream wired) — direct
-                            // effect emission, pre-CP3 behavior.
-                            effects.emitEffect(ControllerEffect.OnSseEvent(identified))
-                        }
-                    }
-                        .onFailure { error ->
-                            Log.e("OC_ERROR", "SSE event failed", error)
-                            effects.tryEmitUiEvent(UiEvent.Error(R.string.error_sse_failed, listOf(error.message ?: "unknown error")))
-                        }
-                }
-        }
-    }
-
-    /**
-     * Cancels the in-flight SSE feed (foreground ON_STOP / ViewModel onCleared).
+     * CP9 §B11: cancels the in-flight SSE feed (foreground ON_STOP /
+     * ViewModel onCleared / process teardown). No longer touches a job —
+     * routes through [StreamingLifecycleCoordinator.onDisconnect] which the
+     * Service observes (the coordinator emits StopSse →
+     * [cn.vectory.ocdroid.service.streaming.ServiceSseConnectionOwner].disconnect).
      * Does NOT reset the catch-up state machine — the foreground return path
      * re-arms it.
+     *
+     * Remains for direct VM / process cleanup callers. The
+     * `streamingLifecycleCoordinator` is null in legacy/test construction
+     * that doesn't wire it (pre-CP9 build) — the call is a no-op there.
      */
     fun cancelSse() {
-        sseJob?.cancel()
-        sseJob = null
+        streamingLifecycleCoordinator?.onDisconnect()
     }
 
     /**
-     * §Stage D (gpter 阻塞 #1): tear down any in-flight SSE feed BEFORE the
-     * repository is reconfigured for a host / profile switch. Without this,
-     * the SSE job bound to the PREVIOUS host keeps delivering events into
-     * AppState while the new host's health probe is still in flight — those
-     * stale events (session/status/message/permission/question) would pollute
-     * the freshly-cleared state for the new profile.
+     * §Stage D (gpter 阻塞 #1) + CP9 §B12: tear down any in-flight SSE feed
+     * BEFORE the repository is reconfigured for a host / profile switch.
+     * CP9: routes through [StreamingLifecycleCoordinator.onDisconnect] (the
+     * §4.1 disconnect entry → L3 teardown); the Service observes the
+     * teardown commands and disconnects its owner. Without this, the SSE job
+     * bound to the PREVIOUS host keeps delivering events into AppState while
+     * the new host's health probe is still in flight — those stale events
+     * would pollute the freshly-cleared state for the new profile.
      *
      * Also resets the foreground catch-up state machine via [effects] so the
-     * next connect is treated as a cold start.
+     * next connect is treated as a cold start. STRICT ORDER (CP9 §B12):
+     *  1. `val newEpoch = identityStore?.beginReconfigure() ?: 0L`
+     *  2. `streamingLifecycleCoordinator.onDisconnect()`
+     *  3. `effects.tryEmitEffect(ControllerEffect.HostReconfigured(newEpoch))`
+     *
+     * The defensive epoch bump (step 1) is preserved verbatim — HostProfileController
+     * already does the true synchronous barrier; this defensive duplicate is
+     * existing behavior (do not redesign it in CP9).
      */
     fun cancelSseForReconfigure() {
         DebugLog.i("SSE", "cancelSse (reconfigure)")
-        sseJob?.cancel()
-        sseJob = null
-        // CP1 (notify Phase-0): bump the epoch AND invalidate the old identity
-        // via the single store. This replaces the removed private
-        // `directoryFetchGeneration.incrementAndGet()` — the SAME epoch now
-        // guards both the SSE collector AND the directory-fetch fan-out (FGS
-        // spec §2 «关键约束»: no second private generation). HostProfileController
-        // ALSO calls beginReconfigure() synchronously BEFORE repository.configure()
-        // (the true barrier origin); this defensive call covers standalone /
-        // non-HPC reconfigure entry points (and tests that drive
-        // cancelSseForReconfigure directly).
+        // §B12 step 1: defensive epoch bump.
         val newEpoch = identityStore?.beginReconfigure() ?: 0L
-        // §Phase1E: a host/profile switch is a fresh server — treat the next
-        // connect as a cold start (skip catch-up, the reconfigure path loads
-        // sessions/messages itself). Routed to the catch-up controller.
+        // §B12 step 2: lifecycle teardown — coordinator.onDisconnect emits
+        // the §4.4 teardown command sequence (StopSse + stopForeground +
+        // stopSelf + arm poller) so the Service disconnects its owner.
+        streamingLifecycleCoordinator?.onDisconnect()
+        // §B12 step 3: HostReconfigured carries the new epoch. Reset the
+        // foreground catch-up state machine (idempotent) — SSC's init
+        // collector independently reads effect.epoch to reset its overlay
+        // to this exact generation.
         // §R18 Phase 3 Wave 1 (P1-3 B 类): 单发非 suspend → tryEmitEffect。
-        // CP1: carry the new epoch so SSC's overlay resets to this exact
-        // generation (SseSyncState.hostGeneration = effect.epoch).
         effects.tryEmitEffect(ControllerEffect.HostReconfigured(newEpoch))
     }
 

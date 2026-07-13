@@ -194,7 +194,8 @@ object ControllerModule {
         @Named("currentServerGroupFp") currentServerGroupFp: () -> String,
         identityStore: cn.vectory.ocdroid.service.identity.ConnectionIdentityStore,
         bootstrapCoordinator: cn.vectory.ocdroid.service.bootstrap.ConnectionBootstrapCoordinator,
-        sseEventStream: cn.vectory.ocdroid.service.events.SseEventStream,
+        streamingServiceLauncher: cn.vectory.ocdroid.service.StreamingServiceLauncher,
+        streamingLifecycleCoordinator: cn.vectory.ocdroid.service.lifecycle.StreamingLifecycleCoordinator,
     ): ConnectionCoordinator = ConnectionCoordinator(
         scope = appScope,
         slices = store.slices,
@@ -208,8 +209,15 @@ object ControllerModule {
         // CP2 (notify Phase-0): delegate TOFU state to the shared bootstrap
         // coordinator (FGS spec §10). CC's public TOFU surface is unchanged.
         bootstrapCoordinator = bootstrapCoordinator,
-        // CP3 (notify Phase-0): publish SSE events into the process-wide
-        // stream so the SseEventBridge routes them.
-        sseEventStream = sseEventStream,
+        // CP9 (notify Phase-0 switchover): CC's startSSE now calls the
+        // streaming Service launcher (the atomic ownership switch); the
+        // Service runs the §5 bootstrap + the SSE collector lives in
+        // ServiceSseConnectionOwner. CC NEVER calls repository.connectSSE.
+        streamingServiceLauncher = streamingServiceLauncher,
+        // CP9 (notify Phase-0 switchover): CC's cancelSse /
+        // cancelSseForReconfigure now route through the lifecycle
+        // coordinator's onDisconnect (§4.1 disconnect → L3 teardown); the
+        // Service observes the commands and disconnects its owner.
+        streamingLifecycleCoordinator = streamingLifecycleCoordinator,
     )
 }

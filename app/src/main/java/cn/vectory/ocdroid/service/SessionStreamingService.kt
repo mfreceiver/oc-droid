@@ -10,6 +10,7 @@ import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
 import androidx.core.app.ServiceCompat
 import cn.vectory.ocdroid.R
+import cn.vectory.ocdroid.data.repository.OpenCodeRepository
 import cn.vectory.ocdroid.di.AppLifecycleMonitor
 import cn.vectory.ocdroid.service.events.IdentifiedSseEvent
 import cn.vectory.ocdroid.service.events.SseEventStream
@@ -21,14 +22,18 @@ import cn.vectory.ocdroid.service.notify.NotificationStrings
 import cn.vectory.ocdroid.service.notify.SessionStatusNotifier
 import cn.vectory.ocdroid.service.streaming.BootstrapRunner
 import cn.vectory.ocdroid.service.streaming.ServiceShell
+import cn.vectory.ocdroid.service.streaming.ServiceSseConnectionOwner
 import cn.vectory.ocdroid.service.streaming.SessionSnapshotProvider
 import cn.vectory.ocdroid.service.streaming.SessionStreamingController
 import cn.vectory.ocdroid.service.status.StatusAggregator
 import cn.vectory.ocdroid.service.status.StatusAggregatorInput
+import cn.vectory.ocdroid.ui.SharedEffectBus
+import cn.vectory.ocdroid.ui.SharedStateStore
 import cn.vectory.ocdroid.util.DebugLog
 import cn.vectory.ocdroid.util.SettingsManager
 import dagger.hilt.android.AndroidEntryPoint
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.MainScope
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.SharedFlow
@@ -52,12 +57,14 @@ import javax.inject.Inject
  *  - [cn.vectory.ocdroid.service.bridge.SseEventBridge] — events → identity
  *    validation → `ControllerEffect.OnSseEvent`.
  *
- * **CP5-7 inert**: this Service's BODY is complete (the
- * [SessionStreamingController] consumes commands, runs the poller, runs the
- * bootstrap), but no production caller does `startForegroundService(this)`
- * yet — the manifest `<service>` entry and the trigger are CP8/CP9. So at
- * runtime through CP7 this Service cannot actually be started. We are
- * completing + unit-testing its body.
+ * **CP9 switchover**: this Service is now the live SSE producer. The
+ * [sseOwner] ([ServiceSseConnectionOwner]) owns the collector that USED to
+ * live inside
+ * [cn.vectory.ocdroid.ui.controller.ConnectionCoordinator] (`sseJob` +
+ * `launchSseCollection`). The trigger that promotes the Service to
+ * foreground is [cn.vectory.ocdroid.service.StreamingServiceLauncher]
+ * (`AndroidStreamingServiceLauncher` in production): CC's `startSSE` now
+ * calls `launcher.ensureStarted()` instead of `repository.connectSSE(...)`.
  *
  * **START_STICKY bootstrap (FGS spec §5)**: a null Intent is the sticky-rebuild
  * signal (process was killed and the system restarted the service). Per §4.3
@@ -92,11 +99,11 @@ class SessionStreamingService : Service() {
 
     /**
      * CP3 (notify Phase-0): the process-wide SSE event stream. The Service
-     * delegates its [events] surface to this stream — so when the Service IS
-     * started, its `events` field IS the same stream the
-     * [cn.vectory.ocdroid.service.bridge.SseEventBridge] subscribes to.
-     * Today (CP3+) the producer is `ConnectionCoordinator.launchSseCollection`;
-     * the Service remains inert / not-started until CP8/CP9.
+     * delegates its [events] surface to this stream AND uses it as the
+     * publish target for [sseOwner] (CP9). The
+     * [cn.vectory.ocdroid.service.bridge.SseEventBridge] (subscribed eagerly
+     * from AppCore) consumes this stream → routes through the §2 epoch guard
+     * + §11 dual-channel → AppCore re-emits as OnSseEvent for SSC's fold.
      */
     @Inject
     lateinit var sseEventStream: SseEventStream
@@ -110,6 +117,13 @@ class SessionStreamingService : Service() {
     @Inject lateinit var bootstrapRunner: BootstrapRunner
     @Inject lateinit var sessionSnapshotProvider: SessionSnapshotProvider
     @Inject lateinit var appLifecycleMonitor: AppLifecycleMonitor
+
+    // ── CP9: Hilt-injected collaborators for [sseOwner] (the SSE collector). ──
+
+    @Inject lateinit var repository: OpenCodeRepository
+    @Inject lateinit var bootstrapCoordinator: cn.vectory.ocdroid.service.bootstrap.ConnectionBootstrapCoordinator
+    @Inject lateinit var sharedStateStore: SharedStateStore
+    @Inject lateinit var sharedEffectBus: SharedEffectBus
 
     /**
      * Service-lifetime [CoroutineScope] bound to [MainScope] (Main thread).
@@ -134,12 +148,34 @@ class SessionStreamingService : Service() {
     private var controller: SessionStreamingController? = null
 
     /**
+     * CP9 (notify Phase-0 switchover): the live SSE collector. Replaces the
+     * `sseJob` + `launchSseCollection` that USED to live inside
+     * [cn.vectory.ocdroid.ui.controller.ConnectionCoordinator]. Built in
+     * [onCreate]; torn down in [onDestroy] before [scope] is cancelled.
+     *
+     * The shell's [ServiceShell.connectSse] / [ServiceShell.disconnectSse]
+     * forward to this owner — the Service IS the SSE producer now.
+     */
+    private var sseOwner: ServiceSseConnectionOwner? = null
+
+    /**
+     * CP9 §A6: the bootstrap restart latch. Retained as a `Job?` so a second
+     * CP9 bootstrap/start intent on the same Service instance can cancel an
+     * in-flight bootstrap and run a fresh one (a `stopSelf()` + a new start
+     * that overlap can no longer be stranded by a once-per-instance latch).
+     * Single-flight is preserved (one active bootstrap at a time); the
+     * coordinator's `onBootstrapResult()` remains the only legal L3→running
+     * entry.
+     */
+    private var bootstrapJob: Job? = null
+
+    /**
      * CP5: the production [ServiceShell] — a private adapter that translates
      * each shell call to `ServiceCompat` / `NotificationManagerCompat` /
-     * `stopSelf` / SSE stubs. Held as a field so the controller can be
-     * rebuilt in tests against a fake shell instead.
+     * `stopSelf` / SSE side-effects.
      *
-     * SSE side ([shellSseConnect] / [shellSseDisconnect]) are CP9 no-op stubs.
+     * SSE side ([shellSseConnect] / [shellSseDisconnect]) forward to
+     * [sseOwner] — the collector is owned here (CP9).
      */
     private val shell: ServiceShell = object : ServiceShell {
         override fun startForeground(spec: NotificationSpec) =
@@ -161,14 +197,18 @@ class SessionStreamingService : Service() {
             // Likewise.
         }
         override fun connectSse(identity: ConnectionIdentity) {
-            // CP9: SSE collector moves here from ConnectionCoordinator
-            // (launchSseCollection + sseJob ownership). Today the collector
-            // still lives in CC, so this is a DEBUG-only no-op stub.
-            DebugLog.d(TAG, "shell.connectSse(identity epoch=${identity.epoch}) — CP9 stub (SSE still in CC)")
+            // CP9: SSE collector is owned here. The coordinator's §4.4
+            // ordering guarantees StartSse is emitted BEFORE StopPoller (new
+            // source active before retiring old).
+            sseOwner?.connect(identity)
         }
         override fun disconnectSse() {
-            // CP9: SSE collector teardown (sseJob?.cancel()) moves here.
-            DebugLog.d(TAG, "shell.disconnectSse — CP9 stub (SSE still in CC)")
+            // CP9: SSE collector teardown. The coordinator emits StopSse
+            // AFTER StartPoller (new source active before retiring old);
+            // markGap=true so a §4.4 teardown stamps the gap-dirty signal
+            // via the CancelSse effect (SessionSyncCoordinator observes it
+            // and reconciles on the next server.connected).
+            sseOwner?.disconnect(markGap = true)
         }
     }
 
@@ -176,10 +216,9 @@ class SessionStreamingService : Service() {
      * Process-level SSE event surface (FGS spec §1 / dev-design P0.1).
      *
      * Delegates to [sseEventStream.events] — the single process-wide stream.
-     * The producer today (CP3+) is `ConnectionCoordinator.launchSseCollection`;
-     * when the SSE ownership migrates here (CP9), [ServiceShell.connectSse]
-     * will publish into the same stream via [SseEventStream.emit], and the
-     * bridge + downstream fold path stay unchanged.
+     * CP9 producer: [sseOwner] publishes each [IdentifiedSseEvent] into the
+     * same stream via [SseEventStream.emit]. The bridge + downstream fold
+     * path stay byte-for-byte unchanged from CP3-8.
      */
     val events: SharedFlow<Result<IdentifiedSseEvent>> get() = sseEventStream.events
 
@@ -194,6 +233,20 @@ class SessionStreamingService : Service() {
             idleMonitoring = getString(R.string.notify_session_idle_monitoring),
             degradedTitle = getString(R.string.notify_session_degraded_title),
             degradedContent = getString(R.string.notify_session_degraded_content),
+        )
+        // CP9: construct the SSE collector here (one instance per Service
+        // instance). The owner publishes into the process-wide
+        // [sseEventStream]; the bridge (eagerly started from AppCore init)
+        // routes through the §2 epoch guard + §11 dual-channel.
+        sseOwner = ServiceSseConnectionOwner(
+            scope = scope,
+            repository = repository,
+            identityStore = identityStore,
+            bootstrapCoordinator = bootstrapCoordinator,
+            sseEventStream = sseEventStream,
+            sharedStateStore = sharedStateStore,
+            sharedEffectBus = sharedEffectBus,
+            onTerminalExhaustion = { coordinator.onDisconnect() },
         )
         controller = SessionStreamingController(
             coordinator = coordinator,
@@ -230,11 +283,12 @@ class SessionStreamingService : Service() {
      *     notification inside the 5s ANR window — BEFORE any network/TOFU
      *     work. The placeholder is LOW priority + ongoing.
      *  3. **Async** bootstrap (§5 steps 3–6) on [scope] via
-     *     [SessionStreamingController.bootstrapAsync]: tunnel/health/TOFU
-     *     (CC-owned until CP9) → global `getSessionStatus` (§3 merge) →
-     *     [StreamingLifecycleCoordinator.onBootstrapResult]. The coordinator's
-     *     decision matrix then drives L1/L2Active/L3 via the command stream
-     *     the controller collects.
+     *    [SessionStreamingController.bootstrapAsync]: tunnel/health/TOFU
+     *    → global `getSessionStatus` (§3 merge) →
+     *    [StreamingLifecycleCoordinator.onBootstrapResult]. The coordinator's
+     *    decision matrix then drives L1/L2Active/L3 via the command stream
+     *    the controller collects (StartSse → [sseOwner].connect /
+     *    StopSse → [sseOwner].disconnect).
      *
      * Returns [START_STICKY] (FGS spec §5 decision 2 / §15: covers
      * process-death rebuild; does NOT guarantee timely recovery and does NOT
@@ -266,9 +320,15 @@ class SessionStreamingService : Service() {
         }
         // §5 step 2: startForeground within the 5s ANR window, BEFORE any async work.
         promoteToForeground(buildNotification(SessionStatusNotifier.buildPlaceholder(strings)))
-        // §5 steps 3–6: async bootstrap. Controller is single-flight; safe if
-        // onStartCommand fires multiple times (sticky rebuild).
-        scope.launch { controller?.bootstrapAsync() }
+        // §5 steps 3–6: async bootstrap. CP9 §A6: retain the bootstrap job so
+        // a second CP9 bootstrap/start intent on the same Service instance
+        // cancels the in-flight one and runs a fresh sequence (a stopSelf +
+        // new start that overlap can no longer be stranded by a once-per-
+        // instance latch). Single-flight preserved (one active bootstrap at a
+        // time); coordinator.onBootstrapResult() remains the only legal
+        // L3→running entry.
+        bootstrapJob?.cancel()
+        bootstrapJob = scope.launch { controller?.bootstrapAsync() }
         return START_STICKY
     }
 
@@ -309,7 +369,15 @@ class SessionStreamingService : Service() {
      * Updates the ongoing notification WITHOUT touching FGS promotion state.
      * Used by the §5 degraded transition (no teardown, no promotion — just
      * surface the Open-app hint).
+     *
+     * §lint: MissingPermission is satisfied by the runCatching guard (a
+     * SecurityException from a denied POST_NOTIFICATIONS or a per-channel
+     * mute is observed as a failure and logged; it does NOT crash the
+     * Service). Lint's dataflow cannot track runCatching's exception
+     * suppression, so the annotation is explicit (mirrors
+     * [AppLifecycleMonitor.notifyDecision] / [AppLifecycleMonitor.notifyError]).
      */
+    @Suppress("MissingPermission")
     private fun notifyOngoing(notification: Notification) {
         runCatching {
             NotificationManagerCompat.from(this).notify(
@@ -423,7 +491,14 @@ class SessionStreamingService : Service() {
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onDestroy() {
-        DebugLog.i(TAG, "onDestroy: cancelling service scope")
+        DebugLog.i(TAG, "onDestroy: disconnecting SSE + cancelling service scope")
+        // CP9 §A5: tear down the SSE collector BEFORE cancelling [scope] so
+        // markGap=true (the gap-dirty signal via CancelSse effect) is emitted
+        // while [scope] is still alive. After scope.cancel() the collector
+        // job is structurally cancelled anyway, but the explicit disconnect
+        // guarantees the gap signal fires (SessionSyncCoordinator observes
+        // it and reconciles on next server.connected).
+        sseOwner?.disconnect()
         controller?.shutdown()
         scope.cancel()
         super.onDestroy()
@@ -451,6 +526,18 @@ class SessionStreamingService : Service() {
          * without going through the Service class.
          */
         const val ACTION_CLOSE_BACKGROUND = "cn.vectory.ocdroid.action.CLOSE_BACKGROUND"
+
+        /**
+         * CP9 §C15: the bootstrap/start action. The
+         * [cn.vectory.ocdroid.service.StreamingServiceLauncher] issues a
+         * `startForegroundService(this).setAction(ACTION_BOOTSTRAP)` when
+         * foreground AND layer is L3; this Service's [onStartCommand] routes
+         * any non-`ACTION_CLOSE_BACKGROUND` action through the §5 bootstrap
+         * path (placeholder promotion → async bootstrap → coordinator
+         * decision matrix). Declared `const val` so the launcher can
+         * reference the literal without going through the Service class.
+         */
+        const val ACTION_BOOTSTRAP = "cn.vectory.ocdroid.action.BOOTSTRAP"
 
         /**
          * Request code for the §16-U1 close-action PendingIntent. Stable so

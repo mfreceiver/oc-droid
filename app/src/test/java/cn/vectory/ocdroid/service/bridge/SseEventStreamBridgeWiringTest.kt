@@ -9,10 +9,10 @@ import cn.vectory.ocdroid.service.events.IdentifiedSseEvent
 import cn.vectory.ocdroid.service.events.SseEventStream
 import cn.vectory.ocdroid.service.identity.ConnectionIdentity
 import cn.vectory.ocdroid.service.identity.ConnectionIdentityStore
+import cn.vectory.ocdroid.service.streaming.ServiceSseConnectionOwner
 import cn.vectory.ocdroid.ui.SharedEffectBus
 import cn.vectory.ocdroid.ui.SharedStateStore
 import cn.vectory.ocdroid.ui.SliceFlows
-import cn.vectory.ocdroid.ui.controller.ConnectionCoordinator
 import cn.vectory.ocdroid.ui.controller.ControllerEffect
 import cn.vectory.ocdroid.ui.controller.SessionSyncCoordinator
 import cn.vectory.ocdroid.util.SettingsManager
@@ -25,7 +25,6 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.asSharedFlow
-import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.toList
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.TestScope
@@ -34,27 +33,26 @@ import kotlinx.coroutines.test.advanceUntilIdle
 import kotlinx.coroutines.test.runTest
 import org.junit.After
 import org.junit.Assert.assertEquals
-import org.junit.Assert.assertFalse
-import org.junit.Assert.assertNotNull
-import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
 
 /**
- * CP3 (notify Phase-0): end-to-end wiring tests for the
- * `CC collector → SseEventStream → SseEventBridge → AppCore dispatch → SSC fold`
- * path.
+ * CP3 (notify Phase-0) + CP9 switchover: end-to-end wiring tests for the
+ * `Service-owned collector → SseEventStream → SseEventBridge → AppCore
+ * dispatch → SSC fold` path.
  *
  * Proves:
- *  - A current-identity SSE frame published by CC into [SseEventStream]
- *    flows through the started [SseEventBridge] → reaches AppCore's
- *    `ControllerEffect.OnSseEvent` emission → SSC's identity-checked
- *    `handleEvent(IdentifiedSseEvent)` folds it.
+ *  - A current-identity SSE frame published by [ServiceSseConnectionOwner]
+ *    into [SseEventStream] flows through the started [SseEventBridge] →
+ *    reaches AppCore's `ControllerEffect.OnSseEvent` emission → SSC's
+ *    identity-checked `handleEvent(IdentifiedSseEvent)` folds it.
  *  - A stale-identity frame is dropped at the bridge's §2 epoch guard and
  *    NEVER reaches SSC.
  *  - Delta overflow populates `dirtySessions` and `consumeDirty()` returns
  *    + clears (§11 consumable overflow).
+ *  - CP9: the collector producer IS [ServiceSseConnectionOwner] (replaces
+ *    the previous ConnectionCoordinator.launchSseCollection).
  */
 @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
 class SseEventStreamBridgeWiringTest {
@@ -68,7 +66,7 @@ class SseEventStreamBridgeWiringTest {
     private lateinit var identityStore: ConnectionIdentityStore
     private lateinit var stream: SseEventStream
     private lateinit var bridge: SseEventBridge
-    private lateinit var coordinator: ConnectionCoordinator
+    private lateinit var sseOwner: ServiceSseConnectionOwner
     private lateinit var sessionSyncCoordinator: SessionSyncCoordinator
 
     @Before
@@ -101,18 +99,20 @@ class SseEventStreamBridgeWiringTest {
         coEvery { repository.getCommands() } returns Result.success(emptyList())
         coEvery { repository.getSessionsForDirectory(any()) } returns Result.success(emptyList())
 
-        coordinator = ConnectionCoordinator(
+        // CP9: the collector is now ServiceSseConnectionOwner (replaces CC's
+        // launchSseCollection). Wire it with the same collaborators the
+        // Service injects in production.
+        sseOwner = ServiceSseConnectionOwner(
             scope = kotlinx.coroutines.CoroutineScope(
                 SupervisorJob() + Dispatchers.Unconfined
             ),
-            slices = slices,
             repository = repository,
-            settingsManager = settingsManager,
-            effects = effects,
-            serverCompatProfile = ServerCompatProfile(),
             identityStore = identityStore,
             bootstrapCoordinator = cn.vectory.ocdroid.service.bootstrap.ConnectionBootstrapCoordinator(),
             sseEventStream = stream,
+            sharedStateStore = store,
+            sharedEffectBus = effects,
+            onTerminalExhaustion = {},
         )
         sessionSyncCoordinator = SessionSyncCoordinator(
             scope = kotlinx.coroutines.CoroutineScope(
@@ -137,7 +137,7 @@ class SseEventStreamBridgeWiringTest {
     }
 
     /**
-     * CP3 spec test: a current-identity SSE frame published by CC into
+     * CP3 spec test: a current-identity SSE frame published into
      * [SseEventStream] flows through the started [SseEventBridge] → reaches
      * AppCore's `ControllerEffect.OnSseEvent` emission → SSC folds it.
      */
@@ -148,16 +148,13 @@ class SseEventStreamBridgeWiringTest {
         // Start the bridge (eagerly, as AppCore does).
         bridge.start(stream.events) { identityStore.currentEpoch() }
 
-        // CC publishes a control event via the stream (simulating collector
-        // output). Use the stream directly (CC's collector calls
+        // Publish a control event via the stream directly (the collector calls
         // stream.emit(Result.success(identified))).
         val event = SSEEvent(payload = SSEPayload(type = "session.status"))
         stream.emit(Result.success(IdentifiedSseEvent(identity, event)))
         advanceUntilIdle()
 
-        // The bridge routed it to controlEvents. Collect from the bridge's
-        // control channel and verify the frame arrives with the correct
-        // identity (proves the epoch guard passed + routing happened).
+        // The bridge routed it to controlEvents.
         val controlReceived = mutableListOf<IdentifiedSseEvent>()
         val controlJob = launch {
             bridge.controlEvents.collect { controlReceived.add(it) }
@@ -264,9 +261,9 @@ class SseEventStreamBridgeWiringTest {
         controlJob.cancel()
         deltaJob.cancel()
 
-        assertNull(
+        assertTrue(
             "stale-identity frame must not reach SSC fold — no sessionStatuses write",
-            slices.sessionList.value.sessionStatuses["s-stale"],
+            !slices.sessionList.value.sessionStatuses.containsKey("s-stale"),
         )
     }
 
@@ -279,12 +276,6 @@ class SseEventStreamBridgeWiringTest {
         val identity = identityStore.bind("test-fp", "/proj", "endpoint")
         bridge.start(stream.events) { identityStore.currentEpoch() }
 
-        // Start a delta consumer that drains slowly (capacity 256, we flood
-        // beyond it). The bridge's deltaChannel has capacity 256; to trigger
-        // overflow we emit > 256 without a consumer.
-        // Actually, the bridge routes via trySend which fails when the channel
-        // is full. Without a consumer, the channel buffer fills at 256 and
-        // subsequent trySend calls fail → markDeltaOverflow.
         val floodSize = SseEventBridge.DELTA_CHANNEL_CAPACITY + 40
         repeat(floodSize) { i ->
             stream.emit(
@@ -329,15 +320,17 @@ class SseEventStreamBridgeWiringTest {
     }
 
     /**
-     * CP3 spec test: CC's collector publishes into SseEventStream (end-to-end
-     * through the real collector path, not just stream.emit). Proves the CC
-     * collector was rerouted to the stream in CP3.
+     * CP9 spec test (replaces the CP3 CC-collector test): the
+     * [ServiceSseConnectionOwner] publishes into SseEventStream end-to-end
+     * (through the real collector path, not just stream.emit). Proves the
+     * switchover relocated the producer from CC to the Service-owned owner
+     * without disturbing the bridge wiring.
      */
     @Test
-    fun `CP3 CC collector publishes to SseEventStream instead of direct OnSseEvent`() = runTest {
+    fun `CP9 ServiceSseConnectionOwner publishes to SseEventStream and reaches bridge`() = runTest {
         val identity = identityStore.bind("test-fp", "/proj", "endpoint")
 
-        // Feed that CC's launchSseCollection will collect from.
+        // Feed that sseOwner.connect will collect from.
         val feed = MutableSharedFlow<Result<SSEEvent>>(extraBufferCapacity = 8)
         every { repository.connectSSE(any()) } returns feed.asSharedFlow()
 
@@ -349,12 +342,12 @@ class SseEventStreamBridgeWiringTest {
             bridge.controlEvents.collect { controlReceived.add(it) }
         }
 
-        // Start CC's SSE collector.
-        coordinator.startSSE()
+        // Start the Service-owned collector.
+        sseOwner.connect(identity)
         advanceUntilIdle()
 
-        // Emit a control event into the feed → CC wraps + publishes to stream
-        // → bridge routes to control channel.
+        // Emit a control event into the feed → sseOwner wraps + publishes to
+        // stream → bridge routes to control channel.
         val event = SSEEvent(payload = SSEPayload(type = "session.status"))
         feed.tryEmit(Result.success(event))
         advanceUntilIdle()
@@ -362,7 +355,7 @@ class SseEventStreamBridgeWiringTest {
         controlJob.cancel()
 
         assertEquals(
-            "CC collector published to stream → bridge routed to control channel",
+            "ServiceSseConnectionOwner published to stream → bridge routed to control channel",
             1,
             controlReceived.size,
         )
@@ -370,9 +363,9 @@ class SseEventStreamBridgeWiringTest {
         assertEquals(0L, controlReceived[0].identity.epoch)
 
         // No direct ControllerEffect.OnSseEvent was emitted on the effect bus
-        // (CC now publishes to the stream, not the effect bus).
+        // (the owner publishes to the stream, not the effect bus).
         assertTrue(
-            "no direct OnSseEvent on effect bus (CC publishes to stream)",
+            "no direct OnSseEvent on effect bus (owner publishes to stream)",
             collectedEffects.filterIsInstance<ControllerEffect.OnSseEvent>().isEmpty(),
         )
 

@@ -183,8 +183,9 @@ class ForkSessionTest {
             identityStore = identityStore,
             // CP2 (notify Phase-0): delegate TOFU state.
             bootstrapCoordinator = cn.vectory.ocdroid.service.bootstrap.ConnectionBootstrapCoordinator(),
-            // CP3 (notify Phase-0): publish into the SSE event stream.
-            sseEventStream = sseEventStream,
+            // CP9 (notify Phase-0 switchover): CC's startSSE now calls the
+            // streaming Service launcher (no more repository.connectSSE).
+            streamingServiceLauncher = cn.vectory.ocdroid.RecordingStreamingServiceLauncher(),
         )
         val gapFillCoordinator = cn.vectory.ocdroid.ui.chat.GapFillCoordinator(
             repository = repository,

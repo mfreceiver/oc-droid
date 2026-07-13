@@ -32,12 +32,26 @@ import kotlinx.coroutines.launch
  *  - `>5min`  → global cold-start reload of the current session + stale banner;
  *    suppress the reconnect catch-up (cold-start already loaded)
  *
+ * **CP9 switchover**: entering background NO LONGER unconditionally emits
+ * `ControllerEffect.CancelSse`. The coordinator decides:
+ *  - busy/unknown from L1 → retain SSE (L1→L2Active keeps the live feed).
+ *  - idle fg→bg → L3 teardown (the Service emits the gap signal via its own
+ *    `disconnect()`; FCC does not need to fire it).
+ *  - L2-active authoritative idle after debounce → L2-idle (poller first,
+ *    then StopSse; gap signal again comes from the Service's `disconnect()`).
+ *
+ * FCC's background branch now ONLY: clears the in-progress draft + stamps
+ * `backgroundedAtMs` (so the foreground-return tier bucketing still works).
+ * The SSE cancellation decision is delegated to the lifecycle coordinator
+ * (FGS spec §4 / CP9 plan §E25).
+ *
  * State machine fields (previously @Volatile on MainViewModel) live HERE now;
  * the orchestrator no longer touches them directly. The controller subscribes
  * to [AppLifecycleMonitor.isInForeground] in its own init (so the subscription
  * lifecycle follows the controller, which follows the orchestrator).
  *
- * RFC R-16 §C / §M1. Zero behaviour change vs the pre-extraction logic.
+ * RFC R-16 §C / §M1. Zero behaviour change vs the pre-extraction logic
+ * (modulo the CP9 background-branch slimming documented above).
  */
 class ForegroundCatchUpController(
     private val appLifecycleMonitor: AppLifecycleMonitor,
@@ -100,8 +114,13 @@ class ForegroundCatchUpController(
      * most once per [FOREGROUND_RELOAD_MIN_INTERVAL_MS] — wipe stale streaming
      * buffers and reload the current session (the wipe+reload are coupled).
      *
-     * On **enter background** (ON_STOP): cancel the SSE feed (R-A: saves data,
-     * avoids half-open sockets).
+     * On **enter background** (ON_STOP): clear the in-progress draft +
+     * stamp [backgroundedAtMs] so the foreground-return tier bucketing
+     * works. CP9 §E23-E25: NO LONGER emits `ControllerEffect.CancelSse`
+     * (the coordinator decides whether SSE stays alive — busy/unknown from
+     * L1 → L2Active retains the live feed; idle fg→bg → L3 teardown;
+     * L2-active idle after debounce → L2-idle). The gap-dirty signal on
+     * teardown is emitted by the Service's own `disconnect()`, not here.
      */
     fun onForegroundChanged(inForeground: Boolean) {
         // The first emission is the current state, not a transition — skip so
@@ -143,13 +162,17 @@ class ForegroundCatchUpController(
                 }
             }
         } else {
-            // Discard any in-progress draft before tearing down SSE so a
-            // backgrounded draft does not leak into the next foreground cycle.
+            // Discard any in-progress draft so a backgrounded draft does not
+            // leak into the next foreground cycle. CP9 §E24: keep
+            // [backgroundedAtMs] stamping (the foreground-return tier
+            // bucketing still needs it).
             clearDraft()
             backgroundedAtMs = clock()
-            DebugLog.i("SSE", "cancelSse (background)")
-            // §R18 Phase 3 Wave 1 (P1-3 B 类): 单发非 suspend → tryEmitEffect。
-            effects.tryEmitEffect(ControllerEffect.CancelSse)
+            // CP9 §E23: DELETE the `DebugLog.i("SSE", "cancelSse (background)")`
+            // + `effects.tryEmitEffect(ControllerEffect.CancelSse)` pair. The
+            // coordinator now decides whether SSE survives the bg transition
+            // (busy/unknown → keep; idle → teardown). The gap signal on a
+            // real teardown comes from the Service's disconnect(), not here.
         }
     }
 

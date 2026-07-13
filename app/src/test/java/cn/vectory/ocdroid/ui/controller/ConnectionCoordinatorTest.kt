@@ -2,9 +2,9 @@ package cn.vectory.ocdroid.ui.controller
 
 import android.util.Log
 import cn.vectory.ocdroid.R
+import cn.vectory.ocdroid.RecordingStreamingServiceLauncher
 import cn.vectory.ocdroid.data.api.CommandInfo
 import cn.vectory.ocdroid.data.model.HealthResponse
-import cn.vectory.ocdroid.data.model.SSEEvent
 import cn.vectory.ocdroid.data.model.Session
 import cn.vectory.ocdroid.data.repository.OpenCodeRepository
 import cn.vectory.ocdroid.ui.ChatState
@@ -29,10 +29,6 @@ import io.mockk.mockkStatic
 import io.mockk.unmockkAll
 import io.mockk.verify
 import kotlinx.coroutines.CompletableDeferred
-import kotlinx.coroutines.flow.MutableSharedFlow
-import kotlinx.coroutines.flow.asSharedFlow
-import kotlinx.coroutines.flow.flow
-import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.toList
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.TestScope
@@ -40,8 +36,6 @@ import kotlinx.coroutines.test.UnconfinedTestDispatcher
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
-import org.junit.Assert.assertNotNull
-import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
@@ -87,6 +81,12 @@ class ConnectionCoordinatorTest {
     private lateinit var identityStore: cn.vectory.ocdroid.service.identity.ConnectionIdentityStore
     /** CP2 (notify Phase-0): the shared TOFU bootstrap coordinator. */
     private lateinit var bootstrapCoordinator: cn.vectory.ocdroid.service.bootstrap.ConnectionBootstrapCoordinator
+    /**
+     * CP9 (notify Phase-0 switchover): the recording launcher. Tests assert
+     * on its callCount instead of `repository.connectSSE` invocations after
+     * the switchover (CC's startSSE now calls the launcher).
+     */
+    private lateinit var launcher: RecordingStreamingServiceLauncher
     /** §R-17 batch2 / §batch 3b: captures UiEvents emitted on effects.uiEvents. */
     private val recordedEvents = mutableListOf<UiEvent>()
 
@@ -113,6 +113,7 @@ class ConnectionCoordinatorTest {
         now = 100_000L
         identityStore = cn.vectory.ocdroid.service.identity.ConnectionIdentityStore()
         bootstrapCoordinator = cn.vectory.ocdroid.service.bootstrap.ConnectionBootstrapCoordinator()
+        launcher = RecordingStreamingServiceLauncher()
         coordinator = ConnectionCoordinator(
             scope = scope,
             slices = slices,
@@ -125,6 +126,13 @@ class ConnectionCoordinatorTest {
             // CP2: delegate TOFU state to the shared coordinator so the
             // delegation test can assert on bootstrapCoordinator.tofuState.
             bootstrapCoordinator = bootstrapCoordinator,
+            // CP9: CC's startSSE now calls the launcher (atomic ownership
+            // switch). cancelSse / cancelSseForReconfigure route through
+            // streamingLifecycleCoordinator (null here — they are no-ops in
+            // this test core; the cancelSseForReconfigure test asserts on
+            // the HostReconfigured epoch bump which still fires).
+            streamingServiceLauncher = launcher,
+            streamingLifecycleCoordinator = null,
         )
         // Defaults: no directory fetch on loadInitialData (so the directory
         // coroutine — whose relaxed Result<List<Session>> mock would otherwise
@@ -201,7 +209,6 @@ class ConnectionCoordinatorTest {
     @Test
     fun `testConnection on healthy sets connected phase and fans out initial data plus SSE`() {
         coEvery { repository.checkHealth() } returns Result.success(HealthResponse(healthy = true, version = "9.9"))
-        every { repository.connectSSE(any()) } returns flowOf()
         coEvery { repository.getCommands() } returns Result.success(emptyList())
 
         coordinator.testConnection()
@@ -221,8 +228,16 @@ class ConnectionCoordinatorTest {
         assertEquals(1, collectedEffects.filterIsInstance<ControllerEffect.LoadPendingQuestions>().size)
         assertEquals(1, collectedEffects.filterIsInstance<ControllerEffect.LoadPendingPermissions>().size)
         coVerify { repository.getCommands() }
-        // SSE feed started.
-        verify { repository.connectSSE(any()) }
+        // CP9 §F27: SSE is now started via the launcher (atomic ownership
+        // switch). The launcher is invoked EXACTLY ONCE on a healthy
+        // connect; repository.connectSSE is invoked ZERO times (CC no
+        // longer owns the collector).
+        assertEquals(
+            "launcher.ensureStarted invoked exactly once on healthy connect",
+            1,
+            launcher.callCount,
+        )
+        verify(exactly = 0) { repository.connectSSE(any()) }
     }
 
     @Test
@@ -276,7 +291,6 @@ class ConnectionCoordinatorTest {
         // connect must NOT emit a fresh UiEvent.Error (it used to clear the
         // legacy `state.error` field here).
         coEvery { repository.checkHealth() } returns Result.success(HealthResponse(healthy = true, version = "1.0"))
-        every { repository.connectSSE(any()) } returns flowOf()
         coEvery { repository.getCommands() } returns Result.success(emptyList())
 
         coordinator.testConnection()
@@ -294,7 +308,6 @@ class ConnectionCoordinatorTest {
         // The coordinator does its own 24h dedup; we only verify the hook is
         // wired (the call fires + passes the current fp).
         coEvery { repository.checkHealth() } returns Result.success(HealthResponse(healthy = true, version = "1.0"))
-        every { repository.connectSSE(any()) } returns flowOf()
         coEvery { repository.getCommands() } returns Result.success(emptyList())
         val cacheMaintenance = mockk<cn.vectory.ocdroid.data.cache.CacheMaintenanceCoordinator>(relaxed = true)
         val sweepCoordinator = ConnectionCoordinator(
@@ -307,6 +320,7 @@ class ConnectionCoordinatorTest {
             cacheMaintenanceCoordinator = cacheMaintenance,
             currentServerGroupFp = { "fp-test" },
             clock = { now },
+            streamingServiceLauncher = RecordingStreamingServiceLauncher(),
         )
 
         sweepCoordinator.testConnection()
@@ -321,7 +335,6 @@ class ConnectionCoordinatorTest {
         // cacheMaintenanceCoordinator null. The hook must be a no-op rather
         // than NPE — the connection itself must succeed.
         coEvery { repository.checkHealth() } returns Result.success(HealthResponse(healthy = true, version = "1.0"))
-        every { repository.connectSSE(any()) } returns flowOf()
         coEvery { repository.getCommands() } returns Result.success(emptyList())
 
         coordinator.testConnection() // null cacheMaintenanceCoordinator
@@ -335,7 +348,6 @@ class ConnectionCoordinatorTest {
         // The sweep is fire-and-forget — a failure (e.g. DB locked) MUST NOT
         // propagate up and break the connection's healthy state.
         coEvery { repository.checkHealth() } returns Result.success(HealthResponse(healthy = true, version = "1.0"))
-        every { repository.connectSSE(any()) } returns flowOf()
         coEvery { repository.getCommands() } returns Result.success(emptyList())
         val cacheMaintenance = mockk<cn.vectory.ocdroid.data.cache.CacheMaintenanceCoordinator>()
         coEvery { cacheMaintenance.dailySweepIfNeeded(any()) } throws java.io.IOException("db locked")
@@ -349,6 +361,7 @@ class ConnectionCoordinatorTest {
             cacheMaintenanceCoordinator = cacheMaintenance,
             currentServerGroupFp = { "fp-test" },
             clock = { now },
+            streamingServiceLauncher = RecordingStreamingServiceLauncher(),
         )
 
         sweepCoordinator.testConnection()
@@ -382,7 +395,6 @@ class ConnectionCoordinatorTest {
 
     @Test
     fun `loadInitialData fans out to every loader and fetches slash commands`() {
-        every { repository.connectSSE(any()) } returns flowOf()
         coEvery { repository.getCommands() } returns Result.success(emptyList())
         every { settingsManager.currentWorkdir } returns null
 
@@ -550,184 +562,33 @@ class ConnectionCoordinatorTest {
         assertEquals(sessions, slices.sessionList.value.directorySessions["/proj"])
     }
 
-    // ── §R-19 fix Blocker 1: SSE stale-host event drop at forwarding layer ──
+    // ── §R-19 fix Blocker 1 / SSE lifecycle: REMOVED in CP9 ─────────────────
+    //
+    // CP9 (notify Phase-0 switchover): the CC-owned collector tests moved to
+    // ServiceSseConnectionOwnerTest. CC no longer owns sseJob / launchSse-
+    // Collection; startSSE delegates to StreamingServiceLauncher, and the
+    // stale-identity drop / event-level failure / collection-level failure /
+    // prior-job replacement / cancel-stops-forwarding / workdir retarget /
+    // capture-time identity / liveness recovery behaviors are now property
+    // of the Service-owned collector.
+
+    // ── SSE lifecycle (cancelSseForReconfigure still lives here) ───────────
 
     @Test
-    fun `launchSseCollection drops events from a stale-host job after reconfigure`() {
-        // §R-19 Sprint 1 Lane A (P1-10) fix Blocker 1: the production-grade
-        // stale-host guard lives HERE (in ConnectionCoordinator.launchSseCollection),
-        // not in SessionSyncCoordinator. The generation is captured at SSE job
-        // start and re-checked per collected event; a host reconfigure that
-        // lands mid-collection causes every subsequent event from THIS job to
-        // be dropped at the forwarding layer (never becomes an OnSseEvent).
-        //
-        // Without this check a late server.connected from the previous host's
-        // cancelled SSE job would arrive at SessionSyncCoordinator.handleEvent,
-        // be stamped with the CURRENT generation (mismatch undetectable at
-        // consume time), and pollute the new host's cold-start semantics.
-        val feed = MutableSharedFlow<Result<SSEEvent>>(extraBufferCapacity = 8)
-        every { repository.connectSSE(any()) } returns feed.asSharedFlow()
-
-        coordinator.startSSE()
-        runPending()
-
-        // Event #1: forwarded normally (gen 0 == captured sseGenAtStart 0).
-        val evt1 = SSEEvent(payload = cn.vectory.ocdroid.data.model.SSEPayload(type = "evt1"))
-        feed.tryEmit(Result.success(evt1))
-        runPending()
-        assertEquals("evt1 forwarded pre-reconfigure", listOf(evt1), forwardedSseEvents())
-
-        // Host reconfigure: bumps directoryFetchGeneration to 1.
+    fun `cancelSseForReconfigure advances epoch and emits HostReconfigured`() {
+        // CP9 §F27: cancelSseForReconfigure still bumps the identityStore
+        // epoch AND emits HostReconfigured(newEpoch). The streamingLifecycle
+        // teardown is now routed through coordinator.onDisconnect (the
+        // streamingLifecycleCoordinator is null in this test core, so the
+        // path is a no-op here — the production wiring is verified in
+        // SessionStreamingControllerWiringTest).
         coordinator.cancelSseForReconfigure()
-        // NOTE: cancelSseForReconfigure also calls sseJob?.cancel(), so the
-        // collector is being torn down. But the race window we cover is the
-        // frame already buffered in `feed` (or mid-flight in the collector)
-        // before cancellation propagates — the generation check at collect time
-        // is the safety net.
 
-        // Stale event #2 from the OLD job: must NOT be forwarded.
-        val staleEvt = SSEEvent(payload = cn.vectory.ocdroid.data.model.SSEPayload(type = "stale"))
-        feed.tryEmit(Result.success(staleEvt))
-        runPending()
-
-        // Only evt1 was forwarded; staleEvt was dropped by the per-event
-        // generation check.
-        assertEquals(
-            "stale-host event dropped at CC forwarding layer",
-            listOf(evt1),
-            forwardedSseEvents()
-        )
-    }
-
-    @Test
-    fun `launchSseCollection forwards events normally when no reconfigure intervenes`() {
-        // Positive control for the Blocker 1 generation guard: identical setup
-        // but NO reconfigure interleaved → every event forwards.
-        val feed = MutableSharedFlow<Result<SSEEvent>>(extraBufferCapacity = 8)
-        every { repository.connectSSE(any()) } returns feed.asSharedFlow()
-
-        coordinator.startSSE()
-        runPending()
-
-        val evt1 = SSEEvent(payload = cn.vectory.ocdroid.data.model.SSEPayload(type = "a"))
-        val evt2 = SSEEvent(payload = cn.vectory.ocdroid.data.model.SSEPayload(type = "b"))
-        feed.tryEmit(Result.success(evt1))
-        feed.tryEmit(Result.success(evt2))
-        runPending()
-
-        assertEquals(
-            "both events forwarded when no reconfigure intervened",
-            listOf(evt1, evt2),
-            forwardedSseEvents()
-        )
-    }
-
-    // ── SSE lifecycle ──────────────────────────────────────────────────────
-
-    /** §batch 3b helper: extracts every SSE event the coordinator forwarded as
-     *  a [ControllerEffect.OnSseEvent]. CP1: OnSseEvent now wraps
-     *  [cn.vectory.ocdroid.service.events.IdentifiedSseEvent] — unwrap to the
-     *  raw [SSEEvent] for the existing assertions. */
-    private fun forwardedSseEvents(): List<SSEEvent> =
-        collectedEffects.filterIsInstance<ControllerEffect.OnSseEvent>().map { it.event.event }
-
-    @Test
-    fun `startSSE forwards each successful SSE event to the onSseEvent callback`() {
-        val event = SSEEvent(payload = cn.vectory.ocdroid.data.model.SSEPayload(type = "session.created"))
-        every { repository.connectSSE(any()) } returns flowOf(Result.success(event))
-
-        coordinator.startSSE()
-        runPending()
-
-        assertEquals(listOf(event), forwardedSseEvents())
-    }
-
-    @Test
-    fun `startSSE collection-level failure writes an SSE Error onto AppState`() {
-        every { repository.connectSSE(any()) } returns flow { throw IOException("feed exhausted") }
-
-        coordinator.startSSE()
-        runPending()
-
-        val errorEvent = recordedEvents.filterIsInstance<UiEvent.Error>().single()
-        assertEquals(R.string.error_sse_failed, errorEvent.resId)
-    }
-
-    @Test
-    fun `startSSE event-level failure writes an SSE Error onto AppState`() {
-        every { repository.connectSSE(any()) } returns flowOf(Result.failure(IOException("bad frame")))
-
-        coordinator.startSSE()
-        runPending()
-
-        val errorEvent = recordedEvents.filterIsInstance<UiEvent.Error>().single()
-        assertEquals(R.string.error_sse_failed, errorEvent.resId)
-    }
-
-    @Test
-    fun `startSSE cancels any prior in-flight SSE Job before launching a new collector`() {
-        // Two distinct hot feeds so we can tell the two collectors apart. The
-        // first collector must be cancelled when the second startSSE runs, so
-        // events emitted on flow #1 AFTER the second start no longer forward.
-        val flow1 = MutableSharedFlow<Result<SSEEvent>>(extraBufferCapacity = 8)
-        val flow2 = MutableSharedFlow<Result<SSEEvent>>(extraBufferCapacity = 8)
-        every { repository.connectSSE(any()) } returnsMany listOf(flow1.asSharedFlow(), flow2.asSharedFlow())
-        val evt1 = SSEEvent(payload = cn.vectory.ocdroid.data.model.SSEPayload(type = "a"))
-        val evt2 = SSEEvent(payload = cn.vectory.ocdroid.data.model.SSEPayload(type = "b"))
-
-        coordinator.startSSE()
-        runPending()
-        flow1.tryEmit(Result.success(evt1)) // collected by the first job
-        runPending()
-        assertEquals("first collector forwarded evt1", listOf(evt1), forwardedSseEvents())
-
-        coordinator.startSSE() // cancels job #1, launches job #2 on flow2
-        runPending()
-        flow1.tryEmit(Result.success(evt1)) // job #1 cancelled → ignored
-        flow2.tryEmit(Result.success(evt2)) // job #2 forwards
-        runPending()
-
-        assertEquals(
-            "evt1 from the cancelled collector was NOT re-forwarded; evt2 forwarded",
-            listOf(evt1, evt2),
-            forwardedSseEvents()
-        )
-        verify(atLeast = 2) { repository.connectSSE(any()) }
-    }
-
-    @Test
-    fun `cancelSse stops forwarding events from the live feed`() {
-        val feed = MutableSharedFlow<Result<SSEEvent>>(extraBufferCapacity = 8)
-        every { repository.connectSSE(any()) } returns feed.asSharedFlow()
-        val evt = SSEEvent(payload = cn.vectory.ocdroid.data.model.SSEPayload(type = "a"))
-
-        coordinator.startSSE()
-        runPending()
-        coordinator.cancelSse()
-        runPending()
-        feed.tryEmit(Result.success(evt)) // collector cancelled → not forwarded
-        runPending()
-
-        assertTrue("no event forwarded after cancelSse", forwardedSseEvents().isEmpty())
-    }
-
-    @Test
-    fun `cancelSseForReconfigure cancels the feed and fires onHostReconfigured`() {
-        val feed = MutableSharedFlow<Result<SSEEvent>>(extraBufferCapacity = 8)
-        every { repository.connectSSE(any()) } returns feed.asSharedFlow()
-        val evt = SSEEvent(payload = cn.vectory.ocdroid.data.model.SSEPayload(type = "a"))
-
-        coordinator.startSSE()
-        runPending()
-        coordinator.cancelSseForReconfigure()
-        feed.tryEmit(Result.success(evt)) // cancelled → ignored
-        runPending()
-
-        // CP1: HostReconfigured now carries the new epoch (data class, not object).
         val reconfigured = collectedEffects.filterIsInstance<ControllerEffect.HostReconfigured>()
         assertEquals(1, reconfigured.size)
         assertTrue("HostReconfigured epoch must be > 0 after beginReconfigure", reconfigured[0].epoch > 0L)
-        assertTrue(forwardedSseEvents().isEmpty())
+        // CP1: identityStore epoch advanced.
+        assertEquals(reconfigured[0].epoch, identityStore.currentEpoch())
     }
 
     @Test
@@ -797,86 +658,36 @@ class ConnectionCoordinatorTest {
         assertTrue(recordedEvents.filterIsInstance<UiEvent.Error>().isEmpty())
     }
 
-    // ── cancelSse (null-branch coverage) ───────────────────────────────────
+    // ── cancelSse (no-op coverage; CC no longer owns a job) ────────────────
 
     @Test
-    fun `cancelSse without an active SSE feed is a safe no-op`() {
-        // No prior startSSE → sseJob is null. cancelSse must not throw (the
-        // null-conditional `sseJob?.cancel()` skip is the coverage target for
-        // the previously partially-covered line 805).
+    fun `cancelSse is a safe no-op without a streaming lifecycle coordinator`() {
+        // CP9: cancelSse now routes through streamingLifecycleCoordinator?.onDisconnect().
+        // In this test core coordinator is null — the call MUST be a no-op
+        // (null-safe delegate). The repository MUST NOT be touched.
         coordinator.cancelSse()
-
-        // No SSE feed was ever started.
         verify(exactly = 0) { repository.connectSSE(any()) }
-        // A subsequent startSSE still works after the no-op cancel.
-        every { repository.connectSSE(any()) } returns flowOf()
-        coordinator.startSSE()
-        runPending()
-        verify(exactly = 1) { repository.connectSSE(any()) }
+        // The launcher is also not touched (cancelSse does not start anything).
+        assertEquals(0, launcher.callCount)
     }
 
-    // ── §R-19 #2: single-SSE + catch-up boundary cases ─────────────────────
+    // ── §R-19 #2 single-SSE product decision: ownership moved to Service ───
     //
-    // The app runs exactly ONE SSE connection (bound to currentWorkdir). These
-    // cases pin the contract that multi-workdir correctness is recovered by
-    // catch-up (loadPendingQuestionsAllWorkdirs reads directorySessions.keys,
-    // which loadInitialData's fan-out populates for every recent workdir). See
-    // ConnectionCoordinator.startSSE KDoc for the full rationale.
+    // CP9: the SSE-bound-to-currentWorkdir tests + the workdir-retarget +
+    // reconnect-consistency tests moved to ServiceSseConnectionOwnerTest
+    // (the workdir is now derived from the StartSse command's identity, not
+    // from a fresh settingsManager.currentWorkdir read at collection start).
+    // The directory-fan-out catch-up precondition (single-SSE on B restores
+    // A's directory) is still exercised via the loadInitialData tests below.
 
     @Test
-    fun `startSSE retargets to the new currentWorkdir after a workdir switch A to B`() {
-        // §single-sse retarget: when the user switches project A → B, the next
-        // startSSE must connect B's SSE. The prior A-bound collector is
-        // cancelled by the sseJob?.cancel() in startSSE; currentWorkdir is
-        // read fresh inside launchSseCollection (no cached value drifts).
-        every { settingsManager.currentWorkdir } returns "/A"
-        val flowA = MutableSharedFlow<Result<SSEEvent>>(extraBufferCapacity = 8)
-        every { repository.connectSSE("/A") } returns flowA.asSharedFlow()
-
-        coordinator.startSSE()
-        runPending()
-
-        // A's feed is now collecting; emit one event to prove liveness.
-        val evtA = SSEEvent(payload = cn.vectory.ocdroid.data.model.SSEPayload(type = "a"))
-        flowA.tryEmit(Result.success(evtA))
-        runPending()
-        assertEquals("A's feed forwarded before switch", listOf(evtA), forwardedSseEvents())
-
-        // User switches project A → B (SessionSwitcher updates currentWorkdir;
-        // the host-switch / session-switch path then calls startSSE again).
-        every { settingsManager.currentWorkdir } returns "/B"
-        val flowB = MutableSharedFlow<Result<SSEEvent>>(extraBufferCapacity = 8)
-        every { repository.connectSSE("/B") } returns flowB.asSharedFlow()
-
-        coordinator.startSSE()
-        runPending()
-
-        // A's collector is cancelled: events on flowA no longer forward.
-        flowA.tryEmit(Result.success(evtA))
-        // B's collector is live: evtB forwards.
-        val evtB = SSEEvent(payload = cn.vectory.ocdroid.data.model.SSEPayload(type = "b"))
-        flowB.tryEmit(Result.success(evtB))
-        runPending()
-
-        // Exactly one connect per workdir; the A feed did not double-connect.
-        verify(exactly = 1) { repository.connectSSE("/A") }
-        verify(exactly = 1) { repository.connectSSE("/B") }
-        assertEquals(
-            "no extra evtA re-forwarded after retarget; evtB forwarded once",
-            listOf(evtA, evtB),
-            forwardedSseEvents()
-        )
-    }
-
-    @Test
-    fun `single SSE on currentWorkdir B still restores background workdir A directory for catch-up fan-out`() {
-        // §catch-up precondition: SSE is bound to currentWorkdir B, but A is a
-        // BACKGROUND workdir (in recentWorkdirs but not currentWorkdir). The
-        // single-SSE model relies on loadInitialData's fan-out restoring
-        // directorySessions[/A] so SessionSyncCoordinator.
-        // loadPendingQuestionsAllWorkdirs (which reads directorySessions.keys)
-        // can still poll A's pending questions. This test pins the precondition
-        // — the SessionSyncCoordinator side is exercised in its own test file.
+    fun `single SSE catch-up fan-out precondition - loadInitialData restores every recent workdir`() {
+        // §catch-up precondition: SSE is bound to currentWorkdir B (CP9: the
+        // Service binds the identity's workdir), but A is a BACKGROUND workdir
+        // (in recentWorkdirs but not currentWorkdir). The single-SSE model
+        // relies on loadInitialData's fan-out restoring directorySessions[/A]
+        // so SessionSyncCoordinator.loadPendingQuestionsAllWorkdirs (which
+        // reads directorySessions.keys) can still poll A's pending questions.
         every { settingsManager.currentWorkdir } returns "/B"
         every { settingsManager.getRecentWorkdirs(any()) } returns listOf("/A", "/B")
         coEvery { repository.getCommands() } returns Result.success(emptyList())
@@ -885,16 +696,6 @@ class ConnectionCoordinatorTest {
         coEvery { repository.getSessionsForDirectory("/A") } returns Result.success(aSessions)
         coEvery { repository.getSessionsForDirectory("/B") } returns Result.success(bSessions)
 
-        // SSE only ever binds currentWorkdir (B) — never the background A.
-        every { repository.connectSSE(any()) } returns flowOf()
-        coordinator.startSSE()
-        runPending()
-        verify(exactly = 1) { repository.connectSSE("/B") }
-        verify(exactly = 0) { repository.connectSSE("/A") }
-
-        // loadInitialData fans out across recentWorkdirs + currentWorkdir →
-        // BOTH directories are restored. directorySessions[/A] being populated
-        // is the catch-up precondition for the background workdir's questions.
         coordinator.loadInitialData()
         runPending()
 
@@ -902,80 +703,12 @@ class ConnectionCoordinatorTest {
         assertEquals(bSessions, slices.sessionList.value.directorySessions["/B"])
     }
 
-    @Test
-    fun `startSSE after cancelSse reads currentWorkdir fresh and does not drift to the prior value`() {
-        // §reconnect consistency: the foreground ON_STOP → ON_START path calls
-        // cancelSse then startSSE on app return. If the user switched workdir
-        // while backgrounded (currentWorkdir flipped /A → /B between cancel
-        // and restart), the reconnect must bind B — never a stale /A captured
-        // at the prior connect. launchSseCollection reads settingsManager.
-        // currentWorkdir at collection start, so the property holds by
-        // construction; this test pins it as a regression guard.
-        every { settingsManager.currentWorkdir } returns "/A"
-        every { repository.connectSSE("/A") } returns flowOf()
-        coordinator.startSSE()
-        runPending()
-        verify(exactly = 1) { repository.connectSSE("/A") }
-
-        // App backgrounded (cancelSse), user switches workdir while bg,
-        // app foregrounded (startSSE again).
-        coordinator.cancelSse()
-        every { settingsManager.currentWorkdir } returns "/B"
-        every { repository.connectSSE("/B") } returns flowOf()
-        coordinator.startSSE()
-        runPending()
-
-        // Reconnect bound the latest currentWorkdir (B); no drift back to /A.
-        verify(exactly = 1) { repository.connectSSE("/A") }
-        verify(exactly = 1) { repository.connectSSE("/B") }
-        // Total connectSSE calls: 2 (one per connect cycle). No phantom third
-        // collector from a stale captured workdir.
-        verify(exactly = 2) { repository.connectSSE(any()) }
-    }
-
-    // ── CP1 (notify Phase-0): identity-guarded SSE forwarding ──────────────
-
-    /**
-     * CP1 spec test: a stale-identity SSE collector frame (captured under an
-     * epoch that was subsequently bumped by beginReconfigure) is dropped at
-     * CC's forwarding layer — it never becomes a [ControllerEffect.OnSseEvent]
-     * and carries the correct (capture-time) identity when forwarded.
-     */
-    @Test
-    fun `CP1 stale-identity collector frame after beginReconfigure is dropped at CC forwarding`() {
-        // Bind the initial identity.
-        identityStore.bind("test-fp", "/proj", "test-endpoint")
-        val feed = MutableSharedFlow<Result<SSEEvent>>(extraBufferCapacity = 8)
-        every { repository.connectSSE(any()) } returns feed.asSharedFlow()
-
-        coordinator.startSSE()
-        runPending()
-
-        // Event #1 (current identity) is forwarded as OnSseEvent(IdentifiedSseEvent).
-        val evt1 = SSEEvent(payload = cn.vectory.ocdroid.data.model.SSEPayload(type = "evt1"))
-        feed.tryEmit(Result.success(evt1))
-        runPending()
-        assertEquals("current-identity event forwarded", listOf(evt1), forwardedSseEvents())
-
-        // Reconfigure invalidates the identity (epoch bump + null currentIdentity).
-        coordinator.cancelSseForReconfigure()
-
-        // Stale event #2 from the OLD collector — must NOT be forwarded.
-        val staleEvt = SSEEvent(payload = cn.vectory.ocdroid.data.model.SSEPayload(type = "stale"))
-        feed.tryEmit(Result.success(staleEvt))
-        runPending()
-
-        assertEquals(
-            "stale-identity event dropped at CC forwarding",
-            listOf(evt1),
-            forwardedSseEvents(),
-        )
-    }
+    // ── CP1 (notify Phase-0): identity-guarded directory-fetch ─────────────
 
     /**
      * CP1 spec test: stale directory-fetch response (old epoch) is dropped via
      * the same epoch check. Explicitly asserts the identityStore-based guard
-     * (complement of the adapted existing generation-guard test).
+     * (the SSE-side stale-identity drop moved to ServiceSseConnectionOwnerTest).
      */
     @Test
     fun `CP1 stale directory-fetch response is dropped via identity epoch check`() {
@@ -1000,30 +733,6 @@ class ConnectionCoordinatorTest {
             "stale-identity directory result dropped",
             slices.sessionList.value.directorySessions.containsKey("/proj"),
         )
-    }
-
-    /**
-     * CP1 spec test: forwarded SSE events carry the capture-time
-     * [cn.vectory.ocdroid.service.events.IdentifiedSseEvent] (not just the raw
-     * SSEEvent), so downstream consumers can validate identity.
-     */
-    @Test
-    fun `CP1 forwarded SSE events carry IdentifiedSseEvent with capture-time identity`() {
-        identityStore.bind("test-fp", "/proj", "test-endpoint")
-        val feed = MutableSharedFlow<Result<SSEEvent>>(extraBufferCapacity = 8)
-        every { repository.connectSSE(any()) } returns feed.asSharedFlow()
-
-        coordinator.startSSE()
-        runPending()
-
-        val evt = SSEEvent(payload = cn.vectory.ocdroid.data.model.SSEPayload(type = "test"))
-        feed.tryEmit(Result.success(evt))
-        runPending()
-
-        val onSse = collectedEffects.filterIsInstance<ControllerEffect.OnSseEvent>().single()
-        assertEquals("test-fp", onSse.event.identity.serverGroupFp)
-        assertEquals("/proj", onSse.event.identity.normalizedWorkdir)
-        assertEquals(evt, onSse.event.event)
     }
 
     // ── CP2 (notify Phase-0): CC delegates TOFU state to bootstrap coordinator ──
@@ -1081,36 +790,45 @@ class ConnectionCoordinatorTest {
     }
 
     /**
-     * CP2 spec test: the freeze semantics are preserved through delegation —
-     * while TOFU is pending, testConnection / coldStartReconnect / startSSE
-     * short-circuit (the guards read through `tofu.pendingTofuHostPort()`
-     * which returns non-null for TrustPending).
+     * CP2 / CP9 spec test: the freeze semantics are preserved through
+     * delegation — while TOFU is pending, testConnection / coldStartReconnect
+     * / startSSE short-circuit (the guards read through
+     * `tofu.pendingTofuHostPort()` which returns non-null for TrustPending).
+     * CP9: startSSE now delegates to the launcher; the freeze assertion is
+     * "launcher NOT invoked while frozen" + "launcher invoked once after clear".
      */
     @Test
     fun `CP2 freeze semantics preserved - startSSE short-circuits while TOFU pending`() {
         // Enter TOFU-pending via the shared coordinator (CC's internal path).
         bootstrapCoordinator.setPendingTofu("example.com:443")
 
-        // startSSE must FROZEN — no SSE collection launched.
+        // startSSE must FROZEN — no launcher call.
         coordinator.startSSE()
         runPending()
 
-        verify(exactly = 0) { repository.connectSSE(any()) }
+        assertEquals(
+            "launcher NOT invoked while TOFU pending",
+            0,
+            launcher.callCount,
+        )
 
         // Resolve + clear → unfreezes.
         bootstrapCoordinator.clearPendingTofu()
 
-        every { repository.connectSSE(any()) } returns flowOf()
         coordinator.startSSE()
         runPending()
 
-        verify(exactly = 1) { repository.connectSSE(any()) }
+        assertEquals(
+            "launcher invoked once after TOFU cleared",
+            1,
+            launcher.callCount,
+        )
     }
 
     /**
-     * CP2 spec test: CC has NO private TOFU fields (grep-verifiable: the old
-     * `pendingTofuHostPort` / `pendingTofuDecision` private vars are gone).
-     * This test exercises the public surface end-to-end to prove no
+     * CP2 / CP9 spec test: CC has NO private TOFU fields (grep-verifiable:
+     * the old `pendingTofuHostPort` / `pendingTofuDecision` private vars are
+     * gone). This test exercises the public surface end-to-end to prove no
      * duplicate state — the shared coordinator is the single source.
      */
     @Test
@@ -1127,16 +845,15 @@ class ConnectionCoordinatorTest {
         )
 
         // CC's internal guard (via delegation) sees the same state.
-        coordinator.startSSE() // should freeze — no connectSSE call.
+        coordinator.startSSE() // should freeze — no launcher call.
         runPending()
-        verify(exactly = 0) { repository.connectSSE(any()) }
+        assertEquals(0, launcher.callCount)
 
         // Clearing via the shared coordinator unfreezes CC.
         bootstrapCoordinator.clearPendingTofu()
-        every { repository.connectSSE(any()) } returns flowOf()
         coordinator.startSSE()
         runPending()
-        verify(exactly = 1) { repository.connectSSE(any()) }
+        assertEquals(1, launcher.callCount)
     }
 
     // ── RecordingConnectionCoordinatorCallbacks (removed in batch 3b) ──────

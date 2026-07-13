@@ -180,9 +180,18 @@ class SessionStreamingControllerBootstrapTest {
     }
 
     @Test
-    fun `bootstrapAsync is single-flight - second invocation returns immediately`() = runTest {
+    fun `bootstrapAsync is restartable - second invocation runs after the first (CP9 A6)`() = runTest {
+        // CP9 §A6: the once-per-instance `bootstrapRan` latch was REMOVED
+        // from SessionStreamingController — it could strand a reconfigure
+        // race if `stopSelf()` + a new start overlapped. Single-flight is
+        // now preserved by the Service-side `bootstrapJob` (cancel + relaunch).
+        // The controller itself is restartable: two consecutive bootstrapAsync
+        // invocations both run the runner body (each driven by its own
+        // Service-side job; the controller makes no per-instance claim about
+        // "already ran").
         val fixture = newFixture(backgroundScope, inForeground = false)
         fixture.aggregator.setState(GlobalBusyState.Busy)
+        fixture.bootstrapRunner.enqueue(BootstrapResult.Success(identity))
         fixture.bootstrapRunner.enqueue(BootstrapResult.Success(identity))
 
         fixture.controller.bootstrapAsync()
@@ -190,13 +199,13 @@ class SessionStreamingControllerBootstrapTest {
         assertEquals(Layer.L2Active, fixture.coordinator.layer.value)
         val callsAfterFirst = fixture.bootstrapRunner.callCount
 
-        // Second invocation must NOT re-run (sticky-rebuild safety).
+        // Second invocation runs the runner body again (restartable).
         fixture.controller.bootstrapAsync()
         runCurrent()
 
         assertEquals(
-            "single-flight: second bootstrapAsync does not re-invoke runner",
-            callsAfterFirst,
+            "restartable: second bootstrapAsync DOES re-invoke runner (no bootstrapRan latch)",
+            callsAfterFirst + 1,
             fixture.bootstrapRunner.callCount,
         )
     }

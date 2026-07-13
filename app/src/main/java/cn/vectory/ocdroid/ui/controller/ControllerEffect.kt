@@ -24,7 +24,21 @@ sealed class ControllerEffect {
     data object ForceReconnect : ControllerEffect()
     /** Global cold-start reload: clear cache + message state for [sessionId]. */
     data class GlobalColdStartRefresh(val sessionId: String) : ControllerEffect()
-    /** Cancels the in-flight SSE feed (and drops delta buffers). */
+    /**
+     * Cancels the in-flight SSE feed (and drops delta buffers).
+     *
+     * CP9 (notify Phase-0 switchover): this is now an OBSERVED
+     * transport-disconnect signal, NOT a request for CC to cancel a job. The
+     * producer is [cn.vectory.ocdroid.service.streaming.ServiceSseConnectionOwner]
+     * — emitted once when a live collector was actually stopped (Service
+     * going away, user explicit close, reconfigure teardown, §4.1 timeout).
+     * [cn.vectory.ocdroid.ui.AppCore.dispatchForegroundCatchUpEffect] no
+     * longer recurses into CC.cancelSse (the loop is broken at the producer).
+     * [SessionSyncCoordinator] still observes the signal: it creates a
+     * `SseReconnectTrigger.Disconnected`, marks the current session dirty,
+     * and stamps the disconnect time so the next `server.connected`
+     * reconciles.
+     */
     data object CancelSse : ControllerEffect()
     /** Gap-aware catch-up probe + tail reload. */
     data class CatchUpAfterDisconnect(val sessionId: String) : ControllerEffect()
