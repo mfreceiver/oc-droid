@@ -15,6 +15,10 @@ import cn.vectory.ocdroid.data.model.TodoItem
 import cn.vectory.ocdroid.data.repository.OpenCodeRepository
 import cn.vectory.ocdroid.service.events.IdentifiedSseEvent
 import cn.vectory.ocdroid.service.identity.ConnectionIdentityStore
+import cn.vectory.ocdroid.service.status.SessionBusyStatus
+import cn.vectory.ocdroid.service.status.SessionStatusKey
+import cn.vectory.ocdroid.service.status.StatusAggregatorInput
+import cn.vectory.ocdroid.service.status.toSessionBusyStatus
 import cn.vectory.ocdroid.ui.ChatState
 import cn.vectory.ocdroid.ui.SessionListState
 import cn.vectory.ocdroid.ui.SharedEffectBus
@@ -127,6 +131,26 @@ class SessionSyncCoordinator(
      * [ConnectionIdentityStore.isCurrent] BEFORE any fold/state mutation.
      */
     internal val identityStore: ConnectionIdentityStore? = null,
+    /**
+     * CP4 (notify Phase-0): the authoritative status aggregator's INPUT
+     * surface. The `session.status` SSE branch feeds it via
+     * [StatusAggregatorInput.applySseStatus] (keyed by `(serverGroupFp,
+     * workdir, sessionId)`, sourced from the SSE arrival time) BEFORE the
+     * existing unread/badge fold runs. Optional so legacy/test construction
+     * (which drives [handleEvent] directly with raw SSEEvent) keeps working
+     * — when null, the SSE branch simply skips the aggregator feed (no
+     * behaviour change for tests that did not wire the aggregator).
+     */
+    internal val statusAggregatorInput: StatusAggregatorInput? = null,
+    /**
+     * CP4 (notify Phase-0): the single clock used for SSE arrival timestamps
+     * passed to [StatusAggregatorInput.applySseStatus]. Defaults to wall-clock
+     * millis — the SAME clock domain as `StatusAggregatorImpl`'s injected
+     * `clock`, so merge-timing comparisons inside the aggregator are
+     * consistent. Test-only override (the existing tests do not assert on
+     * arrival times; the default is fine).
+     */
+    internal val clock: () -> Long = { System.currentTimeMillis() },
 ) {
     /** Tag for [reportNonFatalIssue]; mirrors the original MainViewModel TAG. */
     private val tag: String = "SessionSyncCoordinator"
@@ -555,6 +579,40 @@ class SessionSyncCoordinator(
                 DebugLog.d("Retry", "session.status raw properties=${event.payload.properties?.toString() ?: "null"}")
                 val statusEvent = parseSessionStatusEvent(event)
                 if (statusEvent != null) {
+                    // CP4 (notify Phase-0): feed the authoritative status aggregator
+                    // BEFORE the existing fold. The aggregator's input surface takes
+                    // the composite key `(serverGroupFp, workdir, sessionId)` and the
+                    // SSE arrival time `clock()` (same clock domain as the impl's
+                    // injected clock — merge timing inside the aggregator is consistent).
+                    // The identity gate already ran in [handleEvent(IdentifiedSseEvent)]
+                    // (CP1 isCurrent check) before this dispatch, so the current identity
+                    // is the live one — using [currentServerGroupFp] here matches the
+                    // session.updated archived branch's pattern.
+                    //
+                    // Unknown sessionId (not in sessionsById) → silently skipped
+                    // (matches the existing §unread-lifecycle "unknown id" exclusion;
+                    // we cannot build a composite key without the workdir).
+                    val aggregatorInput = statusAggregatorInput
+                    if (aggregatorInput != null) {
+                        val sessionsByIdNow = allSessionsById(
+                            slices.sessionList.value.sessions,
+                            slices.sessionList.value.directorySessions,
+                            slices.sessionList.value.childSessions,
+                        )
+                        val target = sessionsByIdNow[statusEvent.sessionId]
+                        if (target != null) {
+                            val key = SessionStatusKey(
+                                serverGroupFp = currentServerGroupFp(),
+                                workdir = target.directory,
+                                sessionId = statusEvent.sessionId,
+                            )
+                            aggregatorInput.applySseStatus(
+                                key,
+                                statusEvent.status.toSessionBusyStatus(),
+                                sourceTimeMs = clock(),
+                            )
+                        }
+                    }
                     // §unread-lifecycle Task 3: snapshot the PRIOR status before
                     // applySessionStatus overwrites it — this is the only chance
                     // to detect a busy→idle transition. Main.immediate is serial

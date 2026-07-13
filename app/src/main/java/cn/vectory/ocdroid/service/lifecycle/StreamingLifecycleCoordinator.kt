@@ -9,7 +9,9 @@ import cn.vectory.ocdroid.service.lifecycle.LifecycleCommand.StopSelf
 import cn.vectory.ocdroid.service.lifecycle.LifecycleCommand.StartPoller
 import cn.vectory.ocdroid.service.lifecycle.LifecycleCommand.StartSse
 import cn.vectory.ocdroid.service.lifecycle.LifecycleCommand.StopSse
+import cn.vectory.ocdroid.service.status.GlobalBusyState
 import cn.vectory.ocdroid.service.status.StatusAggregator
+import cn.vectory.ocdroid.service.status.isKeepAlive
 import cn.vectory.ocdroid.util.DebugLog
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.CoroutineScope
@@ -63,11 +65,17 @@ import javax.inject.Singleton
  * **Inputs**:
  *  - a foreground signal [StateFlow] (bound at [start]; §4.3 — default false,
  *    Activity started-count is the truth source);
- *  - [StatusAggregator.globalBusy] (authoritative busy — Lane A impl);
+ *  - [StatusAggregator.globalState] — the authoritative, lifecycle-safe tri-state
+ *    (Lane A impl, FGS spec §3 + §3.1, CP4). Replaces the unsafe `globalBusy:
+ *    Boolean`: [GlobalBusyState.Unknown] (request failure / no fresh data /
+ *    stale entry) is treated like [GlobalBusyState.Busy] for keep-alive (the
+ *    source MUST stay alive, no idle debounce) so a failure can NEVER silently
+ *    drop keep-alive on real busy sessions;
  *  - explicit entries [requestUserClose] (§16-U1), [onTimeout] (dataSync
  *    timeout), [onDisconnect];
  *  - [onBootstrapResult] — the §5 START_STICKY bootstrap completion signal
- *    carrying the fresh [ConnectionIdentity]; the ONLY legal entry out of L3.
+ *    carrying the fresh [ConnectionIdentity] and the bootstrap's
+ *    [GlobalBusyState] verdict; the ONLY legal entry out of L3.
  *
  * **Outputs** — [commands]: a [Flow] of [LifecycleCommand] the service
  * observes (start/stop foreground, start/stop SSE, start/stop poller,
@@ -118,30 +126,40 @@ class StreamingLifecycleCoordinator @Inject constructor(
         if (started) return
         started = true
         inForegroundRef = inForeground
-        scope.launchObserving(inForeground, statusAggregator.globalBusy)
+        scope.launchObserving(inForeground, statusAggregator.globalState)
     }
 
     /**
      * §5 START_STICKY bootstrap completion — the ONLY legal L3 → running
      * transition. Carries the fresh [ConnectionIdentity] (so subsequent
      * [StartSse] commands tag events correctly, FGS spec §2) and the
-     * authoritative busy verdict from the §3 global status snapshot.
+     * authoritative [GlobalBusyState] verdict from the §3 global status
+     * snapshot.
+     *
+     * **CP4**: takes the lifecycle-safe [GlobalBusyState] (not the unsafe
+     * `Boolean`). [GlobalBusyState.Unknown] (bootstrap status fetch failed)
+     * is treated like [GlobalBusyState.Busy] for keep-alive: the source is
+     * kept alive (SSE on, FGS held) and the idle-grace window is NOT entered
+     * — the bootstrap refuses to authoritatively label the host idle until a
+     * fresh successful snapshot arrives (FGS spec §3 «请求失败 → 全局 Unknown,
+     * 不得进 idle 宽限期»).
      *
      * Decision matrix (§5 steps 4–5 / §4.2):
-     *  - busy + foreground → [Layer.L1](busy=true): FGS held (service §5
-     *    step 2), SSE on, layer records busy.
-     *  - busy + background → [Layer.L2Active]: same, background flavour.
-     *  - idle + foreground → [Layer.L1](busy=false): SSE on, FGS downgraded
+     *  - Busy / Unknown + foreground → [Layer.L1](busy=true): FGS held (service §5
+     *    step 2), SSE on, layer records busy. (Unknown keeps the FGS pre-warmed
+     *    while a fresh snapshot is awaited — never teardown on uncertainty.)
+     *  - Busy / Unknown + background → [Layer.L2Active]: same, background flavour.
+     *  - AllIdleFresh + foreground → [Layer.L1](busy=false): SSE on, FGS downgraded
      *    to normal Service (§4.1 L1-idle "普通 Service").
-     *  - idle + background → [Layer.L3]: §5 step 5 `stopForeground` +
+     *  - AllIdleFresh + background → [Layer.L3]: §5 step 5 `stopForeground` +
      *    `stopSelf` (no FGS slot burned on an idle background service).
      */
-    fun onBootstrapResult(identity: ConnectionIdentity, busy: Boolean) {
+    fun onBootstrapResult(identity: ConnectionIdentity, state: GlobalBusyState) {
         scope.launch {
             mutex.withLock {
                 currentIdentity = identity
                 val fg = inForegroundRef?.value ?: false
-                transitionFromL3(fg, busy, identity)
+                transitionFromL3(fg, state, identity)
             }
         }
     }
@@ -181,10 +199,15 @@ class StreamingLifecycleCoordinator @Inject constructor(
      * L3 → running state. Emitted only by [onBootstrapResult]. Per §4.4 the
      * SSE source is started (and the L3 poller stopped) BEFORE the layer
      * flips — new source active before retiring the old.
+     *
+     * CP4: takes the lifecycle-safe [GlobalBusyState]. [GlobalBusyState.Unknown]
+     * is treated like [GlobalBusyState.Busy] (keep source alive, no idle teardown)
+     * — see [onBootstrapResult].
      */
-    private suspend fun transitionFromL3(fg: Boolean, busy: Boolean, identity: ConnectionIdentity) {
+    private suspend fun transitionFromL3(fg: Boolean, state: GlobalBusyState, identity: ConnectionIdentity) {
+        val keepAlive = state.isKeepAlive // true for Busy || Unknown; false for AllIdleFresh
         when {
-            busy -> {
+            keepAlive -> {
                 // §5 step 4: keep FGS (held by service step 2) + SSE on.
                 // L3 had poller running → stop it AFTER starting SSE (§4.4).
                 emit(StartSse(identity))
@@ -209,11 +232,17 @@ class StreamingLifecycleCoordinator @Inject constructor(
 
     /**
      * §4.4 L1 internal conversions + L1→L2/L3 transitions.
+     *
+     * CP4: `state.isKeepAlive` (Busy || Unknown) maps to the prior `busy=true`
+     * branch; only [GlobalBusyState.AllIdleFresh] takes the idle path. So a
+     * failure / stale status (Unknown) keeps the FGS slot hot in L1 just like
+     * Busy — the idle-grace window is never entered on uncertainty.
      */
-    private suspend fun handleL1(current: Layer.L1, fg: Boolean, busy: Boolean) {
+    private suspend fun handleL1(current: Layer.L1, fg: Boolean, state: GlobalBusyState) {
+        val keepAlive = state.isKeepAlive
         if (fg) {
-            if (current.busy == busy) return // no sub-state change
-            if (busy) {
+            if (current.busy == keepAlive) return // no sub-state change
+            if (keepAlive) {
                 // §4.2 L1-idle → L1-busy: foreground promotion is legal → StartForeground.
                 emit(StartForeground)
                 _layer.value = Layer.L1(busy = true)
@@ -224,7 +253,7 @@ class StreamingLifecycleCoordinator @Inject constructor(
             }
         } else {
             cancelDebounce()
-            if (busy) {
+            if (keepAlive) {
                 // §4.2 L1-busy → L2Active: FGS already held, just layer change. SSE stays on.
                 _layer.value = Layer.L2Active
             } else {
@@ -242,23 +271,29 @@ class StreamingLifecycleCoordinator @Inject constructor(
     /**
      * §4.4 L2Active transitions: → L1 (foreground return), → L2Idle (idle
      * debounce), or stay.
+     *
+     * CP4: only [GlobalBusyState.AllIdleFresh] arms the 45s debounce.
+     * [GlobalBusyState.Busy] AND [GlobalBusyState.Unknown] both stay L2Active
+     * with the debounce cancelled (Unknown ≠ idle — a failed / stale snapshot
+     * must NOT enter the idle grace window, FGS spec §3).
      */
-    private suspend fun handleL2Active(fg: Boolean, busy: Boolean) {
+    private suspend fun handleL2Active(fg: Boolean, state: GlobalBusyState) {
+        val keepAlive = state.isKeepAlive
         cancelDebounce()
         if (fg) {
             // L2Active → L1: SSE was on, stays on (no source switch).
-            if (busy) {
+            if (keepAlive) {
                 _layer.value = Layer.L1(busy = true)
             } else {
-                // §4.4: idle on foreground return → stopForeground → L1-idle.
+                // §4.4: AllIdleFresh on foreground return → stopForeground → L1-idle.
                 emit(StopForeground)
                 _layer.value = Layer.L1(busy = false)
             }
         } else {
-            if (busy) {
-                // still busy; stay L2Active (debounce cancelled above, no-op).
+            if (keepAlive) {
+                // still busy OR unknown; stay L2Active (debounce cancelled above, no-op).
             } else {
-                // §4.4: all-idle → arm the 45s debounce.
+                // §4.4: AllIdleFresh → arm the 45s debounce.
                 startIdleDebounce()
             }
         }
@@ -267,31 +302,38 @@ class StreamingLifecycleCoordinator @Inject constructor(
     /**
      * §4.4 L2Idle transitions: → L2Active (poller finds busy, IN-PLACE per
      * groker-R1), → L1 (foreground return), or stay.
+     *
+     * CP4: only [GlobalBusyState.AllIdleFresh] stays L2Idle. Both
+     * [GlobalBusyState.Busy] and [GlobalBusyState.Unknown] return to L2Active
+     * (in-place, per groker-R1): Busy is the normal recovery; Unknown also
+     * re-establishes SSE because L2Idle had SSE OFF and a stale/failed poller
+     * verdict must NOT be trusted to keep the host in idle (restore the source).
      */
-    private suspend fun handleL2Idle(fg: Boolean, busy: Boolean) {
+    private suspend fun handleL2Idle(fg: Boolean, state: GlobalBusyState) {
         val identity = currentIdentity ?: run {
             DebugLog.w(TAG, "handleL2Idle: no identity bound — skipping transition")
             return
         }
+        val keepAlive = state.isKeepAlive
         if (fg) {
             // L2Idle → L1: StartSse (new source) before StopPoller (old). §4.4.
             emit(StartSse(identity))
             emit(StopPoller)
-            if (busy) {
+            if (keepAlive) {
                 _layer.value = Layer.L1(busy = true)
             } else {
                 emit(StopForeground)
                 _layer.value = Layer.L1(busy = false)
             }
         } else {
-            if (busy) {
+            if (keepAlive) {
                 // groker-R1: IN-PLACE L2Idle → L2Active (no new startForegroundService).
                 // §4.4: StartSse (new source) before StopPoller (old).
                 emit(StartSse(identity))
                 emit(StopPoller)
                 _layer.value = Layer.L2Active
             } else {
-                // still idle; stay L2Idle.
+                // still AllIdleFresh; stay L2Idle.
             }
         }
     }
@@ -323,15 +365,20 @@ class StreamingLifecycleCoordinator @Inject constructor(
 
     /**
      * §4.4 L2Active → L2Idle: arms the 45s idle debounce. Fires only if still
-     * L2Active + authoritative all-idle at expiry. On fire: StartPoller (new
-     * source) BEFORE StopSse (old), then flip to L2Idle (FGS shell kept).
+     * L2Active + authoritative [GlobalBusyState.AllIdleFresh] at expiry (CP4:
+     * replaces the unsafe `!globalBusy.value` check — Unknown / Busy keep the
+     * source alive and prevent the L2Idle transition even at debounce expiry).
+     * On fire: StartPoller (new source) BEFORE StopSse (old), then flip to
+     * L2Idle (FGS shell kept).
      */
     private fun startIdleDebounce() {
         debounceJob?.cancel()
         debounceJob = scope.launchDebounce {
             delay(IDLE_DEBOUNCE_MS)
             mutex.withLock {
-                if (_layer.value == Layer.L2Active && !statusAggregator.globalBusy.value) {
+                if (_layer.value == Layer.L2Active &&
+                    statusAggregator.globalState.value == GlobalBusyState.AllIdleFresh
+                ) {
                     emit(StartPoller)
                     emit(StopSse)
                     _layer.value = Layer.L2Idle
@@ -350,22 +397,27 @@ class StreamingLifecycleCoordinator @Inject constructor(
     }
 
     /**
-     * launches the (fg, busy) observer that drives [handleL1]/[handleL2Active]/
+     * launches the (fg, state) observer that drives [handleL1]/[handleL2Active]/
      * [handleL2Idle] on every input change. L3 inputs are ignored (no
      * auto-recovery — §4.1).
+     *
+     * CP4: consumes the lifecycle-safe [GlobalBusyState] (not the legacy
+     * `globalBusy: Boolean`). [GlobalBusyState.Unknown] routes through the
+     * `isKeepAlive=true` branches alongside [GlobalBusyState.Busy] — the
+     * source stays alive, no idle debounce is armed.
      */
     private fun CoroutineScope.launchObserving(
         inForeground: StateFlow<Boolean>,
-        globalBusy: StateFlow<Boolean>,
+        globalState: StateFlow<GlobalBusyState>,
     ) {
         launch {
-            combine(inForeground, globalBusy) { fg, busy -> fg to busy }
-                .collect { (fg, busy) ->
+            combine(inForeground, globalState) { fg, state -> fg to state }
+                .collect { (fg, state) ->
                     mutex.withLock {
                         when (val current = _layer.value) {
-                            is Layer.L1 -> handleL1(current, fg, busy)
-                            Layer.L2Active -> handleL2Active(fg, busy)
-                            Layer.L2Idle -> handleL2Idle(fg, busy)
+                            is Layer.L1 -> handleL1(current, fg, state)
+                            Layer.L2Active -> handleL2Active(fg, state)
+                            Layer.L2Idle -> handleL2Idle(fg, state)
                             Layer.L3 -> {
                                 // §4.1: no automatic recovery from L3.
                             }

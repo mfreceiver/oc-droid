@@ -162,6 +162,7 @@ object ControllerModule {
         cacheRepository: cn.vectory.ocdroid.data.cache.CacheRepository,
         @Named("currentServerGroupFp") currentServerGroupFp: () -> String,
         identityStore: cn.vectory.ocdroid.service.identity.ConnectionIdentityStore,
+        statusAggregatorInput: cn.vectory.ocdroid.service.status.StatusAggregatorInput,
     ): SessionSyncCoordinator = SessionSyncCoordinator(
         scope = appScope,
         slices = store.slices,
@@ -173,6 +174,11 @@ object ControllerModule {
         cacheRepository = cacheRepository,
         // CP1 (notify Phase-0): single connection-identity store.
         identityStore = identityStore,
+        // CP4 (notify Phase-0): feed the authoritative status aggregator on
+        // every `session.status` SSE event (the SSE branch resolves
+        // sessionId→workdir via SessionTree.allSessionsById, builds the
+        // composite key, and calls applySseStatus with clock()).
+        statusAggregatorInput = statusAggregatorInput,
     )
 
     @Provides

@@ -4,6 +4,7 @@ import cn.vectory.ocdroid.data.model.Session
 import cn.vectory.ocdroid.data.model.SessionStatus
 import cn.vectory.ocdroid.data.repository.OpenCodeRepository
 import cn.vectory.ocdroid.service.identity.ConnectionIdentity
+import cn.vectory.ocdroid.service.identity.ConnectionIdentityStore
 import io.mockk.coEvery
 import io.mockk.mockk
 import kotlinx.coroutines.ExperimentalCoroutinesApi
@@ -14,7 +15,7 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
- * Unit coverage for [StatusAggregatorImpl] (dev-design P0.4 / FGS spec §3 + §3.1).
+ * Unit coverage for [StatusAggregatorImpl] (dev-design P0.4 / FGS spec §3 + §3.1, CP4).
  *
  * Focus areas:
  *  - REST success maps host-level statuses to composite [SessionStatusKey]s via
@@ -26,9 +27,14 @@ import org.junit.Test
  *    predates it, and vice-versa.
  *  - `globalBusy` is true iff any entry under the current identity's `serverGroupFp` is
  *    `Busy` or `Retry`.
+ *  - **CP4 tri-state** ([globalState]): Busy / AllIdleFresh / Unknown semantics.
+ *  - **CP4 TTL** (~30s): stale `Idle` entries → Unknown; stale `Busy` stays Busy.
+ *  - **CP4 epoch guard**: a REST response whose epoch was bumped mid-request is dropped.
+ *  - **CP4 explicit failure** entry: [StatusAggregatorInput.markRequestFailed].
  *
  * The repository is mocked (mockk); the clock is a mutable `var` lambda so each test
- * controls `requestStartMs` and SSE arrival times precisely.
+ * controls `requestStartMs` and SSE arrival times precisely. The
+ * [ConnectionIdentityStore] is real (it is a plain atomic holder — no Android deps).
  */
 @OptIn(ExperimentalCoroutinesApi::class)
 class StatusAggregatorImplTest {
@@ -51,8 +57,9 @@ class StatusAggregatorImplTest {
 
     private fun newAggregator(
         repository: OpenCodeRepository,
+        identityStore: ConnectionIdentityStore = ConnectionIdentityStore().also { it.bind(fp, "/work", "endpoint-A") },
         clock: () -> Long = { 0L },
-    ): StatusAggregatorImpl = StatusAggregatorImpl(repository, clock)
+    ): StatusAggregatorImpl = StatusAggregatorImpl(repository, identityStore, clock)
 
     // ── (1) REST success: host statuses → composite keys via session.directory ──────────
 
@@ -101,7 +108,7 @@ class StatusAggregatorImplTest {
     // ── (2) REST failure → Unknown; idle-grace guard ────────────────────────────────────
 
     @Test
-    fun `REST failure labels every known session Unknown and leaves globalBusy false when no prior busy`() = runTest {
+    fun `REST failure labels every known session Unknown and globalState is Unknown`() = runTest {
         val repo = mockk<OpenCodeRepository>(relaxed = true)
         coEvery { repo.getSessionStatus() } returns Result.failure(java.io.IOException("boom"))
         val sessionsById = mapOf(
@@ -119,6 +126,7 @@ class StatusAggregatorImplTest {
         assertEquals(SessionBusyStatus.Unknown, statuses[key("s1", "/work-a")])
         assertEquals(SessionBusyStatus.Unknown, statuses[key("s2", "/work-b")])
         assertFalse(aggregator.globalBusy.value)
+        assertEquals(GlobalBusyState.Unknown, aggregator.globalState.value)
     }
 
     @Test
@@ -141,6 +149,7 @@ class StatusAggregatorImplTest {
         // wrongly clear it, so the idle-grace window cannot engage on a failure.
         assertEquals(SessionBusyStatus.Busy, aggregator.statusByKey.value[key("s1", "/work")])
         assertTrue(aggregator.globalBusy.value)
+        assertEquals(GlobalBusyState.Busy, aggregator.globalState.value)
     }
 
     // ── (3) Merge timing: SSE vs REST ordering ─────────────────────────────────────────
@@ -244,5 +253,188 @@ class StatusAggregatorImplTest {
         val statuses = aggregator.statusByKey.value
         assertEquals(2, statuses.size)
         assertTrue(statuses.any { it.key.serverGroupFp == fp && it.value == SessionBusyStatus.Busy })
+    }
+
+    // ── (5) CP4 tri-state globalState ──────────────────────────────────────────────────
+
+    @Test
+    fun `globalState is Unknown before any refresh on an empty aggregator`() {
+        val repo = mockk<OpenCodeRepository>(relaxed = true)
+        val aggregator = newAggregator(repo)
+        assertEquals(GlobalBusyState.Unknown, aggregator.globalState.value)
+    }
+
+    @Test
+    fun `globalState is Busy when any session is Busy or Retry`() = runTest {
+        val repo = mockk<OpenCodeRepository>(relaxed = true)
+        coEvery { repo.getSessionStatus() } returns Result.success(
+            mapOf("s1" to SessionStatus(type = "busy"))
+        )
+        val aggregator = newAggregator(repo, clock = { 100L })
+
+        aggregator.refresh(identity(), sessionsById = mapOf("s1" to session("s1", "/work")))
+        assertEquals(GlobalBusyState.Busy, aggregator.globalState.value)
+    }
+
+    @Test
+    fun `globalState is AllIdleFresh when all sessions are fresh Idle`() = runTest {
+        val repo = mockk<OpenCodeRepository>(relaxed = true)
+        coEvery { repo.getSessionStatus() } returns Result.success(emptyMap())
+        val aggregator = newAggregator(repo, clock = { 100L })
+
+        aggregator.refresh(
+            identity(),
+            sessionsById = mapOf(
+                "s1" to session("s1", "/work-a"),
+                "s2" to session("s2", "/work-b"),
+            ),
+        )
+        assertEquals(GlobalBusyState.AllIdleFresh, aggregator.globalState.value)
+    }
+
+    @Test
+    fun `globalState is Unknown after a failure (NOT AllIdleFresh)`() = runTest {
+        val repo = mockk<OpenCodeRepository>(relaxed = true)
+        coEvery { repo.getSessionStatus() } returns Result.failure(java.io.IOException("boom"))
+        val aggregator = newAggregator(repo, clock = { 100L })
+
+        aggregator.refresh(identity(), sessionsById = mapOf("s1" to session("s1", "/work")))
+        assertEquals(GlobalBusyState.Unknown, aggregator.globalState.value)
+    }
+
+    // ── (6) CP4 TTL: stale entries fall back to Unknown (for idle) ─────────────────────
+
+    @Test
+    fun `TTL - fresh Idle within 30s is AllIdleFresh`() = runTest {
+        val repo = mockk<OpenCodeRepository>(relaxed = true)
+        coEvery { repo.getSessionStatus() } returns Result.success(emptyMap())
+        var now = 1_000L
+        val aggregator = newAggregator(repo, clock = { now })
+
+        aggregator.refresh(identity(), sessionsById = mapOf("s1" to session("s1", "/work")))
+        assertEquals(GlobalBusyState.AllIdleFresh, aggregator.globalState.value)
+
+        // Within the TTL window: still AllIdleFresh.
+        now = 1_000L + StatusAggregatorImpl.STATUS_TTL_MS - 1
+        // Force recompute by re-applying the same SSE status (a no-op write that triggers recompute).
+        aggregator.applySseStatus(key("s1", "/work"), SessionBusyStatus.Idle, sourceTimeMs = 1_000L)
+        assertEquals(GlobalBusyState.AllIdleFresh, aggregator.globalState.value)
+    }
+
+    @Test
+    fun `TTL - Idle entry older than 30s flips globalState to Unknown (not authoritative idle)`() = runTest {
+        val repo = mockk<OpenCodeRepository>(relaxed = true)
+        coEvery { repo.getSessionStatus() } returns Result.success(emptyMap())
+        var now = 1_000L
+        val aggregator = newAggregator(repo, clock = { now })
+
+        aggregator.refresh(identity(), sessionsById = mapOf("s1" to session("s1", "/work")))
+        assertEquals(GlobalBusyState.AllIdleFresh, aggregator.globalState.value)
+
+        // Cross the TTL boundary: the stale Idle entry is no longer authoritative — globalState
+        // MUST fall back to Unknown (do NOT enter idle grace on stale data, FGS spec §3).
+        now = 1_000L + StatusAggregatorImpl.STATUS_TTL_MS + 1
+        aggregator.applySseStatus(key("s1", "/work"), SessionBusyStatus.Idle, sourceTimeMs = 1_000L)
+        assertEquals(GlobalBusyState.Unknown, aggregator.globalState.value)
+    }
+
+    @Test
+    fun `TTL - stale Busy entry stays Busy (conservative - never silently drop keep-alive)`() = runTest {
+        val repo = mockk<OpenCodeRepository>(relaxed = true)
+        coEvery { repo.getSessionStatus() } returns Result.success(
+            mapOf("s1" to SessionStatus(type = "busy"))
+        )
+        var now = 1_000L
+        val aggregator = newAggregator(repo, clock = { now })
+
+        aggregator.refresh(identity(), sessionsById = mapOf("s1" to session("s1", "/work")))
+        assertEquals(GlobalBusyState.Busy, aggregator.globalState.value)
+
+        // Way past the TTL — a stale Busy stays Busy. The alternative (treating a stale Busy
+        // as Unknown) is the SAME keep-alive verdict anyway, but Busy is the more accurate
+        // label and never silently clears keep-alive on a possibly-still-busy session.
+        now = 1_000L + StatusAggregatorImpl.STATUS_TTL_MS * 10
+        aggregator.applySseStatus(key("s1", "/work"), SessionBusyStatus.Busy, sourceTimeMs = 1_000L)
+        assertEquals(GlobalBusyState.Busy, aggregator.globalState.value)
+    }
+
+    // ── (7) CP4 REST epoch guard ───────────────────────────────────────────────────────
+
+    @Test
+    fun `epoch guard - REST response after an epoch bump is dropped`() = runTest {
+        val repo = mockk<OpenCodeRepository>(relaxed = true)
+        val store = ConnectionIdentityStore()
+        store.bind(fp, "/work", "endpoint-A")
+        val originalEpoch = store.currentEpoch()
+        // Capture requestStartEpoch BEFORE the bump; the response returns AFTER.
+        coEvery { repo.getSessionStatus() } answers {
+            // Simulate a reconfigure landing WHILE the REST call is in flight.
+            store.beginReconfigure()
+            store.bind(fp, "/work", "endpoint-A") // new epoch, same fp
+            Result.success(mapOf("s1" to SessionStatus(type = "busy")))
+        }
+        val aggregator = StatusAggregatorImpl(repo, store, clock = { 100L })
+
+        aggregator.refresh(identity(epoch = originalEpoch), sessionsById = mapOf("s1" to session("s1", "/work")))
+
+        // The stale-epoch response MUST be dropped — the (would-be) Busy entry never lands.
+        assertTrue(aggregator.statusByKey.value.isEmpty())
+        assertEquals(GlobalBusyState.Unknown, aggregator.globalState.value)
+        assertFalse(aggregator.globalBusy.value)
+    }
+
+    @Test
+    fun `epoch guard - REST response with unchanged epoch commits normally`() = runTest {
+        val repo = mockk<OpenCodeRepository>(relaxed = true)
+        coEvery { repo.getSessionStatus() } returns Result.success(
+            mapOf("s1" to SessionStatus(type = "busy"))
+        )
+        val aggregator = newAggregator(repo, clock = { 100L })
+
+        aggregator.refresh(identity(), sessionsById = mapOf("s1" to session("s1", "/work")))
+
+        assertEquals(SessionBusyStatus.Busy, aggregator.statusByKey.value[key("s1", "/work")])
+        assertEquals(GlobalBusyState.Busy, aggregator.globalState.value)
+    }
+
+    // ── (8) CP4 explicit markRequestFailed ─────────────────────────────────────────────
+
+    @Test
+    fun `markRequestFailed labels every known session Unknown without going through refresh`() {
+        val repo = mockk<OpenCodeRepository>(relaxed = true)
+        val aggregator = newAggregator(repo, clock = { 100L })
+
+        aggregator.markRequestFailed(
+            identity(),
+            sessionsById = mapOf(
+                "s1" to session("s1", "/work-a"),
+                "s2" to session("s2", "/work-b"),
+            ),
+            sourceTimeMs = 100L,
+        )
+
+        val statuses = aggregator.statusByKey.value
+        assertEquals(SessionBusyStatus.Unknown, statuses[key("s1", "/work-a")])
+        assertEquals(SessionBusyStatus.Unknown, statuses[key("s2", "/work-b")])
+        assertEquals(GlobalBusyState.Unknown, aggregator.globalState.value)
+    }
+
+    @Test
+    fun `markRequestFailed preserves a fresher prior Busy via merge timing`() {
+        val repo = mockk<OpenCodeRepository>(relaxed = true)
+        val aggregator = newAggregator(repo, clock = { 0L })
+
+        // SSE delivers Busy at t=200.
+        aggregator.applySseStatus(key("s1", "/work"), SessionBusyStatus.Busy, sourceTimeMs = 200L)
+
+        // markRequestFailed at t=100 (older) — must NOT clobber the fresher Busy.
+        aggregator.markRequestFailed(
+            identity(),
+            sessionsById = mapOf("s1" to session("s1", "/work")),
+            sourceTimeMs = 100L,
+        )
+
+        assertEquals(SessionBusyStatus.Busy, aggregator.statusByKey.value[key("s1", "/work")])
+        assertEquals(GlobalBusyState.Busy, aggregator.globalState.value)
     }
 }
