@@ -359,10 +359,26 @@ fun ChatScaffold(
     }
 
     // §PARITY: hoisted per-session scroll-position cache. Previously inside
-    // ChatMessageList; the new ChatScaffold keeps it here (above the
-    // single ChatMessageList call) so the composition-lifetime disposal risk
-    // stays solved. The cache + LRU are passed to ChatMessageList; mutations
-    // stay inside ChatMessageList exactly as before.
+    // ChatMessageList; ChatScaffold keeps it here (above the HorizontalPager
+    // and the single ChatMessageList fallback call) so the composition-
+    // lifetime disposal risk stays solved. The cache + LRU are passed to
+    // ChatMessageList; mutations stay inside ChatMessageList exactly as before.
+    //
+    // §review-D (gpter #3) — WRITE-ONLY: the restore consumer was removed
+    // (§B1), so this map + ledger currently only RECORD offsets (the mirror
+    // effect inside ChatMessageList writes here on every user scroll). They
+    // are retained for a future cross-session restore consumer. The ACTUAL
+    // scroll-preservation guarantees today are carried by
+    // `rememberSaveable(sessionId, LazyListState.Saver)` + saveable
+    // followBottom inside ChatMessageList, which reliably preserve scroll
+    // for: (a) Sessions-page entry → pendingJumpToLatest jump-to-latest;
+    // (b) HorizontalPager swipe + SessionTabStrip tap for ROOT sessions in
+    // the pager page set (stable `key = session.id` keeps each page's
+    // saveable slot alive); (c) Chat→file-preview→back re-entry with the
+    // SAME sessionId. NOT reliably covered: sheet-select of a non-paged
+    // session, root↔sub-agent switches (sub-agents bypass the pager), post-
+    // fork re-entry, programmatic selects outside the pager page set —
+    // those fall back to the saveable default initializer.
     val savedPositions = remember { mutableStateMapOf<String, Pair<Int, Int>>() }
     val accessOrder = remember { mutableStateListOf<String>() }
     LaunchedEffect(sessionList.openSessionIds) {

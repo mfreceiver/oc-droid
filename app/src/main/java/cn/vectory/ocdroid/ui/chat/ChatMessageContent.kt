@@ -99,7 +99,29 @@ internal fun ChatMessageList(
     // access-order LRU ledger. Lifted out of this composable (previously
     // local `remember{}` blocks) so the HorizontalPager page slot disposing
     // and recreating ChatMessageList on currentSessionId flip no longer
-    // drops the cached positions. Owned by ChatScreen; mutated here.
+    // drops the cached positions. Owned by ChatScaffold; mutated here.
+    //
+    // §review-D (gpter #3) — WRITE-ONLY / coverage scope: the restore
+    // CONSUMER was removed (§B1), so this map + ledger are currently WRITE-
+    // ONLY (the mirror effect below records offsets; nothing reads them
+    // back). They are retained for a future cross-session restore consumer.
+    // The ACTUAL scroll-preservation guarantees today are carried by
+    // `rememberSaveable(sessionId, LazyListState.Saver)` + saveable
+    // followBottom below, which reliably preserve scroll for:
+    //   (a) Sessions-page entry → pendingJumpToLatest forces a jump-to-latest
+    //       (NOT a restore — see the LaunchedEffect below).
+    //   (b) HorizontalPager swipe + SessionTabStrip tap for ROOT sessions in
+    //       the pager page set (stable pager `key = session.id` keeps each
+    //       page's SaveableStateHolder slot — and thus its saveable
+    //       LazyListState — alive across page-slot reuse).
+    //   (c) Chat→file-preview→back re-entry with the SAME sessionId (the
+    //       Chat NavBackStackEntry's SaveableStateHolder restores the prior
+    //       viewport).
+    // Best-effort / NOT reliably covered: sheet-select of a non-paged
+    // session, root↔sub-agent switches (sub-agents bypass the pager),
+    // post-fork re-entry, and any programmatic select outside the current
+    // pager page set — those transitions re-create the saveable state from
+    // the default initializer (no cross-session restore consumer exists).
     savedPositions: SnapshotStateMap<String, Pair<Int, Int>>,
     accessOrder: SnapshotStateList<String>,
     // §1C: per-message destructive-action callbacks (Copy / Edit & rerun /
@@ -242,8 +264,19 @@ internal fun ChatMessageList(
     // §flicker-fix (Issue 1): key the LazyListState by sessionId so a fresh
     // state is created on session change. Without the key, the pager reusing
     // a slot for a different session kept the old scroll offset for one frame.
-    // Additive to the hoisted per-session LRU: SaveableStateHolder owned by the
-    // Chat NavBackStackEntry restores the exact viewport after chat/preview pops.
+    //
+    // §review-D (gpter #3) — actual preservation scope: the Chat
+    // NavBackStackEntry's SaveableStateHolder restores the prior viewport
+    // ONLY for (a) HorizontalPager page-slot reuse on ROOT sessions (stable
+    // pager `key = session.id` keeps the slot alive across swipe / tab-tap),
+    // and (b) Chat→file-preview→back re-entry with the SAME sessionId. It
+    // does NOT reliably preserve scroll across sheet-select of a non-paged
+    // session, root↔sub-agent switches (sub-agents bypass the pager), post-
+    // fork re-entry, or other programmatic selects outside the pager page
+    // set — those paths re-create the state from this default initializer.
+    // The hoisted savedPositions/accessOrder LRU (see params above) is
+    // WRITE-ONLY today (its restore consumer was removed); it is retained
+    // for a future cross-session restore and does not affect this line.
     val listState = rememberSaveable(sessionId, saver = LazyListState.Saver) { LazyListState() }
     // §B1: followBottom is per-session saveable so it survives Chat→preview→back.
     // A REAL sessionId change re-runs the initializer (default true); a re-entry
@@ -263,15 +296,25 @@ internal fun ChatMessageList(
     // 而重新点亮按钮（按下后闪烁/重现）。按下时 onJump 置位、动画 finally 清零。
     var navJumping by remember { mutableStateOf(false) }
     // §3-scroll-memory: per-session scroll-position memory is now HOISTED to
-    // ChatScreen (above the HorizontalPager) so the pager disposing this
+    // ChatScaffold (above the HorizontalPager) so the pager disposing this
     // composable on a currentSessionId flip no longer drops the cache. The
     // `savedPositions` map + `accessOrder` LRU ledger are received as params.
     // The mirror effect below continuously records the user's scroll offset
     // against the active sessionId. NOTE (§B1): the restore CONSUMER was
     // removed — savedPositions/accessOrder are currently WRITE-ONLY (kept for
-    // the upcoming cross-session restore; cleanup is out of scope here). The
-    // saveable LazyListState + saveable followBottom above now carry the
-    // preview-return position-preservation contract instead.
+    // a future cross-session restore consumer; cleanup is out of scope here).
+    //
+    // §review-D (gpter #3) — guaranteed vs best-effort: with the restore
+    // consumer gone, the ACTUAL scroll-preservation guarantees are carried
+    // by the saveable LazyListState + saveable followBottom above. Those
+    // reliably preserve scroll for: (a) Sessions-page entry → forced jump
+    // to latest via pendingJumpToLatest (NOT a restore); (b) HorizontalPager
+    // swipe + SessionTabStrip tap for ROOT sessions in the pager page set
+    // (stable `key = session.id` keeps each page's saveable slot alive);
+    // (c) Chat→file-preview→back re-entry with the SAME sessionId. They do
+    // NOT reliably cover sheet-select of a non-paged session, root↔sub-agent
+    // switches, post-fork re-entry, or programmatic selects outside the
+    // pager page set — those paths re-run the saveable initializer.
     //
     // 🟡 Lifecycle constraint (glmer 🟡-6) — RESOLVED by hoisting: the cache
     // used to be bound to ChatMessageList's composition, so navigation away
@@ -509,8 +552,16 @@ internal fun ChatMessageList(
     // (streaming deltas / new turns) leave isEmpty() at false → no re-launch.
     // The other keys (sessionId, pendingJumpToLatest) cover the "intent set"
     // and "session changed" restarts. The horizontal-swipe path + tab-strip
-    // tap + SessionPickerSheet + Chat reselect do NOT set pendingJumpToLatest
-    // → this effect returns early → their saveable scroll restore is preserved.
+    // tap (for ROOT sessions in the pager page set) + SessionPickerSheet +
+    // Chat reselect do NOT set pendingJumpToLatest → this effect returns
+    // early. Of those, ONLY the pager swipe / tab-strip tap for root sessions
+    // reliably preserves scroll (stable pager `key = session.id` keeps each
+    // page's saveable LazyListState alive — §review-D / gpter #3). Chat
+    // reselect scrolls to latest via its own orchestrator effect below.
+    // SessionPickerSheet selecting a non-paged session, root↔sub-agent
+    // switches, and post-fork re-entry fall back to the saveable initializer
+    // (no cross-session restore consumer exists yet — savedPositions /
+    // accessOrder are WRITE-ONLY).
     val pendingJumpToLatest = chatState.pendingJumpToLatest
     LaunchedEffect(sessionId, pendingJumpToLatest, messages.isEmpty()) {
         if (sessionId == null || pendingJumpToLatest == null) return@LaunchedEffect
@@ -1217,14 +1268,20 @@ private fun GapDivider(
 
 /**
  * 🟡 (glmer 🟡-6) Maximum number of per-session scroll positions retained in
- * `savedPositions` inside [ChatMessageList]. The cache is keyed by sessionId
- * and lives for the lifetime of the ChatMessageList composable; without a cap
- * a user that opens many sub-sessions would accumulate entries forever. When
- * the cap is exceeded the least-recently-used entry is evicted — true LRU is
- * implemented via the parallel `accessOrder` SnapshotStateList ledger (see
- * `savedPositions` declaration doc for why SnapshotStateMap alone cannot do
- * this). 30 is comfortably above typical agent-task fan-out while bounding
- * memory to a few KB.
+ * the hoisted `savedPositions` cache (owned by ChatScaffold, mutated inside
+ * [ChatMessageList]). The cache is keyed by sessionId and lives for the
+ * lifetime of the ChatScaffold composition (it survived the lift out of
+ * ChatMessageList so the HorizontalPager disposing a page no longer wipes
+ * it); without a cap a user that opens many sub-sessions would accumulate
+ * entries forever. When the cap is exceeded the least-recently-used entry is
+ * evicted — true LRU is implemented via the parallel `accessOrder`
+ * SnapshotStateList ledger (see `savedPositions` declaration doc for why
+ * SnapshotStateMap alone cannot do this). 30 is comfortably above typical
+ * agent-task fan-out while bounding memory to a few KB.
+ *
+ * §review-D (gpter #3): the cache is currently WRITE-ONLY (its restore
+ * consumer was removed — see the `savedPositions` param doc above). The cap
+ * + LRU are retained so the future restore consumer lands on a bounded cache.
  */
 private const val MAX_SAVED_SESSIONS = 30
 

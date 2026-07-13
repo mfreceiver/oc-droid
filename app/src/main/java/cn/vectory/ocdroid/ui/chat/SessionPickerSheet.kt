@@ -104,10 +104,10 @@ fun SessionPickerSheet(
     @Suppress("UNUSED_PARAMETER") onNewSession: () -> Unit,
     onDismiss: () -> Unit,
 ) {
-    // Overflow menu anchor — when non-null, the DropdownMenu is rendered for
-    // the matching session id. Archive / unarchive are visible by default;
-    // the overflow is the canonical destructive-affordance surface (P4-4).
-    var overflowFor by remember { mutableStateOf<String?>(null) }
+    // §review-D (gpter #4): the per-row overflow DropdownMenu is now anchored
+    // INSIDE each SessionPickerRow's `⋮` Box (Tier-A trigger-anchored rule,
+    // docs/ui-style-spec.md §A). No hoisted overflow anchor is needed here —
+    // each row owns its own expanded state and Archive/Unarchive callbacks.
 
     // Root, non-archived sessions only — sub-agents are reached via the
     // in-chat sub-agent breadcrumb; archived sessions are out of the
@@ -158,22 +158,14 @@ fun SessionPickerSheet(
                         isUnread = s.id in unreadSessions,
                         hasQuestion = s.id in questionSessionIds,
                         onClick = { onSelect(s.id) },
-                        onOverflow = { overflowFor = s.id },
+                        onArchive = { onArchive(s.id) },
+                        onUnarchive = { onUnarchive(s.id) },
                     )
                 }
             }
         }
     }
 
-    val overflowSession = overflowFor?.let { id -> sessions.firstOrNull { it.id == id } }
-    if (overflowSession != null) {
-        SessionRowOverflowMenu(
-            session = overflowSession,
-            onDismiss = { overflowFor = null },
-            onArchive = { overflowFor = null; onArchive(overflowSession.id) },
-            onUnarchive = { overflowFor = null; onUnarchive(overflowSession.id) },
-        )
-    }
 }
 
 @Composable
@@ -184,7 +176,13 @@ private fun SessionPickerRow(
     isUnread: Boolean,
     hasQuestion: Boolean,
     onClick: () -> Unit,
-    onOverflow: () -> Unit,
+    // §review-D (gpter #4): the overflow DropdownMenu is anchored INSIDE this
+    // row's trailing Box (Tier-A trigger-anchored rule, docs/ui-style-spec.md
+    // §A). Each row owns its own expanded state; Archive/Unarchive are routed
+    // straight to the parent's session-level callbacks. See
+    // [SessionRowOverflowMenu] below for the DropdownMenu body.
+    onArchive: () -> Unit,
+    onUnarchive: () -> Unit,
 ) {
     val tone = remember(session.directory) { workdirTone(session.directory) }
     ListItem(
@@ -219,6 +217,14 @@ private fun SessionPickerRow(
             // unread), the unified PickerTrailingCheck (selected → primary
             // Check; replaces the old surfaceContainerHigh selected bg), and
             // the ⋮ overflow IconButton (Archive/Unarchive).
+            //
+            // §review-D (gpter #4): the overflow DropdownMenu MUST live in the
+            // SAME Box as its `⋮` trigger so the popup shares layout coords
+            // with the button and anchors to it (Tier-A trigger-anchored rule,
+            // docs/ui-style-spec.md §A). Per-row local expanded state is fine —
+            // only one menu can be open at a time (the DropdownMenu auto-
+            // dismisses on outside tap / item pick via onDismissRequest).
+            var overflowExpanded by remember { mutableStateOf(false) }
             Row(verticalAlignment = Alignment.CenterVertically) {
                 if (hasQuestion) {
                     Text(
@@ -247,10 +253,19 @@ private fun SessionPickerRow(
                     Spacer(Modifier.size(Dimens.spacingCompact))
                 }
                 PickerTrailingCheck(selected = isSelected)
-                IconButton(onClick = onOverflow) {
-                    Icon(
-                        Icons.Default.MoreVert,
-                        contentDescription = stringResource(R.string.chat_session_overflow),
+                Box {
+                    IconButton(onClick = { overflowExpanded = true }) {
+                        Icon(
+                            Icons.Default.MoreVert,
+                            contentDescription = stringResource(R.string.chat_session_overflow),
+                        )
+                    }
+                    SessionRowOverflowMenu(
+                        session = session,
+                        expanded = overflowExpanded,
+                        onDismissRequest = { overflowExpanded = false },
+                        onArchive = { overflowExpanded = false; onArchive() },
+                        onUnarchive = { overflowExpanded = false; onUnarchive() },
                     )
                 }
             }
@@ -266,13 +281,18 @@ private fun SessionPickerRow(
 @Composable
 private fun SessionRowOverflowMenu(
     session: Session,
-    onDismiss: () -> Unit,
+    // §review-D (gpter #4): expanded + onDismissRequest are now passed in so
+    // the DropdownMenu binds to its trigger's per-row expanded state (the
+    // menu is composed inside the same Box as the `⋮` IconButton in
+    // [SessionPickerRow], making it Tier-A trigger-anchored).
+    expanded: Boolean,
+    onDismissRequest: () -> Unit,
     onArchive: () -> Unit,
     onUnarchive: () -> Unit,
 ) {
     DropdownMenu(
-        expanded = true,
-        onDismissRequest = onDismiss,
+        expanded = expanded,
+        onDismissRequest = onDismissRequest,
     ) {
         if (session.isArchived) {
             DropdownMenuItem(
