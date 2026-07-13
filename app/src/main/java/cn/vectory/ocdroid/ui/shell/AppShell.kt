@@ -209,20 +209,29 @@ fun AppShell(orchestratorVM: OrchestratorViewModel, navBarBottomDp: Dp = 0.dp) {
                 // are no longer consumed by FilesScreen (the WorkdirControl is
                 // read-only). Kept flowing for signature stability; switching
                 // workdir happens by opening a session in the target dir.
+                //
+                // Nav redesign: FilesScreen now hosts the project-list first
+                // screen (ported from SessionsScreen "Connected projects"),
+                // so the session / settings / composer VMs + onSwitchToChat
+                // are threaded in for the per-row actions.
                 FilesScreen(
                     viewModel = filesVM,
                     orchestratorVM = orchestratorVM,
+                    sessionVM = sessionVM,
+                    settingsVM = settingsVM,
+                    composerVM = composerVM,
                     pathToShow = routeEntry.arguments?.getString("path")?.takeIf { it.isNotBlank() },
                     sessions = sessionListState.sessions,
                     activeSessionId = chatState.currentSessionId,
                     initialWorkdir = explicitWorkdir,
+                    onSwitchToChat = { orchestratorVM.setLastRoute(NavRoute.Chat) },
                     // §files-back-fix (Blocker-2): hand the back-to-Chat
-                    // affordance to FilesScreen so its two mutually-exclusive
+                    // affordance to FilesScreen so its three mutually-exclusive
                     // BackHandlers can fully own system back. AppShell's
                     // top-level BackHandler is disabled on the Files route
                     // (see the BackHandler at the bottom of this composable),
-                    // so this onExit is the single exit path when the preview
-                    // is closed.
+                    // so this onExit is the single exit path when both the
+                    // preview is closed AND browseWorkdir == null.
                     onExit = { orchestratorVM.setLastRoute(NavRoute.Chat) },
                 )
             }

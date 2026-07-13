@@ -104,7 +104,7 @@ internal fun launchLoadSessions(
             currentServerGroupFp != null &&
             expectedServerGroupFp != currentServerGroupFp()
 
-        val limit = MainViewModelTimings.sessionPageSize
+        val limit = MainViewModelTimings.sessionFullLoadLimit
         slices.mutateSessionList {
             it.copy(
                 loadedSessionLimit = limit,
@@ -136,7 +136,14 @@ internal fun launchLoadSessions(
                     currentSessionId,
                     currentOpenIds.toSet()
                 )
-                val newHasMore = mergedSessions.size >= limit
+                // Nav redesign: the initial load is a fixed full-page snapshot
+                // (sessionFullLoadLimit) with no load-more UI, so hasMore is
+                // hard-false after this load regardless of the returned size —
+                // other consumers (TopBar/Picker) must not advertise a next page
+                // that the Sessions tab will never trigger. 500 is an accepted
+                // "effectively all" product cap (per-workdir directorySessions
+                // fan-out covers connected projects beyond the global page).
+                val newHasMore = false
                 if (staleHostAfterSuspend()) {
                     return@onSuccess
                 }

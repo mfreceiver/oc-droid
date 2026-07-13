@@ -349,11 +349,12 @@ fun ChatScaffold(
         }
     }
 
-    // §1B: derive ChatTopBarState inside a remembered derivedStateOf so the
-    // new TopAppBar recomposes only when its slice inputs change. Slice reads
-    // match the old ChatTopBarState (see ChatTopBar.kt) — additive only, the
-    // second-row `SessionTabStrip` rendering was removed from the new
-    // TopAppBar (session switching is now via the sheet).
+    // §1B / §nav-redesign: derive ChatTopBarState inside a remembered
+    // derivedStateOf so the TopAppBar recomposes only when its slice inputs
+    // change. Slice reads match ChatTopBarState (see ChatTopBar.kt). The
+    // second-row SessionTabStrip was RESTORED under ChatTopBar by the nav
+    // redesign (quick switch between open root sessions); session switching is
+    // via the strip AND the SessionPickerSheet (title tap = all/search/archive).
     val curHostProfile = currentHostProfile(host.hostProfiles, host.currentHostProfileId)
     // §Nit: hoist the localised "No host" fallback outside the
     // derivedStateOf lambda (Compose forbids @Composable invocations
@@ -363,6 +364,17 @@ fun ChatScaffold(
         derivedStateOf {
             val curHostProfile = currentHostProfile(host.hostProfiles, host.currentHostProfileId)
             val curSession = currentSession(sessionList.sessions, chat.currentSessionId)
+            // §nav-redesign (2026-07-13): populate openSessions for the restored
+            // SessionTabStrip (second row under ChatTopBar). openSessionIds is
+            // root-only + capped at 8 by the session domain, but we defend at
+            // the consumer too: a stale/legacy child id persisted in
+            // openSessionIds must never render as a top-level tab. Associate-by
+            // once for O(1) resolution (8 ids × ~500 sessions otherwise O(n×m)).
+            val sessionsById = (sessionList.sessions +
+                sessionList.directorySessions.values.flatten()).associateBy { it.id }
+            val openSessions = sessionList.openSessionIds
+                .mapNotNull { sessionsById[it] }
+                .filter { it.parentId == null && !it.isArchived }
             ChatTopBarState(
                 sessions = sessionList.sessions,
                 currentSessionId = chat.currentSessionId,
@@ -395,7 +407,12 @@ fun ChatScaffold(
                 serverVersion = connection.serverVersion,
                 providers = settings.providers,
                 disabledModels = settings.disabledModels,
-                currentModel = chat.currentModel
+                currentModel = chat.currentModel,
+                // §nav-redesign: consumed by the restored SessionTabStrip
+                // (rendered as the TopAppBar's second row, directly after
+                // ChatTopBar in the column below). Empty list short-circuits
+                // inside SessionTabStrip (PrimaryScrollableTabRow guard).
+                openSessions = openSessions,
             )
         }
     }
@@ -415,8 +432,14 @@ fun ChatScaffold(
         // §dead-onCompact-cleanup: the standalone "Compress" overflow item
         // was removed; compaction is triggered via the ContextUsageDialog's
         // own "Compress context" button (see showContextDialog below).
+        //
+        // §nav-redesign (2026-07-13): onCloseSession wired to
+        // sessionVM::closeSession so the per-tab close-X in the restored
+        // SessionTabStrip can dismiss an open tab (closes the browser-tab,
+        // NOT archive — the conversation stays in the Sessions history).
         ChatTopBarActions(
             onSelectSession = sessionVM::selectSession,
+            onCloseSession = sessionVM::closeSession,
             onOpenContextDialog = { showContextDialog = true },
             onOpenTodoDialog = { showTodoDialog = true },
             onOpenAgentPicker = { showAgentPicker = true },
@@ -434,6 +457,24 @@ fun ChatScaffold(
             tabVisible = true,
             onTabVisibilityChange = { /* no second-row strip in 1B */ },
             onTitleClick = { showSessionPicker = true },
+        )
+
+        // §nav-redesign (2026-07-13): SessionTabStrip is restored as the
+        // TopAppBar's second row — the persistent horizontal "open sessions"
+        // browser-tab strip. Coexists with the SessionPickerSheet (opened by
+        // tapping the title above) — the strip is the always-visible quick
+        // switcher, the sheet is the full list / search / archive surface.
+        // currentWorkdir tints the selected tab's accent bar with the
+        // current session's directory hash (draftWorkdir fallback so a brand-
+        // new draft tab still gets a stable colour).
+        SessionTabStrip(
+            openSessions = topBarState.openSessions,
+            currentSessionId = topBarState.currentSessionId,
+            parentSessionId = topBarState.parentSessionId,
+            currentWorkdir = curSession?.directory ?: composer.draftWorkdir,
+            unreadSessions = topBarState.unreadSessions,
+            questionSessionIds = topBarState.questionSessionIds,
+            actions = topBarActions,
         )
 
         // §PARITY: wide-screen card wrap mirrors ChatScreen 10/§B3. Phase 1B

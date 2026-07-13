@@ -223,7 +223,8 @@ class ChatViewModelTest : MainViewModelTestBase() {
     @Test
     fun `sendMessage success refreshes sessions`() = runTest {
         coEvery { repository.sendMessage(any(), any(), any(), any()) } returns Result.success(Unit)
-        coEvery { repository.getSessions(10) } returns Result.success(
+        // §nav-redesign: launchLoadSessions uses sessionFullLoadLimit (500).
+        coEvery { repository.getSessions(cn.vectory.ocdroid.ui.MainViewModelTimings.sessionFullLoadLimit) } returns Result.success(
             listOf(cn.vectory.ocdroid.data.model.Session(id = "session-1", directory = "/tmp/project", title = "Updated"))
         )
 
@@ -242,7 +243,8 @@ class ChatViewModelTest : MainViewModelTestBase() {
         chatVM.sendMessage()
         advanceUntilIdle()
 
-        coVerify(atLeast = 1) { repository.getSessions(10) }
+        // §nav-redesign: launchLoadSessions uses sessionFullLoadLimit (500).
+        coVerify(atLeast = 1) { repository.getSessions(cn.vectory.ocdroid.ui.MainViewModelTimings.sessionFullLoadLimit) }
         assertEquals("Updated", sessionVM.sessionListFlow.value.sessions.single().title)
     }
 

@@ -500,6 +500,36 @@ class SettingsViewModel @Inject constructor(
         }
     }
 
+    /**
+     * Register a project (workdir) WITHOUT creating a session — the project is
+     * a first-class entity independent of the session system (nav redesign:
+     * Files "添加新项目"). A project with zero sessions, or whose last session
+     * was archived, still appears and is NOT removed; only [disconnectWorkdir]
+     * removes it.
+     *
+     * Deliberately does NOT: change `currentWorkdir`, clear chat/draft, steal
+     * the active session, or create a session. Contrast [SessionViewModel.
+     * createSessionInWorkdir], which (despite its name) starts a draft +
+     * registers + prefetches — that draft-hijack behaviour is wrong for the
+     * Files "add project" entry, hence this dedicated action.
+     *
+     * No prefetch here: the per-workdir `directorySessions` fan-out
+     * (`loadInitialData`) and the project-row expand both fetch on demand.
+     */
+    fun connectWorkdir(workdir: String) {
+        val wd = workdir.trim()
+        if (wd.isEmpty()) return
+        val profile = hostProfileStore.currentProfile()
+        val fp = profile.serverGroupFp.ifBlank { profile.id }
+        appScope.launch {
+            settingsManager.addRecentWorkdir(fp, wd)
+            // Neither addRecentWorkdir pokes hostFlow/sessionListFlow, so bump
+            // the tick to force recentWorkdirs (and buildWorkdirGroups) to
+            // re-derive immediately — the new project row appears next frame.
+            recentWorkdirsTick.update { it + 1L }
+        }
+    }
+
     private companion object {
         private const val TAG = "SettingsViewModel"
     }

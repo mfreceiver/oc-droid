@@ -1,6 +1,5 @@
 package cn.vectory.ocdroid.ui.sessions
 
-import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -11,22 +10,16 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Chat
-import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
+import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.AddComment
 import androidx.compose.material.icons.filled.Archive
-import androidx.compose.material.icons.filled.CreateNewFolder
 import androidx.compose.material.icons.filled.History
-import androidx.compose.material.icons.filled.Inbox
-import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.clip
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.RectangleShape
 import androidx.compose.ui.res.stringResource
-import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import cn.vectory.ocdroid.R
@@ -51,28 +44,31 @@ import java.util.Locale
 @Composable
 fun SessionsScreen(
     viewModel: SessionViewModel,
-    composerVM: ComposerViewModel,
-    orchestratorVM: OrchestratorViewModel,
-    settingsVM: SettingsViewModel,
+    /**
+     * Nav redesign: SessionsScreen is now the flat session-history tab. The
+     * "Connected projects" block moved to the Files tab (project-centric
+     * workspace), so the composer / settings / repository slices that fed it
+     * are no longer consumed here. The params are KEPT in the signature so
+     * AppShell's call site stays unchanged; they are simply no longer read.
+     */
+    @Suppress("UNUSED_PARAMETER") composerVM: ComposerViewModel,
+    @Suppress("UNUSED_PARAMETER") orchestratorVM: OrchestratorViewModel,
+    @Suppress("UNUSED_PARAMETER") settingsVM: SettingsViewModel,
     /** §R-17 batch3e: repository for the DirectoryPickerSheet (was
      *  `viewModel.core.repository`). Injected via the activity-scoped
      *  [FilesViewModel] at the call site; passed in directly here so this
      *  composable does not reach into `.core`. */
-    repository: OpenCodeRepository,
+    @Suppress("UNUSED_PARAMETER") repository: OpenCodeRepository,
     onSwitchToChat: () -> Unit = {},
     /**
      * Opens the Files destination.
-     * Carries the tapped workdir (non-null here — the folder button is per-
-     * workdir) and an optional specific file path (null from Sessions; only
-     * chat file-path taps carry a path). Two-param signature so the new-shell
-     * AppShell can build a typed route with both fields.
      *
-     * §0.8.2 P3.5: the per-workdir "browse files" (FolderOpen) IconButton that
-     * was the only call site here has been REMOVED — browsing is the Files tab
-     * now. The param is KEPT in the signature so AppShell's call site stays
-     * unchanged; it is simply no longer invoked from this composable.
+     * Nav redesign: browsing is the Files tab now (the per-workdir FolderOpen
+     * button moved there). The param is KEPT in the signature so AppShell's
+     * call site stays unchanged; it is simply no longer invoked from this
+     * composable.
      */
-    onOpenFiles: (workdir: String, path: String?) -> Unit = { _, _ -> },
+    @Suppress("UNUSED_PARAMETER") onOpenFiles: (workdir: String, path: String?) -> Unit = { _, _ -> },
     /**
      * Phase 7：横屏左 1/3 面板内渲染时设 false，隐藏 TopAppBar 的 navigationIcon
      * （面板始终与 chat pane 并列，无需"返回 chat"——onSwitchToChat 在面板内为 no-op）。
@@ -84,7 +80,7 @@ fun SessionsScreen(
      * (which still passes it). `onSwitchToChat` is still used after selecting
      * / creating a session.
      */
-    showBackNavigation: Boolean = true
+    @Suppress("UNUSED_PARAMETER") showBackNavigation: Boolean = true
 ) {
     // §R-17 Stage 3 (+ follow-up debt cleanup): subscribe to the relevant
     // slice Flows directly instead of the whole-app AppState. SessionsScreen
@@ -103,65 +99,32 @@ fun SessionsScreen(
     // kept hot during chat typing — but the field-level subscription is still
     // the cleaner, more precise model.)
     val sessionListState by viewModel.sessionListFlow.collectAsStateWithLifecycle()
-    val draftWorkdir by remember { composerVM.composerFlow.map { it.draftWorkdir }.distinctUntilChanged() }
-        .collectAsStateWithLifecycle(initialValue = null)
+    // Nav redesign: draftWorkdir / recentWorkdirs moved to the Files tab (the
+    // "Connected projects" block now lives there). SessionsScreen is the flat
+    // session history — it only needs the session list + unread badges.
     val unreadSessions by remember { viewModel.unreadFlow.map { it.unreadSessions }.distinctUntilChanged() }
         .collectAsStateWithLifecycle(initialValue = emptySet())
-    val recentWorkdirs by settingsVM.recentWorkdirs.collectAsStateWithLifecycle()
-    var showNewWorkdirDialog by remember { mutableStateOf(false) }
-    var expandedWorkdirs by remember { mutableStateOf(setOf<String>()) }
-    var pendingDisconnectWorkdir by remember { mutableStateOf<String?>(null) }
     // M7: long-press a session card → archive confirmation dialog. Null = hidden.
     var pendingArchiveSession by remember { mutableStateOf<Session?>(null) }
-    // Derive recent sessions (root sessions: parentId == null, by time.updated desc, top 5).
-    // Source merges the global sessions list with directorySessions (#10: prior
-    // conversations discovered for a connected workdir that may not yet appear
-    // in the global list), deduplicated by id so a session present in both
-    // stores is only rendered once.
-    // R-17 Stage 3: reads come from sessionListState (a slice Flow), so only
-    // session-list mutations re-emit. The remembered derivedStateOf still
-    // suppresses structurally-equal results, so an unrelated sessionStatuses
-    // tweak recomputes the block but yields an equal list and the LazyColumn
-    // items are skipped.
+    // Derive the FLAT session list: ALL root sessions (parentId == null,
+    // non-archived) across every connected project, by time.updated desc.
+    // Nav redesign: the old `.take(5)` "recent" cap is removed — the Sessions
+    // tab is now the single flat session history (no workdir grouping, which
+    // moved to the Files tab). Source merges the global sessions list with
+    // directorySessions (#10: per-workdir conversations), deduplicated by id.
     val recentSessions by remember {
         derivedStateOf {
             (sessionListState.sessions + sessionListState.directorySessions.values.flatten())
                 .distinctBy { it.id }
                 .filter { it.parentId == null && !it.isArchived }
                 .sortedByDescending { it.time?.updated ?: 0L }
-                .take(5)
         }
     }
 
-    // Derive workdir groups for the "Connected projects" list, sub-agents
-    // (parentId != null) excluded. Sub-agents are only reachable from within
-    // a parent conversation via SubAgentCard, never from this workdir list.
-    //
-    // §grouping-rewrite Round-3 C3: derivation is now GATED by recent_workdirs
-    // membership — a workdir is visible iff it is in recentWorkdirs OR it is
-    // the active draftWorkdir. This makes the persistent recent_workdirs list
-    // the single source of truth for "connected" so disconnecting a workdir
-    // (which removes it from recent_workdirs + evicts its cache) hides it
-    // from this list EVEN WHEN its live sessions are still in sessionListFlow
-    // (the common case during the window between disconnect and the server
-    // list refresh). The disconnect dialog promises "removed from the list"
-    // unconditionally — the pre-C3 logic broke that promise for any workdir
-    // with at least one live (non-archived, parentId==null) session.
-    //
-    // The derivation lives in [buildWorkdirGroups] (top-level, pure, testable);
-    // this derivedStateOf just feeds it the live slice values + caches the
-    // structurally-equal result so SSE chat deltas / typing (which do not
-    // touch any of the input slices) do not recompose the workdir LazyColumn.
-    val workdirGroups by remember {
-        derivedStateOf {
-            buildWorkdirGroups(
-                allSessions = (sessionListState.sessions + sessionListState.directorySessions.values.flatten())
-                    .distinctBy { it.id },
-                recentWorkdirs = recentWorkdirs,
-                draftWorkdir = draftWorkdir,
-            )
-        }
-    }
+    // Nav redesign: the "Connected projects" workdir-groups section moved to
+    // the Files tab (project-centric workspace). buildWorkdirGroups (the pure
+    // derivation, still defined + unit-tested in this file) is now consumed by
+    // FilesScreen; SessionsScreen is the flat session history only.
 
     // R-17 Stage 3: unreadSessions is a field-level slice Flow (above), so the
     // value is already locally-stable — no derivedStateOf wrapper needed. Lazy
@@ -185,6 +148,20 @@ fun SessionsScreen(
                     // is a top-level tab now (no back arrow). The
                     // showBackNavigation param is retained in the signature
                     // but no longer read here (see param doc above).
+                )
+            },
+            // Nav redesign: new-session FAB. Mirrors SessionPickerSheet's
+            // onNewSession semantic — starts a fresh draft against the current
+            // workdir (viewModel.createSession) and jumps to Chat so the user
+            // lands in the composer for the new (draft) session.
+            floatingActionButton = {
+                ExtendedFloatingActionButton(
+                    onClick = {
+                        viewModel.createSession()
+                        onSwitchToChat()
+                    },
+                    icon = { Icon(Icons.Default.Add, contentDescription = null) },
+                    text = { Text(stringResource(R.string.sessions_new_session_fab)) },
                 )
             }
         ) { padding ->
@@ -231,226 +208,14 @@ fun SessionsScreen(
                 }
             }
 
-            // --- Workdirs Section ---
-            item(key = "workdirs_header") {
-                SectionHeader(
-                    icon = Icons.Default.Inbox,
-                    title = stringResource(R.string.sessions_tab_workdirs),
-                    trailing = {
-                        // §entry-relocate: "连接新项目"入口从 TopAppBar 移到此处，
-                        // 图标换 CreateNewFolder（文件夹+加号，"添加目录"语义最清晰）。
-                        IconButton(onClick = { showNewWorkdirDialog = true }) {
-                            Icon(
-                                Icons.Default.CreateNewFolder,
-                                contentDescription = stringResource(R.string.sessions_connect_new_action),
-                                tint = MaterialTheme.colorScheme.onSurfaceVariant
-                            )
-                        }
-                    }
-                )
-            }
-
-            if (workdirGroups.isEmpty()) {
-                item(key = "workdirs_empty") {
-                    EmptyRow(stringResource(R.string.sessions_tab_no_workdirs))
-                }
-            } else {
-                items(workdirGroups, key = { "workdir_${WorkdirPaths.normalize(it.first)}" }) { (workdir, sessionsInWorkdir) ->
-                    val isExpanded = expandedWorkdirs.contains(workdir)
-                    val displayName = workdir.split("/").filter { it.isNotEmpty() }.lastOrNull()
-                        ?: workdir
-                    // §grouping-rewrite Round-6 F3: normalize-match the draft
-                    // badge. The visibility gate (buildWorkdirGroups) uses
-                    // WorkdirPaths.normalize for the visible-set, so a draft
-                    // whose raw form is a slash variant of a visible workdir
-                    // (e.g. draftWorkdir="proj-a/" while the displayed group's
-                    // workdir is "/proj-a") collapses onto the same group —
-                    // the badge MUST fire for that group, not silently miss
-                    // because the raw strings differ. Mirrors the C3/C4/C5
-                    // pipeline's normalization contract.
-                    //
-                    // Capture draftWorkdir into a local val first so Kotlin
-                    // can smart-cast the null-check (draftWorkdir is a
-                    // delegated property — the compiler refuses to smart-cast
-                    // those inline).
-                    val draft = draftWorkdir
-                    val isDraft = sessionsInWorkdir.isEmpty() &&
-                        draft != null &&
-                        WorkdirPaths.normalize(workdir) == WorkdirPaths.normalize(draft)
-
-                    Column(modifier = Modifier.fillMaxWidth()) {
-                        // Workdir header row (click = expand/collapse, long-click = disconnect).
-                        // A1: converged the custom Row onto the M3 ListItem. The
-                        // combinedClickable (expand/collapse + long-click disconnect)
-                        // is forwarded via the modifier so the whole row remains the
-                        // gesture target; the browse / create IconButtons in
-                        // trailingContent consume their own taps.
-                        ListItem(
-                            modifier = Modifier
-                                .combinedClickable(
-                                onClick = {
-                                    if (isExpanded) {
-                                        expandedWorkdirs = expandedWorkdirs - workdir
-                                    } else {
-                                        expandedWorkdirs = expandedWorkdirs + workdir
-                                        // Fix #6c: re-fetch this project's directory
-                                        // sessions on expand so a conversation created
-                                        // elsewhere (web) — whose session.created SSE
-                                        // event was missed while backgrounded — appears
-                                        // without a full reconnect. Fire-and-forget; on
-                                        // failure the existing list is kept (onSuccess only).
-                                        viewModel.refreshDirectorySessions(workdir)
-                                    }
-                                },
-                                onLongClick = { pendingDisconnectWorkdir = workdir }
-                            ),
-                            leadingContent = {
-                                Icon(
-                                    if (isExpanded) Icons.Default.KeyboardArrowDown
-                                    else Icons.AutoMirrored.Filled.KeyboardArrowRight,
-                                    contentDescription = if (isExpanded) "Collapse" else "Expand",
-                                    tint = MaterialTheme.colorScheme.onSurfaceVariant
-                                )
-                            },
-                            headlineContent = {
-                                Row(verticalAlignment = Alignment.CenterVertically) {
-                                    Text(
-                                        text = displayName,
-                                        style = MaterialTheme.typography.bodyMedium.copy(fontWeight = FontWeight.Medium),
-                                        color = MaterialTheme.colorScheme.onSurface
-                                    )
-                                    if (isDraft) {
-                                        Spacer(modifier = Modifier.width(Dimens.spacingCompact))
-                                        Text(
-                                            text = stringResource(R.string.sessions_draft_badge),
-                                            style = MaterialTheme.typography.labelSmall,
-                                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                            modifier = Modifier
-                                                .clip(MaterialTheme.shapes.extraSmall)
-                                                .background(
-                                                    MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.12f)
-                                                )
-                                                .padding(horizontal = Dimens.spacingCompact, vertical = Dimens.hairline)
-                                        )
-                                    }
-                                }
-                            },
-                            supportingContent = {
-                                Text(
-                                    text = workdir,
-                                    style = MaterialTheme.typography.bodySmall,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                    // §workdir-height-fix: constrain to a single line +
-                                    // ellipsis. M3 ListItem renders multi-line
-                                    // supportingContent with asymmetric bottom spacing
-                                    // (the taller left column mismatches the 48dp
-                                    // trailing IconButtons row), which made long-path
-                                    // workdir items show extra space at the bottom vs
-                                    // single-line items. Capping to 1 line keeps every
-                                    // workdir row a uniform height. The basename (the
-                                    // meaningful part) is already in headlineContent.
-                                    maxLines = 1,
-                                    overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis
-                                )
-                            },
-                            trailingContent = {
-                                Row(verticalAlignment = Alignment.CenterVertically) {
-                                    // §0.8.2 P3.5: the per-workdir "browse files"
-                                    // (FolderOpen) IconButton that used to live here has
-                                    // been REMOVED — browsing is the Files top-level tab
-                                    // now (redundant with it). The onOpenWorkspaceFiles
-                                    // param is retained in the signature (see doc above)
-                                    // but no longer invoked here.
-                                    //
-                                    // Create-session affordance for this workdir. Tapping
-                                    // it opens a fresh draft against this directory AND
-                                    // jumps to Chat so the user lands in the composer
-                                    // for the new (draft) session. The draft itself is
-                                    // created by createSessionInWorkdir; the navigation
-                                    // is wired here so SessionsScreen stays decoupled
-                                    // from the Chat destination's internals.
-                                    // R-12 (WCAG 2.5.5): 48dp default touch target (was 32dp).
-                                    IconButton(
-                                        onClick = {
-                                            viewModel.createSessionInWorkdir(workdir)
-                                            onSwitchToChat()
-                                        }
-                                    ) {
-                                        Icon(
-                                            Icons.Default.AddComment,
-                                            contentDescription = stringResource(R.string.sessions_tab_create_session),
-                                            modifier = Modifier.size(Dimens.iconSm)
-                                        )
-                                    }
-                                }
-                            }
-                        )
-
-                        // Expandable session list within workdir. Use a modest
-                        // inset (was start=40dp) so session cards use the full
-                        // screen width instead of being squeezed into a narrow
-                        // column; SessionCard itself adds 8dp horizontal padding.
-                        AnimatedVisibility(visible = isExpanded) {
-                            Column(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .padding(horizontal = Dimens.spacing2)
-                            ) {
-                                if (sessionsInWorkdir.isEmpty()) {
-                                    EmptyWorkdirPlaceholder(
-                                        onClick = {
-                                            viewModel.createSessionInWorkdir(workdir)
-                                            onSwitchToChat()
-                                        }
-                                    )
-                                }
-                                sessionsInWorkdir.forEach { session ->
-                                    SessionCard(
-                                        session = session,
-                                        isUnread = session.id in unreadSessions,
-                                        status = sessionListState.sessionStatuses[session.id],
-                                        onClick = { onSessionClick(session.id) },
-                                        onLongClick = { pendingArchiveSession = session },
-                                        onArchive = { pendingArchiveSession = session },
-                                        showWorkdir = false
-                                    )
-                                }
-                            }
-                        }
-                    }
-                }
+            // Nav redesign: the "Connected projects" workdir-groups section
+            // moved to the Files tab (project-centric workspace). SessionsScreen
+            // is now the flat session-history tab — only the Recent section
+            // above is rendered. buildWorkdirGroups (the pure derivation,
+            // still defined + unit-tested in this file) is consumed by
+            // FilesScreen via the `cn.vectory.ocdroid.ui.sessions` import.
             }
         }
-    }
-
-    }
-
-    // --- Disconnect workdir confirmation dialog (persistent disconnect) ---
-    pendingDisconnectWorkdir?.let { workdir ->
-        AlertDialog(
-            onDismissRequest = { pendingDisconnectWorkdir = null },
-            title = { Text(stringResource(R.string.workdir_disconnect_title)) },
-            text = {
-                val name = workdir.split("/").filter { it.isNotEmpty() }.lastOrNull() ?: workdir
-                Text(stringResource(R.string.workdir_disconnect_message) + "\n\n" + name + "\n" + workdir)
-            },
-            confirmButton = {
-                TextButton(
-                    onClick = {
-                        settingsVM.disconnectWorkdir(workdir)
-                        expandedWorkdirs = expandedWorkdirs - workdir
-                        pendingDisconnectWorkdir = null
-                    }
-                ) {
-                    Text(stringResource(R.string.workdir_disconnect_confirm))
-                }
-            },
-            dismissButton = {
-                TextButton(onClick = { pendingDisconnectWorkdir = null }) {
-                    Text(stringResource(R.string.common_cancel))
-                }
-            }
-        )
     }
 
     // --- M7: Archive session confirmation dialog ---
@@ -458,7 +223,7 @@ fun SessionsScreen(
     // viewModel.core.archiveSession(id), which PATCHes session/{id} with the current
     // timestamp. The server-returned Session (time.archived > 0 ⇒ isArchived)
     // replaces the local copy, so the derivedStateOf filters (!it.isArchived)
-    // in recentSessions / workdirGroups drop it from the list automatically.
+    // in recentSessions drop it from the list automatically.
     pendingArchiveSession?.let { session ->
         AlertDialog(
             onDismissRequest = { pendingArchiveSession = null },
@@ -480,18 +245,6 @@ fun SessionsScreen(
                 TextButton(onClick = { pendingArchiveSession = null }) {
                     Text(stringResource(R.string.common_cancel))
                 }
-            }
-        )
-    }
-
-    // --- Directory picker (modal bottom sheet) for connecting a new project ---
-    if (showNewWorkdirDialog) {
-        DirectoryPickerSheet(
-            repository = repository,
-            onDismiss = { showNewWorkdirDialog = false },
-            onSelect = { path ->
-                showNewWorkdirDialog = false
-                viewModel.createSessionInWorkdir(path)
             }
         )
     }
@@ -532,7 +285,7 @@ private fun SectionHeader(
 }
 
 @Composable
-private fun SessionCard(
+internal fun SessionCard(
     session: Session,
     isUnread: Boolean = false,
     status: SessionStatus? = null,
@@ -663,7 +416,7 @@ private fun EmptyRow(text: String) {
 }
 
 @Composable
-private fun EmptyWorkdirPlaceholder(onClick: () -> Unit) {
+internal fun EmptyWorkdirPlaceholder(onClick: () -> Unit) {
     ListItem(
         modifier = Modifier
             .fillMaxWidth()

@@ -226,10 +226,12 @@ class SessionViewModelTest : MainViewModelTestBase() {
 
     @Test
     fun `loadSessions requests current limit and tracks hasMore`() = runTest {
+        // §nav-redesign: launchLoadSessions now uses sessionFullLoadLimit (500)
+        // for the initial global fetch. 10 sessions < 500 ⇒ hasMore is false.
         val sessions = (1..10).map { index ->
             cn.vectory.ocdroid.data.model.Session(id = "session-$index", directory = "/tmp/$index")
         }
-        coEvery { repository.getSessions(10) } returns Result.success(sessions)
+        coEvery { repository.getSessions(cn.vectory.ocdroid.ui.MainViewModelTimings.sessionFullLoadLimit) } returns Result.success(sessions)
 
         val core = createCore()
         val chatVM = cn.vectory.ocdroid.ui.ChatViewModel(core)
@@ -243,9 +245,13 @@ class SessionViewModelTest : MainViewModelTestBase() {
         sessionVM.loadSessions()
         advanceUntilIdle()
 
-        coVerify { repository.getSessions(10) }
-        assertEquals(10, sessionVM.sessionListFlow.value.loadedSessionLimit)
-        assertTrue(sessionVM.sessionListFlow.value.hasMoreSessions)
+        coVerify { repository.getSessions(cn.vectory.ocdroid.ui.MainViewModelTimings.sessionFullLoadLimit) }
+        assertEquals(
+            cn.vectory.ocdroid.ui.MainViewModelTimings.sessionFullLoadLimit,
+            sessionVM.sessionListFlow.value.loadedSessionLimit,
+        )
+        // 10 < 500 ⇒ no next page.
+        assertFalse(sessionVM.sessionListFlow.value.hasMoreSessions)
         assertEquals(10, sessionVM.sessionListFlow.value.sessions.size)
         assertFalse(sessionVM.sessionListFlow.value.isRefreshingSessions)
     }
@@ -274,10 +280,13 @@ class SessionViewModelTest : MainViewModelTestBase() {
 
     @Test
     fun `loadSessions fetches sub_agent sessions created after initial load`() = runTest {
+        // §nav-redesign: launchLoadSessions uses sessionFullLoadLimit (500).
         val initialSessions = listOf(
             cn.vectory.ocdroid.data.model.Session(id = "parent-1", directory = "/tmp/project")
         )
-        coEvery { repository.getSessions(10) } returns Result.success(initialSessions)
+        coEvery {
+            repository.getSessions(cn.vectory.ocdroid.ui.MainViewModelTimings.sessionFullLoadLimit)
+        } returns Result.success(initialSessions)
 
         val core = createCore()
         val chatVM = cn.vectory.ocdroid.ui.ChatViewModel(core)
@@ -301,7 +310,9 @@ class SessionViewModelTest : MainViewModelTestBase() {
                 parentId = "parent-1"
             )
         )
-        coEvery { repository.getSessions(10) } returns Result.success(refreshedSessions)
+        coEvery {
+            repository.getSessions(cn.vectory.ocdroid.ui.MainViewModelTimings.sessionFullLoadLimit)
+        } returns Result.success(refreshedSessions)
 
         sessionVM.loadSessions()
         advanceUntilIdle()

@@ -118,6 +118,8 @@
     <string name="sessions_restore">Restore</string>
     <string name="sessions_no_active">No active sessions</string>
     <string name="sessions_new_session">New session</string>
+    <!-- Nav redesign: Sessions tab new-session FAB (flat list, no workdir groups). -->
+    <string name="sessions_new_session_fab">New session</string>
     <string name="sessions_recent_section">Recent</string>
     <string name="sessions_by_workdir_section">By workdir</string>
     <string name="chat_session_overflow">Session actions</string>
@@ -211,6 +213,10 @@
     <string name="files_workdir_none">No workdir</string>
     <string name="files_workdir_none_connected">No connected projects</string>
     <string name="files_workdir_switch">Switch workdir</string>
+    <!-- Nav redesign: Files tab = projects list (first screen) + per-project file browser. -->
+    <string name="files_tab_projects">Projects</string>
+    <string name="files_project_browse">Browse files</string>
+    <string name="files_add_project">Add project</string>
     <!-- §P5b-A / Q7: visible "Host" terminology renamed to "Server" for the
          strings surfaced by the 服务器管理 screen (host list, + button,
          editor dialog title, delete-confirm copy). -->

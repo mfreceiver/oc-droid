@@ -1,12 +1,13 @@
-// SessionPickerSheet.kt — Phase 1B ModalBottomSheet session picker (D.4).
+// SessionPickerSheet.kt — ModalBottomSheet session picker (D.4).
 //
-// Replaces the second-row `SessionTabStrip` + `HorizontalPager` from the old
-// ChatScreen with a sheet-based session switcher. The sheet renders Recent
-// + By-workdir sections (no Search yet — Search is Phase 2 per G.2 step 1).
-// Each row is an M3 `ListItem`; the MoreVert trigger opens an
-// overflow menu with Archive / Unarchive (P4-4 — the old long-press archive
-// gesture is replaced with an explicit overflow menu so the destructive
-// action is always reachable from a visible affordance).
+// §nav-redesign (2026-07-13): the second-row `SessionTabStrip` was RESTORED
+// (quick switch between open root sessions); this sheet no longer "replaces"
+// it — the two coexist. The strip is the fast switcher; this sheet (opened
+// via the ChatTopBar title tap) is the full list + Search + Archive/Unarchive
+// overflow. The sheet renders Recent + By-workdir sections; each row is an M3
+// `ListItem`; the MoreVert trigger opens an overflow menu with Archive /
+// Unarchive (P4-4 — the destructive action is always reachable from a visible
+// affordance).
 //
 // §1B-FIX: the body uses a LazyColumn so the Recent + By-workdir sections
 // scroll inside the sheet when the session count exceeds the visible area.

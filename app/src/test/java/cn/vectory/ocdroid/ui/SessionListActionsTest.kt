@@ -154,14 +154,20 @@ class SessionListActionsTest {
     }
 
     @Test
-    fun `launchLoadSessions sets hasMore true when limit reached`() = runTest {
+    fun `launchLoadSessions clears hasMore when fewer than full-load limit returned`() = runTest {
+        // §nav-redesign: launchLoadSessions now uses sessionFullLoadLimit (500)
+        // for the initial global fetch — the Sessions tab is the flat full
+        // history. Returning fewer sessions than the limit means there is no
+        // next page, so hasMoreSessions is false (the pre-redesign pagination
+        // contract returned true when sessions.size == limit; that no longer
+        // holds because limit is now the "effectively all" cap, not page size).
         val sessions = (1..10).map { Session(id = "s$it", directory = "/x") }
-        coEvery { repository.getSessions(any()) } returns Result.success(sessions)
+        coEvery { repository.getSessions(MainViewModelTimings.sessionFullLoadLimit) } returns Result.success(sessions)
 
         launchLoadSessions(scope, repository, slices, settingsManager, {}, {}, {}, emit)
         advanceUntilIdle()
 
-        assertTrue(slices.sessionList.value.hasMoreSessions)
+        assertFalse(slices.sessionList.value.hasMoreSessions)
     }
 
     @Test

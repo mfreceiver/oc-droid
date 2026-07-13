@@ -368,4 +368,49 @@ class SettingsViewModelTest : MainViewModelTestBase() {
 
         job.cancel()
     }
+
+    @Test
+    fun `connectWorkdir registers the project without creating a session or touching currentWorkdir`() = runTest {
+        // §nav-redesign: Files "add project" registers a workdir as a first-
+        // class entity independent of the session system. connectWorkdir must
+        // ONLY addRecentWorkdir + bump the tick — it must NOT change
+        // currentWorkdir, clear chat/draft, or create a session (contrast
+        // SessionViewModel.createSessionInWorkdir's draft-hijack behaviour).
+        // This test pins that contract so a future refactor can't silently
+        // turn "add project" into "start a draft".
+        val core = createCore()
+        val vm = SettingsViewModel(core)
+
+        var added = false
+        every { settingsManager.addRecentWorkdir(any(), eq("/a")) } answers { added = true }
+        every { settingsManager.getRecentWorkdirs(any()) } answers {
+            if (added) listOf("/a", "/b") else listOf("/b")
+        }
+        // Capture currentWorkdir via a var-backed stub so we can assert it is
+        // untouched by connectWorkdir (resets the baseline right before the
+        // action so any init-time writes don't muddy the assertion).
+        var currentWd = "/existing"
+        every { settingsManager.currentWorkdir } answers { currentWd }
+        every { settingsManager.currentWorkdir = any() } answers { currentWd = firstArg() }
+
+        val collected = mutableListOf<List<String>>()
+        val job = launch { vm.recentWorkdirs.collect { collected.add(it) } }
+        advanceUntilIdle()
+        assertEquals(listOf("/b"), collected.last())
+
+        currentWd = "/existing" // baseline immediately before the action
+        vm.connectWorkdir("/a")
+        advanceUntilIdle()
+
+        // /a registered + tick bumped → re-derived to include /a.
+        verify { settingsManager.addRecentWorkdir(any(), "/a") }
+        assertEquals(listOf("/a", "/b"), collected.last())
+        // Contract: currentWorkdir UNCHANGED (no session/draft hijack).
+        assertEquals("/existing", currentWd)
+        // Contract: connectWorkdir is purely project-registry — it must NOT
+        // evict/attempt session creation (no cache eviction, unlike disconnect).
+        coVerify(exactly = 0) { core.cacheRepository.evictWorkdirInGroup(any(), any()) }
+
+        job.cancel()
+    }
 }

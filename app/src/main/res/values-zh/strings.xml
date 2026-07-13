@@ -113,6 +113,8 @@
     <string name="sessions_restore">恢复</string>
     <string name="sessions_no_active">没有当前会话</string>
     <string name="sessions_new_session">新建会话</string>
+    <!-- 导航改造：Sessions 标签的 new-session FAB（扁平列表，无项目分组）。 -->
+    <string name="sessions_new_session_fab">新建会话</string>
     <string name="sessions_recent_section">最近</string>
     <string name="sessions_by_workdir_section">按工作目录</string>
     <string name="chat_session_overflow">会话操作</string>
@@ -201,6 +203,10 @@
     <string name="files_workdir_none">无工作目录</string>
     <string name="files_workdir_none_connected">没有已连接的项目</string>
     <string name="files_workdir_switch">切换工作目录</string>
+    <!-- 导航改造：Files 标签 = 项目列表（首屏）+ 每项目文件浏览。 -->
+    <string name="files_tab_projects">项目</string>
+    <string name="files_project_browse">浏览文件</string>
+    <string name="files_add_project">添加项目</string>
     <!-- §P5b-A / Q7: 服务器管理屏可见的「主机」文案统一改为「服务器」
          （列表标题、+ 按钮、编辑对话框标题、删除确认提示）。 -->
     <string name="host_profiles_title">服务器配置</string>

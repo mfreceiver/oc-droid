@@ -18,6 +18,19 @@ internal val lenientJson = Json { ignoreUnknownKeys = true }
 
 internal object MainViewModelTimings {
     const val sessionPageSize = 10
+    /**
+     * Full-load limit for the initial global session fetch. The Sessions tab
+     * now shows ALL root sessions across every connected project (flat, by
+     * time.updated desc, no load-more UI) — so the initial fetch must pull a
+     * generous page rather than the 10-row [sessionPageSize] preview.
+     *
+     * 500 is a pragmatic "effectively all" cap: connected projects' sessions
+     * are ALSO covered comprehensively by the per-workdir `directorySessions`
+     * fan-out (see `loadInitialData`), so the global list is supplementary.
+     * `hasMoreSessions` evaluates false at this size, so load-more never
+     * triggers from the UI. Named (not a magic number) so it is tunable.
+     */
+    const val sessionFullLoadLimit = 500
     const val messageRetryDelayMs = 400L
     /**
      * Initial message page size when opening a session.
