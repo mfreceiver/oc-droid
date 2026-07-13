@@ -47,6 +47,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Archive
 import androidx.compose.material3.Icon
+import androidx.compose.material3.ListItem
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -62,6 +63,8 @@ import androidx.compose.ui.unit.dp
 import cn.vectory.ocdroid.R
 import cn.vectory.ocdroid.ui.ContextUsage
 import cn.vectory.ocdroid.ui.theme.AppBottomSheet
+import cn.vectory.ocdroid.ui.theme.AppSectionHeader
+import cn.vectory.ocdroid.ui.theme.Dimens
 import java.util.Locale
 import kotlinx.coroutines.launch
 
@@ -117,10 +120,10 @@ internal fun ContextUsageDialog(
                         Icon(
                             Icons.Outlined.Archive,
                             contentDescription = null,
-                            modifier = Modifier.size(18.dp),
+                            modifier = Modifier.size(Dimens.iconSm),
                             tint = MaterialTheme.colorScheme.primary
                         )
-                        Spacer(Modifier.width(6.dp))
+                        Spacer(Modifier.width(Dimens.spacingCompact))
                         Text(stringResource(R.string.chat_context_compact))
                     }
                 }
@@ -133,23 +136,27 @@ internal fun ContextUsageDialog(
             }
         },
     ) {
-        // 可滚动内容区（sections）。**不用 weight(1f)**——那是原占满屏的根因
-        // （原 :94-98 的 weight(1f).verticalScroll 强制吃满 sheet 剩余高度 ≈ 屏 90%）。
-        // 改为 heightIn(max) 封顶 + verticalScroll：sheet 按内容自然高度，footer 自然
-        // 跟随内容下方，不强制钉底。footer 由 AppBottomSheet 在 content 之后渲染。
+        // §WT1 chat-sheets 统一：body 行从手写 `Row(SpaceBetween){Text(label) Text(value)}`
+        // 改为 M3 ListItem(headlineContent=label, trailingContent=value)；section header
+        // 从手写 labelLarge+onSurfaceVariant 改为 AppSectionHeader。ListItem 自带 16dp
+        // 水平 padding（与 AppSectionHeader 对齐），外层不再叠 24dp——避免双重缩进。
+        // **不用 weight(1f)**——heightIn(max) 封顶 + verticalScroll，sheet 按内容自然高度，
+        // footer 自然跟随下方（footer 由 AppBottomSheet 在 content 之后渲染）。
         Column(
             modifier = Modifier
                 .fillMaxWidth()
                 .heightIn(max = maxContentHeight)
                 .verticalScroll(rememberScrollState())
-                .padding(horizontal = 24.dp),
-            verticalArrangement = Arrangement.spacedBy(16.dp)
         ) {
             if (usage == null) {
                 Text(
                     stringResource(R.string.chat_no_usage_data),
                     style = MaterialTheme.typography.bodyLarge,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(
+                        horizontal = Dimens.spacing4,
+                        vertical = Dimens.spacing3,
+                    ),
                 )
             } else {
                 ContextUsageSection(stringResource(R.string.chat_context_model_section)) {
@@ -178,42 +185,37 @@ private fun ContextUsageSection(
     title: String,
     content: @Composable ColumnScope.() -> Unit
 ) {
-    // B4·P3：section header 从 labelMedium+SemiBold+primary 改为 labelLarge +
-    // onSurfaceVariant（14sp/Med，对齐其它 sheet 的次级标题口径，更易读）。
-    // section 内 item 间 6dp（原 4dp 略松，配合外层 spacedBy(16dp) 节奏）。
-    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-        Text(
-            title,
-            style = MaterialTheme.typography.labelLarge,
-            color = MaterialTheme.colorScheme.onSurfaceVariant
-        )
+    // §WT1：section header 改用 AppSectionHeader（titleSmall 14sp/Med +
+    // onSurfaceVariant + 16dp/8dp padding），跨 sheet 统一。section 内 item 间
+    // 距由 ListItem 自身垂直 padding 自然分隔。
+    Column {
+        AppSectionHeader(text = title)
         content()
     }
 }
 
 @Composable
 private fun ContextUsageRow(label: String, value: String) {
-    // B4·P3：item 字号统一 bodyLarge（与其它 sheet 一致；全局 bodyLarge 将在 P5 升到
-    // 16sp，届时 context 字号随之增大——决策 4「全局 16」的预期，本批不动数值）。
-    // key 行左对齐、value 行右对齐（SpaceBetween）；长 value 允许换行（Top 对齐 + 无
-    // maxLines）。
-    Row(
-        modifier = Modifier.fillMaxWidth(),
-        horizontalArrangement = Arrangement.SpaceBetween,
-        verticalAlignment = Alignment.Top
-    ) {
-        Text(
-            label,
-            style = MaterialTheme.typography.bodyLarge,
-            color = MaterialTheme.colorScheme.onSurfaceVariant
-        )
-        Text(
-            value,
-            style = MaterialTheme.typography.bodyLarge,
-            fontWeight = FontWeight.Medium,
-            modifier = Modifier.padding(start = 16.dp)
-        )
-    }
+    // §WT1：行从手写 Row(SpaceBetween){Text(label) Text(value)} 改为 M3 ListItem
+    // ——headlineContent 承载 label（onSurfaceVariant），trailingContent 承载 value
+    // （Medium 字重）。ListItem 自带 16dp 水平 padding，与 AppSectionHeader 对齐。
+    // 长 value 允许换行（ListItem 默认支持）。
+    ListItem(
+        headlineContent = {
+            Text(
+                label,
+                style = MaterialTheme.typography.bodyLarge,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        },
+        trailingContent = {
+            Text(
+                value,
+                style = MaterialTheme.typography.bodyLarge,
+                fontWeight = FontWeight.Medium,
+            )
+        },
+    )
 }
 
 // §R-19 Sprint 2 #7(b): formatCount / formatOptionalCount were lifted

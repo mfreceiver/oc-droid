@@ -19,8 +19,8 @@ import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.style.TextDecoration
-import androidx.compose.ui.unit.dp
 import cn.vectory.ocdroid.data.model.TodoItem
+import cn.vectory.ocdroid.ui.theme.Dimens
 
 @Composable
 fun TodoListPanel(
@@ -34,12 +34,12 @@ fun TodoListPanel(
         ) {
             androidx.compose.foundation.layout.Column(
                 horizontalAlignment = Alignment.CenterHorizontally,
-                verticalArrangement = Arrangement.spacedBy(8.dp)
+                verticalArrangement = Arrangement.spacedBy(Dimens.spacing2)
             ) {
                 Icon(
                     Icons.Default.Checklist,
                     contentDescription = null,
-                    modifier = Modifier.size(32.dp),
+                    modifier = Modifier.size(Dimens.iconXl),
                     tint = MaterialTheme.colorScheme.outline
                 )
                 Text(
@@ -55,27 +55,30 @@ fun TodoListPanel(
     val completed = todos.count { it.isCompleted }
     val total = todos.size
 
-    LazyColumn(modifier = modifier.padding(horizontal = 16.dp)) {
+    // §WT1: 间距走 Dimens token（与 chat-sheets lane 其它 surface 共享 spacing 语言）。
+    LazyColumn(modifier = modifier.padding(horizontal = Dimens.spacing4)) {
         item {
             if (total > 0) {
                 LinearProgressIndicator(
                     progress = { completed.toFloat() / total.toFloat() },
                     modifier = Modifier
                         .fillMaxWidth()
-                        .padding(bottom = 4.dp),
+                        .padding(bottom = Dimens.spacing1),
                     trackColor = MaterialTheme.colorScheme.outlineVariant
                 )
                 Text(
                     "$completed/$total completed",
                     style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.primary,
-                    modifier = Modifier.padding(bottom = 12.dp)
+                    modifier = Modifier.padding(bottom = Dimens.spacing3)
                 )
             }
         }
 
         items(todos, key = { it.id }) { todo ->
             // §B4-P3C: 行渲染改 M3 ListItem（与 Agent/Model 选择 sheet 一致）。
+            // §WT1: 保留 Checkbox+strikethrough（todo 的 toggle 语义与单选 picker 不同，
+            // 不用 PickerTrailingCheck），但行容器与其它 sheet 共享 ListItem + Dimens。
             // - leadingContent = Checkbox（状态指示）。
             // - headlineContent = todo 内容 bodyLarge；completed 项叠删除线 + onSurfaceVariant。
             // - 无 per-item 背景色（底色由 AppBottomSheet 的 surfaceContainerLow 统一）。
@@ -84,7 +87,7 @@ fun TodoListPanel(
                     Checkbox(
                         checked = todo.isCompleted,
                         onCheckedChange = null,
-                        modifier = Modifier.size(20.dp),
+                        modifier = Modifier.size(Dimens.spacing5),
                     )
                 },
                 headlineContent = {
