@@ -115,7 +115,7 @@ reconfigure 严格顺序（不可颠倒）：
 
 **边界声明**：
 - Android 12+ 的 FGS-start 限制只咬「初始 start」与「sticky 进程死亡重建」——两者都是**合法** FGS-start 上下文（用户动作 / 系统拉起）。
-- 「用户显式关后台」入口（L3 触发之一）= 系统划掉 / Settings 开关（待产品定，§15）；force-stop / task-swipe 进 §14 矩阵。
+- 「用户显式关后台」入口（L3 触发之一）【2026-07-13 用户决策，post-gate 追加】：**确认采用**——机制分两路：(a) ongoing 通知常驻 **Action「关闭后台」**（FGS ongoing 不可被系统划掉，故以 Action 触发 L3 teardown：`stopForeground`+`stopSelf`+`cancelSse`+arm poller+撤 ongoing）；(b) 非 ongoing 通知（完成/decision）的划掉走 `deleteIntent`。Settings 侧不再设独立 app on/off 开关，整合进系统通知设置（见 dev-design P1.6）。force-stop / task-swipe 进 §14 矩阵。
 
 ### 4.2 L1→L2 合法提升时机（闭合 gpter-B#1 续）
 
@@ -325,3 +325,19 @@ reconfigure 严格顺序（不可颠倒）：
 | 2 | SSE 所有权 | 模型 A 收敛：连接迁入 Service，fold 不搬 |
 | 3 | FGS 生命周期 | **分层 L1/L2/L3**：前台 idle=普通 Service、前台 busy/远程无任务=不保证后台提升/恢复（详见 §4.1/§4.2） |
 | 4 | 完成通知 | busy→idle 在 SSE 存活窗口捕获，修「从不发完成」语义缺口 |
+
+---
+
+## 16. 用户决策追加（2026-07-13，post-gate）
+
+> 双 9.5 门后用户补充的三项产品决策（不改变架构，仅闭合 §4.1/§15 的「待产品定」与展示层细节）。实现者按此执行；如与正文冲突，以本节为准。
+
+| # | 决策 | 内容 | 落点 |
+|---|---|---|---|
+| U1 | 「划掉卡片就关」后台 | FGS ongoing 不可被系统划掉（Android 硬性）→ ongoing 通知常驻 **Action「关闭后台」** 触发 L3 teardown；非 ongoing（完成/decision）划掉走 `deleteIntent`。此即 §4.1「用户显式关后台」L3 触发。 | §4.1（已就地标注）/ dev-design §3.1.1 Action |
+| U2 | Settings 整合系统通知设置 | **不设独立 app on/off 开关**。Settings→通知页 = ①`POST_NOTIFICATIONS` 权限状态+申请 ②每 channel 状态 ③「打开系统通知设置」deep-link（`ACTION_APP_NOTIFICATION_SETTINGS`）。 | dev-design P1.6 |
+| U3 | decision 通知可点跳对应会话页 | permission/question 通知点按 → deep-link MainActivity 带 `EXTRA_SESSION_ID`+workdir → `selectSession` + 切 Chat tab，落到该会话页直接授权/回答。ongoing/完成同样支持单 session deep-link。 | dev-design P1.5 / §3.1.1 contentIntent |
+
+**实现注记**：
+- U1 的「关闭后台」Action 须在所有 ongoing 子态（L2-active 单/多 busy、L2-idle、占位、TOFU-degraded）常驻；点击后 **重新查询 identity/status**（不盲用通知创建时的快照）再 teardown。
+- U3 需 app 侧具备「session deep-link」intent 处理（`EXTRA_SESSION_ID`+workdir → selectSession + 导航 Chat）；现有 `files?workdir=` deep-link 基础设施可扩展，Phase 1 落实时补齐。

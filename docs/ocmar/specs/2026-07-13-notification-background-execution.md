@@ -99,6 +99,9 @@ Phase 0 的 10 个任务分两类，必须区分对待：
 
 ## 8. 待用户确认的前置问题（开工前问清）
 
+> **已决议（2026-07-13 用户决策，见 FGS spec §16）**：U1 划掉/Action 关后台（ongoing 用「关闭后台」Action，非 ongoing 用 deleteIntent）；U2 Settings 整合系统通知设置（无独立 app on/off 开关）；U3 decision/完成通知可点跳对应会话页（`EXTRA_SESSION_ID`+workdir deep-link）。这三项不阻塞 Phase 0（U1 的 L3 teardown 入口 Phase 0 需预留，U2/U3 属 Phase 1）。
+
+仍待确认：
 1. 服务端 `GET /session/status` 是否 **host-global**（覆盖所有 workdir）？—— 决定 StatusAggregator 是单查还是 directory fan-out（V-2 探针前置）。
 2. **targetSdk 升级时间表**？—— dataSync 6h/24h 限额（targetSdk 35+）影响保活承诺与 `onTimeout()` 文案。
 3. 本次是否**只做 Phase 0**？Phase 1 通知展示层何时启动？

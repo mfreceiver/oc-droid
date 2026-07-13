@@ -159,14 +159,17 @@
   - 删除 `notifyDecision`（line 264-282）/ `notifyError`（line 286-298）；
   - `pollPendingItems`（line 192-213）/ `onAppError`（line 147-154）改为 emit `DecisionState` / `ErrorState` 给 `IslandNotifier`；
   - `notificationSnapshot`（line 102）**移到 IslandNotifier 的统一 dedup store**。
+- **【U3，2026-07-13 用户决策】decision 通知 deep-link 到会话页**：permission/question 通知的 `contentIntent`（点按主体）+ 主 Action = deep-link MainActivity，带 `EXTRA_SESSION_ID` + workdir → `selectSession` + 切 Chat tab，落到该会话页直接授权/回答。需 app 侧补「session deep-link」intent 处理（扩展现有 `files?workdir=` 基础设施）。完成通知同样单 session deep-link（§3.2）。
 - **依赖**：P1.1。
 - **验收**：V-16 / V-19。
 
 #### P1.6 Settings 文案 / channel 修复
 
-- **修改**：`ui/settings/`（具体文件待定，见代码调研文档）：
-  - 通知页展示**每 channel** 状态 + 跳系统 channel 设置；
-  - 通知权限被拒降级文案（明确「后台保活受 dataSync 6h/24h 与厂商策略限制，不保证永久」）。
+- **【U2，2026-07-13 用户决策】整合系统通知设置，不设独立 app on/off 开关**：`ui/settings/`（具体文件见代码调研文档）通知页 =
+  - ① `POST_NOTIFICATIONS` 权限状态（API 33+）+ 被拒时申请；
+  - ② 每 channel 状态（`ocdroid.session_status` / `session_complete` / `decisions` / `errors`）；
+  - ③「打开系统通知设置」按钮 → `Intent(ACTION_APP_NOTIFICATION_SETTINGS)` + extra `APP_PACKAGE`（跳系统该 app 的通知页，由系统管 per-channel 开关）。
+- 通知权限被拒降级文案（明确「后台保活受 dataSync 6h/24h 与厂商策略限制，不保证永久」）。
 - **依赖**：P1.4。
 - **验收**：FR-31/32/33 / V-19。
 
@@ -254,11 +257,12 @@
 **Action 按钮**（按单/多分流，FGS spec §9）：
 - 单 busy：
   - Action 1：zh「取消任务」/ en「Abort」→ `PendingIntent` BroadcastReceiver → `OpenCodeRepository.abortSession(sessionId)`；
-  - （可选）Action 2：zh「打开」/ en「Open」→ deep-link MainActivity。
+  - （可选）Action 2：zh「打开」/ en「Open」→ deep-link MainActivity（带 `EXTRA_SESSION_ID`+workdir，落到该会话页）。
 - 多 busy：
   - **不**显示「取消」Action（FGS spec §9 钉死）；
   - Action 1：zh「查看任务列表」/ en「View tasks」→ deep-link MainActivity 的任务列表（MVP，跳应用内）；
   - 点按通知主体（contentIntent）也跳任务列表。
+- **常驻「关闭后台」Action**【U1，2026-07-13 用户决策】：所有 ongoing 子态（L2-active 单/多、L2-idle、占位、TOFU-degraded）均挂 zh「关闭后台」/ en「Stop background」→ 触发 L3 teardown（`stopForeground`+`stopSelf`+`cancelSse`+arm poller+撤 ongoing）。FGS ongoing 不可被系统划掉，故以 Action 提供「用户显式关后台」入口（FGS spec §4.1 / §16-U1）。
 - 执行时**重新查询 identity/status**（不盲用通知创建时的 ID 列表）。
 
 **Ongoing / AutoCancel**：`setOngoing(true)`（不可滑动清除），`setAutoCancel(false)`。
