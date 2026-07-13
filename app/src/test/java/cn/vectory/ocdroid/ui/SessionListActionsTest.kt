@@ -326,6 +326,88 @@ class SessionListActionsTest {
     }
 
     @Test
+    fun `WT6 launchLoadSessions invokes onCurrentSessionArchived when merged result flips current to archived`() = runTest {
+        // The gap-3 case Task 1 surfaces: a cross-device archive during an SSE
+        // gap. The reconnect's RefreshSessions triggers launchLoadSessions;
+        // the server returns the current session with isArchived=true. The
+        // merge passes it through (server-authoritative), so the callback must
+        // fire so the caller dispatches AppAction.SessionArchived (clearing
+        // chat.currentSessionId) — otherwise the chat lingers on a session the
+        // render filters now hide.
+        val archived = Session(
+            id = "s1",
+            directory = "/x",
+            time = Session.TimeInfo(archived = 12345L)  // isArchived == true
+        )
+        coEvery { repository.getSessions(any()) } returns Result.success(listOf(archived))
+        store.mutateChat { it.copy(currentSessionId = "s1") }
+        var archivedInvokedFor: Session? = null
+        var msgLoads = 0
+        var statusLoads = 0
+
+        launchLoadSessions(
+            scope, repository, slices, settingsManager,
+            onSelectSession = {},
+            onLoadSessionStatus = { statusLoads += 1 },
+            onLoadMessages = { msgLoads += 1 },
+            emit = emit,
+            onCurrentSessionArchived = { archivedInvokedFor = it },
+        )
+        advanceUntilIdle()
+
+        assertEquals("callback fired with the archived session", "s1", archivedInvokedFor?.id)
+        assertTrue("archived flag preserved in callback payload", archivedInvokedFor?.isArchived == true)
+        // The auto-select / load path is SKIPPED when the callback fires (the
+        // caller's dispatch atomically clears chat — loading messages for the
+        // just-archived id would be wasteful + racy vs the reducer's clear).
+        assertEquals("onLoadMessages skipped (archived current → eviction path)", 0, msgLoads)
+        assertEquals("onLoadSessionStatus skipped (archived current → eviction path)", 0, statusLoads)
+    }
+
+    @Test
+    fun `WT6 launchLoadSessions skips onCurrentSessionArchived when current session is not archived`() = runTest {
+        // Negative control: a normal refresh (current session NOT archived)
+        // must NOT fire the archive callback — the existing load path runs.
+        val sessions = listOf(Session(id = "s1", directory = "/x"))
+        coEvery { repository.getSessions(any()) } returns Result.success(sessions)
+        store.mutateChat { it.copy(currentSessionId = "s1") }
+        var archivedInvoked = false
+        var msgLoads = 0
+
+        launchLoadSessions(
+            scope, repository, slices, settingsManager,
+            onSelectSession = {},
+            onLoadSessionStatus = {},
+            onLoadMessages = { msgLoads += 1 },
+            emit = emit,
+            onCurrentSessionArchived = { archivedInvoked = true },
+        )
+        advanceUntilIdle()
+
+        assertFalse("callback must NOT fire for a non-archived current session", archivedInvoked)
+        assertEquals("normal load path runs", 1, msgLoads)
+    }
+
+    @Test
+    fun `WT6 launchLoadSessions without onCurrentSessionArchived callback still writes merged list (legacy callers)`() = runTest {
+        // The new param is nullable so legacy callers (SessionViewModel, tests
+        // that pass positional args) keep compiling. When null, the archived-
+        // current case is detected but no callback fires — the merged list is
+        // still written (the caller simply does not clear chat). This is the
+        // pre-WT6 behavior for paths that have not wired the callback.
+        val archived = Session(id = "s1", directory = "/x", time = Session.TimeInfo(archived = 1L))
+        coEvery { repository.getSessions(any()) } returns Result.success(listOf(archived))
+        store.mutateChat { it.copy(currentSessionId = "s1") }
+
+        launchLoadSessions(scope, repository, slices, settingsManager, {}, {}, {}, emit)
+        advanceUntilIdle()
+
+        // Merged list IS written with the archived session (server-authoritative).
+        assertEquals(listOf("s1"), slices.sessionList.value.sessions.map { it.id })
+        assertTrue(slices.sessionList.value.sessions.first().isArchived)
+    }
+
+    @Test
     fun `launchLoadSessions clears chat when no sessions and no current`() = runTest {
         coEvery { repository.getSessions(any()) } returns Result.success(emptyList())
         // No currentSessionId → falls through to the else branch which clears the chat.

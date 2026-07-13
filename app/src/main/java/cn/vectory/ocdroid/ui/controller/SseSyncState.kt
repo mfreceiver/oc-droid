@@ -152,7 +152,9 @@ sealed class SseSyncDecision {
     /** Refresh all session statuses after an SSE reconnect. */
     data object LoadSessionStatus : SseSyncDecision()
 
-    /** Refresh the entire session list (a non-current session was dirty). */
+    /** Refresh the entire session list. WT6: emitted on EVERY reconnect so a
+     *  cross-device archive / metadata mutation that landed during the SSE
+     *  gap propagates (the feed does not replay missed session.updated). */
     data object RefreshSessions : SseSyncDecision()
 
     /** Drop all per-partId delta/fullText coalesce buffers (overlay is stale). */
@@ -200,11 +202,15 @@ sealed class SseSyncDecision {
  *      (lastDisconnectAt == null — the SSE feed's internal retryWhen
  *      reconnected without emitting any signal the overlay could observe;
  *      §R-19 fix Blocker 3). Emit `ClearDeltaBuffers` + `ReloadSession(currentSessionId)`
- *      (unless null) + `RefreshSessions` (iff a non-current session was dirty
- *      → scenario 3). Clear `lastDisconnectAt`. `sessionsDirty` is NOT
- *      modified (§R-19 fix Blocker 2 v2: the prior "add currentSessionId to
- *      dirty for idle dedup" is removed — see [SseSyncState.sessionsDirty]
- *      KDoc for the rationale).
+ *      (unless null) + `RefreshSessions` (unconditionally — WT6: the SSE feed
+ *      does not replay missed session.updated events, so any cross-device
+ *      archive / metadata mutation during the gap stays invisible to this
+ *      device until the list is re-fetched; the merge preserves a strictly-
+ *      newer local title AND honors server time.archived). Clear
+ *      `lastDisconnectAt`. `sessionsDirty` is NOT modified (§R-19 fix
+ *      Blocker 2 v2: the prior "add currentSessionId to dirty for idle
+ *      dedup" is removed — see [SseSyncState.sessionsDirty] KDoc for the
+ *      rationale).
  *
  *   §R-19 fix Blocker 3 note: the prior implementation had an idempotency
  *   branch (`lastDisconnectAt == null → no-op`) that silently swallowed
@@ -291,14 +297,27 @@ fun reconcileGap(
                 // session.status frames are only emitted on changes, so an already-busy
                 // session needs an authoritative REST refresh after reconnect.
                 decisions.add(SseSyncDecision.LoadSessionStatus)
-                // If a non-current session was dirty (scenario 3: user switched
-                // mid-disconnect), RefreshSessions reconciles its list-level state
-                // (badge / last-activity). The current session is handled by
-                // ReloadSession above.
-                val otherDirty = prev.sessionsDirty.any { it != currentSessionId }
-                if (otherDirty) {
-                    decisions.add(SseSyncDecision.RefreshSessions)
-                }
+                // WT6 (archive-sync): ALWAYS refresh the session list on reconnect.
+                // The SSE feed does NOT replay missed `session.updated` events, so
+                // a cross-device archive (or any metadata mutation: title rename,
+                // pinned toggle, workdir move) that landed during the gap is
+                // invisible to this device until the list is re-fetched. The prior
+                // `otherDirty` gate compared prev.sessionsDirty — which is
+                // populated only with currentSessionId by the Disconnected trigger
+                // (SessionSyncCoordinator.kt CancelSse branch) — against
+                // currentSessionId, so it was structurally always-false → the list
+                // NEVER refreshed here, and the local copy's isArchived stayed
+                // stale forever. Dropping the gate makes every reconnect re-fetch.
+                // The merge the resulting LoadSessions triggers
+                // (mergeRefreshedSessionsPreservingLocalActivity) is sound: it
+                // keeps a strictly-newer local title AND lifts the server
+                // time.archived when the server is at least as fresh — so a
+                // stale local title is NOT clobbered while the archived flag
+                // propagates. ReloadSession above already covers the current
+                // session's message window; RefreshSessions covers list-level
+                // state for every session (current included — its archived flag
+                // may have flipped cross-device).
+                decisions.add(SseSyncDecision.RefreshSessions)
 
                 // §R-19 fix Blocker 2 v2: sessionsDirty is NOT modified here.
                 // The prior "add currentSessionId to dirty for idle dedup"

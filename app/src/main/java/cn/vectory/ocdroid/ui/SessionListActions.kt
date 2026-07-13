@@ -99,6 +99,17 @@ internal fun launchLoadSessions(
     // this rewrite deleted (attemptCrossGroupMerge was the sole consumer
     // inside this function body). Both call sites (SessionViewModel,
     // AppCoreOrchestration) and one test updated to drop the now-unused arg.
+    /**
+     * WT6 (archive-sync, gap-3): invoked when the merged refresh result flips
+     * the [currentSessionId] session to `isArchived == true` (the canonical
+     * cross-device-archive-during-SSE-gap case Task 1's reconnect refresh now
+     * surfaces). The caller mirrors the SSE archive eviction path
+     * (AppAction.SessionArchived → applyArchiveEviction + applyArchivedChatClear)
+     * so the chat does not linger on a session the render filters now hide.
+     * Null = caller has no dispatch surface (legacy / test) → the merged list
+     * is still written; only the chat-clear is skipped.
+     */
+    onCurrentSessionArchived: ((Session) -> Unit)? = null,
 ) {
 
     scope.launch {
@@ -189,6 +200,29 @@ internal fun launchLoadSessions(
                     revertCutoffs = slices.chat.value.revertCutoffs
                 )
                 if (staleHostAfterSuspend()) return@onSuccess
+                // WT6 (archive-sync, gap-3): if the current session became
+                // archived via the bulk refresh (cross-device archive during an
+                // SSE gap that the feed did not replay — the exact case Task 1's
+                // unconditional RefreshSessions now surfaces), the SSE-only
+                // eviction path (SessionSyncCoordinator archive handler →
+                // AppAction.SessionArchived → applyArchiveEviction +
+                // applyArchivedChatClear) is NEVER invoked for this device, so
+                // chat.currentSessionId would still reference an archived
+                // session that the render filters hide from the lists, leaving
+                // the chat dangling on a hidden session. Detect it here and
+                // invoke the SAME eviction the SSE path uses (the caller's
+                // onCurrentSessionArchived hook dispatches AppAction.SessionArchived).
+                // Skip the auto-select / load logic below — the dispatch
+                // atomically clears chat (applyArchivedChatClear) + openIds +
+                // unread, so loading messages for the just-archived id is
+                // both wasteful and racy vs the reducer's clear.
+                if (currentSessionId != null && onCurrentSessionArchived != null) {
+                    val mergedCurrent = mergedSessions.firstOrNull { it.id == currentSessionId }
+                    if (mergedCurrent != null && mergedCurrent.isArchived) {
+                        onCurrentSessionArchived?.invoke(mergedCurrent)
+                        return@onSuccess
+                    }
+                }
                 when {
                     // Skip auto-select when the user is mid-draft (a workdir
                     // has been chosen but no session created yet): selecting a
