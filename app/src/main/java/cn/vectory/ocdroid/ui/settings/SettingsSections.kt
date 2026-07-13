@@ -81,11 +81,22 @@ internal fun AppearanceSection(
 ) {
     AppSectionHeader(text = stringResource(R.string.settings_appearance))
 
+    // §review-AB: each bare widget self-pads `horizontal = Dimens.spacing4` so
+    // it shares one 16dp keyline with AppSectionHeader (self-pad) + ListItem
+    // (self-pad). The route Column no longer adds a parent horizontal padding
+    // (that caused the header to sit at 32dp while bare content sat at 16dp).
+
     val modes = listOf(ThemeMode.SYSTEM, ThemeMode.LIGHT, ThemeMode.DARK)
-    Text(stringResource(R.string.settings_theme), style = MaterialTheme.typography.labelMedium)
+    Text(
+        stringResource(R.string.settings_theme),
+        style = MaterialTheme.typography.labelMedium,
+        modifier = Modifier.padding(horizontal = Dimens.spacing4),
+    )
     Spacer(modifier = Modifier.height(Dimens.spacing2))
     SingleChoiceSegmentedButtonRow(
-        modifier = Modifier.fillMaxWidth()
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = Dimens.spacing4)
     ) {
         modes.forEachIndexed { index, mode ->
             SegmentedButton(
@@ -121,10 +132,16 @@ internal fun AppearanceSection(
     // §P5a (Q5): language SegmentedButton — parallel to the Theme row above.
     // Follow System re-resolves the real system locale (zh→zh, en→en, other→zh).
     val locales = listOf(LocaleMode.SYSTEM, LocaleMode.ZH, LocaleMode.EN)
-    Text(stringResource(R.string.settings_language), style = MaterialTheme.typography.labelMedium)
+    Text(
+        stringResource(R.string.settings_language),
+        style = MaterialTheme.typography.labelMedium,
+        modifier = Modifier.padding(horizontal = Dimens.spacing4),
+    )
     Spacer(modifier = Modifier.height(Dimens.spacing2))
     SingleChoiceSegmentedButtonRow(
-        modifier = Modifier.fillMaxWidth()
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = Dimens.spacing4)
     ) {
         locales.forEachIndexed { index, mode ->
             SegmentedButton(
@@ -163,9 +180,16 @@ internal fun AppearanceSection(
     // slider visibly resizes the whole app in real time (the root composition
     // recomposes because MainActivity subscribes to settingsFlow).
     val percentFmt = remember { java.text.DecimalFormat("0%") }
-    Text(stringResource(R.string.settings_ui_font_scale), style = MaterialTheme.typography.labelMedium)
+    Text(
+        stringResource(R.string.settings_ui_font_scale),
+        style = MaterialTheme.typography.labelMedium,
+        modifier = Modifier.padding(horizontal = Dimens.spacing4),
+    )
     Row(
-        modifier = Modifier.fillMaxWidth().padding(top = Dimens.spacing1),
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = Dimens.spacing4)
+            .padding(top = Dimens.spacing1),
         verticalAlignment = Alignment.CenterVertically
     ) {
         Slider(
@@ -190,9 +214,16 @@ internal fun AppearanceSection(
 
     Spacer(modifier = Modifier.height(Dimens.spacing3))
 
-    Text(stringResource(R.string.settings_ui_content_scale), style = MaterialTheme.typography.labelMedium)
+    Text(
+        stringResource(R.string.settings_ui_content_scale),
+        style = MaterialTheme.typography.labelMedium,
+        modifier = Modifier.padding(horizontal = Dimens.spacing4),
+    )
     Row(
-        modifier = Modifier.fillMaxWidth().padding(top = Dimens.spacing1),
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = Dimens.spacing4)
+            .padding(top = Dimens.spacing1),
         verticalAlignment = Alignment.CenterVertically
     ) {
         Slider(
@@ -280,8 +311,11 @@ internal fun DangerZoneSection(
     // total cached-data size; the right button triggers the destructive wipe
     // (gated by the confirmation dialog below). Same Row so the user sees the
     // cost + the action together.
+    // §review-AB: Row self-pads horizontal 16dp (route Column no longer pads).
     Row(
-        modifier = Modifier.fillMaxWidth(),
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = Dimens.spacing4),
         horizontalArrangement = Arrangement.SpaceBetween,
         verticalAlignment = Alignment.CenterVertically
     ) {
@@ -303,19 +337,31 @@ internal fun DangerZoneSection(
     }
 
     if (showConfirm) {
-        // §WT5: clear-local-data confirm consolidated onto AppConfirmDialog
-        // (was a hand-rolled AlertDialog with three separately-styled Text
-        // rows). Body now joins the three message strings (keeps / clears /
-        // irreversible) with blank-line separators so all the user-facing
-        // messages are preserved verbatim — only the per-paragraph color
-        // emphasis is folded into the canonical dialog look.
+        // §review-AB: clear-local-data confirm now uses the AppConfirmDialog
+        // composable-body overload so the three message segments keep their
+        // semantic colors (keeps=primary / clears=onSurfaceVariant /
+        // irreversible=error). Previously WT5 collapsed them into a single
+        // String body, losing the red "irreversible" safety cue. Texts are
+        // preserved verbatim — only the per-paragraph color emphasis is
+        // restored on top of the canonical dialog shell.
         AppConfirmDialog(
             title = stringResource(R.string.settings_clear_local_data_title),
-            body = listOf(
-                stringResource(R.string.settings_clear_local_data_keeps),
-                stringResource(R.string.settings_clear_local_data_clears),
-                stringResource(R.string.settings_clear_local_data_irreversible),
-            ).joinToString("\n\n"),
+            bodyContent = {
+                Text(
+                    stringResource(R.string.settings_clear_local_data_keeps),
+                    color = MaterialTheme.colorScheme.primary,
+                )
+                Spacer(modifier = Modifier.height(Dimens.spacing2))
+                Text(
+                    stringResource(R.string.settings_clear_local_data_clears),
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                Spacer(modifier = Modifier.height(Dimens.spacing2))
+                Text(
+                    stringResource(R.string.settings_clear_local_data_irreversible),
+                    color = MaterialTheme.colorScheme.error,
+                )
+            },
             confirmText = stringResource(R.string.cache_clear_cache),
             onConfirm = {
                 showConfirm = false
@@ -332,9 +378,12 @@ internal fun DangerZoneSection(
 internal fun AboutSection() {
     AppSectionHeader(text = stringResource(R.string.settings_about))
 
+    // §review-AB: bare Texts self-pad horizontal 16dp (route Column no longer
+    // pads) so they share one keyline with AppSectionHeader.
     Text(
         stringResource(R.string.app_name),
-        style = MaterialTheme.typography.bodyLarge
+        style = MaterialTheme.typography.bodyLarge,
+        modifier = Modifier.padding(horizontal = Dimens.spacing4),
     )
     Text(
         // BuildConfig.VERSION_NAME is generated at build time from
@@ -342,7 +391,8 @@ internal fun AboutSection() {
         // without a hardcoded string to keep in sync.
         stringResource(R.string.settings_version, cn.vectory.ocdroid.BuildConfig.VERSION_NAME),
         style = MaterialTheme.typography.bodySmall,
-        color = MaterialTheme.colorScheme.outline
+        color = MaterialTheme.colorScheme.outline,
+        modifier = Modifier.padding(horizontal = Dimens.spacing4),
     )
 }
 

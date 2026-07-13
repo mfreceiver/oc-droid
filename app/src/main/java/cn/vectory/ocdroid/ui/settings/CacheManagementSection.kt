@@ -139,8 +139,12 @@ internal fun CacheManagementSection(
         Spacer(modifier = Modifier.height(Dimens.spacing3))
     }
 
+    // §review-AB: Card self-pads horizontal 16dp (route Column no longer pads)
+    // so it shares one keyline with AppSectionHeader + ListItem.
     Card(
-        modifier = Modifier.fillMaxWidth(),
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = Dimens.spacing4),
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)
     ) {
         Column(modifier = Modifier.padding(Dimens.spacing4)) {
@@ -454,8 +458,13 @@ internal data class CacheProjectBucket(
 
 @Composable
 private fun DegradedCacheWarning() {
+    // §review-AB: Card self-pads horizontal 16dp (route Column no longer pads)
+    // so it shares one keyline with AppSectionHeader + ListItem + the main
+    // cache Card above.
     Card(
-        modifier = Modifier.fillMaxWidth(),
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = Dimens.spacing4),
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.errorContainer)
     ) {
         Row(
@@ -655,8 +664,12 @@ private fun CacheManagementSectionPreviewHost(
         Spacer(modifier = Modifier.height(Dimens.spacing3))
     }
 
+    // §review-AB: Card self-pads horizontal 16dp to mirror production
+    // (CacheManagementSection above) so previews match the on-screen keyline.
     Card(
-        modifier = Modifier.fillMaxWidth(),
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = Dimens.spacing4),
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)
     ) {
         Column(modifier = Modifier.padding(Dimens.spacing4)) {

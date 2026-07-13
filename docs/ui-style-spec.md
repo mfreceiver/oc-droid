@@ -38,23 +38,27 @@ Q2: 是表单 / 阻塞决策 / 破坏性确认?        ── yes ──▶ Tier
 
 ### 1.2 现有 surface → tier 映射
 
+> §review-AB：以下状态表已对齐到 WT0/WT1/WT5 全部迁移完成后的最终态。
+> 「已使用」= 调用点已落到本规范定义的共享原语上；候选 / 待迁移条目已全部清结。
+
 | Surface | Tier | 备注 |
 |---|---|---|
-| Composer agent picker sheet | B | `AppBottomSheet`（已迁移） |
-| Composer model picker sheet | B | `AppBottomSheet`（已迁移） |
-| Composer session picker sheet | B | `AppBottomSheet`（WT1 待迁移） |
-| ChatContextUsageDialog | B | `AppBottomSheet`（已迁移，footer 恒可见旗舰例） |
-| TodoListPanel | B | `AppBottomSheet`（已迁移） |
-| **WorkdirControl switcher** | B | `AppBottomSheet`（WT0 本次迁移） |
-| **DirectoryPickerSheet** | B | `AppBottomSheet`（WT0 本次迁移） |
-| Composer Add-menu (Photos/Reference/Commands) | B | `AppBottomSheet` |
-| Composer stop-confirm | **C** destructive | `AppConfirmDialog` 候选（WT1） |
-| Message revert confirm | C destructive | `AppConfirmDialog` 候选（WT1） |
-| Sessions archive confirm | C destructive | `AppConfirmDialog` 候选（WT5） |
-| Files disconnect-workdir confirm | C destructive | `AppConfirmDialog` 候选（WT5） |
-| Settings clear-data confirm | C destructive | `AppConfirmDialog` 候选（WT5） |
-| Host delete confirm | C destructive | `AppConfirmDialog` 候选（WT5） |
-| Settings model-management dialog | **C form** | `AppFormDialog` 候选（WT5，现网已用 BasicAlertDialog+Surface 验证过） |
+| Composer agent picker sheet | B | `AppBottomSheet`（已使用） |
+| Composer model picker sheet | B | `AppBottomSheet`（已使用） |
+| Composer session picker sheet | B | `AppBottomSheet`（已使用） |
+| ChatContextUsageDialog | B | `AppBottomSheet`（已使用，footer 恒可见旗舰例） |
+| TodoListPanel | B | `AppBottomSheet`（已使用） |
+| WorkdirControl switcher | B | `AppBottomSheet`（已使用） |
+| DirectoryPickerSheet | B | `AppBottomSheet`（已使用） |
+| Composer Add-menu (Photos/Reference/Commands) | B | `AppBottomSheet`（已使用） |
+| Composer stop-confirm | **C** destructive | `AppConfirmDialog`（已使用，字符串 body） |
+| Message revert confirm | C destructive | `AppConfirmDialog`（已使用，字符串 body） |
+| Sessions archive confirm | C destructive | `AppConfirmDialog`（已使用，字符串 body） |
+| Files disconnect-workdir confirm | C destructive | `AppConfirmDialog`（已使用，字符串 body） |
+| Settings clear-data confirm | C destructive | `AppConfirmDialog`（已使用，composable body——按段落着色：keeps=primary / clears=onSurfaceVariant / irreversible=error；见 [SettingsSections.kt](../app/src/main/java/cn/vectory/ocdroid/ui/settings/SettingsSections.kt) `DangerZoneSection`） |
+| Host delete confirm | C destructive | `AppConfirmDialog`（已使用，字符串 body） |
+| Settings model-management dialog | **C form** | `AppFormDialog`（已使用；title 钉顶 + content 单独滚动 + Done 按钮钉底） |
+| Host profile editor dialog (mTLS / Advanced) | **C form** | `AppFormDialog`（已使用；title 钉顶 + content 单独滚动 + Test/Delete/Cancel/Save 按钮行钉底） |
 | 任何 top-bar overflow `DropdownMenu` | A | ≤6 项的单选 / 动作 |
 
 ---
@@ -110,4 +114,5 @@ Dimens.iconXl  = 32dp
   并在本文件 §2 表格里登记。
 - 新增 overlay surface：先按 §1 判别流程定 tier，再在 §1.2 表格里登记。
 - 本规范由 WT0 落地（commit `feat(ui-theme): foundation primitives + mandatory
-  style spec (WT0)`），后续 lane（WT1 chat-sheets / WT5 settings …）按本规范迁移。
+  style spec (WT0)`），后续 lane（WT1 chat-sheets / WT5 settings 等）已按本规范
+  完成迁移；新 surface 必须遵循本文规则，无例外。

@@ -160,14 +160,23 @@ internal fun HostProfilesManagerScreen(
             }
         },
     ) { scaffoldMod ->
+        // §review-AB: no parent horizontal padding — AppSectionHeader +
+        // ListItem (HostProfileRow / TrafficSection) self-pad at 16dp; the
+        // bare error Text below self-pads via `Modifier.padding(horizontal =
+        // Dimens.spacing4)` so it shares one keyline with the header / rows.
         Column(
             modifier = scaffoldMod
                 .verticalScroll(rememberScrollState())
-                .padding(Dimens.spacing4)
                 .testTag("host.profile.list")
         ) {
             error?.let {
-                Text(it, color = MaterialTheme.colorScheme.error)
+                Text(
+                    it,
+                    color = MaterialTheme.colorScheme.error,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = Dimens.spacing4),
+                )
                 Spacer(modifier = Modifier.height(Dimens.spacing3))
             }
 
