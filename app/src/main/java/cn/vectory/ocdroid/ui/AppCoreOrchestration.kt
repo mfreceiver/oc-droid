@@ -2,6 +2,8 @@ package cn.vectory.ocdroid.ui
 
 import cn.vectory.ocdroid.R
 import cn.vectory.ocdroid.data.model.Message
+import cn.vectory.ocdroid.data.model.Session
+import cn.vectory.ocdroid.ui.controller.ControllerEffect
 import cn.vectory.ocdroid.util.DebugLog
 import cn.vectory.ocdroid.util.runSuspendCatching
 import kotlinx.coroutines.delay
@@ -634,6 +636,49 @@ internal fun AppCore.loadSessionsForEffect() {
         // Phase 5 wired here (for cross-group merge of LAN + tunnel same-server
         // profiles) is removed — attemptCrossGroupMerge was deleted by item 1
         // of this rewrite.
+        // WT6 (archive-sync, gap-3): if the merged refresh result flips the
+        // current session to archived, dispatch the SAME eviction the SSE
+        // archive path uses (AppAction.SessionArchived → applyArchiveEviction
+        // + applyArchivedChatClear + unread cleanup) + evict the cached window
+        // so the chat does not linger on a session the render filters hide.
+        onCurrentSessionArchived = { archived -> dispatchArchivedCurrentSession(archived) },
+    )
+}
+
+/**
+ * WT6 (archive-sync, gap-3): mirrors the SSE archive handler in
+ * [cn.vectory.ocdroid.ui.controller.SessionSyncCoordinator] (the
+ * `session.updated` isArchived branch) so the bulk-refresh path that detects
+ * an archived current session reuses the EXISTING reducer + cache-eviction
+ * pipeline instead of hand-rolling state mutation. Computes newOpenIds,
+ * persists them, dispatches [AppAction.SessionArchived] (the reducer derives
+ * the chat-clear decision from the snapshot — chat.currentSessionId == id),
+ * and emits [ControllerEffect.EvictSession] for memory + persistent cache
+ * hygiene (mirrors the SSE path's R-20 Phase 1 eviction).
+ *
+ * Called synchronously from inside `launchLoadSessions`'s onSuccess (Main
+ * dispatcher) — same context the SSE handler runs in, so the dispatch is
+ * committed before any collector observes a torn "sessionList archived but
+ * chat.currentSessionId still references it" intermediate.
+ */
+private fun AppCore.dispatchArchivedCurrentSession(updated: Session) {
+    val currentOpenIds = store.sessionListFlow.value.openSessionIds
+    val newOpenIds = currentOpenIds.filter { it != updated.id }
+    if (newOpenIds != currentOpenIds) {
+        settingsManager.openSessionIds = newOpenIds
+    }
+    store.dispatch(
+        AppAction.SessionArchived(
+            session = updated,
+            openSessionIds = newOpenIds,
+        )
+    )
+    // R-20 Phase 1 cache hygiene (mirrors the SSE archive path's EvictSession
+    // emit): drop the archived current session's window from the memory LRU +
+    // persistent cache. The fp is read live so a mid-flight host switch cannot
+    // re-key the eviction to the wrong group.
+    effectBus.tryEmitEffect(
+        ControllerEffect.EvictSession(currentServerGroupFp(), updated.id)
     )
 }
 
