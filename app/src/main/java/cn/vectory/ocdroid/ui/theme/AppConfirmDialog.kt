@@ -22,13 +22,16 @@ import androidx.compose.runtime.Composable
 // `MaterialTheme.colorScheme.error` 染色。本组件把这个模式固化下来，避免每
 // 个调用点重复样板与漂移（曾有调用点忘记染 error 色）。
 //
-// **本 lane 只创建原语**——上述 6 个调用点不改，下游 lane（WT1 chat-sheets /
-// WT5 settings 等）迁移时再 adopt。
-//
 // 与 `AppFormDialog` 的边界：本组件用于**纯文本**确认/破坏性对话框（title +
 // 可选 body + 两按钮）。若 dialog 内含 `Switch` / 输入字段等可交互控件，请用
 // `AppFormDialog`（`AlertDialog.text` 槽会吞 `Switch` 触摸事件，详见
 // `AppFormDialog.kt` 文件头）。
+//
+// **两个 overload**（§review-AB）：
+//  - 字符串 body：常见情况（一行/一段文本），调用方传 `body = "..."`。
+//  - composable body：当正文需要按段落着色（如 clear-data 的 irreversible 段
+//    染 error 色）或包含富文本结构时，调用方传 `bodyContent = { ... }`。
+//    字符串 overload 委托到 composable overload（包一层 `Text(it)`）。
 // ─────────────────────────────────────────────────────────────────────────────
 
 /**
@@ -61,8 +64,26 @@ import androidx.compose.runtime.Composable
  * )
  * ```
  *
+ * 用法（composable body——按段落着色，如 clear-data 的 irreversible 红字）：
+ * ```
+ * AppConfirmDialog(
+ *     title = "Clear local data?",
+ *     bodyContent = {
+ *         Text("Keeps ...", color = MaterialTheme.colorScheme.primary)
+ *         Spacer(Modifier.height(8.dp))
+ *         Text("Irreversible!", color = MaterialTheme.colorScheme.error)
+ *     },
+ *     confirmText = "Clear",
+ *     onConfirm = onClear,
+ *     dismissText = "Cancel",
+ *     onDismiss = { showDialog = false },
+ * )
+ * ```
+ *
  * @param title 对话框标题。
- * @param body 可选正文。null 时不渲染 `text` 槽。
+ * @param bodyContent 可选的 composable 正文槽。null 时不渲染 `text` 槽；非 null
+ *   时整块作为 `AlertDialog.text` 内容渲染——调用方可在其中放多段不同颜色的
+ *   `Text` / `Spacer` 等（如破坏性确认里 irreversible 段染 error 色）。
  * @param confirmText confirm 按钮文本。
  * @param onConfirm confirm 按钮回调。
  * @param dismissText dismiss 按钮文本。
@@ -75,7 +96,7 @@ import androidx.compose.runtime.Composable
 @Composable
 fun AppConfirmDialog(
     title: String,
-    body: String? = null,
+    bodyContent: @Composable (() -> Unit)? = null,
     confirmText: String,
     onConfirm: () -> Unit,
     dismissText: String,
@@ -86,7 +107,7 @@ fun AppConfirmDialog(
     AlertDialog(
         onDismissRequest = onDismissRequest,
         title = { Text(title) },
-        text = body?.let { { Text(it) } },
+        text = bodyContent?.let { { it() } },
         confirmButton = {
             TextButton(onClick = onConfirm) {
                 Text(
@@ -106,3 +127,41 @@ fun AppConfirmDialog(
         },
     )
 }
+
+/**
+ * 字符串 body overload —— 委托到 [AppConfirmDialog] 的 composable body overload，
+ * 把字符串包成单段 `Text(it)`（默认 onSurface 变体色由 AlertDialog.text 容器
+ * 决定）。当正文需要按段落着色时，调用方应改用 composable body overload。
+ *
+ * 参数语义与 [AppConfirmDialog] 的 composable overload 完全一致，仅 [body]
+ * 改为字符串。详细文档见 overload 的 KDoc。
+ *
+ * @param title 对话框标题。
+ * @param body 可选正文。null 时不渲染 `text` 槽。
+ * @param confirmText confirm 按钮文本。
+ * @param onConfirm confirm 按钮回调。
+ * @param dismissText dismiss 按钮文本。
+ * @param onDismiss dismiss 按钮回调。
+ * @param destructive true（默认）→ confirm 按钮染 `colorScheme.error`。
+ * @param onDismissRequest scrim / 返回键关闭时的回调，默认与 [onDismiss] 同。
+ */
+@Composable
+fun AppConfirmDialog(
+    title: String,
+    body: String? = null,
+    confirmText: String,
+    onConfirm: () -> Unit,
+    dismissText: String,
+    onDismiss: () -> Unit,
+    destructive: Boolean = true,
+    onDismissRequest: () -> Unit = onDismiss,
+) = AppConfirmDialog(
+    title = title,
+    bodyContent = body?.let { { Text(it) } },
+    confirmText = confirmText,
+    onConfirm = onConfirm,
+    dismissText = dismissText,
+    onDismiss = onDismiss,
+    destructive = destructive,
+    onDismissRequest = onDismissRequest,
+)

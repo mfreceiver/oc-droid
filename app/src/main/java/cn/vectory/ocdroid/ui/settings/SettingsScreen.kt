@@ -297,10 +297,13 @@ fun SettingsAppearanceRoute(
         .collectAsStateWithLifecycle(initialValue = 1f)
 
     SettingsSubRouteScaffold(titleRes = R.string.settings_section_appearance, onBack = onBack) { mod ->
+        // §review-AB: parent Column no longer adds `.padding(horizontal = ...)`
+        // — AppSectionHeader (self-pad 16dp) + ListItem (self-pad 16dp) +
+        // bare widgets now share ONE 16dp keyline (header was at 32dp before,
+        // misaligned with bare content). Bare widgets inside AppearanceSection
+        // carry their own `Modifier.padding(horizontal = Dimens.spacing4)`.
         Column(
-            modifier = mod
-                .verticalScroll(rememberScrollState())
-                .padding(horizontal = Dimens.spacing4),
+            modifier = mod.verticalScroll(rememberScrollState()),
         ) {
             AppearanceSection(
                 themeMode = themeMode,
@@ -334,10 +337,11 @@ fun SettingsModelsRoute(
         .collectAsStateWithLifecycle(initialValue = emptySet())
 
     SettingsSubRouteScaffold(titleRes = R.string.settings_section_models, onBack = onBack) { mod ->
+        // §review-AB: no parent horizontal padding — ModelManagementSection's
+        // AppSectionHeader + ListItem self-pad; its bare empty-state Text
+        // already self-pads (`Modifier.padding(Dimens.spacing4)`).
         Column(
-            modifier = mod
-                .verticalScroll(rememberScrollState())
-                .padding(Dimens.spacing4),
+            modifier = mod.verticalScroll(rememberScrollState()),
         ) {
             ModelManagementSection(
                 providers = providers,
@@ -376,10 +380,11 @@ fun SettingsNotificationsRoute(onBack: () -> Unit) {
     }
 
     SettingsSubRouteScaffold(titleRes = R.string.settings_section_notifications, onBack = onBack) { mod ->
+        // §review-AB: no parent horizontal padding — AppSectionHeader +
+        // ListItem self-pad at 16dp; the bare grant-button Row below also
+        // self-pads (`Modifier.padding(horizontal = Dimens.spacing4)`).
         Column(
-            modifier = mod
-                .verticalScroll(rememberScrollState())
-                .padding(horizontal = Dimens.spacing4),
+            modifier = mod.verticalScroll(rememberScrollState()),
         ) {
             AppSectionHeader(text = stringResource(R.string.settings_section_notifications))
             // §setux #new5: 移除 leadingContent icon，与其它 settings item
@@ -402,7 +407,9 @@ fun SettingsNotificationsRoute(onBack: () -> Unit) {
             if (!granted && Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
                 Spacer(modifier = Modifier.height(Dimens.spacing3))
                 Row(
-                    modifier = Modifier.fillMaxWidth(),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = Dimens.spacing4),
                     horizontalArrangement = Arrangement.Center,
                 ) {
                     androidx.compose.material3.TextButton(onClick = {
@@ -455,10 +462,13 @@ fun SettingsStorageRoute(
         onBack = onBack,
         snackbarHost = { SnackbarHost(snackbarHostState) },
     ) { mod ->
+        // §review-AB: no parent horizontal padding — AppSectionHeader self-pads
+        // at 16dp; DangerZoneSection's bare Row + CacheManagementSection's
+        // bare Card (+ DegradedCacheWarning) each self-pad via
+        // `Modifier.padding(horizontal = Dimens.spacing4)` so all content
+        // shares one 16dp keyline with the header.
         Column(
-            modifier = mod
-                .verticalScroll(rememberScrollState())
-                .padding(horizontal = Dimens.spacing4),
+            modifier = mod.verticalScroll(rememberScrollState()),
         ) {
             // ① 清除数据 (first, flat).
             AppSectionHeader(text = stringResource(R.string.settings_danger_zone))
@@ -498,10 +508,10 @@ fun SettingsAboutRoute(
     onBack: () -> Unit,
 ) {
     SettingsSubRouteScaffold(titleRes = R.string.settings_section_about, onBack = onBack) { mod ->
+        // §review-AB: no parent horizontal padding — AppSectionHeader +
+        // DebugLogSection's Card self-pad; AboutSection's bare Texts self-pad.
         Column(
-            modifier = mod
-                .verticalScroll(rememberScrollState())
-                .padding(horizontal = Dimens.spacing4),
+            modifier = mod.verticalScroll(rememberScrollState()),
         ) {
             AboutSection()
             Spacer(modifier = Modifier.height(Dimens.spacing6))

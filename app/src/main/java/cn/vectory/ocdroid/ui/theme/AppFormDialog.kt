@@ -42,9 +42,6 @@ import androidx.compose.ui.window.DialogProperties
 // 现网 `ModelManagementSection.kt:ModelManagementDialog` 是参考实现——本组件
 // 提炼其容器骨架，调用方只负责 `content`（表单控件）与可选的 title / 按钮。
 //
-// **本 lane 只创建原语**——上述 ModelManagementDialog 不改，WT5 settings 迁
-// 移时再 adopt。
-//
 // 与 `AppConfirmDialog` 的边界：纯文本 + 两按钮的破坏性确认用
 // `AppConfirmDialog`（基于 `AlertDialog`，更轻）；含 `Switch` / 输入字段等
 // 可交互控件的表单 dialog 才用本组件（基于 `BasicAlertDialog` + `Surface`）。
@@ -55,9 +52,9 @@ import androidx.compose.ui.window.DialogProperties
  *
  * 基于 [BasicAlertDialog] + [Surface]（不基于 [androidx.compose.material3.AlertDialog]，
  * 因为 AlertDialog 的 `text` 槽会吞 `Switch` 触摸事件——见文件头注释）。容器
- * 样式对齐 [AlertDialogDefaults] 的 `shape` / `containerColor` / `TonalElevation`，
- * 内层 `Column` 带 `padding(Dimens.spacing6)` + `verticalScroll` + 高度封顶
- * （`screenHeight * 0.85f`），保证小屏 / 横屏 / 分屏下 confirm 按钮始终可达。
+ * 样式对齐 [AlertDialogDefaults] 的 `shape` / `containerColor` / `TonalElevation`；
+ * `Surface` 用 `heightIn(max = screenHeight * 0.85f)` 封顶避免占满整屏，小屏 /
+ * 横屏 / 分屏下 confirm 按钮始终可达。
  *
  * 用法：
  * ```
@@ -73,13 +70,14 @@ import androidx.compose.ui.window.DialogProperties
  * }
  * ```
  *
- * **布局说明**：
- *  - 整个 `Column`（含 title / content / buttons）一起 `verticalScroll`，溢出
- *    时整体滚动；`heightIn(max)` 封顶避免占满整屏。
- *  - 若需要 title / buttons 固定、只中间内容滚动（如现网 ModelManagementDialog
- *    的做法），调用方可在 [content] 槽内自行放一个 `Column(Modifier.weight(1f)
- *    .verticalScroll(...))`——但注意：在已 `verticalScroll` 的父 `Column` 里
- *    `weight(1f)` 不生效，需调用方按需调整本组件用法或提 issue。
+ * **布局结构（§review-AB 固定 footer 修复）**：
+ *  - 外层 `Surface`（`heightIn(max = screenHeight*0.85f)` 封顶）内是一个
+ *    **不滚动**的外层 `Column`，依次为：[title] → 滚动的 [content] → 按钮行。
+ *  - [title] 与 confirm/dismiss 按钮恒可见（钉在外层 Column 头尾）；只有
+ *    [content] 包在 `Column(Modifier.weight(1f).verticalScroll(...))` 里滚动。
+ *  - 把按钮挪出滚动区后，`weight(1f)` 重新合法（外层 Column 无 `verticalScroll`）；
+ *    长表单（Host 编辑器 mTLS+Advanced、Model 管理）的 Save/Done/Test 按钮不再
+ *    被滚出视野，恢复了固定 action bar 的体验。
  *
  * @param onDismissRequest scrim / 返回键 / 点击外部关闭时的回调。
  * @param title 可选标题。null 时不渲染标题行。
@@ -87,7 +85,7 @@ import androidx.compose.ui.window.DialogProperties
  * @param dismissButton 可选的 dismiss 按钮槽（confirm 左侧）。null 时不渲染。
  * @param content 表单内容槽（[ColumnScope]），放在最后一个参数以支持尾随 lambda。
  *   任意的 `Switch` / `TextField` / `ListItem` 等都可放入——触摸事件由
- *   [BasicAlertDialog] 透传，不会被吞。
+ *   [BasicAlertDialog] 透传，不会被吞。内容会单独滚动；title 与按钮保持固定。
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -113,15 +111,19 @@ fun AppFormDialog(
             modifier = Modifier
                 .fillMaxWidth()
                 .padding(horizontal = Dimens.spacing4)  // 16dp 屏幕侧边距
+                // §review-AB: 高度封顶挂在 Surface 上（外层）——Surface 是
+                // heightIn(max) 的边界，内层 non-scrolling Column 据此拿到
+                // bounded 高度，content 的 weight(1f) 才能正常解析。
                 .heightIn(max = LocalConfiguration.current.screenHeightDp.dp * 0.85f),
             shape = AlertDialogDefaults.shape,
             tonalElevation = AlertDialogDefaults.TonalElevation,
             color = AlertDialogDefaults.containerColor,
         ) {
+            // §review-AB: 外层 Column **不**滚动——title + content + buttons
+            // 三段平铺，content 用 weight(1f) 吃掉剩余高度并自行滚动，使
+            // title 与按钮行恒可见（修复长表单上 Save/Done 被滚出视野的回归）。
             Column(
-                modifier = Modifier
-                    .padding(Dimens.spacing6)  // 24dp 内 padding（与 AppBottomSheet title 行对齐）
-                    .verticalScroll(rememberScrollState()),
+                modifier = Modifier.padding(Dimens.spacing6),  // 24dp 内 padding（与 AppBottomSheet title 行对齐）
             ) {
                 if (title != null) {
                     Text(
@@ -132,7 +134,15 @@ fun AppFormDialog(
                     Spacer(modifier = Modifier.height(Dimens.spacing4))
                 }
 
-                content()
+                // 滚动区——仅中间 content 滚动。weight(1f) 在外层非滚动
+                // Column 下合法，吃满 title 与按钮之间的剩余高度。
+                Column(
+                    modifier = Modifier
+                        .weight(1f)
+                        .verticalScroll(rememberScrollState()),
+                ) {
+                    content()
+                }
 
                 if (confirmButton != null || dismissButton != null) {
                     Spacer(modifier = Modifier.height(Dimens.spacing4))
