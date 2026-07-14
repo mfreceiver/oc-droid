@@ -117,11 +117,14 @@ sealed interface RegisterStartingOutcome {
  */
 sealed interface OwnershipState {
     val identity: ConnectionIdentity
+    /** Launcher attempt that created this owner, or null for sticky/internal ownership. */
+    val attemptId: Long?
     val disconnectAndJoin: suspend (Boolean) -> Unit
     val terminal: CompletableDeferred<OwnershipStartResult>
 
     data class Starting(
         override val identity: ConnectionIdentity,
+        override val attemptId: Long?,
         override val disconnectAndJoin: suspend (Boolean) -> Unit,
         /**
          * D4-B B1: invoked by [StreamingOwnershipGate.failStarting] when a
@@ -137,6 +140,7 @@ sealed interface OwnershipState {
 
     data class Ready(
         override val identity: ConnectionIdentity,
+        override val attemptId: Long?,
         override val disconnectAndJoin: suspend (Boolean) -> Unit,
         override val terminal: CompletableDeferred<OwnershipStartResult>,
     ) : OwnershipState
@@ -427,7 +431,13 @@ class StreamingOwnershipGate @Inject constructor() {
                     pendingAttempt = null
                     pending.terminal
                 }
-            owner = OwnershipState.Starting(identity, disconnectAndJoin, abortStartup, terminal)
+            owner = OwnershipState.Starting(
+                identity = identity,
+                attemptId = if (attemptId == NO_ATTEMPT_ID) null else attemptId,
+                disconnectAndJoin = disconnectAndJoin,
+                abortStartup = abortStartup,
+                terminal = terminal,
+            )
             // Refuse waiters for OTHER identities (legacy waiter set; the new
             // model uses the per-attempt terminal deferred but we keep the old
             // waiter semantics for back-compat).
@@ -481,8 +491,18 @@ class StreamingOwnershipGate @Inject constructor() {
         synchronized(lock) {
             val pending = pendingAttempt
             if (pending == null || pending.attemptId != attemptId) {
-                // Already cleared or different attempt. Nothing to expire.
-                extracted = null
+                // The prepared record is consumed by registerStarting when
+                // Stage 1 is accepted. In that case the accepted Starting
+                // owner retains the attempt ID and is the state that must be
+                // rolled back for the expire-after-Accept boundary race.
+                val current = owner as? OwnershipState.Starting
+                if (current?.attemptId == attemptId) {
+                    owner = null
+                    current.terminal.complete(OwnershipStartResult.Refused(reason))
+                    extracted = current
+                } else {
+                    extracted = null
+                }
             } else {
                 pendingAttempt = null
                 pending.terminal.complete(OwnershipStartResult.Refused(reason))
@@ -536,7 +556,12 @@ class StreamingOwnershipGate @Inject constructor() {
             val current = owner ?: return@synchronized emptyList()
             if (current.identity != identity) return@synchronized emptyList()
             if (current is OwnershipState.Starting) {
-                owner = OwnershipState.Ready(identity, current.disconnectAndJoin, current.terminal)
+                owner = OwnershipState.Ready(
+                    identity = identity,
+                    attemptId = current.attemptId,
+                    disconnectAndJoin = current.disconnectAndJoin,
+                    terminal = current.terminal,
+                )
             }
             val list = mutableListOf<CompletableDeferred<OwnershipStartResult>>()
             current.terminal.let { list += it }

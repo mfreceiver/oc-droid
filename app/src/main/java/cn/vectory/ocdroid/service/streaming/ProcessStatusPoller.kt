@@ -227,9 +227,22 @@ class ProcessStatusPoller internal constructor(
         identity: ConnectionIdentity,
         snapshot: StatusSnapshot,
     ): SourceActivation {
-        val current = synchronized(stateLock) { runningIdentity }
-        if (current == identity && loopJob?.isActive == true) {
-            // Same identity already running — no-op (idempotent).
+        // D5-3 (#2-race): capture the generation together with the fast-path
+        // state. A concurrent StopPoller invalidates this observation by
+        // incrementing generation and clearing runningIdentity; do not report
+        // Ready from an observation that Stop has already superseded.
+        val observed = synchronized(stateLock) {
+            Triple(generation, runningIdentity, loopJob?.isActive == true)
+        }
+        if (observed.second == identity && observed.third &&
+            synchronized(stateLock) {
+                generation == observed.first &&
+                    runningIdentity == identity &&
+                    loopJob?.isActive == true
+            }
+        ) {
+            // Same identity already running — no-op (idempotent), but only
+            // while the generation remains live.
             return SourceActivation.Ready
         }
         val activation = startAndAwaitFirstPoll(identity, snapshot)

@@ -111,21 +111,21 @@ interface ServiceShell {
 
     /**
      * D2 §4.4 / §1 — start / retarget the SSE collector for [identity],
-     * AWAIT transport readiness + status-baseline verification, and return
-     * the resulting [SourceActivation]. The controller forwards the
+     * AWAIT transport readiness, and return the resulting [SourceActivation].
+     * [SourceActivation.Ready] is transport-only: the first valid
+     * current-identity SSE frame proves the connection, while the coordinator
+     * reads the status authority separately at commit. The controller forwards the
      * activation to
      * [cn.vectory.ocdroid.service.lifecycle.StreamingLifecycleCoordinator.onActivationAck];
      * the coordinator's handoff commit consumes [SourceActivation.Ready] to
      * commit `StopPoller` + the layer flip, OR consumes
      * [SourceActivation.Rejected] to leave the prior source intact.
      *
-     * Returns [SourceActivation.Ready] only AFTER the first successful
-     * current-identity frame AND an immediate
-     * [cn.vectory.ocdroid.service.status.StatusAggregatorInput.refresh]
-     * baseline that the [cn.vectory.ocdroid.service.status.StatusAggregator]
-     * projects as `Busy` or `AllIdleFresh` (`Unknown` is NOT a verified
-     * baseline — the collector keeps running and the deferred stays open
-     * until a verified frame arrives OR the §5 step 6 retry budget exhausts).
+     * Returns [SourceActivation.Ready] after the first successful
+     * current-identity frame. It does NOT await or gate on a REST status
+     * baseline; `Unknown` is handled by the coordinator's supplemental-poller
+     * decision at commit, and transport retry/exhaustion remains the owner's
+     * responsibility.
      *
      * Returns [SourceActivation.Rejected]:
      *  - [SourceActivation.Rejected.StaleIdentity] — the identity is no

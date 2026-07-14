@@ -33,11 +33,12 @@ import kotlinx.coroutines.withTimeoutOrNull
  *    return `false`; NEVER call `startForegroundService`. Background recovery
  *    is limited to user-reopen / notification Action / system sticky restart
  *    (FGS spec §4.1).
- *  - foreground AND lifecycle layer is NOT [Layer.L3] → return `true`
- *    WITHOUT starting anything. The existing L1/L2 Service instance already
- *    owns the live SSE / lifecycle (a second start would either be a no-op
- *    Android redelivery or a duplicate bootstrap state machine).
- *  - foreground AND [Layer.L3] → `ContextCompat.startForegroundService` with
+ *  - foreground → ALWAYS consult [StreamingOwnershipGate]. A non-L3 layer
+ *    does not prove that this identity owns a working transport; readiness
+ *    must never be inferred from the lifecycle layer. The gate handles exact
+ *    Ready/Starting reuse versus a new prepared attempt.
+ *  - foreground with a launch-required attempt →
+ *    `ContextCompat.startForegroundService` with
  *    [SessionStreamingService.ACTION_BOOTSTRAP]; the Service runs its §5
  *    sequence (`startForeground` placeholder → async bootstrap → coordinator
  *    `onBootstrapResult` → L1/L2/L3 decision matrix → `StartSse` /

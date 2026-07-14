@@ -10,6 +10,8 @@ import cn.vectory.ocdroid.service.status.SessionBusyStatus
 import cn.vectory.ocdroid.service.status.SessionStatusKey
 import cn.vectory.ocdroid.service.status.StatusAggregator
 import cn.vectory.ocdroid.service.status.StatusSnapshot
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -115,6 +117,41 @@ class SessionStreamingControllerPollerTest {
         )
     }
 
+    @Test
+    fun `StopPoller cancels an in-flight EnsurePoller activation before it can install`() = runTest {
+        val fixture = newFixture(backgroundScope)
+        fixture.shell.ensureEntered = CompletableDeferred()
+        fixture.shell.ensureResult = CompletableDeferred()
+        fixture.controller.start()
+        fixture.bootstrapRunner.enqueue(BootstrapResult.Success(identity))
+        fixture.store.bind(
+            serverGroupFp = identity.serverGroupFp,
+            normalizedWorkdir = identity.normalizedWorkdir,
+            endpointFp = identity.endpointFp,
+        )
+        fixture.aggregator.setState(GlobalBusyState.Unknown)
+        fixture.shell.nextSseActivation = SourceActivation.Ready
+        fixture.controller.bootstrapAsync()
+        runCurrent()
+
+        // Unknown SSE commit emits EnsurePoller; hold its first-poll await.
+        fixture.shell.ensureEntered!!.await()
+
+        // A definitive Busy verdict emits StopPoller while EnsurePoller is
+        // still suspended. Stop must cancel the command job, not merely call
+        // shell.stopPoller (which would be too early to see the not-yet-
+        // installed process loop).
+        fixture.aggregator.setState(GlobalBusyState.Busy)
+        runCurrent()
+
+        assertTrue(
+            "StopPoller cancels pending EnsurePoller activation",
+            fixture.shell.ensureCancelled,
+        )
+        fixture.shell.ensureResult!!.complete(SourceActivation.Ready)
+        runCurrent()
+    }
+
     // ── Fixture / fakes ───────────────────────────────────────────────────
 
     private fun newFixture(scope: kotlinx.coroutines.CoroutineScope): Fixture {
@@ -201,6 +238,9 @@ class SessionStreamingControllerPollerTest {
         val recorded = mutableListOf<String>()
         var nextSseActivation: SourceActivation = SourceActivation.Ready
         var nextPollerActivation: SourceActivation = SourceActivation.Ready
+        var ensureEntered: CompletableDeferred<Unit>? = null
+        var ensureResult: CompletableDeferred<SourceActivation>? = null
+        var ensureCancelled: Boolean = false
 
         override fun startForeground(spec: cn.vectory.ocdroid.service.notify.NotificationSpec) = Unit
         override fun updateNotification(spec: cn.vectory.ocdroid.service.notify.NotificationSpec) = Unit
@@ -221,7 +261,13 @@ class SessionStreamingControllerPollerTest {
             snapshot: StatusSnapshot,
         ): SourceActivation {
             recorded += "ensurePoller"
-            return nextPollerActivation
+            ensureEntered?.complete(Unit)
+            return try {
+                ensureResult?.await() ?: nextPollerActivation
+            } catch (error: CancellationException) {
+                ensureCancelled = true
+                throw error
+            }
         }
         override suspend fun connectSse(identity: ConnectionIdentity): SourceActivation {
             recorded += "connectSse"

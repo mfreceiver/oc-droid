@@ -9,11 +9,14 @@ import cn.vectory.ocdroid.service.status.StatusAggregator
 import cn.vectory.ocdroid.service.status.StatusAggregatorInput
 import cn.vectory.ocdroid.service.status.StatusSnapshot
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.async
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.TestScope
 import kotlinx.coroutines.test.UnconfinedTestDispatcher
 import kotlinx.coroutines.test.advanceTimeBy
@@ -231,6 +234,56 @@ class ProcessStatusPollerTest {
         assertEquals(0, input.refreshCount)
     }
 
+    @Test
+    fun `stop during EnsurePoller first poll rejects late install and later ensure recovers`() = runTest {
+        val appScope = TestScope(UnconfinedTestDispatcher())
+        val input = RecordingStatusInput(GlobalBusyState.Unknown)
+        val entered = CompletableDeferred<Unit>()
+        val release = CompletableDeferred<Unit>()
+        input.refreshEntered = entered
+        input.refreshRelease = release
+        val store = ConnectionIdentityStore()
+        bindIdentity(store)
+        val poller = ProcessStatusPoller(
+            scope = appScope,
+            statusAggregatorInput = input,
+            snapshotProvider = SessionSnapshotProvider { StatusSnapshot.Empty },
+            identityStore = store,
+            statusAggregator = input,
+            clock = { 0L },
+        )
+
+        val pending = backgroundScope.async {
+            poller.ensureRunning(identity, StatusSnapshot.Empty)
+        }
+        entered.await()
+
+        // This models coordinator Busy/AllIdleFresh -> StopPoller while the
+        // EnsurePoller first-poll command is still suspended.
+        poller.stop()
+        release.complete(Unit)
+        runCurrent(appScope)
+
+        assertEquals(
+            "generation guard rejects the late install",
+            SourceActivation.Rejected.Superseded,
+            pending.await(),
+        )
+        val refreshesAfterStop = input.refreshCount
+        advanceTimeBy(appScope, ProcessStatusPoller.DEFAULT_INTERVAL_MS * 2)
+        runCurrent(appScope)
+        assertEquals("no loop survives StopPoller", refreshesAfterStop, input.refreshCount)
+
+        // A later legitimate EnsurePoller can still install a fresh loop;
+        // the generation guard is invalidation, not a permanent lockout.
+        input.refreshEntered = null
+        input.refreshRelease = null
+        assertEquals(SourceActivation.Ready, poller.ensureRunning(identity, StatusSnapshot.Empty))
+        advanceTimeBy(appScope, ProcessStatusPoller.DEFAULT_INTERVAL_MS)
+        runCurrent(appScope)
+        assertTrue("later ensure starts a fresh loop", input.refreshCount > refreshesAfterStop)
+    }
+
     private fun advanceTimeBy(scope: TestScope, ms: Long) = scope.testScheduler.advanceTimeBy(ms)
     private fun runCurrent(scope: TestScope) = scope.testScheduler.runCurrent()
 
@@ -256,11 +309,15 @@ class ProcessStatusPollerTest {
 
         var refreshCount: Int = 0
             private set
+        var refreshEntered: CompletableDeferred<Unit>? = null
+        var refreshRelease: CompletableDeferred<Unit>? = null
 
         override suspend fun refresh(
             identity: ConnectionIdentity,
             snapshot: StatusSnapshot,
         ) {
+            refreshEntered?.complete(Unit)
+            refreshRelease?.await()
             refreshCount++
         }
 

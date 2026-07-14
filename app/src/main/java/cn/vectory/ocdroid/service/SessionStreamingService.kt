@@ -174,6 +174,8 @@ class SessionStreamingService : Service() {
      * entry.
      */
     private var bootstrapJob: Job? = null
+    /** D5-3: prevents duplicate terminal teardown from expiry/abort races. */
+    private var bootstrapAbortIssued = false
     private var acceptedOwnershipIdentity: ConnectionIdentity? = null
 
     /**
@@ -404,6 +406,7 @@ class SessionStreamingService : Service() {
         val installedJob = scope.launch(start = kotlinx.coroutines.CoroutineStart.LAZY) {
             controller?.bootstrapAsync()
         }
+        bootstrapAbortIssued = false
         bootstrapJob = installedJob
         if (requestedOwnership != null) {
             scope.launch {
@@ -421,15 +424,11 @@ class SessionStreamingService : Service() {
                         // teardown (stopForeground + stopSelf + cancel SSE)
                         // runs via the BootstrapFailure teardown path.
                         DebugLog.w(TAG, "onStartCommand: registerStarting outcome=$outcome → abort bootstrap")
-                        bootstrapJob?.cancel()
-                        bootstrapJob = null
-                        coordinator.teardownAndAwait(TeardownReason.BootstrapFailure)
+                        abortExpiredStartup()
                     }
                 } else {
                     ownershipGate.refuse(requestedOwnership, OwnershipRefusal.StaleIdentity)
-                    bootstrapJob?.cancel()
-                    bootstrapJob = null
-                    coordinator.teardownAndAwait(TeardownReason.BootstrapFailure)
+                    abortExpiredStartup()
                 }
             }
         } else {
@@ -442,9 +441,9 @@ class SessionStreamingService : Service() {
      * D4-B B1 Stage 1 — the Service claims the bootstrap/recovery ownership
      * (Starting). Records the disconnect + abortStartup callbacks so the gate
      * can roll back without the Service being asked again. Does NOT complete
-     * the launcher's readiness waiter (that is [StreamingOwnershipGate.markReady],
-     * fired from the controller's `onSseTransportReady` once the SSE transport
-     * delivers a valid current-identity frame).
+     * the launcher's terminal waiter (that is
+     * [StreamingOwnershipGate.markReady], called by the lifecycle coordinator
+     * only after the acknowledged SSE activation has committed).
      *
      * D5-2 (#4): the [attemptId] (carried in the Service Intent) is validated
      * by the gate. If it has already been expired by the launcher's 5s
@@ -464,12 +463,33 @@ class SessionStreamingService : Service() {
             identity = identity,
             attemptId = attemptId,
             disconnectAndJoin = { markGap -> sseOwner?.disconnectAndJoin(markGap) },
-            abortStartup = { /* shell cleanup runs via failStarting / coordinator */ },
+            // D5-3 (#4 seam): expire-after-Accept can extract this Starting
+            // owner before the Service reaches Ready. The abort callback must
+            // be symmetric with the late-Expired onStartCommand branch:
+            // cancel bootstrap and force the terminal FGS/SSE teardown.
+            abortStartup = { abortExpiredStartup() },
         )
         if (outcome is RegisterStartingOutcome.Accepted) {
             acceptedOwnershipIdentity = identity
         }
         return outcome
+    }
+
+    /**
+     * D5-3 (#4 seam) — terminal abort for a launcher attempt that was accepted
+     * at Stage 1 but expired before Stage 2. The gate invokes this callback
+     * outside its lock; keep it non-suspending and launch the awaitable
+     * teardown on the Service scope. [bootstrapAbortIssued] makes the path
+     * idempotent when an expiry callback and another terminal failure race.
+     */
+    private fun abortExpiredStartup() {
+        bootstrapJob?.cancel()
+        bootstrapJob = null
+        if (bootstrapAbortIssued) return
+        bootstrapAbortIssued = true
+        scope.launch {
+            coordinator.teardownAndAwait(TeardownReason.BootstrapFailure)
+        }
     }
 
     /**

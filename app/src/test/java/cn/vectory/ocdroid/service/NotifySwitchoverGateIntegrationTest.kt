@@ -216,6 +216,47 @@ class NotifySwitchoverGateIntegrationTest {
         assertNull("ownership released", gate.readyIdentity())
     }
 
+    @Test
+    fun `D-v2 - expire after Starting acceptance invokes abort and releases ownership`() = runTest {
+        val gate = StreamingOwnershipGate()
+        val attempt = gate.prepareAttempt(identity)
+        var bootstrapCancelled = false
+        var stopForeground = false
+        var stopSelf = false
+        val abortJob = backgroundScope.launch { kotlinx.coroutines.awaitCancellation() }
+
+        assertEquals(
+            RegisterStartingOutcome.Accepted,
+            gate.registerStarting(
+                identity = identity,
+                attemptId = attempt.attemptId,
+                disconnectAndJoin = { abortJob.cancel(); bootstrapCancelled = true },
+                abortStartup = {
+                    abortJob.cancel()
+                    bootstrapCancelled = true
+                    stopForeground = true
+                    stopSelf = true
+                },
+            ),
+        )
+        assertNull("Starting is not Ready", gate.readyIdentity())
+
+        // Boundary race: Stage 1 was accepted, but the launcher expires the
+        // attempt before Stage 2. The gate must invoke the owner's abort path,
+        // not leave a live FGS/SSE with no ownership.
+        gate.expireAttempt(attempt.attemptId, OwnershipRefusal.AckTimeout)
+        runCurrent()
+
+        assertTrue("bootstrap job cancelled", bootstrapCancelled)
+        assertTrue("StopForeground observed by abort path", stopForeground)
+        assertTrue("StopSelf observed by abort path", stopSelf)
+        assertNull("ownership absent after expire-after-Accept", gate.readyIdentity())
+        assertEquals(
+            OwnershipStartResult.Refused(OwnershipRefusal.AckTimeout),
+            attempt.terminal.await(),
+        )
+    }
+
     // ── A — post-Ready outage recovery lifecycle ───────────────────────────
 
     @Test

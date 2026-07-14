@@ -97,6 +97,14 @@ class SessionStreamingController(
     // Single-flight guards (read/write on `scope` = Main.immediate).
     private var commandCollectorJob: Job? = null
     private var busyObserverJob: Job? = null
+    /**
+     * D5-3 (#2-race): EnsurePoller activations are independent coroutines and
+     * may be suspended in the poller's immediate first refresh. Track them so
+     * a later StopPoller cancels the pending activation BEFORE delegating the
+     * stop to the shell. The poller's generation guard is the second line of
+     * defense if cancellation loses a race at the install boundary.
+     */
+    private val pendingEnsurePollerJobs = mutableMapOf<Long, Job>()
     private var started = false
 
     /**
@@ -282,6 +290,13 @@ class SessionStreamingController(
                 }
             }
             LifecycleCommand.StopPoller -> {
+                // D5-3 (#2-race): StopPoller strictly wins over an in-flight
+                // EnsurePoller. Without this cancellation, shell.stopPoller()
+                // can run before ensureRunning installs its delayed loop; the
+                // late EnsurePoller ack is then ignored by the coordinator and
+                // no second StopPoller is emitted.
+                pendingEnsurePollerJobs.values.toList().forEach { it.cancel() }
+                pendingEnsurePollerJobs.clear()
                 shell.stopPoller()
             }
             is LifecycleCommand.EnsurePoller -> {
@@ -291,11 +306,17 @@ class SessionStreamingController(
                 // the result + updates the PollerRuntime.
                 val identity = cmd.identity
                 val requestId = cmd.requestId
-                scope.launch {
-                    val snapshot = sessionSnapshotProvider.current()
-                    val activation = shell.ensurePoller(identity, snapshot)
-                    coordinator.onEnsurePollerAck(identity, requestId, activation)
+                val ensureJob = scope.launch(start = kotlinx.coroutines.CoroutineStart.LAZY) {
+                    try {
+                        val snapshot = sessionSnapshotProvider.current()
+                        val activation = shell.ensurePoller(identity, snapshot)
+                        coordinator.onEnsurePollerAck(identity, requestId, activation)
+                    } finally {
+                        pendingEnsurePollerJobs.remove(requestId)
+                    }
                 }
+                pendingEnsurePollerJobs[requestId] = ensureJob
+                ensureJob.start()
             }
         }
     }
@@ -321,6 +342,8 @@ class SessionStreamingController(
     fun shutdown() {
         commandCollectorJob?.cancel()
         busyObserverJob?.cancel()
+        pendingEnsurePollerJobs.values.toList().forEach { it.cancel() }
+        pendingEnsurePollerJobs.clear()
     }
 
     /**
