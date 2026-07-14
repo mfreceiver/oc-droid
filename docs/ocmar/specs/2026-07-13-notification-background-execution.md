@@ -165,5 +165,5 @@ Phase 0 的 10 个任务分两类，必须区分对待：
 - **merge 后（merge-commit）**：`git revert -m 1 <merge-sha>`。
 - **线性连续区间**：CP1…D4-B 在同一连续 commit range → 执行**一次** reviewed revert 覆盖整个区间（不逐 commit revert——中间态不可编译）。
 - **禁止**：不得创建并行「legacy SSE owner」runtime flag（双轨复活 gpter-M1 双 SSE 状态机，且不可测）。
-- **merge SHA**：合并后记录于此 — `<待合并后填写>`。
+- **merge SHA**：合并后记录于此 — `b4a2185`（2026-07-14，merge-commit；revert 命令：`git revert -m 1 b4a2185`）。
 - **验证**：revert 后 `./scripts/check.sh` 必须全绿（若失败说明 revert 不完整——扩大到整个连续区间）。

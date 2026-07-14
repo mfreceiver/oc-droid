@@ -392,5 +392,5 @@ reconfigure 严格顺序（不可颠倒）：
   - **线性连续区间**（CP1…D4-B 全在一个连续 commit range）：执行**一次** reviewed `git revert` 覆盖整个连续区间，**不**逐 commit revert（逐个会产生中间态——例如只回 D4-B 但保留 D4-A 会留下对已不存在的 `SourceActivation.Ready(state)` 的引用，编译失败）。
 - **禁止**：不得创建并行的「legacy SSE owner」runtime flag / feature toggle 来「保留旧路径同时运行新路径」——SSE 所有权是单一路径（模型 A），双轨会复活 gpter-M1（两个 SSE 状态机）且无法在测试矩阵中覆盖。
 - **merge SHA 记录**：合并后在本文档记录 merge/squash SHA：
-  - _merge SHA: `<待合并后填写>`_
+  - _merge SHA: `b4a2185`（2026-07-14，merge-commit；revert：`git revert -m 1 b4a2185`）_
 - **验证 revert 完整性**：revert 后必须跑 `./scripts/check.sh` 全绿（recommit 会因 D4-A/D4-B 互相依赖的符号删除/改名而失败——这正是「不可分割」的证据；若 revert 后 check.sh 失败说明 revert 不完整，需扩大 revert 范围到整个连续区间）。
