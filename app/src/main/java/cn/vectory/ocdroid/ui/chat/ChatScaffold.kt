@@ -955,8 +955,6 @@ fun ChatScaffold(
                 sessionVM.selectSession(sessionId)
                 showSessionPicker = false
             },
-            onArchive = sessionVM::archiveSession,
-            onUnarchive = sessionVM::restoreSession,
             onNewSession = {
                 sessionVM.createSession()
                 showSessionPicker = false
