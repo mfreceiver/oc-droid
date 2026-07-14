@@ -1244,6 +1244,119 @@ class SessionListActionsTest {
         assertTrue(slices.sessionList.value.childSessions.isEmpty())
     }
 
+    // ── §gpter-blocker (v097 review-fix): stale in-flight child-load must NOT
+    //    re-certify a root after the tree was invalidated mid-flight ──────────
+
+    @Test
+    fun `gpter-blocker launchLoadChildSessions drops stale result when epoch bumped mid-flight`() = runTest {
+        val root = Session(id = "p1", directory = "/x")
+        val child = Session(id = "c1", directory = "/x", parentId = "p1")
+        store.mutateSessionList { it.copy(sessions = listOf(root)) }
+
+        val gate = CompletableDeferred<Unit>()
+        coEvery { repository.getChildren("p1") } coAnswers {
+            gate.await()
+            Result.success(listOf(child))
+        }
+        coEvery { repository.getChildren("c1") } returns Result.success(emptyList())
+        coEvery { repository.getSessionStatus() } returns Result.success(emptyMap())
+
+        launchLoadChildSessions(scope, repository, slices, "p1", "Tag")
+        advanceUntilIdle() // hydration suspended inside gate
+
+        // Simulate invalidation mid-flight: bump the epoch (as
+        // upsertAndInvalidateTree / REST structural replace would).
+        val epochBefore = slices.sessionList.value.completenessEpoch
+        store.mutateSessionList { it.copy(completenessEpoch = it.completenessEpoch + 1L) }
+        assertTrue(slices.sessionList.value.completenessEpoch > epochBefore)
+
+        // Release the stale hydration.
+        gate.complete(Unit)
+        advanceUntilIdle()
+
+        // §gpter-blocker: stale result dropped — root NOT in completeRootIds.
+        assertFalse(
+            "stale child-load must NOT re-certify root after invalidation",
+            "p1" in slices.sessionList.value.completeRootIds,
+        )
+
+        // Follow-up tick re-hydrates and succeeds.
+        coEvery { repository.getChildren("p1") } returns Result.success(listOf(child))
+        launchLoadChildSessions(scope, repository, slices, "p1", "Tag")
+        advanceUntilIdle()
+
+        assertTrue(
+            "follow-up tick re-hydrates and certifies root",
+            "p1" in slices.sessionList.value.completeRootIds,
+        )
+    }
+
+    @Test
+    fun `gpter-blocker launchLoadChildSessions commits normally when epoch unchanged`() = runTest {
+        // Negative control: no invalidation mid-flight → commit succeeds.
+        val root = Session(id = "p1", directory = "/x")
+        val child = Session(id = "c1", directory = "/x", parentId = "p1")
+        store.mutateSessionList { it.copy(sessions = listOf(root)) }
+        coEvery { repository.getChildren("p1") } returns Result.success(listOf(child))
+        coEvery { repository.getChildren("c1") } returns Result.success(emptyList())
+        coEvery { repository.getSessionStatus() } returns Result.success(emptyMap())
+
+        launchLoadChildSessions(scope, repository, slices, "p1", "Tag")
+        advanceUntilIdle()
+
+        assertTrue("p1 must be certified when no invalidation occurred", "p1" in slices.sessionList.value.completeRootIds)
+    }
+
+    // ── §gpter-important (v097 review-fix): REST structural replace discards
+    //    cached completeness proofs and bumps the invalidation epoch ─────────
+
+    @Test
+    fun `gpter-important launchLoadSessions clears completeRootIds and bumps epoch`() = runTest {
+        val root = Session(id = "A", directory = "/x")
+        store.mutateSessionList {
+            it.copy(
+                sessions = listOf(root),
+                completeRootIds = setOf("A"),
+                completenessEpoch = 5L,
+            )
+        }
+        coEvery { repository.getSessions(any()) } returns Result.success(listOf(root))
+
+        launchLoadSessions(scope, repository, slices, settingsManager, {}, {}, {}, emit)
+        advanceUntilIdle()
+
+        assertTrue(
+            "stale completeRootIds discarded on REST full-list replace",
+            slices.sessionList.value.completeRootIds.isEmpty(),
+        )
+        assertEquals("epoch bumped", 6L, slices.sessionList.value.completenessEpoch)
+    }
+
+    @Test
+    fun `gpter-important launchLoadMoreSessions clears completeRootIds and bumps epoch`() = runTest {
+        val root = Session(id = "A", directory = "/x")
+        store.mutateSessionList {
+            it.copy(
+                sessions = listOf(root),
+                completeRootIds = setOf("A"),
+                completenessEpoch = 3L,
+                hasMoreSessions = true,
+                isLoadingMoreSessions = false,
+                loadedSessionLimit = 10,
+            )
+        }
+        coEvery { repository.getSessions(any()) } returns Result.success(listOf(root))
+
+        launchLoadMoreSessions(scope, repository, slices, {}, emit)
+        advanceUntilIdle()
+
+        assertTrue(
+            "stale completeRootIds discarded on REST pagination catch-up",
+            slices.sessionList.value.completeRootIds.isEmpty(),
+        )
+        assertEquals("epoch bumped", 4L, slices.sessionList.value.completenessEpoch)
+    }
+
     // ── launchLoadPendingQuestions ────────────────────────────────────────────
 
     @Test
