@@ -99,14 +99,35 @@ object ApplicationScopeModule {
 class AppLifecycleMonitor @Inject constructor(
     private val application: Application,
     @ApplicationScope private val appScope: CoroutineScope,
+    @UiApplicationScope private val uiScope: CoroutineScope,
     private val repository: OpenCodeRepository,
     // §R18 Phase 2-E step 1: needed to pass the explicit directory header to
     // getPendingQuestions for the background poll (was injected from the
     // global currentDirectory before; that fallback is being phased out).
     private val settingsManager: SettingsManager
 ) {
+    /**
+     * §4.3 foreground truth-source.
+     *
+     * **Default `false`** (CP8): a sticky-rebuilt process with no started
+     * Activity is **background**, NOT foreground. The previous `true` default
+     * caused the §4.3 bug — a Service-only sticky rebuild (the OS restarted
+     * `SessionStreamingService` after process death without bringing any
+     * Activity back up) misreported foreground, which would have routed the
+     * §5 bootstrap through the L1 (foreground) decision branch instead of
+     * the L2 (background) one and tripped a wrong-state teardown on the
+     * subsequent onActivityStarted→0 transition.
+     *
+     * The `onActivityStarted` 0→1 transition below still flips this to `true`
+     * on the first real Activity start, so the foreground UX is unchanged;
+     * only the "no Activity yet" window is now correctly treated as background.
+     */
+    // main (unread stale-poll guard, d999259): monotonic generation bumped on
+    // lifecycle transitions; BackgroundUnreadPoller captures it via
+    // currentLifecycleGeneration() to reject commits whose lifecycle has since
+    // moved. Kept alongside the CP8 default-false + §4.3 debounce below.
     private val lifecycleGeneration = java.util.concurrent.atomic.AtomicLong(0)
-    private val _isInForeground = MutableStateFlow(true)
+    private val _isInForeground = MutableStateFlow(false)
     val isInForeground: StateFlow<Boolean> = _isInForeground.asStateFlow()
 
     /**
@@ -125,6 +146,20 @@ class AppLifecycleMonitor @Inject constructor(
     /** Currently-running background poller job; null while in foreground. */
     private var pollJob: Job? = null
 
+    /**
+     * D1 (gate #2, §4.3): pending background-confirmation job. A 1→0
+     * `onActivityStopped` transition does NOT flip `_isInForeground=false`
+     * synchronously — it launches this confirmation job, which waits
+     * [BACKGROUND_CONFIRMATION_MS] (matching AndroidX
+     * `ProcessLifecycleOwner`'s 700ms) and re-checks that the started-count
+     * is still 0 before actually emitting background. The 0→1
+     * `onActivityStarted` transition cancels this job, so an in-flight
+     * configuration change (rotation: 1→0→1 inside 700ms) does NOT wrongly
+     * drive the §4.3 foreground→background→foreground cycle (which would
+     * have flipped L1→L3/L2 on stale data).
+     */
+    private var backgroundConfirmationJob: Job? = null
+
     /** Last error message surfaced via [onAppError]; tracked so we don't loop. */
     private var lastNotifiedError: String? = null
 
@@ -138,6 +173,12 @@ class AppLifecycleMonitor @Inject constructor(
         // foreground StateFlow.
         application.registerActivityLifecycleCallbacks(object : Application.ActivityLifecycleCallbacks {
             override fun onActivityStarted(activity: Activity) {
+                // D1 (gate #2): a 0→1 transition cancels any pending
+                // background-confirmation job (rotation 1→0→1 inside 700ms
+                // must NOT emit background). Done BEFORE incrementing so a
+                // racing in-flight confirmation recheck observes count >= 1.
+                backgroundConfirmationJob?.cancel()
+                backgroundConfirmationJob = null
                 activityStartedCount++
                 if (activityStartedCount == 1 && !_isInForeground.value) {
                     lifecycleGeneration.incrementAndGet()
@@ -147,10 +188,32 @@ class AppLifecycleMonitor @Inject constructor(
             }
             override fun onActivityStopped(activity: Activity) {
                 activityStartedCount = (activityStartedCount - 1).coerceAtLeast(0)
+                // D1 (gate #2, §4.3): do NOT flip foreground synchronously at
+                // count 0. A rotation produces a transient 1→0→1 cycle and
+                // the synchronous flip would wrongly drive L1→L3/L2 on the
+                // §4.3 foreground signal. Match AndroidX
+                // ProcessLifecycleOwner's 700ms confirmation: cancel any
+                // prior pending job, launch a new one, and only actually
+                // emit background if the count is STILL 0 after the delay.
                 if (activityStartedCount == 0 && _isInForeground.value) {
+                    // main (unread stale-poll guard): bump the generation
+                    // immediately on the activity→0 edge so any in-flight
+                    // BackgroundUnreadPoller whose lifecycle has moved rejects
+                    // its commit. This runs alongside (not instead of) the
+                    // §4.3 700ms debounce below — the generation guard and the
+                    // foreground-truth debounce solve different races.
                     lifecycleGeneration.incrementAndGet()
-                    _isInForeground.value = false
-                    onEnterBackground()
+                    backgroundConfirmationJob?.cancel()
+                    backgroundConfirmationJob = uiScope.launch {
+                        delay(BACKGROUND_CONFIRMATION_MS)
+                        // Lifecycle callbacks and this delayed recheck share
+                        // Main.immediate, so a start cannot race a stale
+                        // Default-dispatcher confirmation into a false flip.
+                        if (activityStartedCount == 0 && _isInForeground.value) {
+                            _isInForeground.value = false
+                            onEnterBackground()
+                        }
+                    }
                 }
             }
             override fun onActivityCreated(activity: Activity, savedInstanceState: android.os.Bundle?) {}
@@ -389,17 +452,47 @@ class AppLifecycleMonitor @Inject constructor(
         const val CHANNEL_IDLE = "ocdroid.idle"
         const val CHANNEL_ERRORS = "ocdroid.errors"
 
+        /**
+         * Ongoing session-status channel id (FGS spec §7 channel matrix /
+         * dev-design P1.4). IMPORTANCE_LOW. Used by
+         * [cn.vectory.ocdroid.service.SessionStreamingService] for the
+         * ongoing FGS notification.
+         *
+         * **Single-source rule**: this is the one canonical home for the
+         * channel id. The Service references `AppLifecycleMonitor.CHANNEL_SESSION_STATUS`
+         * rather than keeping its own copy. (Pre-CP8 the Service held its
+         * own const as a placeholder; CP8 moves the source here because
+         * `createChannels` — which uses the id — lives in this companion.)
+         */
+        const val CHANNEL_SESSION_STATUS = "ocdroid.session_status"
+
         /** Background polling interval per §18.1 (R-A, D1). */
         private const val POLL_INTERVAL_MS = 30_000L
+
+        /**
+         * D1 (gate #2, §4.3): delay between the started-activity count
+         * reaching 0 and the actual `_isInForeground=false` flip. Matches
+         * AndroidX `ProcessLifecycleOwner`'s established 700ms window — a
+         * rotation's transient 1→0→1 cycle completes well inside this, so
+         * the §4.3 foreground signal stays stable across configuration
+         * changes. Do NOT use a different value without coordinating with
+         * the lifecycle-state tests (the L1→L3/L2 transitions keyed off
+         * this signal depend on this exact delay for correctness).
+         */
+        const val BACKGROUND_CONFIRMATION_MS = 700L
 
         /** Fixed notification ID for the latest app error. */
         private const val ERROR_NOTIFICATION_ID = 4242
 
         /**
-         * Creates the notification channels required by §18.1/T3b. Wrapped in
-         * try/catch and only invoked on API 26+ (NotificationChannel was added
-         * in O). Channels are idempotent — re-creating with the same ID is a
-         * no-op. Called from [cn.vectory.ocdroid.OpenCodeApp.onCreate].
+         * Creates the notification channels required by §18.1 + §7. Wrapped
+         * in try/catch and only invoked on API 26+ (NotificationChannel was
+         * added in O). Channels are idempotent — re-creating with the same
+         * ID is a no-op. Called from [cn.vectory.ocdroid.OpenCodeApp.onCreate].
+         *
+         * CP8: adds [CHANNEL_SESSION_STATUS] (FGS spec §7 IMPORTANCE_LOW)
+         * alongside the existing [CHANNEL_DECISIONS] / [CHANNEL_IDLE] /
+         * [CHANNEL_ERRORS].
          */
         fun createChannels(context: Context) {
             if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
@@ -436,7 +529,14 @@ class AppLifecycleMonitor @Inject constructor(
                 ).apply {
                     description = CHANNEL_ERRORS_DESC
                 }
-                manager.createNotificationChannels(listOf(decisions, idle, errors))
+                val sessionStatus = NotificationChannel(
+                    CHANNEL_SESSION_STATUS,
+                    CHANNEL_SESSION_STATUS_NAME,
+                    NotificationManager.IMPORTANCE_LOW
+                ).apply {
+                    description = CHANNEL_SESSION_STATUS_DESC
+                }
+                manager.createNotificationChannels(listOf(decisions, idle, errors, sessionStatus))
             }.onFailure { Log.w(TAG, "Failed to create notification channels", it) }
         }
 
@@ -450,6 +550,9 @@ class AppLifecycleMonitor @Inject constructor(
         private const val CHANNEL_IDLE_DESC = "Completed sessions that are ready to review"
         private const val CHANNEL_ERRORS_NAME = "opencode errors"
         private const val CHANNEL_ERRORS_DESC = "Connection and runtime errors from opencode"
+        private const val CHANNEL_SESSION_STATUS_NAME = "opencode session status"
+        private const val CHANNEL_SESSION_STATUS_DESC =
+            "Ongoing session-status notifications while opencode is connected in the background"
         const val NOTIF_PERMISSION_TITLE = "Permission required"
         const val NOTIF_QUESTION_TITLE = "Question from agent"
         const val NOTIF_DECISION_BODY = "Open the session to review"

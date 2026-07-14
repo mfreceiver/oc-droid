@@ -1,15 +1,24 @@
 package cn.vectory.ocdroid.ui.controller
 
-import android.util.Log
 import cn.vectory.ocdroid.R
 import cn.vectory.ocdroid.data.api.CommandInfo
 import cn.vectory.ocdroid.data.cache.CacheMaintenanceCoordinator
-import cn.vectory.ocdroid.data.model.SSEEvent
 import cn.vectory.ocdroid.data.model.Session
 import cn.vectory.ocdroid.data.repository.OpenCodeRepository
 import cn.vectory.ocdroid.data.repository.ServerCompatProfile
 import cn.vectory.ocdroid.data.repository.http.TofuDecision
 import cn.vectory.ocdroid.data.repository.http.hostPortFromUrl
+import cn.vectory.ocdroid.service.bootstrap.ConnectionBootstrapCoordinator
+import cn.vectory.ocdroid.service.StreamingServiceLauncher
+import cn.vectory.ocdroid.service.OwnershipStartResult
+import cn.vectory.ocdroid.service.TeardownReason
+import cn.vectory.ocdroid.service.DegradedBootstrapTerminator
+import cn.vectory.ocdroid.service.streaming.BootstrapRetryPolicy
+import cn.vectory.ocdroid.service.streaming.ConnectionBootstrapEngine
+import cn.vectory.ocdroid.service.streaming.ConnectionBootstrapOutcome
+import cn.vectory.ocdroid.service.identity.ConnectionIdentityStore
+import cn.vectory.ocdroid.service.lifecycle.StreamingLifecycleCoordinator
+import cn.vectory.ocdroid.di.AppLifecycleMonitor
 import cn.vectory.ocdroid.ui.ConnectionPhase
 import cn.vectory.ocdroid.ui.ConnectionState
 import cn.vectory.ocdroid.ui.SharedEffectBus
@@ -21,12 +30,12 @@ import cn.vectory.ocdroid.ui.reportNonFatalIssue
 import cn.vectory.ocdroid.util.DebugLog
 import cn.vectory.ocdroid.util.SettingsManager
 import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
-import kotlinx.coroutines.flow.catch
-import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.filter
+import kotlinx.coroutines.flow.map
 import javax.net.ssl.SSLException
 import java.security.cert.CertificateException
 import java.util.Locale
@@ -34,8 +43,23 @@ import java.util.Locale
 /**
  * R-16 M4 → R-17 batch3b: owns the server connection lifecycle — health-check
  * probe with exponential-backoff retry, the 30s health-check throttle,
- * initial-data load orchestration on a healthy connect, and the SSE feed's
- * start/stop.
+ * initial-data load orchestration on a healthy connect.
+ *
+ * **CP9 switchover**: the SSE feed ownership (sseJob + launchSseCollection)
+ * has been DELETED from this coordinator and moved into the Service-owned
+ * [cn.vectory.ocdroid.service.streaming.ServiceSseConnectionOwner]. The
+ * thin [startSSE] delegate is preserved (ConnectionViewModel /
+ * ControllerEffect.StartSse / tests expose it; deleting adds rollback churn)
+ * — it now calls [streamingServiceLauncher].ensureStarted() so a successful
+ * foreground health probe synchronously requests the Service before
+ * reporting success. The no-zero-time-gap guarantee (FGS spec §1) is
+ * preserved: there is NO terminal connected-without-SSE path.
+ *
+ * `cancelSse` / `cancelSseForReconfigure` remain as lifecycle-teardown
+ * delegates (still exposed for direct VM/process cleanup callers), but they
+ * no longer touch a job — they route through
+ * [StreamingLifecycleCoordinator.onDisconnect] which the Service observes
+ * (the coordinator emits StopSse → owner.disconnect).
  *
  * **Migration (batch 3b)**: the [ConnectionCoordinatorCallbacks] interface
  * was eliminated. Most of its methods either (a) had all dependencies already
@@ -52,17 +76,16 @@ import java.util.Locale
  * [effects] — UiEvents now ride [SharedEffectBus.uiEvents].
  *
  * **Moved from the orchestrator:**
- *  - `sseJob` + `lastHealthCheckTime` fields — the SSE feed Job and the
- *    throttle anchor now live here.
+ *  - `lastHealthCheckTime` field — the throttle anchor lives here.
  *  - `testConnection(force, retries)` — the full connect state machine.
  *  - `coldStartReconnect()` — `testConnection(force=true, retries=3)`.
  *  - `loadInitialData()` — sessions/agents/providers/questions/commands + the
  *    directory-sessions re-fetch for the restored workdir.
  *  - `loadCommands()` + `localCommands()` + `mergeCommands()` — slash-command
  *    merge (server list + client-side /clear /compact /undo /redo).
- *  - `startSSE()` — starts the SSE collection coroutine.
- *  - `cancelSse()` / `cancelSseForReconfigure()` — tear down the in-flight
- *    feed (reconfigure also resets the catch-up state machine via effect).
+ *  - `startSSE()` — thin delegate to [streamingServiceLauncher].
+ *  - `cancelSse()` / `cancelSseForReconfigure()` — coordinator teardown
+ *    delegates.
  *
  * The 30s throttle clock is injectable ([clock]) so the cooldown is
  * deterministically testable without wall-clock latency.
@@ -103,51 +126,121 @@ class ConnectionCoordinator(
     // testable without depending on wall-clock latency. Defaults to
     // System::currentTimeMillis in production (preserves the exact pre-extraction
     // behaviour — the original `testConnection` called System.currentTimeMillis()).
-    private val clock: () -> Long = { System.currentTimeMillis() }
+    private val clock: () -> Long = { System.currentTimeMillis() },
+    /**
+     * CP1 (notify Phase-0): the single connection-identity store. Replaces
+     * the private [directoryFetchGeneration] AtomicLong. Guards the
+     * directory-fetch fan-out in [loadInitialData]. FGS spec §2 «关键约束»:
+     * no second private generation.
+     *
+     * `null` for legacy/test construction that doesn't wire the store — the
+     * coordinator falls back to unconditional forwarding (no identity gate).
+     */
+    private val identityStore: ConnectionIdentityStore? = null,
+    /**
+     * CP2 (notify Phase-0): the application-level shared TOFU bootstrap
+     * coordinator. CC DELEGATES its TOFU state here (FGS spec §10 — TOFU
+     * state is extracted so the SessionStreamingService shares the
+     * same single source and the bootstrap cannot fork into two TLS/SSE
+     * state machines). CC's public TOFU surface ([resolveTofuTrust] + the
+     * freeze guards on testConnection/coldStartReconnect/startSSE) is
+     * preserved verbatim — callers (ConnectionViewModel) see no change.
+     *
+     * `null` for legacy/test construction that doesn't exercise the TOFU
+     * path — CC constructs a private fallback so the guards work even
+     * without Hilt wiring (mirrors the pre-extraction private fields).
+     */
+    private val bootstrapCoordinator: ConnectionBootstrapCoordinator? = null,
+    /**
+     * CP9 (notify Phase-0 switchover): the trigger that promotes the live
+     * SSE connection ownership into [cn.vectory.ocdroid.service.SessionStreamingService].
+     * CC's [startSSE] delegate now calls [StreamingServiceLauncher.ensureStarted]
+     * instead of `repository.connectSSE(...)`; the Service runs the §5
+     * bootstrap and the coordinator's decision matrix drives StartSse /
+     * StopSse into the new owner.
+     *
+     * `null` for legacy/test construction — CC falls back to a no-op so
+     * tests that drive health probes without the launcher keep compiling.
+     */
+    private val streamingServiceLauncher: StreamingServiceLauncher? = null,
+    /**
+     * CP9 (notify Phase-0 switchover): the lifecycle coordinator that
+     * drives the L1/L2/L3 state machine inside the Service. CC's
+     * [cancelSse] / [cancelSseForReconfigure] delegates now call
+     * [StreamingLifecycleCoordinator.onDisconnect] (the §4.1 disconnect
+     * entry → L3 teardown); the Service observes the teardown commands and
+     * disconnects its [cn.vectory.ocdroid.service.streaming.ServiceSseConnectionOwner].
+     *
+     * `null` for legacy/test construction — CC falls back to the existing
+     * HostReconfigured effect emission so tests that drive
+     * [cancelSseForReconfigure] directly keep asserting on the epoch +
+     * effect.
+     */
+    private val streamingLifecycleCoordinator: StreamingLifecycleCoordinator? = null,
+    private val connectionBootstrapEngine: ConnectionBootstrapEngine? = null,
+    private val bootstrapRetryPolicy: BootstrapRetryPolicy = BootstrapRetryPolicy(),
+    private val appLifecycleMonitor: AppLifecycleMonitor? = null,
+    private val degradedBootstrapTerminator: DegradedBootstrapTerminator? = null,
 ) {
-    private var sseJob: Job? = null
     private var lastHealthCheckTime = 0L
 
     /**
-     * §tofu R2: pending-trust state — non-null hostPort means a TOFU trust
-     * dialog is showing for this endpoint and the [testConnection] retry loop
-     * is SUSPENDED on [pendingTofuDecision].await(). Three guards read this:
-     *  1. The retry loop itself (no retries burn while waiting).
-     *  2. [coldStartReconnect] / [startSSE] early-return while frozen so a
-     *     tunnel/reset path or foreground catch-up cannot race the decision.
-     *  3. [resolveTofuTrust] is the ONLY writer (completes the deferred +
-     *     clears both fields + applies the decision to the pin store).
+     * CP2 (notify Phase-0): TOFU state single source. CC delegates to the
+     * injected [bootstrapCoordinator] (production: Hilt @Singleton shared
+     * with the future SessionStreamingService). The lazy fallback preserves
+     * the pre-CP2 behavior for legacy/test construction that passes
+     * `bootstrapCoordinator = null`.
      */
-    @Volatile
-    private var pendingTofuHostPort: String? = null
-    @Volatile
-    private var pendingTofuDecision: kotlinx.coroutines.CompletableDeferred<TofuDecision>? = null
+    private val tofu: ConnectionBootstrapCoordinator by lazy {
+        bootstrapCoordinator ?: ConnectionBootstrapCoordinator()
+    }
 
-    /**
-     * §generation-guard: bumped on every [cancelSseForReconfigure] (host/profile
-     * switch or manual reconfigure). Two consumers:
-     *
-     *  1. [loadInitialData] captures this value and discards directory-fetch
-     *     results that return AFTER a reconfigure — their sessions belong to
-     *     the previous host and would otherwise pollute the new host's
-     *     directorySessions. The fan-out in [loadInitialData] (up to one
-     *     launch per recent workdir) amplifies this in-flight window, hence
-     *     the explicit guard.
-     *
-     *  2. §R-19 Sprint 1 Lane A (P1-10 fix Blocker 1): [launchSseCollection]
-     *     captures this value at coroutine start ([sseGenAtStart]) and
-     *     re-checks per collected event. A mismatch means the host was
-     *     reconfigured away mid-collection; further events from THIS job
-     *     belong to the previous host and are dropped at the forwarding layer
-     *     (never become [ControllerEffect.OnSseEvent]s). This is the
-     *     production-grade stale-host guard that closes the race the
-     *     SessionSyncCoordinator's own trigger-stamped generation could not.
-     *
-     * Reads/writes are on the main thread (reconfigure + loadInitialData +
-     * launchSseCollection's collect lambda all run there); AtomicLong is
-     * belt-and-suspenders.
-     */
-    private val directoryFetchGeneration = java.util.concurrent.atomic.AtomicLong(0L)
+    init {
+        appLifecycleMonitor?.let { monitor ->
+            scope.launch {
+                monitor.isInForeground.map { it }.distinctUntilChanged().filter { it }.collect {
+                    promoteDegradedTofuIfNeeded()
+                }
+            }
+        }
+    }
+
+    private fun hasPendingTofuDecision(): Boolean = tofu.tofuState.value is cn.vectory.ocdroid.service.bootstrap.TofuState.TrustPending
+
+    private fun promoteDegradedTofuIfNeeded() {
+        val challenge = tofu.promoteDegradedToPending() ?: return
+        writeConnection {
+            it.copy(
+                pendingTofuCapture = challenge.capture,
+                connectionPhase = ConnectionPhase.AwaitingTofuTrust,
+                isConnecting = false,
+                isConnected = false,
+            )
+        }
+        scope.launch {
+            when (val decision = challenge.decision.await()) {
+                TofuDecision.Cancel -> {
+                    tofu.clearPendingTofu()
+                    writeConnection {
+                        it.copy(
+                            pendingTofuCapture = null,
+                            connectionPhase = ConnectionPhase.Disconnected,
+                            isConnecting = false,
+                            isConnected = false,
+                        )
+                    }
+                    degradedBootstrapTerminator?.terminate()
+                }
+                else -> {
+                    repository.applyTofuDecision(challenge.hostPort, decision)
+                    cn.vectory.ocdroid.ui.util.HttpImageHolder.updateSsl(repository.currentSslConfig())
+                    tofu.clearPendingTofu()
+                    writeConnection { it.copy(pendingTofuCapture = null) }
+                    testConnection(force = true, retries = 3)
+                }
+            }
+        }
+    }
 
     // ── State sync helpers (mirror orchestrator.writeConnection) ──
 
@@ -193,10 +286,15 @@ class ConnectionCoordinator(
         lastHealthCheckTime = now
         // §tofu R2 round-1 fix (cgpt B3/opuser): 待 TOFU 决策期间不并发探测——pending
         // 流程负责 settle；并行 testConnection（弹窗期间的 ForceReconnect）否则可能在
-        // 弹窗仍显示时写 Disconnected。入口守卫 + 下面 pendingTofuHostPort==null 检查
+        // 弹窗仍显示时写 Disconnected。入口守卫 + 下面 pendingTofuHostPort()==null 检查
         // + coldStart/startSSE 早退共同保证 single-flight。
-        if (pendingTofuHostPort != null) {
-            DebugLog.i(TAG, "testConnection: TOFU trust pending for $pendingTofuHostPort — deferring")
+        // CP2: TOFU state is delegated to [tofu] (ConnectionBootstrapCoordinator).
+        if (hasPendingTofuDecision()) {
+            DebugLog.i(TAG, "testConnection: TOFU trust pending for ${tofu.pendingTofuHostPort()} — deferring")
+            return
+        }
+        connectionBootstrapEngine?.let { engine ->
+            testConnectionWithEngine(engine, retries, onSettled)
             return
         }
         scope.launch {
@@ -238,8 +336,8 @@ class ConnectionCoordinator(
                     // §tofu R2 round-2 fix (cgpt): 并发连接 job 在 TOFU 待决期间 defer——
                     // 不探/不烧重试/不写终态；待决的 job 独占 settle。入口守卫只挡"新调用"，
                     // 此处挡"已 launch 但 pending 尚未置位时入队的并发 job"的迭代。
-                    if (pendingTofuHostPort != null) {
-                        DebugLog.i(TAG, "testConnection: deferring loop — TOFU pending for $pendingTofuHostPort")
+                    if (hasPendingTofuDecision()) {
+                        DebugLog.i(TAG, "testConnection: deferring loop — TOFU pending for ${tofu.pendingTofuHostPort()}")
                         return@launch
                     }
                     attempt++
@@ -264,6 +362,19 @@ class ConnectionCoordinator(
                                     connectionPhase = ConnectionPhase.Connected
                                 )
                             }
+                            // CP1 (notify Phase-0): bind the connection identity
+                            // at the current epoch so loadInitialData's directory
+                            // fan-out AND launchSseCollection's collector share
+                            // the SAME identity guard. FGS spec §2 step 5: bind
+                            // new collector to new identity. The epoch was
+                            // settled by beginReconfigure (called synchronously
+                            // at the HostProfileController barrier) or is 0 on
+                            // the very first cold start.
+                            identityStore?.bind(
+                                serverGroupFp = currentServerGroupFp(),
+                                normalizedWorkdir = settingsManager.currentWorkdir ?: "",
+                                endpointFp = settingsManager.serverUrl,
+                            )
                             loadInitialData()
                             startSSE()
                             // R-20 Phase 3 (plan §3): fire-and-forget the daily
@@ -319,16 +430,17 @@ class ConnectionCoordinator(
                     val hostPort = hostPortFromUrl(baseUrl)
                     if (rootCause != null && hostPort != null &&
                         repository.pinnedSpkiFor(hostPort) == null &&
-                        pendingTofuHostPort == null &&
+                        !hasPendingTofuDecision() &&
                         // §tofu fix: mTLS 主机不进 TOFU——mTLS 优先级会忽略 TOFU pin，
                         // 弹"信任"无效且误导；mTLS 服务器证书失败应直接作连接错误呈现。
                         !repository.isMutualTlsActive()
                     ) {
                         // §tofu R2 round-1 fix (cgpt B3/opuser): 在 capture 探测【之前】
                         // 占住 pending（single-flight）。并发的 ForceReconnect 驱动的
-                        // testConnection 会因入口守卫 + 此处的 pendingTofuHostPort==null
+                        // testConnection 会因入口守卫 + 此处的 pendingTofuHostPort()==null
                         // 检查而 defer，不再二次 capture 覆盖本循环的 deferred 致其孤儿。
-                        pendingTofuHostPort = hostPort
+                        // CP2: delegated to [tofu] (ConnectionBootstrapCoordinator).
+                        tofu.setPendingTofu(hostPort)
                         try {
                             val capture = repository.captureServerCert(baseUrl, hostPort, clientCert = null)
                             if (capture != null) {
@@ -337,7 +449,7 @@ class ConnectionCoordinator(
                                 // While pending, the freeze guards in [coldStartReconnect] /
                                 // [startSSE] + the testConnection entry guard early-return.
                                 val deferred = kotlinx.coroutines.CompletableDeferred<TofuDecision>()
-                                pendingTofuDecision = deferred
+                                tofu.setTofuDecision(deferred)
                                 writeConnection {
                                     it.copy(
                                         connectionPhase = ConnectionPhase.AwaitingTofuTrust,
@@ -380,7 +492,8 @@ class ConnectionCoordinator(
                                     // §tofu R2 round-1 fix (opuser): 每条路径都清弹窗 + decision
                                     // 引用——决策完成 OR 协程在 await 期间被取消（外层 finally 清
                                     // pendingTofuHostPort，防 coldStart/startSSE 永久冻结）。
-                                    pendingTofuDecision = null
+                                    // CP2: delegated to [tofu].
+                                    tofu.setTofuDecision(null)
                                     writeConnection { it.copy(pendingTofuCapture = null) }
                                 }
                             }
@@ -388,14 +501,15 @@ class ConnectionCoordinator(
                             // fall through to the normal failure path below — the
                             // original SSLHandshakeException is surfaced verbatim.
                         } finally {
-                            pendingTofuHostPort = null
+                            // CP2: delegated full reset to [tofu] (clears hostPort + decision).
+                            tofu.clearPendingTofu()
                         }
                     }
                     if (attempt >= maxAttempts || !isActive) {
                         // §tofu R2 round-2 fix (cgpt): 另一个 job 正在 await TOFU 决策时，
                         // 不宣布终态 Disconnected（否则弹窗仍显示却已断开，UI 不一致）——defer。
-                        if (pendingTofuHostPort != null) {
-                            DebugLog.i(TAG, "testConnection: deferring terminal — TOFU pending for $pendingTofuHostPort")
+                        if (hasPendingTofuDecision()) {
+                            DebugLog.i(TAG, "testConnection: deferring terminal — TOFU pending for ${tofu.pendingTofuHostPort()}")
                             return@launch
                         }
                         // §R-17 batch2: error is now a one-shot UiEvent on
@@ -435,6 +549,114 @@ class ConnectionCoordinator(
         }
     }
 
+    private fun testConnectionWithEngine(
+        engine: ConnectionBootstrapEngine,
+        retries: Int,
+        onSettled: ((Boolean) -> Unit)?,
+    ) {
+        scope.launch {
+            var settled = false
+            try {
+                writeConnection { it.copy(isConnecting = true, connectionPhase = ConnectionPhase.Connecting) }
+                val delays = bootstrapRetryPolicy.delaysMs.take(retries.coerceAtLeast(0))
+                var attempt = 0
+                while (true) {
+                    when (val outcome = engine.bootstrap()) {
+                        is ConnectionBootstrapOutcome.Success -> {
+                            loadInitialData()
+                            // D5-2 (#4): CC state during the ownership window —
+                            // from engine success until the terminal ownership
+                            // result, stay Connecting (do NOT enter Connected or
+                            // Disconnected mid-window). `ensureStarted` is
+                            // suspend; CC is parked here while the launcher
+                            // awaits Stage 1 acceptance (5s) + Stage 2 terminal.
+                            val ownership = streamingServiceLauncher?.ensureStarted(outcome.identity)
+                                ?: OwnershipStartResult.Refused(
+                                    cn.vectory.ocdroid.service.OwnershipRefusal.ServiceStopped,
+                                )
+                            // D5-2 (#4): identity recheck BEFORE writing Connected.
+                            // A newer epoch may have started during the (possibly
+                            // long) ownership wait — this stale-result branch
+                            // settles false WITHOUT writing Disconnected (a
+                            // newer epoch may already be connecting).
+                            if (identityStore != null && !identityStore.isCurrent(outcome.identity)) {
+                                settled = true
+                                onSettled?.invoke(false)
+                                return@launch
+                            }
+                            if (ownership is OwnershipStartResult.Ready &&
+                                ownership.identity == outcome.identity
+                            ) {
+                                writeConnection {
+                                    it.copy(
+                                        isConnected = true,
+                                        isConnecting = false,
+                                        serverVersion = outcome.health.version,
+                                        connectionPhase = ConnectionPhase.Connected,
+                                    )
+                                }
+                                cacheMaintenanceCoordinator?.let { maintenance ->
+                                    scope.launch {
+                                        runCatching { maintenance.dailySweepIfNeeded(outcome.identity.serverGroupFp) }
+                                    }
+                                }
+                                settled = true
+                                onSettled?.invoke(true)
+                                return@launch
+                            }
+                            writeConnection {
+                                it.copy(
+                                    isConnected = false,
+                                    isConnecting = false,
+                                    connectionPhase = ConnectionPhase.Disconnected,
+                                )
+                            }
+                            settled = true
+                            onSettled?.invoke(false)
+                            return@launch
+                        }
+                        is ConnectionBootstrapOutcome.TofuNeedsActivity -> {
+                            writeConnection {
+                                it.copy(
+                                    isConnected = false,
+                                    isConnecting = false,
+                                    pendingTofuCapture = outcome.capture,
+                                    connectionPhase = ConnectionPhase.AwaitingTofuTrust,
+                                )
+                            }
+                            settled = true
+                            onSettled?.invoke(false)
+                            return@launch
+                        }
+                        is ConnectionBootstrapOutcome.Failed -> {
+                            if (attempt >= delays.size) {
+                                effects.tryEmitUiEvent(
+                                    UiEvent.Error(
+                                        R.string.error_connection_failed,
+                                        listOf(errorMessageOrFallback(outcome.error, "unknown error")),
+                                    ),
+                                )
+                                writeConnection {
+                                    it.copy(
+                                        isConnected = false,
+                                        isConnecting = false,
+                                        connectionPhase = ConnectionPhase.Disconnected,
+                                    )
+                                }
+                                settled = true
+                                onSettled?.invoke(false)
+                                return@launch
+                            }
+                            delay(delays[attempt++])
+                        }
+                    }
+                }
+            } finally {
+                if (!settled) onSettled?.invoke(false)
+            }
+        }
+    }
+
     /**
      * Cold-start entry point: force a connection check with up to 3 retries
      * (exponential backoff 1s/2s/4s) so a slow-to-wake server (common when
@@ -448,8 +670,8 @@ class ConnectionCoordinator(
      * state and the loop re-probes; cold-start then proceeds naturally.
      */
     fun coldStartReconnect() {
-        if (pendingTofuHostPort != null) {
-            DebugLog.i(TAG, "coldStartReconnect: frozen — TOFU trust pending for $pendingTofuHostPort")
+        if (hasPendingTofuDecision()) {
+            DebugLog.i(TAG, "coldStartReconnect: frozen — TOFU trust pending for ${tofu.pendingTofuHostPort()}")
             return
         }
         testConnection(force = true, retries = 3)
@@ -486,10 +708,15 @@ class ConnectionCoordinator(
         effects.tryEmitEffect(ControllerEffect.LoadPendingPermissions)
         // Same-domain inline: slash commands merged with client-side commands.
         loadCommands()
-        // §generation-guard: capture the current generation so directory fetches
-        // that return AFTER a host reconfigure (cancelSseForReconfigure bumps
-        // this) are dropped — their sessions belong to the previous host.
-        val generation = directoryFetchGeneration.get()
+        // CP1 (notify Phase-0): capture the current identity so directory
+        // fetches that return AFTER a host reconfigure
+        // (cancelSseForReconfigure → identityStore.beginReconfigure bumps the
+        // epoch AND nulls currentIdentity) are dropped — their sessions belong
+        // to the previous host. FGS spec §2: the SAME epoch guards both the
+        // SSE collector AND the directory fan-out (no private second
+        // generation — the removed `directoryFetchGeneration` is now the
+        // identityStore's epoch).
+        val fetchIdentity = identityStore?.currentIdentity?.value
         // Re-fetch directory-scoped sessions for EVERY known workdir (the
         // persisted recentWorkdirs set + currentWorkdir) so each connected
         // project's sessions reappear after restart. directorySessions is
@@ -521,7 +748,10 @@ class ConnectionCoordinator(
                         // Drop stale-host results: a host/profile switch between
                         // dispatch and return would otherwise write the previous
                         // host's sessions into the new host's directorySessions.
-                        if (generation != directoryFetchGeneration.get()) return@launch
+                        // CP1: identityStore.isCurrent checks epoch + fp fields.
+                        if (fetchIdentity != null && identityStore != null &&
+                            !identityStore.isCurrent(fetchIdentity)
+                        ) return@launch
                         appendDirectorySessions(workdir, sessions)
                     }
                     .onFailure { error ->
@@ -531,7 +761,9 @@ class ConnectionCoordinator(
                         // user-initiated refreshDirectorySessions are the
                         // fallbacks. Log for diagnosability without surfacing
                         // a user-facing error.
-                        if (generation == directoryFetchGeneration.get()) {
+                        if (fetchIdentity == null || identityStore == null ||
+                            identityStore.isCurrent(fetchIdentity)
+                        ) {
                             reportNonFatalIssue(TAG, "directory restore failed for $workdir", error)
                         }
                     }
@@ -605,52 +837,25 @@ class ConnectionCoordinator(
     // ── SSE lifecycle ───────────────────────────────────────────────────────
 
     /**
-     * Starts the SSE event collection feed. Cancels any in-flight feed first so
-     * reconnects / reconfigures never leave two collectors racing. Each
-     * `Result<SSEEvent>` is unpacked and forwarded to the SessionSyncCoordinator
-     * via [ControllerEffect.OnSseEvent]; collection failures emit a UiEvent.Error
-     * via [effects.uiEvents] so the UI can surface a "messages may be stale"
-     * banner.
+     * CP9 switchover: the SSE feed collector has been moved into the
+     * Service-owned [cn.vectory.ocdroid.service.streaming.ServiceSseConnectionOwner].
+     * This method is preserved as a thin compatibility delegate (VMs,
+     * [ControllerEffect.StartSse], and tests expose it; deleting adds
+     * rollback churn). It MUST NEVER call `repository.connectSSE` — the
+     * atomic capture belongs to the command identity (StartSse), not to a
+     * re-read of `SettingsManager.currentWorkdir`.
      *
-     * Verbatim move of the `startSSE` body + the inlined `launchSseCollection`
-     * free function.
+     * The shared TOFU-frozen guard is preserved verbatim — while a TOFU trust
+     * dialog is pending the launcher must NOT be invoked (the resulting
+     * Service bootstrap would try the same unpinned TLS handshake and fail
+     * the same way; the user's [resolveTofuTrust] unfreezes the retry loop
+     * which re-calls startSSE).
      *
-     * §R-19 #2 — single-SSE product decision (documented):
-     * OC Droid runs **exactly one** SSE connection at a time, bound to
-     * [SettingsManager.currentWorkdir] (see [launchSseCollection]). There is
-     * **no per-workdir SSE multiplex**. Multi-workdir correctness is recovered
-     * by catch-up instead of by parallel feeds:
-     *
-     *   (a) [SessionSyncCoordinator.loadPendingQuestionsAllWorkdirs] polls
-     *       pending questions/permissions across EVERY workdir in
-     *       `slices.sessionList.directorySessions.keys` + `currentWorkdir`,
-     *       so a `question.asked` SSE event for a non-current (background)
-     *       workdir is still surfaced (R-18 P1-9). The directory map those
-     *       keys come from is populated by THIS coordinator's [loadInitialData]
-     *       fan-out — the catch-up contract therefore depends on that fan-out
-     *       running on every healthy connect.
-     *   (b) [ForegroundCatchUpController] re-syncs the 15s/5min foreground
-     *       gap on app return (no SSE is collected while backgrounded).
-     *   (c) The session-switch path emits `LoadMessages(resetLimit=true)` to
-     *       rehydrate the freshly-selected session's history, so a workdir
-     *       that has never held the SSE feed still catches up on first view.
-     *
-     * Rationale: a multi-feed SSE redesign (one collector per
-     * [SettingsManager.recentWorkdirs]) is a large change — server-side
-     * routing, backpressure on N collectors, per-feed cancel/reconfigure
-     * fan-out, and a per-feed generation guard — for marginal benefit because
-     * the catch-up path above is already production-verified. The single-feed
-     * model keeps the connection lifecycle in one place ([sseJob] +
-     * [cancelSseForReconfigure]'s [directoryFetchGeneration] guard).
-     *
-     * **Invariant for tests**: [launchSseCollection] reads
-     * `settingsManager.currentWorkdir` **fresh** at collection start; it is
-     * NOT captured at construction or at first connect. A workdir switch must
-     * call [startSSE] again to retarget the feed — the session-switch /
-     * host-switch paths already do this. Boundary cases covered in
-     * [ConnectionCoordinatorTest]: workdir retarget on switch, background-
-     * workdir directory fan-out (the catch-up precondition), and reconnect
-     * consistency (no currentWorkdir drift across cancel → restart).
+     * §no-zero-time-gap (FGS spec §1): the Service start is asynchronous,
+     * but the start REQUEST is issued synchronously here BEFORE
+     * `onSettled(true)` returns in [testConnection]. The Service's §5
+     * bootstrap then leads to `StartSse` (the only legal L3→running entry);
+     * there is NO terminal connected-without-SSE path.
      */
     fun startSSE() {
         // §tofu R2: FROZEN while a TOFU trust dialog is pending — the SSE
@@ -658,13 +863,25 @@ class ConnectionCoordinator(
         // way (the pin isn't written until the user decides). Wait for
         // [resolveTofuTrust]; the connect retry loop calls startSSE itself
         // once the pin is in place.
-        if (pendingTofuHostPort != null) {
-            DebugLog.i(TAG, "startSSE: frozen — TOFU trust pending for $pendingTofuHostPort")
+        // CP2: TOFU state delegated to [tofu] (ConnectionBootstrapCoordinator).
+        if (hasPendingTofuDecision()) {
+            DebugLog.i(TAG, "startSSE: frozen — TOFU trust pending for ${tofu.pendingTofuHostPort()}")
             return
         }
-        DebugLog.i("SSE", "startSSE")
-        sseJob?.cancel()
-        sseJob = launchSseCollection()
+        val identity = identityStore?.currentIdentity?.value ?: return
+        DebugLog.i("SSE", "startSSE → launcher.ensureStarted(identity=${identity.epoch})")
+        scope.launch {
+            val result = streamingServiceLauncher?.ensureStarted(identity)
+            if (result !is OwnershipStartResult.Ready || result.identity != identity) {
+                writeConnection {
+                    it.copy(
+                        isConnected = false,
+                        isConnecting = false,
+                        connectionPhase = ConnectionPhase.Disconnected,
+                    )
+                }
+            }
+        }
     }
 
     /**
@@ -674,135 +891,54 @@ class ConnectionCoordinator(
      * Completes the deferred the [testConnection] retry loop is awaiting; the
      * loop then writes the pin (Accept/Trust) and re-probes, or settles false
      * (Cancel). No-op when no TOFU prompt is pending.
+     *
+     * CP2 (notify Phase-0): delegates to [ConnectionBootstrapCoordinator.
+     * resolveTofuTrust] (FGS spec §10). CC's public surface is unchanged —
+     * ConnectionViewModel / external callers see the same signature + behavior.
      */
     fun resolveTofuTrust(decision: TofuDecision) {
-        pendingTofuDecision?.complete(decision)
-            ?: DebugLog.w(TAG, "resolveTofuTrust: no pending TOFU decision — ignoring $decision")
+        tofu.resolveTofuTrust(decision)
     }
 
     /**
-     * §15.1: SSE collection coroutine. Wraps [OpenCodeRepository.connectSSE] so
-     * the resulting Flow's [Result]s are unpacked and forwarded as
-     * [ControllerEffect.OnSseEvent]. Failures (including the
-     * SSEConnectionExhausted raised after the §15.3 retry budget is spent) emit
-     * a UiEvent.Error via [effects.uiEvents] so the UI can surface a
-     * "messages may be stale" banner.
+     * CP9 §B11: cancels the in-flight SSE feed (foreground ON_STOP /
+     * ViewModel onCleared / process teardown). No longer touches a job —
+     * routes through [StreamingLifecycleCoordinator.onDisconnect] which the
+     * Service observes (the coordinator emits StopSse →
+     * [cn.vectory.ocdroid.service.streaming.ServiceSseConnectionOwner].disconnect).
+     * Does NOT reset the catch-up state machine — the foreground return path
+     * re-arms it.
      *
-     * §R-19 Sprint 1 Lane A fix (gpter Blocker 1): the per-event
-     * [directoryFetchGeneration] check is the production-grade stale-host
-     * guard. The generation is captured at coroutine start ([sseGenAtStart])
-     * and re-checked per collected event; a mismatch means a host reconfigure
-     * ([cancelSseForReconfigure] bumped [directoryFetchGeneration]) landed
-     * while this job was still collecting — any further events from THIS job
-     * belong to the PREVIOUS host and are silently dropped (return@collect)
-     * rather than forwarded as [ControllerEffect.OnSseEvent]. This closes the
-     * race that the SessionSyncCoordinator's own generation guard could NOT
-     * close (it stamped triggers with the CURRENT generation at consume time,
-     * so a late event from the previous host arrived carrying the new
-     * generation and was treated as a cold-start of the new host).
-     *
-     * Verbatim move of the `launchSseCollection` free function, plus the
-     * per-event generation check.
+     * Remains for direct VM / process cleanup callers. The
+     * `streamingLifecycleCoordinator` is null in legacy/test construction
+     * that doesn't wire it (pre-CP9 build) — the call is a no-op there.
      */
-    private fun launchSseCollection(): Job {
-        return scope.launch {
-            // §R18 Phase 2-E step 1: pass the persisted workdir explicitly so
-            // SSE routes to the right InstanceState. Was the global
-            // currentDirectory before; behavior preserved (switchTo still
-            // seeds settingsManager.currentWorkdir on session select).
-            //
-            // §R-19 #2: this is the ONLY SSE connection in the app — bound to
-            // settingsManager.currentWorkdir (single-feed product decision;
-            // see [startSSE] KDoc for the multi-workdir catch-up rationale).
-            // currentWorkdir is read FRESH here on every collection start so a
-            // workdir switch + new startSSE() retargets the feed (no cached
-            // value to drift across reconnect).
-            //
-            // §R-19 P1-10 Blocker 1 fix: capture the generation at coroutine
-            // start so per-event re-check can detect a host reconfigure that
-            // happened mid-collection.
-            val sseGenAtStart = directoryFetchGeneration.get()
-            repository.connectSSE(settingsManager.currentWorkdir)
-                .catch { error ->
-                    Log.e("OC_ERROR", "SSE collection failed", error)
-                    effects.tryEmitUiEvent(UiEvent.Error(R.string.error_sse_failed, listOf(error.message ?: "unknown error")))
-                }
-                .collect { result ->
-                    // §R-19 P1-10 Blocker 1 fix: drop stale-host events BEFORE
-                    // they're forwarded. The cancellation triggered by
-                    // cancelSseForReconfigure is async; a frame already in the
-                    // Flow's buffer (or mid-flight in the collector) could be
-                    // delivered to this lambda before cancellation propagates.
-                    // Without this check that frame would be forwarded as an
-                    // OnSseEvent and pollute the new host's state (a late
-                    // `server.connected` from the previous host would land in
-                    // SessionSyncCoordinator.handleEvent and flip
-                    // connectedOnce=true for the new host's cold-start, or
-                    // worse, fire a ReloadSession of the wrong session).
-                    if (sseGenAtStart != directoryFetchGeneration.get()) {
-                        DebugLog.i("SSE", "drop stale-host SSE event (gen $sseGenAtStart → ${directoryFetchGeneration.get()})")
-                        return@collect
-                    }
-                    result.onSuccess { event ->
-                        // SSE liveness: a successful event (initial connect OR
-                        // retryWhen recovery after a network outage) proves the
-                        // server is reachable. Mirror it into ConnectionState so
-                        // the server icon flips green even when recovery happened
-                        // via the SSE auto-reconnect rather than a testConnection
-                        // health probe (which was the only place isConnected was
-                        // set true — leaving the icon red after auto-recovery).
-                        writeConnection {
-                            it.copy(
-                                isConnected = true,
-                                isConnecting = false,
-                                connectionPhase = ConnectionPhase.Connected
-                            )
-                        }
-                        // §R18 Phase 3 Wave 1 (P1-3 A 类): launchSseCollection 内 SSE collect 回调是 suspend 上下文 → suspend emitEffect。
-                        effects.emitEffect(ControllerEffect.OnSseEvent(event))
-                    }
-                        .onFailure { error ->
-                            Log.e("OC_ERROR", "SSE event failed", error)
-                            effects.tryEmitUiEvent(UiEvent.Error(R.string.error_sse_failed, listOf(error.message ?: "unknown error")))
-                        }
-                }
+    fun cancelSse() {
+        scope.launch {
+            streamingLifecycleCoordinator?.teardownAndAwait(TeardownReason.Disconnect)
         }
     }
 
     /**
-     * Cancels the in-flight SSE feed (foreground ON_STOP / ViewModel onCleared).
-     * Does NOT reset the catch-up state machine — the foreground return path
-     * re-arms it.
-     */
-    fun cancelSse() {
-        sseJob?.cancel()
-        sseJob = null
-    }
-
-    /**
-     * §Stage D (gpter 阻塞 #1): tear down any in-flight SSE feed BEFORE the
-     * repository is reconfigured for a host / profile switch. Without this,
-     * the SSE job bound to the PREVIOUS host keeps delivering events into
-     * AppState while the new host's health probe is still in flight — those
-     * stale events (session/status/message/permission/question) would pollute
-     * the freshly-cleared state for the new profile.
+     * §Stage D (gpter 阻塞 #1) + CP9 §B12: tear down any in-flight SSE feed
+     * BEFORE the repository is reconfigured for a host / profile switch.
+     * CP9: routes through [StreamingLifecycleCoordinator.onDisconnect] (the
+     * §4.1 disconnect entry → L3 teardown); the Service observes the
+     * teardown commands and disconnects its owner. Without this, the SSE job
+     * bound to the PREVIOUS host keeps delivering events into AppState while
+     * the new host's health probe is still in flight — those stale events
+     * would pollute the freshly-cleared state for the new profile.
      *
-     * Also resets the foreground catch-up state machine via [effects] so the
-     * next connect is treated as a cold start.
+     * D3 keeps this as a legacy effect adapter only. It deliberately does not
+     * bump epoch or publish HostReconfigured: ConnectionReconfigureBarrier is
+     * the sole transaction/epoch owner and performs the repository rebuild
+     * only after this lifecycle teardown has joined.
      */
     fun cancelSseForReconfigure() {
         DebugLog.i("SSE", "cancelSse (reconfigure)")
-        sseJob?.cancel()
-        sseJob = null
-        // §generation-guard: a host/profile switch invalidates every in-flight
-        // directory fetch from the previous host. Bump so loadInitialData's
-        // late-returning onSuccess blocks drop their (stale-host) results.
-        directoryFetchGeneration.incrementAndGet()
-        // §Phase1E: a host/profile switch is a fresh server — treat the next
-        // connect as a cold start (skip catch-up, the reconfigure path loads
-        // sessions/messages itself). Routed to the catch-up controller.
-        // §R18 Phase 3 Wave 1 (P1-3 B 类): 单发非 suspend → tryEmitEffect。
-        effects.tryEmitEffect(ControllerEffect.HostReconfigured)
+        scope.launch {
+            streamingLifecycleCoordinator?.teardownAndAwait(TeardownReason.Reconfigure)
+        }
     }
 
     companion object {

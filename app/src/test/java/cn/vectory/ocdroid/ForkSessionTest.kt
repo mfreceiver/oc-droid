@@ -138,6 +138,11 @@ class ForkSessionTest {
             currentServerGroupFp = { "test-fp" },
         )
         val cacheRepository = io.mockk.mockk<cn.vectory.ocdroid.data.cache.CacheRepository>(relaxed = true)
+        // CP1 (notify Phase-0): single connection-identity store.
+        val identityStore = cn.vectory.ocdroid.service.identity.ConnectionIdentityStore()
+        // CP3 (notify Phase-0): SSE event stream + bridge.
+        val sseEventStream = cn.vectory.ocdroid.service.events.SseEventStream()
+        val sseEventBridge = cn.vectory.ocdroid.service.bridge.SseEventBridge(appScope)
         // R-20 Phase 1: stub verifyAndLoad to a non-null default — relaxed
         // mockk returns null for sealed-interface return types, which crashes
         // AppCore's VerifyAndHydrate handler `when`.
@@ -158,6 +163,7 @@ class ForkSessionTest {
             currentServerGroupFp = { "test-fp" },
             appContext = appContext,
             cacheRepository = cacheRepository,
+            identityStore = identityStore,
         )
         val sessionSyncCoordinator = cn.vectory.ocdroid.ui.controller.SessionSyncCoordinator(
             scope = appScope,
@@ -165,6 +171,7 @@ class ForkSessionTest {
             settingsManager = settingsManager,
             effects = effectBus,
             currentServerGroupFp = { "test-fp" },
+            identityStore = identityStore,
         )
         val connectionCoordinator = cn.vectory.ocdroid.ui.controller.ConnectionCoordinator(
             scope = appScope,
@@ -173,6 +180,12 @@ class ForkSessionTest {
             settingsManager = settingsManager,
             effects = effectBus,
             serverCompatProfile = cn.vectory.ocdroid.data.repository.ServerCompatProfile(),
+            identityStore = identityStore,
+            // CP2 (notify Phase-0): delegate TOFU state.
+            bootstrapCoordinator = cn.vectory.ocdroid.service.bootstrap.ConnectionBootstrapCoordinator(),
+            // CP9 (notify Phase-0 switchover): CC's startSSE now calls the
+            // streaming Service launcher (no more repository.connectSSE).
+            streamingServiceLauncher = cn.vectory.ocdroid.RecordingStreamingServiceLauncher(),
         )
         // §unread-soak: real controller for parity with MainViewModelTestBase.
         val unreadSoakController = cn.vectory.ocdroid.ui.controller.UnreadSoakController(
@@ -207,6 +220,11 @@ class ForkSessionTest {
             // §review-fix #1: fp provider (same as MainViewModelTestBase).
             { hostProfileStore.currentProfile().serverGroupFp.ifBlank { hostProfileStore.currentProfile().id } },
             appScope,
+            // CP1 (notify Phase-0): single connection-identity store.
+            identityStore,
+            // CP3 (notify Phase-0): SSE event stream + bridge.
+            sseEventStream,
+            sseEventBridge,
         )
     }
 

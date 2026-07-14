@@ -1,6 +1,6 @@
 package cn.vectory.ocdroid.ui.controller
 
-import cn.vectory.ocdroid.data.model.SSEEvent
+import cn.vectory.ocdroid.service.events.IdentifiedSseEvent
 
 /**
  * R-17 batch3: cross-domain controller→VM signals. Replaces the 6 callback
@@ -24,7 +24,21 @@ sealed class ControllerEffect {
     data object ForceReconnect : ControllerEffect()
     /** Global cold-start reload: clear cache + message state for [sessionId]. */
     data class GlobalColdStartRefresh(val sessionId: String) : ControllerEffect()
-    /** Cancels the in-flight SSE feed (and drops delta buffers). */
+    /**
+     * Cancels the in-flight SSE feed (and drops delta buffers).
+     *
+     * CP9 (notify Phase-0 switchover): this is now an OBSERVED
+     * transport-disconnect signal, NOT a request for CC to cancel a job. The
+     * producer is [cn.vectory.ocdroid.service.streaming.ServiceSseConnectionOwner]
+     * — emitted once when a live collector was actually stopped (Service
+     * going away, user explicit close, reconfigure teardown, §4.1 timeout).
+     * [cn.vectory.ocdroid.ui.AppCore.dispatchForegroundCatchUpEffect] no
+     * longer recurses into CC.cancelSse (the loop is broken at the producer).
+     * [SessionSyncCoordinator] still observes the signal: it creates a
+     * `SseReconnectTrigger.Disconnected`, marks the current session dirty,
+     * and stamps the disconnect time so the next `server.connected`
+     * reconciles.
+     */
     data object CancelSse : ControllerEffect()
     /** Gap-aware catch-up probe + tail reload. */
     data class CatchUpAfterDisconnect(val sessionId: String) : ControllerEffect()
@@ -93,8 +107,16 @@ sealed class ControllerEffect {
     data class EvictGroup(val serverGroupFp: String) : ControllerEffect()
 
     // ── ConnectionCoordinator ──
-    /** A host/profile switch → reset foreground catch-up state machine. */
-    data object HostReconfigured : ControllerEffect()
+    /**
+     * A host/profile switch → reset foreground catch-up state machine.
+     *
+     * CP1 (notify Phase-0): carries [epoch] — the new connection epoch from
+     * [cn.vectory.ocdroid.service.identity.ConnectionIdentityStore.beginReconfigure]
+     * that invalidated the old collector. Consumers (SSC's init collector)
+     * reset their overlay state to this exact epoch so a late frame from the
+     * previous host (whose epoch < [epoch]) is a no-op.
+     */
+    data class HostReconfigured(val epoch: Long) : ControllerEffect()
     /**
      * Initial-data fan-out entry: load sessions list (cross-domain — needs
      * SessionSwitcher + loadMessages/loadSessionStatus callbacks that the
@@ -112,8 +134,13 @@ sealed class ControllerEffect {
      * owns the SSE collection feed; SSC owns the fold. SSC is constructed
      * AFTER CC in AppCore, so CC cannot take it as a constructor param —
      * route via the bus instead.
+     *
+     * CP1 (notify Phase-0): carries an [IdentifiedSseEvent] so SSC can
+     * validate the connection identity BEFORE any fold/state mutation
+     * (FGS spec §1 «identity 不得在 fold 前被剥掉»). The identity was captured
+     * at SSE collection start in `ConnectionCoordinator.launchSseCollection`.
      */
-    data class OnSseEvent(val event: SSEEvent) : ControllerEffect()
+    data class OnSseEvent(val event: IdentifiedSseEvent) : ControllerEffect()
 
     // ── SessionSyncCoordinator ──
     /** server.connected frame → route to catch-up controller. */

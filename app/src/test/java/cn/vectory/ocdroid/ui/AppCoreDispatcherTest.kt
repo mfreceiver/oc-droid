@@ -73,6 +73,13 @@ class AppCoreDispatcherTest : MainViewModelTestBase() {
 
     @Test
     fun `dispatchForegroundCatchUpEffect handles CancelSse and clears delta buffers`() = runTest {
+        // CP9 §D21: AppCore.dispatchForegroundCatchUpEffect(CancelSse) NO
+        // LONGER calls connectionCoordinator.cancelSse() — CancelSse is now
+        // an OBSERVED transport-disconnect signal (the producer is the
+        // Service's ServiceSseConnectionOwner.disconnect). Calling CC here
+        // would route through coordinator.onDisconnect() → redundant
+        // teardown loop. The delta-buffer clear is retained (the gap-dirty
+        // contract is still relevant).
         val core = newCore()
         // Seed an observable delta-buffer entry so ClearDeltaBuffers has
         // something to drop.
@@ -88,6 +95,12 @@ class AppCoreDispatcherTest : MainViewModelTestBase() {
             "CancelSse must clear SessionSyncCoordinator delta buffers",
             core.store.chatFlow.value.deltaBuffer.isEmpty()
         )
+        // No CC teardown recursion: cancelSse / cancelSseForReconfigure on
+        // the CC instance are no-ops in this test core
+        // (streamingLifecycleCoordinator = null). The CP9 §D21 invariant is
+        // that AppCore does not even CALL cancelSse; we verify by asserting
+        // the dispatcher returned handled=true without observable side
+        // effects beyond the buffer clear.
     }
 
     @Test
@@ -148,6 +161,7 @@ class AppCoreDispatcherTest : MainViewModelTestBase() {
         // Seed a known workdir so the multi-workdir fan-out has at least one
         // directory to probe (settingsManager.currentWorkdir mock).
         io.mockk.every { settingsManager.currentWorkdir } returns "/proj"
+        identityStore.bind("test-fp", "/proj", "test-endpoint")
 
         val handled = core.dispatchSessionEffect(ControllerEffect.LoadPendingQuestions)
         advanceUntilIdle()
@@ -190,15 +204,26 @@ class AppCoreDispatcherTest : MainViewModelTestBase() {
 
     @Test
     fun `dispatchHostEffect handles StartSse and opens the SSE feed`() = runTest {
+        // CP9 (notify Phase-0 switchover): CC's startSSE now calls
+        // StreamingServiceLauncher.ensureStarted() instead of
+        // repository.connectSSE. The SSE collector moved to the
+        // Service-owned ServiceSseConnectionOwner; the launcher is the
+        // atomic trigger that promotes the Service to foreground.
         io.mockk.every { settingsManager.currentWorkdir } returns "/proj"
-        io.mockk.every { repository.connectSSE(any()) } returns kotlinx.coroutines.flow.emptyFlow()
         val core = newCore()
+        identityStore.bind("test-fp", "/proj", "test-endpoint")
+        val callsBefore = streamingServiceLauncher.callCount
 
         val handled = core.dispatchHostEffect(ControllerEffect.StartSse)
         advanceUntilIdle()
 
         assertTrue(handled)
-        io.mockk.verify { repository.connectSSE("/proj") }
+        assertEquals(
+            "StartSse dispatches through the launcher, not repository.connectSSE",
+            callsBefore + 1,
+            streamingServiceLauncher.callCount,
+        )
+        io.mockk.verify(exactly = 0) { repository.connectSSE(any()) }
     }
 
     @Test
@@ -302,8 +327,18 @@ class AppCoreDispatcherTest : MainViewModelTestBase() {
     fun `dispatchConnectionEffect handles OnSseEvent by forwarding to SessionSyncCoordinator`() = runTest {
         val core = newCore()
         val event = SSEEvent(payload = SSEPayload(type = "server.connected"))
+        // CP1: OnSseEvent now wraps IdentifiedSseEvent. Use a zero-epoch
+        // identity — SSC's identity gate is skipped when no identity is bound
+        // (test cold-start, identityStore.currentIdentity == null), so the
+        // raw dispatch path runs.
+        val identified = cn.vectory.ocdroid.service.events.IdentifiedSseEvent(
+            cn.vectory.ocdroid.service.identity.ConnectionIdentity(
+                epoch = 0L, serverGroupFp = "", normalizedWorkdir = "", endpointFp = ""
+            ),
+            event,
+        )
 
-        val handled = core.dispatchConnectionEffect(ControllerEffect.OnSseEvent(event))
+        val handled = core.dispatchConnectionEffect(ControllerEffect.OnSseEvent(identified))
         advanceUntilIdle()
 
         assertTrue(handled)
@@ -390,12 +425,19 @@ class AppCoreDispatcherTest : MainViewModelTestBase() {
             ControllerEffect.ResetLocalDataAndResync,
             ControllerEffect.ClearSessionWindowCache,
             // Connection
-            ControllerEffect.HostReconfigured,
+            ControllerEffect.HostReconfigured(epoch = 0L),
             ControllerEffect.LoadSessions,
             ControllerEffect.LoadAgents,
             ControllerEffect.LoadProviders,
             ControllerEffect.LoadPendingPermissions,
-            ControllerEffect.OnSseEvent(SSEEvent(payload = SSEPayload(type = "server.connected"))),
+            ControllerEffect.OnSseEvent(
+                cn.vectory.ocdroid.service.events.IdentifiedSseEvent(
+                    cn.vectory.ocdroid.service.identity.ConnectionIdentity(
+                        epoch = 0L, serverGroupFp = "", normalizedWorkdir = "", endpointFp = ""
+                    ),
+                    SSEEvent(payload = SSEPayload(type = "server.connected")),
+                )
+            ),
             // SessionSync
             ControllerEffect.ServerConnected,
             ControllerEffect.RefreshSessions,

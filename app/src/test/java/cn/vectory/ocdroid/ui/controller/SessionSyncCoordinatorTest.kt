@@ -79,6 +79,8 @@ class SessionSyncCoordinatorTest {
     private lateinit var settingsManager: SettingsManager
     private lateinit var scope: TestScope
     private lateinit var coordinator: SessionSyncCoordinator
+    /** CP1 (notify Phase-0): single connection-identity store. */
+    private lateinit var identityStore: cn.vectory.ocdroid.service.identity.ConnectionIdentityStore
     /**
      * R-20 Phase 1 (C4): persistent cache mock. Relaxed by default (returns
      * Unit / null); individual tests re-stub to verify the
@@ -111,6 +113,7 @@ class SessionSyncCoordinatorTest {
         collectedEffects = mutableListOf()
         recordedUiEvents = mutableListOf()
         scope = TestScope(UnconfinedTestDispatcher())
+        identityStore = cn.vectory.ocdroid.service.identity.ConnectionIdentityStore()
         cacheRepository = io.mockk.mockk(relaxed = true)
         // Drain every emitted effect into collectedEffects so the test bodies
         // can filter by type. Launched in scope so it auto-cancels at test end.
@@ -120,6 +123,7 @@ class SessionSyncCoordinatorTest {
             scope, slices, settingsManager, effects,
             currentServerGroupFp = { "test-fp" },
             cacheRepository = cacheRepository,
+            identityStore = identityStore,
         )
     }
 
@@ -2509,5 +2513,89 @@ class SessionSyncCoordinatorTest {
         })
 
         assertTrue(slices.chat.value.messages.isEmpty())
+    }
+
+    // ── CP1 (notify Phase-0): identity-checked entry point ───────────────────
+
+    /**
+     * CP1 spec test: old-identity collector frame emitted AFTER
+     * [cn.vectory.ocdroid.service.identity.ConnectionIdentityStore.beginReconfigure]
+     * is dropped BEFORE the SSC fold (no state mutation).
+     */
+    @Test
+    fun `CP1 stale-identity SSE frame is dropped before SSC fold`() {
+        // Bind the initial identity (epoch 0).
+        val initialIdentity = identityStore.bind("test-fp", "/proj", "test-endpoint")
+        setCurrentSession("s1")
+
+        // A reconfigure invalidates the initial identity (epoch bumps to 1,
+        // currentIdentity is nulled).
+        identityStore.beginReconfigure()
+
+        // A stale-identity frame arrives (captured under the OLD identity).
+        val staleEvent = event("session.status") {
+            put("sessionID", JsonPrimitive("s1"))
+            put("status", buildJsonObject { put("type", JsonPrimitive("busy")) })
+        }
+        coordinator.handleEvent(
+            cn.vectory.ocdroid.service.events.IdentifiedSseEvent(initialIdentity, staleEvent)
+        )
+
+        // The stale-identity frame MUST NOT mutate state — the badge is
+        // absent because the fold never ran.
+        assertNull(
+            "stale-identity frame must not write sessionStatuses",
+            slices.sessionList.value.sessionStatuses["s1"]
+        )
+        assertTrue(
+            "stale-identity frame must not emit LoadMessages",
+            collectedEffects.filterIsInstance<ControllerEffect.LoadMessages>().isEmpty()
+        )
+    }
+
+    /**
+     * CP1 spec test: [ControllerEffect.HostReconfigured] resets SSC's overlay
+     * to the EXACT epoch carried on the effect.
+     */
+    @Test
+    fun `CP1 HostReconfigured resets SSC overlay to the carried epoch`() {
+        // Establish some overlay state under epoch 0.
+        setCurrentSession("s1")
+        coordinator.handleEvent(event("server.connected") {})  // cold-start: connectedOnce=true
+        assertTrue("baseline connectedOnce=true", coordinator.sseSyncStateSnapshot().connectedOnce)
+
+        // Reconfigure: bump the store epoch + emit HostReconfigured carrying it.
+        val newEpoch = identityStore.beginReconfigure()
+        effects.tryEmitEffect(ControllerEffect.HostReconfigured(epoch = newEpoch))
+
+        val snap = coordinator.sseSyncStateSnapshot()
+        assertEquals(
+            "SSC overlay hostGeneration must match the effect's epoch",
+            newEpoch,
+            snap.hostGeneration,
+        )
+        assertFalse("connectedOnce reset by HostReconfigured", snap.connectedOnce)
+        assertTrue("sessionsDirty cleared", snap.sessionsDirty.isEmpty())
+        assertNull("lastDisconnectAt cleared", snap.lastDisconnectAt)
+    }
+
+    /**
+     * CP1 spec test: the current-identity frame (matching the store's bound
+     * identity + epoch) passes through the identity gate and folds normally.
+     */
+    @Test
+    fun `CP1 current-identity SSE frame passes the gate and folds`() {
+        val identity = identityStore.bind("test-fp", "/proj", "test-endpoint")
+        setCurrentSession("s1")
+
+        coordinator.handleEvent(
+            cn.vectory.ocdroid.service.events.IdentifiedSseEvent(identity, event("session.status") {
+                put("sessionID", JsonPrimitive("s1"))
+                put("status", buildJsonObject { put("type", JsonPrimitive("busy")) })
+            })
+        )
+
+        assertNotNull(slices.sessionList.value.sessionStatuses["s1"])
+        assertTrue(slices.sessionList.value.sessionStatuses["s1"]!!.isBusy)
     }
 }

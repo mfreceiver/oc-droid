@@ -166,6 +166,9 @@ object ControllerModule {
         effectBus: SharedEffectBus,
         cacheRepository: cn.vectory.ocdroid.data.cache.CacheRepository,
         @Named("currentServerGroupFp") currentServerGroupFp: () -> String,
+        identityStore: cn.vectory.ocdroid.service.identity.ConnectionIdentityStore,
+        reconfigureBarrier: cn.vectory.ocdroid.service.ConnectionReconfigureBarrier,
+        effectiveConnectionConfigResolver: cn.vectory.ocdroid.service.streaming.EffectiveConnectionConfigResolver,
     ): HostProfileController = HostProfileController(
         scope = appScope,
         slices = store.slices,
@@ -177,6 +180,9 @@ object ControllerModule {
         currentServerGroupFp = currentServerGroupFp,
         appContext = appContext,
         cacheRepository = cacheRepository,
+        identityStore = identityStore,
+        reconfigureBarrier = reconfigureBarrier,
+        effectiveConnectionConfigResolver = effectiveConnectionConfigResolver,
     )
 
     @Provides
@@ -188,6 +194,8 @@ object ControllerModule {
         effectBus: SharedEffectBus,
         cacheRepository: cn.vectory.ocdroid.data.cache.CacheRepository,
         @Named("currentServerGroupFp") currentServerGroupFp: () -> String,
+        identityStore: cn.vectory.ocdroid.service.identity.ConnectionIdentityStore,
+        statusAggregatorInput: cn.vectory.ocdroid.service.status.StatusAggregatorInput,
     ): SessionSyncCoordinator = SessionSyncCoordinator(
         scope = appScope,
         slices = store.slices,
@@ -197,6 +205,13 @@ object ControllerModule {
         // R-20 Phase 1 (C4): persistent cache for the message.updated
         // new-insert append path (maxer I11).
         cacheRepository = cacheRepository,
+        // CP1 (notify Phase-0): single connection-identity store.
+        identityStore = identityStore,
+        // CP4 (notify Phase-0): feed the authoritative status aggregator on
+        // every `session.status` SSE event (the SSE branch resolves
+        // sessionId→workdir via SessionTree.allSessionsById, builds the
+        // composite key, and calls applySseStatus with clock()).
+        statusAggregatorInput = statusAggregatorInput,
     )
 
     @Provides
@@ -210,6 +225,14 @@ object ControllerModule {
         serverCompatProfile: ServerCompatProfile,
         cacheMaintenanceCoordinator: cn.vectory.ocdroid.data.cache.CacheMaintenanceCoordinator,
         @Named("currentServerGroupFp") currentServerGroupFp: () -> String,
+        identityStore: cn.vectory.ocdroid.service.identity.ConnectionIdentityStore,
+        bootstrapCoordinator: cn.vectory.ocdroid.service.bootstrap.ConnectionBootstrapCoordinator,
+        streamingServiceLauncher: cn.vectory.ocdroid.service.StreamingServiceLauncher,
+        streamingLifecycleCoordinator: cn.vectory.ocdroid.service.lifecycle.StreamingLifecycleCoordinator,
+        connectionBootstrapEngine: cn.vectory.ocdroid.service.streaming.ConnectionBootstrapEngine,
+        bootstrapRetryPolicy: cn.vectory.ocdroid.service.streaming.BootstrapRetryPolicy,
+        appLifecycleMonitor: AppLifecycleMonitor,
+        degradedBootstrapTerminator: cn.vectory.ocdroid.service.DegradedBootstrapTerminator,
     ): ConnectionCoordinator = ConnectionCoordinator(
         scope = appScope,
         slices = store.slices,
@@ -219,5 +242,23 @@ object ControllerModule {
         serverCompatProfile = serverCompatProfile,
         cacheMaintenanceCoordinator = cacheMaintenanceCoordinator,
         currentServerGroupFp = currentServerGroupFp,
+        identityStore = identityStore,
+        // CP2 (notify Phase-0): delegate TOFU state to the shared bootstrap
+        // coordinator (FGS spec §10). CC's public TOFU surface is unchanged.
+        bootstrapCoordinator = bootstrapCoordinator,
+        // CP9 (notify Phase-0 switchover): CC's startSSE now calls the
+        // streaming Service launcher (the atomic ownership switch); the
+        // Service runs the §5 bootstrap + the SSE collector lives in
+        // ServiceSseConnectionOwner. CC NEVER calls repository.connectSSE.
+        streamingServiceLauncher = streamingServiceLauncher,
+        // CP9 (notify Phase-0 switchover): CC's cancelSse /
+        // cancelSseForReconfigure now route through the lifecycle
+        // coordinator's onDisconnect (§4.1 disconnect → L3 teardown); the
+        // Service observes the commands and disconnects its owner.
+        streamingLifecycleCoordinator = streamingLifecycleCoordinator,
+        connectionBootstrapEngine = connectionBootstrapEngine,
+        bootstrapRetryPolicy = bootstrapRetryPolicy,
+        appLifecycleMonitor = appLifecycleMonitor,
+        degradedBootstrapTerminator = degradedBootstrapTerminator,
     )
 }

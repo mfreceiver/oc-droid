@@ -129,7 +129,13 @@ class ForegroundCatchUpControllerTest {
     // ── background tier ────────────────────────────────────────────────────
 
     @Test
-    fun `background transition clears draft, cancels SSE, stamps backgroundedAtMs`() = withCollectedEffects { controllerScope, collected ->
+    fun `background transition clears draft and stamps backgroundedAtMs but does NOT emit CancelSse`() = withCollectedEffects { controllerScope, collected ->
+        // CP9 §E23-E25 + §F30: the background branch NO LONGER emits
+        // ControllerEffect.CancelSse — the lifecycle coordinator decides
+        // whether SSE survives the bg transition (busy/unknown → keep;
+        // idle → teardown via the Service's own disconnect()). The test
+        // asserts ONLY: draft cleared + backgroundedAtMs stamped (the
+        // foreground-return tier bucketing still needs it) + NO CancelSse.
         val controller = makeController(controllerScope)
         controller.onForegroundChanged(true) // consume the baseline emission
         nowMs = 1_000
@@ -142,8 +148,14 @@ class ForegroundCatchUpControllerTest {
         // clearDraft inline path ran: workdir cleared, input text emptied.
         assertEquals(null, composerFlow.value.draftWorkdir)
         assertEquals("", composerFlow.value.inputText)
-        // CancelSse effect fired.
-        assertTrue("CancelSse emitted", collected.filterIsInstance<ControllerEffect.CancelSse>().isNotEmpty())
+        // backgroundedAtMs stamped (the foreground-return tier bucketing
+        // still needs it — verified indirectly by the <15s / 15s–5min / >5min
+        // tier tests below which all read backgroundedAtMs via nowMs deltas).
+        // CP9 §E23: NO CancelSse emitted (coordinator decides SSE teardown).
+        assertTrue(
+            "background transition must NOT emit CancelSse (CP9 §E23)",
+            collected.filterIsInstance<ControllerEffect.CancelSse>().isEmpty(),
+        )
     }
 
     // ── <15s tier (throttle) ───────────────────────────────────────────────

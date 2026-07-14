@@ -10,6 +10,7 @@ import cn.vectory.ocdroid.data.repository.OpenCodeRepository
 import cn.vectory.ocdroid.data.repository.http.ClientCertMaterial
 import cn.vectory.ocdroid.data.repository.http.buildMutualTlsConfig
 import cn.vectory.ocdroid.data.repository.http.hostPortFromUrl
+import cn.vectory.ocdroid.service.identity.ConnectionIdentityStore
 import cn.vectory.ocdroid.ui.ComposerState
 import cn.vectory.ocdroid.ui.ConnectionFormSettings
 import cn.vectory.ocdroid.ui.ConnectionPhase
@@ -34,6 +35,7 @@ import cn.vectory.ocdroid.util.DebugLog
 import cn.vectory.ocdroid.util.SettingsManager
 import cn.vectory.ocdroid.util.TrafficTracker
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.isActive
@@ -95,6 +97,19 @@ class HostProfileController(
      *  nuke that bypasses the per-group effect and clears everything, so it
      *  calls cacheRepository directly here. */
     internal val cacheRepository: CacheRepository,
+    /**
+     * CP1 (notify Phase-0): the single connection-identity store. The
+     * reconfigure barrier origin — [configureServer] /
+     * [configureRepositoryForProfile] / [resetLocalDataAndResync] call
+     * [ConnectionIdentityStore.beginReconfigure] SYNCHRONOUSLY BEFORE
+     * `repository.configure()` so the epoch bump is guaranteed to precede
+     * any client rebuild. The async effect-bus emission
+     * (CancelSseForReconfigure → CC.cancelSseForReconfigure) does NOT
+     * guarantee this ordering — that was the bug being fixed (FGS spec §2).
+     */
+    internal val identityStore: ConnectionIdentityStore? = null,
+    private val reconfigureBarrier: cn.vectory.ocdroid.service.ConnectionReconfigureBarrier? = null,
+    private val effectiveConnectionConfigResolver: cn.vectory.ocdroid.service.streaming.EffectiveConnectionConfigResolver? = null,
 ) {
     // ── Public accessors ───────────────────────────────────────────────────
 
@@ -225,15 +240,16 @@ class HostProfileController(
             settingsManager.clearModelDataForGroup(normalized.serverGroupFp.ifBlank { normalized.id })
         }
         if (isActiveHost && (urlChanged || mtlsChanged)) {
-            configureRepositoryForProfile(normalized)
-            // §R18 Phase 3 Wave 1 (P1-3 C 类): saveHostProfile 多发顺序敏感 → 保持同步 tryEmitEffect。
-            // wrapping in scope.launch would race the synchronous purge above; FIFO via the
-            // SUSPEND buffer (256) makes a synchronous multi-emit reliable in practice.
-            effects.tryEmitEffect(ControllerEffect.ForceReconnect)
-            // §disabled-models-consistency: per-url/group 状态只在 urlChanged 时重载
-            // （纯 TLS / mTLS 变化无需重载模型数据，只需 reconnect——gro-1/gpt-2/glm-2）。
-            if (urlChanged) {
-                effects.tryEmitEffect(ControllerEffect.HostProfileSwitched)
+            if (reconfigureBarrier != null) {
+                scope.launch {
+                    configureRepositoryForProfileAwait(normalized)
+                    effects.emitEffect(ControllerEffect.ForceReconnect)
+                    if (urlChanged) effects.emitEffect(ControllerEffect.HostProfileSwitched)
+                }
+            } else {
+                configureRepositoryForProfile(normalized)
+                effects.tryEmitEffect(ControllerEffect.ForceReconnect)
+                if (urlChanged) effects.tryEmitEffect(ControllerEffect.HostProfileSwitched)
             }
         }
     }
@@ -305,6 +321,10 @@ class HostProfileController(
      * host profile → 该 group 无其它 profile 引用→清；有→不清".
      */
     fun deleteHostProfile(profileId: String) {
+        if (reconfigureBarrier != null) {
+            scope.launch { deleteHostProfileWithBarrier(profileId) }
+            return
+        }
         val wasCurrent = profileId == slices.host.value.currentHostProfileId
         // §bug5 / R-20 Phase 5: capture the deleted profile's fp before the
         // store mutation so we can purge its group's model data if it was the
@@ -381,6 +401,39 @@ class HostProfileController(
         }
     }
 
+    private suspend fun deleteHostProfileWithBarrier(profileId: String) {
+        var wasCurrent = false
+        var deletedFp: String? = null
+        var remainingInGroup: List<HostProfile> = emptyList()
+        reconfigureBarrier!!.reconfigure {
+            wasCurrent = profileId == slices.host.value.currentHostProfileId
+            val deletedProfile = hostProfileStore.profiles().firstOrNull { it.id == profileId }
+            deletedFp = deletedProfile?.serverGroupFp
+            remainingInGroup = deletedFp?.let { fp ->
+                hostProfileStore.profilesInGroup(fp).filter { it.id != profileId }
+            }.orEmpty()
+            hostProfileStore.delete(profileId)
+            deletedProfile?.clientCertId?.let { settingsManager.clearClientCert(it) }
+            configureRepositoryForProfileRaw(hostProfileStore.currentProfile())
+            refreshHostProfileState()
+            if (wasCurrent) {
+                if (remainingInGroup.isEmpty()) {
+                    deletedFp?.let { settingsManager.clearModelDataForGroup(it) }
+                }
+                purgePerHostState(preserveServerGroupData = false)
+            }
+        }
+        if (wasCurrent) {
+            if (remainingInGroup.isEmpty()) {
+                deletedFp?.let { effects.emitEffect(ControllerEffect.EvictGroup(it)) }
+            }
+            effects.emitEffect(ControllerEffect.ForceReconnect)
+            effects.emitEffect(ControllerEffect.HostProfileSwitched)
+        } else if (remainingInGroup.isEmpty()) {
+            deletedFp?.let { effects.emitEffect(ControllerEffect.EvictGroup(it)) }
+        }
+    }
+
     fun importHostProfile(payload: String): Result<HostProfile> = runCatching {
         hostProfileStore.importJson(payload).also { refreshHostProfileState() }
     }
@@ -420,15 +473,26 @@ class HostProfileController(
             // Step 1: snapshot previousFp BEFORE select (select's side effect
             // makes post-select currentProfile() read the NEW profile).
             val previousFp = hostProfileStore.currentProfile().serverGroupFp
-            // Step 2: select (mutates the store).
-            val profile = hostProfileStore.select(profileId)
-            // Step 3: read targetFp from the returned (new) profile.
-            val targetFp = profile.serverGroupFp
-            // Step 4: same-group → skip cache eviction (memory view only);
-            //         different-group → emit EvictGroup(previousFp).
-            val sameGroup = previousFp == targetFp
-            purgePerHostState(preserveServerGroupData = sameGroup)
-            if (!sameGroup) {
+            effectiveConnectionConfigResolver?.activateProfile(profileId)
+            val profile = if (effectiveConnectionConfigResolver != null) {
+                hostProfileStore.currentProfile()
+            } else {
+                hostProfileStore.select(profileId)
+            }
+            val sameGroup = previousFp == profile.serverGroupFp
+            if (reconfigureBarrier != null) {
+                reconfigureBarrier.reconfigure {
+                    purgePerHostState(preserveServerGroupData = sameGroup)
+                    configureRepositoryForProfileRaw(profile)
+                    refreshHostProfileState()
+                }
+            } else {
+                purgePerHostState(preserveServerGroupData = sameGroup)
+                if (!sameGroup) effects.emitEffect(ControllerEffect.EvictGroup(previousFp))
+                configureRepositoryForProfile(profile)
+                refreshHostProfileState()
+            }
+            if (reconfigureBarrier != null && !sameGroup) {
                 // Group-scoped eviction: clears memory LRU + persistent cache
                 // for previousFp only; the new group (targetFp, now current)
                 // keeps its cache. Routed through the effect bus so AppCore's
@@ -437,8 +501,6 @@ class HostProfileController(
                 // §R18 Phase 3 Wave 1 (P1-3 A 类): scope.launch suspend context → suspend emitEffect.
                 effects.emitEffect(ControllerEffect.EvictGroup(previousFp))
             }
-            configureRepositoryForProfile(profile)
-            refreshHostProfileState()
             // §R18 Phase 3 Wave 1 (P1-3 A 类): scope.launch suspend 上下文 → 用 suspend emitEffect
             // 可靠+FIFO，不会丢。
             effects.emitEffect(ControllerEffect.ForceReconnect)
@@ -567,9 +629,26 @@ class HostProfileController(
      * via [hostPortFromUrl]) so the TOFU pin lookup resolves for previously-
      * trusted endpoints — replaces the legacy `allowInsecureConnections` flag.
      */
-    fun configureServer(url: String, username: String? = null, password: String? = null) {
+    fun configureServer(url: String, username: String? = null, password: String? = null): Job? {
+        if (reconfigureBarrier != null) {
+            return scope.launch {
+                reconfigureBarrier.reconfigure { configureServerRaw(url, username, password) }
+            }
+        }
+        identityStore?.beginReconfigure()
+        effects.tryEmitEffect(ControllerEffect.CancelSseForReconfigure)
+        configureServerRaw(url, username, password)
+        return null
+    }
+
+    private fun configureServerRaw(url: String, username: String?, password: String?) {
         val oldUrl = settingsManager.serverUrl
         val urlChanging = oldUrl != url
+        // CP1 (notify Phase-0) §2 step 1: SYNCHRONOUSLY bump the epoch AND
+        // invalidate the old identity BEFORE repository.configure() runs.
+        // The async CancelSseForReconfigure effect emission below does NOT
+        // guarantee the epoch bump lands before the client rebuild — this
+        // synchronous barrier does. FGS spec §2 «reconfigure 严格顺序».
         if (urlChanging) {
             // §bug5 / R-20 Phase 5: manual URL change also clears model data
             // so the disable set does not orphan against an identity the user
@@ -581,10 +660,11 @@ class HostProfileController(
             // empty) set.
             settingsManager.clearModelDataForGroup(currentServerGroupFp())
         }
-        effects.tryEmitEffect(ControllerEffect.CancelSseForReconfigure)
-        settingsManager.serverUrl = url
-        settingsManager.username = username
-        settingsManager.password = password
+        effectiveConnectionConfigResolver?.activateManual(url, username, password) ?: run {
+            settingsManager.serverUrl = url
+            settingsManager.username = username
+            settingsManager.password = password
+        }
         val profile = currentHostProfile()
         // §2.5(b): 注入 mTLS 客户端证书材料（profile.mtlsEnabled 时从 ESP 载入）。
         // 手动输新 URL（未存为 profile）会沿用当前 profile 的证书——客户端证书为
@@ -622,8 +702,25 @@ class HostProfileController(
      * host switch by the caller (see resetLocalDataAndResync).
      */
     internal fun configureRepositoryForProfile(profile: HostProfile) {
-        // §R18 Phase 3 Wave 1 (P1-3 B 类): 单发非 suspend (configureRepositoryForProfile 可能被 C 类路径调用，但本处只是一次 emit) → tryEmitEffect。
+        if (reconfigureBarrier != null) {
+            scope.launch { configureRepositoryForProfileAwait(profile) }
+            return
+        }
+        identityStore?.beginReconfigure()
         effects.tryEmitEffect(ControllerEffect.CancelSseForReconfigure)
+        configureRepositoryForProfileRaw(profile)
+    }
+
+    private suspend fun configureRepositoryForProfileAwait(profile: HostProfile) {
+        val barrier = reconfigureBarrier
+        if (barrier != null) {
+            barrier.reconfigure { configureRepositoryForProfileRaw(profile) }
+        } else {
+            configureRepositoryForProfile(profile)
+        }
+    }
+
+    private fun configureRepositoryForProfileRaw(profile: HostProfile) {
         val password = profile.basicAuth?.passwordId?.let { settingsManager.basicAuthPassword(it) }
         // §2.5(a): 注入 mTLS 客户端证书材料（profile.mtlsEnabled 时从 ESP 载入）。
         // configure(null) 会 clear 已持材料，所以切到非 mTLS profile 时停止出示证书。
@@ -768,6 +865,25 @@ class HostProfileController(
      * loadInitialData on a healthy connection.
      */
     fun resetLocalDataAndResync() {
+        if (reconfigureBarrier != null) {
+            scope.launch {
+                reconfigureBarrier.reconfigure {
+                    runCatching { cacheRepository.clearAll() }
+                        .onFailure { DebugLog.e(TAG, "cacheRepository.clearAll failed during reset", it) }
+                    runCatching { appContext.deleteDatabase(CACHE_DB_NAME) }
+                        .onFailure { DebugLog.e(TAG, "deleteDatabase($CACHE_DB_NAME) failed during reset", it) }
+                    resetLocalStateCore()
+                }
+                effects.emitEffect(ControllerEffect.ColdStartReconnect)
+            }
+            return
+        }
+        // CP1 (notify Phase-0) §2 step 1: SYNCHRONOUSLY bump the epoch AND
+        // invalidate the old identity BEFORE any reset/reconnect runs. The
+        // full-data reset is a reconfigure (the SSE collector + all caches
+        // are torn down); the epoch bump ensures any in-flight collector /
+        // directory fetch from the pre-reset state is dropped.
+        identityStore?.beginReconfigure()
         // R-20 Phase 1 (dser I-2, maxer B1): wipe the cache DB FIRST (before
         // clearAllLocalData) so the cache_db_key preserved-key has nothing to
         // unlock. deleteDatabase removes the .db + -wal + -shm sidecars;
@@ -845,6 +961,37 @@ class HostProfileController(
         slices.mutateSettings { SettingsState() }
         // 8. Reconnect to the (preserved) current host profile and re-fetch.
         effects.tryEmitEffect(ControllerEffect.ColdStartReconnect)
+    }
+
+    private fun resetLocalStateCore() {
+        settingsManager.clearAllLocalData()
+        trafficTracker.reset()
+        effects.tryEmitEffect(ControllerEffect.ClearSessionWindowCache)
+        slices.mutateChat { c ->
+            c.copy(
+                currentSessionId = null,
+                messages = emptyList(),
+                partsByMessage = emptyMap(),
+                streamingPartTexts = emptyMap(),
+                streamingReasoningPart = null,
+                olderMessagesCursor = null,
+                hasMoreMessages = false,
+                isLoadingMessages = false,
+                isLoadingMoreMessages = false,
+                gapMarkers = emptyList(),
+                staleNotice = false,
+                currentModel = null,
+            )
+        }
+        slices.mutateSessionList { SessionListState() }
+        slices.mutateUnread { UnreadState() }
+        slices.mutateConnection {
+            ConnectionState(isConnecting = true, connectionPhase = ConnectionPhase.Reconnecting)
+        }
+        slices.mutateTraffic { TrafficState() }
+        slices.mutateComposer { ComposerState() }
+        slices.mutateFile { FileState() }
+        slices.mutateSettings { SettingsState() }
     }
 
     private companion object {

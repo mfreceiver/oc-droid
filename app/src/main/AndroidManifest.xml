@@ -7,6 +7,11 @@
     <!-- §18 background notifications (best-effort). Runtime request is gated by
          a Settings toggle so we never prompt from the background. -->
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <!-- §4.1 SessionStreamingService (dataSync FGS) — declared in CP8, started
+         in CP9. FOREGROUND_SERVICE is the base permission (API 28+);
+         FOREGROUND_SERVICE_DATA_SYNC is the typed permission (API 34+). -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
 
     <application
         android:name=".OpenCodeApp"
@@ -43,6 +48,17 @@
                 android:name="android.support.FILE_PROVIDER_PATHS"
                 android:resource="@xml/file_paths" />
         </provider>
+        <!-- §4.1 SessionStreamingService (FGS spec). Inert through CP8 (no
+             production caller startForegroundService(this) until CP9 — only
+             the §16-U1 CLOSE_BACKGROUND action PendingIntent can deliver to
+             it, and that PendingIntent only exists on an ongoing notification
+             that itself only shows when the Service is already running, i.e.
+             CP9). foregroundServiceType=dataSync matches the platform 6h/24h
+             budget + the onTimeout(startId) callback (§4.1). -->
+        <service
+            android:name=".service.SessionStreamingService"
+            android:exported="false"
+            android:foregroundServiceType="dataSync" />
     </application>
 
 </manifest>

@@ -9,6 +9,9 @@ import cn.vectory.ocdroid.data.repository.HostProfileStore
 import cn.vectory.ocdroid.data.repository.OpenCodeRepository
 import cn.vectory.ocdroid.di.AppLifecycleMonitor
 import cn.vectory.ocdroid.di.UiApplicationScope
+import cn.vectory.ocdroid.service.bridge.SseEventBridge
+import cn.vectory.ocdroid.service.events.SseEventStream
+import cn.vectory.ocdroid.service.identity.ConnectionIdentityStore
 import cn.vectory.ocdroid.util.DebugLog
 import cn.vectory.ocdroid.util.SettingsManager
 import cn.vectory.ocdroid.util.TrafficTracker
@@ -150,6 +153,28 @@ class AppCore @Inject constructor(
      *  R-19-P2-2 dispatch helpers (in this file) and the AppCoreOrchestration
      *  extensions reach `appScope` directly. */
     @UiApplicationScope internal val appScope: CoroutineScope,
+    /**
+     * CP1 (notify Phase-0): the single connection-identity store. Injected
+     * here so the test hook [handleSSEEvent] can auto-wrap raw SSEEvent with
+     * the current identity (production goes through CC.launchSseCollection
+     * which captures the identity at collection start). Hilt auto-provides
+     * the @Singleton instance (same one CC / SSC / HPC inject).
+     */
+    internal val identityStore: ConnectionIdentityStore,
+    /**
+     * CP3 (notify Phase-0): the process-wide SSE event stream. CC publishes
+     * each [cn.vectory.ocdroid.service.events.IdentifiedSseEvent] here (CP3
+     * replaced the direct ControllerEffect.OnSseEvent emission). Injected
+     * here so AppCore can pass it to the bridge.
+     */
+    internal val sseEventStream: SseEventStream,
+    /**
+     * CP3 (notify Phase-0): the identity-checked SSE event bridge. Subscribes
+     * to [sseEventStream.events], validates epoch (§2), routes to the §11
+     * control/delta dual-channel. AppCore collects both channels and re-emits
+     * them as [ControllerEffect.OnSseEvent] for SSC's identity-checked fold.
+     */
+    internal val sseEventBridge: SseEventBridge,
 ) {
 
     // ── Slice accessors (delegate to SharedStateStore) ──────────────────────
@@ -257,6 +282,53 @@ class AppCore @Inject constructor(
         // registered synchronously here, before the constructor returns.
         appScope.launch(start = CoroutineStart.UNDISPATCHED) {
             effectBus.effects.collect { effect -> dispatchEffect(effect) }
+        }
+
+        // CP3 (notify Phase-0): eagerly start the SSE event bridge so it is
+        // subscribed to [sseEventStream.events] BEFORE any producer emits.
+        // The bridge performs the §2 epoch guard (drops stale-identity frames)
+        // and routes fresh frames to the §11 control/delta dual-channel.
+        // currentEpoch is read fresh per frame from the single identity store.
+        sseEventBridge.start(sseEventStream.events) { identityStore.currentEpoch() }
+
+        // CP3: collect the bridge's control + delta channels and re-emit each
+        // validated [IdentifiedSseEvent] as [ControllerEffect.OnSseEvent] so
+        // SSC's identity-checked [handleEvent(IdentifiedSseEvent)] fold runs
+        // exactly as it did pre-CP3 (when CC emitted OnSseEvent directly).
+        // The OnSseEvent type + the fold path are unchanged; only the producer
+        // moved (CC → stream → bridge → AppCore → OnSseEvent → SSC).
+        appScope.launch(start = CoroutineStart.UNDISPATCHED) {
+            sseEventBridge.controlEvents.collect { identified ->
+                dispatchEffect(ControllerEffect.OnSseEvent(identified))
+            }
+        }
+        appScope.launch(start = CoroutineStart.UNDISPATCHED) {
+            sseEventBridge.deltaEvents.collect { identified ->
+                dispatchEffect(ControllerEffect.OnSseEvent(identified))
+            }
+        }
+
+        // CP3 §11 overflow recovery: when delta overflow marks sessions dirty,
+        // drain the set and drive a REST reconcile for each dirty session via
+        // the existing LoadMessages effect (resetLimit=true forces a full
+        // window reload from the server). The dirtySessions StateFlow starts
+        // empty; we only react when it transitions to non-empty.
+        appScope.launch(start = CoroutineStart.UNDISPATCHED) {
+            sseEventBridge.dirtySessions.filter { it.isNotEmpty() }.collect { _ ->
+                    val sessions = sseEventBridge.consumeDirty()
+                    for (sid in sessions) {
+                        // Skip the bridge's "__unknown__" placeholder + blanks —
+                        // those have no session-scoped reload target.
+                        if (sid.isBlank() || sid.startsWith("__")) continue
+                        DebugLog.i(
+                            TAG,
+                            "§11 delta overflow reconcile: reloading session $sid"
+                        )
+                        effectBus.tryEmitEffect(
+                            ControllerEffect.LoadMessages(sid, resetLimit = true)
+                        )
+                    }
+                }
         }
 
         // §R18 Phase 2-F: currentSessionId convergence. ChatState
@@ -397,7 +469,15 @@ class AppCore @Inject constructor(
             true
         }
         is ControllerEffect.CancelSse -> {
-            connectionCoordinator.cancelSse()
+            // CP9 §D21: REMOVE `connectionCoordinator.cancelSse()` — the
+            // Service's `disconnect()` is now the producer of this effect
+            // (it is an OBSERVED transport-disconnect signal, NOT a request
+            // for CC to cancel a job; CC no longer owns a job). Calling CC
+            // here would route through coordinator.onDisconnect() →
+            // redundant teardown loop. RETAIN the delta-buffer clear (the
+            // gap-dirty contract is still relevant — SSC stamps the current
+            // session dirty + records the disconnect time so the next
+            // server.connected reconciles).
             sessionSyncCoordinator.clearDeltaBuffers()
             true
         }
@@ -602,6 +682,10 @@ class AppCore @Inject constructor(
     /** ConnectionCoordinator-owned effects. */
     internal fun dispatchConnectionEffect(effect: ControllerEffect): Boolean = when (effect) {
         is ControllerEffect.HostReconfigured -> {
+            // CP1: HostReconfigured carries the new epoch. Reset the
+            // foreground catch-up state machine (idempotent) — SSC's init
+            // collector independently reads effect.epoch to reset its overlay
+            // to this exact generation.
             foregroundCatchUpController.onHostReconfigured()
             true
         }
@@ -624,6 +708,11 @@ class AppCore @Inject constructor(
             true
         }
         is ControllerEffect.OnSseEvent -> {
+            // CP1: route through the identity-checked entry point.
+            // SSC.handleEvent(IdentifiedSseEvent) validates
+            // identityStore.isCurrent BEFORE any fold/state mutation — a
+            // stale-identity frame (captured under a pre-reconfigure epoch)
+            // is dropped silently.
             sessionSyncCoordinator.handleEvent(effect.event)
             true
         }
@@ -653,9 +742,20 @@ class AppCore @Inject constructor(
      * [ConnectionCoordinator] (which emits [ControllerEffect.OnSseEvent] for
      * each event, dispatched back to [sessionSyncCoordinator] by
      * [dispatchEffect]).
+     *
+     * CP1: auto-wraps with the current identity (if bound) so the identity-
+     * checked path is exercised. Tests that don't bind an identity fall
+     * through to the raw [SSEEvent] dispatch (no identity gate).
      */
     internal fun handleSSEEvent(event: SSEEvent) {
-        sessionSyncCoordinator.handleEvent(event)
+        val identity = identityStore.currentIdentity.value
+        if (identity != null) {
+            sessionSyncCoordinator.handleEvent(
+                cn.vectory.ocdroid.service.events.IdentifiedSseEvent(identity, event)
+            )
+        } else {
+            sessionSyncCoordinator.handleEvent(event)
+        }
     }
 
     internal fun sessionWindowCacheSize(): Int = sessionSwitcher.sessionWindowCacheSize()

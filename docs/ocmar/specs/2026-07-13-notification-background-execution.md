@@ -150,3 +150,20 @@ Phase 0 的 10 个任务分两类，必须区分对待：
 | 日期 | 变更 | 作者 |
 |---|---|---|
 | 2026-07-13 | 初版（执行入口 + 交接提示词 + 代码锚点核验 + post-v0.9.4 备忘） | orchestrator |
+| 2026-07-14 | D4-B：transport readiness + Starting→Ready ownership + reconfigure no-source + teardown/runBlocking/KDoc + tests + rollback docs（见 §11） | fixer |
+
+---
+
+## 11. 回滚纪律（D4-B，2026-07-14）
+
+> CP1-9 + D1/D2/D3/D4-A/D4-B 是**一个不可分割的切换**。D1-D4 改变了 CP9 的契约（`SourceActivation.Ready` 去 state、`OwnershipStartResult.Accepted`→`Ready`、`OwnershipState` 两段式、`TeardownReason.BootstrapFailure`、`StreamingOwnershipGate` synchronized 重构 + `releaseNow`、`teardownAndAwait` 统一、reconfigure 不 emit StartPoller）。**CP9 单独 revert 被禁止**——会复活 B1 unowned window / M3 Unknown hang / M4 stale replacement poll，且因符号删除/改名导致编译失败。
+
+**回滚操作**：
+
+- **merge 前**：discard / close `omos/notify-switchover` 分支。
+- **merge 后（squash）**：`git revert <squash-sha>`。
+- **merge 后（merge-commit）**：`git revert -m 1 <merge-sha>`。
+- **线性连续区间**：CP1…D4-B 在同一连续 commit range → 执行**一次** reviewed revert 覆盖整个区间（不逐 commit revert——中间态不可编译）。
+- **禁止**：不得创建并行「legacy SSE owner」runtime flag（双轨复活 gpter-M1 双 SSE 状态机，且不可测）。
+- **merge SHA**：合并后记录于此 — `<待合并后填写>`。
+- **验证**：revert 后 `./scripts/check.sh` 必须全绿（若失败说明 revert 不完整——扩大到整个连续区间）。

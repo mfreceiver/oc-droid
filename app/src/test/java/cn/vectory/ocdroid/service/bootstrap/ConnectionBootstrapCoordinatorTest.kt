@@ -1,6 +1,9 @@
 package cn.vectory.ocdroid.service.bootstrap
 
 import cn.vectory.ocdroid.data.repository.http.TofuDecision
+import cn.vectory.ocdroid.data.repository.OpenCodeRepository
+import io.mockk.every
+import io.mockk.mockk
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CancellationException
@@ -215,6 +218,26 @@ class ConnectionBootstrapCoordinatorTest {
         c.clearPendingTofu()
         assertEquals(TofuState.Idle, c.tofuState.value)
         assertNull(c.pendingTofuHostPort())
+    }
+
+    @Test
+    fun `B2 degraded capture promotes once to TrustPending with fresh deferred`() {
+        val c = newCoordinator()
+        val capture = mockk<OpenCodeRepository.TofuCaptureResult>()
+        every { capture.hostPort } returns "h:443"
+        c.setPendingTofu("h:443")
+        c.setPendingCapture(capture)
+        c.markDegradedNeedsActivity()
+
+        val challenge = c.promoteDegradedToPending()
+
+        assertNotNull(challenge)
+        assertSame(capture, challenge!!.capture)
+        assertFalse(challenge.decision.isCompleted)
+        assertEquals(TofuState.TrustPending("h:443", capture), c.tofuState.value)
+        assertNull("duplicate foreground signal cannot allocate another prompt", c.promoteDegradedToPending())
+        c.resolveTofuTrust(TofuDecision.AcceptOnce("spki"))
+        assertEquals(TofuDecision.AcceptOnce("spki"), challenge.decision.getCompleted())
     }
 
     // ── StateFlow observability ────────────────────────────────────────────

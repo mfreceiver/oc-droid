@@ -434,6 +434,8 @@ class GapReconcileIntegrationTest {
     private lateinit var settingsManager: SettingsManager
     private lateinit var scope: TestScope
     private lateinit var coordinator: SessionSyncCoordinator
+    /** CP1 (notify Phase-0): single connection-identity store (sources epoch). */
+    private lateinit var identityStore: cn.vectory.ocdroid.service.identity.ConnectionIdentityStore
     /**
      * Carries the prior snapshot so successive `seed { ... }` calls compose
      * against the prior state (mirrors [SessionSyncCoordinatorTest]'s pattern).
@@ -455,11 +457,16 @@ class GapReconcileIntegrationTest {
         effects = SharedEffectBus()
         collectedEffects = mutableListOf()
         scope = TestScope(UnconfinedTestDispatcher())
+        identityStore = cn.vectory.ocdroid.service.identity.ConnectionIdentityStore()
         // Drain every emitted effect so test bodies can filter by type.
         scope.launch(start = kotlinx.coroutines.CoroutineStart.UNDISPATCHED) {
             effects.effectsConsumed.toList(collectedEffects)
         }
-        coordinator = SessionSyncCoordinator(scope, slices, settingsManager, effects, currentServerGroupFp = { "test-fp" })
+        coordinator = SessionSyncCoordinator(
+            scope, slices, settingsManager, effects,
+            currentServerGroupFp = { "test-fp" },
+            identityStore = identityStore,
+        )
     }
 
     @After
@@ -698,7 +705,10 @@ class GapReconcileIntegrationTest {
         // Disconnect, then host reconfigure bumps the generation to 1 and
         // resets connectedOnce=false.
         effects.tryEmitEffect(ControllerEffect.CancelSse)
-        effects.tryEmitEffect(ControllerEffect.HostReconfigured)
+        // CP1: HostReconfigured carries the epoch from beginReconfigure (same
+        // as production CC.cancelSseForReconfigure).
+        val newEpoch = identityStore.beginReconfigure()
+        effects.tryEmitEffect(ControllerEffect.HostReconfigured(epoch = newEpoch))
         collectedEffects.clear()
 
         val stateAfterReconfigure = coordinator.sseSyncStateSnapshot()
@@ -764,7 +774,10 @@ class GapReconcileIntegrationTest {
         effects.tryEmitEffect(ControllerEffect.CancelSse)  // marks session-A dirty
         assertTrue(coordinator.sseSyncStateSnapshot().sessionsDirty.contains("session-A"))
 
-        effects.tryEmitEffect(ControllerEffect.HostReconfigured)
+        // CP1: HostReconfigured carries the epoch from beginReconfigure (same
+        // as production CC.cancelSseForReconfigure).
+        val newEpoch = identityStore.beginReconfigure()
+        effects.tryEmitEffect(ControllerEffect.HostReconfigured(epoch = newEpoch))
 
         val snap = coordinator.sseSyncStateSnapshot()
         assertTrue("sessionsDirty cleared on HostReconfigured", snap.sessionsDirty.isEmpty())

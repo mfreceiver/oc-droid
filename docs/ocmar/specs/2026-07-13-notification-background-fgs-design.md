@@ -67,7 +67,9 @@ reconfigure 严格顺序（不可颠倒）：
 5. 新 collector 绑定新 identity；
 6. **每个发布事件携带 identity**；`SseEventBridge` / 通知聚合器 / `SessionSyncCoordinator.fold` 在**任何副作用前**校验 identity。
 
-- `CancelSseForReconfigure` → 先 stop Service SSE 并 bump **与 collector 绑定的 epoch** → 再 repository/host 重配 → `loadInitialData` → start SSE。
+**D3 落地协议（gate #3）**：`ConnectionReconfigureBarrier` 是唯一 epoch owner；所有生产 host/profile/reset 路径必须在同一互斥 transaction 中执行 `beginReconfigure()` → 请求 lifecycle 进入 L3 → 等待 D2 replacement source ready 且旧 Service transport `disconnectAndJoin` → repository/client rebuild + 旧 host 状态隔离 → `HostReconfigured(epoch)`。`ConnectionCoordinator.cancelSseForReconfigure()` 不再 bump epoch 或发布第二个 `HostReconfigured`。`StreamingServiceLauncher.ensureStarted(identity)` 返回 identity-bound `OwnershipStartResult`；只有 Service 对**完全相同** identity 注册 ownership acknowledgement 后，CC 才允许发布 `Connected` / `onSettled(true)`，background、platform reject、ack timeout、stale identity、different owner 一律按失败 settle。
+
+- 生产 reconfigure 不再依赖异步 `CancelSseForReconfigure` effect；barrier 同步 bump **与 collector 绑定的 epoch**，完成 source handoff + transport join 后才允许 repository/host 重配 → `loadInitialData` → identity-bound Service ownership/start SSE。
 - **`loadInitialData` 的 directory fan-out 必须读同一 epoch**（实现注记，gpter）：不得让 CC 私有第二个 generation 与 SSE 的 epoch 分裂。统一为：epoch 同时作 SSE collector 守卫 + directory-fetch 守卫。
 - 单测：迁移/保留 `ConnectionCoordinatorTest` stale-host 场景（旧帧 `server.connected`/`session.status`/`message.*` 不得污染新 host；通知聚合器也不得用旧 `session.status` 触发错误完成通知）。
 
@@ -81,6 +83,12 @@ reconfigure 严格顺序（不可颠倒）：
 
 - busy = **全局**，键为复合 `(serverGroupFp, workdir, sessionId) → Fresh|Busy|Retry|Idle|Unknown`。
 - **Phase 0 主路径**：直接用现有**全局** `getSessionStatus()` 一次；用 `session.directory`（来自 `sessions` / `directorySessions`）把每个 `sessionId` 归并到 workdir。**请求失败 → 全局 `Unknown`，不得进 idle 宽限期**。
+- **D1 gate #1：status TTL 主动过期（passive→active）**。TTL 不再仅由 map mutation 触发的 recompute 隐式生效——`StatusAggregatorImpl` 注入 `@UiApplicationScope CoroutineScope`，在每次 commit 后调度**单一的 earliest-deadline wake-up**（`freshnessJob`），目标时刻为「所有当前 identity 下 Idle 条目的 `sourceTimeMs + STATUS_TTL_MS + 1` + 成功快照 coverage marker 的 TTL 截止」中最早者。到期时 `recompute` 不依赖任何 map mutation。**新鲜度边界明确**：`now - sourceTimeMs <= STATUS_TTL_MS` 为 fresh；过期 `Idle` → 贡献 `Unknown`；过期 `Busy`/`Retry` → 保守地保持 `Busy`（绝不静默丢 keep-alive）。
+- **D1 gate #1：debounce 读取时间正确状态**。`StreamingLifecycleCoordinator.startIdleDebounce` 在 45s 到期时调用 `statusAggregator.stateAtNow()`（按当前 `clock()` 即时投影），**不读** `globalState.value`（后者可能滞后于 wall clock）。`stateAtNow()` 与 `recompute` 共用同一个纯函数 `project(state, coverage, now)`。
+- **D1 gate #5：returned-but-unmapped active IDs 强制 Busy**。`/session/status` 返回的 `sessionId` 若**不在** `sessionsById` 中，是**正向已知 active** → 贡献 `GlobalBusyState.Busy`（既不跳过，也不发明 workdir 制造复合键）。在 coverage metadata 的 `unmappedActiveIds` 中跟踪。
+- **D1 gate #5：registered-workdir coverage 谓词**。snapshot 同时携带 `sessionsById` + `registeredWorkdirs`（= `recentWorkdirs(currentFp) + currentWorkdir + directorySessions.keys + sessionsById.values.map(Session::directory)`，dedup）。`AllIdleFresh` 合法当且仅当全部满足：(a) current-epoch 的成功快照存在且在 TTL 内；(b) `unmappedActiveIds.isEmpty()`；(c) `registeredWorkdirs` 中每个 workdir 都被当前投影里的 fresh 条目覆盖；(d) 每个已知 tracked session 已被映射；(e) 每个 tracked status 为 fresh `Idle`；(f) 无 `Unknown`/`Busy`/`Retry`。一个**无 session 但已登记**的 workdir 由 coverage marker 代表，不会因 session 全部 archive 而从 all-idle 谓词中消失。
+- 一次**成功的空全局快照 + 零 registeredWorkdirs** 可以是 `AllIdleFresh`（由 fresh coverage marker 担保，**不是**空洞的未初始化状态）。
+- **D4-A M7/M6**：aggregator 以单个 immutable `Aggregate(entries, coverage, currentGroupFp)` 的 `AtomicReference` 提交；map、coverage、identity 不得分裂。host-global `/session/status` 成功时 `coverage.coveredWorkdirs = snapshot.registeredWorkdirs`，因此零 session 的 registered workdir 也由成功 snapshot marker 覆盖；失败清空 covered marker 并保持 Unknown，过期 marker 仍为 Unknown，unmapped active 仍优先 Busy。
 - **status TTL** 明确（如 30s）；只有**所有已登记 workdir 都取得新鲜+成功 idle** 才进停流宽限期。
 - **Phase 0 门禁探针（必过）**：确认 `/session/status` 返回确为 host 级、覆盖所有 workdir（非仅 current）。**两 workdir 隔离测试**：两个不同 workdir 各有 active session 时，单次全局请求须**同时**反映两者。若实测全局只返回 current workdir → 升级为 **directory fan-out**（每 workdir 显式查询，复合键不变）并跑同一隔离门禁。
 - 多 workdir **pending** 轮询独立（`computeQuestionFanOutWorkdirs` / `loadPendingQuestionsAllWorkdirs`），与 status 无关。
@@ -132,35 +140,42 @@ reconfigure 严格顺序（不可颠倒）：
 
 - **不再默认 true**；Activity started-count 是前台事实源。
 - Service 冷启动、无 started Activity → 按后台处理。
-- 用带延迟的 process-lifecycle 语义，避免配置变化时短暂 1→0 被误判为后台。
+- **D1 gate #2：用带延迟的 process-lifecycle 语义（700ms 延迟确认）**。`onActivityStopped` 把 started-count 递减；当递减到 0 时**不立即**翻 `_isInForeground=false`，而是取消上一个 pending 确认 job + 启动 `delay(700)`；到时**再次检查** `activityStartedCount == 0` 才真正翻 false + `onEnterBackground()`。`onActivityStarted`（0→1）**立即取消**该 pending 确认 job。**700ms 是 AndroidX `ProcessLifecycleOwner` 既定值**——配置变化（rotation: 1→0→1）在该窗口内完成，不会误判为后台。前台判定读取发生在 Main，主 dispatcher delay 与之同线程一致。
+- **D4-A M5**：started-count callback、confirmation cancel、700ms delay/recheck 与 foreground flip 全部由 `@UiApplicationScope`（Main.immediate）串行；`@ApplicationScope`/Default 仅承载后台通知 polling，不得承载 foreground confirmation。
 
 ### 4.4 统一交接顺序（闭合 gpter-B#3 / groker-B4）
 
-**单一串行状态机（持锁），新 source active + notifier 切换成功后才关旧 source：**
+**单一串行状态机，新 source 经确认 ready + notifier 切换成功后才关旧 source：**
+
+> **D2 gate #4**：`StartSse` / `StartPoller` 不是「launch 即 ready」。协调器在 mutex 内分配单调 handoff token、记录 `(token, layer, identity)` 并发出 activation；随后**释放 mutex**等待 source acknowledgement；ack 后重新持锁，只有 token、layer、identity 都未变化才 commit。前台变化、timeout、用户关闭或新的 handoff 会使旧 token 失效，迟到 ack 只能清理自己，不能关闭旧 source 或翻 layer。任何网络连接、REST refresh、首帧 baseline 均不得在协调器 mutex 内 await。
+
+> **D1 gate #1 §4.4**：idle debounce 到期时**读取时间正确状态**——`statusAggregator.stateAtNow()`（按当前 `clock()` 即时投影），**不读** `globalState.value`（后者由 `freshnessJob` 保持一致，但 dispatcher 延迟可能令其在 debounce 到期的瞬间仍缓存着 stale `AllIdleFresh`）。`stateAtNow()` 与 `recompute` 共用同一个 `project(state, coverage, now)` 纯函数。
 
 **L1 内部转换**（前台）：
 - `L1-idle → L1-busy`：前台合法 `startForeground`（提升 dataSync FGS，§4.2）。
 - `L1-busy → L1-idle`：`stopForeground`（回普通 Service + SSE 保活）。
 
 **L2-active → L2-idle**（全 idle、debounce 到期；FGS 外壳保持）：
-1. 执行最终全 workdir snapshot poll；
-2. 启动 poller 并确认 job 已 active；
+1. 启动进程级 poller，并在 t=0 立即执行最终全 workdir snapshot poll（无首个 30s delay）；
+2. await 首次 poll acknowledgement；仅最终状态仍为 `AllIdleFresh` 才可继续，`Busy`/`Unknown` 则停止新 poller、保留 SSE、继续 L2-active；
 3. notifier 数据源切到 polling；
 4. `cancelSse`（Service 内，留下 §1.1 的 gap-dirty）；
 5. **进入 L2-idle**（外壳保持，不 stopSelf）。
 
 **L2-idle → L2-active**（poller/REST 发现 busy）或 **→ L1**（回前台）：
 1. FGS 仍在（L2 窗口内）/ 回前台（L1）；
-2. 建立并验证 SSE / status baseline；
+2. 建立 SSE，await 当前 identity 的有效 transport frame；随后 refresh status snapshot，并在 suspend 后复核 identity；仅 `Busy` / `AllIdleFresh` 是已验证 baseline；
 3. notifier 数据源切到 service source；
 4. 取消 poller。
+- stale identity、TOFU pending、exhausted 或 `Unknown` baseline 均不 commit，poller 保持运行。
 - 若回前台时仍 idle → `stopForeground` 回 **L1-idle**（普通 Service + SSE），不长期占 FGS（gpter 注记）。
 
 **→ L3 teardown**（`onTimeout()` / disconnect / 用户关后台）：
-1. notifier 数据源切到 polling；
-2. `cancelSse`；
-3. `stopForeground` / `stopSelf`；
-4. 之后 poller only，**不**自动提升。
+1. 启动 application-scope 进程 poller，t=0 执行并 await 第一次 poll attempt；
+2. notifier 数据源切到 polling；
+3. `cancelSse` 并等待 collector cancellation 完成；
+4. `stopForeground` / `stopSelf`；
+5. 之后 poller only，且 Service `onDestroy` / controller shutdown **不得**取消该 poller；它只刷新状态，**不**自动启动 FGS/SSE。
 
 > 不存在「两边都没数据源」的中间态。L3 teardown 后的恢复只能走 §4.1 合法入口。
 
@@ -176,7 +191,11 @@ reconfigure 严格顺序（不可颠倒）：
 3. **异步** bootstrap：激活/校验 tunnel → health probe + TLS/TOFU gate → `getSessionStatus`（**全局，按 §3 归并，非 fan-out**）。
 4. **全局 busy/retry** → 保持 FGS（**L2-active**）+ `connectSSE(currentWorkdir)` → 事件进 `events`。
 5. **权威全 idle** → **`stopForeground` / `stopSelf` → 进入 L3**（poller only，不占 FGS）；占位通知撤销。
-6. `SSEConnectionExhausted` → service 级**长期重试 / degraded**（不等进程重启）。
+6. `SSEConnectionExhausted` → 每次 transport outage 先且仅先发一次 gap-dirty；随后做 **3 次额外 service 级 collector 尝试**，基础延迟严格为 `30s / 2m / 5m`，每次注入 `±20%` jitter。首个当前 identity 的有效 frame 重置预算并完成 transport readiness；intentional cancel / stale identity 不发 false gap、不启动 retry。三次均失败后才且仅一次标记 degraded/disconnected，并调用 lifecycle `onDisconnect()` 进入 L3；reconfigure / timeout / 用户关闭 / cancel 会取消 recovery。
+
+**D3 fresh-process 实现（gate #6）**：CC 与 Service 共用单例 `ConnectionBootstrapEngine`，按 effective persisted config 做 keyed single-flight；它从 `HostProfileStore + SettingsManager` 读取 host/basic-auth/workdir/tunnel/mTLS，串行完成 repository configure、tunnel activation、health、TLS capture/TOFU、`ServerCompatProfile` 与 `ConnectionIdentityStore.bind`。sticky null Intent 不依赖 Activity/CC 预热；无 Activity 的 TOFU capture 保存在 shared coordinator 并返回 degraded。Service bootstrap 网络失败使用严格延迟 `2s / 5s / 15s / 30s / 2m / 5m`（六次 delay、最多七次 probe），任一次恢复立即进入 §4 decision matrix，最终耗尽才回 L3。bootstrap 成功会为 sticky-created Service 注册当前 identity ownership；显式 launcher start 则在 Service 安装 exact identity owner 后才 ack。
+
+**D4-A M8/B2**：effective connection source 以持久化 `Manual|Profile` marker 明确选择，Service step-1 与 shared engine 必须调用同一 `EffectiveConnectionConfigResolver.resolve()`；不得以 URL 相等性推断。无 marker 的旧 profile payload 迁移为 Profile，legacy direct-only settings 迁移为 Manual。headless TOFU 保留 capture；Activity 回前台时原子 `promoteDegradedToPending()` 分配 fresh deferred 且只提示一次。Accept/Trust 应用 pin、刷新 image SSL 并重跑 shared engine；Cancel 清 UI/state，并向 degraded placeholder Service 发送无 identity close command完成 terminal cleanup。
 
 **未决 TOFU 且无 Activity**（闭合 gpter-MAJOR#2 / #5）：
 - 不无限等 UI deferred；不消耗 SSE 重试预算；
@@ -185,11 +204,24 @@ reconfigure 严格顺序（不可颠倒）：
 
 > `START_STICKY` 仅覆盖「进程被杀后系统可能拉起」，**不**保证及时、不保证 force-stop 后恢复。spec 不将其列为确定恢复入口。
 
+**D4-B（transport readiness / Starting→Ready ownership / reconfigure no-source / rollback）**：
+
+- **§4.4 transport readiness vs status authority（M3）**：`SourceActivation.Ready` 仅表示 **transport-ready**（首个有效当前 identity SSE frame / poller 首次 poll 完成），**不**携带 status verdict。协调器在 handoff commit 时读 `statusAggregator.stateAtNow()` 决定 layer 转换。SSE 首帧即完成 readiness（liveness + event + reset gap），**不**等待 REST status baseline——分离「transport 可证」与「host busy 权威」。30s transport activation timeout → `Rejected.TransportTimeout`（handoff cancels the attempted SSE collector）。
+- **§4.4 supplemental poller（M3）**：当 SSE Bootstrap/L2Idle-exit commit 时 `stateAtNow()` 为 Unknown → 提交 SSE transport + layer **并保留**进程 poller（`supplementalPollerActive`）；coordinator 后续观察到 Busy/AllIdleFresh 时 emit `StopPoller` + 清 flag。Unknown **永不**授权 idle teardown。
+- **§4.4 reconfigure 是有意 no-source barrier（M4）**：`teardownAndAwait(Reconfigure)` 专用路径——cancel pending handoff → `StopPoller`（终止旧 identity poller）→ `StopSse` + await cancellation → `StopForeground` → `StopSelf` → L3 → release ownership；**不 emit `StartPoller`**（旧 identity 在 `beginReconfigure()` 后有意失效，不做 stale replacement poll）。no-source 窗口仅持续 serialized repository rebuild / new bootstrap（§4.4 exception）。
+- **§4.4 commit/ownership race（D5-2 #4）**：`StartSse` 的 activation ack 必须在 token、layer、identity 仍匹配时才能 commit；reconfigure/supersede 后的迟到 ack 返回 `Superseded`，不切换 layer、不 `markReady`、不让 CC 写 Connected。
+- **§4.4 CC ownership window（D5-2 #4）**：engine 成功到 terminal ownership result 之间，CC 保持 `isConnected=false`、`isConnecting=true`、`ConnectionPhase.Connecting`；写 Connected 前再次调用 `identityStore.isCurrent(outcome.identity)`，陈旧结果只 settle false，不覆盖新 epoch 的 Connecting/其他状态。
+- **§4.4 EnsurePoller/StopPoller race（D5-3 #2-race）**：`EnsurePoller` 的 pending activation Job 必须由 controller 跟踪；后续 `StopPoller` 先取消该 Job 再调用 shell stop。`ProcessStatusPoller` 同时以单调 generation 在 first-poll 返回后、安装 loop 前复核；generation 已被 stop 改变时取消临时 loop 并返回 `Rejected.Superseded`。因此 StopPoller 严格胜出，迟到 EnsurePoller ack 不会留下脱离 coordinator runtime 的 process poller。
+- **§5 expire-after-Accept seam（D5-3 #4）**：attempt 被接受为 Starting 后若在 Stage 2 前过期，Starting owner 保留 attemptId，gate 回滚并调用 Service 的 `abortStartup`；Service 取消 bootstrap、执行一次 BootstrapFailure teardown（StopSse/StopForeground/StopSelf），避免 no-ownership live FGS/SSE 窗口。
+- **§5 ownership stages Starting→Ready（B1 / D5-2 #4）**：`OwnershipState` 两段——`Starting(identity)`（Service 验证 identity 后注册，闭合 unowned 窗口，但**不**完成 terminal waiter）/ `Ready(identity)`（SSE transport ready + coordinator commit 后 `markReady` 完成 terminal waiter → CC Connected）。Launcher 先通过 `prepareAttempt(identity)` 获得单调递增 `attemptId`、`starting` deferred 与 `terminal` deferred；只有 `starting` 有 5s deadline，接受后 `terminal` 不再受 launcher wall-clock 限制，30s 仅由 `StartSse` transport readiness 计时器负责。`attemptId` 随 bootstrap Intent 的 `EXTRA_ATTEMPT_ID` 传入 `registerStarting(identity, attemptId, ...)`，gate 必须同时验证 attemptId 与 identity。5s 到期先 `expireAttempt`；迟到 Service 得到 `RegisterStartingOutcome.Expired`，取消 bootstrap/SSE 并执行 `StopForeground` + `StopSelf`，绝不注册 ownership，因而不会出现 CC 已 Disconnected 而 Service 后续升格为 Ready 的 orphan owner。`failStarting(identity?, reason)` 是强制 rollback：完成 terminal w/ refusal + 释放 Starting + cancel/join SSE + stopForeground + stopSelf。`TeardownReason.BootstrapFailure` 即使 layer 已在 L3 也强制 terminal cleanup（L3 短路对 live placeholder Service 无效）。
+- **awaitable teardown 统一**：`teardownAndAwait(reason)` 是 canonical path；非 suspend Android 入口（onDisconnect/onTimeout/requestUserClose/terminal SSE callback/bootstrap failure/reconfigure）仅 `scope.launch { teardownAndAwait(...) }`；`handleUserClose` 已 suspend → 直接 await。`StreamingOwnershipGate` 重构为 `synchronized(lock)`（非 coroutine Mutex）+ `releaseNow(identity)`；`onDestroy` 移除 `runBlocking`。
+
 ---
 
 ## 6. FGS↔poller 无缝交接 + 统一 notifier（闭合 gpter-B#6；groker-B4）
 
 - 生命周期协调器串行（见 §4.4）。
+- poller 是 `@Singleton`、运行于 `@ApplicationScope` 的进程级 source：`startAndAwaitFirstPoll(identity, snapshot)` 取消并替换旧 job，t=0 refresh 后返回时间正确状态，再按 30s 周期运行；`stop()` 仅取消该 job。进入 L3 后它跨 `SessionStreamingService.onDestroy` 存活，且绝不自行启动 FGS/SSE。
 - **单一 `IslandNotifier`（应用级）** 持唯一 dedup store，复合业务键 `(serverGroupFp, workdir, sessionId, type)`；**不再**让 Service 与 `AppLifecycleMonitor` 各持 snapshot。
 - `AppLifecycleMonitor` 职责收敛为：进程前台信号源（§4.3）+ poller 机制宿主；不再被当作 SSE-cancel 所有者。
 - completion 通知归统一 notifier。
@@ -297,6 +329,9 @@ reconfigure 严格顺序（不可颠倒）：
 - Activity 重建：idle 帧不丢；SSC 由进程级 owner 持续 fold。
 - 后台非当前 workdir busy：全局 busy 源识别；不误停 SSE。
 - `sticky null Intent`：占位通知先贴 → 异步 bootstrap。
+- D3 sticky fresh process：仅持久配置即可完成 configure/tunnel/health/TOFU/identity；Busy→L2-active，权威 idle→`stopForeground`+`stopSelf`→L3；覆盖六档 bootstrap delay 的恢复与最终耗尽。
+- D3 ownership：background/platform reject/timeout/stale/different identity 均不得发布 Connected；exact Service ack 是 `onSettled(true)` 的唯一入口。
+- D3 reconfigure：并发 reconfigure 串行；每次 transaction 恰好一个 epoch；旧 transport join 必须先于 repository rebuild，`HostReconfigured(epoch)` 必须最后发布，旧 collector/frame 不得跨 transaction 存活。
 - `SSEConnectionExhausted`：service 级长期重试，不等进程重启。
 - 通知权限拒绝 / FGS 启动被拒：降级路径。
 - poller 交接（§4.4 双向）：无空窗、无双发。
@@ -334,10 +369,28 @@ reconfigure 严格顺序（不可颠倒）：
 
 | # | 决策 | 内容 | 落点 |
 |---|---|---|---|
-| U1 | 「划掉卡片就关」后台 | FGS ongoing 不可被系统划掉（Android 硬性）→ ongoing 通知常驻 **Action「关闭后台」** 触发 L3 teardown；非 ongoing（完成/decision）划掉走 `deleteIntent`。此即 §4.1「用户显式关后台」L3 触发。 | §4.1（已就地标注）/ dev-design §3.1.1 Action |
+| U1 | 「划掉卡片就关」后台 | FGS ongoing 不可被系统划掉（Android 硬性）→ ongoing 通知常驻 **Action「关闭后台」** 触发 L3 teardown；Action 的 PendingIntent 必须携带渲染时 identity（epoch、server-group fp、workdir、endpoint fp）。非 ongoing（完成/decision）划掉走 `deleteIntent`。 | §4.1（已就地标注）/ dev-design §3.1.1 Action |
 | U2 | Settings 整合系统通知设置 | **不设独立 app on/off 开关**。Settings→通知页 = ①`POST_NOTIFICATIONS` 权限状态+申请 ②每 channel 状态 ③「打开系统通知设置」deep-link（`ACTION_APP_NOTIFICATION_SETTINGS`）。 | dev-design P1.6 |
 | U3 | decision 通知可点跳对应会话页 | permission/question 通知点按 → deep-link MainActivity 带 `EXTRA_SESSION_ID`+workdir → `selectSession` + 切 Chat tab，落到该会话页直接授权/回答。ongoing/完成同样支持单 session deep-link。 | dev-design P1.5 / §3.1.1 contentIntent |
 
 **实现注记**：
-- U1 的「关闭后台」Action 须在所有 ongoing 子态（L2-active 单/多 busy、L2-idle、占位、TOFU-degraded）常驻；点击后 **重新查询 identity/status**（不盲用通知创建时的快照）再 teardown。
+- U1 的「关闭后台」Action 须在所有 ongoing 子态（L2-active 单/多 busy、L2-idle、占位、TOFU-degraded）常驻。点击后先比较 payload identity 与当前 identity：入口已 stale 则不查询、不 teardown；一致时以当前 identity 调 `StatusAggregatorInput.refresh(current, snapshotProvider.current())`，suspend 后再次复核 identity，epoch/任一 fingerprint 改变都中止。identity 稳定后无论结果是 Busy、AllIdleFresh 或 Unknown 均执行 teardown（显式关闭不以 busy 为 veto）。无 identity 的占位/TOFU-degraded 通知可直接关闭其前台外壳。
 - U3 需 app 侧具备「session deep-link」intent 处理（`EXTRA_SESSION_ID`+workdir → selectSession + 导航 Chat）；现有 `files?workdir=` deep-link 基础设施可扩展，Phase 1 落实时补齐。
+
+---
+
+## 17. 发布 / 回滚（D4-B，2026-07-14）
+
+> CP1-9 + D1/D2/D3/D4-A/D4-B 构成**一个不可分割的切换**。D1-D4 改变了 CP9 的契约（transport readiness、两段式 ownership、reconfigure no-source barrier、teardown 统一、`StreamingOwnershipGate` synchronized 重构），CP9 单独 revert 会复活已修复的 bug（B1 unowned window、M3 Unknown hang、M4 stale replacement poll 等）。
+
+**回滚纪律（MANDATORY）**：
+
+- **merge 前（PR 未合并）**：直接 discard / close 分支（`omos/notify-switchover`）。不存在「只回 CP9」的部分回滚。
+- **merge 后（squash / merge-commit 已进 main）**：
+  - squash 提交：`git revert <squash-sha>`（单 commit revert）。
+  - merge-commit：`git revert -m 1 <merge-sha>`。
+  - **线性连续区间**（CP1…D4-B 全在一个连续 commit range）：执行**一次** reviewed `git revert` 覆盖整个连续区间，**不**逐 commit revert（逐个会产生中间态——例如只回 D4-B 但保留 D4-A 会留下对已不存在的 `SourceActivation.Ready(state)` 的引用，编译失败）。
+- **禁止**：不得创建并行的「legacy SSE owner」runtime flag / feature toggle 来「保留旧路径同时运行新路径」——SSE 所有权是单一路径（模型 A），双轨会复活 gpter-M1（两个 SSE 状态机）且无法在测试矩阵中覆盖。
+- **merge SHA 记录**：合并后在本文档记录 merge/squash SHA：
+  - _merge SHA: `<待合并后填写>`_
+- **验证 revert 完整性**：revert 后必须跑 `./scripts/check.sh` 全绿（recommit 会因 D4-A/D4-B 互相依赖的符号删除/改名而失败——这正是「不可分割」的证据；若 revert 后 check.sh 失败说明 revert 不完整，需扩大 revert 范围到整个连续区间）。

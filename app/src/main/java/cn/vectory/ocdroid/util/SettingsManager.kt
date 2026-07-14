@@ -63,6 +63,14 @@ class SettingsManager @Inject constructor(
         get() = encryptedPrefs.getString(KEY_CURRENT_HOST_PROFILE_ID, null)
         set(value) = encryptedPrefs.edit().putString(KEY_CURRENT_HOST_PROFILE_ID, value).apply()
 
+    /** Explicit Manual/Profile bootstrap source; null means legacy migration is pending. */
+    var effectiveConnectionSourceMarker: String?
+        get() = encryptedPrefs.getString(KEY_EFFECTIVE_CONNECTION_SOURCE, null)
+        set(value) = encryptedPrefs.edit().apply {
+            if (value == null) remove(KEY_EFFECTIVE_CONNECTION_SOURCE)
+            else putString(KEY_EFFECTIVE_CONNECTION_SOURCE, value)
+        }.apply()
+
     fun basicAuthPassword(passwordId: String): String? {
         if (passwordId == LEGACY_BASIC_AUTH_PASSWORD_ID) return password
         return encryptedPrefs.getString(basicAuthPasswordKey(passwordId), null)
@@ -890,7 +898,8 @@ class SettingsManager @Inject constructor(
             KEY_USERNAME,
             KEY_PASSWORD,
             KEY_HOST_PROFILES,
-            KEY_CURRENT_HOST_PROFILE_ID
+            KEY_CURRENT_HOST_PROFILE_ID,
+            KEY_EFFECTIVE_CONNECTION_SOURCE,
         )
         // R-20 Phase 0: cache DB key MUST survive a "reset local data" — if it
         // is wiped, the SQLCipher DB becomes permanently unreadable (the key
@@ -939,6 +948,7 @@ class SettingsManager @Inject constructor(
         private const val KEY_PASSWORD = "password"
         private const val KEY_HOST_PROFILES = "host_profiles_json"
         private const val KEY_CURRENT_HOST_PROFILE_ID = "current_host_profile_id"
+        private const val KEY_EFFECTIVE_CONNECTION_SOURCE = "effective_connection_source"
         private const val KEY_SESSION_ID = "session_id"
         private const val KEY_LAST_NAV_PAGE = "last_nav_page"
         private const val KEY_LAST_ROUTE = "last_route"
