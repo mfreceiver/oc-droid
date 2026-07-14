@@ -138,7 +138,6 @@
     <string name="cache_management_clear_session_cd">Clear session cache</string>
     <string name="sessions_recent_section">Recent</string>
     <string name="sessions_by_workdir_section">By workdir</string>
-    <string name="chat_session_overflow">Session actions</string>
     <string name="chat_add_menu_title">Add to message</string>
     <string name="chat_add_photos">Photos</string>
     <string name="chat_add_photos_desc">Attach images to the next message</string>

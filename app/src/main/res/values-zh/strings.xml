@@ -133,7 +133,6 @@
     <string name="cache_management_clear_session_cd">清除会话缓存</string>
     <string name="sessions_recent_section">最近</string>
     <string name="sessions_by_workdir_section">按工作目录</string>
-    <string name="chat_session_overflow">会话操作</string>
     <string name="chat_add_menu_title">添加到消息</string>
     <string name="chat_add_photos">图片</string>
     <string name="chat_add_photos_desc">附加图片到下一条消息</string>
