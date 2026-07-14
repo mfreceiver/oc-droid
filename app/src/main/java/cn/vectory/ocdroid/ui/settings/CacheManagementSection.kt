@@ -429,6 +429,9 @@ private fun CachedSessionRowItem(
             // §setux #8: 清除按钮改为无圆角矩形 + 透明底 + primary 图标，
             // 无文字。紧凑 36dp 方形，contentDescription 走专用无障碍 key
             // (cache_management_clear_session_cd)。
+            // Material Button retains Compose's automatic minimum touch-target
+            // expansion even though the locked painted footprint is 36dp.
+            // elevation=null keeps the transparent visual shadow-free.
             Button(
                 onClick = onClearSession,
                 shape = RectangleShape,
@@ -436,6 +439,7 @@ private fun CachedSessionRowItem(
                     containerColor = Color.Transparent,
                     contentColor = MaterialTheme.colorScheme.primary
                 ),
+                elevation = null,
                 contentPadding = PaddingValues(0.dp),
                 modifier = Modifier.size(36.dp)
             ) {

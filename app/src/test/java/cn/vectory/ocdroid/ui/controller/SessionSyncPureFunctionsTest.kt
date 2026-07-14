@@ -127,6 +127,19 @@ class SessionSyncPureFunctionsTest {
     }
 
     @Test
+    fun `session created with unresolved parent invalidates every complete root`() {
+        val state = SessionListState(
+            sessions = listOf(Session(id = "A", directory = "/x")),
+            completeRootIds = setOf("A", "B"),
+        )
+        val unknownGrandchild = Session(id = "G", directory = "/x", parentId = "missing-parent")
+
+        val (next, _) = state.applySessionCreated(unknownGrandchild)
+
+        assertTrue(next.completeRootIds.isEmpty())
+    }
+
+    @Test
     fun `applySessionUpsert replaces an existing session id`() {
         val state = SessionListState(sessions = listOf(
             Session(id = "s1", directory = "/tmp", title = "old title")

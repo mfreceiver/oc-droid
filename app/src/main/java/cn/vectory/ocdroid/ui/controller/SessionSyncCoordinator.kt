@@ -1329,10 +1329,13 @@ internal fun SessionListState.applySessionUpsert(updated: Session): Pair<Session
 private fun SessionListState.upsertAndInvalidateTree(session: Session): SessionListState {
     val updatedSessions = upsertSession(sessions, session)
     val byId = allSessionsById(updatedSessions, directorySessions, childSessions)
-    val rootId = rootIdOf(session.id, byId) ?: session.id
+    val rootId = rootIdOf(session.id, byId)
     return copy(
         sessions = updatedSessions,
-        completeRootIds = completeRootIds - rootId,
+        // An unresolved parent chain cannot be attributed safely. Invalidate
+        // every completeness proof rather than risk a false "all descendants
+        // idle" result until hydration reconnects the new node to its root.
+        completeRootIds = if (rootId == null) emptySet() else completeRootIds - rootId,
     )
 }
 
