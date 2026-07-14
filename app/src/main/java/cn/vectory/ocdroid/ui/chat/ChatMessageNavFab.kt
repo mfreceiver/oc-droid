@@ -4,18 +4,22 @@ package cn.vectory.ocdroid.ui.chat
 
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.layout.WindowInsets
-import androidx.compose.foundation.layout.isImeVisible
+import androidx.compose.foundation.layout.ime
 import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material3.Icon
 import androidx.compose.material3.SmallFloatingActionButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import cn.vectory.ocdroid.R
+import cn.vectory.ocdroid.ui.theme.Dimens
 import kotlinx.coroutines.launch
 
 /**
@@ -30,7 +34,7 @@ import kotlinx.coroutines.launch
  *  - 按下 → animateScrollToItem(0)（一段平滑动画跳到最新），随后隐藏。
  *  - 仅在用户"向新滑动"（从历史往最新方向滚）时由调用方浮现。
  *  - 静置 3s 或按一次后由调用方隐藏。
- *  - 键盘打开时不渲染。
+ *  - 键盘打开时下滑+淡出（由 IME 实时 inset 高度驱动，与 composer / 底栏同步）。
  *
  * reverseLayout 语义：index 0 = 最新 = 视觉底部，故"跳到最新"= 滚到 index 0。
  *
@@ -47,14 +51,36 @@ internal fun ChatMessageNavFab(
     onJumpDone: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
-    // 键盘打开 → 不渲染。
-    if (WindowInsets.isImeVisible) return
+    // §kbd-ime: hide the FAB by sliding it DOWN + fading, driven by the LIVE
+    // ime inset height (in lockstep with the composer's imePadding and the
+    // bottom bar's own graphicsLayer slide). Replaces the old
+    // `if (WindowInsets.isImeVisible) return` early-exit, which dropped the
+    // node in a single composition-frame and produced a pop on dismiss. The
+    // ime bottom inset is read here in composition (WindowInsets.ime's getter
+    // is @Composable, so it cannot be read inside the graphicsLayer lambda);
+    // recomposition fires per-frame during the IME spring, keeping the FAB
+    // synced with the composer. graphicsLayer (not offset) keeps the FAB's
+    // INPUT bounds at its aligned spot while it is visually gone. The fade +
+    // slide complete across the first fabShiftPx of ime height (the FAB's own
+    // ~56dp), so the button clears off the bottom edge as it vanishes.
+    val density = LocalDensity.current
+    val fabShiftPx = remember(density) {
+        with(density) { (Dimens.touchTargetMin + Dimens.spacing2).toPx() }
+    }
+    val imeBottomPx = WindowInsets.ime.getBottom(density).toFloat()
 
     val scope = rememberCoroutineScope()
 
     // §fix-nav-position: modifier（含 .align(BottomEnd)）必须应用在 AnimatedVisibility
-    // 上——它是外层 Box 的直接子节点。
-    AnimatedVisibility(visible = visible, modifier = modifier) {
+    // 上——它是外层 Box 的直接子节点。graphicsLayer 链在最外层，整体平移+淡化 FAB。
+    AnimatedVisibility(
+        visible = visible,
+        modifier = modifier.graphicsLayer {
+            val progress = (imeBottomPx / fabShiftPx).coerceIn(0f, 1f)
+            translationY = progress * fabShiftPx
+            alpha = 1f - progress
+        },
+    ) {
         SmallFloatingActionButton(
             onClick = {
                 // §navfab-press: onJump 同步先执行——立即隐藏按钮（按一次即消失）+

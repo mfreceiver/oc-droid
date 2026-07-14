@@ -13,7 +13,7 @@ import androidx.compose.foundation.layout.consumeWindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.isImeVisible
+import androidx.compose.foundation.layout.ime
 import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
@@ -35,9 +35,12 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.contentDescription
@@ -137,24 +140,51 @@ fun AppShell(orchestratorVM: OrchestratorViewModel, navBarBottomDp: Dp = 0.dp) {
     // (the DecorView consumes the inset before Compose sees it), so the value
     // is sourced from ViewCompat/WindowInsetsCompat where it is reliable.
 
+    // §kbd-ime: drive the bottom bar's position/alpha from the LIVE ime inset
+    // height instead of the binary `WindowInsets.isImeVisible` flag. The flag
+    // flips in a single composition-frame, so the old `if (!isImeVisible)`
+    // guard made the bar POP in one frame late on dismiss — a two-phase jank
+    // (composer slides smoothly via imePadding, then the bar snaps). The ime
+    // bottom inset is read here in composition (WindowInsets.ime's getter is
+    // @Composable, so it cannot be read inside the graphicsLayer lambda);
+    // recomposition fires per-frame during the IME spring, so the bar slides
+    // + fades in lockstep with the composer. barHeightPx is the bar's full
+    // painted height (tab Row + navBarBottomDp gesture-pill spacer), used to
+    // clamp the slide so the bar travels exactly its own height and is fully
+    // faded by the time the IME is open. graphicsLayer (not Modifier.offset)
+    // is used so the off-screen bar's INPUT bounds stay at the layout
+    // position (behind the IME) and never intercept composer touches.
+    val density = LocalDensity.current
+    val barHeightPx = remember(density, navBarBottomDp) {
+        with(density) { (Dimens.touchTargetMin + Dimens.spacing2 + navBarBottomDp).toPx() }
+    }
+    val imeBottomPx = WindowInsets.ime.getBottom(density).toFloat()
+
     Scaffold(
         contentWindowInsets = WindowInsets(0, 0, 0, 0),
         bottomBar = {
-            if (!WindowInsets.isImeVisible) {
-                CompactBottomBar(
-                    currentRoute = currentRoute,
-                    sessionsBadgeVisible = sessionsBadgeVisible,
-                    navBarBottomDp = navBarBottomDp,
-                    onSelect = { route ->
-                        if (route == currentRoute) {
-                            navController.popBackStack(NavRoute.homeRoute(route), inclusive = false)
-                            orchestratorVM.emitReselect(route)
-                        } else {
-                            orchestratorVM.setLastRoute(route)
-                        }
-                    },
-                )
-            }
+            CompactBottomBar(
+                currentRoute = currentRoute,
+                sessionsBadgeVisible = sessionsBadgeVisible,
+                navBarBottomDp = navBarBottomDp,
+                onSelect = { route ->
+                    if (route == currentRoute) {
+                        navController.popBackStack(NavRoute.homeRoute(route), inclusive = false)
+                        orchestratorVM.emitReselect(route)
+                    } else {
+                        orchestratorVM.setLastRoute(route)
+                    }
+                },
+                modifier = Modifier.graphicsLayer {
+                    val imePx = imeBottomPx.coerceIn(0f, barHeightPx)
+                    // Positive translationY slides the bar DOWN off the bottom
+                    // edge as the IME grows; alpha fades it out over the same
+                    // range. On dismiss imePx→0 so the bar slides back UP into
+                    // place and fades in — in lockstep, no second-phase pop.
+                    translationY = imePx
+                    alpha = 1f - (imePx / barHeightPx).coerceIn(0f, 1f)
+                },
+            )
         },
     ) { innerPadding ->
         NavHost(
