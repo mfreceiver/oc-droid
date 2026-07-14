@@ -595,18 +595,18 @@ internal fun launchLoadChildSessions(
             val hydration = loadCompleteSessionTrees(repository, listOf(root))
             if (rootId in hydration.completeRootIds) {
                 val statusBefore = slices.sessionList.value.sessionStatuses
-                val statusSnapshot = repository.getSessionStatus().getOrElse {
-                    reportNonFatalIssue(tag, "Failed to refresh statuses after tree hydration for $rootId", it)
-                    return@launch
-                }
+                val statusSnapshot = repository.getSessionStatus().getOrNull()
                 slices.mutateSessionList {
                     val nextChildren = it.childSessions + hydration.childrenByParent
-                    val authoritativeIds = allSessionsById(it.sessions, it.directorySessions, nextChildren).keys
-                    val normalizedStatuses = normalizeAuthoritativeStatusSnapshot(statusSnapshot, authoritativeIds)
+                    val nextStatuses = if (statusSnapshot != null) {
+                        val authoritativeIds = allSessionsById(it.sessions, it.directorySessions, nextChildren).keys
+                        val normalizedStatuses = normalizeAuthoritativeStatusSnapshot(statusSnapshot, authoritativeIds)
+                        mergeStatusSnapshot(statusBefore, it.sessionStatuses, normalizedStatuses)
+                    } else it.sessionStatuses
                     it.copy(
                         childSessions = nextChildren,
                         completeRootIds = it.completeRootIds + rootId,
-                        sessionStatuses = mergeStatusSnapshot(statusBefore, it.sessionStatuses, normalizedStatuses),
+                        sessionStatuses = nextStatuses,
                     )
                 }
             } else {

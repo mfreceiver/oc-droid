@@ -13,6 +13,7 @@ import cn.vectory.ocdroid.ui.controller.HostProfileController
 import cn.vectory.ocdroid.ui.controller.SessionSwitcher
 import cn.vectory.ocdroid.ui.controller.SessionSyncCoordinator
 import cn.vectory.ocdroid.ui.controller.UnreadSoakController
+import cn.vectory.ocdroid.ui.controller.ControllerEffect
 import cn.vectory.ocdroid.util.SettingsManager
 import cn.vectory.ocdroid.util.TrafficTracker
 import dagger.Module
@@ -115,11 +116,13 @@ object ControllerModule {
         @UiApplicationScope appScope: CoroutineScope,
         store: SharedStateStore,
         repository: OpenCodeRepository,
+        effectBus: SharedEffectBus,
     ): UnreadSoakController = UnreadSoakController(
         appLifecycleMonitor = appLifecycleMonitor,
         scope = appScope,
         store = store,
         requestTreeHydration = ForegroundSessionTreeHydrator(repository, store, appScope)::request,
+        requestStatusRefresh = { effectBus.tryEmitEffect(ControllerEffect.LoadSessionStatus) },
     )
 
     @Provides

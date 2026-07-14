@@ -55,6 +55,7 @@ class UnreadSoakController @Inject constructor(
     private val clock: () -> Long = { System.currentTimeMillis() },
     private val autoStart: Boolean = true,
     private val requestTreeHydration: (Set<String>) -> Unit = {},
+    private val requestStatusRefresh: () -> Unit = {},
 ) {
     /** Current sweep loop job; null while backgrounded (or not yet started). */
     @Volatile
@@ -119,6 +120,11 @@ class UnreadSoakController @Inject constructor(
             .filter { it !in sl.completeRootIds }
             .toSet()
         if (incompleteIdleRoots.isNotEmpty()) requestTreeHydration(incompleteIdleRoots)
+        val hasUnknownCompleteDescendant = sl.completeRootIds.any { rootId ->
+            subtreeIds(rootId, sl.sessions, sl.directorySessions, sl.childSessions)
+                .any { it !in sl.sessionStatuses }
+        }
+        if (hasUnknownCompleteDescendant) requestStatusRefresh()
         evaluateAndApply(clock())
     }
 

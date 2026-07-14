@@ -2,16 +2,20 @@ package cn.vectory.ocdroid.ui.controller
 
 import cn.vectory.ocdroid.data.model.Session
 import cn.vectory.ocdroid.data.repository.OpenCodeRepository
+import cn.vectory.ocdroid.data.model.SessionStatus
+import cn.vectory.ocdroid.ui.SharedStateStore
 import io.mockk.coEvery
 import io.mockk.mockk
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.test.runTest
+import kotlinx.coroutines.test.advanceUntilIdle
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.util.concurrent.atomic.AtomicInteger
 
+@OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
 class SessionTreeHydratorTest {
     private val repository = mockk<OpenCodeRepository>()
     private fun session(id: String, parentId: String? = null) =
@@ -63,5 +67,25 @@ class SessionTreeHydratorTest {
 
         assertEquals(8, result.completeRootIds.size)
         assertTrue("observed ${maxActive.get()} concurrent requests", maxActive.get() <= 3)
+    }
+
+    @Test
+    fun `status failure caches complete tree while descendants remain unknown`() = runTest {
+        val store = SharedStateStore()
+        val root = session("A")
+        val child = session("C", "A")
+        store.mutateSessionList {
+            it.copy(sessions = listOf(root), sessionStatuses = mapOf("A" to SessionStatus("idle")))
+        }
+        coEvery { repository.getChildren("A") } returns Result.success(listOf(child))
+        coEvery { repository.getChildren("C") } returns Result.success(emptyList())
+        coEvery { repository.getSessionStatus() } returns Result.failure(IllegalStateException("offline"))
+
+        ForegroundSessionTreeHydrator(repository, store, this).request(setOf("A"))
+        advanceUntilIdle()
+
+        assertTrue("A" in store.sessionListFlow.value.completeRootIds)
+        assertEquals(listOf("C"), store.sessionListFlow.value.childSessions["A"]?.map { it.id })
+        assertFalse("C" in store.sessionListFlow.value.sessionStatuses)
     }
 }

@@ -90,7 +90,7 @@ internal class ForegroundSessionTreeHydrator(
             try {
                 val result = loadCompleteSessionTrees(repository, roots)
                 val statusBefore = store.sessionListFlow.value.sessionStatuses
-                val statusSnapshot = repository.getSessionStatus().getOrElse { return@launch }
+                val statusSnapshot = repository.getSessionStatus().getOrNull()
                 store.mutateSessionList { current ->
                     val currentById = allSessionsById(current.sessions, current.directorySessions, current.childSessions)
                     val stillSameIdentity = store.hostFlow.value.currentHostProfileId == hostId
@@ -102,16 +102,19 @@ internal class ForegroundSessionTreeHydrator(
                         validRoots.any { rootId -> parentId in treeIds(rootId, currentById + result.childrenByParent.values.flatten().associateBy { it.id }) }
                     }
                     val nextChildren = current.childSessions + validParents
-                    val authoritativeIds = allSessionsById(
-                        current.sessions,
-                        current.directorySessions,
-                        nextChildren,
-                    ).keys
-                    val normalizedStatuses = normalizeAuthoritativeStatusSnapshot(statusSnapshot, authoritativeIds)
+                    val nextStatuses = if (statusSnapshot != null) {
+                        val authoritativeIds = allSessionsById(
+                            current.sessions,
+                            current.directorySessions,
+                            nextChildren,
+                        ).keys
+                        val normalizedStatuses = normalizeAuthoritativeStatusSnapshot(statusSnapshot, authoritativeIds)
+                        mergeStatusSnapshot(statusBefore, current.sessionStatuses, normalizedStatuses)
+                    } else current.sessionStatuses
                     current.copy(
                         childSessions = nextChildren,
                         completeRootIds = current.completeRootIds + validRoots,
-                        sessionStatuses = mergeStatusSnapshot(statusBefore, current.sessionStatuses, normalizedStatuses),
+                        sessionStatuses = nextStatuses,
                     )
                 }
             } finally {

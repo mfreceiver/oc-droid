@@ -63,6 +63,7 @@ class UnreadSoakControllerTest {
 
     private fun makeController(
         requestTreeHydration: (Set<String>) -> Unit = {},
+        requestStatusRefresh: () -> Unit = {},
     ): UnreadSoakController = UnreadSoakController(
         appLifecycleMonitor = stubMonitor(),
         scope = scope,
@@ -70,6 +71,7 @@ class UnreadSoakControllerTest {
         clock = { nowMs },
         autoStart = false,
         requestTreeHydration = requestTreeHydration,
+        requestStatusRefresh = requestStatusRefresh,
     )
 
     private fun stubMonitor(): AppLifecycleMonitor = mockk(relaxed = true) {
@@ -102,7 +104,7 @@ class UnreadSoakControllerTest {
     @Test
     fun `incomplete idle root requests hydration and cannot start soak`() {
         val requested = mutableSetOf<String>()
-        val controller = makeController { requested += it }
+        val controller = makeController(requestTreeHydration = { requested += it })
         seedSessions(root("A"))
         store.mutateSessionList { it.copy(completeRootIds = emptySet()) }
         seedStatuses("A" to idle)
@@ -140,6 +142,25 @@ class UnreadSoakControllerTest {
         controller.tick()
 
         assertEquals(1_000L, store.unreadFlow.value.idleSince["A"])
+    }
+
+    @Test
+    fun `complete tree with unknown descendant retries status without rehydrating tree`() {
+        var statusRefreshes = 0
+        val hydratedAgain = mutableSetOf<String>()
+        val controller = makeController(
+            requestTreeHydration = { hydratedAgain += it },
+            requestStatusRefresh = { statusRefreshes += 1 },
+        )
+        seedSessions(root("A"), child("C", "A"))
+        seedStatuses("A" to idle)
+        store.mutateSessionList { it.copy(completeRootIds = setOf("A")) }
+
+        controller.tick()
+
+        assertEquals(1, statusRefreshes)
+        assertTrue(hydratedAgain.isEmpty())
+        assertNull(store.unreadFlow.value.idleSince["A"])
     }
 
     @Test
