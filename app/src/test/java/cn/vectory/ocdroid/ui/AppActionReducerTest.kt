@@ -942,6 +942,41 @@ class AppActionReducerTest {
     }
 
     @Test
+    fun `gpter-residual reduce BulkSessionsRefreshed discards cached completeness proofs and bumps epoch`() {
+        // §gpter-residual: a bulk refresh is authoritative for structure, so
+        // cached completeRootIds may be stale if SSE dropped events. The
+        // reducer must clear them and bump the epoch so in-flight hydration is
+        // dropped fail-closed (mirroring the REST full-list replace path).
+        val current = Session(id = "current", directory = "/x")
+        val prior = StoreState.initial().copy(
+            sessionList = SessionListState(
+                openSessionIds = listOf("current"),
+                completeRootIds = setOf("stale-root"),
+                completenessEpoch = 7L,
+            ),
+        )
+
+        val out = reduce(
+            prior,
+            AppAction.BulkSessionsRefreshed(
+                sessions = listOf(current),
+                openSessionIds = listOf("current"),
+                hasMoreSessions = false,
+            ),
+        )
+
+        assertTrue(
+            "BulkSessionsRefreshed discards stale completeRootIds",
+            out.sessionList.completeRootIds.isEmpty(),
+        )
+        assertEquals(
+            "BulkSessionsRefreshed bumps completeness epoch",
+            8L,
+            out.sessionList.completenessEpoch,
+        )
+    }
+
+    @Test
     fun `FIX-C reduce BulkSessionsRefreshed clears chat when current session is archived`() {
         // FIX-C: if the current session is among the archived, the reducer
         // atomically clears chat in the SAME committed state as the list write

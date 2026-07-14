@@ -85,11 +85,16 @@ class BackgroundUnreadPoller internal constructor(
         var committedSessionsById: Map<String, cn.vectory.ocdroid.data.model.Session> = emptyMap()
         store.mutateState { snapshot ->
             if (!identityValid() || snapshot.host.currentHostProfileId != startHostId) return@mutateState snapshot
+            // Bump the epoch alongside the authoritative completeness snapshot:
+            // any foreground hydration captured an earlier epoch is dropped at
+            // its commit (fail-closed) instead of re-certifying roots against a
+            // stale session map and overwriting this background result.
             val nextSessionList = snapshot.sessionList.copy(
                 sessions = sessions,
                 childSessions = children,
                 completeRootIds = hydration.completeRootIds,
                 sessionStatuses = normalizedStatuses,
+                completenessEpoch = snapshot.sessionList.completenessEpoch + 1L,
             )
             val sessionsById = allSessionsById(sessions, nextSessionList.directorySessions, children)
             val archivedTreeIds = roots.filter { it.isArchived }

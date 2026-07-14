@@ -71,8 +71,27 @@ class BackgroundUnreadPollerTest {
         assertTrue(poller.poll().isEmpty())
         now = 31_000L
 
-        assertEquals(listOf("A"), poller.poll().map { it.rootId })
+        assertEquals(listOf("A"), poller().poll().map { it.rootId })
     }
+
+    @Test
+    fun `successful background poll bumps completeness epoch to drop in-flight foreground hydration`() = runTest {
+        // §gpter-residual: the background poll writes an authoritative
+        // completeness snapshot. Bumping the epoch makes any foreground
+        // hydration captured before this poll fail-closed at its commit
+        // instead of re-certifying roots against a stale session map.
+        stubSnapshot(listOf(root("A")), mapOf("A" to SessionStatus("idle")))
+        assertEquals("default epoch", 0L, store.sessionListFlow.value.completenessEpoch)
+
+        assertTrue(poller().poll().isEmpty())
+
+        assertEquals(
+            "background poll bumped the completeness epoch",
+            1L,
+            store.sessionListFlow.value.completenessEpoch,
+        )
+    }
+
 
     @Test
     fun `current root and busy child produce no background alert`() = runTest {

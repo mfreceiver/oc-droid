@@ -359,6 +359,12 @@ internal fun reduce(state: StoreState, action: AppAction): StoreState = when (ac
             hasMoreSessions = action.hasMoreSessions,
             isLoadingMoreSessions = false,
             isRefreshingSessions = false,
+            // A bulk refresh is authoritative for structure (archive-sync),
+            // so any cached completeness proof may be stale if SSE dropped
+            // events. Discard proofs and bump the epoch so in-flight hydration
+            // is dropped fail-closed; the next tick re-hydrates fresh trees.
+            completeRootIds = emptySet(),
+            completenessEpoch = state.sessionList.completenessEpoch + 1L,
         )
         // Compute the subtree UNION over ALL archived ids. Each archived root
         // may have descendants that did NOT get their own archive event —
