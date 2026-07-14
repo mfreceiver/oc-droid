@@ -25,6 +25,7 @@ import cn.vectory.ocdroid.service.streaming.ServiceShell
 import cn.vectory.ocdroid.service.streaming.ServiceSseConnectionOwner
 import cn.vectory.ocdroid.service.streaming.SessionSnapshotProvider
 import cn.vectory.ocdroid.service.streaming.SessionStreamingController
+import cn.vectory.ocdroid.service.streaming.UserCloseRequestParser
 import cn.vectory.ocdroid.service.status.StatusAggregator
 import cn.vectory.ocdroid.service.status.StatusAggregatorInput
 import cn.vectory.ocdroid.ui.SharedEffectBus
@@ -125,6 +126,11 @@ class SessionStreamingService : Service() {
     @Inject lateinit var sharedStateStore: SharedStateStore
     @Inject lateinit var sharedEffectBus: SharedEffectBus
 
+    // ── D2 (gate #4 / #7): process-level poller + SSE recovery policy. ──
+
+    @Inject lateinit var processStatusPoller: cn.vectory.ocdroid.service.streaming.ProcessStatusPoller
+    @Inject lateinit var sseRecoveryPolicy: cn.vectory.ocdroid.service.streaming.SseRecoveryPolicy
+
     /**
      * Service-lifetime [CoroutineScope] bound to [MainScope] (Main thread).
      * `startForeground` / `stopForeground` / notification updates MUST be
@@ -174,8 +180,15 @@ class SessionStreamingService : Service() {
      * each shell call to `ServiceCompat` / `NotificationManagerCompat` /
      * `stopSelf` / SSE side-effects.
      *
-     * SSE side ([shellSseConnect] / [shellSseDisconnect]) forward to
-     * [sseOwner] — the collector is owned here (CP9).
+     * D2 gate #4: [startPoller] delegates to [processStatusPoller] which
+     * runs the loop on `@ApplicationScope` (survives this Service's
+     * onDestroy); [stopPoller] cancels the loop. The shell method is
+     * `suspend` so the controller's await measures the immediate-first-poll
+     * latency; the loop continues independently after the suspend returns.
+     *
+     * SSE side ([connectSse] / [disconnectSse]) forward to [sseOwner] — the
+     * collector is owned here (CP9); D2 gate #7 wires [sseRecoveryPolicy]
+     * into the owner for the §5 step 6 service-level retry budget.
      */
     private val shell: ServiceShell = object : ServiceShell {
         override fun startForeground(spec: NotificationSpec) =
@@ -189,25 +202,37 @@ class SessionStreamingService : Service() {
             )
         }
         override fun serviceStopSelf() = this@SessionStreamingService.stopSelf()
-        override fun startPoller() {
-            // Production marker no-op — the controller owns the poller job.
-            // Tests use a recording fake to assert §4.4 source-switch ordering.
+        override suspend fun startPoller(
+            identity: ConnectionIdentity,
+            snapshot: cn.vectory.ocdroid.service.status.StatusSnapshot,
+        ): cn.vectory.ocdroid.service.streaming.SourceActivation {
+            // D2 gate #4: delegate to the process-level poller. The loop
+            // runs on @ApplicationScope and survives this Service's death.
+            return processStatusPoller.startAndAwaitFirstPoll(identity, snapshot)
         }
         override fun stopPoller() {
-            // Likewise.
+            // D2 gate #4: cancel the process-level poller loop. The
+            // coordinator emits StopPoller on the L2Idle→L2Active commit OR
+            // when the DebounceFire handoff cancels a non-idle poller.
+            processStatusPoller.stop()
         }
-        override fun connectSse(identity: ConnectionIdentity) {
-            // CP9: SSE collector is owned here. The coordinator's §4.4
-            // ordering guarantees StartSse is emitted BEFORE StopPoller (new
-            // source active before retiring old).
-            sseOwner?.connect(identity)
+        override suspend fun connectSse(identity: ConnectionIdentity): cn.vectory.ocdroid.service.streaming.SourceActivation {
+            // CP9 + D2 gate #4: SSE collector owned here; connect is suspend
+            // returning SourceActivation. The coordinator's §4.4 ordering
+            // guarantees StartSse is emitted BEFORE StopPoller (new source
+            // active before retiring old); the commit (StopPoller + layer
+            // flip) runs only after this returns Ready.
+            return sseOwner?.connect(identity)
+                ?: cn.vectory.ocdroid.service.streaming.SourceActivation.Rejected.TofuPending
         }
-        override fun disconnectSse() {
-            // CP9: SSE collector teardown. The coordinator emits StopSse
-            // AFTER StartPoller (new source active before retiring old);
-            // markGap=true so a §4.4 teardown stamps the gap-dirty signal
-            // via the CancelSse effect (SessionSyncCoordinator observes it
-            // and reconciles on the next server.connected).
+        override suspend fun disconnectSse() {
+            // CP9 + D2 gate #7: SSE collector teardown. The coordinator emits
+            // StopSse AFTER StartPoller (new source active before retiring
+            // old); markGap=true so a §4.4 teardown stamps the gap-dirty
+            // signal via the idempotent CancelSse effect.
+            //
+            // The shell contract is suspend so cancellation is joined before
+            // the following StopForeground / StopSelf commands execute.
             sseOwner?.disconnect(markGap = true)
         }
     }
@@ -238,6 +263,11 @@ class SessionStreamingService : Service() {
         // instance). The owner publishes into the process-wide
         // [sseEventStream]; the bridge (eagerly started from AppCore init)
         // routes through the §2 epoch guard + §11 dual-channel.
+        //
+        // D2 gate #4 / #7: the owner now needs the status-aggregator input +
+        // snapshot provider (first-frame readiness baseline) + the recovery
+        // policy (§5 step 6 service-level retries). The status snapshot
+        // provider is the same one the controller / poller uses.
         sseOwner = ServiceSseConnectionOwner(
             scope = scope,
             repository = repository,
@@ -246,6 +276,10 @@ class SessionStreamingService : Service() {
             sseEventStream = sseEventStream,
             sharedStateStore = sharedStateStore,
             sharedEffectBus = sharedEffectBus,
+            statusAggregatorInput = statusAggregatorInput,
+            statusAggregator = statusAggregator,
+            snapshotProvider = sessionSnapshotProvider,
+            recoveryPolicy = sseRecoveryPolicy,
             onTerminalExhaustion = { coordinator.onDisconnect() },
         )
         controller = SessionStreamingController(
@@ -300,10 +334,22 @@ class SessionStreamingService : Service() {
         // Action PendingIntent (CP8 §16-U1 wiring) — never via sticky rebuild.
         // Routing logic lives in [StartCommandRouter] so it is pure-JVM
         // unit-testable without a real Android Intent.
-        when (val route = StartCommandRouter.routeFor(intent?.action)) {
-            StartCommandRouter.Route.CloseBackground -> {
+        //
+        // D2 gate #8: the close action's PendingIntent carries the identity
+        // used to build it; [UserCloseRequestParser] reconstructs the
+        // [ConnectionIdentity] from the Intent extras so the controller can
+        // revalidate against the current identity before any teardown.
+        val closeRequest = UserCloseRequestParser.parse(
+            epoch = intent?.getLongExtra(UserCloseRequestParser.EXTRA_EPOCH, -1L)
+                ?.takeIf { it >= 0 },
+            serverGroupFp = intent?.getStringExtra(UserCloseRequestParser.EXTRA_SERVER_GROUP_FP),
+            normalizedWorkdir = intent?.getStringExtra(UserCloseRequestParser.EXTRA_NORMALIZED_WORKDIR),
+            endpointFp = intent?.getStringExtra(UserCloseRequestParser.EXTRA_ENDPOINT_FP),
+        )
+        when (val route = StartCommandRouter.routeFor(intent?.action, closeRequest)) {
+            is StartCommandRouter.Route.CloseBackground -> {
                 DebugLog.i(TAG, "onStartCommand: ACTION_CLOSE_BACKGROUND (§16-U1 user-explicit close)")
-                controller?.requestUserClose()
+                controller?.requestUserClose(route.request)
                 return START_STICKY
             }
             StartCommandRouter.Route.Bootstrap -> {
@@ -454,14 +500,33 @@ class SessionStreamingService : Service() {
 
     /**
      * §16-U1 close-action target. Delivers ACTION_CLOSE_BACKGROUND to this
-     * Service via `PendingIntent.getService` (FLAG_IMMUTABLE because the
-     * carried intent carries no extras the trigger needs to mutate;
-     * FLAG_UPDATE_CURRENT so a subsequent rebuild of the ongoing notification
-     * with a fresh spec does not orphan the prior PendingIntent).
+     * Service via `PendingIntent.getService`.
+     *
+     * D2 gate #8: the intent carries the identity (epoch, serverGroupFp,
+     * normalizedWorkdir, endpointFp) used to build the ongoing notification;
+     * [onStartCommand] routes it through [UserCloseRequestParser] so the
+     * controller can revalidate against the current identity before any
+     * teardown side-effect. If no identity is bound (the §5 degraded
+     * placeholder), the extras are absent → the parser returns a no-identity
+     * request → the close handler dismisses the placeholder directly.
+     *
+     * FLAG_IMMUTABLE because the carried extras are not mutated by the
+     * trigger; FLAG_UPDATE_CURRENT so a subsequent rebuild of the ongoing
+     * notification with a fresh identity (reconfigure epoch bump) refreshes
+     * the same PendingIntent slot — the prior identity is discarded.
      */
     private fun buildCloseBackgroundPendingIntent(): PendingIntent {
         val intent = Intent(this, SessionStreamingService::class.java).apply {
             action = ACTION_CLOSE_BACKGROUND
+            // D2 gate #8: stamp the current identity into the extras so the
+            // close handler can detect a stale notification (host reconfigured
+            // since this notification was built).
+            identityStore.currentIdentity.value?.let { id ->
+                putExtra(UserCloseRequestParser.EXTRA_EPOCH, id.epoch)
+                putExtra(UserCloseRequestParser.EXTRA_SERVER_GROUP_FP, id.serverGroupFp)
+                putExtra(UserCloseRequestParser.EXTRA_NORMALIZED_WORKDIR, id.normalizedWorkdir)
+                putExtra(UserCloseRequestParser.EXTRA_ENDPOINT_FP, id.endpointFp)
+            }
         }
         return PendingIntent.getService(
             this,
@@ -492,13 +557,15 @@ class SessionStreamingService : Service() {
 
     override fun onDestroy() {
         DebugLog.i(TAG, "onDestroy: disconnecting SSE + cancelling service scope")
-        // CP9 §A5: tear down the SSE collector BEFORE cancelling [scope] so
-        // markGap=true (the gap-dirty signal via CancelSse effect) is emitted
-        // while [scope] is still alive. After scope.cancel() the collector
-        // job is structurally cancelled anyway, but the explicit disconnect
-        // guarantees the gap signal fires (SessionSyncCoordinator observes
-        // it and reconciles on next server.connected).
-        sseOwner?.disconnect()
+        // Normal L3 teardown already used the suspend disconnect path and
+        // joined the collector before stopSelf. This synchronous fallback only
+        // invalidates/cancels a collector left by an abnormal Service destroy;
+        // it deliberately emits no false transport-outage signal.
+        //
+        // D2 gate #4: the [processStatusPoller]'s loop runs on
+        // @ApplicationScope and is NOT cancelled here — it survives this
+        // Service's death (§6 L3 source contract).
+        sseOwner?.cancelForShutdown()
         controller?.shutdown()
         scope.cancel()
         super.onDestroy()

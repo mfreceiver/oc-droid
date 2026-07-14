@@ -141,7 +141,9 @@ reconfigure 严格顺序（不可颠倒）：
 
 ### 4.4 统一交接顺序（闭合 gpter-B#3 / groker-B4）
 
-**单一串行状态机（持锁），新 source active + notifier 切换成功后才关旧 source：**
+**单一串行状态机，新 source 经确认 ready + notifier 切换成功后才关旧 source：**
+
+> **D2 gate #4**：`StartSse` / `StartPoller` 不是「launch 即 ready」。协调器在 mutex 内分配单调 handoff token、记录 `(token, layer, identity)` 并发出 activation；随后**释放 mutex**等待 source acknowledgement；ack 后重新持锁，只有 token、layer、identity 都未变化才 commit。前台变化、timeout、用户关闭或新的 handoff 会使旧 token 失效，迟到 ack 只能清理自己，不能关闭旧 source 或翻 layer。任何网络连接、REST refresh、首帧 baseline 均不得在协调器 mutex 内 await。
 
 > **D1 gate #1 §4.4**：idle debounce 到期时**读取时间正确状态**——`statusAggregator.stateAtNow()`（按当前 `clock()` 即时投影），**不读** `globalState.value`（后者由 `freshnessJob` 保持一致，但 dispatcher 延迟可能令其在 debounce 到期的瞬间仍缓存着 stale `AllIdleFresh`）。`stateAtNow()` 与 `recompute` 共用同一个 `project(state, coverage, now)` 纯函数。
 
@@ -150,24 +152,26 @@ reconfigure 严格顺序（不可颠倒）：
 - `L1-busy → L1-idle`：`stopForeground`（回普通 Service + SSE 保活）。
 
 **L2-active → L2-idle**（全 idle、debounce 到期；FGS 外壳保持）：
-1. 执行最终全 workdir snapshot poll；
-2. 启动 poller 并确认 job 已 active；
+1. 启动进程级 poller，并在 t=0 立即执行最终全 workdir snapshot poll（无首个 30s delay）；
+2. await 首次 poll acknowledgement；仅最终状态仍为 `AllIdleFresh` 才可继续，`Busy`/`Unknown` 则停止新 poller、保留 SSE、继续 L2-active；
 3. notifier 数据源切到 polling；
 4. `cancelSse`（Service 内，留下 §1.1 的 gap-dirty）；
 5. **进入 L2-idle**（外壳保持，不 stopSelf）。
 
 **L2-idle → L2-active**（poller/REST 发现 busy）或 **→ L1**（回前台）：
 1. FGS 仍在（L2 窗口内）/ 回前台（L1）；
-2. 建立并验证 SSE / status baseline；
+2. 建立 SSE，await 当前 identity 的有效 transport frame；随后 refresh status snapshot，并在 suspend 后复核 identity；仅 `Busy` / `AllIdleFresh` 是已验证 baseline；
 3. notifier 数据源切到 service source；
 4. 取消 poller。
+- stale identity、TOFU pending、exhausted 或 `Unknown` baseline 均不 commit，poller 保持运行。
 - 若回前台时仍 idle → `stopForeground` 回 **L1-idle**（普通 Service + SSE），不长期占 FGS（gpter 注记）。
 
 **→ L3 teardown**（`onTimeout()` / disconnect / 用户关后台）：
-1. notifier 数据源切到 polling；
-2. `cancelSse`；
-3. `stopForeground` / `stopSelf`；
-4. 之后 poller only，**不**自动提升。
+1. 启动 application-scope 进程 poller，t=0 执行并 await 第一次 poll attempt；
+2. notifier 数据源切到 polling；
+3. `cancelSse` 并等待 collector cancellation 完成；
+4. `stopForeground` / `stopSelf`；
+5. 之后 poller only，且 Service `onDestroy` / controller shutdown **不得**取消该 poller；它只刷新状态，**不**自动启动 FGS/SSE。
 
 > 不存在「两边都没数据源」的中间态。L3 teardown 后的恢复只能走 §4.1 合法入口。
 
@@ -183,7 +187,7 @@ reconfigure 严格顺序（不可颠倒）：
 3. **异步** bootstrap：激活/校验 tunnel → health probe + TLS/TOFU gate → `getSessionStatus`（**全局，按 §3 归并，非 fan-out**）。
 4. **全局 busy/retry** → 保持 FGS（**L2-active**）+ `connectSSE(currentWorkdir)` → 事件进 `events`。
 5. **权威全 idle** → **`stopForeground` / `stopSelf` → 进入 L3**（poller only，不占 FGS）；占位通知撤销。
-6. `SSEConnectionExhausted` → service 级**长期重试 / degraded**（不等进程重启）。
+6. `SSEConnectionExhausted` → 每次 transport outage 先且仅先发一次 gap-dirty；随后做 **3 次额外 service 级 collector 尝试**，基础延迟严格为 `30s / 2m / 5m`，每次注入 `±20%` jitter。首个当前 identity 的有效 frame 重置预算并完成 transport readiness；intentional cancel / stale identity 不发 false gap、不启动 retry。三次均失败后才且仅一次标记 degraded/disconnected，并调用 lifecycle `onDisconnect()` 进入 L3；reconfigure / timeout / 用户关闭 / cancel 会取消 recovery。
 
 **未决 TOFU 且无 Activity**（闭合 gpter-MAJOR#2 / #5）：
 - 不无限等 UI deferred；不消耗 SSE 重试预算；
@@ -197,6 +201,7 @@ reconfigure 严格顺序（不可颠倒）：
 ## 6. FGS↔poller 无缝交接 + 统一 notifier（闭合 gpter-B#6；groker-B4）
 
 - 生命周期协调器串行（见 §4.4）。
+- poller 是 `@Singleton`、运行于 `@ApplicationScope` 的进程级 source：`startAndAwaitFirstPoll(identity, snapshot)` 取消并替换旧 job，t=0 refresh 后返回时间正确状态，再按 30s 周期运行；`stop()` 仅取消该 job。进入 L3 后它跨 `SessionStreamingService.onDestroy` 存活，且绝不自行启动 FGS/SSE。
 - **单一 `IslandNotifier`（应用级）** 持唯一 dedup store，复合业务键 `(serverGroupFp, workdir, sessionId, type)`；**不再**让 Service 与 `AppLifecycleMonitor` 各持 snapshot。
 - `AppLifecycleMonitor` 职责收敛为：进程前台信号源（§4.3）+ poller 机制宿主；不再被当作 SSE-cancel 所有者。
 - completion 通知归统一 notifier。
@@ -341,10 +346,10 @@ reconfigure 严格顺序（不可颠倒）：
 
 | # | 决策 | 内容 | 落点 |
 |---|---|---|---|
-| U1 | 「划掉卡片就关」后台 | FGS ongoing 不可被系统划掉（Android 硬性）→ ongoing 通知常驻 **Action「关闭后台」** 触发 L3 teardown；非 ongoing（完成/decision）划掉走 `deleteIntent`。此即 §4.1「用户显式关后台」L3 触发。 | §4.1（已就地标注）/ dev-design §3.1.1 Action |
+| U1 | 「划掉卡片就关」后台 | FGS ongoing 不可被系统划掉（Android 硬性）→ ongoing 通知常驻 **Action「关闭后台」** 触发 L3 teardown；Action 的 PendingIntent 必须携带渲染时 identity（epoch、server-group fp、workdir、endpoint fp）。非 ongoing（完成/decision）划掉走 `deleteIntent`。 | §4.1（已就地标注）/ dev-design §3.1.1 Action |
 | U2 | Settings 整合系统通知设置 | **不设独立 app on/off 开关**。Settings→通知页 = ①`POST_NOTIFICATIONS` 权限状态+申请 ②每 channel 状态 ③「打开系统通知设置」deep-link（`ACTION_APP_NOTIFICATION_SETTINGS`）。 | dev-design P1.6 |
 | U3 | decision 通知可点跳对应会话页 | permission/question 通知点按 → deep-link MainActivity 带 `EXTRA_SESSION_ID`+workdir → `selectSession` + 切 Chat tab，落到该会话页直接授权/回答。ongoing/完成同样支持单 session deep-link。 | dev-design P1.5 / §3.1.1 contentIntent |
 
 **实现注记**：
-- U1 的「关闭后台」Action 须在所有 ongoing 子态（L2-active 单/多 busy、L2-idle、占位、TOFU-degraded）常驻；点击后 **重新查询 identity/status**（不盲用通知创建时的快照）再 teardown。
+- U1 的「关闭后台」Action 须在所有 ongoing 子态（L2-active 单/多 busy、L2-idle、占位、TOFU-degraded）常驻。点击后先比较 payload identity 与当前 identity：入口已 stale 则不查询、不 teardown；一致时以当前 identity 调 `StatusAggregatorInput.refresh(current, snapshotProvider.current())`，suspend 后再次复核 identity，epoch/任一 fingerprint 改变都中止。identity 稳定后无论结果是 Busy、AllIdleFresh 或 Unknown 均执行 teardown（显式关闭不以 busy 为 veto）。无 identity 的占位/TOFU-degraded 通知可直接关闭其前台外壳。
 - U3 需 app 侧具备「session deep-link」intent 处理（`EXTRA_SESSION_ID`+workdir → selectSession + 导航 Chat）；现有 `files?workdir=` deep-link 基础设施可扩展，Phase 1 落实时补齐。

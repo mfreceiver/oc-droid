@@ -5,6 +5,7 @@ import cn.vectory.ocdroid.service.status.GlobalBusyState
 import cn.vectory.ocdroid.service.status.SessionBusyStatus
 import cn.vectory.ocdroid.service.status.SessionStatusKey
 import cn.vectory.ocdroid.service.status.StatusAggregator
+import cn.vectory.ocdroid.service.streaming.SourceActivation
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -13,6 +14,8 @@ import kotlinx.coroutines.test.advanceTimeBy
 import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -20,26 +23,13 @@ import org.junit.Test
  * Phase 0 / dev-design P0.3 — unit tests for [StreamingLifecycleCoordinator],
  * the FGS §4 L1/L2/L3 state machine.
  *
- * Covers the highest-value state-machine invariants (FGS spec §4.1 / §4.2 /
- * §4.4 / §16-U1):
- *  - L1-idle → L1-busy foreground elevation (§4.2);
- *  - bootstrap background+busy → L2Active (§5 step 4);
- *  - L2Active all-idle + 45s debounce → L2Idle (SSE off + poller on, §4.4);
- *  - L2Idle poller finds busy → L2Active IN-PLACE (groker-R1, no new
- *    startForegroundService);
- *  - user-close / timeout → L3 teardown (§16-U1 / §4.1);
- *  - §4.4 handoff ordering — new source active BEFORE closing old source
- *    (no "no data source" middle state).
- *
- * **CP4**: drives the lifecycle-safe [GlobalBusyState] (Busy / AllIdleFresh /
- * Unknown) — replaces the legacy `busy: Boolean`. Critical new invariant:
- * [GlobalBusyState.Unknown] does NOT arm the 45s idle debounce (a failure /
- * stale snapshot must keep the source alive, FGS spec §3 «请求失败 → 全局
- * Unknown, 不得进 idle 宽限期»).
- *
- * Uses a fakeable [StatusAggregator] (the bridge depends on the INTERFACE,
- * never the impl) and the `runTest` virtual clock to advance the 45s idle
- * debounce without wall-clock latency.
+ * **D2 gate #4 acknowledgeable handoff**: [LifecycleCommand.StartSse] /
+ * [LifecycleCommand.StartPoller] now carry a handoff token; the transition's
+ * commit phase (StopX + layer flip) runs ONLY after the test drives an
+ * [SourceActivation] back via [StreamingLifecycleCoordinator.onActivationAck].
+ * Tests that need the full transition extract the token from the emitted
+ * StartX command + call onActivationAck; tests that only care about the
+ * activation being emitted (not the commit) can leave the deferred pending.
  */
 @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
 class StreamingLifecycleCoordinatorTest {
@@ -51,6 +41,25 @@ class StreamingLifecycleCoordinatorTest {
         endpointFp = "endpoint-fp",
     )
 
+    /**
+     * Drives the ack for the most-recently-emitted StartSse / StartPoller
+     * command in [commands] (highest handoff token wins — both command kinds
+     * share the same monotonic token counter, so this picks the LATEST
+     * handoff regardless of source kind). The D2 handoff commit phase runs
+     * in [runCurrent] after the ack.
+     */
+    private suspend fun driveLastHandoffAck(
+        coordinator: StreamingLifecycleCoordinator,
+        commands: MutableList<LifecycleCommand>,
+        activation: SourceActivation,
+    ) {
+        val sseTokens = commands.filterIsInstance<LifecycleCommand.StartSse>().map { it.handoffToken }
+        val pollerTokens = commands.filterIsInstance<LifecycleCommand.StartPoller>().map { it.handoffToken }
+        val token = (sseTokens + pollerTokens).maxOrNull()
+            ?: error("no pending StartSse/StartPoller to ack")
+        coordinator.onActivationAck(token, activation)
+    }
+
     @Test
     fun `L1 idle to busy elevates foreground (section 4_2)`() = runTest {
         val status = FakeStatusAggregator()
@@ -60,9 +69,12 @@ class StreamingLifecycleCoordinatorTest {
         backgroundScope.launch { coordinator.commands.collect { commands.add(it) } }
 
         coordinator.start(inForeground)
+        // bootstrap: L3 → L1(idle). Emits StartSse + (commit) StopPoller.
         coordinator.onBootstrapResult(identity, GlobalBusyState.AllIdleFresh)
         runCurrent()
-        // bootstrap: L3 → L1(idle). Commands: StartSse, StopPoller, StopForeground.
+        // Drive the SSE handoff ack to complete the L1-idle commit.
+        driveLastHandoffAck(coordinator, commands, SourceActivation.Ready(GlobalBusyState.AllIdleFresh))
+        runCurrent()
         assertEquals(Layer.L1(busy = false), coordinator.layer.value)
         commands.clear()
 
@@ -86,6 +98,8 @@ class StreamingLifecycleCoordinatorTest {
         status.setState(GlobalBusyState.Busy)
         coordinator.onBootstrapResult(identity, GlobalBusyState.Busy)
         runCurrent()
+        driveLastHandoffAck(coordinator, commands, SourceActivation.Ready(GlobalBusyState.Busy))
+        runCurrent()
         assertEquals(Layer.L1(busy = true), coordinator.layer.value)
         commands.clear()
 
@@ -98,7 +112,7 @@ class StreamingLifecycleCoordinatorTest {
     }
 
     @Test
-    fun `bootstrap background plus busy enters L2Active directly (section 5 step 4)`() = runTest {
+    fun `bootstrap background plus busy enters L2Active after SSE ack (section 5 step 4)`() = runTest {
         val status = FakeStatusAggregator()
         val coordinator = StreamingLifecycleCoordinator(status, backgroundScope)
         val inForeground = MutableStateFlow(false)
@@ -109,11 +123,19 @@ class StreamingLifecycleCoordinatorTest {
         status.setState(GlobalBusyState.Busy)
         coordinator.onBootstrapResult(identity, GlobalBusyState.Busy)
         runCurrent()
+        // Pre-ack: only StartSse emitted (commit waits for ack).
+        assertEquals(Layer.L3, coordinator.layer.value)
+        val startSse = commands.filterIsInstance<LifecycleCommand.StartSse>().single()
+        assertEquals(identity, startSse.identity)
+
+        // Drive Ready → commit StopPoller + L2Active.
+        driveLastHandoffAck(coordinator, commands, SourceActivation.Ready(GlobalBusyState.Busy))
+        runCurrent()
 
         assertEquals(Layer.L2Active, coordinator.layer.value)
         // §4.4: SSE (new source) started before the L3 poller is retired.
         assertEquals(
-            listOf(LifecycleCommand.StartSse(identity), LifecycleCommand.StopPoller),
+            listOf(startSse, LifecycleCommand.StopPoller),
             commands,
         )
     }
@@ -131,7 +153,7 @@ class StreamingLifecycleCoordinatorTest {
         runCurrent()
 
         assertEquals(Layer.L3, coordinator.layer.value)
-        // §5 step 5: background idle → stopForeground + stopSelf.
+        // §5 step 5: background idle → stopForeground + stopSelf (no handoff).
         assertEquals(
             listOf(LifecycleCommand.StopForeground, LifecycleCommand.StopSelf),
             commands,
@@ -139,7 +161,7 @@ class StreamingLifecycleCoordinatorTest {
     }
 
     @Test
-    fun `L2Active all-idle waits 45s then transitions to L2Idle with poller on SSE off (section 4_4)`() = runTest {
+    fun `L2Active all-idle waits 45s then transitions to L2Idle after poller ack (section 4_4)`() = runTest {
         val status = FakeStatusAggregator()
         val coordinator = StreamingLifecycleCoordinator(status, backgroundScope)
         val inForeground = MutableStateFlow(false)
@@ -149,6 +171,8 @@ class StreamingLifecycleCoordinatorTest {
         coordinator.start(inForeground)
         status.setState(GlobalBusyState.Busy)
         coordinator.onBootstrapResult(identity, GlobalBusyState.Busy)
+        runCurrent()
+        driveLastHandoffAck(coordinator, commands, SourceActivation.Ready(GlobalBusyState.Busy))
         runCurrent()
         assertEquals(Layer.L2Active, coordinator.layer.value)
         commands.clear()
@@ -169,12 +193,92 @@ class StreamingLifecycleCoordinatorTest {
         advanceTimeBy(1)
         runCurrent()
 
+        // Pre-ack: StartPoller emitted, layer still L2Active (commit waits).
+        assertEquals(Layer.L2Active, coordinator.layer.value)
+        val startPoller = commands.filterIsInstance<LifecycleCommand.StartPoller>().single()
+
+        // Drive Ready(AllIdleFresh) → commit StopSse + L2Idle.
+        driveLastHandoffAck(
+            coordinator,
+            commands,
+            SourceActivation.Ready(GlobalBusyState.AllIdleFresh),
+        )
+        runCurrent()
+
         assertEquals(Layer.L2Idle, coordinator.layer.value)
         // §4.4 handoff: StartPoller (new source) BEFORE StopSse (old) — no no-source middle state.
         assertEquals(
-            listOf(LifecycleCommand.StartPoller, LifecycleCommand.StopSse),
+            listOf(startPoller, LifecycleCommand.StopSse),
             commands,
         )
+    }
+
+    @Test
+    fun `D2 gate #4 - L2Active to L2Idle final poll reports Busy - no StopSse, stop the new poller`() = runTest {
+        val status = FakeStatusAggregator()
+        val coordinator = StreamingLifecycleCoordinator(status, backgroundScope)
+        val inForeground = MutableStateFlow(false)
+        val commands = mutableListOf<LifecycleCommand>()
+        backgroundScope.launch { coordinator.commands.collect { commands.add(it) } }
+
+        coordinator.start(inForeground)
+        status.setState(GlobalBusyState.Busy)
+        coordinator.onBootstrapResult(identity, GlobalBusyState.Busy)
+        runCurrent()
+        driveLastHandoffAck(coordinator, commands, SourceActivation.Ready(GlobalBusyState.Busy))
+        runCurrent()
+        status.setState(GlobalBusyState.AllIdleFresh)
+        runCurrent()
+        advanceTimeBy(StreamingLifecycleCoordinator.IDLE_DEBOUNCE_MS)
+        runCurrent()
+        val pollerToken = commands.filterIsInstance<LifecycleCommand.StartPoller>().single().handoffToken
+        commands.clear() // clear after debounce fires (StartPoller already emitted)
+
+        // Final poll reports Busy (the host got busy during the 45s debounce).
+        coordinator.onActivationAck(pollerToken, SourceActivation.Ready(GlobalBusyState.Busy))
+        runCurrent()
+
+        // Stay L2Active; StopPoller emitted (the new poller is cancelled);
+        // NO StopSse (SSE was never closed).
+        assertEquals(Layer.L2Active, coordinator.layer.value)
+        assertEquals(
+            "StopPoller emitted (cancel the new poller); no StopSse",
+            listOf(LifecycleCommand.StopPoller),
+            commands,
+        )
+        assertFalse(
+            "StopSse MUST NOT be emitted when the final poll reports Busy",
+            commands.any { it == LifecycleCommand.StopSse },
+        )
+    }
+
+    @Test
+    fun `D2 gate #4 - L2Active to L2Idle final poll reports Unknown - no StopSse`() = runTest {
+        val status = FakeStatusAggregator()
+        val coordinator = StreamingLifecycleCoordinator(status, backgroundScope)
+        val inForeground = MutableStateFlow(false)
+        val commands = mutableListOf<LifecycleCommand>()
+        backgroundScope.launch { coordinator.commands.collect { commands.add(it) } }
+
+        coordinator.start(inForeground)
+        status.setState(GlobalBusyState.Busy)
+        coordinator.onBootstrapResult(identity, GlobalBusyState.Busy)
+        runCurrent()
+        driveLastHandoffAck(coordinator, commands, SourceActivation.Ready(GlobalBusyState.Busy))
+        runCurrent()
+        status.setState(GlobalBusyState.AllIdleFresh)
+        runCurrent()
+        advanceTimeBy(StreamingLifecycleCoordinator.IDLE_DEBOUNCE_MS)
+        runCurrent()
+        val pollerToken = commands.filterIsInstance<LifecycleCommand.StartPoller>().single().handoffToken
+        commands.clear()
+
+        coordinator.onActivationAck(pollerToken, SourceActivation.Ready(GlobalBusyState.Unknown))
+        runCurrent()
+
+        // Stay L2Active; StopPoller emitted; NO StopSse.
+        assertEquals(Layer.L2Active, coordinator.layer.value)
+        assertEquals(listOf(LifecycleCommand.StopPoller), commands)
     }
 
     @Test
@@ -188,6 +292,8 @@ class StreamingLifecycleCoordinatorTest {
         coordinator.start(inForeground)
         status.setState(GlobalBusyState.Busy)
         coordinator.onBootstrapResult(identity, GlobalBusyState.Busy)
+        runCurrent()
+        driveLastHandoffAck(coordinator, commands, SourceActivation.Ready(GlobalBusyState.Busy))
         runCurrent()
         commands.clear()
 
@@ -205,7 +311,7 @@ class StreamingLifecycleCoordinatorTest {
     }
 
     @Test
-    fun `L2Idle finds busy returns to L2Active in place without startForegroundService (groker-R1)`() = runTest {
+    fun `L2Idle finds busy returns to L2Active after SSE ack (groker-R1)`() = runTest {
         val status = FakeStatusAggregator()
         val coordinator = StreamingLifecycleCoordinator(status, backgroundScope)
         val inForeground = MutableStateFlow(false)
@@ -216,23 +322,84 @@ class StreamingLifecycleCoordinatorTest {
         status.setState(GlobalBusyState.Busy)
         coordinator.onBootstrapResult(identity, GlobalBusyState.Busy)
         runCurrent()
+        driveLastHandoffAck(coordinator, commands, SourceActivation.Ready(GlobalBusyState.Busy))
+        runCurrent()
         status.setState(GlobalBusyState.AllIdleFresh)
         runCurrent()
         advanceTimeBy(StreamingLifecycleCoordinator.IDLE_DEBOUNCE_MS)
         runCurrent()
+        driveLastHandoffAck(
+            coordinator,
+            commands,
+            SourceActivation.Ready(GlobalBusyState.AllIdleFresh),
+        )
+        runCurrent()
         assertEquals(Layer.L2Idle, coordinator.layer.value)
         commands.clear()
 
-        // groker-R1: poller finds busy → IN-PLACE L2Idle → L2Active.
+        // groker-R1: poller finds busy → in-place L2Idle → L2Active (after ack).
         status.setState(GlobalBusyState.Busy)
+        runCurrent()
+        // Pre-ack: StartSse emitted, layer still L2Idle.
+        assertEquals(Layer.L2Idle, coordinator.layer.value)
+        val startSse = commands.filterIsInstance<LifecycleCommand.StartSse>().single()
+
+        driveLastHandoffAck(coordinator, commands, SourceActivation.Ready(GlobalBusyState.Busy))
         runCurrent()
 
         assertEquals(Layer.L2Active, coordinator.layer.value)
         // §4.4: StartSse (new source) BEFORE StopPoller (old). No StartForeground (in-place).
         assertEquals(
-            listOf(LifecycleCommand.StartSse(identity), LifecycleCommand.StopPoller),
+            listOf(startSse, LifecycleCommand.StopPoller),
             commands,
         )
+    }
+
+    @Test
+    fun `D2 gate #4 - TOFU or stale StartSse Rejected - poller stays running, stay L2Idle`() = runTest {
+        val status = FakeStatusAggregator()
+        val coordinator = StreamingLifecycleCoordinator(status, backgroundScope)
+        val inForeground = MutableStateFlow(false)
+        val commands = mutableListOf<LifecycleCommand>()
+        backgroundScope.launch { coordinator.commands.collect { commands.add(it) } }
+
+        coordinator.start(inForeground)
+        status.setState(GlobalBusyState.Busy)
+        coordinator.onBootstrapResult(identity, GlobalBusyState.Busy)
+        runCurrent()
+        driveLastHandoffAck(coordinator, commands, SourceActivation.Ready(GlobalBusyState.Busy))
+        runCurrent()
+        status.setState(GlobalBusyState.AllIdleFresh)
+        runCurrent()
+        advanceTimeBy(StreamingLifecycleCoordinator.IDLE_DEBOUNCE_MS)
+        runCurrent()
+        driveLastHandoffAck(
+            coordinator,
+            commands,
+            SourceActivation.Ready(GlobalBusyState.AllIdleFresh),
+        )
+        runCurrent()
+        assertEquals(Layer.L2Idle, coordinator.layer.value)
+        commands.clear()
+
+        // L2Idle → L2Active attempted; the SSE activation is Rejected (TOFU/stale).
+        status.setState(GlobalBusyState.Busy)
+        runCurrent()
+        val startSse = commands.filterIsInstance<LifecycleCommand.StartSse>().single()
+        driveLastHandoffAck(coordinator, commands, SourceActivation.Rejected.TofuPending)
+        runCurrent()
+
+        // Stay L2Idle. No StopPoller (poller stays running). No layer change.
+        assertEquals(Layer.L2Idle, coordinator.layer.value)
+        assertFalse(
+            "StopPoller MUST NOT be emitted when SSE activation is Rejected",
+            commands.any { it == LifecycleCommand.StopPoller },
+        )
+        // The StartSse was emitted (it's the activation request); its
+        // Rejected ack means the collector couldn't establish a baseline.
+        // The controller-side test (ServiceSseConnectionOwnerTest) verifies
+        // the collector did NOT actually start (TOFU freeze / stale drop).
+        assertEquals(startSse, commands.single())
     }
 
     @Test
@@ -246,6 +413,8 @@ class StreamingLifecycleCoordinatorTest {
         coordinator.start(inForeground)
         status.setState(GlobalBusyState.Busy)
         coordinator.onBootstrapResult(identity, GlobalBusyState.Busy)
+        runCurrent()
+        driveLastHandoffAck(coordinator, commands, SourceActivation.Ready(GlobalBusyState.Busy))
         runCurrent()
         assertEquals(Layer.L1(busy = true), coordinator.layer.value)
         commands.clear()
@@ -269,18 +438,28 @@ class StreamingLifecycleCoordinatorTest {
         coordinator.start(inForeground)
         coordinator.onBootstrapResult(identity, GlobalBusyState.AllIdleFresh)
         runCurrent()
+        driveLastHandoffAck(coordinator, commands, SourceActivation.Ready(GlobalBusyState.AllIdleFresh))
+        runCurrent()
         assertEquals(Layer.L1(busy = false), coordinator.layer.value)
         commands.clear()
 
-        // §4.2: foreground idle → background = NO FGS promotion → L3.
+        // §4.2: foreground idle → background = NO FGS promotion → L3 (poller handoff).
         inForeground.value = false
+        runCurrent()
+        // Pre-ack: StartPoller emitted, layer still L1-idle.
+        assertEquals(Layer.L1(busy = false), coordinator.layer.value)
+        val startPoller = commands.filterIsInstance<LifecycleCommand.StartPoller>().single()
+
+        // Drive Ready → commit StopSse + StopForeground + StopSelf + L3.
+        driveLastHandoffAck(coordinator, commands, SourceActivation.Ready(GlobalBusyState.AllIdleFresh))
         runCurrent()
 
         assertEquals(Layer.L3, coordinator.layer.value)
-        // §4.4 teardown ordering: StartPoller (new) before StopSse (old).
+        // §4.4 teardown ordering: StartPoller (new) before StopSse, then
+        // StopForeground + StopSelf.
         assertEquals(
             listOf(
-                LifecycleCommand.StartPoller,
+                startPoller,
                 LifecycleCommand.StopSse,
                 LifecycleCommand.StopForeground,
                 LifecycleCommand.StopSelf,
@@ -290,7 +469,7 @@ class StreamingLifecycleCoordinatorTest {
     }
 
     @Test
-    fun `user close from L2Active tears down to L3 (section 16-U1)`() = runTest {
+    fun `user close from L2Active tears down to L3 after poller ack (section 16-U1)`() = runTest {
         val status = FakeStatusAggregator()
         val coordinator = StreamingLifecycleCoordinator(status, backgroundScope)
         val inForeground = MutableStateFlow(false)
@@ -301,17 +480,25 @@ class StreamingLifecycleCoordinatorTest {
         status.setState(GlobalBusyState.Busy)
         coordinator.onBootstrapResult(identity, GlobalBusyState.Busy)
         runCurrent()
+        driveLastHandoffAck(coordinator, commands, SourceActivation.Ready(GlobalBusyState.Busy))
+        runCurrent()
         assertEquals(Layer.L2Active, coordinator.layer.value)
         commands.clear()
 
         coordinator.requestUserClose()
+        runCurrent()
+        // Pre-ack: StartPoller emitted, layer still L2Active.
+        assertEquals(Layer.L2Active, coordinator.layer.value)
+        val startPoller = commands.filterIsInstance<LifecycleCommand.StartPoller>().single()
+
+        driveLastHandoffAck(coordinator, commands, SourceActivation.Ready(GlobalBusyState.Busy))
         runCurrent()
 
         assertEquals(Layer.L3, coordinator.layer.value)
         // §4.4 teardown: StartPoller (new source) before StopSse, then StopForeground + StopSelf.
         assertEquals(
             listOf(
-                LifecycleCommand.StartPoller,
+                startPoller,
                 LifecycleCommand.StopSse,
                 LifecycleCommand.StopForeground,
                 LifecycleCommand.StopSelf,
@@ -332,9 +519,17 @@ class StreamingLifecycleCoordinatorTest {
         status.setState(GlobalBusyState.Busy)
         coordinator.onBootstrapResult(identity, GlobalBusyState.Busy)
         runCurrent()
+        driveLastHandoffAck(coordinator, commands, SourceActivation.Ready(GlobalBusyState.Busy))
+        runCurrent()
         status.setState(GlobalBusyState.AllIdleFresh)
         runCurrent()
         advanceTimeBy(StreamingLifecycleCoordinator.IDLE_DEBOUNCE_MS)
+        runCurrent()
+        driveLastHandoffAck(
+            coordinator,
+            commands,
+            SourceActivation.Ready(GlobalBusyState.AllIdleFresh),
+        )
         runCurrent()
         assertEquals(Layer.L2Idle, coordinator.layer.value)
         commands.clear()
@@ -386,6 +581,8 @@ class StreamingLifecycleCoordinatorTest {
         status.setState(GlobalBusyState.Busy)
         coordinator.onBootstrapResult(identity, GlobalBusyState.Busy)
         runCurrent()
+        driveLastHandoffAck(coordinator, commands, SourceActivation.Ready(GlobalBusyState.Busy))
+        runCurrent()
         commands.clear()
 
         status.setState(GlobalBusyState.AllIdleFresh)
@@ -393,11 +590,24 @@ class StreamingLifecycleCoordinatorTest {
         advanceTimeBy(StreamingLifecycleCoordinator.IDLE_DEBOUNCE_MS)
         runCurrent()
 
-        // §4.4: StartPoller (new source active) BEFORE StopSse (old source closed).
-        val pollerIdx = commands.indexOf(LifecycleCommand.StartPoller)
+        // Pre-ack: StartPoller emitted; StopSse waits for ack.
+        val pollerIdx = commands.indexOfFirst { it is LifecycleCommand.StartPoller }
+        assertTrue("StartPoller must be emitted at debounce fire", pollerIdx >= 0)
+        assertFalse(
+            "StopSse MUST NOT be emitted before the poller ack",
+            commands.any { it == LifecycleCommand.StopSse },
+        )
+
+        driveLastHandoffAck(
+            coordinator,
+            commands,
+            SourceActivation.Ready(GlobalBusyState.AllIdleFresh),
+        )
+        runCurrent()
+
+        // Post-ack: StopSse emitted AFTER StartPoller.
         val stopSseIdx = commands.indexOf(LifecycleCommand.StopSse)
-        assertTrue("StartPoller must be emitted", pollerIdx >= 0)
-        assertTrue("StopSse must be emitted", stopSseIdx >= 0)
+        assertTrue("StopSse must be emitted after ack", stopSseIdx >= 0)
         assertTrue(
             "StartPoller (idx=$pollerIdx) must precede StopSse (idx=$stopSseIdx) — no no-source gap",
             pollerIdx < stopSseIdx,
@@ -416,17 +626,33 @@ class StreamingLifecycleCoordinatorTest {
         status.setState(GlobalBusyState.Busy)
         coordinator.onBootstrapResult(identity, GlobalBusyState.Busy)
         runCurrent()
+        driveLastHandoffAck(coordinator, commands, SourceActivation.Ready(GlobalBusyState.Busy))
+        runCurrent()
         status.setState(GlobalBusyState.AllIdleFresh)
         runCurrent()
         advanceTimeBy(StreamingLifecycleCoordinator.IDLE_DEBOUNCE_MS)
         runCurrent()
+        driveLastHandoffAck(
+            coordinator,
+            commands,
+            SourceActivation.Ready(GlobalBusyState.AllIdleFresh),
+        )
+        runCurrent()
+        assertEquals(Layer.L2Idle, coordinator.layer.value)
         commands.clear()
 
         status.setState(GlobalBusyState.Busy)
         runCurrent()
+        // The L2Idle → L2Active handoff's StartSse should now be in commands.
+        assertTrue(
+            "L2Idle-exit StartSse must be emitted after Busy arrival; commands=$commands",
+            commands.any { it is LifecycleCommand.StartSse },
+        )
+        driveLastHandoffAck(coordinator, commands, SourceActivation.Ready(GlobalBusyState.Busy))
+        runCurrent()
 
         // §4.4: StartSse (new source) BEFORE StopPoller (old source).
-        val startSseIdx = commands.indexOf(LifecycleCommand.StartSse(identity))
+        val startSseIdx = commands.indexOfFirst { it is LifecycleCommand.StartSse }
         val stopPollerIdx = commands.indexOf(LifecycleCommand.StopPoller)
         assertTrue("StartSse must be emitted", startSseIdx >= 0)
         assertTrue("StopPoller must be emitted", stopPollerIdx >= 0)
@@ -434,6 +660,131 @@ class StreamingLifecycleCoordinatorTest {
             "StartSse (idx=$startSseIdx) must precede StopPoller (idx=$stopPollerIdx)",
             startSseIdx < stopPollerIdx,
         )
+    }
+
+    @Test
+    fun `D2 gate #4 - concurrent timeout during SSE activation invalidates handoff - no stale commit`() = runTest {
+        val status = FakeStatusAggregator()
+        val coordinator = StreamingLifecycleCoordinator(status, backgroundScope)
+        val inForeground = MutableStateFlow(false)
+        val commands = mutableListOf<LifecycleCommand>()
+        backgroundScope.launch { coordinator.commands.collect { commands.add(it) } }
+
+        coordinator.start(inForeground)
+        status.setState(GlobalBusyState.Busy)
+        coordinator.onBootstrapResult(identity, GlobalBusyState.Busy)
+        runCurrent()
+        driveLastHandoffAck(coordinator, commands, SourceActivation.Ready(GlobalBusyState.Busy))
+        runCurrent()
+        status.setState(GlobalBusyState.AllIdleFresh)
+        runCurrent()
+        advanceTimeBy(StreamingLifecycleCoordinator.IDLE_DEBOUNCE_MS)
+        runCurrent()
+        driveLastHandoffAck(
+            coordinator,
+            commands,
+            SourceActivation.Ready(GlobalBusyState.AllIdleFresh),
+        )
+        runCurrent()
+        assertEquals(Layer.L2Idle, coordinator.layer.value)
+        commands.clear()
+
+        // Start L2Idle → L2Active handoff (SSE activation). Then BEFORE the
+        // ack arrives, a timeout tears down (the L2Idle path: synchronous
+        // teardown, no handoff).
+        status.setState(GlobalBusyState.Busy)
+        runCurrent()
+        // StartSse was emitted; layer is still L2Idle (commit waits for ack).
+        val startSseBeforeTimeout = commands.filterIsInstance<LifecycleCommand.StartSse>().single()
+        assertEquals(Layer.L2Idle, coordinator.layer.value)
+
+        // Concurrent timeout — teardown arrives mid-handoff. The teardown
+        // sees L2Idle (poller already on, SSE off) and runs the synchronous
+        // path: cancelPendingHandoff emits StopSse + cancels the deferred,
+        // then StopForeground + StopSelf + L3.
+        coordinator.onTimeout()
+        runCurrent()
+
+        assertEquals(Layer.L3, coordinator.layer.value)
+        // The pending SSE handoff was cancelled — its commit will bail when
+        // the (already-cancelled) deferred throws.
+        val stopSseCount = commands.count { it == LifecycleCommand.StopSse }
+        assertTrue(
+            "cancelPendingHandoff emitted StopSse (cancel the in-flight SSE activation)",
+            stopSseCount >= 1,
+        )
+        assertTrue(
+            "teardown emitted StopForeground + StopSelf",
+            commands.any { it == LifecycleCommand.StopForeground } &&
+                commands.any { it == LifecycleCommand.StopSelf },
+        )
+
+        // Late ack arrives for the superseded handoff — must NOT re-flip layer.
+        // The deferred was cancelled, so onActivationAck drops it.
+        coordinator.onActivationAck(
+            startSseBeforeTimeout.handoffToken,
+            SourceActivation.Ready(GlobalBusyState.Busy),
+        )
+        runCurrent()
+
+        assertEquals(
+            "concurrent timeout invalidated the handoff — no stale commit to L2Active",
+            Layer.L3,
+            coordinator.layer.value,
+        )
+    }
+
+    @Test
+    fun `D2 gate #4 - foreground change during bootstrap activation supersedes its token`() = runTest {
+        val status = FakeStatusAggregator()
+        val coordinator = StreamingLifecycleCoordinator(status, backgroundScope)
+        val inForeground = MutableStateFlow(false)
+        val commands = mutableListOf<LifecycleCommand>()
+        backgroundScope.launch { coordinator.commands.collect { commands += it } }
+        coordinator.start(inForeground)
+        status.setState(GlobalBusyState.Busy)
+        coordinator.onBootstrapResult(identity, GlobalBusyState.Busy)
+        runCurrent()
+        val oldStart = commands.filterIsInstance<LifecycleCommand.StartSse>().single()
+
+        inForeground.value = true
+        runCurrent()
+        val starts = commands.filterIsInstance<LifecycleCommand.StartSse>()
+        assertEquals(2, starts.size)
+        assertTrue(starts[1].handoffToken > oldStart.handoffToken)
+
+        coordinator.onActivationAck(oldStart.handoffToken, SourceActivation.Ready(GlobalBusyState.Busy))
+        runCurrent()
+        assertEquals("stale foreground token cannot commit", Layer.L3, coordinator.layer.value)
+
+        coordinator.onActivationAck(starts[1].handoffToken, SourceActivation.Ready(GlobalBusyState.Busy))
+        runCurrent()
+        assertEquals(Layer.L1(busy = true), coordinator.layer.value)
+    }
+
+    @Test
+    fun `D2 gate #4 - user close during bootstrap activation invalidates token and tears down`() = runTest {
+        val status = FakeStatusAggregator()
+        val coordinator = StreamingLifecycleCoordinator(status, backgroundScope)
+        val inForeground = MutableStateFlow(false)
+        val commands = mutableListOf<LifecycleCommand>()
+        backgroundScope.launch { coordinator.commands.collect { commands += it } }
+        coordinator.start(inForeground)
+        status.setState(GlobalBusyState.Busy)
+        coordinator.onBootstrapResult(identity, GlobalBusyState.Busy)
+        runCurrent()
+        val start = commands.filterIsInstance<LifecycleCommand.StartSse>().single()
+
+        coordinator.requestUserClose()
+        runCurrent()
+        assertEquals(Layer.L3, coordinator.layer.value)
+        assertTrue(commands.contains(LifecycleCommand.StopForeground))
+        assertTrue(commands.contains(LifecycleCommand.StopSelf))
+
+        coordinator.onActivationAck(start.handoffToken, SourceActivation.Ready(GlobalBusyState.Busy))
+        runCurrent()
+        assertEquals("late close-invalidated ack cannot commit", Layer.L3, coordinator.layer.value)
+        assertFalse(commands.contains(LifecycleCommand.StopPoller))
     }
 
     // ── CP4: Unknown state must NOT arm the 45s idle debounce ──────────────
@@ -450,6 +801,8 @@ class StreamingLifecycleCoordinatorTest {
         status.setState(GlobalBusyState.Busy)
         coordinator.onBootstrapResult(identity, GlobalBusyState.Busy)
         runCurrent()
+        driveLastHandoffAck(coordinator, commands, SourceActivation.Ready(GlobalBusyState.Busy))
+        runCurrent()
         assertEquals(Layer.L2Active, coordinator.layer.value)
         commands.clear()
 
@@ -457,8 +810,6 @@ class StreamingLifecycleCoordinatorTest {
         status.setState(GlobalBusyState.Unknown)
         runCurrent()
 
-        // Unknown MUST keep the source alive: stays L2Active, no debounce arming,
-        // no L2Idle transition even past the 45s window.
         assertEquals(Layer.L2Active, coordinator.layer.value)
         assertTrue("Unknown must emit no source-switch commands", commands.isEmpty())
 
@@ -473,7 +824,7 @@ class StreamingLifecycleCoordinatorTest {
     }
 
     @Test
-    fun `CP4 - bootstrap background Unknown keeps source alive (treated like Busy)`() = runTest {
+    fun `CP4 - bootstrap background Unknown keeps source alive after ack (treated like Busy)`() = runTest {
         val status = FakeStatusAggregator()
         val coordinator = StreamingLifecycleCoordinator(status, backgroundScope)
         val inForeground = MutableStateFlow(false)
@@ -484,13 +835,15 @@ class StreamingLifecycleCoordinatorTest {
         status.setState(GlobalBusyState.Unknown)
         coordinator.onBootstrapResult(identity, GlobalBusyState.Unknown)
         runCurrent()
+        driveLastHandoffAck(coordinator, commands, SourceActivation.Ready(GlobalBusyState.Unknown))
+        runCurrent()
 
         // Unknown + background → L2Active (NOT L3 teardown). The bootstrap refuses to
-        // authoritatively label the host idle until a fresh successful snapshot arrives
-        // (FGS spec §3 «请求失败 → 全局 Unknown, 不得进 idle 宽限期»).
+        // authoritatively label the host idle until a fresh successful snapshot arrives.
         assertEquals(Layer.L2Active, coordinator.layer.value)
+        val startSse = commands.filterIsInstance<LifecycleCommand.StartSse>().single()
         assertEquals(
-            listOf(LifecycleCommand.StartSse(identity), LifecycleCommand.StopPoller),
+            listOf(startSse, LifecycleCommand.StopPoller),
             commands,
         )
     }
@@ -507,6 +860,8 @@ class StreamingLifecycleCoordinatorTest {
         status.setState(GlobalBusyState.Unknown)
         coordinator.onBootstrapResult(identity, GlobalBusyState.Unknown)
         runCurrent()
+        driveLastHandoffAck(coordinator, commands, SourceActivation.Ready(GlobalBusyState.Unknown))
+        runCurrent()
 
         // Unknown + foreground → L1(busy=true) (FGS pre-warmed while a fresh snapshot
         // is awaited — never teardown / downgrade on uncertainty).
@@ -514,7 +869,7 @@ class StreamingLifecycleCoordinatorTest {
     }
 
     @Test
-    fun `CP4 - L2Idle then Unknown re-establishes SSE (restore source on uncertainty)`() = runTest {
+    fun `CP4 - L2Idle then Unknown re-establishes SSE after ack (restore source on uncertainty)`() = runTest {
         val status = FakeStatusAggregator()
         val coordinator = StreamingLifecycleCoordinator(status, backgroundScope)
         val inForeground = MutableStateFlow(false)
@@ -525,9 +880,17 @@ class StreamingLifecycleCoordinatorTest {
         status.setState(GlobalBusyState.Busy)
         coordinator.onBootstrapResult(identity, GlobalBusyState.Busy)
         runCurrent()
+        driveLastHandoffAck(coordinator, commands, SourceActivation.Ready(GlobalBusyState.Busy))
+        runCurrent()
         status.setState(GlobalBusyState.AllIdleFresh)
         runCurrent()
         advanceTimeBy(StreamingLifecycleCoordinator.IDLE_DEBOUNCE_MS)
+        runCurrent()
+        driveLastHandoffAck(
+            coordinator,
+            commands,
+            SourceActivation.Ready(GlobalBusyState.AllIdleFresh),
+        )
         runCurrent()
         assertEquals(Layer.L2Idle, coordinator.layer.value)
         commands.clear()
@@ -536,10 +899,13 @@ class StreamingLifecycleCoordinatorTest {
         // (do NOT trust an uncertain verdict to keep the host in idle).
         status.setState(GlobalBusyState.Unknown)
         runCurrent()
+        driveLastHandoffAck(coordinator, commands, SourceActivation.Ready(GlobalBusyState.Unknown))
+        runCurrent()
 
         assertEquals(Layer.L2Active, coordinator.layer.value)
+        val startSse = commands.filterIsInstance<LifecycleCommand.StartSse>().single()
         assertEquals(
-            listOf(LifecycleCommand.StartSse(identity), LifecycleCommand.StopPoller),
+            listOf(startSse, LifecycleCommand.StopPoller),
             commands,
         )
     }
@@ -549,16 +915,6 @@ class StreamingLifecycleCoordinatorTest {
     /**
      * In-memory [StatusAggregator] for tests — `globalState` is a writable
      * [MutableStateFlow] so the test drives state transitions directly.
-     * `globalBusy` is derived as `state == Busy` (matches the impl's `anyBusy`
-     * projection closely enough for the coordinator tests, which only consume
-     * `globalState`).
-     *
-     * Defaults to [GlobalBusyState.AllIdleFresh] (matches the pre-CP4
-     * `globalBusy = false` default) so a test that calls
-     * `onBootstrapResult(identity, AllIdleFresh)` without first setting the
-     * aggregator's state sees the bootstrap's idle verdict hold (otherwise
-     * the observer would fire with `Unknown` and immediately flip L1-idle to
-     * L1-busy).
      */
     private class FakeStatusAggregator : StatusAggregator {
         private val _globalState = MutableStateFlow(GlobalBusyState.AllIdleFresh)
@@ -567,12 +923,6 @@ class StreamingLifecycleCoordinatorTest {
         override val statusByKey: StateFlow<Map<SessionStatusKey, SessionBusyStatus>> =
             MutableStateFlow(emptyMap())
 
-        /**
-         * D1 (gate #1): the coordinator's idle-debounce now reads stateAtNow
-         * instead of globalState.value. The fake keeps them in lockstep so
-         * existing tests that drive state via [setState] continue to flow
-         * through to the debounce expiry check.
-         */
         override fun stateAtNow(): GlobalBusyState = _globalState.value
 
         fun setState(state: GlobalBusyState) {
@@ -583,13 +933,6 @@ class StreamingLifecycleCoordinatorTest {
 
 // ── D1 (gate #1) integrated lifecycle scenarios ─────────────────────────
 
-/**
- * D1 (gate #1): the coordinator's idle-debounce reads [StatusAggregator.stateAtNow]
- * (time-correct) instead of the cached [StatusAggregator.globalState] `.value`.
- * A divergence — `globalState` still AllIdleFresh but `stateAtNow` returns
- * Unknown (stale Idle at the instant of firing) — MUST NOT trigger the
- * L2Active→L2Idle transition.
- */
 @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
 class StreamingLifecycleCoordinatorStateAtNowTest {
 
@@ -602,11 +945,6 @@ class StreamingLifecycleCoordinatorStateAtNowTest {
 
     @Test
     fun `D1 gate #1 - debounce expiry reads stateAtNow - Unknown at expiry cancels L2Idle transition`() = runTest {
-        // Integrated acceptance: a 45s debounce fires at the TTL boundary.
-        // globalState.value may still be cached at AllIdleFresh (the
-        // aggregator's passive wake-up may not have recomputed yet); the
-        // coordinator MUST call stateAtNow() which returns Unknown (time-
-        // correct verdict) and refuse the L2Active→L2Idle transition.
         val status = DivergingFakeStatusAggregator(
             initialGlobalState = GlobalBusyState.AllIdleFresh,
             stateAtNowValue = GlobalBusyState.Unknown,
@@ -620,6 +958,10 @@ class StreamingLifecycleCoordinatorStateAtNowTest {
         status.setGlobalState(GlobalBusyState.Busy)
         coordinator.onBootstrapResult(identity, GlobalBusyState.Busy)
         runCurrent()
+        // Drive the bootstrap SSE ack first.
+        val bootstrapToken = commands.filterIsInstance<LifecycleCommand.StartSse>().last().handoffToken
+        coordinator.onActivationAck(bootstrapToken, SourceActivation.Ready(GlobalBusyState.Busy))
+        runCurrent()
         assertEquals(Layer.L2Active, coordinator.layer.value)
         commands.clear()
 
@@ -630,7 +972,7 @@ class StreamingLifecycleCoordinatorStateAtNowTest {
         assertTrue("debounce armed — no commands yet", commands.isEmpty())
 
         // Cross the 45s threshold. The debounce fires; it reads stateAtNow()
-        // which returns Unknown → no L2Idle transition, no StopSse.
+        // which returns Unknown → no L2Idle transition, no StartPoller.
         advanceTimeBy(StreamingLifecycleCoordinator.IDLE_DEBOUNCE_MS)
         runCurrent()
 
@@ -640,8 +982,8 @@ class StreamingLifecycleCoordinatorStateAtNowTest {
             coordinator.layer.value,
         )
         assertTrue(
-            "no StopSse emitted on stale-idle verdict",
-            commands.none { it == LifecycleCommand.StopSse },
+            "no StartPoller emitted on stale-idle verdict",
+            commands.none { it is LifecycleCommand.StartPoller },
         )
     }
 

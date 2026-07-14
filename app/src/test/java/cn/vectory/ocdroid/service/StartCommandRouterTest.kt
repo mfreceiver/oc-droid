@@ -1,6 +1,9 @@
 package cn.vectory.ocdroid.service
 
 import cn.vectory.ocdroid.service.StartCommandRouter.Route
+import cn.vectory.ocdroid.service.identity.ConnectionIdentity
+import cn.vectory.ocdroid.service.streaming.UserCloseRequest
+import cn.vectory.ocdroid.service.streaming.UserCloseRequestParser
 import org.junit.Assert.assertEquals
 import org.junit.Test
 
@@ -22,8 +25,35 @@ class StartCommandRouterTest {
     @Test
     fun `ACTION_CLOSE_BACKGROUND routes to CloseBackground (section 16-U1)`() {
         assertEquals(
-            Route.CloseBackground,
+            Route.CloseBackground(UserCloseRequest(expectedIdentity = null)),
             StartCommandRouter.routeFor(SessionStreamingService.ACTION_CLOSE_BACKGROUND),
+        )
+    }
+
+    @Test
+    fun `close route preserves the identity parsed from notification extras`() {
+        val identity = ConnectionIdentity(9L, "group", "/work", "endpoint")
+        val request = UserCloseRequestParser.parse(
+            epoch = identity.epoch,
+            serverGroupFp = identity.serverGroupFp,
+            normalizedWorkdir = identity.normalizedWorkdir,
+            endpointFp = identity.endpointFp,
+        )
+
+        assertEquals(
+            Route.CloseBackground(UserCloseRequest(identity)),
+            StartCommandRouter.routeFor(
+                SessionStreamingService.ACTION_CLOSE_BACKGROUND,
+                request,
+            ),
+        )
+    }
+
+    @Test
+    fun `incomplete close identity parses as degraded no-identity request`() {
+        assertEquals(
+            UserCloseRequest(expectedIdentity = null),
+            UserCloseRequestParser.parse(9L, "group", null, "endpoint"),
         )
     }
 

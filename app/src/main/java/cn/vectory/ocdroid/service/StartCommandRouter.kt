@@ -1,5 +1,7 @@
 package cn.vectory.ocdroid.service
 
+import cn.vectory.ocdroid.service.streaming.UserCloseRequest
+
 /**
  * FGS spec §5 / §16-U1 — pure-JVM intent-action dispatcher for
  * [SessionStreamingService.onStartCommand].
@@ -11,10 +13,17 @@ package cn.vectory.ocdroid.service
  *
  * ```kotlin
  * when (val route = StartCommandRouter.routeFor(intent?.action)) {
- *     StartCommandRoute.CloseBackground -> controller?.requestUserClose()
+ *     is StartCommandRoute.CloseBackground -> controller?.requestUserClose(route.request)
  *     StartCommandRoute.Bootstrap -> { /* §5 host-check + placeholder + bootstrap */ }
  * }
  * ```
+ *
+ * D2 gate #8: the [Route.CloseBackground] carries a [UserCloseRequest] (built
+ * by [cn.vectory.ocdroid.service.streaming.UserCloseRequestParser] from the
+ * Intent extras BEFORE this router is consulted — the router itself stays
+ * pure-JVM, identity-agnostic). The controller revalidates the request's
+ * expected identity against the current identity before any teardown
+ * side-effect (§16-U1 implementation note).
  *
  * Both routes return [Service.START_STICKY] (the manifest-declared service is
  * `START_STICKY`); the router does NOT decide stickiness, only the body.
@@ -38,7 +47,7 @@ object StartCommandRouter {
          * [cn.vectory.ocdroid.service.streaming.SessionStreamingController.requestUserClose]
          * → L3 teardown. Does NOT re-bootstrap.
          */
-        data object CloseBackground : Route
+        data class CloseBackground(val request: UserCloseRequest) : Route
 
         /**
          * §5 START_STICKY bootstrap path. Covers:
@@ -53,7 +62,10 @@ object StartCommandRouter {
     /**
      * Decides the [Route] for [action]. Pure function — no Android deps.
      */
-    fun routeFor(action: String?): Route =
-        if (action == SessionStreamingService.ACTION_CLOSE_BACKGROUND) Route.CloseBackground
+    fun routeFor(
+        action: String?,
+        closeRequest: UserCloseRequest = UserCloseRequest(expectedIdentity = null),
+    ): Route =
+        if (action == SessionStreamingService.ACTION_CLOSE_BACKGROUND) Route.CloseBackground(closeRequest)
         else Route.Bootstrap
 }

@@ -17,10 +17,12 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+
 /**
  * FGS spec §1.0 / §5 / §6 — the pure-JVM orchestrator that turns
  * [StreamingLifecycleCoordinator.commands] into [ServiceShell] side-effects,
- * runs the §6 background poller, and drives the §5 START_STICKY bootstrap.
+ * runs the §5 START_STICKY bootstrap, and acks source activations back into
+ * the coordinator (D2 gate #4 — acknowledgeable handoff).
  *
  * The Android [cn.vectory.ocdroid.service.SessionStreamingService] is a thin
  * shell: it builds [NotificationStrings] from `R.string.*`, constructs this
@@ -34,17 +36,21 @@ import kotlinx.coroutines.launch
  * [ConnectionIdentityStore]). The controller is unit-tested with fakes +
  * `runTest` — no Robolectric.
  *
- * **§4.4 source-switch ordering**: the coordinator already emits commands in
- * the right order (new source active BEFORE closing old). This controller
- * forwards each command to the shell in the order received, so the shell
- * observes e.g. `startPoller()` THEN `disconnectSse()` for L2Active→L2Idle.
+ * **§4.4 source-switch ordering + D2 acknowledgeable handoff**: the
+ * coordinator emits [LifecycleCommand.StartSse] / [LifecycleCommand.StartPoller]
+ * carrying a handoff token; this controller launches the corresponding
+ * activation on [scope], and on completion forwards the [SourceActivation]
+ * to [StreamingLifecycleCoordinator.onActivationAck]. The coordinator's
+ * commit (close prior source + flip layer) runs ONLY after the activation
+ * verifies — see [StreamingLifecycleCoordinator.beginHandoff].
  *
- * **Poller idempotence** (§6): a single [pollerJob] guard prevents stacking.
- * `StartPoller` cancels any in-flight poller before launching the new one;
- * `StopPoller` cancels + nulls. The poller loop calls
- * [StatusAggregatorInput.refresh] every [pollIntervalMs]; the resulting
- * [StatusAggregator.globalState] flows back into the coordinator (L2Idle
- * poller finds busy → in-place L2Active per groker-R1).
+ * **§6 poller host (D2 gate #4)**: the controller no longer owns a poller
+ * job — it delegates [LifecycleCommand.StartPoller] to the shell, which in
+ * production forwards to [ProcessStatusPoller.startAndAwaitFirstPoll] (runs
+ * the loop on `@ApplicationScope`, survives
+ * [cn.vectory.ocdroid.service.SessionStreamingService.onDestroy]). The L3
+ * source contract (§6: "no FGS, no SSE, poller only") is thus preserved
+ * across Service death.
  *
  * **§5 bootstrap (CP7)**: [bootstrapAsync] runs the §5 steps 3-6 sequence:
  *  - call [BootstrapRunner.runBootstrap];
@@ -68,14 +74,12 @@ class SessionStreamingController(
     private val strings: NotificationStrings,
     private val inForeground: StateFlow<Boolean>,
     private val scope: CoroutineScope,
-    private val pollIntervalMs: Long = DEFAULT_POLL_INTERVAL_MS,
     private val bootstrapMaxAttempts: Int = DEFAULT_BOOTSTRAP_MAX_ATTEMPTS,
     private val bootstrapBackoffMs: Long = DEFAULT_BOOTSTRAP_BACKOFF_MS,
     private val clock: () -> Long = { System.currentTimeMillis() },
 ) {
 
     // Single-flight guards (read/write on `scope` = Main.immediate).
-    private var pollerJob: Job? = null
     private var commandCollectorJob: Job? = null
     private var busyObserverJob: Job? = null
     private var started = false
@@ -142,26 +146,12 @@ class SessionStreamingController(
                 is BootstrapResult.Success -> {
                     degraded = false
                     val identity = result.identity
-                    // §3 Phase-0 main path: global getSessionStatus, binned by
-                    // sessionsById.directory. The aggregator applies §3.1 merge
-                    // timing + §2 epoch guard internally.
-                    //
-                    // D1 (gate #5): the snapshot carries registeredWorkdirs
-                    // alongside sessionsById so the aggregator can enforce the
-                    // all-idle coverage predicate + classify unmapped-active
-                    // ids as Busy.
                     val snapshot = sessionSnapshotProvider.current()
                     statusAggregatorInput.refresh(identity, snapshot)
-                    // §5 decision matrix feeds the post-refresh authoritative
-                    // state; the coordinator's matrix picks L1/L2Active/L3.
                     coordinator.onBootstrapResult(identity, statusAggregator.globalState.value)
                     return
                 }
                 is BootstrapResult.TofuNeedsActivity -> {
-                    // §5 degraded: do NOT retry, do NOT teardown (Unknown keeps
-                    // the source alive per CP4). Mark the request failed so the
-                    // aggregator reports Unknown (keep-alive), surface the
-                    // degraded notification.
                     degraded = true
                     DebugLog.w(TAG, "bootstrapAsync: TOFU degraded for ${result.hostPort}")
                     val identity = identityStore.currentIdentity.value
@@ -184,13 +174,6 @@ class SessionStreamingController(
                     return
                 }
                 BootstrapResult.Failed -> {
-                    // §5 step 6: bounded retry with backoff. CP9: SSE
-                    // ownership lives in [ServiceSseConnectionOwner]; the
-                    // collector's collection-level failure routes through
-                    // the owner's `onTerminalExhaustion` callback
-                    // (coordinator.onDisconnect). This retry mechanism is
-                    // for the bootstrap itself (network down on sticky
-                    // rebuild / no identity bound yet).
                     if (attempt >= bootstrapMaxAttempts) {
                         DebugLog.w(TAG, "bootstrapAsync: exhausted $attempt attempts → onDisconnect")
                         coordinator.onDisconnect()
@@ -211,11 +194,18 @@ class SessionStreamingController(
      * the order received; the coordinator's emission order already encodes
      * the §4.4 "new source active BEFORE closing old" invariant.
      *
+     * D2 gate #4: [LifecycleCommand.StartSse] + [LifecycleCommand.StartPoller]
+     * are acknowledgeable — the controller launches the activation on [scope]
+     * and forwards the result to [StreamingLifecycleCoordinator.onActivationAck]
+     * when it completes. The handoff token on the command identifies which
+     * coordinator handoff is being acked; a stale activation (superseded
+     * mid-flight) is dropped by the coordinator's token check.
+     *
      * SSE side ([connectSse] / [disconnectSse]) is wired through to the
      * Service's [ServiceSseConnectionOwner] (CP9) — the dispatch test
      * verifies the call sequence end-to-end via a recording shell fake.
      */
-    private fun executeCommand(cmd: LifecycleCommand) {
+    private suspend fun executeCommand(cmd: LifecycleCommand) {
         when (cmd) {
             LifecycleCommand.StartForeground -> {
                 val spec = SessionStatusNotifier.build(
@@ -230,50 +220,36 @@ class SessionStreamingController(
             LifecycleCommand.StopForeground -> shell.stopForeground()
             LifecycleCommand.StopSelf -> shell.serviceStopSelf()
             is LifecycleCommand.StartSse -> {
-                // CP9: SSE collector is owned by the Service
-                // ([ServiceSseConnectionOwner]); the shell forwards the
-                // identity-bound StartSse command to it.
-                shell.connectSse(cmd.identity)
+                // D2: acknowledgeable activation. Launch on scope (non-blocking
+                // so the command collector can process concurrent commands —
+                // e.g., a teardown's StopSse that supersedes this activation).
+                val token = cmd.handoffToken
+                val identity = cmd.identity
+                scope.launch {
+                    val activation = shell.connectSse(identity)
+                    coordinator.onActivationAck(token, activation)
+                }
             }
             LifecycleCommand.StopSse -> {
-                // CP9: SSE collector teardown — shell forwards to the owner.
                 shell.disconnectSse()
             }
-            LifecycleCommand.StartPoller -> {
-                // §6 idempotence: cancel any in-flight poller before relaunch.
-                pollerJob?.cancel()
-                pollerJob = scope.launch {
-                    while (isActive) {
-                        delay(pollIntervalMs)
-                        runPollCycle()
-                    }
+            is LifecycleCommand.StartPoller -> {
+                // D2 gate #4: acknowledgeable activation. The shell delegates
+                // to ProcessStatusPoller.startAndAwaitFirstPoll which does
+                // the immediate-first-poll (no 30s delay) + returns Ready(state).
+                // The shell call is suspend; launching on scope means the
+                // command collector is not blocked on the first poll.
+                val token = cmd.handoffToken
+                scope.launch {
+                    val snapshot = sessionSnapshotProvider.current()
+                    val activation = shell.startPoller(cmd.identity, snapshot)
+                    coordinator.onActivationAck(token, activation)
                 }
-                // Observable marker — production impl is a no-op, tests record
-                // the call sequence to verify §4.4 source-switch ordering.
-                shell.startPoller()
             }
             LifecycleCommand.StopPoller -> {
-                pollerJob?.cancel()
-                pollerJob = null
                 shell.stopPoller()
             }
         }
-    }
-
-    /**
-     * One §3 global-status refresh cycle. The aggregator's internal §3.1
-     * merge timing + §2 epoch guard apply; the resulting [StatusAggregator.globalState]
-     * flows back into the lifecycle coordinator (groker-R1 in-place L2Idle→L2Active).
-     */
-    private suspend fun runPollCycle() {
-        val identity: ConnectionIdentity = identityStore.currentIdentity.value ?: run {
-            DebugLog.w(TAG, "poller: no bound identity — skipping cycle")
-            return
-        }
-        // D1 (gate #5): refresh sees the snapshot's registeredWorkdirs so the
-        // all-idle coverage predicate cannot falsely pass on stale state.
-        val snapshot: StatusSnapshot = sessionSnapshotProvider.current()
-        statusAggregatorInput.refresh(identity, snapshot)
     }
 
     private fun currentBusyCount(): Int {
@@ -284,15 +260,19 @@ class SessionStreamingController(
     }
 
     /**
-     * Cancel the command collector + poller + busy observer. The Service's
+     * Cancel the command collector + busy observer. The Service's
      * `onDestroy` cancels its `MainScope`, which structurally cancels these
      * too — this method is exposed for explicit / test cleanup.
+     *
+     * D2 gate #4: the [ProcessStatusPoller]'s loop job runs on
+     * `@ApplicationScope` and is NOT cancelled here (it survives Service
+     * death — §6 L3 source contract). The poller is cancelled via the
+     * [LifecycleCommand.StopPoller] command, which the coordinator emits on
+     * L2Idle→L2Active / Rejected activations.
      */
     fun shutdown() {
         commandCollectorJob?.cancel()
         busyObserverJob?.cancel()
-        pollerJob?.cancel()
-        pollerJob = null
     }
 
     /**
@@ -310,15 +290,75 @@ class SessionStreamingController(
     }
 
     /**
-     * §16-U1 user-explicit-close entry routed through the controller for
-     * testability (the Service's `onStartCommand` ACTION_CLOSE_BACKGROUND
-     * branch is a single-line forwarder). Forwards to
-     * [StreamingLifecycleCoordinator.requestUserClose] → L3 teardown
-     * (`stopForeground` + `stopSelf` + `cancelSse` + arm poller + dismiss
-     * ongoing).
+     * §16-U1 user-explicit-close entry — the non-suspend Service-side
+     * forwarder. Launches [handleUserClose] on [scope] so the suspend
+     * identity/status recheck + the eventual teardown run asynchronously.
+     * The Service's `onStartCommand` ACTION_CLOSE_BACKGROUND branch is a
+     * single-line call to this method.
      */
-    fun requestUserClose() {
-        DebugLog.i(TAG, "requestUserClose (§16-U1 user-explicit close)")
+    fun requestUserClose(request: UserCloseRequest = UserCloseRequest(expectedIdentity = null)) {
+        DebugLog.i(TAG, "requestUserClose (§16-U1) — launching handleUserClose")
+        scope.launch { handleUserClose(request) }
+    }
+
+    /**
+     * D2 gate #8 / §16-U1 — the §16-U1 implementation note "点击后 **重新查询
+     * identity/status**" made testable. Pure-JVM (no Robolectric) — the
+     * Service's PendingIntent carries the identity used to build it, parsed
+     * by [UserCloseRequestParser]; the close handler revalidates BEFORE any
+     * teardown side-effect.
+     *
+     * Decision tree (Busy is NOT a veto — explicit user command):
+     *  1. Parse expected identity (already done — [request] carries it).
+     *  2. Read current identity.
+     *  3. If [UserCloseRequest.expectedIdentity] exists AND is not current
+     *     ([ConnectionIdentityStore.isCurrent] == false) → ignore the stale
+     *     action (no teardown). The host reconfigured since the notification
+     *     was built; tapping its Action must not tear down the new host.
+     *  4. If current identity exists: refresh the status snapshot + recheck
+     *     identity AFTER the suspend. If it changed mid-refresh → abort
+     *     (don't tear down the newly-configured host).
+     *  5. If identity still current (or no identity — degraded/placeholder) →
+     *     awaitable user-close teardown via
+     *     [StreamingLifecycleCoordinator.requestUserClose].
+     *
+     * The status query's purpose is to (a) prevent acting on a STALE
+     * notification + (b) update the final status snapshot for the
+     * notification display layer. **Busy / Unknown does NOT veto** — the
+     * close action must not appear broken to the user; if the status query
+     * fails (Unknown) the close still proceeds after a stable-identity
+     * recheck.
+     */
+    suspend fun handleUserClose(request: UserCloseRequest) {
+        val expected = request.expectedIdentity
+        if (expected == null) {
+            DebugLog.i(TAG, "handleUserClose: closing no-identity degraded placeholder directly")
+            shell.stopForeground()
+            shell.serviceStopSelf()
+            return
+        }
+        val current = identityStore.currentIdentity.value
+        // §16-U1 step 3: stale-identity action → ignore.
+        if (!UserCloseRequestParser.isStillCurrent(expected, identityStore)) {
+            DebugLog.i(
+                TAG,
+                "handleUserClose: stale action (expected epoch=${expected.epoch}, " +
+                    "current epoch=${identityStore.currentEpoch()}) — ignoring",
+            )
+            return
+        }
+        // §16-U1 step 4: refresh + recheck.
+        if (current != null) {
+            val snapshot = sessionSnapshotProvider.current()
+            statusAggregatorInput.refresh(current, snapshot)
+            // Recheck identity AFTER the suspend refresh.
+            if (!identityStore.isCurrent(current)) {
+                DebugLog.i(TAG, "handleUserClose: identity changed mid-refresh — aborting teardown")
+                return
+            }
+        }
+        // §16-U1 step 5: proceed to teardown (Busy/Unknown is NOT a veto).
+        DebugLog.i(TAG, "handleUserClose: proceeding to teardown")
         coordinator.requestUserClose()
     }
 
@@ -326,19 +366,14 @@ class SessionStreamingController(
         private const val TAG = "SessionStreamingCtrl"
 
         /**
-         * §6 background poller interval.
-         *
-         * Chosen to equal the §3 status TTL
-         * ([StatusAggregatorImpl.STATUS_TTL_MS] = 30s) so each cycle produces
-         * a fresh snapshot just as the prior one would have aged out — the
-         * [StatusAggregator.globalState] projection thus never reports stale
-         * `Idle` (which would wrongly permit the idle grace window) during
-         * steady-state polling. Same value as
-         * [cn.vectory.ocdroid.di.AppLifecycleMonitor]'s legacy background poller
-         * (§18.1 R-A, D1) so the two pollers (legacy permissions/questions vs.
-         * §3 status) align cadence while the switchover lanes coexist.
+         * §6 background poller interval. Equals the §3 status TTL (30s) so
+         * each cycle produces a fresh snapshot just as the prior one would
+         * age out. Delegates to [ProcessStatusPoller.DEFAULT_INTERVAL_MS]
+         * (D2: the poller loop now lives on `@ApplicationScope` in
+         * [ProcessStatusPoller]; the const stays here as a back-compat
+         * reference for existing tests).
          */
-        const val DEFAULT_POLL_INTERVAL_MS = 30_000L
+        const val DEFAULT_POLL_INTERVAL_MS = ProcessStatusPoller.DEFAULT_INTERVAL_MS
 
         /**
          * §5 step 6 bounded retry budget. Conservative so a transient network

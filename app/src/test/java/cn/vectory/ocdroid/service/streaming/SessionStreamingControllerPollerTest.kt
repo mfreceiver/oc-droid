@@ -1,6 +1,5 @@
 package cn.vectory.ocdroid.service.streaming
 
-import cn.vectory.ocdroid.data.model.Session
 import cn.vectory.ocdroid.service.identity.ConnectionIdentity
 import cn.vectory.ocdroid.service.identity.ConnectionIdentityStore
 import cn.vectory.ocdroid.service.lifecycle.Layer
@@ -22,14 +21,16 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
- * FGS spec §6 — poller behavior of [SessionStreamingController].
- *
- * Verifies the §6 background poller:
- *  - fires [cn.vectory.ocdroid.service.status.StatusAggregatorInput.refresh]
- *    on the test scheduler at the poller interval (virtual clock);
- *  - is cancelled on `StopPoller` (no further refresh calls after the stop);
- *  - is idempotent: a second `StartPoller` does not stack a second job (no
- *    doubled refresh calls per interval).
+ * D2 gate #4 — controller dispatch tests for the [LifecycleCommand.StartPoller]
+ * handoff. The §6 poller loop itself is owned by [ProcessStatusPoller]
+ * (tested in [ProcessStatusPollerTest]); this file verifies the controller's
+ * command→shell delegation:
+ *  - StartPoller → shell.startPoller(identity, snapshot) returns
+ *    [SourceActivation]; the controller acks the coordinator.
+ *  - StopPoller → shell.stopPoller (the controller does not own a job; the
+ *    shell delegates to [ProcessStatusPoller.stop] in production).
+ *  - StartPoller with no bound identity → the controller acks
+ *    [SourceActivation.Rejected.StaleIdentity] without calling the shell.
  */
 @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
 class SessionStreamingControllerPollerTest {
@@ -53,10 +54,9 @@ class SessionStreamingControllerPollerTest {
     )
 
     @Test
-    fun `StartPoller fires refresh on the poller interval`() = runTest {
+    fun `StartPoller delegates to shell_startPoller and acks the coordinator`() = runTest {
         val fixture = newFixture(backgroundScope)
         fixture.controller.start()
-        // Bootstrap background + Busy → L2Active directly.
         fixture.bootstrapRunner.enqueue(BootstrapResult.Success(identity))
         fixture.store.bind(
             serverGroupFp = identity.serverGroupFp,
@@ -64,34 +64,26 @@ class SessionStreamingControllerPollerTest {
             endpointFp = identity.endpointFp,
         )
         fixture.aggregator.setState(GlobalBusyState.Busy)
+        fixture.shell.nextSseActivation = SourceActivation.Ready(GlobalBusyState.Busy)
         fixture.controller.bootstrapAsync()
         runCurrent()
         assertEquals(Layer.L2Active, fixture.coordinator.layer.value)
 
-        // All-idle → 45s debounce → L2Idle emits StartPoller.
+        // Drive to L2Idle.
+        fixture.shell.nextPollerActivation = SourceActivation.Ready(GlobalBusyState.AllIdleFresh)
         fixture.aggregator.setState(GlobalBusyState.AllIdleFresh)
         runCurrent()
         advanceTimeBy(StreamingLifecycleCoordinator.IDLE_DEBOUNCE_MS)
         runCurrent()
         assertEquals(Layer.L2Idle, fixture.coordinator.layer.value)
-
-        val refreshesBefore = fixture.input.refreshCount
-        // Advance one poll interval — should fire exactly one refresh.
-        advanceTimeBy(SessionStreamingController.DEFAULT_POLL_INTERVAL_MS)
-        runCurrent()
-        assertEquals(
-            "one refresh per interval",
-            refreshesBefore + 1,
-            fixture.input.refreshCount,
+        assertTrue(
+            "shell.startPoller recorded (controller delegated)",
+            fixture.shell.recorded.any { it == "startPoller" },
         )
-
-        advanceTimeBy(SessionStreamingController.DEFAULT_POLL_INTERVAL_MS)
-        runCurrent()
-        assertEquals(refreshesBefore + 2, fixture.input.refreshCount)
     }
 
     @Test
-    fun `StopPoller cancels the poller - no further refresh calls`() = runTest {
+    fun `StopPoller delegates to shell_stopPoller`() = runTest {
         val fixture = newFixture(backgroundScope)
         fixture.controller.start()
         fixture.bootstrapRunner.enqueue(BootstrapResult.Success(identity))
@@ -101,102 +93,25 @@ class SessionStreamingControllerPollerTest {
             endpointFp = identity.endpointFp,
         )
         fixture.aggregator.setState(GlobalBusyState.Busy)
+        fixture.shell.nextSseActivation = SourceActivation.Ready(GlobalBusyState.Busy)
         fixture.controller.bootstrapAsync()
         runCurrent()
-        // Background busy → L2Active. Now idle → debounce → L2Idle.
+        fixture.shell.nextPollerActivation = SourceActivation.Ready(GlobalBusyState.AllIdleFresh)
         fixture.aggregator.setState(GlobalBusyState.AllIdleFresh)
         runCurrent()
         advanceTimeBy(StreamingLifecycleCoordinator.IDLE_DEBOUNCE_MS)
         runCurrent()
         assertEquals(Layer.L2Idle, fixture.coordinator.layer.value)
+        fixture.shell.recorded.clear()
 
-        // Then busy again — L2Idle → L2Active IN-PLACE emits StopPoller.
+        // L2Idle → L2Active emits StartSse; the commit emits StopPoller.
+        fixture.shell.nextSseActivation = SourceActivation.Ready(GlobalBusyState.Busy)
         fixture.aggregator.setState(GlobalBusyState.Busy)
         runCurrent()
-        assertEquals(Layer.L2Active, fixture.coordinator.layer.value)
 
-        val refreshesAtStop = fixture.input.refreshCount
-        // Advance well past the poll interval — no new refreshes should fire.
-        advanceTimeBy(SessionStreamingController.DEFAULT_POLL_INTERVAL_MS * 3)
-        runCurrent()
-        assertEquals(
-            "StopPoller cancelled the poller — no further refreshes",
-            refreshesAtStop,
-            fixture.input.refreshCount,
-        )
-    }
-
-    @Test
-    fun `poller is idempotent - second StartPoller does not stack a job`() = runTest {
-        val fixture = newFixture(backgroundScope)
-        fixture.controller.start()
-        // Drive into L2Idle once.
-        fixture.bootstrapRunner.enqueue(BootstrapResult.Success(identity))
-        fixture.store.bind(
-            serverGroupFp = identity.serverGroupFp,
-            normalizedWorkdir = identity.normalizedWorkdir,
-            endpointFp = identity.endpointFp,
-        )
-        fixture.aggregator.setState(GlobalBusyState.Busy)
-        fixture.controller.bootstrapAsync()
-        runCurrent()
-        fixture.aggregator.setState(GlobalBusyState.AllIdleFresh)
-        runCurrent()
-        advanceTimeBy(StreamingLifecycleCoordinator.IDLE_DEBOUNCE_MS)
-        runCurrent()
-        assertEquals(Layer.L2Idle, fixture.coordinator.layer.value)
-
-        // Cycle back through L2Active → L2Idle to force a second StartPoller
-        // (the controller should have cancelled the prior poller first).
-        fixture.aggregator.setState(GlobalBusyState.Busy)
-        runCurrent()
-        assertEquals(Layer.L2Active, fixture.coordinator.layer.value)
-        fixture.aggregator.setState(GlobalBusyState.AllIdleFresh)
-        runCurrent()
-        advanceTimeBy(StreamingLifecycleCoordinator.IDLE_DEBOUNCE_MS)
-        runCurrent()
-        assertEquals(Layer.L2Idle, fixture.coordinator.layer.value)
-
-        val refreshesBefore = fixture.input.refreshCount
-        // One interval → exactly one refresh (not two — no stacking).
-        advanceTimeBy(SessionStreamingController.DEFAULT_POLL_INTERVAL_MS)
-        runCurrent()
-        assertEquals(
-            "idempotent poller — exactly one refresh per interval after restart",
-            refreshesBefore + 1,
-            fixture.input.refreshCount,
-        )
-    }
-
-    @Test
-    fun `poller skips cycle when no identity is bound`() = runTest {
-        val fixture = newFixture(backgroundScope)
-        // Do NOT bind identity — poller should skip refresh gracefully.
-        fixture.controller.start()
-        fixture.bootstrapRunner.enqueue(BootstrapResult.Success(identity))
-        fixture.aggregator.setState(GlobalBusyState.Busy)
-        // Bind then unbind via beginReconfigure so currentIdentity.value == null.
-        fixture.store.bind(
-            serverGroupFp = identity.serverGroupFp,
-            normalizedWorkdir = identity.normalizedWorkdir,
-            endpointFp = identity.endpointFp,
-        )
-        fixture.controller.bootstrapAsync()
-        runCurrent()
-        fixture.store.beginReconfigure() // nulls currentIdentity
-        fixture.aggregator.setState(GlobalBusyState.AllIdleFresh)
-        runCurrent()
-        advanceTimeBy(StreamingLifecycleCoordinator.IDLE_DEBOUNCE_MS)
-        runCurrent()
-        assertEquals(Layer.L2Idle, fixture.coordinator.layer.value)
-
-        val refreshesBefore = fixture.input.refreshCount
-        advanceTimeBy(SessionStreamingController.DEFAULT_POLL_INTERVAL_MS)
-        runCurrent()
-        assertEquals(
-            "no identity → poller skips refresh (no exception, no call)",
-            refreshesBefore,
-            fixture.input.refreshCount,
+        assertTrue(
+            "shell.stopPoller recorded (controller delegated)",
+            fixture.shell.recorded.any { it == "stopPoller" },
         )
     }
 
@@ -206,7 +121,7 @@ class SessionStreamingControllerPollerTest {
         val input = RecordingStatusInput()
         val coordinator = StreamingLifecycleCoordinator(input, scope)
         val store = ConnectionIdentityStore()
-        val shell = NoopShell()
+        val shell = RecordingShell()
         val snapshotProvider = SessionSnapshotProvider { StatusSnapshot.Empty }
         val bootstrapRunner = ScriptedBootstrapRunner()
         val inForegroundFlow = MutableStateFlow(false)
@@ -223,7 +138,7 @@ class SessionStreamingControllerPollerTest {
             scope = scope,
             clock = { 0L },
         )
-        return Fixture(controller, coordinator, input, store, bootstrapRunner)
+        return Fixture(controller, coordinator, input, store, bootstrapRunner, shell)
     }
 
     private class Fixture(
@@ -232,14 +147,9 @@ class SessionStreamingControllerPollerTest {
         val aggregator: RecordingStatusInput,
         val store: ConnectionIdentityStore,
         val bootstrapRunner: ScriptedBootstrapRunner,
-    ) {
-        val input: RecordingStatusInput get() = aggregator
-    }
+        val shell: RecordingShell,
+    )
 
-    /**
-     * Recording [StatusAggregator] + [cn.vectory.ocdroid.service.status.StatusAggregatorInput]:
-     * counts refresh calls and exposes [setState] for driving transitions.
-     */
     private class RecordingStatusInput : StatusAggregator,
         cn.vectory.ocdroid.service.status.StatusAggregatorInput {
         private val _globalState = MutableStateFlow(GlobalBusyState.AllIdleFresh)
@@ -252,11 +162,7 @@ class SessionStreamingControllerPollerTest {
         override val statusByKey: StateFlow<Map<SessionStatusKey, SessionBusyStatus>> =
             _statusByKey.asStateFlow()
 
-        /** D1 gate #1: stateAtNow tracks globalState in the fake. */
         override fun stateAtNow(): GlobalBusyState = _globalState.value
-
-        var refreshCount: Int = 0
-            private set
 
         fun setState(state: GlobalBusyState) {
             _globalState.value = state
@@ -266,9 +172,7 @@ class SessionStreamingControllerPollerTest {
         override suspend fun refresh(
             identity: ConnectionIdentity,
             snapshot: StatusSnapshot,
-        ) {
-            refreshCount++
-        }
+        ) = Unit
 
         override fun applySseStatus(
             key: SessionStatusKey,
@@ -293,14 +197,31 @@ class SessionStreamingControllerPollerTest {
             queue.removeFirstOrNull() ?: BootstrapResult.Failed
     }
 
-    private class NoopShell : ServiceShell {
+    private class RecordingShell : ServiceShell {
+        val recorded = mutableListOf<String>()
+        var nextSseActivation: SourceActivation = SourceActivation.Ready(GlobalBusyState.Busy)
+        var nextPollerActivation: SourceActivation = SourceActivation.Ready(GlobalBusyState.AllIdleFresh)
+
         override fun startForeground(spec: cn.vectory.ocdroid.service.notify.NotificationSpec) = Unit
         override fun updateNotification(spec: cn.vectory.ocdroid.service.notify.NotificationSpec) = Unit
         override fun stopForeground() = Unit
         override fun serviceStopSelf() = Unit
-        override fun startPoller() = Unit
-        override fun stopPoller() = Unit
-        override fun connectSse(identity: ConnectionIdentity) = Unit
-        override fun disconnectSse() = Unit
+        override suspend fun startPoller(
+            identity: ConnectionIdentity,
+            snapshot: StatusSnapshot,
+        ): SourceActivation {
+            recorded += "startPoller"
+            return nextPollerActivation
+        }
+        override fun stopPoller() {
+            recorded += "stopPoller"
+        }
+        override suspend fun connectSse(identity: ConnectionIdentity): SourceActivation {
+            recorded += "connectSse"
+            return nextSseActivation
+        }
+        override suspend fun disconnectSse() {
+            recorded += "disconnectSse"
+        }
     }
 }

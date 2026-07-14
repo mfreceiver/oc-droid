@@ -130,6 +130,7 @@ class SessionStreamingControllerBootstrapTest {
     @Test
     fun `bootstrap Failed retries with backoff then succeeds within budget`() = runTest {
         val fixture = newFixture(backgroundScope, inForeground = false)
+        fixture.controller.start()
         fixture.aggregator.setState(GlobalBusyState.Busy)
         // Two failures, then success.
         fixture.bootstrapRunner.enqueue(BootstrapResult.Failed)
@@ -190,6 +191,7 @@ class SessionStreamingControllerBootstrapTest {
         // Service-side job; the controller makes no per-instance claim about
         // "already ran").
         val fixture = newFixture(backgroundScope, inForeground = false)
+        fixture.controller.start()
         fixture.aggregator.setState(GlobalBusyState.Busy)
         fixture.bootstrapRunner.enqueue(BootstrapResult.Success(identity))
         fixture.bootstrapRunner.enqueue(BootstrapResult.Success(identity))
@@ -337,19 +339,24 @@ class SessionStreamingControllerBootstrapTest {
             recorded += "serviceStopSelf"
         }
 
-        override fun startPoller() {
+        override suspend fun startPoller(
+            identity: ConnectionIdentity,
+            snapshot: cn.vectory.ocdroid.service.status.StatusSnapshot,
+        ): SourceActivation {
             recorded += "startPoller"
+            return SourceActivation.Ready(GlobalBusyState.AllIdleFresh)
         }
 
         override fun stopPoller() {
             recorded += "stopPoller"
         }
 
-        override fun connectSse(identity: ConnectionIdentity) {
+        override suspend fun connectSse(identity: ConnectionIdentity): SourceActivation {
             recorded += "connectSse"
+            return SourceActivation.Ready(GlobalBusyState.Busy)
         }
 
-        override fun disconnectSse() {
+        override suspend fun disconnectSse() {
             recorded += "disconnectSse"
         }
     }

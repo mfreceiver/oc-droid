@@ -2,6 +2,7 @@ package cn.vectory.ocdroid.service.streaming
 
 import cn.vectory.ocdroid.service.identity.ConnectionIdentity
 import cn.vectory.ocdroid.service.notify.NotificationSpec
+import cn.vectory.ocdroid.service.status.StatusSnapshot
 
 /**
  * FGS spec §1.0 — the side-effect surface [SessionStreamingController] drives.
@@ -13,15 +14,23 @@ import cn.vectory.ocdroid.service.notify.NotificationSpec
  *
  * The Android [cn.vectory.ocdroid.service.SessionStreamingService] is the only
  * production implementation: it holds a private `ServiceShell` that delegates
- * to `ServiceCompat` / `NotificationManagerCompat` / `stopSelf` / SSE stubs.
+ * to `ServiceCompat` / `NotificationManagerCompat` / `stopSelf` /
+ * [ServiceSseConnectionOwner] / [ProcessStatusPoller].
  *
- * **CP5-7 seam**: [connectSse] and [disconnectSse] are deliberately **no-op
- * stubs** on the production shell — the SSE collector stays in
- `ConnectionCoordinator` until CP9 (HARD constraint). The ServiceShell methods
- * still exist so the dispatch test can verify §4.4 source-switch ordering
- * (StartSse BEFORE StopPoller, etc.) — the *sequence* of side-effects is what
- * the contract protects; whether the body actually opens a socket today is a
- * CP9 concern.
+ * **D2 gate #4 / §4.4 acknowledgeable source activation**: [connectSse] and
+ * [startPoller] are `suspend` functions returning [SourceActivation]. The
+ * controller awaits the activation result, then forwards it to
+ * [cn.vectory.ocdroid.service.lifecycle.StreamingLifecycleCoordinator.onActivationAck]
+ * — the coordinator's handoff commit runs ONLY after the source establishes
+ * (or fails to establish) a verified baseline. The shell fakes in tests
+ * script the activation (Ready / Rejected) to drive each handoff branch.
+ *
+ * **L3 source survival**: the production [startPoller] delegates to
+ * [ProcessStatusPoller.startAndAwaitFirstPoll] which runs the loop on
+ * `@ApplicationScope` (process-lifetime — survives
+ * [cn.vectory.ocdroid.service.SessionStreamingService.onDestroy]). The shell
+ * method itself is `suspend` so the controller's await measures the
+ * immediate-first-poll latency.
  */
 interface ServiceShell {
 
@@ -56,30 +65,72 @@ interface ServiceShell {
     fun serviceStopSelf()
 
     /**
-     * §6 poller source arming marker. The controller owns the actual poller
-     * job (launched on its scope); this call is the observable side-channel
-     * tests use to assert §4.4 source-switch ordering
-     * (StartPoller BEFORE StopSse, etc.). Production impl is a no-op marker.
+     * D2 §4.4 — start the §6 background poller bound to [identity] +
+     * [snapshot], AWAIT its immediate-first-poll (no 30s delay), and return
+     * the resulting [SourceActivation]. The controller forwards the
+     * activation to
+     * [cn.vectory.ocdroid.service.lifecycle.StreamingLifecycleCoordinator.onActivationAck];
+     * the coordinator's handoff commit consumes [SourceActivation.Ready.state]
+     * to decide `StopSse` (AllIdleFresh) vs `StopPoller` (Busy/Unknown —
+     * stay L2Active).
+     *
+     * The production impl delegates to
+     * [ProcessStatusPoller.startAndAwaitFirstPoll]; the poller loop runs on
+     * `@ApplicationScope` and survives Service death.
+     *
+     * @param identity the atomic identity capture from the command (the
+     *  controller reads `identityStore.currentIdentity.value` at command
+     *  emission time — no re-read of SettingsManager).
+     * @param snapshot the atomic snapshot capture from the command (the
+     *  controller reads `sessionSnapshotProvider.current()` at command
+     *  emission time — the immediate first poll uses this verbatim).
      */
-    fun startPoller()
+    suspend fun startPoller(identity: ConnectionIdentity, snapshot: StatusSnapshot): SourceActivation
 
     /**
-     * §6 poller stop marker. Mirrors [startPoller] — the controller cancels
-     * its poller job; this is the observable marker.
+     * §6 poller stop marker — cancels the [ProcessStatusPoller]'s loop job.
+     * Idempotent (no-op if no loop is running).
      */
     fun stopPoller()
 
     /**
-     * **CP9 stub.** Start / retarget the SSE collector for [identity] (FGS
-     * spec §1 / §2). SSE ownership stays in `ConnectionCoordinator` until
-     * CP9; today the production body is a DEBUG log only. The dispatch test
-     * still calls this so source-switch ordering is verifiable end-to-end.
+     * D2 §4.4 / §1 — start / retarget the SSE collector for [identity],
+     * AWAIT transport readiness + status-baseline verification, and return
+     * the resulting [SourceActivation]. The controller forwards the
+     * activation to
+     * [cn.vectory.ocdroid.service.lifecycle.StreamingLifecycleCoordinator.onActivationAck];
+     * the coordinator's handoff commit consumes [SourceActivation.Ready] to
+     * commit `StopPoller` + the layer flip, OR consumes
+     * [SourceActivation.Rejected] to leave the prior source intact.
+     *
+     * Returns [SourceActivation.Ready] only AFTER the first successful
+     * current-identity frame AND an immediate
+     * [cn.vectory.ocdroid.service.status.StatusAggregatorInput.refresh]
+     * baseline that the [cn.vectory.ocdroid.service.status.StatusAggregator]
+     * projects as `Busy` or `AllIdleFresh` (`Unknown` is NOT a verified
+     * baseline — the collector keeps running and the deferred stays open
+     * until a verified frame arrives OR the §5 step 6 retry budget exhausts).
+     *
+     * Returns [SourceActivation.Rejected]:
+     *  - [SourceActivation.Rejected.StaleIdentity] — the identity is no
+     *    longer current (reconfigure invalidated the queued StartSse); no
+     *    network retry budget consumed, no gap-dirty signal emitted.
+     *  - [SourceActivation.Rejected.TofuPending] — a TOFU trust prompt is
+     *    pending (the TLS handshake cannot succeed); no retry budget consumed.
+     *  - [SourceActivation.Rejected.Exhausted] — the §5 step 6 service-level
+     *    retry budget (3 attempts past the SSEClient's internal 10) is spent;
+     *    the gap-dirty signal has already been emitted (idempotently).
      */
-    fun connectSse(identity: ConnectionIdentity)
+    suspend fun connectSse(identity: ConnectionIdentity): SourceActivation
 
     /**
-     * **CP9 stub.** Tear down the in-flight SSE collector (§1.1 / §4.4).
-     * SSE ownership stays in `ConnectionCoordinator` until CP9.
+     * §4.4 SSE collector teardown — cancels the in-flight collector and
+     * emits the §1.1 gap-dirty signal (CancelSse effect). Idempotent via
+     * [ServiceSseConnectionOwner]'s transport-generation tracking.
+     *
+     * D2 gate #7: the gap-dirty signal is independent of `Job.isActive` —
+     * [ServiceSseConnectionOwner.disconnect] invokes the same idempotent
+     * `emitGapOnce` path that the terminal-collection-exception branch uses.
      */
-    fun disconnectSse()
+    suspend fun disconnectSse()
 }

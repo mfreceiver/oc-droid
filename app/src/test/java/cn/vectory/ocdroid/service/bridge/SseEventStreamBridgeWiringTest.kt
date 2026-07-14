@@ -25,6 +25,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.asSharedFlow
+import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.toList
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.TestScope
@@ -101,7 +102,9 @@ class SseEventStreamBridgeWiringTest {
 
         // CP9: the collector is now ServiceSseConnectionOwner (replaces CC's
         // launchSseCollection). Wire it with the same collaborators the
-        // Service injects in production.
+        // Service injects in production. D2: the owner now needs the status
+        // aggregator + input + snapshot provider + recovery policy for the
+        // acknowledgeable-readiness contract.
         sseOwner = ServiceSseConnectionOwner(
             scope = kotlinx.coroutines.CoroutineScope(
                 SupervisorJob() + Dispatchers.Unconfined
@@ -112,6 +115,12 @@ class SseEventStreamBridgeWiringTest {
             sseEventStream = stream,
             sharedStateStore = store,
             sharedEffectBus = effects,
+            statusAggregatorInput = BridgeFakeStatusInput(),
+            statusAggregator = BridgeFakeStatusAggregator(),
+            snapshotProvider = cn.vectory.ocdroid.service.streaming.SessionSnapshotProvider {
+                cn.vectory.ocdroid.service.status.StatusSnapshot.Empty
+            },
+            recoveryPolicy = cn.vectory.ocdroid.service.streaming.SseRecoveryPolicy(),
             onTerminalExhaustion = {},
         )
         sessionSyncCoordinator = SessionSyncCoordinator(
@@ -342,8 +351,8 @@ class SseEventStreamBridgeWiringTest {
             bridge.controlEvents.collect { controlReceived.add(it) }
         }
 
-        // Start the Service-owned collector.
-        sseOwner.connect(identity)
+        // Start the Service-owned collector (D2: connect is suspend → launch).
+        launch { sseOwner.connect(identity) }
         advanceUntilIdle()
 
         // Emit a control event into the feed → sseOwner wraps + publishes to
@@ -371,4 +380,52 @@ class SseEventStreamBridgeWiringTest {
 
         bridge.close()
     }
+}
+/**
+ * Minimal [cn.vectory.ocdroid.service.status.StatusAggregatorInput] fake for
+ * the bridge wiring test: refresh is a no-op (the bridge test does not
+ * exercise readiness verification). Kept at file scope so the test class
+ * stays focused on the bridge contract.
+ */
+private class BridgeFakeStatusInput : cn.vectory.ocdroid.service.status.StatusAggregatorInput {
+    override suspend fun refresh(
+        identity: cn.vectory.ocdroid.service.identity.ConnectionIdentity,
+        snapshot: cn.vectory.ocdroid.service.status.StatusSnapshot,
+    ) = Unit
+    override fun applySseStatus(
+        key: cn.vectory.ocdroid.service.status.SessionStatusKey,
+        status: cn.vectory.ocdroid.service.status.SessionBusyStatus,
+        sourceTimeMs: Long,
+    ) = Unit
+    override fun markRequestFailed(
+        identity: cn.vectory.ocdroid.service.identity.ConnectionIdentity,
+        snapshot: cn.vectory.ocdroid.service.status.StatusSnapshot,
+        sourceTimeMs: Long,
+    ) = Unit
+}
+
+/**
+ * Minimal [cn.vectory.ocdroid.service.status.StatusAggregator] fake: reports
+ * [cn.vectory.ocdroid.service.status.GlobalBusyState.AllIdleFresh] so the
+ * owner's first-frame readiness completes immediately (the bridge test does
+ * not exercise state-dependent readiness).
+ */
+private class BridgeFakeStatusAggregator : cn.vectory.ocdroid.service.status.StatusAggregator {
+    private val _globalState = kotlinx.coroutines.flow.MutableStateFlow(
+        cn.vectory.ocdroid.service.status.GlobalBusyState.AllIdleFresh
+    )
+    private val _globalBusy = kotlinx.coroutines.flow.MutableStateFlow(false)
+    private val _statusByKey: kotlinx.coroutines.flow.MutableStateFlow<
+        Map<cn.vectory.ocdroid.service.status.SessionStatusKey,
+        cn.vectory.ocdroid.service.status.SessionBusyStatus>> =
+        kotlinx.coroutines.flow.MutableStateFlow(emptyMap())
+    override val globalState:
+        kotlinx.coroutines.flow.StateFlow<cn.vectory.ocdroid.service.status.GlobalBusyState> =
+        _globalState.asStateFlow()
+    override val globalBusy: kotlinx.coroutines.flow.StateFlow<Boolean> = _globalBusy.asStateFlow()
+    override val statusByKey:
+        kotlinx.coroutines.flow.StateFlow<Map<cn.vectory.ocdroid.service.status.SessionStatusKey, cn.vectory.ocdroid.service.status.SessionBusyStatus>> =
+        _statusByKey.asStateFlow()
+    override fun stateAtNow(): cn.vectory.ocdroid.service.status.GlobalBusyState =
+        cn.vectory.ocdroid.service.status.GlobalBusyState.AllIdleFresh
 }
