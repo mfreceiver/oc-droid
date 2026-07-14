@@ -11,6 +11,7 @@ import cn.vectory.ocdroid.util.DebugLog
 import dagger.hilt.android.qualifiers.ApplicationContext
 import javax.inject.Inject
 import javax.inject.Singleton
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.withTimeoutOrNull
 
 /**
@@ -91,6 +92,7 @@ interface StreamingServiceLauncher {
  * `@Binds`/`@Provides` module needed). The qualifier-free constructor
  * arguments are themselves Hilt-injected singletons.
  */
+@OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
 @Singleton
 class AndroidStreamingServiceLauncher @Inject constructor(
     @ApplicationContext private val context: Context,
@@ -108,42 +110,67 @@ class AndroidStreamingServiceLauncher @Inject constructor(
             DebugLog.i(TAG, "ensureStarted: NOT foreground → refuse (no FGS in background)")
             return OwnershipStartResult.Refused(OwnershipRefusal.Background)
         }
-        ownershipGate.readyIdentity()?.let { owned ->
-            return if (owned == identity) {
-                OwnershipStartResult.Ready(identity)
-            } else {
-                OwnershipStartResult.Refused(OwnershipRefusal.AlreadyOwned(owned))
+        // D5-2 (#4): prepared-attempt + split-deferred model. prepareAttempt
+        // handles the four cases (Ready same / Starting same / no owner /
+        // different owner). Only the "no owner" case sets launchRequired=true.
+        val attempt = ownershipGate.prepareAttempt(identity)
+        if (attempt.launchRequired) {
+            // §C15 step 3: foreground + L3 → start the Service with the §5
+            // bootstrap action. The Service runs its §5 sequence (placeholder
+            // promotion → async bootstrap → coordinator.onBootstrapResult →
+            // StartSse via the §4 decision matrix). D5-2 (#4): stamp the
+            // attempt ID so the late Service invocation can validate it.
+            try {
+                val intent = Intent(context, SessionStreamingService::class.java).apply {
+                    action = SessionStreamingService.ACTION_BOOTSTRAP
+                    putExtra(OwnershipRequestParser.EXTRA_EPOCH, identity.epoch)
+                    putExtra(OwnershipRequestParser.EXTRA_SERVER_GROUP_FP, identity.serverGroupFp)
+                    putExtra(OwnershipRequestParser.EXTRA_WORKDIR, identity.normalizedWorkdir)
+                    putExtra(OwnershipRequestParser.EXTRA_ENDPOINT_FP, identity.endpointFp)
+                    putExtra(OwnershipRequestParser.EXTRA_ATTEMPT_ID, attempt.attemptId)
+                }
+                ContextCompat.startForegroundService(context, intent)
+                DebugLog.i(TAG, "ensureStarted: startForegroundService issued (ACTION_BOOTSTRAP, attemptId=${attempt.attemptId})")
+            } catch (t: Throwable) {
+                // §C15 step 4: platform start rejection (ForegroundServiceStart-
+                // NotAllowedException, SecurityException on quota exhaustion,
+                // etc.). MUST NOT crash the health coroutine that called us —
+                // surface as a refused start so CC reports its own connect
+                // state honestly and the foreground return path retries.
+                DebugLog.w(TAG, "ensureStarted: platform rejected startForegroundService: ${t.message}")
+                val refusal = OwnershipRefusal.PlatformRejected(t)
+                ownershipGate.expireAttempt(attempt.attemptId, refusal)
+                return OwnershipStartResult.Refused(refusal)
             }
         }
-        // §C15 step 3: foreground + L3 → start the Service with the §5
-        // bootstrap action. The Service runs its §5 sequence (placeholder
-        // promotion → async bootstrap → coordinator.onBootstrapResult →
-        // StartSse via the §4 decision matrix).
-        val waiter = ownershipGate.prepare(identity)
-        try {
-            val intent = Intent(context, SessionStreamingService::class.java).apply {
-                action = SessionStreamingService.ACTION_BOOTSTRAP
-                putExtra(OwnershipRequestParser.EXTRA_EPOCH, identity.epoch)
-                putExtra(OwnershipRequestParser.EXTRA_SERVER_GROUP_FP, identity.serverGroupFp)
-                putExtra(OwnershipRequestParser.EXTRA_WORKDIR, identity.normalizedWorkdir)
-                putExtra(OwnershipRequestParser.EXTRA_ENDPOINT_FP, identity.endpointFp)
+        // D5-2 (#4): the 5s wall-clock covers ONLY Stage 1 acceptance
+        // (registerStarting). On acceptance, await terminal WITHOUT a second
+        // wall-clock timeout — the 30s transport timeout runs ONLY inside
+        // ServiceSseConnectionOwner.setupConnectLocked (already true from D4-B).
+        val startingAck = withTimeoutOrNull(ackPolicy.timeoutMs) { attempt.starting.await() }
+        // Race safety: withTimeoutOrNull may return null at the exact boundary
+        // even though `starting` was just completed. If so, use the completed
+        // value — the Service has already recorded Stage 1 ownership.
+        @Suppress("UNCHECKED_CAST")
+        val ack: StartingAck? = startingAck
+            ?: (attempt.starting as? CompletableDeferred<StartingAck>)
+                ?.takeIf { it.isCompleted }
+                ?.let { runCatching { it.getCompleted() }.getOrNull() }
+        return when (ack) {
+            is StartingAck.Accepted -> {
+                // Stage 1 accepted — await Stage 2 with NO second wall-clock.
+                attempt.terminal.await()
             }
-            ContextCompat.startForegroundService(context, intent)
-            DebugLog.i(TAG, "ensureStarted: startForegroundService issued (ACTION_BOOTSTRAP)")
-            return withTimeoutOrNull(ackPolicy.timeoutMs) { waiter.await() }
-                ?: OwnershipStartResult.Refused(OwnershipRefusal.AckTimeout)
-        } catch (t: Throwable) {
-            // §C15 step 4: platform start rejection (ForegroundServiceStart-
-            // NotAllowedException, SecurityException on quota exhaustion,
-            // etc.). MUST NOT crash the health coroutine that called us —
-            // surface as a refused start so CC reports its own connect state
-            // honestly and the foreground return path retries.
-            DebugLog.w(TAG, "ensureStarted: platform rejected startForegroundService: ${t.message}")
-            val refusal = OwnershipRefusal.PlatformRejected(t)
-            ownershipGate.refuse(identity, refusal)
-            return OwnershipStartResult.Refused(refusal)
-        } finally {
-            ownershipGate.cancelWaiter(identity, waiter)
+            is StartingAck.Refused -> OwnershipStartResult.Refused(ack.reason)
+            null -> {
+                // Stage 1 NOT accepted within 5s → EXPIRE the attempt ID at
+                // the gate so any LATE Service registerStarting for this
+                // attemptId returns Expired and the Service aborts (no orphan
+                // owner). Settles the attempt's deferreds with AckTimeout.
+                DebugLog.w(TAG, "ensureStarted: Stage 1 AckTimeout (attemptId=${attempt.attemptId}) → expireAttempt")
+                ownershipGate.expireAttempt(attempt.attemptId, OwnershipRefusal.AckTimeout)
+                OwnershipStartResult.Refused(OwnershipRefusal.AckTimeout)
+            }
         }
     }
 

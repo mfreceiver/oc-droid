@@ -305,7 +305,9 @@ class SessionStreamingService : Service() {
             inForeground = appLifecycleMonitor.isInForeground,
             scope = scope,
             bootstrapRetryPolicy = bootstrapRetryPolicy,
-            onBootstrapIdentity = { identity -> registerStartingOwnership(identity) },
+            onBootstrapIdentity = { identity ->
+                registerStartingOwnership(identity, StreamingOwnershipGate.NO_ATTEMPT_ID)
+            },
             onBootstrapFailure = { identity -> failStarting(identity) },
         ).also { it.start() }
     }
@@ -377,6 +379,11 @@ class SessionStreamingService : Service() {
             workdir = intent?.getStringExtra(OwnershipRequestParser.EXTRA_WORKDIR),
             endpointFp = intent?.getStringExtra(OwnershipRequestParser.EXTRA_ENDPOINT_FP),
         )
+        // D5-2 (#4): the launcher's monotonic attempt ID. Sticky rebuild
+        // (null Intent) leaves attemptId == NO_ATTEMPT_ID — no launcher
+        // deadline, validated as a back-compat / internal registration.
+        val requestedAttemptId = intent?.getLongExtra(OwnershipRequestParser.EXTRA_ATTEMPT_ID, StreamingOwnershipGate.NO_ATTEMPT_ID)
+            ?: StreamingOwnershipGate.NO_ATTEMPT_ID
         // §5 step 1: synchronous minimal persisted-config read.
         val hasValidHost = effectiveConnectionConfigResolver.resolve() != null
         if (!hasValidHost) {
@@ -401,11 +408,29 @@ class SessionStreamingService : Service() {
         if (requestedOwnership != null) {
             scope.launch {
                 if (identityStore.isCurrent(requestedOwnership)) {
-                    registerStartingOwnership(requestedOwnership)
+                    val outcome = registerStartingOwnership(requestedOwnership, requestedAttemptId)
+                    if (outcome is RegisterStartingOutcome.Accepted) {
+                        // Stage 1 ownership recorded — proceed with the §5 bootstrap.
+                        installedJob.start()
+                    } else {
+                        // D5-2 (#4): Expired or Conflict — the launcher has
+                        // already given up (5s AckTimeout) OR another owner
+                        // holds the gate. ABORT this invocation so it does NOT
+                        // register an orphan owner / hold an FGS slot with no
+                        // owner. The bootstrap job is cancelled; the shell
+                        // teardown (stopForeground + stopSelf + cancel SSE)
+                        // runs via the BootstrapFailure teardown path.
+                        DebugLog.w(TAG, "onStartCommand: registerStarting outcome=$outcome → abort bootstrap")
+                        bootstrapJob?.cancel()
+                        bootstrapJob = null
+                        coordinator.teardownAndAwait(TeardownReason.BootstrapFailure)
+                    }
                 } else {
                     ownershipGate.refuse(requestedOwnership, OwnershipRefusal.StaleIdentity)
+                    bootstrapJob?.cancel()
+                    bootstrapJob = null
+                    coordinator.teardownAndAwait(TeardownReason.BootstrapFailure)
                 }
-                installedJob.start()
             }
         } else {
             installedJob.start()
@@ -420,18 +445,31 @@ class SessionStreamingService : Service() {
      * the launcher's readiness waiter (that is [StreamingOwnershipGate.markReady],
      * fired from the controller's `onSseTransportReady` once the SSE transport
      * delivers a valid current-identity frame).
+     *
+     * D5-2 (#4): the [attemptId] (carried in the Service Intent) is validated
+     * by the gate. If it has already been expired by the launcher's 5s
+     * AckTimeout, the gate returns [RegisterStartingOutcome.Expired] and this
+     * invocation must NOT record an owner — the caller (onStartCommand)
+     * runs the abort path instead.
      */
-    private suspend fun registerStartingOwnership(identity: ConnectionIdentity) {
+    private suspend fun registerStartingOwnership(
+        identity: ConnectionIdentity,
+        attemptId: Long,
+    ): RegisterStartingOutcome {
         if (!identityStore.isCurrent(identity)) {
             ownershipGate.refuse(identity, OwnershipRefusal.StaleIdentity)
-            return
+            return RegisterStartingOutcome.Expired
         }
-        acceptedOwnershipIdentity = identity
-        ownershipGate.registerStarting(
+        val outcome = ownershipGate.registerStarting(
             identity = identity,
+            attemptId = attemptId,
             disconnectAndJoin = { markGap -> sseOwner?.disconnectAndJoin(markGap) },
             abortStartup = { /* shell cleanup runs via failStarting / coordinator */ },
         )
+        if (outcome is RegisterStartingOutcome.Accepted) {
+            acceptedOwnershipIdentity = identity
+        }
+        return outcome
     }
 
     /**

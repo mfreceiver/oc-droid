@@ -564,10 +564,26 @@ class ConnectionCoordinator(
                     when (val outcome = engine.bootstrap()) {
                         is ConnectionBootstrapOutcome.Success -> {
                             loadInitialData()
+                            // D5-2 (#4): CC state during the ownership window —
+                            // from engine success until the terminal ownership
+                            // result, stay Connecting (do NOT enter Connected or
+                            // Disconnected mid-window). `ensureStarted` is
+                            // suspend; CC is parked here while the launcher
+                            // awaits Stage 1 acceptance (5s) + Stage 2 terminal.
                             val ownership = streamingServiceLauncher?.ensureStarted(outcome.identity)
                                 ?: OwnershipStartResult.Refused(
                                     cn.vectory.ocdroid.service.OwnershipRefusal.ServiceStopped,
                                 )
+                            // D5-2 (#4): identity recheck BEFORE writing Connected.
+                            // A newer epoch may have started during the (possibly
+                            // long) ownership wait — this stale-result branch
+                            // settles false WITHOUT writing Disconnected (a
+                            // newer epoch may already be connecting).
+                            if (identityStore != null && !identityStore.isCurrent(outcome.identity)) {
+                                settled = true
+                                onSettled?.invoke(false)
+                                return@launch
+                            }
                             if (ownership is OwnershipStartResult.Ready &&
                                 ownership.identity == outcome.identity
                             ) {
