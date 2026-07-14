@@ -12,6 +12,10 @@ import cn.vectory.ocdroid.R
 import cn.vectory.ocdroid.data.cache.CacheRepository
 import cn.vectory.ocdroid.data.cache.FingerprintResult
 import cn.vectory.ocdroid.ui.controller.applySessionDiffIfAbsent
+import cn.vectory.ocdroid.ui.controller.allSessionsById
+import cn.vectory.ocdroid.ui.controller.normalizeAuthoritativeStatusSnapshot
+import cn.vectory.ocdroid.ui.controller.loadCompleteSessionTrees
+import cn.vectory.ocdroid.ui.controller.rootIdOf
 import cn.vectory.ocdroid.data.model.Session
 import cn.vectory.ocdroid.data.model.SessionStatus
 import cn.vectory.ocdroid.data.model.RevertCutoff
@@ -505,9 +509,13 @@ internal fun launchLoadSessionStatus(
                         DebugLog.d("Sync", "launchLoadSessionStatus: epoch $myEpoch superseded, discarding stale snapshot")
                         return@mutateSessionList sl
                     }
-                    sl.copy(
-                        sessionStatuses = mergeStatusSnapshot(localBefore, sl.sessionStatuses, statuses)
-                    )
+                    val authoritativeIds = allSessionsById(
+                        sl.sessions,
+                        sl.directorySessions,
+                        sl.childSessions,
+                    ).keys
+                    val normalized = normalizeAuthoritativeStatusSnapshot(statuses, authoritativeIds)
+                    sl.copy(sessionStatuses = mergeStatusSnapshot(localBefore, sl.sessionStatuses, normalized))
                 }
             }
             .onFailure { error ->
@@ -577,13 +585,24 @@ internal fun launchLoadChildSessions(
 ) {
     scope.launch {
         try {
-            repository.getChildren(sessionId)
-                .onSuccess { children ->
-                    slices.mutateSessionList { it.copy(childSessions = it.childSessions + (sessionId to children)) }
+            val before = slices.sessionList.value
+            val byId = allSessionsById(before.sessions, before.directorySessions, before.childSessions)
+            val rootId = rootIdOf(sessionId, byId) ?: sessionId
+            // The effect can race the root list load. The children endpoint is
+            // still addressable by id, so hydrate from a minimal placeholder;
+            // metadata will be supplied by the normal session-list refresh.
+            val root = byId[rootId] ?: Session(id = rootId, directory = "")
+            val hydration = loadCompleteSessionTrees(repository, listOf(root))
+            if (rootId in hydration.completeRootIds) {
+                slices.mutateSessionList {
+                    it.copy(
+                        childSessions = it.childSessions + hydration.childrenByParent,
+                        completeRootIds = it.completeRootIds + rootId,
+                    )
                 }
-                .onFailure { error ->
-                    reportNonFatalIssue(tag, "Failed to load child sessions for $sessionId", error)
-                }
+            } else {
+                reportNonFatalIssue(tag, "Failed to load complete child tree for $rootId")
+            }
         } catch (cancellation: kotlinx.coroutines.CancellationException) {
             throw cancellation
         } catch (e: Exception) {

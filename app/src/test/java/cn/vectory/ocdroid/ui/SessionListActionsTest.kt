@@ -945,15 +945,21 @@ class SessionListActionsTest {
     }
 
     @Test
-    fun `launchLoadSessionStatus replaces snapshot dropping stale idle entries`() = runTest {
+    fun `launchLoadSessionStatus normalizes omitted authoritative nodes to idle`() = runTest {
         // §item6: /session/status 是全局权威快照, 只含 active(busy/retry) — idle 已被
         // server delete (opencode session/status.ts: data.delete on idle). 整体替换清除
         // server 已 idle(快照缺失)的 stale 本地 busy; merge(+statuses) 会永久保留旧 busy.
         slices.mutateSessionList {
-            it.copy(sessionStatuses = mutableMapOf(
+            it.copy(
+                sessions = listOf(
+                    Session(id = "stale-idle", directory = "/x"),
+                    Session(id = "keep", directory = "/x"),
+                ),
+                sessionStatuses = mutableMapOf(
                 "stale-idle" to cn.vectory.ocdroid.data.model.SessionStatus(type = "busy"),
                 "keep" to cn.vectory.ocdroid.data.model.SessionStatus(type = "retry")
-            ))
+                ),
+            )
         }
         coEvery { repository.getSessionStatus() } returns Result.success(
             mapOf("keep" to cn.vectory.ocdroid.data.model.SessionStatus(type = "busy"))
@@ -963,12 +969,30 @@ class SessionListActionsTest {
         advanceUntilIdle()
 
         val result = slices.sessionList.value.sessionStatuses
-        assertFalse(
-            "stale busy must be cleared (server idle = absent from snapshot)",
-            result.containsKey("stale-idle")
+        assertEquals(
+            "successful omission is authoritative idle, not unknown",
+            cn.vectory.ocdroid.data.model.SessionStatus(type = "idle"),
+            result["stale-idle"],
         )
         assertEquals(cn.vectory.ocdroid.data.model.SessionStatus(type = "busy"), result["keep"])
-        assertEquals(1, result.size)
+        assertEquals(2, result.size)
+    }
+
+    @Test
+    fun `status normalization leaves nodes outside loaded authoritative tree unknown`() = runTest {
+        slices.mutateSessionList {
+            it.copy(
+                sessions = listOf(Session(id = "known", directory = "/x")),
+                sessionStatuses = mapOf("outside" to cn.vectory.ocdroid.data.model.SessionStatus("busy")),
+            )
+        }
+        coEvery { repository.getSessionStatus() } returns Result.success(emptyMap())
+
+        launchLoadSessionStatus(scope, repository, slices)
+        advanceUntilIdle()
+
+        assertEquals(cn.vectory.ocdroid.data.model.SessionStatus("idle"), slices.sessionList.value.sessionStatuses["known"])
+        assertFalse("outside node is not authoritative", "outside" in slices.sessionList.value.sessionStatuses)
     }
 
     @Test
@@ -1064,9 +1088,10 @@ class SessionListActionsTest {
         launchLoadSessionStatus(scope, repository, slices)
         advanceUntilIdle()
 
-        assertTrue(
-            "busy A must be cleared from sessionStatuses (REST snapshot replaces)",
-            slices.sessionList.value.sessionStatuses.isEmpty(),
+        assertEquals(
+            "successful omission must normalize A to explicit idle",
+            cn.vectory.ocdroid.data.model.SessionStatus("idle"),
+            slices.sessionList.value.sessionStatuses["A"],
         )
         assertFalse(
             "A must NOT be marked unread by the REST backstop (sweep owns marking)",
@@ -1195,16 +1220,20 @@ class SessionListActionsTest {
     @Test
     fun `launchLoadChildSessions success writes into childSessions map`() = runTest {
         val children = listOf(Session(id = "c1", directory = "/x", parentId = "p1"))
+        store.mutateSessionList { it.copy(sessions = listOf(Session(id = "p1", directory = "/x"))) }
         coEvery { repository.getChildren("p1") } returns Result.success(children)
+        coEvery { repository.getChildren("c1") } returns Result.success(emptyList())
 
         launchLoadChildSessions(scope, repository, slices, "p1", "Tag")
         advanceUntilIdle()
 
         assertEquals(children, slices.sessionList.value.childSessions["p1"])
+        assertTrue("p1" in slices.sessionList.value.completeRootIds)
     }
 
     @Test
     fun `launchLoadChildSessions failure does not throw`() = runTest {
+        store.mutateSessionList { it.copy(sessions = listOf(Session(id = "p1", directory = "/x"))) }
         coEvery { repository.getChildren(any()) } returns Result.failure(IllegalStateException("x"))
 
         launchLoadChildSessions(scope, repository, slices, "p1", "Tag")

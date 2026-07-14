@@ -51,6 +51,9 @@ class UnreadSoakTest {
         soakMs: Long = soak,
         directorySessions: Map<String, List<Session>> = emptyMap(),
         childSessions: Map<String, List<Session>> = emptyMap(),
+        completeRootIds: Set<String> = (sessions + directorySessions.values.flatten())
+            .filter { it.parentId == null }
+            .mapTo(mutableSetOf()) { it.id },
     ) = evaluateUnread(
         sessions = sessions,
         sessionStatuses = sessionStatuses,
@@ -61,9 +64,23 @@ class UnreadSoakTest {
         idleSince = idleSince,
         now = now,
         soakMs = soakMs,
+        completeRootIds = completeRootIds,
     )
 
     // ── rising edge ────────────────────────────────────────────────────────
+
+    @Test
+    fun `incomplete root cannot start a soak even when every locally known node is idle`() {
+        val r = eval(
+            sessions = listOf(root("A")),
+            sessionStatuses = mapOf("A" to idle),
+            completeRootIds = emptySet(),
+            now = 1_000L,
+        )
+
+        assertTrue(r.newIdleSince.isEmpty())
+        assertTrue(r.rootsToMarkUnread.isEmpty())
+    }
 
     @Test
     fun `rising edge - root all-idle with no prior stamp sets idleSince to now`() {

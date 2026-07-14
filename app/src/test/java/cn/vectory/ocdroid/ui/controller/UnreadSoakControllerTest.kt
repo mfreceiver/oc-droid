@@ -61,12 +61,15 @@ class UnreadSoakControllerTest {
         scope.cancel()
     }
 
-    private fun makeController(): UnreadSoakController = UnreadSoakController(
+    private fun makeController(
+        requestTreeHydration: (Set<String>) -> Unit = {},
+    ): UnreadSoakController = UnreadSoakController(
         appLifecycleMonitor = stubMonitor(),
         scope = scope,
         store = store,
         clock = { nowMs },
         autoStart = false,
+        requestTreeHydration = requestTreeHydration,
     )
 
     private fun stubMonitor(): AppLifecycleMonitor = mockk(relaxed = true) {
@@ -77,7 +80,13 @@ class UnreadSoakControllerTest {
     private fun child(id: String, parent: String) = Session(id = id, directory = "/x", parentId = parent)
 
     private fun seedSessions(vararg sessions: Session) {
-        store.mutateSessionList { it.copy(sessions = sessions.toList()) }
+        store.mutateSessionList {
+            it.copy(
+                sessions = sessions.toList(),
+                completeRootIds = sessions.filter { session -> session.parentId == null }
+                    .mapTo(mutableSetOf()) { session -> session.id },
+            )
+        }
     }
 
     private fun seedStatuses(vararg entries: Pair<String, SessionStatus>) {
@@ -89,6 +98,49 @@ class UnreadSoakControllerTest {
     }
 
     // ── busy → all-idle → 10s → mark ───────────────────────────────────────
+
+    @Test
+    fun `incomplete idle root requests hydration and cannot start soak`() {
+        val requested = mutableSetOf<String>()
+        val controller = makeController { requested += it }
+        seedSessions(root("A"))
+        store.mutateSessionList { it.copy(completeRootIds = emptySet()) }
+        seedStatuses("A" to idle)
+
+        nowMs = 1_000L
+        controller.tick()
+
+        assertEquals(setOf("A"), requested)
+        assertNull(store.unreadFlow.value.idleSince["A"])
+    }
+
+    @Test
+    fun `hydration revealing busy child blocks unread`() {
+        val controller = makeController()
+        seedSessions(root("A"), child("C", "A"))
+        seedStatuses("A" to idle, "C" to busy)
+        store.mutateSessionList { it.copy(completeRootIds = setOf("A")) }
+        store.mutateUnread { it.copy(idleSince = mapOf("A" to 1_000L)) }
+
+        nowMs = 11_000L
+        controller.tick()
+
+        assertFalse("A" in store.unreadFlow.value.unreadSessions)
+        assertNull(store.unreadFlow.value.idleSince["A"])
+    }
+
+    @Test
+    fun `complete hydrated all-idle tree can soak`() {
+        val controller = makeController()
+        seedSessions(root("A"), child("C", "A"))
+        seedStatuses("A" to idle, "C" to idle)
+        store.mutateSessionList { it.copy(completeRootIds = setOf("A")) }
+
+        nowMs = 1_000L
+        controller.tick()
+
+        assertEquals(1_000L, store.unreadFlow.value.idleSince["A"])
+    }
 
     @Test
     fun `root busy then all-idle plus 10s not viewed enters unreadSessions`() {
@@ -195,8 +247,8 @@ class UnreadSoakControllerTest {
         )
         // And never marked unread.
         assertFalse(store.unreadFlow.value.unreadSessions.contains("A"))
-        // The cycle stamp stays until a busy reset, preventing a second soak.
-        assertEquals(5_000L, store.unreadFlow.value.idleSince["A"])
+        // Opening/current viewing consumes the pending cycle immediately.
+        assertNull(store.unreadFlow.value.idleSince["A"])
     }
 
     @Test
@@ -244,6 +296,24 @@ class UnreadSoakControllerTest {
 
         assertFalse(store.unreadFlow.value.unreadSessions.contains("A"))
         assertEquals(11_000L, store.unreadFlow.value.lastViewedTime["A"])
+    }
+
+    @Test
+    fun `sweep defensively clears existing root unread when current session is a child`() {
+        val controller = makeController()
+        seedSessions(root("A"), child("C", "A"))
+        seedCurrent("C")
+        seedStatuses("A" to busy, "C" to busy)
+        store.mutateUnread {
+            it.copy(unreadSessions = setOf("A"), idleSince = mapOf("A" to 1_000L))
+        }
+
+        nowMs = 5_000L
+        controller.tick()
+
+        assertFalse("A" in store.unreadFlow.value.unreadSessions)
+        assertFalse("A" in store.unreadFlow.value.idleSince)
+        assertEquals(5_000L, store.unreadFlow.value.lastViewedTime["A"])
     }
 
     @Test

@@ -54,6 +54,7 @@ class UnreadSoakController @Inject constructor(
     // harness. Defaults to System::currentTimeMillis in production.
     private val clock: () -> Long = { System.currentTimeMillis() },
     private val autoStart: Boolean = true,
+    private val requestTreeHydration: (Set<String>) -> Unit = {},
 ) {
     /** Current sweep loop job; null while backgrounded (or not yet started). */
     @Volatile
@@ -109,6 +110,15 @@ class UnreadSoakController @Inject constructor(
      * the loop in [startSweep] is the only production driver.
      */
     internal fun tick() {
+        val sl = store.sessionListFlow.value
+        val incompleteIdleRoots = (sl.sessions + sl.directorySessions.values.flatten())
+            .asSequence()
+            .filter { it.parentId == null && !it.isArchived }
+            .filter { sl.sessionStatuses[it.id]?.isIdle == true }
+            .map { it.id }
+            .filter { it !in sl.completeRootIds }
+            .toSet()
+        if (incompleteIdleRoots.isNotEmpty()) requestTreeHydration(incompleteIdleRoots)
         evaluateAndApply(clock())
     }
 
@@ -132,31 +142,47 @@ class UnreadSoakController @Inject constructor(
 internal fun SharedStateStore.evaluateAndApplyUnread(now: Long): UnreadSoakResult {
     lateinit var committedResult: UnreadSoakResult
     mutateUnreadFromState { snapshot ->
-        val sl = snapshot.sessionList
-        val chat = snapshot.chat
-        val unread = snapshot.unread
-        val result = evaluateUnread(
-            sessions = sl.sessions,
-            sessionStatuses = sl.sessionStatuses,
-            childSessions = sl.childSessions,
-            directorySessions = sl.directorySessions,
-            currentSessionId = chat.currentSessionId,
-            lastViewedTime = unread.lastViewedTime,
-            idleSince = unread.idleSince,
-            now = now,
-        )
+        val (nextUnread, result) = snapshot.evaluateAndApplyUnread(now)
         committedResult = result
-        var next = unread.copy(idleSince = result.newIdleSince)
-        result.rootsToMarkUnread.forEach { root ->
-            next = next.applyMarkSessionUnread(root, chat.currentSessionId).first
-        }
-        if (result.rootsToStampViewed.isNotEmpty()) {
-            next = next.copy(
-                lastViewedTime = next.lastViewedTime +
-                    result.rootsToStampViewed.associateWith { now }
-            )
-        }
-        next
+        nextUnread
     }
     return committedResult
+}
+
+internal fun cn.vectory.ocdroid.ui.StoreState.evaluateAndApplyUnread(
+    now: Long,
+): Pair<cn.vectory.ocdroid.ui.UnreadState, UnreadSoakResult> {
+    val sl = sessionList
+    val result = evaluateUnread(
+        sessions = sl.sessions,
+        sessionStatuses = sl.sessionStatuses,
+        childSessions = sl.childSessions,
+        directorySessions = sl.directorySessions,
+        currentSessionId = chat.currentSessionId,
+        lastViewedTime = unread.lastViewedTime,
+        idleSince = unread.idleSince,
+        now = now,
+        completeRootIds = sl.completeRootIds,
+    )
+    var next = unread.copy(idleSince = result.newIdleSince)
+    result.rootsToMarkUnread.forEach { root ->
+        next = next.applyMarkSessionUnread(root, chat.currentSessionId).first
+    }
+    if (result.rootsToStampViewed.isNotEmpty()) {
+        next = next.copy(
+            lastViewedTime = next.lastViewedTime + result.rootsToStampViewed.associateWith { now }
+        )
+    }
+    val sessionMap = allSessionsById(sl.sessions, sl.directorySessions, sl.childSessions)
+    val currentRootId = chat.currentSessionId?.let { rootIdOf(it, sessionMap) }
+    if (currentRootId != null &&
+        (currentRootId in next.unreadSessions || currentRootId in next.idleSince)
+    ) {
+        next = next.copy(
+            unreadSessions = next.unreadSessions - currentRootId,
+            idleSince = next.idleSince - currentRootId,
+            lastViewedTime = next.lastViewedTime + (currentRootId to now),
+        )
+    }
+    return next to result
 }

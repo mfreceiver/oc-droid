@@ -3,6 +3,7 @@ package cn.vectory.ocdroid.ui.controller
 import cn.vectory.ocdroid.data.model.QuestionRequest
 import cn.vectory.ocdroid.data.model.Session
 import cn.vectory.ocdroid.ui.UnreadState
+import cn.vectory.ocdroid.data.model.SessionStatus
 
 /** Merge the three session stores into a deduped id→Session map. */
 internal fun allSessionsById(
@@ -47,6 +48,19 @@ internal fun subtreeIds(
     directorySessions: Map<String, List<Session>>,
     childSessions: Map<String, List<Session>>,
 ): Set<String> = treeIds(rootId, allSessionsById(sessions, directorySessions, childSessions))
+
+/**
+ * `/session/status` is authoritative but omits idle entries. Convert omitted
+ * nodes from a proven authoritative tree to explicit idle; IDs outside that
+ * tree remain absent/unknown and therefore fail closed in the unread evaluator.
+ */
+internal fun normalizeAuthoritativeStatusSnapshot(
+    snapshot: Map<String, SessionStatus>,
+    authoritativeNodeIds: Set<String>,
+): Map<String, SessionStatus> = buildMap {
+    putAll(snapshot)
+    authoritativeNodeIds.forEach { putIfAbsent(it, SessionStatus(type = "idle")) }
+}
 
 /**
  * §task6: project each pending question's session up to its ROOT id. Used by

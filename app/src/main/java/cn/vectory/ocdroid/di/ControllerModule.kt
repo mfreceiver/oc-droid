@@ -8,6 +8,7 @@ import cn.vectory.ocdroid.ui.SharedStateStore
 import cn.vectory.ocdroid.ui.controller.ComposerController
 import cn.vectory.ocdroid.ui.controller.ConnectionCoordinator
 import cn.vectory.ocdroid.ui.controller.ForegroundCatchUpController
+import cn.vectory.ocdroid.ui.controller.ForegroundSessionTreeHydrator
 import cn.vectory.ocdroid.ui.controller.HostProfileController
 import cn.vectory.ocdroid.ui.controller.SessionSwitcher
 import cn.vectory.ocdroid.ui.controller.SessionSyncCoordinator
@@ -113,10 +114,12 @@ object ControllerModule {
         appLifecycleMonitor: AppLifecycleMonitor,
         @UiApplicationScope appScope: CoroutineScope,
         store: SharedStateStore,
+        repository: OpenCodeRepository,
     ): UnreadSoakController = UnreadSoakController(
         appLifecycleMonitor = appLifecycleMonitor,
         scope = appScope,
         store = store,
+        requestTreeHydration = ForegroundSessionTreeHydrator(repository, store, appScope)::request,
     )
 
     @Provides

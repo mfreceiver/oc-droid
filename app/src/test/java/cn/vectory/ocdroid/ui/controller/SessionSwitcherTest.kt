@@ -602,6 +602,29 @@ class SessionSwitcherTest {
     }
 
     @Test
+    fun `opening descendant immediately clears and consumes root unread cycle`() {
+        seed {
+            it.copy(
+                currentSessionId = null,
+                unreadSessions = setOf("root"),
+                idleSince = mapOf("root" to 1_000L),
+                sessions = listOf(
+                    Session(id = "root", directory = "/d"),
+                    Session(id = "child", directory = "/d", parentId = "root"),
+                ),
+            )
+        }
+        nowMs = 50_000L
+
+        switcher.switchTo("child")
+
+        assertFalse("root" in slices.unread.value.unreadSessions)
+        assertFalse("child" in slices.unread.value.unreadSessions)
+        assertFalse("root" in slices.unread.value.idleSince)
+        assertEquals(50_000L, slices.unread.value.lastViewedTime["root"])
+    }
+
+    @Test
     fun `switchTo AB pingpong both clear`() {
         val busyStatus = SessionStatus(type = "busy")
         seed {

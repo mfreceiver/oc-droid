@@ -98,6 +98,7 @@ class AppLifecycleMonitor @Inject constructor(
     // global currentDirectory before; that fallback is being phased out).
     private val settingsManager: SettingsManager
 ) {
+    private val lifecycleGeneration = java.util.concurrent.atomic.AtomicLong(0)
     private val _isInForeground = MutableStateFlow(true)
     val isInForeground: StateFlow<Boolean> = _isInForeground.asStateFlow()
 
@@ -132,6 +133,7 @@ class AppLifecycleMonitor @Inject constructor(
             override fun onActivityStarted(activity: Activity) {
                 activityStartedCount++
                 if (activityStartedCount == 1 && !_isInForeground.value) {
+                    lifecycleGeneration.incrementAndGet()
                     _isInForeground.value = true
                     onEnterForeground()
                 }
@@ -139,6 +141,7 @@ class AppLifecycleMonitor @Inject constructor(
             override fun onActivityStopped(activity: Activity) {
                 activityStartedCount = (activityStartedCount - 1).coerceAtLeast(0)
                 if (activityStartedCount == 0 && _isInForeground.value) {
+                    lifecycleGeneration.incrementAndGet()
                     _isInForeground.value = false
                     onEnterBackground()
                 }
@@ -150,6 +153,8 @@ class AppLifecycleMonitor @Inject constructor(
             override fun onActivityDestroyed(activity: Activity) {}
         })
     }
+
+    internal fun currentLifecycleGeneration(): Long = lifecycleGeneration.get()
 
     /**
      * Hook for [cn.vectory.ocdroid.ui.MainViewModel] to push its

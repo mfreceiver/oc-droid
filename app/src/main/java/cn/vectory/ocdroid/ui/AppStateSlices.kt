@@ -358,6 +358,8 @@ data class SessionListState(
     val pendingPermissions: List<PermissionRequest> = emptyList(),
     val pendingQuestions: List<QuestionRequest> = emptyList(),
     val childSessions: Map<String, List<Session>> = emptyMap(),
+    /** Roots whose complete descendant tree was fetched successfully. */
+    val completeRootIds: Set<String> = emptySet(),
     val directorySessions: Map<String, List<Session>> = emptyMap(),
     val openSessionIds: List<String> = emptyList(),
     val sessionTodos: Map<String, List<TodoItem>> = emptyMap(),

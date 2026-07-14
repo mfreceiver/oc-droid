@@ -107,4 +107,23 @@ class BackgroundUnreadPollerTest {
             idleNotificationKey("server-1", "/repo", "A", 1_000L),
         )
     }
+
+    @Test
+    fun `host switch during final tree request prevents stale commit and alert`() = runTest {
+        val a = root("A")
+        every { settings.currentWorkdir } returns "/repo"
+        store.mutateHost { it.copy(currentHostProfileId = "host-1") }
+        coEvery { repository.getSessions(any()) } returns Result.success(listOf(a))
+        coEvery { repository.getSessionStatus() } returns Result.success(emptyMap())
+        coEvery { repository.getChildren("A") } coAnswers {
+            store.mutateHost { it.copy(currentHostProfileId = "host-2") }
+            Result.success(emptyList())
+        }
+
+        val alerts = poller().poll()
+
+        assertTrue(alerts.isEmpty())
+        assertTrue(store.sessionListFlow.value.sessions.isEmpty())
+        assertTrue(store.unreadFlow.value.unreadSessions.isEmpty())
+    }
 }

@@ -72,6 +72,7 @@ fun evaluateUnread(
     idleSince: Map<String, Long>,
     now: Long,
     soakMs: Long = UNREAD_SOAK_MS,
+    completeRootIds: Set<String>,
 ): UnreadSoakResult {
     // Build the live ROOT set: parentId==null, !isArchived, deduped by id.
     // Order-stable (LinkedHashMap) so deterministic iteration aids reproducible
@@ -100,7 +101,8 @@ fun evaluateUnread(
     for ((rootId, _) in roots) {
         val isCurrent = rootId == currentRootId
         val subtree = subtreeIds(rootId, sessions, directorySessions, childSessions)
-        val allIdle = subtree.all { sessionStatuses[it]?.isIdle == true }
+        val allIdle = rootId in completeRootIds &&
+            subtree.all { sessionStatuses[it]?.isIdle == true }
 
         when {
             // soak reset: root or any descendant busy / unknown → reset.

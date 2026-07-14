@@ -1317,14 +1317,24 @@ class SessionSyncCoordinator(
  * Pure; effects empty (the dispatcher handles parse-failure via ReportNonFatal).
  */
 internal fun SessionListState.applySessionCreated(session: Session): Pair<SessionListState, List<SseSideEffect>> =
-    copy(sessions = upsertSession(sessions, session)) to emptyList()
+    upsertAndInvalidateTree(session) to emptyList()
 
 /**
  * session.updated (non-archived) → upsert the parsed [Session] into
  * [SessionListState.sessions]. Pure; effects empty.
  */
 internal fun SessionListState.applySessionUpsert(updated: Session): Pair<SessionListState, List<SseSideEffect>> =
-    copy(sessions = upsertSession(sessions, updated)) to emptyList()
+    upsertAndInvalidateTree(updated) to emptyList()
+
+private fun SessionListState.upsertAndInvalidateTree(session: Session): SessionListState {
+    val updatedSessions = upsertSession(sessions, session)
+    val byId = allSessionsById(updatedSessions, directorySessions, childSessions)
+    val rootId = rootIdOf(session.id, byId) ?: session.id
+    return copy(
+        sessions = updatedSessions,
+        completeRootIds = completeRootIds - rootId,
+    )
+}
 
 /**
  * §recent-sort-by-message: when a session receives a message, bump its

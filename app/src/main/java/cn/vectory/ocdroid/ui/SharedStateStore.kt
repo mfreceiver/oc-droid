@@ -116,6 +116,8 @@ class SharedStateStore @Inject constructor() {
     /** Derive an unread update from one atomic aggregate snapshot. */
     internal fun mutateUnreadFromState(transform: (StoreState) -> UnreadState) =
         state.update { snapshot -> snapshot.copy(unread = transform(snapshot)) }
+    /** Internal aggregate CAS for controllers that must commit multiple slices together. */
+    internal fun mutateState(transform: (StoreState) -> StoreState) = state.update(transform)
     fun mutateHost(transform: (HostState) -> HostState) =
         state.update { it.copy(host = transform(it.host)) }
     /** §history-load-fix / §A5-3 B1: CAS write of the expansion map. */

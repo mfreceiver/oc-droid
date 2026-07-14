@@ -398,10 +398,17 @@ class SessionSwitcher(
 
         // ── Step 8: Unread state machine + draft discard + openSessionIds ───
         val now = clock()
+        val sessionMap = allSessionsById(
+            slices.sessionList.value.sessions,
+            slices.sessionList.value.directorySessions,
+            slices.sessionList.value.childSessions,
+        )
+        val rootId = rootIdOf(sessionId, sessionMap) ?: sessionId
         slices.mutateUnread {
             it.copy(
-                unreadSessions = it.unreadSessions - sessionId,
-                lastViewedTime = it.lastViewedTime + (sessionId to now),
+                unreadSessions = it.unreadSessions - setOf(sessionId, rootId),
+                idleSince = it.idleSince - setOf(sessionId, rootId),
+                lastViewedTime = it.lastViewedTime + (rootId to now),
             )
         }
         // Selecting a real session discards any in-progress draft.
