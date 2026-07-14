@@ -71,6 +71,14 @@ android {
         versionCode = gitVersionCode
         versionName = gitVersionName
 
+        // §apk-size: 仅打包 arm64-v8a。minSdk=34（Android 14+）真机 100% arm64；
+        // SQLCipher .so 原全 4 ABI 打包占 7.3MB，收敛后 release APK 省 ~5.3MB。
+        // x86/x86_64 仅模拟器用；模拟器测试用 debug 包（同样受此 filter 影响，但
+        // arm64 模拟器即原生目标）。如需多 ABI，改发 .aab 让商店按设备下发。
+        ndk {
+            abiFilters += "arm64-v8a"
+        }
+
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         // Integration test credentials from .env (dynamic, not in code)
         testInstrumentationRunnerArguments["openCodeServerUrl"] = env["OPENCODE_SERVER_URL"] ?: ""
