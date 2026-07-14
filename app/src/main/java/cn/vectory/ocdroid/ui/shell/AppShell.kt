@@ -39,7 +39,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.res.stringResource
@@ -146,18 +146,15 @@ fun AppShell(orchestratorVM: OrchestratorViewModel, navBarBottomDp: Dp = 0.dp) {
     // guard made the bar POP in one frame late on dismiss — a two-phase jank
     // (composer slides smoothly via imePadding, then the bar snaps). The ime
     // bottom inset is read here in composition (WindowInsets.ime's getter is
-    // @Composable, so it cannot be read inside the graphicsLayer lambda);
+    // @Composable, so it cannot be read inside the layout modifier);
     // recomposition fires per-frame during the IME spring, so the bar slides
     // + fades in lockstep with the composer. barHeightPx is the bar's full
     // painted height (tab Row + navBarBottomDp gesture-pill spacer), used to
     // clamp the slide so the bar travels exactly its own height and is fully
-    // faded by the time the IME is open. graphicsLayer (not Modifier.offset)
-    // is used so the off-screen bar's INPUT bounds stay at the layout
-    // position (behind the IME) and never intercept composer touches.
+    // faded by the time the IME is open. The custom layout also shrinks the
+    // height reported to Scaffold, so innerPadding.bottom reaches zero and the
+    // zero-height clipped bar cannot intercept composer touches.
     val density = LocalDensity.current
-    val barHeightPx = remember(density, navBarBottomDp) {
-        with(density) { (Dimens.touchTargetMin + Dimens.spacing2 + navBarBottomDp).toPx() }
-    }
     val imeBottomPx = WindowInsets.ime.getBottom(density).toFloat()
 
     Scaffold(
@@ -175,15 +172,9 @@ fun AppShell(orchestratorVM: OrchestratorViewModel, navBarBottomDp: Dp = 0.dp) {
                         orchestratorVM.setLastRoute(route)
                     }
                 },
-                modifier = Modifier.graphicsLayer {
-                    val imePx = imeBottomPx.coerceIn(0f, barHeightPx)
-                    // Positive translationY slides the bar DOWN off the bottom
-                    // edge as the IME grows; alpha fades it out over the same
-                    // range. On dismiss imePx→0 so the bar slides back UP into
-                    // place and fades in — in lockstep, no second-phase pop.
-                    translationY = imePx
-                    alpha = 1f - (imePx / barHeightPx).coerceIn(0f, 1f)
-                },
+                modifier = Modifier
+                    .clipToBounds()
+                    .collapseForIme(imeBottomPx),
             )
         },
     ) { innerPadding ->
