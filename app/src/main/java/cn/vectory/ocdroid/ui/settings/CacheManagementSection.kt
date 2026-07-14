@@ -49,6 +49,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.RectangleShape
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
@@ -425,14 +426,15 @@ private fun CachedSessionRowItem(
                             else MaterialTheme.colorScheme.onSurfaceVariant
                 )
             }
-            // §setux #8: 清除按钮改为无圆角矩形 + 主题深色填充 + Delete 图标，
+            // §setux #8: 清除按钮改为无圆角矩形 + 透明底 + primary 图标，
             // 无文字。紧凑 36dp 方形，contentDescription 走专用无障碍 key
             // (cache_management_clear_session_cd)。
             Button(
                 onClick = onClearSession,
                 shape = RectangleShape,
                 colors = ButtonDefaults.buttonColors(
-                    containerColor = MaterialTheme.colorScheme.primary
+                    containerColor = Color.Transparent,
+                    contentColor = MaterialTheme.colorScheme.primary
                 ),
                 contentPadding = PaddingValues(0.dp),
                 modifier = Modifier.size(36.dp)
@@ -440,6 +442,7 @@ private fun CachedSessionRowItem(
                 Icon(
                     Icons.Default.Delete,
                     contentDescription = stringResource(R.string.cache_management_clear_session_cd),
+                    tint = MaterialTheme.colorScheme.primary,
                     modifier = Modifier.size(Dimens.iconXs)
                 )
             }
