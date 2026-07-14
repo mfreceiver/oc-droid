@@ -8,7 +8,20 @@ import kotlinx.coroutines.sync.withLock
 import javax.inject.Inject
 import javax.inject.Singleton
 
-enum class TeardownReason { Reconfigure, Timeout, UserClose, Disconnect }
+/**
+ * The reason a [ReconfigureTeardown.teardownAndAwait] is running. Drives the
+ * dedicated teardown path inside [StreamingLifecycleCoordinator]:
+ *  - [Reconfigure] — D4-B M4: intentional no-source barrier (NO replacement
+ *    poller emitted; old identity is invalid post-`beginReconfigure()`).
+ *  - [Timeout] / [UserClose] / [Disconnect] — generic L3 teardown (the
+ *    acknowledgeable StartPoller → StopSse handoff may run if leaving L1/L2).
+ *  - [BootstrapFailure] — D4-B B1: forces terminal shell cleanup EVEN WHEN
+ *    the lifecycle layer is already L3 (a live placeholder Service holding
+ *    Starting ownership must be fully torn down: StopSse + StopForeground +
+ *    StopPoller + StopSelf + release ownership). The ordinary `L3 → return`
+ *    short-circuit is invalid for this reason.
+ */
+enum class TeardownReason { Reconfigure, Timeout, UserClose, Disconnect, BootstrapFailure }
 
 interface ReconfigureTeardown {
     suspend fun teardownAndAwait(reason: TeardownReason)

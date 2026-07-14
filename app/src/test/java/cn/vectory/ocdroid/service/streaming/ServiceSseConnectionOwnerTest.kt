@@ -106,9 +106,6 @@ class ServiceSseConnectionOwnerTest {
             sseEventStream = stream,
             sharedStateStore = store,
             sharedEffectBus = effects,
-            statusAggregatorInput = aggregator,
-            statusAggregator = aggregator,
-            snapshotProvider = SessionSnapshotProvider { StatusSnapshot.Empty },
             recoveryPolicy = policy,
             jitterSource = { 0.0f },
             onTerminalExhaustion = { disconnectRequests++ },
@@ -132,7 +129,12 @@ class ServiceSseConnectionOwnerTest {
     }
 
     private fun runPending() {
-        scope.testScheduler.advanceUntilIdle()
+        // D4-B M3: runCurrent (NOT advanceUntilIdle) — the transport-timeout
+        // job's 30s delay would otherwise fire when no frame is pending. The
+        // collector subscribes immediately under UnconfinedTestDispatcher, so
+        // runCurrent suffices to deliver frames; retry tests use
+        // [advanceOwnerTimeBy] for explicit delay advancement.
+        scope.testScheduler.runCurrent()
     }
 
     private fun advanceOwnerTimeBy(delayMs: Long) {
@@ -530,12 +532,12 @@ class ServiceSseConnectionOwnerTest {
         verify { repository.connectSSE("/proj-B") }
     }
 
-    // (14) D2 gate #4: SSE first frame but baseline Unknown → poller stays running
-    //      (readiness NOT completed; collector keeps running).
+    // (14) D4-B M3: SSE first frame completes transport readiness regardless of
+    //      the status verdict (Unknown is no longer a transport-readiness gate).
     @Test
-    fun `D2 gate #4 - SSE first frame with Unknown baseline - readiness stays open`() = runTest {
+    fun `D4-B M3 - SSE first frame with Unknown baseline still completes transport readiness`() = runTest {
         val identity = bindIdentity("/proj")
-        aggregator.nextState = GlobalBusyState.Unknown  // baseline Unknown
+        aggregator.nextState = GlobalBusyState.Unknown  // baseline Unknown (now irrelevant to transport)
         val feed = MutableSharedFlow<Result<SSEEvent>>(extraBufferCapacity = 8)
         stubFeed(feed)
 
@@ -546,17 +548,65 @@ class ServiceSseConnectionOwnerTest {
         feed.tryEmit(Result.success(sseEvent("first-frame")))
         runPending()
 
-        // The connect call is still suspended (deferred not completed) —
-        // Unknown is NOT a verified baseline. result == null here.
+        // D4-B M3: transport readiness completes on the first frame — Unknown
+        // status authority is the coordinator's concern at commit, NOT the
+        // collector's. result == Ready.
         assertEquals(
-            "Unknown baseline does NOT complete readiness (collector keeps running)",
-            null,
+            "Unknown baseline does NOT gate transport readiness (M3)",
+            SourceActivation.Ready,
             result,
         )
-        // But the frame DID reach the stream (Unknown is not a frame-level drop).
+        // The frame DID reach the stream.
         assertTrue(
-            "first frame reached the stream even with Unknown baseline",
+            "first frame reached the stream",
             collectedFrames().any { it.payload.type == "first-frame" },
+        )
+    }
+
+    // (15) D4-B M3: no frame within the transport timeout → TransportTimeout +
+    //      the attempted collector is cancelled (no late frame leaks).
+    @Test
+    fun `D4-B M3 - no frame within transport timeout completes TransportTimeout and cancels collector`() = runTest {
+        val identity = bindIdentity("/proj")
+        // A feed that never emits (quiet SSE).
+        val feed = MutableSharedFlow<Result<SSEEvent>>(extraBufferCapacity = 8)
+        stubFeed(feed)
+        // Tight transport timeout so the virtual clock can drive it.
+        val timeoutOwner = ServiceSseConnectionOwner(
+            scope = scope,
+            repository = repository,
+            identityStore = identityStore,
+            bootstrapCoordinator = bootstrapCoordinator,
+            sseEventStream = stream,
+            sharedStateStore = store,
+            sharedEffectBus = effects,
+            recoveryPolicy = policy,
+            transportTimeoutMs = 5_000L,
+            jitterSource = { 0.0f },
+            onTerminalExhaustion = { disconnectRequests++ },
+        )
+        var result: SourceActivation? = null
+        scope.launch { result = timeoutOwner.connect(identity) }
+        scope.testScheduler.runCurrent()
+
+        // No frame emitted; advance past the transport timeout.
+        assertEquals("readiness not yet completed (no frame)", null, result)
+        scope.testScheduler.advanceTimeBy(5_000L)
+        scope.testScheduler.runCurrent()
+
+        assertEquals(
+            "transport timeout completed readiness with TransportTimeout",
+            SourceActivation.Rejected.TransportTimeout,
+            result,
+        )
+
+        // The collector was cancelled — a late frame does NOT leak.
+        val late = sseEvent("late-frame")
+        feed.tryEmit(Result.success(late))
+        scope.testScheduler.advanceUntilIdle()
+        assertTrue(
+            "late frame after timeout MUST NOT reach the stream (collector cancelled)",
+            collectedFrames().none { it.payload.type == "late-frame" },
         )
     }
 

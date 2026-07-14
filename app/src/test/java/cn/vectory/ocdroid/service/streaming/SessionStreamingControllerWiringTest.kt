@@ -67,7 +67,7 @@ class SessionStreamingControllerWiringTest {
             endpointFp = identity.endpointFp,
         )
         fixture.aggregator.setState(GlobalBusyState.Busy)
-        fixture.shell.nextSseActivation = SourceActivation.Ready(GlobalBusyState.Busy)
+        fixture.shell.nextSseActivation = SourceActivation.Ready
         fixture.controller.bootstrapAsync()
         runCurrent()
         assertEquals(Layer.L2Active, fixture.coordinator.layer.value)
@@ -75,7 +75,7 @@ class SessionStreamingControllerWiringTest {
 
         // Act: §4.1 dataSync platform timeout. The teardown needs the poller
         // activation ack to commit; the shell returns nextPollerActivation.
-        fixture.shell.nextPollerActivation = SourceActivation.Ready(GlobalBusyState.Busy)
+        fixture.shell.nextPollerActivation = SourceActivation.Ready
         fixture.controller.onServiceTimeout()
         runCurrent()
 
@@ -101,13 +101,13 @@ class SessionStreamingControllerWiringTest {
             endpointFp = identity.endpointFp,
         )
         fixture.aggregator.setState(GlobalBusyState.Busy)
-        fixture.shell.nextSseActivation = SourceActivation.Ready(GlobalBusyState.Busy)
+        fixture.shell.nextSseActivation = SourceActivation.Ready
         fixture.controller.bootstrapAsync()
         runCurrent()
         assertEquals(Layer.L2Active, fixture.coordinator.layer.value)
         fixture.shell.recorded.clear()
 
-        fixture.shell.nextPollerActivation = SourceActivation.Ready(GlobalBusyState.Busy)
+        fixture.shell.nextPollerActivation = SourceActivation.Ready
         fixture.controller.requestUserClose(UserCloseRequest(expectedIdentity = bound))
         runCurrent()
 
@@ -167,12 +167,12 @@ class SessionStreamingControllerWiringTest {
             endpointFp = identity.endpointFp,
         )
         fixture.aggregator.setState(GlobalBusyState.Busy)
-        fixture.shell.nextSseActivation = SourceActivation.Ready(GlobalBusyState.Busy)
+        fixture.shell.nextSseActivation = SourceActivation.Ready
         fixture.controller.bootstrapAsync()
         runCurrent()
         assertEquals(Layer.L2Active, fixture.coordinator.layer.value)
         fixture.shell.recorded.clear()
-        fixture.shell.nextPollerActivation = SourceActivation.Ready(GlobalBusyState.Busy)
+        fixture.shell.nextPollerActivation = SourceActivation.Ready
 
         // Close request with the current identity; refresh reports Busy.
         // Teardown MUST still occur (Busy is NOT a veto for an explicit close).
@@ -197,12 +197,12 @@ class SessionStreamingControllerWiringTest {
             endpointFp = identity.endpointFp,
         )
         fixture.aggregator.setState(GlobalBusyState.Busy)
-        fixture.shell.nextSseActivation = SourceActivation.Ready(GlobalBusyState.Busy)
+        fixture.shell.nextSseActivation = SourceActivation.Ready
         fixture.controller.bootstrapAsync()
         runCurrent()
         assertEquals(Layer.L2Active, fixture.coordinator.layer.value)
         fixture.shell.recorded.clear()
-        fixture.shell.nextPollerActivation = SourceActivation.Ready(GlobalBusyState.AllIdleFresh)
+        fixture.shell.nextPollerActivation = SourceActivation.Ready
         fixture.aggregator.setState(GlobalBusyState.AllIdleFresh)
 
         fixture.controller.handleUserClose(UserCloseRequest(expectedIdentity = bound))
@@ -225,11 +225,11 @@ class SessionStreamingControllerWiringTest {
             endpointFp = identity.endpointFp,
         )
         fixture.aggregator.setState(GlobalBusyState.Busy)
-        fixture.shell.nextSseActivation = SourceActivation.Ready(GlobalBusyState.Busy)
+        fixture.shell.nextSseActivation = SourceActivation.Ready
         fixture.controller.bootstrapAsync()
         runCurrent()
         fixture.shell.recorded.clear()
-        fixture.shell.nextPollerActivation = SourceActivation.Ready(GlobalBusyState.Busy)
+        fixture.shell.nextPollerActivation = SourceActivation.Ready
 
         // Mark refresh to produce Unknown; identity unchanged.
         fixture.aggregator.refreshReturnsUnknown = true
@@ -253,7 +253,7 @@ class SessionStreamingControllerWiringTest {
             endpointFp = identity.endpointFp,
         )
         fixture.aggregator.setState(GlobalBusyState.Busy)
-        fixture.shell.nextSseActivation = SourceActivation.Ready(GlobalBusyState.Busy)
+        fixture.shell.nextSseActivation = SourceActivation.Ready
         fixture.controller.bootstrapAsync()
         runCurrent()
         fixture.shell.recorded.clear()
@@ -288,7 +288,7 @@ class SessionStreamingControllerWiringTest {
             endpointFp = identity.endpointFp,
         )
         fixture.aggregator.setState(GlobalBusyState.Busy)
-        fixture.shell.nextSseActivation = SourceActivation.Ready(GlobalBusyState.Busy)
+        fixture.shell.nextSseActivation = SourceActivation.Ready
         fixture.controller.bootstrapAsync()
         runCurrent()
         fixture.shell.recorded.clear()
@@ -321,7 +321,7 @@ class SessionStreamingControllerWiringTest {
         fixture.controller.start()
         // No bootstrap → no identity bound.
         // Close request with expectedIdentity = null (the degraded placeholder).
-        fixture.shell.nextPollerActivation = SourceActivation.Ready(GlobalBusyState.AllIdleFresh)
+        fixture.shell.nextPollerActivation = SourceActivation.Ready
         fixture.controller.handleUserClose(UserCloseRequest(expectedIdentity = null))
         runCurrent()
 
@@ -424,8 +424,8 @@ class SessionStreamingControllerWiringTest {
 
     private class RecordingShell : ServiceShell {
         val recorded = mutableListOf<String>()
-        var nextSseActivation: SourceActivation = SourceActivation.Ready(GlobalBusyState.Busy)
-        var nextPollerActivation: SourceActivation = SourceActivation.Ready(GlobalBusyState.Busy)
+        var nextSseActivation: SourceActivation = SourceActivation.Ready
+        var nextPollerActivation: SourceActivation = SourceActivation.Ready
 
         override fun startForeground(spec: NotificationSpec) { recorded += "startForeground" }
         override fun updateNotification(spec: NotificationSpec) { recorded += "updateNotification" }

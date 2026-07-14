@@ -39,7 +39,7 @@ class RecordingStreamingServiceLauncher : StreamingServiceLauncher {
     override suspend fun ensureStarted(identity: ConnectionIdentity): OwnershipStartResult {
         callCountAtomic.incrementAndGet()
         requestedIdentities += identity
-        return if (nextResult) OwnershipStartResult.Accepted(identity)
+        return if (nextResult) OwnershipStartResult.Ready(identity)
         else OwnershipStartResult.Refused(OwnershipRefusal.ServiceStopped)
     }
 }

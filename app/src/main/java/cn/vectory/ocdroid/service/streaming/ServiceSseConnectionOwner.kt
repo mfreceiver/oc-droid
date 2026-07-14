@@ -7,9 +7,6 @@ import cn.vectory.ocdroid.service.events.SseEventStream
 import cn.vectory.ocdroid.service.identity.ConnectionIdentity
 import cn.vectory.ocdroid.service.identity.ConnectionIdentityStore
 import cn.vectory.ocdroid.service.lifecycle.StreamingLifecycleCoordinator
-import cn.vectory.ocdroid.service.status.GlobalBusyState
-import cn.vectory.ocdroid.service.status.StatusAggregator
-import cn.vectory.ocdroid.service.status.StatusAggregatorInput
 import cn.vectory.ocdroid.ui.ConnectionPhase
 import cn.vectory.ocdroid.ui.SharedEffectBus
 import cn.vectory.ocdroid.ui.SharedStateStore
@@ -22,7 +19,6 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.collect
-import kotlinx.coroutines.flow.catch
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.sync.Mutex
@@ -41,13 +37,6 @@ import kotlinx.coroutines.sync.withLock
  * [ControllerEffect.OnSseEvent] for `SessionSyncCoordinator.fold`. The
  * downstream path is byte-for-byte preserved from CP3-8.
  *
- * **Not a Hilt singleton**: created by `SessionStreamingService.onCreate`
- * (one instance per Service instance) with Service-lifetime collaborators
- * that are themselves Hilt-provided. Test construction uses real
- * `OpenCodeRepository` / `ConnectionIdentityStore` / `SseEventStream` /
- * `SharedStateStore` / `SharedEffectBus` mocks/spies so the collector path
- * is exercised identically.
- *
  * **Identity contract (FGS spec §2)**: the [ConnectionIdentity] passed to
  * [connect] is the atomic capture (no re-read of `SettingsManager.currentWorkdir`).
  * A queued `StartSse` whose identity is no longer current
@@ -56,20 +45,25 @@ import kotlinx.coroutines.sync.withLock
  * since been invalidated. Returns [SourceActivation.Rejected.StaleIdentity].
  *
  * **TOFU freeze**: while [ConnectionBootstrapCoordinator] holds a pending
- * TOFU trust prompt ([pendingTofuHostPort][cn.vectory.ocdroid.service.bootstrap.ConnectionBootstrapCoordinator.pendingTofuHostPort]
+ * TOFU trust prompt ([pendingTofuHostPort][ConnectionBootstrapCoordinator.pendingTofuHostPort]
  * != null), [connect] is a no-op collector-wise. The TLS handshake would
  * fail the same way (the pin is not written until the user decides); resuming
  * the bootstrap retry loop after the user's decision re-issues `StartSse`.
  * Returns [SourceActivation.Rejected.TofuPending].
  *
- * **D2 gate #4 — acknowledgeable activation**: [connect] is a `suspend fun`
- * returning [SourceActivation]:
- *  - [SourceActivation.Ready] — only AFTER the first successful current-
- *    identity frame AND an immediate [StatusAggregatorInput.refresh]
- *    baseline projected as `Busy` or `AllIdleFresh` (`Unknown` is NOT a
- *    verified baseline; the collector keeps running + the deferred stays
- *    open until a verified frame arrives OR the §5 step 6 retry budget
- *    exhausts).
+ * **D2 gate #4 — acknowledgeable activation** → **D4-B M3 (transport-only
+ * readiness)**: [connect] is a `suspend fun` returning [SourceActivation]:
+ *  - [SourceActivation.Ready] — ONLY AFTER the first successful current-
+ *    identity SSE frame proves the transport works. The readiness completes
+ *    IMMEDIATELY on that frame (liveness + event publish + gap reset); it
+ *    does NOT await or gate on a REST status baseline. The status authority
+ *    (Busy / AllIdleFresh / Unknown) is consulted separately by the
+ *    [StreamingLifecycleCoordinator] at handoff commit — a host whose
+ *    snapshot is Unknown no longer hangs the SSE activation.
+ *  - [SourceActivation.Rejected.TransportTimeout] — NO valid current-identity
+ *    frame arrived within [TRANSPORT_READY_TIMEOUT_MS] (30s). The attempted
+ *    collector is cancelled; the handoff commit routes through
+ *    [StreamingOwnershipGate.failStarting] → full B1 rollback.
  *  - [SourceActivation.Rejected.StaleIdentity] / [SourceActivation.Rejected.TofuPending]
  *    — no network retry consumed.
  *  - [SourceActivation.Rejected.Exhausted] — §5 step 6 service-level retry
@@ -101,16 +95,12 @@ import kotlinx.coroutines.sync.withLock
  *   `UiEvent.Error(R.string.error_sse_failed, ...)` here. Liveness + errors
  *   belong at the point that proves transport delivery (the collector), NOT
  *   in the bridge — see CP9 plan §D19.
- * @param statusAggregatorInput D2 readiness: the immediate baseline refresh
- *   on the first current-identity frame. Readiness accepts the baseline only
- *   when identity still current AND state is Busy / AllIdleFresh (Unknown is
- *   NOT a verified baseline — keep the collector running).
- * @param statusAggregator D2 readiness: read [StatusAggregator.globalState]
- *   after the baseline refresh.
- * @param snapshotProvider D2 readiness: the snapshot for the baseline refresh
- *   (registered-workdir coverage set so AllIdleFresh cannot falsely pass).
  * @param recoveryPolicy D2 gate #7: the service-level retry schedule
  *   (30s / 2m / 5m + ±20% jitter).
+ * @param transportTimeoutMs D4-B M3: the bounded window for the first valid
+ *   current-identity frame. Default [TRANSPORT_READY_TIMEOUT_MS] (30s). If
+ *   no frame arrives within this window the activation completes with
+ *   [SourceActivation.Rejected.TransportTimeout].
  * @param onTerminalExhaustion invoked once after the collector exhausts the
  *   service-level retry budget (3 attempts past the SSEClient's internal 10);
  *   routes through [StreamingLifecycleCoordinator.onDisconnect] → L3 teardown.
@@ -124,10 +114,8 @@ class ServiceSseConnectionOwner(
     private val sseEventStream: SseEventStream,
     private val sharedStateStore: SharedStateStore,
     private val sharedEffectBus: SharedEffectBus,
-    private val statusAggregatorInput: StatusAggregatorInput,
-    private val statusAggregator: StatusAggregator,
-    private val snapshotProvider: SessionSnapshotProvider,
     private val recoveryPolicy: SseRecoveryPolicy,
+    private val transportTimeoutMs: Long = TRANSPORT_READY_TIMEOUT_MS,
     private val jitterSource: () -> Float = {
         kotlin.random.Random.nextFloat() * 0.4f - 0.2f
     },
@@ -138,12 +126,14 @@ class ServiceSseConnectionOwner(
      * Read/written under [connectMutex].
      */
     private var sseJob: Job? = null
+    private var transportTimeoutJob: Job? = null
     private var activeIdentity: ConnectionIdentity? = null
 
     /**
      * D2 gate #4: the readiness deferred for the in-flight [connect]. The
      * `suspend fun connect` awaits this; the collector completes it on the
-     * first verifiable frame OR [onTerminalExhaustion]'s exhausted signal.
+     * first current-identity frame (Ready), the transport timeout
+     * (TransportTimeout), or [onTerminalExhaustion]'s exhausted signal.
      *
      * A SUPERSEDED connect (a newer [connect] arrived, or [disconnect] was
      * called) cancels this deferred — the older `connect` await throws
@@ -190,18 +180,18 @@ class ServiceSseConnectionOwner(
 
     /**
      * D2 gate #4 — launches one SSE collector bound to [identity], awaits
-     * transport readiness + status-baseline verification OUTSIDE the
-     * [connectMutex] (so a newer [connect] OR [disconnect] can supersede an
-     * in-flight await by cancelling [pendingReadiness]), and returns the
-     * resulting [SourceActivation]. See the class kdoc for the readiness /
-     * rejection contract.
+     * transport readiness OUTSIDE the [connectMutex] (so a newer [connect]
+     * OR [disconnect] can supersede an in-flight await by cancelling
+     * [pendingReadiness]), and returns the resulting [SourceActivation].
+     *
+     * **D4-B M3**: readiness completes on the FIRST valid current-identity
+     * frame (transport-ready), NOT on a REST status baseline. A 30s transport
+     * timeout produces [SourceActivation.Rejected.TransportTimeout].
      *
      * The setup (TOFU check, stale check, cancel prior collector, bump
      * generation, launch collector) runs under [connectMutex] so concurrent
      * connect calls are serialized on `sseJob` + `pendingReadiness`. The
-     * await itself is OUTSIDE the lock — that's the key to keeping the
-     * collector mutable-state race-free while still letting supersede cancel
-     * a stuck connection attempt.
+     * await itself is OUTSIDE the lock.
      */
     suspend fun connect(identity: ConnectionIdentity): SourceActivation {
         val setup = connectMutex.withLock { setupConnectLocked(identity) }
@@ -253,6 +243,8 @@ class ServiceSseConnectionOwner(
         // controller launch dies without acking).
         sseJob?.cancel()
         sseJob = null
+        transportTimeoutJob?.cancel()
+        transportTimeoutJob = null
         activeIdentity = identity
         pendingReadiness?.cancel()
         val readiness = CompletableDeferred<SourceActivation>()
@@ -261,9 +253,37 @@ class ServiceSseConnectionOwner(
         val generation = ++transportGenerationCounter
         gapEmittedForGen = -1L
         exhaustedReportedForGen = -1L
-        // §A3.5 — launch one new job.
+        // §A3.5 — launch one new job + the M3 transport-readiness timeout.
         sseJob = scope.launchSseCollector(identity, generation, readiness)
+        transportTimeoutJob = scope.launchTransportTimeout(generation, readiness)
         return ConnectSetup.Started(readiness)
+    }
+
+    /**
+     * D4-B M3 — the transport-readiness timeout. If no valid current-identity
+     * frame completes [readiness] within [transportTimeoutMs], the activation
+     * fails with [SourceActivation.Rejected.TransportTimeout] + the collector
+     * is cancelled (the handoff commit routes through B1 rollback). Cancelled
+     * by [onSuccessfulFrame] the moment a frame verifies.
+     */
+    private fun CoroutineScope.launchTransportTimeout(
+        generation: Long,
+        readiness: CompletableDeferred<SourceActivation>,
+    ): Job = launch {
+        try {
+            delay(transportTimeoutMs)
+        } catch (e: CancellationException) {
+            return@launch
+        }
+        if (isCurrentTransport(generation) && !readiness.isCompleted) {
+            DebugLog.w(TAG, "transport timeout (gen=$generation, ${transportTimeoutMs}ms, no frame)")
+            // Cancel the collector so it does not keep churning after the
+            // activation has been rejected.
+            transportTimeoutJob = null
+            sseJob?.cancel()
+            sseJob = null
+            readiness.complete(SourceActivation.Rejected.TransportTimeout)
+        }
     }
 
     /**
@@ -276,13 +296,18 @@ class ServiceSseConnectionOwner(
      * frame, completes [readiness] with [SourceActivation.Rejected.Exhausted]
      * + invokes [onTerminalExhaustion] exactly once.
      *
+     * **D4-B M3**: readiness completes on the first frame regardless of the
+     * post-refresh status verdict — the status authority is consulted by the
+     * coordinator at commit, not by the collector.
+     *
      * Gap-dirty: idempotent per generation — [emitGapOnce] emits
      * [ControllerEffect.CancelSse] once per outage (reset by a successful
      * frame). Repeated failures in the same outage do not emit duplicates.
      *
      * Intentional cancellation (the job is cancelled by a newer connect /
-     * disconnect / scope shutdown) + stale-identity termination do NOT emit
-     * gap + do NOT start recovery + do NOT invoke [onTerminalExhaustion].
+     * disconnect / scope shutdown / transport-timeout) + stale-identity
+     * termination do NOT emit gap + do NOT start recovery + do NOT invoke
+     * [onTerminalExhaustion].
      */
     private fun CoroutineScope.launchSseCollector(
         identity: ConnectionIdentity,
@@ -312,7 +337,9 @@ class ServiceSseConnectionOwner(
                     }
                     result.onSuccess { event ->
                         // §A3.8 — liveness + identified emit + first-frame
-                        // readiness + gap reset (new outage can begin).
+                        // transport readiness + gap reset (new outage can
+                        // begin). D4-B M3: NO status refresh — readiness
+                        // completes on transport proof alone.
                         onSuccessfulFrame(identity, generation, event, readiness)
                         retriesUsed = 0
                     }.onFailure { error ->
@@ -328,8 +355,8 @@ class ServiceSseConnectionOwner(
                 }
             } catch (e: CancellationException) {
                 // Cooperative cancellation (newer connect / disconnect /
-                // scope shutdown). Do NOT emit gap, do NOT start recovery,
-                // do NOT invoke onTerminalExhaustion. Just propagate.
+                // transport-timeout / scope shutdown). Do NOT emit gap, do NOT
+                // start recovery, do NOT invoke onTerminalExhaustion. Propagate.
                 throw e
             } catch (e: Throwable) {
                 failure = e
@@ -339,6 +366,11 @@ class ServiceSseConnectionOwner(
             //    stream should complete). Stale-identity termination exits
             //    silently (no gap, no recovery, no exhaustion callback).
             if (!isCurrentTransport(identity, generation)) {
+                return@launch
+            }
+            // D4-B M3: if transport readiness already completed (timeout or
+            // otherwise) the collector is being torn down — exit silently.
+            if (readiness.isCompleted) {
                 return@launch
             }
             val failureThrowable = failure
@@ -377,10 +409,12 @@ class ServiceSseConnectionOwner(
     }
 
     /**
-     * D2 gate #4 — first-frame readiness + gap-reset side-effect handler.
-     * Called for every successful current-identity frame; the readiness
-     * complete is gated on the post-refresh [StatusAggregator.globalState]
-     * being Busy / AllIdleFresh (Unknown is NOT a verified baseline).
+     * D4-B M3 — first-frame transport readiness + gap-reset side-effect
+     * handler. Called for every successful current-identity frame. On the
+     * FIRST such frame: writes liveness, publishes the event, completes
+     * [readiness] with [SourceActivation.Ready], cancels the transport
+     * timeout, and resets the gap flag. Does NOT perform a REST status
+     * refresh — the status authority is the coordinator's concern at commit.
      *
      * Resetting [gapEmittedForGen] = -1 means the next failure starts a NEW
      * outage (a new gap emission). This is the §1.1 "observed transport-
@@ -407,24 +441,13 @@ class ServiceSseConnectionOwner(
         // dual-channel + re-emits each validated frame as OnSseEvent for
         // SSC's fold.
         sseEventStream.emit(Result.success(IdentifiedSseEvent(identity, event)))
-        // §A3.8 — D2 gate #4: first-frame readiness. Perform an immediate
-        // baseline refresh + accept the readiness only when identity still
-        // current AND state is Busy / AllIdleFresh. Unknown does NOT verify.
+        // D4-B M3: transport readiness completes on the first frame — NO
+        // status refresh, NO baseline gating. Cancel the transport timeout
+        // (the transport proved itself).
         if (!readiness.isCompleted) {
-            val snapshot = snapshotProvider.current()
-            statusAggregatorInput.refresh(identity, snapshot)
-            // Re-check identity AFTER the suspend refresh (reconfigure may
-            // have invalidated the snapshot mid-refresh).
-            if (!isCurrentTransport(identity, generation)) {
-                return
-            }
-            val state = statusAggregator.stateAtNow()
-            if (state == GlobalBusyState.Busy || state == GlobalBusyState.AllIdleFresh) {
-                readiness.complete(SourceActivation.Ready(state))
-            }
-            // Unknown: leave readiness incomplete — keep collector running.
-            // Either a later frame triggers a re-refresh with a verifying
-            // state, OR the retry budget exhausts → Rejected.Exhausted.
+            transportTimeoutJob?.cancel()
+            transportTimeoutJob = null
+            readiness.complete(SourceActivation.Ready)
         }
         // Reset the per-generation gap flag — a new outage can begin.
         gapEmittedForGen = -1L
@@ -466,11 +489,6 @@ class ServiceSseConnectionOwner(
      * outage (same generation, no successful frame between them) do NOT emit
      * duplicates.
      *
-     * The signal is now an OBSERVED transport-disconnect signal
-     * (SessionSyncCoordinator stamps the current session dirty + records the
-     * disconnect time so the next `server.connected` reconciles) — NOT a
-     * request for CC to cancel a job (CC no longer owns a job).
-     *
      * Per-generation idempotence: [gapEmittedForGen] tracks which generation
      * has already been gap-emitted; a successful frame resets it (`-1L`) so
      * a NEW outage (later failure in the same generation) emits a fresh gap.
@@ -502,6 +520,8 @@ class ServiceSseConnectionOwner(
         val job = connectMutex.withLock {
             val job = sseJob
             sseJob = null
+            transportTimeoutJob?.cancel()
+            transportTimeoutJob = null
             val readiness = pendingReadiness
             pendingReadiness = null
             val generation = transportGenerationCounter
@@ -525,6 +545,8 @@ class ServiceSseConnectionOwner(
         transportGenerationCounter += 1
         sseJob?.cancel()
         sseJob = null
+        transportTimeoutJob?.cancel()
+        transportTimeoutJob = null
         pendingReadiness?.cancel()
         pendingReadiness = null
         activeIdentity = null
@@ -533,8 +555,21 @@ class ServiceSseConnectionOwner(
     private fun isCurrentTransport(identity: ConnectionIdentity, generation: Long): Boolean =
         generation == transportGenerationCounter && identityStore.isCurrent(identity)
 
+    private fun isCurrentTransport(generation: Long): Boolean =
+        generation == transportGenerationCounter
+
     private companion object {
         private const val TAG = "ServiceSseOwner"
+
+        /**
+         * D4-B M3: the bounded window (30s) for the first valid current-
+         * identity SSE frame. If no frame arrives within this window the
+         * activation fails with [SourceActivation.Rejected.TransportTimeout]
+         * and the handoff routes through B1 rollback. Generous vs. a LAN
+         * server's first-frame latency; tight enough that a dead endpoint
+         * does not stall the bootstrap.
+         */
+        const val TRANSPORT_READY_TIMEOUT_MS = 30_000L
 
         // Indirection so tests do not need to mockkStatic(Log). Production
         // routes through android.util.Log; tests see a no-op.

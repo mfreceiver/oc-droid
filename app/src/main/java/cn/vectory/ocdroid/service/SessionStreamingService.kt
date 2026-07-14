@@ -269,6 +269,11 @@ class SessionStreamingService : Service() {
         // snapshot provider (first-frame readiness baseline) + the recovery
         // policy (§5 step 6 service-level retries). The status snapshot
         // provider is the same one the controller / poller uses.
+        // D2 gate #4 / #7: the owner now needs only the recovery policy
+        // (§5 step 6 service-level retries). D4-B M3: transport readiness is
+        // first-frame-only — the owner no longer consumes the status
+        // aggregator / snapshot provider (status authority is the
+        // coordinator's concern at handoff commit).
         sseOwner = ServiceSseConnectionOwner(
             scope = scope,
             repository = repository,
@@ -277,9 +282,6 @@ class SessionStreamingService : Service() {
             sseEventStream = sseEventStream,
             sharedStateStore = sharedStateStore,
             sharedEffectBus = sharedEffectBus,
-            statusAggregatorInput = statusAggregatorInput,
-            statusAggregator = statusAggregator,
-            snapshotProvider = sessionSnapshotProvider,
             recoveryPolicy = sseRecoveryPolicy,
             onTerminalExhaustion = { coordinator.onDisconnect() },
         )
@@ -295,7 +297,9 @@ class SessionStreamingService : Service() {
             inForeground = appLifecycleMonitor.isInForeground,
             scope = scope,
             bootstrapRetryPolicy = bootstrapRetryPolicy,
-            onBootstrapIdentity = { identity -> acceptOwnership(identity) },
+            onBootstrapIdentity = { identity -> registerStartingOwnership(identity) },
+            onSseTransportReady = { identity -> ownershipGate.markReady(identity) },
+            onBootstrapFailure = { identity -> failStarting(identity) },
         ).also { it.start() }
     }
 
@@ -390,7 +394,7 @@ class SessionStreamingService : Service() {
         if (requestedOwnership != null) {
             scope.launch {
                 if (identityStore.isCurrent(requestedOwnership)) {
-                    acceptOwnership(requestedOwnership)
+                    registerStartingOwnership(requestedOwnership)
                 } else {
                     ownershipGate.refuse(requestedOwnership, OwnershipRefusal.StaleIdentity)
                 }
@@ -402,14 +406,55 @@ class SessionStreamingService : Service() {
         return START_STICKY
     }
 
-    private suspend fun acceptOwnership(identity: ConnectionIdentity) {
+    /**
+     * D4-B B1 Stage 1 — the Service claims the bootstrap/recovery ownership
+     * (Starting). Records the disconnect + abortStartup callbacks so the gate
+     * can roll back without the Service being asked again. Does NOT complete
+     * the launcher's readiness waiter (that is [StreamingOwnershipGate.markReady],
+     * fired from the controller's `onSseTransportReady` once the SSE transport
+     * delivers a valid current-identity frame).
+     */
+    private suspend fun registerStartingOwnership(identity: ConnectionIdentity) {
         if (!identityStore.isCurrent(identity)) {
             ownershipGate.refuse(identity, OwnershipRefusal.StaleIdentity)
             return
         }
         acceptedOwnershipIdentity = identity
-        ownershipGate.registerAccepted(identity) { markGap ->
-            sseOwner?.disconnectAndJoin(markGap)
+        ownershipGate.registerStarting(
+            identity = identity,
+            disconnectAndJoin = { markGap -> sseOwner?.disconnectAndJoin(markGap) },
+            abortStartup = { /* shell cleanup runs via failStarting / coordinator */ },
+        )
+    }
+
+    /**
+     * D4-B B1 mandatory rollback — bootstrap exhaustion / transport rejection
+     * / stale identity. Performs the full 6-step rollback:
+     * (1) complete ownership waiters w/ refusal, (2) release Starting
+     * ownership, (3) write shared connection state Disconnected,
+     * (4) cancel/join any SSE attempt, (5) stop foreground + StopSelf via
+     * the coordinator's BootstrapFailure teardown, (6) `stopSelf()`.
+     */
+    private fun failStarting(identity: ConnectionIdentity?) {
+        scope.launch {
+            val extracted = ownershipGate.failStarting(
+                identity,
+                OwnershipRefusal.BootstrapFailed,
+            )
+            // (4) cancel/join any SSE attempt via the extracted owner callback.
+            extracted?.disconnectAndJoin?.invoke(false)
+            extracted?.abortStartup?.invoke()
+            // (3) write shared connection state Disconnected.
+            sharedStateStore.mutateConnection {
+                it.copy(
+                    isConnected = false,
+                    isConnecting = false,
+                    connectionPhase = cn.vectory.ocdroid.ui.ConnectionPhase.Disconnected,
+                )
+            }
+            // (5-6) coordinator BootstrapFailure teardown: force L3 +
+            // StopSse + StopForeground + StopPoller + StopSelf.
+            coordinator.teardownAndAwait(TeardownReason.BootstrapFailure)
         }
     }
 
@@ -600,9 +645,15 @@ class SessionStreamingService : Service() {
         // D2 gate #4: the [processStatusPoller]'s loop runs on
         // @ApplicationScope and is NOT cancelled here — it survives this
         // Service's death (§6 L3 source contract).
+        //
+        // D4-B (runBlocking removal): ownership is released via the
+        // non-suspend [StreamingOwnershipGate.releaseNow] under a short
+        // `synchronized(lock)` section (no main-thread blocking). The prior
+        // `runBlocking { release(identity) }` could stall the main thread on
+        // a contended coroutine Mutex.
         sseOwner?.cancelForShutdown()
         acceptedOwnershipIdentity?.let { identity ->
-            kotlinx.coroutines.runBlocking { ownershipGate.release(identity) }
+            ownershipGate.releaseNow(identity)
         }
         acceptedOwnershipIdentity = null
         controller?.shutdown()

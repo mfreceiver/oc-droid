@@ -65,7 +65,7 @@ class SessionStreamingControllerDispatchTest {
         // StopPoller.
         fixture.aggregator.setState(GlobalBusyState.Busy)
         fixture.bootstrapSucceed(identity)
-        fixture.shell.nextSseActivation = SourceActivation.Ready(GlobalBusyState.Busy)
+        fixture.shell.nextSseActivation = SourceActivation.Ready
         fixture.controller.bootstrapAsync()
         runCurrent()
 
@@ -87,7 +87,7 @@ class SessionStreamingControllerDispatchTest {
         fixture.start()
         fixture.aggregator.setState(GlobalBusyState.Busy)
         fixture.bootstrapSucceed(identity)
-        fixture.shell.nextSseActivation = SourceActivation.Ready(GlobalBusyState.Busy)
+        fixture.shell.nextSseActivation = SourceActivation.Ready
         fixture.controller.bootstrapAsync()
         runCurrent()
         assertEquals(Layer.L2Active, fixture.coordinator.layer.value)
@@ -123,11 +123,11 @@ class SessionStreamingControllerDispatchTest {
         fixture.start()
         fixture.aggregator.setState(GlobalBusyState.Busy)
         fixture.bootstrapSucceed(identity)
-        fixture.shell.nextSseActivation = SourceActivation.Ready(GlobalBusyState.Busy)
+        fixture.shell.nextSseActivation = SourceActivation.Ready
         fixture.controller.bootstrapAsync()
         runCurrent()
         // Drive to L2Idle: the poller activation returns Ready(AllIdleFresh).
-        fixture.shell.nextPollerActivation = SourceActivation.Ready(GlobalBusyState.AllIdleFresh)
+        fixture.shell.nextPollerActivation = SourceActivation.Ready
         fixture.aggregator.setState(GlobalBusyState.AllIdleFresh)
         runCurrent()
         advanceTimeBy(StreamingLifecycleCoordinator.IDLE_DEBOUNCE_MS)
@@ -150,13 +150,19 @@ class SessionStreamingControllerDispatchTest {
         fixture.start()
         fixture.aggregator.setState(GlobalBusyState.Busy)
         fixture.bootstrapSucceed(identity)
-        fixture.shell.nextSseActivation = SourceActivation.Ready(GlobalBusyState.Busy)
+        fixture.shell.nextSseActivation = SourceActivation.Ready
         fixture.controller.bootstrapAsync()
         runCurrent()
         fixture.shell.recorded.clear()
 
         // The poller's immediate first poll returns Busy — stay L2Active.
-        fixture.shell.nextPollerActivation = SourceActivation.Ready(GlobalBusyState.Busy)
+        // D4-B M3: the commit reads stateAtNow() AFTER the poller's first-
+        // poll refresh. globalState stays AllIdleFresh (so the debounce
+        // fires); nextRefreshState=Busy simulates the poll discovering Busy
+        // (the shell's startPoller calls refresh → updates the aggregator
+        // → the commit reads Busy → StopPoller + stay L2Active).
+        fixture.shell.nextPollerActivation = SourceActivation.Ready
+        fixture.aggregator.nextRefreshState = GlobalBusyState.Busy
         fixture.aggregator.setState(GlobalBusyState.AllIdleFresh)
         runCurrent()
         advanceTimeBy(StreamingLifecycleCoordinator.IDLE_DEBOUNCE_MS)
@@ -183,10 +189,10 @@ class SessionStreamingControllerDispatchTest {
         fixture.start()
         fixture.aggregator.setState(GlobalBusyState.Busy)
         fixture.bootstrapSucceed(identity)
-        fixture.shell.nextSseActivation = SourceActivation.Ready(GlobalBusyState.Busy)
+        fixture.shell.nextSseActivation = SourceActivation.Ready
         fixture.controller.bootstrapAsync()
         runCurrent()
-        fixture.shell.nextPollerActivation = SourceActivation.Ready(GlobalBusyState.AllIdleFresh)
+        fixture.shell.nextPollerActivation = SourceActivation.Ready
         fixture.aggregator.setState(GlobalBusyState.AllIdleFresh)
         runCurrent()
         advanceTimeBy(StreamingLifecycleCoordinator.IDLE_DEBOUNCE_MS)
@@ -195,7 +201,7 @@ class SessionStreamingControllerDispatchTest {
         fixture.shell.recorded.clear()
 
         // groker-R1: poller finds busy → in-place L2Idle → L2Active.
-        fixture.shell.nextSseActivation = SourceActivation.Ready(GlobalBusyState.Busy)
+        fixture.shell.nextSseActivation = SourceActivation.Ready
         fixture.aggregator.setState(GlobalBusyState.Busy)
         runCurrent()
 
@@ -216,10 +222,10 @@ class SessionStreamingControllerDispatchTest {
         fixture.start()
         fixture.aggregator.setState(GlobalBusyState.Busy)
         fixture.bootstrapSucceed(identity)
-        fixture.shell.nextSseActivation = SourceActivation.Ready(GlobalBusyState.Busy)
+        fixture.shell.nextSseActivation = SourceActivation.Ready
         fixture.controller.bootstrapAsync()
         runCurrent()
-        fixture.shell.nextPollerActivation = SourceActivation.Ready(GlobalBusyState.AllIdleFresh)
+        fixture.shell.nextPollerActivation = SourceActivation.Ready
         fixture.aggregator.setState(GlobalBusyState.AllIdleFresh)
         runCurrent()
         advanceTimeBy(StreamingLifecycleCoordinator.IDLE_DEBOUNCE_MS)
@@ -253,7 +259,7 @@ class SessionStreamingControllerDispatchTest {
         fixture.start()
         fixture.aggregator.setState(GlobalBusyState.Busy)
         fixture.bootstrapSucceed(identity)
-        fixture.shell.nextSseActivation = SourceActivation.Ready(GlobalBusyState.Busy)
+        fixture.shell.nextSseActivation = SourceActivation.Ready
         fixture.controller.bootstrapAsync()
         runCurrent()
         assertEquals(Layer.L2Active, fixture.coordinator.layer.value)
@@ -261,7 +267,7 @@ class SessionStreamingControllerDispatchTest {
 
         // teardown from L2Active: StartPoller (handoff) → ack → StopSse +
         // StopForeground + StopSelf.
-        fixture.shell.nextPollerActivation = SourceActivation.Ready(GlobalBusyState.Busy)
+        fixture.shell.nextPollerActivation = SourceActivation.Ready
         fixture.coordinator.requestUserClose()
         runCurrent()
 
@@ -287,7 +293,7 @@ class SessionStreamingControllerDispatchTest {
             ),
         )
         fixture.bootstrapSucceed(identity)
-        fixture.shell.nextSseActivation = SourceActivation.Ready(GlobalBusyState.AllIdleFresh)
+        fixture.shell.nextSseActivation = SourceActivation.Ready
         fixture.aggregator.setState(GlobalBusyState.AllIdleFresh)
         fixture.controller.bootstrapAsync()
         runCurrent()
@@ -315,7 +321,7 @@ class SessionStreamingControllerDispatchTest {
         val aggregator = FakeStatusAggregator()
         val coordinator = StreamingLifecycleCoordinator(aggregator, scope)
         val store = ConnectionIdentityStore()
-        val shell = RecordingShell()
+        val shell = RecordingShell(onPollRefresh = { id, snap -> aggregator.refresh(id, snap) })
         val snapshotProvider = SessionSnapshotProvider { StatusSnapshot.Empty }
         val bootstrapRunner = ScriptedBootstrapRunner()
         val inForegroundFlow = MutableStateFlow(inForeground)
@@ -369,7 +375,26 @@ class SessionStreamingControllerDispatchTest {
         override val statusByKey: StateFlow<Map<SessionStatusKey, SessionBusyStatus>> =
             _statusByKey.asStateFlow()
 
-        override fun stateAtNow(): GlobalBusyState = _globalState.value
+        /**
+         * D4-B M3: optional override for [stateAtNow] — when non-null, returned
+         * instead of [_globalState.value]. Tests that need the debounce to fire
+         * on AllIdleFresh (globalState) while the poller's final-snapshot
+         * commit reads a DIFFERENT verdict (Busy/Unknown) set this before the
+         * commit. Mirrors the production split between the cached globalState
+         * and the time-correct stateAtNow.
+         */
+        var stateAtNowOverride: GlobalBusyState? = null
+
+        /**
+         * D4-B M3: when non-null, [refresh] pushes this into [_globalState]
+         * (simulating the production poller's first-poll status refresh that
+         * updates the aggregator BEFORE the handoff commit reads
+         * [stateAtNow]). The dispatch test's fake shell invokes refresh from
+         * [RecordingShell.startPoller] to mirror production.
+         */
+        var nextRefreshState: GlobalBusyState? = null
+
+        override fun stateAtNow(): GlobalBusyState = stateAtNowOverride ?: _globalState.value
 
         fun setState(state: GlobalBusyState) {
             _globalState.value = state
@@ -383,7 +408,9 @@ class SessionStreamingControllerDispatchTest {
         override suspend fun refresh(
             identity: ConnectionIdentity,
             snapshot: StatusSnapshot,
-        ) = Unit
+        ) {
+            nextRefreshState?.let { setState(it) }
+        }
 
         override fun applySseStatus(
             key: SessionStatusKey,
@@ -410,13 +437,21 @@ class SessionStreamingControllerDispatchTest {
      * records + returns the scripted [nextSseActivation] / [nextPollerActivation]
      * (default: Ready with the current aggregator state).
      */
-    private class RecordingShell : ServiceShell {
+    private class RecordingShell(
+        /**
+         * D4-B M3: invoked from [startPoller] to simulate the production
+         * poller's first-poll status refresh (which updates the aggregator
+         * BEFORE the handoff commit reads stateAtNow). The fixture wires this
+         * to the fake aggregator's refresh.
+         */
+        private val onPollRefresh: (suspend (ConnectionIdentity, StatusSnapshot) -> Unit)? = null,
+    ) : ServiceShell {
         val recorded = mutableListOf<String>()
         var lastStartForegroundSpec: NotificationSpec? = null
             private set
 
-        var nextSseActivation: SourceActivation = SourceActivation.Ready(GlobalBusyState.Busy)
-        var nextPollerActivation: SourceActivation = SourceActivation.Ready(GlobalBusyState.AllIdleFresh)
+        var nextSseActivation: SourceActivation = SourceActivation.Ready
+        var nextPollerActivation: SourceActivation = SourceActivation.Ready
 
         override fun startForeground(spec: NotificationSpec) {
             recorded += "startForeground"
@@ -440,9 +475,9 @@ class SessionStreamingControllerDispatchTest {
             snapshot: StatusSnapshot,
         ): SourceActivation {
             recorded += "startPoller"
-            // The dispatch test's virtual clock does not advance network
-            // latency; return immediately so the commit phase runs in
-            // runCurrent.
+            // D4-B M3: simulate the production first-poll refresh so the
+            // handoff commit reads the post-poll aggregator state.
+            onPollRefresh?.invoke(identity, snapshot)
             return nextPollerActivation
         }
 

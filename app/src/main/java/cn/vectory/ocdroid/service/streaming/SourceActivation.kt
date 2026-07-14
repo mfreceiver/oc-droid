@@ -1,15 +1,12 @@
 package cn.vectory.ocdroid.service.streaming
 
-import cn.vectory.ocdroid.service.status.GlobalBusyState
-
 /**
- * D2 (gate #4 / §4.4 «acknowledged readiness, not coroutine launch»): the
- * result of activating a streaming source (SSE collector OR the §6 background
- * poller) — the [StreamingLifecycleCoordinator]'s handoff commit does not
- * fire until one of these is received for the corresponding
- * [cn.vectory.ocdroid.service.lifecycle.LifecycleCommand.StartSse] /
- * [cn.vectory.ocdroid.service.lifecycle.LifecycleCommand.StartPoller]
- * command.
+ * D2 (gate #4 / §4.4 «acknowledged readiness, not coroutine launch») → **D4-B
+ * M3 (transport-readiness / status-authority separation)**: the result of
+ * activating a streaming source (SSE collector OR the §6 background poller) —
+ * the [StreamingLifecycleCoordinator]'s handoff commit does not fire until one
+ * of these is received for the corresponding
+ * [LifecycleCommand.StartSse] / [LifecycleCommand.StartPoller] command.
  *
  * **Why a sealed result rather than `Unit`**: previously the controller
  * launched the poller job / SSE collector and trusted that launch ==
@@ -21,39 +18,50 @@ import cn.vectory.ocdroid.service.status.GlobalBusyState
  * [SourceActivation.Ready] ONLY after a verifiable observation, and the
  * coordinator's handoff commit is the sole consumer of that signal.
  *
- * - [Ready] — the source produced at least one verifiable, current-identity
- *   observation. [Ready.state] is the time-correct
- *   [GlobalBusyState] the coordinator uses to decide whether to commit the
- *   layer transition (e.g. for L2Active→L2Idle: only [GlobalBusyState.AllIdleFresh]
- *   commits `StopSse`; [GlobalBusyState.Busy] / [GlobalBusyState.Unknown]
- *   cancel the activation, stop the new poller, and stay L2Active).
- * - [Rejected] — the source could NOT establish a verified baseline. The
- *   coordinator's handoff commit cancels the activation (stops the new
- *   source if it was started) and leaves the prior layer + prior source
- *   intact. Rejections never consume the §4.4 ordering invariant — they do
- *   NOT close the old source.
+ * **D4-B M3 — transport readiness vs status authority**: [Ready] now means
+ * **transport-ready** (the SSE collector delivered at least one valid
+ * current-identity frame; the poller completed its immediate first poll) —
+ * NOT a status verdict. The coordinator consults
+ * [cn.vectory.ocdroid.service.status.StatusAggregator.stateAtNow] at handoff
+ * commit to decide the layer transition (Busy/AllIdleFresh vs Unknown). This
+ * separates «can we prove the transport works» from «is the host busy» so
+ * that a host whose REST status snapshot is Unknown (failed / not yet fresh)
+ * no longer hangs the SSE bootstrap — the transport commits + a supplemental
+ * poller keeps the status authority alive until a definitive verdict arrives.
+ *
+ *  - [Ready] — the source produced at least one verifiable, current-identity
+ *    observation that proves the transport works. The coordinator reads
+ *    status authority separately at commit.
+ *  - [Rejected] — the source could NOT establish transport readiness. The
+ *    coordinator's handoff commit cancels the activation (stops the new
+ *    source if it was started) and leaves the prior layer + prior source
+ *    intact (except for teardown decisions, which proceed regardless).
+ *    Rejections never consume the §4.4 ordering invariant — they do NOT
+ *    close the old source on non-teardown transitions.
  */
 sealed interface SourceActivation {
 
     /**
-     * The source is ready — at least one verifiable, current-identity
-     * observation established a baseline. [state] is the post-activation
-     * verdict the coordinator consults to decide whether to commit the
-     * transition.
+     * **D4-B M3**: the source is transport-ready — at least one verifiable,
+     * current-identity observation proved the transport works (SSE first
+     * frame / poller first poll). The coordinator consults
+     * [cn.vectory.ocdroid.service.status.StatusAggregator.stateAtNow] at
+     * commit to decide the layer transition + whether to retire the
+     * supplemental poller.
      */
-    data class Ready(val state: GlobalBusyState) : SourceActivation
+    data object Ready : SourceActivation
 
     /**
-     * The source could not establish a verified baseline. The handoff commit
-     * MUST NOT close the prior source — the rejection leaves the layer +
-     * source topology intact (the new source, if any, is torn down by the
-     * commit).
+     * The source could not establish transport readiness. The handoff commit
+     * MUST NOT close the prior source on non-teardown transitions — the
+     * rejection leaves the layer + source topology intact (the new source, if
+     * any, is torn down by the commit).
      */
     sealed interface Rejected : SourceActivation {
 
         /**
          * SSE / poller activation arrived with an identity that
-         * [cn.vectory.ocdroid.service.identity.ConnectionIdentityStore.isCurrent]
+         * [ConnectionIdentityStore.isCurrent]
          * rejects (a queued StartSse / StartPoller from a prior epoch, or
          * the host reconfigured mid-activation). No network retry budget
          * consumed; no UI error surfaced for the new identity; no gap-dirty
@@ -63,7 +71,7 @@ sealed interface SourceActivation {
 
         /**
          * SSE activation was rejected because the TOFU trust prompt is
-         * pending ([cn.vectory.ocdroid.service.bootstrap.ConnectionBootstrapCoordinator.pendingTofuHostPort]
+         * pending ([ConnectionBootstrapCoordinator.pendingTofuHostPort]
          * != null) — the TLS handshake cannot succeed until the user
          * decides. No retry budget consumed; the bootstrap coordinator's
          * retry loop re-issues the activation after the decision.
@@ -79,9 +87,22 @@ sealed interface SourceActivation {
          * exhaustion — see [SseRecoveryPolicy]). The collector has already
          * emitted the gap-dirty signal idempotently; the handoff commit
          * routes through
-         * [cn.vectory.ocdroid.service.lifecycle.StreamingLifecycleCoordinator.onDisconnect]
+         * [StreamingLifecycleCoordinator.onDisconnect]
          * → L3 teardown (exactly once).
          */
         data object Exhausted : Rejected
+
+        /**
+         * **D4-B M3**: the SSE transport did NOT deliver a valid current-
+         * identity frame within the 30s transport activation timeout
+         * ([ServiceSseConnectionOwner.TRANSPORT_READY_TIMEOUT_MS]). Unlike
+         * [Exhausted] (which fires only after the full service-level retry
+         * budget is spent), [TransportTimeout] fires once the FIRST
+         * activation attempt proves unproductive for the bounded readiness
+         * window — the handoff commit treats it as a bootstrap/transport
+         * failure and routes through [StreamingOwnershipGate.failStarting]
+         * → full rollback (B1).
+         */
+        data object TransportTimeout : Rejected
     }
 }

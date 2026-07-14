@@ -394,7 +394,7 @@ class SessionStreamingControllerBootstrapTest {
             snapshot: cn.vectory.ocdroid.service.status.StatusSnapshot,
         ): SourceActivation {
             recorded += "startPoller"
-            return SourceActivation.Ready(GlobalBusyState.AllIdleFresh)
+            return SourceActivation.Ready
         }
 
         override fun stopPoller() {
@@ -403,7 +403,7 @@ class SessionStreamingControllerBootstrapTest {
 
         override suspend fun connectSse(identity: ConnectionIdentity): SourceActivation {
             recorded += "connectSse"
-            return SourceActivation.Ready(GlobalBusyState.Busy)
+            return SourceActivation.Ready
         }
 
         override suspend fun disconnectSse() {

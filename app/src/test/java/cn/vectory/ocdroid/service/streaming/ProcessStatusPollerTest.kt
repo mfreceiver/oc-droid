@@ -80,7 +80,7 @@ class ProcessStatusPollerTest {
             1,
             input.refreshCount,
         )
-        assertEquals(SourceActivation.Ready(GlobalBusyState.AllIdleFresh), activation)
+        assertEquals(SourceActivation.Ready, activation)
 
         // Subsequent refreshes at the 30s cadence.
         advanceTimeBy(appScope, ProcessStatusPoller.DEFAULT_INTERVAL_MS)

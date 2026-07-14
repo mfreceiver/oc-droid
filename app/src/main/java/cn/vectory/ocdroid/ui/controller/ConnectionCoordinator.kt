@@ -568,7 +568,7 @@ class ConnectionCoordinator(
                                 ?: OwnershipStartResult.Refused(
                                     cn.vectory.ocdroid.service.OwnershipRefusal.ServiceStopped,
                                 )
-                            if (ownership is OwnershipStartResult.Accepted &&
+                            if (ownership is OwnershipStartResult.Ready &&
                                 ownership.identity == outcome.identity
                             ) {
                                 writeConnection {
@@ -856,7 +856,7 @@ class ConnectionCoordinator(
         DebugLog.i("SSE", "startSSE → launcher.ensureStarted(identity=${identity.epoch})")
         scope.launch {
             val result = streamingServiceLauncher?.ensureStarted(identity)
-            if (result !is OwnershipStartResult.Accepted || result.identity != identity) {
+            if (result !is OwnershipStartResult.Ready || result.identity != identity) {
                 writeConnection {
                     it.copy(
                         isConnected = false,

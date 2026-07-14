@@ -204,6 +204,14 @@ reconfigure 严格顺序（不可颠倒）：
 
 > `START_STICKY` 仅覆盖「进程被杀后系统可能拉起」，**不**保证及时、不保证 force-stop 后恢复。spec 不将其列为确定恢复入口。
 
+**D4-B（transport readiness / Starting→Ready ownership / reconfigure no-source / rollback）**：
+
+- **§4.4 transport readiness vs status authority（M3）**：`SourceActivation.Ready` 仅表示 **transport-ready**（首个有效当前 identity SSE frame / poller 首次 poll 完成），**不**携带 status verdict。协调器在 handoff commit 时读 `statusAggregator.stateAtNow()` 决定 layer 转换。SSE 首帧即完成 readiness（liveness + event + reset gap），**不**等待 REST status baseline——分离「transport 可证」与「host busy 权威」。30s transport activation timeout → `Rejected.TransportTimeout`（handoff cancels the attempted SSE collector）。
+- **§4.4 supplemental poller（M3）**：当 SSE Bootstrap/L2Idle-exit commit 时 `stateAtNow()` 为 Unknown → 提交 SSE transport + layer **并保留**进程 poller（`supplementalPollerActive`）；coordinator 后续观察到 Busy/AllIdleFresh 时 emit `StopPoller` + 清 flag。Unknown **永不**授权 idle teardown。
+- **§4.4 reconfigure 是有意 no-source barrier（M4）**：`teardownAndAwait(Reconfigure)` 专用路径——cancel pending handoff → `StopPoller`（终止旧 identity poller）→ `StopSse` + await cancellation → `StopForeground` → `StopSelf` → L3 → release ownership；**不 emit `StartPoller`**（旧 identity 在 `beginReconfigure()` 后有意失效，不做 stale replacement poll）。no-source 窗口仅持续 serialized repository rebuild / new bootstrap（§4.4 exception）。
+- **§5 ownership stages Starting→Ready（B1）**：`OwnershipState` 两段——`Starting(identity)`（Service 验证 identity 后注册，闭合 unowned 窗口，但**不**完成 launcher readiness waiter）/ `Ready(identity)`（SSE transport ready + coordinator commit 后 `markReady` 完成 waiter → CC Connected）。`failStarting(identity?, reason)` 是强制 rollback：完成 waiter w/ refusal + 释放 Starting + 写 Disconnected + cancel/join SSE + stopForeground + stopSelf。`TeardownReason.BootstrapFailure` 即使 layer 已在 L3 也强制 terminal cleanup（L3 短路对 live placeholder Service 无效）。
+- **awaitable teardown 统一**：`teardownAndAwait(reason)` 是 canonical path；非 suspend Android 入口（onDisconnect/onTimeout/requestUserClose/terminal SSE callback/bootstrap failure/reconfigure）仅 `scope.launch { teardownAndAwait(...) }`；`handleUserClose` 已 suspend → 直接 await。`StreamingOwnershipGate` 重构为 `synchronized(lock)`（非 coroutine Mutex）+ `releaseNow(identity)`；`onDestroy` 移除 `runBlocking`。
+
 ---
 
 ## 6. FGS↔poller 无缝交接 + 统一 notifier（闭合 gpter-B#6；groker-B4）
@@ -364,3 +372,21 @@ reconfigure 严格顺序（不可颠倒）：
 **实现注记**：
 - U1 的「关闭后台」Action 须在所有 ongoing 子态（L2-active 单/多 busy、L2-idle、占位、TOFU-degraded）常驻。点击后先比较 payload identity 与当前 identity：入口已 stale 则不查询、不 teardown；一致时以当前 identity 调 `StatusAggregatorInput.refresh(current, snapshotProvider.current())`，suspend 后再次复核 identity，epoch/任一 fingerprint 改变都中止。identity 稳定后无论结果是 Busy、AllIdleFresh 或 Unknown 均执行 teardown（显式关闭不以 busy 为 veto）。无 identity 的占位/TOFU-degraded 通知可直接关闭其前台外壳。
 - U3 需 app 侧具备「session deep-link」intent 处理（`EXTRA_SESSION_ID`+workdir → selectSession + 导航 Chat）；现有 `files?workdir=` deep-link 基础设施可扩展，Phase 1 落实时补齐。
+
+---
+
+## 17. 发布 / 回滚（D4-B，2026-07-14）
+
+> CP1-9 + D1/D2/D3/D4-A/D4-B 构成**一个不可分割的切换**。D1-D4 改变了 CP9 的契约（transport readiness、两段式 ownership、reconfigure no-source barrier、teardown 统一、`StreamingOwnershipGate` synchronized 重构），CP9 单独 revert 会复活已修复的 bug（B1 unowned window、M3 Unknown hang、M4 stale replacement poll 等）。
+
+**回滚纪律（MANDATORY）**：
+
+- **merge 前（PR 未合并）**：直接 discard / close 分支（`omos/notify-switchover`）。不存在「只回 CP9」的部分回滚。
+- **merge 后（squash / merge-commit 已进 main）**：
+  - squash 提交：`git revert <squash-sha>`（单 commit revert）。
+  - merge-commit：`git revert -m 1 <merge-sha>`。
+  - **线性连续区间**（CP1…D4-B 全在一个连续 commit range）：执行**一次** reviewed `git revert` 覆盖整个连续区间，**不**逐 commit revert（逐个会产生中间态——例如只回 D4-B 但保留 D4-A 会留下对已不存在的 `SourceActivation.Ready(state)` 的引用，编译失败）。
+- **禁止**：不得创建并行的「legacy SSE owner」runtime flag / feature toggle 来「保留旧路径同时运行新路径」——SSE 所有权是单一路径（模型 A），双轨会复活 gpter-M1（两个 SSE 状态机）且无法在测试矩阵中覆盖。
+- **merge SHA 记录**：合并后在本文档记录 merge/squash SHA：
+  - _merge SHA: `<待合并后填写>`_
+- **验证 revert 完整性**：revert 后必须跑 `./scripts/check.sh` 全绿（recommit 会因 D4-A/D4-B 互相依赖的符号删除/改名而失败——这正是「不可分割」的证据；若 revert 后 check.sh 失败说明 revert 不完整，需扩大 revert 范围到整个连续区间）。

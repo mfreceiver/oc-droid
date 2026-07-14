@@ -115,11 +115,6 @@ class SseEventStreamBridgeWiringTest {
             sseEventStream = stream,
             sharedStateStore = store,
             sharedEffectBus = effects,
-            statusAggregatorInput = BridgeFakeStatusInput(),
-            statusAggregator = BridgeFakeStatusAggregator(),
-            snapshotProvider = cn.vectory.ocdroid.service.streaming.SessionSnapshotProvider {
-                cn.vectory.ocdroid.service.status.StatusSnapshot.Empty
-            },
             recoveryPolicy = cn.vectory.ocdroid.service.streaming.SseRecoveryPolicy(),
             onTerminalExhaustion = {},
         )

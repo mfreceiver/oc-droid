@@ -42,13 +42,25 @@ import kotlinx.coroutines.withTimeoutOrNull
  *    `onBootstrapResult` → L1/L2/L3 decision matrix → `StartSse` /
  *    `StopPoller` / etc.).
  *
- * **No-zero-time-gap guarantee** (FGS spec §1 / CP9 plan): a Service start is
- * asynchronous, so a literal zero-time gap between `onSettled(true)` and
- * `connectSSE()` is impossible. Instead, this launcher guarantees that there
- * is NO TERMINAL connected-without-SSE path: CC calls [ensureStarted]
- * synchronously before reporting success; Service bootstrap leads to
- * `StartSse`; the coordinator's decision matrix is the only legal L3 →
- * running entry (`onBootstrapResult`).
+ * **D4-B B1 (two-stage Starting→Ready ownership)**:
+ *  - The Service registers **Starting** ownership synchronously when it
+ *    verifies the requested identity (within the 5s [OwnershipAckPolicy]
+ *    window). Starting DOES close the unowned window (a concurrent
+ *    reconfigure teardown observes + releases it) but DOES NOT satisfy the
+ *    launcher's readiness waiter.
+ *  - The launcher's waiter completes with [OwnershipStartResult.Ready] ONLY
+ *    after the Service marks ownership Ready (Stage 2: the SSE transport
+ *    delivered a valid current-identity frame AND the coordinator committed
+ *    the Bootstrap handoff). The launcher MUST NOT map Starting to Connected
+ *    — CC publishes [cn.vectory.ui.ConnectionPhase.Connected] exclusively on
+ *    Ready.
+ *  - Exact-identity owner reuse: a Ready owner for the same identity returns
+ *    Ready immediately (no second startForegroundService); a Starting owner
+ *    for the same identity makes the launcher await the Stage-2 promotion.
+ *
+ * **No "non-L3 means no-op" assumption** (D4-B): a non-L3 layer does not by
+ * itself imply the Service owns a working transport. The launcher ALWAYS
+ * consults the ownership gate rather than inferring readiness from the layer.
  *
  * Returns `true` iff the start was issued OR not needed (already running /
  * non-L3); returns `false` iff the start was refused (background or platform
@@ -96,9 +108,9 @@ class AndroidStreamingServiceLauncher @Inject constructor(
             DebugLog.i(TAG, "ensureStarted: NOT foreground → refuse (no FGS in background)")
             return OwnershipStartResult.Refused(OwnershipRefusal.Background)
         }
-        ownershipGate.acceptedIdentity()?.let { owned ->
+        ownershipGate.readyIdentity()?.let { owned ->
             return if (owned == identity) {
-                OwnershipStartResult.Accepted(identity)
+                OwnershipStartResult.Ready(identity)
             } else {
                 OwnershipStartResult.Refused(OwnershipRefusal.AlreadyOwned(owned))
             }

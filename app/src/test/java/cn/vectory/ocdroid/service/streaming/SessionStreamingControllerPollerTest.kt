@@ -64,13 +64,13 @@ class SessionStreamingControllerPollerTest {
             endpointFp = identity.endpointFp,
         )
         fixture.aggregator.setState(GlobalBusyState.Busy)
-        fixture.shell.nextSseActivation = SourceActivation.Ready(GlobalBusyState.Busy)
+        fixture.shell.nextSseActivation = SourceActivation.Ready
         fixture.controller.bootstrapAsync()
         runCurrent()
         assertEquals(Layer.L2Active, fixture.coordinator.layer.value)
 
         // Drive to L2Idle.
-        fixture.shell.nextPollerActivation = SourceActivation.Ready(GlobalBusyState.AllIdleFresh)
+        fixture.shell.nextPollerActivation = SourceActivation.Ready
         fixture.aggregator.setState(GlobalBusyState.AllIdleFresh)
         runCurrent()
         advanceTimeBy(StreamingLifecycleCoordinator.IDLE_DEBOUNCE_MS)
@@ -93,10 +93,10 @@ class SessionStreamingControllerPollerTest {
             endpointFp = identity.endpointFp,
         )
         fixture.aggregator.setState(GlobalBusyState.Busy)
-        fixture.shell.nextSseActivation = SourceActivation.Ready(GlobalBusyState.Busy)
+        fixture.shell.nextSseActivation = SourceActivation.Ready
         fixture.controller.bootstrapAsync()
         runCurrent()
-        fixture.shell.nextPollerActivation = SourceActivation.Ready(GlobalBusyState.AllIdleFresh)
+        fixture.shell.nextPollerActivation = SourceActivation.Ready
         fixture.aggregator.setState(GlobalBusyState.AllIdleFresh)
         runCurrent()
         advanceTimeBy(StreamingLifecycleCoordinator.IDLE_DEBOUNCE_MS)
@@ -105,7 +105,7 @@ class SessionStreamingControllerPollerTest {
         fixture.shell.recorded.clear()
 
         // L2Idle → L2Active emits StartSse; the commit emits StopPoller.
-        fixture.shell.nextSseActivation = SourceActivation.Ready(GlobalBusyState.Busy)
+        fixture.shell.nextSseActivation = SourceActivation.Ready
         fixture.aggregator.setState(GlobalBusyState.Busy)
         runCurrent()
 
@@ -199,8 +199,8 @@ class SessionStreamingControllerPollerTest {
 
     private class RecordingShell : ServiceShell {
         val recorded = mutableListOf<String>()
-        var nextSseActivation: SourceActivation = SourceActivation.Ready(GlobalBusyState.Busy)
-        var nextPollerActivation: SourceActivation = SourceActivation.Ready(GlobalBusyState.AllIdleFresh)
+        var nextSseActivation: SourceActivation = SourceActivation.Ready
+        var nextPollerActivation: SourceActivation = SourceActivation.Ready
 
         override fun startForeground(spec: cn.vectory.ocdroid.service.notify.NotificationSpec) = Unit
         override fun updateNotification(spec: cn.vectory.ocdroid.service.notify.NotificationSpec) = Unit

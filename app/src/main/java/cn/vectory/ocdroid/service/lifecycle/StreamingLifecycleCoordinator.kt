@@ -135,6 +135,19 @@ class StreamingLifecycleCoordinator @Inject constructor(
     private var inForegroundRef: StateFlow<Boolean>? = null
     private var currentIdentity: ConnectionIdentity? = null
 
+    /**
+     * D4-B M3 — the supplemental process-poller flag. Set when an SSE
+     * Bootstrap/L2Idle-exit handoff commits while the status authority is
+     * [GlobalBusyState.Unknown] (the SSE transport proved itself but the REST
+     * status snapshot is not yet definitive). The process poller is kept
+     * running (NOT retired) so the status authority keeps refreshing; the
+     * flag is cleared + [LifecycleCommand.StopPoller] emitted once the
+     * coordinator observes a definitive [GlobalBusyState.Busy] /
+     * [GlobalBusyState.AllIdleFresh] in L1/L2-active. [GlobalBusyState.Unknown]
+     * NEVER authorizes idle teardown while this flag is set.
+     */
+    private var supplementalPollerActive: Boolean = false
+
     // ── D2 gate #4: handoff token / pending-handoff state ───────────────────
 
     /**
@@ -241,43 +254,79 @@ class StreamingLifecycleCoordinator @Inject constructor(
      * §16-U1 user-explicit-close entry (ongoing notification Action
      * 「关闭后台」). Triggers L3 teardown regardless of current layer. D2 (gate #8):
      * the §16-U1 identity/status recheck happens at the controller
-     * ([cn.vectory.ocdroid.service.streaming.SessionStreamingController.handleUserClose])
+     * ([SessionStreamingController.handleUserClose])
      * BEFORE this entry — by the time [requestUserClose] is called the action
      * has been revalidated against the current identity and the final status
      * snapshot has been refreshed. Busy/Unknown does NOT veto an explicit
      * user close (§16-U1 implementation note).
+     *
+     * D4-B (awaitable unification): non-suspend Android entrypoint →
+     * `scope.launch { teardownAndAwait(UserClose) }`. The canonical path is
+     * [teardownAndAwait].
      */
     fun requestUserClose() {
         DebugLog.i(TAG, "requestUserClose (§16-U1)")
-        scope.launch { teardown() }
+        scope.launch { teardownAndAwait(TeardownReason.UserClose) }
     }
 
     /**
      * §4.1 dataSync `onTimeout()` entry (targetSdk 35+ 6h/24h limit). L3
      * teardown; the machine cannot restart the FGS from L3.
+     *
+     * D4-B (awaitable unification): non-suspend entrypoint →
+     * `scope.launch { teardownAndAwait(Timeout) }`.
      */
     fun onTimeout() {
         DebugLog.i(TAG, "onTimeout (§4.1 dataSync timeout)")
-        scope.launch { teardown() }
+        scope.launch { teardownAndAwait(TeardownReason.Timeout) }
     }
 
     /**
      * §4.1 disconnect entry (SSEConnectionExhausted past the service-level
      * retry budget). L3 teardown.
+     *
+     * D4-B (awaitable unification): non-suspend entrypoint →
+     * `scope.launch { teardownAndAwait(Disconnect) }`.
      */
     fun onDisconnect() {
         DebugLog.i(TAG, "onDisconnect (§4.1)")
-        scope.launch { teardown() }
+        scope.launch { teardownAndAwait(TeardownReason.Disconnect) }
     }
 
+    /**
+     * D4-B — the CANONICAL awaitable teardown path. Every teardown entry
+     * (onDisconnect / onTimeout / requestUserClose / terminal SSE callback /
+     * bootstrap failure / reconfigure) routes through here.
+     *
+     * Reason-specific behavior:
+     *  - [TeardownReason.Reconfigure] (M4): intentional no-source barrier —
+     *    cancels pending handoff, emits StopPoller + StopSse + StopForeground
+     *    + StopSelf, sets L3, releases ownership; does NOT emit a replacement
+     *    StartPoller (old identity is intentionally invalid post-
+     *    `beginReconfigure()`). The no-source window lasts only through the
+     *    serialized repository rebuild.
+     *  - [TeardownReason.BootstrapFailure] (B1): forces terminal shell cleanup
+     *    EVEN WHEN the lifecycle layer is already L3 (a live placeholder
+     *    Service holding Starting ownership must be fully torn down). Does
+     *    NOT call [StreamingOwnershipGate.disconnectAndRelease] — the caller
+     *    ([SessionStreamingService.failStarting]) owns the Starting rollback
+     *    + SSE join via [StreamingOwnershipGate.failStarting].
+     *  - [TeardownReason.Timeout] / [UserClose] / [Disconnect]: generic L3
+     *    teardown (the acknowledgeable StartPoller → StopSse handoff may run
+     *    if leaving L1/L2); then releases ownership via
+     *    [StreamingOwnershipGate.disconnectAndRelease].
+     */
     override suspend fun teardownAndAwait(reason: TeardownReason) {
         DebugLog.i(TAG, "teardownAndAwait(reason=$reason)")
-        teardown()
-        layer.first { it == Layer.L3 }
-        // L3 is committed only after D2's replacement poller has acknowledged
-        // readiness. Join the old transport after that handoff, but before a
-        // reconfigure caller is allowed to rebuild the repository client.
-        ownershipGate?.disconnectAndRelease(markGap = true)
+        when (reason) {
+            TeardownReason.Reconfigure -> teardownForReconfigure()
+            TeardownReason.BootstrapFailure -> teardownForBootstrapFailure()
+            TeardownReason.Timeout, TeardownReason.UserClose, TeardownReason.Disconnect -> {
+                teardown()
+                layer.first { it == Layer.L3 }
+                ownershipGate?.disconnectAndRelease(markGap = true)
+            }
+        }
     }
     /**
      * D2 (gate #4): the controller's completion signal for a source activation.
@@ -366,6 +415,12 @@ class StreamingLifecycleCoordinator @Inject constructor(
      * source-stable (SSE stays on).
      */
     private suspend fun handleL1(current: Layer.L1, fg: Boolean, state: GlobalBusyState) {
+        // D4-B M3: clear a supplemental poller once the status authority is
+        // definitive (Busy/AllIdleFresh). Unknown keeps it running.
+        if (supplementalPollerActive && (state == GlobalBusyState.Busy || state == GlobalBusyState.AllIdleFresh)) {
+            emit(StopPoller)
+            supplementalPollerActive = false
+        }
         val keepAlive = state.isKeepAlive
         if (fg) {
             if (current.busy == keepAlive) return // no sub-state change
@@ -403,6 +458,12 @@ class StreamingLifecycleCoordinator @Inject constructor(
      * must NOT enter the idle grace window, FGS spec §3).
      */
     private suspend fun handleL2Active(fg: Boolean, state: GlobalBusyState) {
+        // D4-B M3: clear a supplemental poller once the status authority is
+        // definitive (Busy/AllIdleFresh). Unknown keeps it running.
+        if (supplementalPollerActive && (state == GlobalBusyState.Busy || state == GlobalBusyState.AllIdleFresh)) {
+            emit(StopPoller)
+            supplementalPollerActive = false
+        }
         val keepAlive = state.isKeepAlive
         cancelDebounce()
         if (pendingHandoff?.decision == HandoffDecision.DebounceFire && (fg || keepAlive)) {
@@ -473,6 +534,67 @@ class StreamingLifecycleCoordinator @Inject constructor(
      */
     private suspend fun teardown() {
         mutex.withLock { teardownLocked() }
+    }
+
+    /**
+     * D4-B M4 — the Reconfigure no-source teardown. Modelled as an
+     * INTENTIONAL bounded no-source barrier: the old identity is invalid
+     * post-`beginReconfigure()`, so NO replacement StartPoller is emitted
+     * (do NOT poll with a transition identity; do NOT delay epoch
+     * invalidation for a final old-host poll). The no-source window lasts
+     * only through the serialized repository rebuild / new bootstrap that the
+     * [ConnectionReconfigureBarrier] runs after this returns (spec §4.4
+     * exception).
+     *
+     * Sequence: cancel pending handoff → StopPoller (terminate old-identity
+     * process poller) → StopSse + await cancellation (via the ownership
+     * disconnect callback) → StopForeground → StopSelf → enter L3 → release
+     * ownership. Does NOT emit StartPoller.
+     */
+    private suspend fun teardownForReconfigure() {
+        mutex.withLock {
+            cancelDebounce()
+            cancelPendingHandoff()
+            // Terminate the old-identity process poller (L3 source contract
+            // is void during reconfigure — the new bootstrap will start a
+            // fresh poller bound to the new identity).
+            emit(StopPoller)
+            emit(StopSse)
+            emit(StopForeground)
+            emit(StopSelf)
+            supplementalPollerActive = false
+            _layer.value = Layer.L3
+        }
+        layer.first { it == Layer.L3 }
+        // disconnectAndRelease joins the SSE collector cancellation BEFORE
+        // the barrier's repository rebuild runs.
+        ownershipGate?.disconnectAndRelease(markGap = false)
+    }
+
+    /**
+     * D4-B B1 — the BootstrapFailure teardown. Forces terminal shell cleanup
+     * EVEN WHEN the lifecycle layer is already L3 (a live placeholder
+     * Service holding Starting ownership must be fully torn down: the
+     * ordinary `L3 → return` short-circuit in [teardownLocked] is INVALID
+     * for this reason). Emits StopSse + StopForeground + StopPoller +
+     * StopSelf + sets L3 unconditionally.
+     *
+     * Does NOT call [StreamingOwnershipGate.disconnectAndRelease] — the
+     * caller ([SessionStreamingService.failStarting]) owns the Starting
+     * rollback + SSE join via [StreamingOwnershipGate.failStarting].
+     */
+    private suspend fun teardownForBootstrapFailure() {
+        mutex.withLock {
+            cancelDebounce()
+            cancelPendingHandoff()
+            emit(StopSse)
+            emit(StopPoller)
+            emit(StopForeground)
+            emit(StopSelf)
+            supplementalPollerActive = false
+            _layer.value = Layer.L3
+        }
+        layer.first { it == Layer.L3 }
     }
 
     /**
@@ -714,21 +836,33 @@ class StreamingLifecycleCoordinator @Inject constructor(
      * D2: the decision-specific commit logic. Runs under [mutex] inside
      * [launchCommit] AFTER the activation ack verified the handoff is still
      * current. Emits the closing StopX + flips the layer.
+     *
+     * **D4-B M3**: the status authority is read via
+     * [StatusAggregator.stateAtNow] AT COMMIT (not carried on the activation
+     * — [SourceActivation.Ready] is transport-only). For the SSE handoffs
+     * (Bootstrap / L2IdleExit): if the verdict is Busy / AllIdleFresh →
+     * retire the supplemental/process poller ([LifecycleCommand.StopPoller]);
+     * if Unknown → commit the SSE transport + layer AND keep the process
+     * poller running (set [supplementalPollerActive]) until a definitive
+     * verdict arrives.
      */
     private suspend fun runDecisionCommit(
         decision: HandoffDecision,
         activation: SourceActivation,
         fg: Boolean,
-        state: GlobalBusyState,
+        @Suppress("UNUSED_PARAMETER") state: GlobalBusyState,
     ) {
         when (decision) {
             HandoffDecision.DebounceFire -> {
-                // L2Active → L2Idle: poller's final poll decides.
+                // L2Active → L2Idle: the poller's immediate first poll is the
+                // final snapshot. Read the time-correct verdict at commit.
                 when (activation) {
                     is SourceActivation.Ready -> {
-                        if (activation.state == GlobalBusyState.AllIdleFresh) {
+                        val verdict = statusAggregator.stateAtNow()
+                        if (verdict == GlobalBusyState.AllIdleFresh) {
                             // Commit: StopSse (close old) + flip to L2Idle.
                             emit(StopSse)
+                            supplementalPollerActive = false
                             _layer.value = Layer.L2Idle
                         } else {
                             // Busy/Unknown — stop the new poller, stay L2Active.
@@ -743,22 +877,9 @@ class StreamingLifecycleCoordinator @Inject constructor(
                 }
             }
             HandoffDecision.L2IdleExit -> {
-                // L2Idle → L1/L2Active: SSE readiness decides.
+                // L2Idle → L1/L2Active: SSE transport readiness decides.
                 when (activation) {
-                    is SourceActivation.Ready -> {
-                        // Commit: StopPoller (close old) + flip layer.
-                        emit(StopPoller)
-                        if (fg) {
-                            if (state.isKeepAlive) {
-                                _layer.value = Layer.L1(busy = true)
-                            } else {
-                                emit(StopForeground)
-                                _layer.value = Layer.L1(busy = false)
-                            }
-                        } else {
-                            _layer.value = Layer.L2Active
-                        }
-                    }
+                    is SourceActivation.Ready -> commitSseTransport(fg)
                     is SourceActivation.Rejected -> {
                         // Don't commit. Poller stays running. Stay L2Idle.
                     }
@@ -771,42 +892,60 @@ class StreamingLifecycleCoordinator @Inject constructor(
                 emit(StopSse)
                 emit(StopForeground)
                 emit(StopSelf)
+                supplementalPollerActive = false
                 _layer.value = Layer.L3
             }
             HandoffDecision.Bootstrap -> {
-                // L3 → L1/L2Active: SSE readiness decides.
+                // L3 → L1/L2Active: SSE transport readiness decides.
                 when (activation) {
-                    is SourceActivation.Ready -> {
-                        emit(StopPoller)
-                        val keepAlive = state.isKeepAlive
-                        if (fg) {
-                            if (keepAlive) {
-                                _layer.value = Layer.L1(busy = true)
-                            } else {
-                                emit(StopForeground)
-                                _layer.value = Layer.L1(busy = false)
-                            }
-                        } else {
-                            if (keepAlive) {
-                                _layer.value = Layer.L2Active
-                            } else {
-                                // Background idle (rare at bootstrap — the
-                                // status snapshot was AllIdleFresh; the SSE
-                                // activation succeeded anyway). Don't burn an
-                                // FGS slot on idle background.
-                                emit(StopForeground)
-                                emit(StopSelf)
-                                // Stay L3.
-                            }
-                        }
-                    }
+                    is SourceActivation.Ready -> commitSseTransport(fg)
                     is SourceActivation.Rejected -> {
-                        // SSE couldn't establish baseline. Stay L3. The
+                        // SSE couldn't establish transport. Stay L3. The
                         // bootstrap retry path (or the user re-opening the
                         // app) handles recovery. Poller stays running (the
                         // L3 source).
                     }
                 }
+            }
+        }
+    }
+
+    /**
+     * D4-B M3 — the SSE transport commit (Bootstrap + L2IdleExit share this
+     * body). Runs under [mutex]. Reads [StatusAggregator.stateAtNow] to
+     * decide the layer sub-state + whether to retire the supplemental
+     * poller. MUST be called under [mutex].
+     */
+    private suspend fun commitSseTransport(fg: Boolean) {
+        val verdict = statusAggregator.stateAtNow()
+        if (verdict == GlobalBusyState.Busy || verdict == GlobalBusyState.AllIdleFresh) {
+            // Definitive status — retire the process poller (SSE is the source).
+            emit(StopPoller)
+            supplementalPollerActive = false
+        } else {
+            // Unknown — commit the SSE transport + layer, KEEP the process
+            // poller running as a supplemental status authority. Cleared
+            // once a definitive verdict arrives (handleL1/handleL2Active).
+            supplementalPollerActive = true
+        }
+        if (fg) {
+            if (verdict.isKeepAlive) {
+                _layer.value = Layer.L1(busy = true)
+            } else {
+                emit(StopForeground)
+                _layer.value = Layer.L1(busy = false)
+            }
+        } else {
+            if (verdict.isKeepAlive) {
+                _layer.value = Layer.L2Active
+            } else {
+                // Background idle (rare at bootstrap — the status snapshot
+                // was AllIdleFresh; the SSE activation succeeded anyway).
+                // Don't burn an FGS slot on idle background.
+                emit(StopForeground)
+                emit(StopSelf)
+                supplementalPollerActive = false
+                // Stay L3.
             }
         }
     }

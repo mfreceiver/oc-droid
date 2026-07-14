@@ -79,9 +79,12 @@ class StreamingServiceLauncherTest {
 
     @Test
     fun `only exact matching registered identity is accepted`() = runTest {
-        gate.registerAccepted(identity) { }
-        assertEquals(OwnershipStartResult.Accepted(identity), launcher.ensureStarted(identity))
+        // D4-B B1: two-stage ownership. A Ready owner short-circuits the launcher.
+        gate.registerStarting(identity, disconnectAndJoin = { }, abortStartup = { })
+        gate.markReady(identity)
+        assertEquals(OwnershipStartResult.Ready(identity), launcher.ensureStarted(identity))
 
+        // A different-identity request is refused (AlreadyOwned).
         val other = identity.copy(normalizedWorkdir = "/other")
         assertEquals(
             OwnershipStartResult.Refused(OwnershipRefusal.AlreadyOwned(identity)),

@@ -10,6 +10,7 @@ import cn.vectory.ocdroid.service.status.SessionBusyStatus
 import cn.vectory.ocdroid.service.status.StatusAggregator
 import cn.vectory.ocdroid.service.status.StatusAggregatorInput
 import cn.vectory.ocdroid.service.status.StatusSnapshot
+import cn.vectory.ocdroid.service.TeardownReason
 import cn.vectory.ocdroid.util.DebugLog
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
@@ -78,6 +79,23 @@ class SessionStreamingController(
     private val bootstrapBackoffMs: Long = DEFAULT_BOOTSTRAP_BACKOFF_MS,
     private val bootstrapRetryPolicy: BootstrapRetryPolicy? = null,
     private val onBootstrapIdentity: suspend (ConnectionIdentity) -> Unit = {},
+    /**
+     * D4-B B1/M3 — invoked when an SSE activation acks [SourceActivation.Ready]
+     * (transport proved). The Service wires this to
+     * [cn.vectory.ocdroid.service.StreamingOwnershipGate.markReady] so the
+     * Starting ownership is promoted to Ready + the launcher's waiter
+     * completes with [cn.vectory.ocdroid.service.OwnershipStartResult.Ready]
+     * (CC then publishes Connected). Idempotent for an already-Ready owner.
+     */
+    private val onSseTransportReady: suspend (ConnectionIdentity) -> Unit = {},
+    /**
+     * D4-B B1 — invoked when the bootstrap exhausts its retry budget OR an
+     * SSE activation is rejected for transport reasons (TransportTimeout /
+     * Exhausted). The Service wires this to its full B1 rollback
+     * (`failStarting` → waiters refused + Starting released + shell cleanup).
+     * Passes the currently-bound identity (or null if none).
+     */
+    private val onBootstrapFailure: (ConnectionIdentity?) -> Unit = {},
     private val clock: () -> Long = { System.currentTimeMillis() },
 ) {
 
@@ -184,8 +202,12 @@ class SessionStreamingController(
                         attempt >= bootstrapMaxAttempts
                     }
                     if (exhausted) {
-                        DebugLog.w(TAG, "bootstrapAsync: exhausted $attempt attempts → onDisconnect")
-                        coordinator.onDisconnect()
+                        DebugLog.w(TAG, "bootstrapAsync: exhausted $attempt attempts → B1 rollback")
+                        // D4-B B1: bootstrap exhaustion is a full Starting
+                        // rollback (the Service's failStarting refuses the
+                        // launcher waiter + releases Starting + tears down
+                        // the shell via teardownAndAwait(BootstrapFailure)).
+                        onBootstrapFailure(identityStore.currentIdentity.value)
                         return
                     }
                     val delayMs = retryDelays?.get(attempt - 1) ?: bootstrapBackoffMs
@@ -237,6 +259,16 @@ class SessionStreamingController(
                 val identity = cmd.identity
                 scope.launch {
                     val activation = shell.connectSse(identity)
+                    // D4-B B1/M3: transport readiness promotes Starting→Ready
+                    // ownership; transport rejection triggers B1 rollback.
+                    when (activation) {
+                        is SourceActivation.Ready -> onSseTransportReady(identity)
+                        is SourceActivation.Rejected.TransportTimeout,
+                        is SourceActivation.Rejected.Exhausted -> {
+                            onBootstrapFailure(identityStore.currentIdentity.value)
+                        }
+                        else -> {}
+                    }
                     coordinator.onActivationAck(token, activation)
                 }
             }
@@ -368,8 +400,10 @@ class SessionStreamingController(
             }
         }
         // §16-U1 step 5: proceed to teardown (Busy/Unknown is NOT a veto).
+        // D4-B (awaitable unification): handleUserClose is suspend → await
+        // teardownAndAwait directly (no fire-and-forget wrapper).
         DebugLog.i(TAG, "handleUserClose: proceeding to teardown")
-        coordinator.requestUserClose()
+        coordinator.teardownAndAwait(TeardownReason.UserClose)
     }
 
     companion object {

@@ -168,7 +168,9 @@ class ProcessStatusPoller internal constructor(
             return@withLock SourceActivation.Rejected.Superseded
         }
         newJob.start()
-        SourceActivation.Ready(firstState)
+        // D4-B M3: transport readiness carries no status verdict — the
+        // coordinator reads statusAggregator.stateAtNow() at handoff commit.
+        SourceActivation.Ready
     }
 
     /**
