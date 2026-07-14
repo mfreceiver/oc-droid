@@ -173,8 +173,17 @@ fun SessionsScreen(
     // item lambdas (recent + workdir session cards) capture this snapshot value
     // directly.
 
-    // Navigate to Chat tab after selecting a session
+    // Navigate to Chat tab after selecting a session.
+    //
+    // §WT2-taskB (Q6 locked): Sessions-page tap sets the "jump to latest"
+    // intent BEFORE selectSession. The matching SessionSwitcher.switchTo
+    // keeps the intent (currentSessionId becomes the tapped id and matches
+    // pendingJumpToLatest); ChatMessageList then consumes it once messages
+    // have loaded (scrollToItem(0) + followBottom=true + clear). Swipe,
+    // tab-strip, and SessionPickerSheet paths do NOT set the intent, so
+    // each session's saveable scroll position is preserved there.
     fun onSessionClick(sessionId: String) {
+        viewModel.requestJumpToLatest(sessionId)
         viewModel.selectSession(sessionId)
         onSwitchToChat()
     }

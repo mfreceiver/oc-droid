@@ -120,6 +120,61 @@ internal sealed interface AppAction {
     data class WorkdirDraftStarted(
         val workdir: String,
     ) : AppAction
+
+    /**
+     * §WT2-taskB (Q6 locked): one-shot "Sessions page entry → jump to latest"
+     * intent on [ChatState.pendingJumpToLatest]. The reducer sets
+     * `chat.pendingJumpToLatest = action.sessionId`:
+     *  - non-null [sessionId] → SET the intent (the id the user tapped in the
+     *    Sessions list). Used by
+     *    [cn.vectory.ocdroid.ui.SessionViewModel.requestJumpToLatest], which
+     *    SessionsScreen.onSessionClick fires BEFORE selectSession so the
+     *    matching switchTo keeps it and ChatMessageList consumes it once the
+     *    session's messages have loaded.
+     *  - null [sessionId] → CLEAR the intent. Used by
+     *    [cn.vectory.ocdroid.ui.ChatViewModel.clearPendingJumpToLatest] after
+     *    ChatMessageList has performed the scrollToItem(0) jump, so the intent
+     *    fires exactly once per Sessions-page entry.
+     *
+     * Single-slice / single-field write. Kept as a dispatched [AppAction]
+     * (rather than a raw `mutateChat`) per the WT2 plan ("reducer entries to
+     * set it and clear it") so the intent transition is observable on the
+     * aggregate stateFlow and unit-testable via [AppActionReducerTest].
+     */
+    data class PendingJumpToLatestSet(
+        val sessionId: String?,
+    ) : AppAction
+
+    /**
+     * FIX-A/C (archive-sync, review-blocker): atomic bulk-refresh commit.
+     * Replaces the torn two-step (`mutateSessionList` then
+     * `onCurrentSessionArchived` → separate dispatch) with a SINGLE dispatch
+     * that writes the merged session list AND prunes [openSessionIds] of EVERY
+     * archived id (FIX-A — not just current) AND — if the current session is
+     * among the archived — clears chat via [applyArchivedChatClear] + does
+     * unread/pending-question subtree cleanup (mirrors [SessionArchived]'s
+     * cleanup for the current session). All in one committed aggregate state
+     * so no collector ever observes the torn intermediate
+     * "sessions[current].isArchived == true AND chat.currentSessionId == current".
+     *
+     * Non-current archived ids: the [openSessionIds] prune alone is sufficient
+     * (SSE parity — the SSE path's observable effect for non-current archived
+     * sessions is the openIds prune; the per-session unread/questions cleanup
+     * there is defensive and the bulk path's prune closes the ghost-tab hole).
+     *
+     * Carries:
+     *  - [sessions]: the full merged refresh result (server-authoritative;
+     *    includes archived sessions with isArchived == true).
+     *  - [openSessionIds]: the NEW open-tabs list with ALL archived ids pruned
+     *    (caller computes + persists; reducer just stores it).
+     *  - [hasMoreSessions]: the pagination flag (mirrors the mutateSessionList
+     *    field the non-archive path writes).
+     */
+    data class BulkSessionsRefreshed(
+        val sessions: List<Session>,
+        val openSessionIds: List<String>,
+        val hasMoreSessions: Boolean,
+    ) : AppAction
 }
 
 /**
@@ -212,6 +267,15 @@ internal fun reduce(state: StoreState, action: AppAction): StoreState = when (ac
                     sessionStatuses = emptyMap(),
                     sessionTodos = emptyMap(),
                     sessionDiffs = emptyMap(),
+                    // §gpter-residual: cross-group purge must also drop cached
+                    // child trees and completeness proofs — a root-id collision
+                    // across hosts would otherwise let a stale proof skip new-host
+                    // hydration. Bump the epoch so any in-flight child load
+                    // captured before the switch is dropped fail-closed instead
+                    // of committing the prior host's children here.
+                    childSessions = emptyMap(),
+                    completeRootIds = emptySet(),
+                    completenessEpoch = state.sessionList.completenessEpoch + 1L,
                     // §fix-leak-window (fix B): pending permission / question
                     // requests belong to the prior host's sessions — must NOT
                     // survive a cross-group switch.
@@ -221,6 +285,10 @@ internal fun reduce(state: StoreState, action: AppAction): StoreState = when (ac
                 state.unread.copy(
                     unreadSessions = emptySet(),
                     lastViewedTime = emptyMap(),
+                    // §unread-soak: clear the soak map on cross-group purge so
+                    // a stale idleSince entry from the prior host cannot later
+                    // fire an unread badge for a session that no longer exists.
+                    idleSince = emptyMap(),
                 ),
             )
         } else {
@@ -269,6 +337,72 @@ internal fun reduce(state: StoreState, action: AppAction): StoreState = when (ac
             draftWorkdir = action.workdir,
         ),
     )
+
+    is AppAction.PendingJumpToLatestSet -> state.copy(
+        // §WT2-taskB: single-field write. No cross-slice concerns.
+        chat = state.chat.copy(pendingJumpToLatest = action.sessionId),
+    )
+
+    is AppAction.BulkSessionsRefreshed -> {
+        // FIX-A/C (archive-sync, review-blocker): atomic bulk-refresh commit.
+        // Writes the merged list + pruned openIds + load flags in ONE step.
+        //
+        // gro-2 Blocker 1 (round-2): subtree / unread / pendingQuestions
+        // cleanup now runs UNCONDITIONALLY over ALL archived ids (not just
+        // the current session) — mirroring SessionArchived's unconditional
+        // subtree cleanup. Previously the else-branch (non-current archived)
+        // skipped cleanup entirely, leaking stale unread badges +
+        // pendingQuestions for non-current archived open tabs (inflating
+        // crossSessionPendingCount). The CHAT-CLEAR remains current-only:
+        // only the archived CURRENT session's chat is wiped (non-current
+        // archived ids have no active chat window to clear).
+        val archivedIds = action.sessions
+            .filter { it.isArchived }
+            .map { it.id }
+            .toSet()
+        val currentId = state.chat.currentSessionId
+        val isCurrentArchived = currentId != null && currentId in archivedIds
+        val newSessionList = state.sessionList.copy(
+            sessions = action.sessions,
+            openSessionIds = action.openSessionIds,
+            hasMoreSessions = action.hasMoreSessions,
+            isLoadingMoreSessions = false,
+            isRefreshingSessions = false,
+            // A bulk refresh is authoritative for structure (archive-sync),
+            // so any cached completeness proof may be stale if SSE dropped
+            // events. Discard proofs and bump the epoch so in-flight hydration
+            // is dropped fail-closed; the next tick re-hydrates fresh trees.
+            completeRootIds = emptySet(),
+            completenessEpoch = state.sessionList.completenessEpoch + 1L,
+        )
+        // Compute the subtree UNION over ALL archived ids. Each archived root
+        // may have descendants that did NOT get their own archive event —
+        // defensive subtree cleanup (mirrors SessionArchived's logic).
+        val allArchivedSubtree = archivedIds.flatMap { archivedId ->
+            subtreeIds(
+                archivedId,
+                action.sessions,
+                newSessionList.directorySessions,
+                newSessionList.childSessions,
+            )
+        }.toSet()
+        val cleanedQuestions = newSessionList.pendingQuestions
+            .filter { it.sessionId !in allArchivedSubtree }
+        val newUnread = state.unread.removeSessions(allArchivedSubtree)
+        // Chat-clear is CURRENT-ONLY (non-current archived ids have no active
+        // chat window). applyArchivedChatClear also wipes pendingJumpToLatest
+        // (FIX-B).
+        val newChat = if (isCurrentArchived) {
+            state.chat.applyArchivedChatClear().first
+        } else {
+            state.chat
+        }
+        state.copy(
+            sessionList = newSessionList.copy(pendingQuestions = cleanedQuestions),
+            chat = newChat,
+            unread = newUnread,
+        )
+    }
 }
 
 /**
@@ -307,6 +441,9 @@ private fun ChatState.clearSessionData(): ChatState = copy(
     deltaBuffer = emptyMap(),
     fullTextBuffer = emptyMap(),
     pendingFlushPartIds = emptySet(),
+    // §WT2-taskB: clear the one-shot jump-to-latest intent too — it
+    // references a session id that is being cleared (draft / host purge).
+    pendingJumpToLatest = null,
     // PRESERVED (chrome, NOT per-session — kept via .copy() above):
     // isCompacting, compactStartedAt, refreshNonce.
 )

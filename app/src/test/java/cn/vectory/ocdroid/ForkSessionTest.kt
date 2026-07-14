@@ -187,6 +187,13 @@ class ForkSessionTest {
             // streaming Service launcher (no more repository.connectSSE).
             streamingServiceLauncher = cn.vectory.ocdroid.RecordingStreamingServiceLauncher(),
         )
+        // §unread-soak: real controller for parity with MainViewModelTestBase.
+        val unreadSoakController = cn.vectory.ocdroid.ui.controller.UnreadSoakController(
+            appLifecycleMonitor = appLifecycleMonitor,
+            scope = appScope,
+            store = store,
+            autoStart = false,
+        )
         val gapFillCoordinator = cn.vectory.ocdroid.ui.chat.GapFillCoordinator(
             repository = repository,
             cacheRepository = cacheRepository,
@@ -207,6 +214,7 @@ class ForkSessionTest {
             hostProfileController,
             sessionSyncCoordinator,
             connectionCoordinator,
+            unreadSoakController,
             gapFillCoordinator,
             cacheRepository,
             // §review-fix #1: fp provider (same as MainViewModelTestBase).

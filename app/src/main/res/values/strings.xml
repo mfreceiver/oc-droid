@@ -53,6 +53,12 @@
     <string name="settings_notifications_runtime_perm_blocked">Notifications: blocked by system</string>
     <string name="settings_notifications_completion_channel">Completion alerts</string>
     <string name="settings_notifications_completion_channel_desc">Posted when a session finishes or errors out</string>
+    <string name="settings_notifications_system_settings">System notification settings</string>
+    <string name="settings_notifications_system_settings_desc">Configure completion and decision alerts independently</string>
+    <string name="session_picker_state_selected">Selected</string>
+    <string name="session_picker_state_question">Question pending</string>
+    <string name="session_picker_state_retry">Retrying</string>
+    <string name="session_picker_state_unread">Unread</string>
     <!-- §vcs-section: Working directory / Git group in Settings -->
     <string name="settings_section_working_directory">Working directory</string>
     <string name="settings_vcs_branch">Branch</string>
@@ -132,7 +138,6 @@
     <string name="cache_management_clear_session_cd">Clear session cache</string>
     <string name="sessions_recent_section">Recent</string>
     <string name="sessions_by_workdir_section">By workdir</string>
-    <string name="chat_session_overflow">Session actions</string>
     <string name="chat_add_menu_title">Add to message</string>
     <string name="chat_add_photos">Photos</string>
     <string name="chat_add_photos_desc">Attach images to the next message</string>

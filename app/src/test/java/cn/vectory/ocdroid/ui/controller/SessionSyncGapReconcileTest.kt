@@ -73,8 +73,11 @@ class GapReconcilePureFunctionsTest {
 
         val (newState, decisions) = reconcileGap(state, trigger)
 
+        // WT6: RefreshSessions is now UNCONDITIONAL on every reconnect (the SSE
+        // feed does not replay missed session.updated events, so a cross-device
+        // archive during the gap stays invisible until the list is re-fetched).
         assertEquals(
-            listOf(SseSyncDecision.ClearDeltaBuffers, SseSyncDecision.ReloadSession("A", true), SseSyncDecision.LoadSessionStatus),
+            listOf(SseSyncDecision.ClearDeltaBuffers, SseSyncDecision.ReloadSession("A", true), SseSyncDecision.LoadSessionStatus, SseSyncDecision.RefreshSessions),
             decisions
         )
         // lastDisconnectAt cleared → idempotent for the next server.connected.
@@ -106,13 +109,15 @@ class GapReconcilePureFunctionsTest {
 
         val (newState, decisions) = reconcileGap(state, trigger)
 
-        // Implicit gap recovery: ClearDeltaBuffers + ReloadSession(A). The
+        // Implicit gap recovery: ClearDeltaBuffers + ReloadSession(A) +
+        // RefreshSessions (WT6: unconditional list refresh — a cross-device
+        // archive during the implicit retryWhen gap must propagate). The
         // idempotency for true duplicate server.connected frames within a single
         // healthy connection now relies on the dispatch layer's
         // isLoadingMessages coalescing (same path that absorbs
         // ForegroundCatchUpController's overlapping catch-up effects).
         assertEquals(
-            listOf(SseSyncDecision.ClearDeltaBuffers, SseSyncDecision.ReloadSession("A", true), SseSyncDecision.LoadSessionStatus),
+            listOf(SseSyncDecision.ClearDeltaBuffers, SseSyncDecision.ReloadSession("A", true), SseSyncDecision.LoadSessionStatus, SseSyncDecision.RefreshSessions),
             decisions
         )
         assertNull(newState.lastDisconnectAt)
@@ -144,10 +149,12 @@ class GapReconcilePureFunctionsTest {
         assertTrue("resetLimit should be true (authoritative reload)", reload.resetLimit)
         // ClearDeltaBuffers always fires on reconnect.
         assertTrue(decisions.contains(SseSyncDecision.ClearDeltaBuffers))
-        // A is dirty AND not current → RefreshSessions handles its list-level
-        // state (badge / last-activity) without a windowed reload.
+        // WT6: RefreshSessions fires UNCONDITIONALLY on reconnect (previously
+        // gated on a non-current dirty session; the gate was structurally
+        // always-false so the list never refreshed). Scenario 3's dirty
+        // non-current session A is now covered by the unconditional refresh.
         assertTrue(
-            "expected RefreshSessions for non-current dirty session A",
+            "RefreshSessions fires on reconnect (WT6: unconditional)",
             decisions.contains(SseSyncDecision.RefreshSessions)
         )
         // New state: sessionsDirty unchanged (§R-19 fix Blocker 2 v2:
@@ -253,21 +260,22 @@ class GapReconcilePureFunctionsTest {
     }
 
     @Test
-    fun `server connected with null current session still clears buffers and refreshes dirty`() {
+    fun `server connected with null current session still clears buffers and refreshes list`() {
         val state = SseSyncState(
             connectedOnce = true,
             lastDisconnectAt = 100L,
             sessionsDirty = setOf("A"),
             hostGeneration = 5L
         )
-        // currentSessionId null: no per-session reload, but A is dirty and not
-        // current → RefreshSessions handles it.
+        // currentSessionId null: no per-session reload, but the list refresh
+        // fires unconditionally (WT6 — cross-device archive/metadata mutations
+        // during the gap must propagate even when no session is open).
         val trigger = SseReconnectTrigger.ServerConnected(currentSessionId = null, hostGeneration = 5L)
 
         val (newState, decisions) = reconcileGap(state, trigger)
 
         assertEquals(
-            "no ReloadSession when currentSessionId is null",
+            "no ReloadSession when currentSessionId is null; RefreshSessions fires unconditionally (WT6)",
             listOf(SseSyncDecision.ClearDeltaBuffers, SseSyncDecision.LoadSessionStatus, SseSyncDecision.RefreshSessions),
             decisions
         )
@@ -294,9 +302,9 @@ class GapReconcilePureFunctionsTest {
         val (newState, decisions) = reconcileGap(state, trigger)
 
         // ReloadSession fires unconditionally (always-reconcile after cold-start,
-        // §R-19 fix Blocker 3).
+        // §R-19 fix Blocker 3). RefreshSessions also fires unconditionally (WT6).
         assertEquals(
-            listOf(SseSyncDecision.ClearDeltaBuffers, SseSyncDecision.ReloadSession("A", true), SseSyncDecision.LoadSessionStatus),
+            listOf(SseSyncDecision.ClearDeltaBuffers, SseSyncDecision.ReloadSession("A", true), SseSyncDecision.LoadSessionStatus, SseSyncDecision.RefreshSessions),
             decisions
         )
         assertNull(newState.lastDisconnectAt)
@@ -325,8 +333,8 @@ class GapReconcilePureFunctionsTest {
         val (newState, decisions) = reconcileGap(state, trigger)
 
         assertEquals(
-            "implicit gap recovery fires ClearDeltaBuffers + ReloadSession",
-            listOf(SseSyncDecision.ClearDeltaBuffers, SseSyncDecision.ReloadSession("session-X", true), SseSyncDecision.LoadSessionStatus),
+            "implicit gap recovery fires ClearDeltaBuffers + ReloadSession + RefreshSessions (WT6)",
+            listOf(SseSyncDecision.ClearDeltaBuffers, SseSyncDecision.ReloadSession("session-X", true), SseSyncDecision.LoadSessionStatus, SseSyncDecision.RefreshSessions),
             decisions
         )
         // §R-19 fix Blocker 2 v2: currentSessionId is NOT added to sessionsDirty.
@@ -366,6 +374,49 @@ class GapReconcilePureFunctionsTest {
         assertNull(newState.lastDisconnectAt)
         // session-X preserved (was in input; not added, not removed).
         assertTrue(newState.sessionsDirty.contains("session-X"))
+    }
+
+    // ── WT6 (archive-sync): unconditional RefreshSessions on reconnect ───────
+
+    @Test
+    fun `WT6 - reconnect emits RefreshSessions unconditionally even with empty dirty set and current session`() {
+        // The regression this pins: the OLD `otherDirty` gate compared
+        // prev.sessionsDirty (populated only with currentSessionId by the
+        // Disconnected trigger) against currentSessionId, so it was structurally
+        // always-false → RefreshSessions NEVER fired → a cross-device archive
+        // that landed during the gap never propagated to this device's local
+        // copy (the SSE feed does not replay missed session.updated events).
+        // The gate is now dropped; RefreshSessions fires on every reconnect
+        // (cold-start guard still suppresses the very first connect).
+        val state = SseSyncState(
+            connectedOnce = true,
+            lastDisconnectAt = 100L,
+            sessionsDirty = emptySet(),  // ← empty: the OLD gate's no-op case
+            hostGeneration = 5L
+        )
+        val trigger = SseReconnectTrigger.ServerConnected(currentSessionId = "A", hostGeneration = 5L)
+
+        val (_, decisions) = reconcileGap(state, trigger)
+
+        assertTrue(
+            "RefreshSessions must fire unconditionally on reconnect (WT6: cross-device archive propagation)",
+            decisions.contains(SseSyncDecision.RefreshSessions)
+        )
+    }
+
+    @Test
+    fun `WT6 - cold start still suppresses RefreshSessions (no double-load regression)`() {
+        // The cold-start guard is the ONLY thing that keeps the very first
+        // server.connected from emitting decisions (the cold-start loader just
+        // fetched the authoritative snapshot; RefreshSessions here would be a
+        // redundant double-load). WT6 must NOT regress this.
+        val state = SseSyncState(connectedOnce = false, hostGeneration = 0L)
+        val trigger = SseReconnectTrigger.ServerConnected(currentSessionId = "A", hostGeneration = 0L)
+
+        val (newState, decisions) = reconcileGap(state, trigger)
+
+        assertTrue("cold-start emits no decisions", decisions.isEmpty())
+        assertTrue("connectedOnce flips to true", newState.connectedOnce)
     }
 }
 

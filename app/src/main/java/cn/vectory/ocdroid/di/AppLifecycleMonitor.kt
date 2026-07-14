@@ -4,6 +4,8 @@ import android.app.Activity
 import android.app.Application
 import android.app.NotificationChannel
 import android.app.NotificationManager
+import android.media.AudioAttributes
+import android.provider.Settings
 import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
@@ -19,6 +21,7 @@ import cn.vectory.ocdroid.data.repository.OpenCodeRepository
 import cn.vectory.ocdroid.util.DebugLog
 import cn.vectory.ocdroid.util.SettingsManager
 import cn.vectory.ocdroid.util.runSuspendCatching
+import cn.vectory.ocdroid.ui.controller.IdleUnreadAlert
 import dagger.Module
 import dagger.Provides
 import dagger.hilt.InstallIn
@@ -36,6 +39,19 @@ import kotlinx.coroutines.launch
 import javax.inject.Qualifier
 import javax.inject.Singleton
 import javax.inject.Inject
+
+internal fun shouldPostIdleNotification(
+    isInForeground: Boolean,
+    key: String,
+    notifiedKeys: Set<String>,
+): Boolean = !isInForeground && key !in notifiedKeys
+
+internal fun pruneIdleNotificationSnapshot(
+    notifiedKeys: MutableSet<String>,
+    activeKeys: Set<String>,
+) {
+    notifiedKeys.retainAll(activeKeys)
+}
 
 /**
  * Hilt qualifier for the application-wide [CoroutineScope] tied to the
@@ -106,6 +122,11 @@ class AppLifecycleMonitor @Inject constructor(
      * on the first real Activity start, so the foreground UX is unchanged;
      * only the "no Activity yet" window is now correctly treated as background.
      */
+    // main (unread stale-poll guard, d999259): monotonic generation bumped on
+    // lifecycle transitions; BackgroundUnreadPoller captures it via
+    // currentLifecycleGeneration() to reject commits whose lifecycle has since
+    // moved. Kept alongside the CP8 default-false + §4.3 debounce below.
+    private val lifecycleGeneration = java.util.concurrent.atomic.AtomicLong(0)
     private val _isInForeground = MutableStateFlow(false)
     val isInForeground: StateFlow<Boolean> = _isInForeground.asStateFlow()
 
@@ -117,6 +138,10 @@ class AppLifecycleMonitor @Inject constructor(
      * notifications). Key shape: `"perm:<id>"` / `"q:<id>"`.
      */
     private val notificationSnapshot: MutableSet<String> = HashSet()
+    private val idleNotificationSnapshot: MutableSet<String> = HashSet()
+
+    @Volatile
+    private var backgroundUnreadPoll: (suspend () -> List<IdleUnreadAlert>)? = null
 
     /** Currently-running background poller job; null while in foreground. */
     private var pollJob: Job? = null
@@ -156,6 +181,7 @@ class AppLifecycleMonitor @Inject constructor(
                 backgroundConfirmationJob = null
                 activityStartedCount++
                 if (activityStartedCount == 1 && !_isInForeground.value) {
+                    lifecycleGeneration.incrementAndGet()
                     _isInForeground.value = true
                     onEnterForeground()
                 }
@@ -170,6 +196,13 @@ class AppLifecycleMonitor @Inject constructor(
                 // prior pending job, launch a new one, and only actually
                 // emit background if the count is STILL 0 after the delay.
                 if (activityStartedCount == 0 && _isInForeground.value) {
+                    // main (unread stale-poll guard): bump the generation
+                    // immediately on the activity→0 edge so any in-flight
+                    // BackgroundUnreadPoller whose lifecycle has moved rejects
+                    // its commit. This runs alongside (not instead of) the
+                    // §4.3 700ms debounce below — the generation guard and the
+                    // foreground-truth debounce solve different races.
+                    lifecycleGeneration.incrementAndGet()
                     backgroundConfirmationJob?.cancel()
                     backgroundConfirmationJob = uiScope.launch {
                         delay(BACKGROUND_CONFIRMATION_MS)
@@ -191,6 +224,8 @@ class AppLifecycleMonitor @Inject constructor(
         })
     }
 
+    internal fun currentLifecycleGeneration(): Long = lifecycleGeneration.get()
+
     /**
      * Hook for [cn.vectory.ocdroid.ui.MainViewModel] to push its
      * `state.error` changes. Per §18.1: when the error changes AND we are in
@@ -204,6 +239,11 @@ class AppLifecycleMonitor @Inject constructor(
         if (!_isInForeground.value) {
             notifyError(error)
         }
+    }
+
+    /** Registers the narrow T3b bridge without coupling lifecycle to UI state. */
+    fun registerBackgroundUnreadPoller(poller: suspend () -> List<IdleUnreadAlert>) {
+        backgroundUnreadPoll = poller
     }
 
     /**
@@ -263,6 +303,21 @@ class AppLifecycleMonitor @Inject constructor(
                 questions.forEach { handlePendingQuestion(it) }
             }
             .onFailure { Log.w(TAG, "Background poll getPendingQuestions failed", it) }
+
+        // Re-check foreground before and after network work. A poll that began
+        // in background must not emit sound/vibration after the Activity starts.
+        if (_isInForeground.value) return
+        runSuspendCatching { backgroundUnreadPoll?.invoke().orEmpty() }
+            .onSuccess { alerts ->
+                pruneIdleNotificationSnapshot(idleNotificationSnapshot, alerts.mapTo(mutableSetOf()) { it.key })
+                if (!_isInForeground.value) alerts.forEach { handleIdleAlert(it) }
+            }
+            .onFailure { Log.w(TAG, "Background unread poll failed", it) }
+    }
+
+    private fun handleIdleAlert(alert: IdleUnreadAlert) {
+        if (!shouldPostIdleNotification(_isInForeground.value, alert.key, idleNotificationSnapshot)) return
+        if (notifyIdle(alert)) idleNotificationSnapshot.add(alert.key)
     }
 
     private fun handlePendingPermission(permission: PermissionRequest) {
@@ -322,6 +377,7 @@ class AppLifecycleMonitor @Inject constructor(
             .setContentText(body)
             .setStyle(NotificationCompat.BigTextStyle().bigText(body))
             .setPriority(NotificationCompat.PRIORITY_HIGH)
+            .setDefaults(NotificationCompat.DEFAULT_SOUND or NotificationCompat.DEFAULT_VIBRATE)
             .setAutoCancel(true)
             .setContentIntent(buildContentIntent(sessionId, notificationId))
             .build()
@@ -350,6 +406,23 @@ class AppLifecycleMonitor @Inject constructor(
         runCatching { notificationManagerCompat.notify(ERROR_NOTIFICATION_ID, notification) }
     }
 
+    @Suppress("MissingPermission")
+    private fun notifyIdle(alert: IdleUnreadAlert): Boolean {
+        if (!hasNotificationPermission() || _isInForeground.value) return false
+        val notificationId = alert.key.hashCode()
+        val notification = NotificationCompat.Builder(application, CHANNEL_IDLE)
+            .setSmallIcon(R.mipmap.ic_launcher)
+            .setContentTitle(NOTIF_IDLE_TITLE)
+            .setContentText(alert.title)
+            .setStyle(NotificationCompat.BigTextStyle().bigText(alert.title))
+            .setPriority(NotificationCompat.PRIORITY_HIGH)
+            .setDefaults(NotificationCompat.DEFAULT_SOUND or NotificationCompat.DEFAULT_VIBRATE)
+            .setAutoCancel(true)
+            .setContentIntent(buildContentIntent(alert.rootId, notificationId))
+            .build()
+        return runCatching { notificationManagerCompat.notify(notificationId, notification) }.isSuccess
+    }
+
     private fun buildContentIntent(sessionId: String, requestCode: Int): PendingIntent {
         val intent = Intent(application, MainActivity::class.java).apply {
             flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
@@ -376,6 +449,7 @@ class AppLifecycleMonitor @Inject constructor(
         private const val TAG = "AppLifecycleMonitor"
 
         const val CHANNEL_DECISIONS = "ocdroid.decisions"
+        const val CHANNEL_IDLE = "ocdroid.idle"
         const val CHANNEL_ERRORS = "ocdroid.errors"
 
         /**
@@ -417,7 +491,8 @@ class AppLifecycleMonitor @Inject constructor(
          * ID is a no-op. Called from [cn.vectory.ocdroid.OpenCodeApp.onCreate].
          *
          * CP8: adds [CHANNEL_SESSION_STATUS] (FGS spec §7 IMPORTANCE_LOW)
-         * alongside the existing [CHANNEL_DECISIONS] / [CHANNEL_ERRORS].
+         * alongside the existing [CHANNEL_DECISIONS] / [CHANNEL_IDLE] /
+         * [CHANNEL_ERRORS].
          */
         fun createChannels(context: Context) {
             if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
@@ -429,6 +504,23 @@ class AppLifecycleMonitor @Inject constructor(
                     NotificationManager.IMPORTANCE_HIGH
                 ).apply {
                     description = CHANNEL_DECISIONS_DESC
+                    enableVibration(true)
+                    setSound(
+                        Settings.System.DEFAULT_NOTIFICATION_URI,
+                        AudioAttributes.Builder().setUsage(AudioAttributes.USAGE_NOTIFICATION).build(),
+                    )
+                }
+                val idle = NotificationChannel(
+                    CHANNEL_IDLE,
+                    CHANNEL_IDLE_NAME,
+                    NotificationManager.IMPORTANCE_HIGH
+                ).apply {
+                    description = CHANNEL_IDLE_DESC
+                    enableVibration(true)
+                    setSound(
+                        Settings.System.DEFAULT_NOTIFICATION_URI,
+                        AudioAttributes.Builder().setUsage(AudioAttributes.USAGE_NOTIFICATION).build(),
+                    )
                 }
                 val errors = NotificationChannel(
                     CHANNEL_ERRORS,
@@ -444,7 +536,7 @@ class AppLifecycleMonitor @Inject constructor(
                 ).apply {
                     description = CHANNEL_SESSION_STATUS_DESC
                 }
-                manager.createNotificationChannels(listOf(decisions, errors, sessionStatus))
+                manager.createNotificationChannels(listOf(decisions, idle, errors, sessionStatus))
             }.onFailure { Log.w(TAG, "Failed to create notification channels", it) }
         }
 
@@ -454,6 +546,8 @@ class AppLifecycleMonitor @Inject constructor(
         // i18n pass can promote them to R.string entries.
         private const val CHANNEL_DECISIONS_NAME = "opencode decisions"
         private const val CHANNEL_DECISIONS_DESC = "Permission and question prompts from opencode sessions"
+        private const val CHANNEL_IDLE_NAME = "opencode completions"
+        private const val CHANNEL_IDLE_DESC = "Completed sessions that are ready to review"
         private const val CHANNEL_ERRORS_NAME = "opencode errors"
         private const val CHANNEL_ERRORS_DESC = "Connection and runtime errors from opencode"
         private const val CHANNEL_SESSION_STATUS_NAME = "opencode session status"
@@ -463,5 +557,6 @@ class AppLifecycleMonitor @Inject constructor(
         const val NOTIF_QUESTION_TITLE = "Question from agent"
         const val NOTIF_DECISION_BODY = "Open the session to review"
         const val NOTIF_ERROR_TITLE = "opencode error"
+        const val NOTIF_IDLE_TITLE = "Session finished"
     }
 }

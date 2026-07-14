@@ -321,7 +321,24 @@ data class ChatState(
       */
      val deltaBuffer: Map<String, String> = emptyMap(),
      val fullTextBuffer: Map<String, String> = emptyMap(),
-     val pendingFlushPartIds: Set<String> = emptySet()
+     val pendingFlushPartIds: Set<String> = emptySet(),
+     /**
+      * §WT2-taskB (Q6 locked): one-shot "enter from Sessions page → jump to
+      * latest" intent. Set by [cn.vectory.ocdroid.ui.SessionViewModel.requestJumpToLatest]
+      * (SessionsScreen.onSessionClick → requestJumpToLatest → selectSession),
+      * consumed ONCE by [cn.vectory.ocdroid.ui.chat.ChatMessageList]'s
+      * LaunchedEffect, and cleared immediately after the jump so it does not
+      * fire again. NOT set by the horizontal-swipe path, the chat tab-strip
+      * tap, the SessionPickerSheet, or the Chat reselect path — those preserve
+      * each session's saveable scroll position (see ChatMessageList's
+      * `rememberSaveable(sessionId, LazyListState.Saver)`). The intent is
+      * also cleared inside [cn.vectory.ocdroid.ui.controller.SessionSwitcher.switchTo]
+      * whenever the incoming session id does NOT match it (so a swipe away
+      * from a still-pending session — rare — does not later force a jump when
+      * the user swipes back). Lives on ChatState (not SessionListState)
+      * because it is a chat-surface intent, not a session-list attribute.
+      */
+     val pendingJumpToLatest: String? = null
  )
 
 /**
@@ -341,6 +358,20 @@ data class SessionListState(
     val pendingPermissions: List<PermissionRequest> = emptyList(),
     val pendingQuestions: List<QuestionRequest> = emptyList(),
     val childSessions: Map<String, List<Session>> = emptyMap(),
+    /** Roots whose complete descendant tree was fetched successfully. */
+    val completeRootIds: Set<String> = emptySet(),
+    /**
+     * §gpter-blocker (v097 review-fix): monotonic completeness invalidation
+     * epoch. Bumped by every structural mutation that invalidates cached
+     * completeness proofs ([upsertAndInvalidateTree] on SSE session.created /
+     * session.updated, and the REST structural replaces in
+     * [launchLoadSessions] / [launchLoadMoreSessions]). Hydration paths
+     * capture this value at START and, at COMMIT, only re-certify roots if
+     * the epoch is unchanged — an in-flight hydration that straddled an
+     * invalidation is dropped (fail-closed) so a stale snapshot can never
+     * re-add a root to [completeRootIds] after the tree was invalidated.
+     */
+    val completenessEpoch: Long = 0L,
     val directorySessions: Map<String, List<Session>> = emptyMap(),
     val openSessionIds: List<String> = emptyList(),
     val sessionTodos: Map<String, List<TodoItem>> = emptyMap(),
@@ -354,10 +385,30 @@ data class SessionListState(
  * §R-17 M4: unread-domain state slice (RFC §2.7). Authoritative storage lives
  * in [MainViewModel._unreadFlow]. Drives the unread badge; depends on session
  * status + chat currentSessionId + foreground (cross-domain, see RFC §4).
+ *
+ * §unread-soak: the single [unreadSessions] set is the source of truth for
+ * ALL unread indicators (bottom badge, Sessions cards, picker dots, tab strip,
+ * files card). Its POPULATION logic changed — a root now becomes unread ONLY
+ * when (a) the root AND ALL its descendants are idle, (b) that all-idle state
+ * has persisted ≥[UNREAD_SOAK_MS], (c) the root is not the currently-open
+ * session, AND (d) the user has not viewed the root since it went idle. UIs
+ * keep reading [unreadSessions] as before; only the producer changed (the
+ * [cn.vectory.ocdroid.ui.controller.UnreadSoakController] sweep + the pure
+ * [cn.vectory.ocdroid.ui.controller.evaluateUnread] evaluator).
  */
 data class UnreadState(
     val unreadSessions: Set<String> = emptySet(),
-    val lastViewedTime: Map<String, Long> = emptyMap()
+    val lastViewedTime: Map<String, Long> = emptyMap(),
+    /**
+     * §unread-soak: rootId → epoch-ms when it first entered the all-idle state
+     * in the current soak cycle. Drives [evaluateUnread]'s ≥[UNREAD_SOAK_MS]
+     * soak gate. Cleared on busy (root or any descendant) → resets the soak;
+     * retained after completion/current viewing as edge memory, and cleared
+     * by the next busy/unknown transition (then re-soaks on busy→idle).
+     * Set/cleared by [cn.vectory.ocdroid.ui.controller.UnreadSoakController]
+     * via [cn.vectory.ocdroid.ui.controller.evaluateUnread].
+     */
+    val idleSince: Map<String, Long> = emptyMap()
 )
 
 /**

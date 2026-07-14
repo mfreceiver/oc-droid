@@ -397,6 +397,17 @@ class ChatViewModel @Inject constructor(
         core.composerController.clearExpandedParts()
     }
 
+    /**
+     * §WT2-taskB (Q6 locked): clear the "Sessions page entry → jump to latest"
+     * intent. Called by [cn.vectory.ocdroid.ui.chat.ChatMessageList]'s
+     * LaunchedEffect AFTER it has performed the scrollToItem(0) jump for the
+     * pending session, so the intent fires exactly once per entry (does not
+     * re-fire on recomposition / preview return for the same session).
+     */
+    fun clearPendingJumpToLatest() {
+        core.store.dispatch(AppAction.PendingJumpToLatestSet(null))
+    }
+
     /** Cross-domain: composer→chat→session creation lives in [AppCore]. */
     fun sendMessage() = core.sendMessage()
 

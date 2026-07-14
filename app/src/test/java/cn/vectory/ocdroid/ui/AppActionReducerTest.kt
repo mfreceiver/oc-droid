@@ -441,6 +441,38 @@ class AppActionReducerTest {
         assertNull(out.connection.serverVersion)
     }
 
+    @Test
+    fun `gpter-residual reduce HostStatePurged cross-group clears child trees + completeness proofs and bumps epoch`() {
+        // §gpter-residual: a cross-group purge must drop cached child trees and
+        // completeness proofs — a root-id collision across hosts would otherwise
+        // let a stale proof skip new-host hydration, and an in-flight child load
+        // captured before the switch could commit the prior host's children.
+        val prior = StoreState.initial().copy(
+            sessionList = SessionListState(
+                sessions = listOf(Session(id = "s1", directory = "/p")),
+                childSessions = mapOf("s1" to listOf(Session(id = "c1", directory = "/p", parentId = "s1"))),
+                completeRootIds = setOf("s1"),
+                completenessEpoch = 9L,
+            ),
+        )
+
+        val out = reduce(prior, AppAction.HostStatePurged(preserveServerGroupData = false))
+
+        assertTrue(
+            "childSessions cleared cross-host",
+            out.sessionList.childSessions.isEmpty(),
+        )
+        assertTrue(
+            "completeRootIds cleared cross-host",
+            out.sessionList.completeRootIds.isEmpty(),
+        )
+        assertEquals(
+            "completeness epoch bumped on purge",
+            10L,
+            out.sessionList.completenessEpoch,
+        )
+    }
+
     // ── HostStatePurged (same-group = preserve server data) ────────────────
 
     @Test
@@ -825,7 +857,378 @@ class AppActionReducerTest {
         reduce(prior, AppAction.HostStatePurged(preserveServerGroupData = false))
         reduce(prior, AppAction.HostStatePurged(preserveServerGroupData = true))
         reduce(prior, AppAction.WorkdirDraftStarted(workdir = "/w"))
+        reduce(prior, AppAction.PendingJumpToLatestSet(sessionId = "x"))
+        reduce(prior, AppAction.PendingJumpToLatestSet(sessionId = null))
+        reduce(prior, AppAction.BulkSessionsRefreshed(sessions = seed.sessions, openSessionIds = seed.openSessionIds, hasMoreSessions = false))
         // No exception thrown == each when-branch is total. The concrete field-by-field
         // assertions live in the dedicated tests above.
+    }
+
+    // ── PendingJumpToLatestSet (§WT2-taskB / Q6 locked) ────────────────────
+    //
+    // The "Sessions page entry → jump to latest" intent. Verifies the pure
+    // reducer writes/clears the field and that clearSessionData (used by
+    // HostStatePurged cross-group + WorkdirDraftStarted) also wipes it so a
+    // stale intent cannot survive a draft-create or host purge.
+
+    @Test
+    fun `reduce PendingJumpToLatestSet with non-null id sets chat pendingJumpToLatest`() {
+        val prior = StoreState.initial().copy(
+            chat = ChatState(currentSessionId = "old", pendingJumpToLatest = null),
+        )
+
+        val out = reduce(prior, AppAction.PendingJumpToLatestSet(sessionId = "target"))
+
+        assertEquals("target", out.chat.pendingJumpToLatest)
+        // No other chat field changes (single-field write).
+        assertEquals("old", out.chat.currentSessionId)
+    }
+
+    @Test
+    fun `reduce PendingJumpToLatestSet with null id clears chat pendingJumpToLatest`() {
+        val prior = StoreState.initial().copy(
+            chat = ChatState(pendingJumpToLatest = "stale"),
+        )
+
+        val out = reduce(prior, AppAction.PendingJumpToLatestSet(sessionId = null))
+
+        assertNull(out.chat.pendingJumpToLatest)
+    }
+
+    @Test
+    fun `reduce WorkdirDraftStarted clears a stale pendingJumpToLatest via clearSessionData`() {
+        val prior = StoreState.initial().copy(
+            chat = ChatState(pendingJumpToLatest = "abandoned-by-draft"),
+        )
+
+        val out = reduce(prior, AppAction.WorkdirDraftStarted(workdir = "/w"))
+
+        assertNull(
+            "draft-create must wipe a stale jump intent (references a session id that is being cleared)",
+            out.chat.pendingJumpToLatest,
+        )
+    }
+
+    @Test
+    fun `reduce HostStatePurged cross-group clears a stale pendingJumpToLatest via clearSessionData`() {
+        val prior = StoreState.initial().copy(
+            chat = ChatState(pendingJumpToLatest = "abandoned-by-host-switch"),
+        )
+
+        val out = reduce(prior, AppAction.HostStatePurged(preserveServerGroupData = false))
+
+        assertNull(
+            "cross-group host purge must wipe a stale jump intent",
+            out.chat.pendingJumpToLatest,
+        )
+    }
+
+    @Test
+    fun `reduce HostStatePurged same-group preserves pendingJumpToLatest`() {
+        // Same-group host switch keeps the chat slice (only streaming is
+        // cleared). The jump intent references a session id that still
+        // exists on the same server → preserved.
+        val prior = StoreState.initial().copy(
+            chat = ChatState(pendingJumpToLatest = "still-valid"),
+        )
+
+        val out = reduce(prior, AppAction.HostStatePurged(preserveServerGroupData = true))
+
+        assertEquals("still-valid", out.chat.pendingJumpToLatest)
+    }
+
+    // ── BulkSessionsRefreshed (FIX-A/C: atomic bulk-archive commit) ────────
+
+    @Test
+    fun `FIX-A reduce BulkSessionsRefreshed writes merged list and prunes ALL archived openIds`() {
+        // The core FIX-A invariant: non-current OPEN tabs B and C were
+        // archived cross-device; the bulk refresh discovers them. The reducer
+        // MUST prune BOTH from openSessionIds (not just the current session).
+        val current = Session(id = "current", directory = "/x")
+        val archivedB = Session(id = "B", directory = "/x", time = Session.TimeInfo(archived = 1L))
+        val archivedC = Session(id = "C", directory = "/x", time = Session.TimeInfo(archived = 1L))
+        val prior = StoreState.initial().copy(
+            chat = ChatState(currentSessionId = "current"),
+            sessionList = SessionListState(
+                openSessionIds = listOf("current", "B", "C"),
+            ),
+        )
+
+        val out = reduce(
+            prior,
+            AppAction.BulkSessionsRefreshed(
+                sessions = listOf(current, archivedB, archivedC),
+                openSessionIds = listOf("current"),  // caller pre-computed prune
+                hasMoreSessions = false,
+            ),
+        )
+
+        assertEquals(listOf("current", "B", "C"), out.sessionList.sessions.map { it.id })
+        assertEquals(
+            "FIX-A: ALL archived ids pruned from openSessionIds",
+            listOf("current"),
+            out.sessionList.openSessionIds,
+        )
+        assertFalse(out.sessionList.isRefreshingSessions)
+        assertFalse(out.sessionList.hasMoreSessions)
+    }
+
+    @Test
+    fun `gpter-residual reduce BulkSessionsRefreshed discards cached completeness proofs and bumps epoch`() {
+        // §gpter-residual: a bulk refresh is authoritative for structure, so
+        // cached completeRootIds may be stale if SSE dropped events. The
+        // reducer must clear them and bump the epoch so in-flight hydration is
+        // dropped fail-closed (mirroring the REST full-list replace path).
+        val current = Session(id = "current", directory = "/x")
+        val prior = StoreState.initial().copy(
+            sessionList = SessionListState(
+                openSessionIds = listOf("current"),
+                completeRootIds = setOf("stale-root"),
+                completenessEpoch = 7L,
+            ),
+        )
+
+        val out = reduce(
+            prior,
+            AppAction.BulkSessionsRefreshed(
+                sessions = listOf(current),
+                openSessionIds = listOf("current"),
+                hasMoreSessions = false,
+            ),
+        )
+
+        assertTrue(
+            "BulkSessionsRefreshed discards stale completeRootIds",
+            out.sessionList.completeRootIds.isEmpty(),
+        )
+        assertEquals(
+            "BulkSessionsRefreshed bumps completeness epoch",
+            8L,
+            out.sessionList.completenessEpoch,
+        )
+    }
+
+    @Test
+    fun `FIX-C reduce BulkSessionsRefreshed clears chat when current session is archived`() {
+        // FIX-C: if the current session is among the archived, the reducer
+        // atomically clears chat in the SAME committed state as the list write
+        // (no torn "sessions[current].isArchived AND chat.currentSessionId == current").
+        val archivedCurrent = Session(id = "cur", directory = "/x", time = Session.TimeInfo(archived = 1L))
+        val prior = StoreState.initial().copy(
+            chat = ChatState(
+                currentSessionId = "cur",
+                messages = listOf(Message(id = "m1", role = "user")),
+                partsByMessage = mapOf("m1" to emptyList()),
+                pendingJumpToLatest = "cur",  // FIX-B: must also be wiped
+            ),
+            sessionList = SessionListState(openSessionIds = listOf("cur")),
+        )
+
+        val out = reduce(
+            prior,
+            AppAction.BulkSessionsRefreshed(
+                sessions = listOf(archivedCurrent),
+                openSessionIds = emptyList(),
+                hasMoreSessions = false,
+            ),
+        )
+
+        // Chat cleared atomically.
+        assertNull("chat.currentSessionId cleared", out.chat.currentSessionId)
+        assertTrue("messages cleared", out.chat.messages.isEmpty())
+        assertTrue("partsByMessage cleared", out.chat.partsByMessage.isEmpty())
+        assertNull("FIX-B: pendingJumpToLatest cleared", out.chat.pendingJumpToLatest)
+        // List written in the SAME state.
+        assertTrue("sessionList has the archived session", out.sessionList.sessions.any { it.id == "cur" && it.isArchived })
+        assertTrue("openSessionIds pruned", out.sessionList.openSessionIds.isEmpty())
+    }
+
+    @Test
+    fun `FIX-C reduce BulkSessionsRefreshed does NOT clear chat when current is not archived`() {
+        val current = Session(id = "cur", directory = "/x")
+        val archivedOther = Session(id = "other", directory = "/x", time = Session.TimeInfo(archived = 1L))
+        val prior = StoreState.initial().copy(
+            chat = ChatState(
+                currentSessionId = "cur",
+                messages = listOf(Message(id = "m1", role = "user")),
+            ),
+            sessionList = SessionListState(openSessionIds = listOf("cur", "other")),
+        )
+
+        val out = reduce(
+            prior,
+            AppAction.BulkSessionsRefreshed(
+                sessions = listOf(current, archivedOther),
+                openSessionIds = listOf("cur"),  // other pruned
+                hasMoreSessions = false,
+            ),
+        )
+
+        // Chat NOT cleared (current is not archived).
+        assertEquals("cur", out.chat.currentSessionId)
+        assertEquals(1, out.chat.messages.size)
+        // But openIds IS pruned (FIX-A — non-current archived tab removed).
+        assertEquals(listOf("cur"), out.sessionList.openSessionIds)
+    }
+
+    @Test
+    fun `FIX-C dispatch BulkSessionsRefreshed produces exactly one aggregate emission with no torn intermediate`() = runTest {
+        // The FIX-C atomicity test: the prior two-step (mutateSessionList then
+        // separate dispatch) produced an emission where
+        // sessions[current].isArchived == true AND chat.currentSessionId == current
+        // coexisted. The single BulkSessionsRefreshed dispatch collapses this
+        // to ONE committed state — no torn intermediate in the stream.
+        val store = SharedStateStore()
+        store.mutateChat {
+            it.copy(currentSessionId = "cur", messages = listOf(Message(id = "m1", role = "user")))
+        }
+        store.mutateSessionList {
+            it.copy(sessions = listOf(Session(id = "cur", directory = "/p")), openSessionIds = listOf("cur"))
+        }
+
+        val seen = mutableListOf<StoreState>()
+        val job = launch {
+            store.stateFlow.collect { seen += it }
+        }
+        advanceUntilIdle()
+        assertEquals(1, seen.size)
+
+        val archivedCurrent = Session(id = "cur", directory = "/p", time = Session.TimeInfo(archived = 1L))
+        store.dispatch(
+            AppAction.BulkSessionsRefreshed(
+                sessions = listOf(archivedCurrent),
+                openSessionIds = emptyList(),
+                hasMoreSessions = false,
+            ),
+        )
+        advanceUntilIdle()
+
+        // Exactly ONE new aggregate emission.
+        assertEquals("exactly one initial + one post-dispatch emission", 2, seen.size)
+        val finalState = seen.last()
+        // Single committed state: sessionList archived AND chat cleared.
+        assertTrue("sessionList has archived session", finalState.sessionList.sessions.any { it.id == "cur" && it.isArchived })
+        assertNull("chat cleared in SAME state", finalState.chat.currentSessionId)
+        // No torn intermediate anywhere in the stream.
+        seen.forEach { s ->
+            val torn = s.sessionList.sessions.any { it.id == "cur" && it.isArchived } && s.chat.currentSessionId == "cur"
+            assertFalse("no torn intermediate (archived-but-current) in stream", torn)
+        }
+        job.cancel()
+    }
+
+    // ── gro-2 Blocker 1: non-current archived subtree cleanup ──────────────
+
+    @Test
+    fun `gro-2 Blocker 1 - BulkSessionsRefreshed cleans subtree unread + pendingQuestions for non-current archived open tab`() {
+        // The bug: the reducer's else-branch (non-current archived) skipped
+        // subtree/unread/questions cleanup entirely. So a non-current archived
+        // OPEN tab's unread badge + pendingQuestions leaked — inflating
+        // crossSessionPendingCount and leaving dead badges.
+        // Fix: subtree cleanup now runs UNCONDITIONALLY over ALL archived ids.
+        val archivedRoot = Session(id = "archived-root", directory = "/p", time = Session.TimeInfo(archived = 1L))
+        val archivedChild = Session(id = "archived-child", directory = "/p", parentId = "archived-root")
+        val archivedGrandchild = Session(id = "archived-gc", directory = "/p", parentId = "archived-child")
+        val liveCurrent = Session(id = "live-cur", directory = "/p")
+        val prior = StoreState.initial().copy(
+            chat = ChatState(currentSessionId = "live-cur"),
+            sessionList = SessionListState(
+                sessions = listOf(liveCurrent, archivedRoot, archivedChild, archivedGrandchild),
+                openSessionIds = listOf("live-cur", "archived-root"),
+                pendingQuestions = listOf(
+                    QuestionRequest(id = "q-root", sessionId = "archived-root", questions = emptyList()),
+                    QuestionRequest(id = "q-child", sessionId = "archived-child", questions = emptyList()),
+                    QuestionRequest(id = "q-gc", sessionId = "archived-gc", questions = emptyList()),
+                    // A question bound to the LIVE current session MUST survive.
+                    QuestionRequest(id = "q-live", sessionId = "live-cur", questions = emptyList()),
+                ),
+            ),
+            unread = UnreadState(
+                unreadSessions = setOf("archived-root", "archived-child", "archived-gc", "live-cur"),
+                lastViewedTime = mapOf(
+                    "archived-root" to 1L, "archived-child" to 2L, "archived-gc" to 3L, "live-cur" to 4L,
+                ),
+            ),
+        )
+
+        val out = reduce(
+            prior,
+            AppAction.BulkSessionsRefreshed(
+                sessions = listOf(liveCurrent, archivedRoot, archivedChild, archivedGrandchild),
+                openSessionIds = listOf("live-cur"),  // archived-root pruned
+                hasMoreSessions = false,
+            ),
+        )
+
+        // The non-current archived subtree (root + child + grandchild) is
+        // cleaned from unread + pendingQuestions — even though chat was NOT
+        // cleared (non-current).
+        assertFalse("archived root removed from unread", "archived-root" in out.unread.unreadSessions)
+        assertFalse("archived child removed from unread", "archived-child" in out.unread.unreadSessions)
+        assertFalse("archived grandchild removed from unread", "archived-gc" in out.unread.unreadSessions)
+        assertTrue("live current session unread preserved", "live-cur" in out.unread.unreadSessions)
+        // lastViewedTime orphans dropped for the subtree only.
+        assertFalse("archived root lastViewed cleared", "archived-root" in out.unread.lastViewedTime)
+        assertFalse("archived child lastViewed cleared", "archived-child" in out.unread.lastViewedTime)
+        assertEquals(4L, out.unread.lastViewedTime["live-cur"])
+        // Subtree questions removed; live current's question survives.
+        assertTrue(
+            "archived subtree questions removed",
+            out.sessionList.pendingQuestions.none { it.sessionId in setOf("archived-root", "archived-child", "archived-gc") },
+        )
+        assertTrue(
+            "live current question preserved",
+            out.sessionList.pendingQuestions.any { it.sessionId == "live-cur" },
+        )
+        // Chat is NOT cleared for the non-current archived session.
+        assertEquals("chat NOT cleared (current is live)", "live-cur", out.chat.currentSessionId)
+        // openIds pruned of the archived id.
+        assertEquals(listOf("live-cur"), out.sessionList.openSessionIds)
+    }
+
+    @Test
+    fun `gro-2 Blocker 1 regression - BulkSessionsRefreshed current-archived STILL clears chat + subtree`() {
+        // Regression guard: the current-archived case must STILL clear chat +
+        // subtree cleanup (the fix broadened cleanup to ALL archived ids, but
+        // the chat-clear must remain current-only and still fire).
+        val archivedCurrent = Session(id = "cur", directory = "/p", time = Session.TimeInfo(archived = 1L))
+        val archivedChild = Session(id = "child", directory = "/p", parentId = "cur")
+        val prior = StoreState.initial().copy(
+            chat = ChatState(
+                currentSessionId = "cur",
+                messages = listOf(Message(id = "m1", role = "user")),
+                pendingJumpToLatest = "cur",
+            ),
+            sessionList = SessionListState(
+                sessions = listOf(archivedCurrent, archivedChild),
+                openSessionIds = listOf("cur"),
+                pendingQuestions = listOf(
+                    QuestionRequest(id = "q-cur", sessionId = "cur", questions = emptyList()),
+                    QuestionRequest(id = "q-child", sessionId = "child", questions = emptyList()),
+                ),
+            ),
+            unread = UnreadState(
+                unreadSessions = setOf("cur", "child"),
+                lastViewedTime = mapOf("cur" to 1L, "child" to 2L),
+            ),
+        )
+
+        val out = reduce(
+            prior,
+            AppAction.BulkSessionsRefreshed(
+                sessions = listOf(archivedCurrent, archivedChild),
+                openSessionIds = emptyList(),
+                hasMoreSessions = false,
+            ),
+        )
+
+        // Chat cleared (current IS archived).
+        assertNull("chat cleared for archived current", out.chat.currentSessionId)
+        assertTrue("messages cleared", out.chat.messages.isEmpty())
+        assertNull("pendingJumpToLatest cleared (FIX-B)", out.chat.pendingJumpToLatest)
+        // Full subtree cleaned.
+        assertFalse("cur removed from unread", "cur" in out.unread.unreadSessions)
+        assertFalse("child removed from unread", "child" in out.unread.unreadSessions)
+        assertTrue("all subtree questions removed", out.sessionList.pendingQuestions.isEmpty())
     }
 }

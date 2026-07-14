@@ -5,20 +5,13 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.verticalScroll
-import androidx.compose.material3.AlertDialogDefaults
-import androidx.compose.material3.BasicAlertDialog
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.ListItem
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -31,14 +24,14 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.res.stringResource
-import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
-import androidx.compose.ui.unit.dp
-import androidx.compose.ui.window.DialogProperties
 import cn.vectory.ocdroid.R
 import cn.vectory.ocdroid.data.model.ConfigProvider
 import cn.vectory.ocdroid.data.model.ProvidersResponse
+import cn.vectory.ocdroid.ui.theme.AppFormDialog
+import cn.vectory.ocdroid.ui.theme.AppSectionHeader
+import cn.vectory.ocdroid.ui.theme.Dimens
 
 /**
  * §model-management: Settings → Model management section.
@@ -63,7 +56,7 @@ internal fun ModelManagementSection(
     onToggleModelDisabled: (providerId: String, modelId: String) -> Unit,
     onSetProviderModelsEnabled: (providerId: String, enabled: Boolean) -> Unit
 ) {
-    SectionHeader(title = stringResource(R.string.settings_model_management))
+    AppSectionHeader(text = stringResource(R.string.settings_model_management))
 
     val (disabledCount, totalModels) = modelCatalogCounts(providers, disabledModels)
     if (totalModels == 0) {
@@ -73,7 +66,7 @@ internal fun ModelManagementSection(
             stringResource(R.string.settings_model_management_empty),
             style = MaterialTheme.typography.bodyMedium,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
-            modifier = Modifier.padding(16.dp)
+            modifier = Modifier.padding(Dimens.spacing4)
         )
         return
     }
@@ -133,82 +126,51 @@ private fun ModelManagementDialog(
     onDismiss: () -> Unit
 ) {
     val catalog = providers?.providers.orEmpty().filter { it.models.isNotEmpty() }
-    // §setux #6: 改为 BasicAlertDialog + Surface 容器。原实现用 AlertDialog 的
-    // text 槽承载 verticalScroll 列表，Switch 触摸事件被 AlertDialog 的内部
-    // scroll/layout 消化导致「无法点击」。BasicAlertDialog 把内容完全交给
-    // 调用方，Switch 在普通 Column 里——触摸路由恢复正常。title / Done 按钮 /
-    // scroll / providers 遍历 / ProviderBlock / ModelRow / 接线全部保留。
-    BasicAlertDialog(
+    // §WT5: dialog consolidated onto the shared `AppFormDialog` primitive
+    // (BasicAlertDialog + Surface + AlertDialogDefaults + verticalScroll +
+    // heightIn(max=screen*0.85f)). Previously this was a hand-rolled
+    // BasicAlertDialog+Surface here — the canonical container now lives once
+    // in `ui/theme/AppFormDialog.kt`. Per `AppFormDialog.kt` file header, the
+    // BasicAlertDialog route (not AlertDialog) is mandatory because
+    // AlertDialog's `text` slot swallows Switch touch events.
+    //
+    // The title hint + scrollable providers list + Done button are preserved
+    // verbatim; only the container boilerplate is removed.
+    AppFormDialog(
         onDismissRequest = onDismiss,
-        properties = DialogProperties(
-            usePlatformDefaultWidth = false,
-            dismissOnBackPress = true,
-            dismissOnClickOutside = true,
-        ),
-    ) {
-        Surface(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 16.dp)
-                // §review-fix (gpter M2): cap the dialog at ~85% of the screen
-                // height so the Done button stays reachable on small / landscape
-                // / split-screen (the old fixed heightIn(max=480) list + title
-                // + spacers + Done could exceed the viewport and clip Done).
-                .heightIn(max = LocalConfiguration.current.screenHeightDp.dp * 0.85f),
-            shape = AlertDialogDefaults.shape,
-            tonalElevation = AlertDialogDefaults.TonalElevation,
-            color = AlertDialogDefaults.containerColor,
-        ) {
-            Column(modifier = Modifier.fillMaxHeight().padding(24.dp)) {
-                // title (含 hint 副标题) — 保留原 AlertDialog.title 内容。
-                Column {
-                    Text(stringResource(R.string.settings_model_management))
-                    Text(
-                        text = stringResource(R.string.settings_model_management_hint),
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        modifier = Modifier.padding(top = 4.dp)
-                    )
-                }
-                Spacer(modifier = Modifier.height(16.dp))
-
-                // 滚动内容（providers + 每个 ProviderBlock 的 Switch + 每个
-                // ModelRow 的 Switch）。现在这些 Switch 在普通 Column（非
-                // AlertDialog.text 槽），触摸事件正常派发。weight(1f) 让列表
-                // 消费 title/Done 之外的剩余高度并在溢出时滚动。
-                Column(
-                    modifier = Modifier
-                        .weight(1f)
-                        .verticalScroll(rememberScrollState())
-                ) {
-                    catalog.forEachIndexed { providerIndex, provider ->
-                        if (providerIndex > 0) {
-                            Spacer(modifier = Modifier.height(12.dp))
-                            Spacer(modifier = Modifier.height(8.dp))
-                            Spacer(modifier = Modifier.height(12.dp))
-                        }
-                        ProviderBlock(
-                            provider = provider,
-                            disabledModels = disabledModels,
-                            onToggleModelDisabled = onToggleModelDisabled,
-                            onSetProviderModelsEnabled = onSetProviderModelsEnabled
-                        )
-                    }
-                }
-
-                Spacer(modifier = Modifier.height(24.dp))
-                // confirmButton (Done) — 右对齐，保留原 TextButton。
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.End
-                ) {
-                    TextButton(onClick = onDismiss) {
-                        Text(stringResource(R.string.common_done))
-                    }
-                }
+        title = stringResource(R.string.settings_model_management),
+        confirmButton = {
+            TextButton(onClick = onDismiss) {
+                Text(stringResource(R.string.common_done))
             }
-        }
-    }
+        },
+        content = {
+            Text(
+                text = stringResource(R.string.settings_model_management_hint),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Spacer(modifier = Modifier.height(Dimens.spacing4))
+
+            // Scrollable content (providers + per-provider Switch + per-model
+            // Switch). AppFormDialog already wraps the whole Column in
+            // verticalScroll; an inner scroll Column would double-wrap, so we
+            // emit the providers list directly into the ColumnScope.
+            catalog.forEachIndexed { providerIndex, provider ->
+                if (providerIndex > 0) {
+                    Spacer(modifier = Modifier.height(Dimens.spacing3))
+                    Spacer(modifier = Modifier.height(Dimens.spacing2))
+                    Spacer(modifier = Modifier.height(Dimens.spacing3))
+                }
+                ProviderBlock(
+                    provider = provider,
+                    disabledModels = disabledModels,
+                    onToggleModelDisabled = onToggleModelDisabled,
+                    onSetProviderModelsEnabled = onSetProviderModelsEnabled
+                )
+            }
+        },
+    )
 }
 
 @Composable
@@ -222,9 +184,9 @@ private fun ProviderBlock(
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(vertical = 4.dp),
+                .padding(vertical = Dimens.spacing1),
             verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(12.dp)
+            horizontalArrangement = Arrangement.spacedBy(Dimens.spacing3)
         ) {
             Text(
                 provider.name?.takeIf { it.isNotEmpty() } ?: provider.id,
@@ -238,7 +200,7 @@ private fun ProviderBlock(
                 onCheckedChange = { onSetProviderModelsEnabled(provider.id, it) }
             )
         }
-        Spacer(modifier = Modifier.height(8.dp))
+        Spacer(modifier = Modifier.height(Dimens.spacing2))
         provider.models.forEach { (modelId, model) ->
             ModelRow(
                 providerId = provider.id,
@@ -267,9 +229,9 @@ private fun ModelRow(
         modifier = Modifier
             .fillMaxWidth()
             .clickable(onClick = onToggle)
-            .padding(vertical = 6.dp),
+            .padding(vertical = Dimens.spacingCompact),
         verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(12.dp)
+        horizontalArrangement = Arrangement.spacedBy(Dimens.spacing3)
     ) {
         Column(modifier = Modifier.weight(1f)) {
             Text(
@@ -288,7 +250,7 @@ private fun ModelRow(
                 overflow = TextOverflow.Ellipsis
             )
         }
-        Spacer(modifier = Modifier.width(8.dp))
+        Spacer(modifier = Modifier.width(Dimens.spacing2))
         Switch(checked = enabled, onCheckedChange = { onToggle() })
     }
 }

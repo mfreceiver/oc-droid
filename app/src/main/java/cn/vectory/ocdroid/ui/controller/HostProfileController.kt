@@ -935,7 +935,15 @@ class HostProfileController(
                 currentModel = null
             )
         }
-        slices.mutateSessionList { SessionListState() }
+        // §gpter-residual (oracle must-fix): reset every sessionList field to
+        // its default, but BUMP the completeness epoch from the previous value
+        // instead of resetting it to 0. A reset-to-0 creates an ABA window
+        // where a hydration captured before this reset (epoch == 0 on a fresh
+        // app start) could commit afterward and re-certify a stale root. The
+        // monotonic bump makes the epoch guard drop it fail-closed.
+        slices.mutateSessionList { previous ->
+            SessionListState().copy(completenessEpoch = previous.completenessEpoch + 1L)
+        }
         slices.mutateUnread { UnreadState() }
         // 6. Reset the connection + traffic slices to "reconnecting / zeroed".
         //    Defaults already cover tunnelActivationState=Idle; we override

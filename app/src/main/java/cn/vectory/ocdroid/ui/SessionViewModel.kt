@@ -4,7 +4,6 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import cn.vectory.ocdroid.R
 import cn.vectory.ocdroid.data.cache.CacheRepository
-import cn.vectory.ocdroid.data.cache.contract.CachedSessionWindow
 import cn.vectory.ocdroid.data.repository.HostProfileStore
 import cn.vectory.ocdroid.data.repository.OpenCodeRepository
 import cn.vectory.ocdroid.di.UiApplicationScope
@@ -13,7 +12,6 @@ import cn.vectory.ocdroid.ui.controller.ConnectionCoordinator
 import cn.vectory.ocdroid.ui.controller.SessionSwitcher
 import cn.vectory.ocdroid.ui.controller.allSessionsById
 import cn.vectory.ocdroid.ui.controller.removeSessions
-import cn.vectory.ocdroid.util.DebugLog
 import cn.vectory.ocdroid.util.SettingsManager
 import cn.vectory.ocdroid.util.WorkdirPaths
 import cn.vectory.ocdroid.util.runSuspendCatching
@@ -93,6 +91,20 @@ class SessionViewModel @Inject constructor(
 
     fun selectSession(sessionId: String) {
         sessionSwitcher.switchTo(sessionId)
+    }
+
+    /**
+     * §WT2-taskB (Q6 locked): set the "enter from Sessions page → jump to
+     * latest" intent for [sessionId]. SessionsScreen.onSessionClick calls
+     * this BEFORE [selectSession] so the matching switchTo keeps the intent
+     * (SessionSwitcher clears it when the incoming id does not match),
+     * and ChatMessageList consumes it exactly once the session's messages
+     * have loaded (scrollToItem(0) + followBottom=true + clear). Swipe,
+     * tab-strip tap, and SessionPickerSheet paths do NOT call this — their
+     * saveable scroll-position restore is preserved unchanged.
+     */
+    fun requestJumpToLatest(sessionId: String) {
+        store.dispatch(AppAction.PendingJumpToLatestSet(sessionId))
     }
 
     fun openSubAgent(childSessionId: String) {
@@ -345,86 +357,13 @@ class SessionViewModel @Inject constructor(
         )
     }
 
-    /**
-     * §R-19 P2-5: was `core.loadSessionsForEffect()` (a 1-line wrapper around
-     * [launchLoadSessions] that lived in AppCoreOrchestration.kt). Inlined
-     * here so this VM does not need an AppCore reference just for that one
-     * orchestration helper. The callbacks mirror the wrapper's: select-on-
-     * load + cascade to loadSessionStatus + loadMessages for the current
-     * session. Behaviour preserved verbatim.
-     */
-    fun loadSessions() {
-        val expectedFp = hostProfileStore.currentProfile().serverGroupFp.ifBlank { hostProfileStore.currentProfile().id }
-        launchLoadSessions(
-            scope = appScope,
-            repository = repository,
-            slices = store.slices,
-            settingsManager = settingsManager,
-            onSelectSession = ::selectSession,
-            onLoadSessionStatus = { launchLoadSessionStatus(appScope, repository, store.slices) },
-            onLoadMessages = { sessionId -> launchLoadMessagesForEffect(sessionId) },
-            emit = EventEmitter { event -> effectBus.tryEmitUiEvent(event) },
-            // R-20 Phase 1 (C7): mirror AppCore.loadSessionsForEffect's wiring
-            // so the currentSessionId fingerprint verify runs on this VM's
-            // loadSessions path too. AppCore holds the cacheRepository
-            // singleton; this VM holds its own (Hilt-bound same instance).
-            cacheRepository = cacheRepository,
-            expectedServerGroupFp = expectedFp,
-            currentServerGroupFp = { hostProfileStore.currentProfile().serverGroupFp.ifBlank { hostProfileStore.currentProfile().id } },
-            // §grouping-rewrite Round-2 #5: the hostProfileStore arg that R-20
-            // Phase 5 wired here is removed — its sole consumer inside
-            // launchLoadSessions (attemptCrossGroupMerge) was deleted by item 1
-            // of this rewrite.
-        )
-    }
-
-    /** §R-19 P2-5: extracted from the former AppCore.loadMessagesForEffect so
-     *  [loadSessions]'s onLoadMessages callback stays self-contained. Mirrors
-     *  the AppCoreOrchestration.kt helper's body (which is preserved verbatim
-     *  for AppCore's own dispatch helpers).
-     *
-     *  R-20 Phase 1: onCacheWindow mirrors the in-memory LRU write to the
-     *  persistent encrypted cache. fp captured at this call (current host)
-     *  so a profile switch mid-flight cannot re-key a write to the wrong
-     *  group. Mirrors [AppCore.makeCacheHook]; the body is duplicated rather
-     *  than injected because the §R-19 P2-5 design rule keeps AppCore out of
-     *  this VM's constructor (precise injection only).
-     *
-     *  §review-fix #2 (gpter #2): memory LRU write uses the CAPTURED fp (was
-     *  re-reading currentServerGroupFp via SessionSwitcher — now passes fp
-     *  explicitly). §review-fix #3 (gpter #3): session metadata lookup
-     *  includes directorySessions. */
-     private fun launchLoadMessagesForEffect(sessionId: String) {
-         val fp = hostProfileStore.currentProfile().serverGroupFp.ifBlank { hostProfileStore.currentProfile().id }
-         val cacheHook: (String, CachedSessionWindow) -> Unit = { sid, window ->
-             sessionSwitcher.writeSessionWindow(fp, sid, window)
-             // §review-fix #3: include directorySessions so directory-only
-             // sessions get their real createdAt/workdir cached.
-             val sessionList = store.sessionListFlow.value
-             val session = (sessionList.sessions + sessionList.directorySessions.values.flatten())
-                 .firstOrNull { it.id == sid }
-             val createdAt = session?.time?.created
-             val workdir = session?.directory ?: settingsManager.currentWorkdir ?: ""
-             appScope.launch {
-                 runCatching { cacheRepository.putSessionWindow(fp, sid, createdAt, workdir, window) }
-                     .onFailure { DebugLog.e(TAG, "cache write failed for fp=$fp sid=$sid", it) }
-             }
-         }
-         launchLoadMessages(
-             scope = appScope,
-             repository = repository,
-             slices = store.slices,
-             sessionId = sessionId,
-             resetLimit = true,
-             settingsManager = settingsManager,
-             onCacheWindow = cacheHook,
-             emit = EventEmitter { event -> effectBus.tryEmitUiEvent(event) },
-             // gpter 复审 final-fix: compound-key guard.
-             expectedServerGroupFp = fp,
-             currentServerGroupFp = { hostProfileStore.currentProfile().serverGroupFp.ifBlank { hostProfileStore.currentProfile().id } },
-         )
-     }
-
+    // §R-19 P2-5 legacy entry removed: `loadSessions()` had no production
+    //  caller (only tests) and bypassed `onArchivedSessionsDetected`, unlike
+    //  [AppCore.loadSessionsForEffect] which is now the sole session-list
+    //  refresh entry (and carries archive-detection). Tests that exercised
+    //  this path now call `core.loadSessionsForEffect()` directly. The
+    //  private `launchLoadMessagesForEffect` helper was reachable only from
+    //  the deleted entry and is removed with it.
     /**
      * §issue-1(1): 拉取指定会话的文件变更快照（GET /session/{id}/diff）。由聊天视图
      * 打开会话时按需触发（见 ChatMessageList 的 LaunchedEffect），刻意解耦消息加载

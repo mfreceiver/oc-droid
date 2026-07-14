@@ -51,7 +51,9 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
 import cn.vectory.ocdroid.R
+import cn.vectory.ocdroid.ui.theme.AppSectionHeader
 import cn.vectory.ocdroid.ui.theme.BundledMonoFamily
+import cn.vectory.ocdroid.ui.theme.Dimens
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import cn.vectory.ocdroid.util.DebugLog
@@ -88,11 +90,15 @@ internal fun DebugLogSection(hideHeader: Boolean = false) {
     }
 
     if (!hideHeader) {
-        SectionHeader(title = stringResource(R.string.debug_log_title))
+        AppSectionHeader(text = stringResource(R.string.debug_log_title))
     }
 
+    // §review-AB: Card self-pads horizontal 16dp (route Column no longer pads)
+    // so it shares one keyline with AppSectionHeader + ListItem.
     Card(
-        modifier = Modifier.fillMaxWidth(),
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = Dimens.spacing4),
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainer)
     ) {
         Column(modifier = Modifier.padding(16.dp)) {

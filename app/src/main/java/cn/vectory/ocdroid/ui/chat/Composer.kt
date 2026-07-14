@@ -36,7 +36,6 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.AttachFile
-import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.PhotoLibrary
 import androidx.compose.material.icons.filled.Stop
@@ -49,11 +48,9 @@ import androidx.compose.material3.InputChip
 import androidx.compose.material3.InputChipDefaults
 import androidx.compose.material3.LocalTextStyle
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
-import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -76,7 +73,9 @@ import cn.vectory.ocdroid.ui.ComposerFileReference
 import cn.vectory.ocdroid.ui.ComposerViewModel
 import cn.vectory.ocdroid.ui.OrchestratorViewModel
 import cn.vectory.ocdroid.ui.theme.AppBottomSheet
+import cn.vectory.ocdroid.ui.theme.AppSectionHeader
 import cn.vectory.ocdroid.ui.theme.Dimens
+import cn.vectory.ocdroid.ui.theme.PickerTrailingCheck
 import kotlinx.coroutines.launch
 
 /**
@@ -419,45 +418,41 @@ private fun AddMenuSheet(
     onFileRef: () -> Unit,
     onCommands: () -> Unit,
 ) {
-    val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
-    ModalBottomSheet(
+    // §WT1: 迁移到 AppBottomSheet（容器色 / titleLarge / sheetState / 底部
+    // inset 由 recipe 统一）。原手写 titleMedium 标题行删除（recipe 的 title
+    // 槽接管）。底部 16dp padding 也删除（recipe 已统一加底部 Spacer，避免
+    // 双重留白，见 SheetRecipe.kt §inset-note）。
+    AppBottomSheet(
         onDismissRequest = onDismiss,
-        sheetState = sheetState,
+        title = stringResource(R.string.chat_add_menu_title),
     ) {
-        Column(modifier = Modifier.fillMaxWidth().padding(bottom = 16.dp)) {
-            Text(
-                text = stringResource(R.string.chat_add_menu_title),
-                style = MaterialTheme.typography.titleMedium,
-                modifier = Modifier.padding(horizontal = 24.dp, vertical = 8.dp),
-            )
-            androidx.compose.material3.ListItem(
-                headlineContent = { Text(stringResource(R.string.chat_add_photos)) },
-                supportingContent = { Text(stringResource(R.string.chat_add_photos_desc)) },
-                leadingContent = {
-                    Icon(Icons.Default.PhotoLibrary, contentDescription = null)
-                },
-                modifier = Modifier.clickable(onClick = onPhotos),
-            )
-            androidx.compose.material3.ListItem(
-                headlineContent = { Text(stringResource(R.string.chat_add_file_ref)) },
-                supportingContent = { Text(stringResource(R.string.chat_add_file_ref_desc)) },
-                leadingContent = {
-                    Icon(Icons.Default.AttachFile, contentDescription = null)
-                },
-                // Phase 1B: row is visible but disabled to communicate the
-                // upcoming surface; Phase 2 will wire
-                // orchestratorVM.requestPickFileForComposer → workspace/files.
-                modifier = Modifier.clickable(enabled = false, onClick = onFileRef),
-            )
-            androidx.compose.material3.ListItem(
-                headlineContent = { Text(stringResource(R.string.chat_add_commands)) },
-                supportingContent = { Text(stringResource(R.string.chat_add_commands_desc)) },
-                leadingContent = {
-                    Icon(Icons.Default.Terminal, contentDescription = null)
-                },
-                modifier = Modifier.clickable(onClick = onCommands),
-            )
-        }
+        androidx.compose.material3.ListItem(
+            headlineContent = { Text(stringResource(R.string.chat_add_photos)) },
+            supportingContent = { Text(stringResource(R.string.chat_add_photos_desc)) },
+            leadingContent = {
+                Icon(Icons.Default.PhotoLibrary, contentDescription = null)
+            },
+            modifier = Modifier.clickable(onClick = onPhotos),
+        )
+        androidx.compose.material3.ListItem(
+            headlineContent = { Text(stringResource(R.string.chat_add_file_ref)) },
+            supportingContent = { Text(stringResource(R.string.chat_add_file_ref_desc)) },
+            leadingContent = {
+                Icon(Icons.Default.AttachFile, contentDescription = null)
+            },
+            // Phase 1B: row is visible but disabled to communicate the
+            // upcoming surface; Phase 2 will wire
+            // orchestratorVM.requestPickFileForComposer → workspace/files.
+            modifier = Modifier.clickable(enabled = false, onClick = onFileRef),
+        )
+        androidx.compose.material3.ListItem(
+            headlineContent = { Text(stringResource(R.string.chat_add_commands)) },
+            supportingContent = { Text(stringResource(R.string.chat_add_commands_desc)) },
+            leadingContent = {
+                Icon(Icons.Default.Terminal, contentDescription = null)
+            },
+            modifier = Modifier.clickable(onClick = onCommands),
+        )
     }
 }
 
@@ -535,7 +530,10 @@ internal fun ModelPickerSheet(
                 text = stringResource(R.string.chat_model_picker_empty),
                 style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
-                modifier = Modifier.padding(horizontal = 24.dp, vertical = 12.dp),
+                modifier = Modifier.padding(
+                    horizontal = Dimens.spacing6,
+                    vertical = Dimens.spacing3,
+                ),
             )
         } else {
             LazyColumn(modifier = Modifier.fillMaxWidth()) {
@@ -546,20 +544,13 @@ internal fun ModelPickerSheet(
                             "${provider.id}/$modelId" !in disabledModels
                         }
                     if (matchingModels.isEmpty()) return@forEach
-                    // §B4 provider header：labelLarge(14sp/Med) + onSurfaceVariant，
-                    // padding 水平 24dp、顶 8dp / 底 4dp（provider 之间自然 8dp，
-                    // provider 内 model 行连续无额外间距）。
+                    // §WT1 provider header：用 AppSectionHeader（titleSmall 14sp/Med
+                    // + onSurfaceVariant + 16dp/8dp padding），替代原手写 labelLarge
+                    // + 硬编码 padding(start=24,end=24,top=8,bottom=4)——与 ui-style-spec
+                    // §2 的 section header 原语对齐，跨 picker 统一。
                     item(key = "header_${provider.id}") {
-                        Text(
+                        AppSectionHeader(
                             text = provider.name?.takeIf { it.isNotEmpty() } ?: provider.id,
-                            style = MaterialTheme.typography.labelLarge,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            modifier = Modifier.padding(
-                                start = 24.dp,
-                                end = 24.dp,
-                                top = 8.dp,
-                                bottom = 4.dp,
-                            ),
                         )
                     }
                     items(
@@ -577,34 +568,12 @@ internal fun ModelPickerSheet(
                                     else MaterialTheme.colorScheme.onSurface,
                                 )
                             },
-                            trailingContent = { PickerTrailingCheck(isSelected) },
+                            trailingContent = { PickerTrailingCheck(selected = isSelected) },
                             modifier = Modifier.clickable { onSwitch(provider.id, modelId) },
                         )
                     }
                 }
             }
         }
-    }
-}
-
-/**
- * §B4·P3-B picker 选中态的稳定 trailing 槽（用户点 6）。
- *
- * 选中 = `Icons.Filled.Check`(18dp, primary)；未选中 = 同尺寸 `Spacer`。
- * 始终渲染保证：Check 出现/消失时左侧 headline 文本宽度不跳动，各行左对齐齐平。
- * 同时承担用户点 5 的选中态统一：Agent 与 Model 选中项不再用 SmartToy /
- * Outlined Memory，统一为 Filled Check + primary 文字（无 per-item 选中底色）。
- */
-@Composable
-private fun PickerTrailingCheck(selected: Boolean) {
-    if (selected) {
-        Icon(
-            Icons.Filled.Check,
-            contentDescription = null,
-            tint = MaterialTheme.colorScheme.primary,
-            modifier = Modifier.size(18.dp),
-        )
-    } else {
-        Spacer(Modifier.size(18.dp))
     }
 }

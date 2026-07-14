@@ -2,6 +2,8 @@ package cn.vectory.ocdroid.ui
 
 import cn.vectory.ocdroid.R
 import cn.vectory.ocdroid.data.model.Message
+import cn.vectory.ocdroid.data.model.Session
+import cn.vectory.ocdroid.ui.controller.ControllerEffect
 import cn.vectory.ocdroid.util.DebugLog
 import cn.vectory.ocdroid.util.runSuspendCatching
 import kotlinx.coroutines.delay
@@ -634,7 +636,87 @@ internal fun AppCore.loadSessionsForEffect() {
         // Phase 5 wired here (for cross-group merge of LAN + tunnel same-server
         // profiles) is removed — attemptCrossGroupMerge was deleted by item 1
         // of this rewrite.
+        // WT6 (archive-sync, gap-3) + FIX-A/C (review-blocker): if the merged
+        // refresh result contains ANY archived session that was open (in
+        // openSessionIds) or was the current session, the callback dispatches
+        // a SINGLE atomic [AppAction.BulkSessionsRefreshed] that writes the
+        // merged list AND prunes ALL archived openIds (FIX-A — not just
+        // current) AND (if current is archived) clears chat + unread/questions
+        // subtree cleanup + emits [ControllerEffect.EvictSession]. One
+        // committed aggregate state — no torn intermediate.
+        onArchivedSessionsDetected = { merged, newOpenIds, hasMore ->
+            dispatchBulkArchivedSessions(merged, newOpenIds, hasMore)
+        },
     )
+}
+
+/**
+ * WT6 (archive-sync, gap-3) + FIX-A/C (review-blocker): mirrors the SSE
+ * archive handler in [cn.vectory.ocdroid.ui.controller.SessionSyncCoordinator]
+ * (the `session.updated` isArchived branch) for the BULK-refresh path. When
+ * the merged refresh result discovers archived sessions, this dispatches a
+ * SINGLE [AppAction.BulkSessionsRefreshed] that atomically:
+ *  1. Writes the merged session list (sessions).
+ *  2. Prunes [SessionListState.openSessionIds] of EVERY archived id (FIX-A —
+ *     not just the current session; the SSE path does this per-session).
+ *  3. IFF the current session is among the archived, clears chat
+ *     ([applyArchivedChatClear] → currentSessionId/messages/partsByMessage/
+ *     pendingJumpToLatest per FIX-B) + unread/questions subtree cleanup.
+ *
+ * The reducer derives the "clear chat" decision from the snapshot
+ * (chat.currentSessionId in archivedIds), so the action carries pure data
+ * only. ONE committed aggregate state — no torn intermediate (the prior
+ * two-step mutateSessionList → onCurrentSessionArchived produced an observable
+ * emission where sessions[current].isArchived == true AND
+ * chat.currentSessionId == current coexisted; FIX-C eliminates this).
+ *
+ * Side effects OUTSIDE the dispatch (not state): persisting
+ * [SettingsManager.openSessionIds] + emitting [ControllerEffect.EvictSession]
+ * for the archived current session's cache window (mirrors the SSE path's
+ * R-20 Phase 1 eviction). The [persistSessionCache] call is in
+ * [launchLoadSessions] (it uses the caller's local variables, not the slice).
+ */
+private fun AppCore.dispatchBulkArchivedSessions(
+    mergedSessions: List<Session>,
+    newOpenIds: List<String>,
+    hasMoreSessions: Boolean,
+) {
+    val currentOpenIds = store.sessionListFlow.value.openSessionIds
+    // Capture the PREVIOUS currentSessionId before the dispatch clears it
+    // (used to emit EvictSession for the archived current's cache window).
+    val previousCurrentId = store.chatFlow.value.currentSessionId
+    val archivedIds = mergedSessions
+        .filter { it.isArchived }
+        .map { it.id }
+        .toSet()
+    val currentWasArchived = previousCurrentId != null && previousCurrentId in archivedIds
+    // FIX-A: persist ALL archived ids pruned from openSessionIds (not just
+    // current — the SSE path prunes any archived id; the bulk path previously
+    // only handled the current session, leaving non-current archived open
+    // tabs as ghosts capping the 8-tab budget).
+    if (newOpenIds != currentOpenIds) {
+        settingsManager.openSessionIds = newOpenIds
+    }
+    // FIX-C: single atomic dispatch. The reducer writes the merged list +
+    // pruned openIds + load flags, and IFF the current session is archived,
+    // clears chat + unread/questions subtree. No torn intermediate.
+    store.dispatch(
+        AppAction.BulkSessionsRefreshed(
+            sessions = mergedSessions,
+            openSessionIds = newOpenIds,
+            hasMoreSessions = hasMoreSessions,
+        )
+    )
+    // R-20 Phase 1 cache hygiene (mirrors the SSE archive path's EvictSession
+    // emit): drop the archived CURRENT session's window from the memory LRU +
+    // persistent cache. Non-current archived ids don't have an active chat
+    // window to evict (openIds prune alone is sufficient per FIX-A spec). The
+    // fp is read live so a mid-flight host switch cannot re-key the eviction.
+    if (currentWasArchived && previousCurrentId != null) {
+        effectBus.tryEmitEffect(
+            ControllerEffect.EvictSession(currentServerGroupFp(), previousCurrentId)
+        )
+    }
 }
 
 private fun AppCore.selectSessionForEffect(sessionId: String) {

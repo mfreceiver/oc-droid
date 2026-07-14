@@ -254,6 +254,17 @@ class SessionSwitcher(
         // the new non-null id back to SettingsManager. No manual write here.
         val restoredDraft = settingsManager.getDraftText(fp, sessionId)
         slices.mutateChat {
+            // §WT2-taskB (Q6 locked): keep pendingJumpToLatest ONLY when the
+            // incoming sessionId matches it (the Sessions-page entry path —
+            // SessionsScreen.onSessionClick calls requestJumpToLatest(id)
+            // BEFORE selectSession, so the id is already set on the slice by
+            // the time switchTo runs here). Any OTHER selection path (swipe,
+            // tab-strip, SessionPickerSheet, programmatic) lands on an id that
+            // does NOT match the intent → clear it. This also guards the edge
+            // case where the user swipes AWAY from a still-pending session
+            // before its messages load: the intent is dropped here so a later
+            // swipe back to that session preserves scroll instead of jumping.
+            val retainedJump = it.pendingJumpToLatest?.takeIf { it == sessionId }
             it.copy(
                 currentSessionId = sessionId,
                 messages = emptyList(),
@@ -285,7 +296,9 @@ class SessionSwitcher(
                 // per-session value is reloaded from SettingsManager by
                 // launchLoadMessages (stored wins) / dispatchSendMessage
                 // (getModelForSession preferred).
-                currentModel = null
+                currentModel = null,
+                // §WT2-taskB: retained-or-cleared jump intent (see above).
+                pendingJumpToLatest = retainedJump,
             )
         }
         // Restore the selected session's draft into the composer slice.
@@ -385,10 +398,17 @@ class SessionSwitcher(
 
         // ── Step 8: Unread state machine + draft discard + openSessionIds ───
         val now = clock()
+        val sessionMap = allSessionsById(
+            slices.sessionList.value.sessions,
+            slices.sessionList.value.directorySessions,
+            slices.sessionList.value.childSessions,
+        )
+        val rootId = rootIdOf(sessionId, sessionMap) ?: sessionId
         slices.mutateUnread {
             it.copy(
-                unreadSessions = it.unreadSessions - sessionId,
-                lastViewedTime = it.lastViewedTime + (sessionId to now),
+                unreadSessions = it.unreadSessions - setOf(sessionId, rootId),
+                idleSince = it.idleSince - setOf(sessionId, rootId),
+                lastViewedTime = it.lastViewedTime + (rootId to now),
             )
         }
         // Selecting a real session discards any in-progress draft.

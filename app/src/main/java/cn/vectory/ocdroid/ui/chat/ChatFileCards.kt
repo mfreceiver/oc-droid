@@ -16,10 +16,8 @@ import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
-import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -32,7 +30,9 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.testTag
+import cn.vectory.ocdroid.ui.theme.AppBottomSheet
 import cn.vectory.ocdroid.ui.theme.BundledMonoFamily
+import cn.vectory.ocdroid.ui.theme.Dimens
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import cn.vectory.ocdroid.data.model.Part
@@ -201,21 +201,29 @@ internal fun FileCard(
         val entries = remember(part.id, part.toolOutput) {
             ToolCardClassifier.parseDirectoryEntries(part.toolOutput)
         }
-        val sheetState = rememberModalBottomSheetState()
-        ModalBottomSheet(
+        // §WT1 chat-sheets: 迁移到 AppBottomSheet（容器色 / titleLarge / sheetState /
+        // 底部 inset 由 recipe 统一）。标题经 recipe 的 title 槽渲染（titleLarge +
+        // 24/8 padding），原 FolderContents 内的 titleMedium Text 已移除。原 sheet
+        // 传入的 testTag 保留在 AppBottomSheet 的 modifier 上。
+        AppBottomSheet(
             onDismissRequest = { showFolderSheet = false },
-            sheetState = sheetState,
-            modifier = Modifier.testTag("toolcard.folder.sheet.$basename")
+            title = basename,
+            modifier = Modifier.testTag("toolcard.folder.sheet.$basename"),
         ) {
-            FolderContents(folderName = basename, entries = entries)
+            FolderContents(entries = entries)
         }
     }
 }
 
-/** Sheet body listing a read directory's contents. Subdirectories sort above files. */
+/** Sheet body listing a read directory's contents. Subdirectories sort above files.
+ *
+ * §WT1: `folderName` 参数已删除——标题经 [AppBottomSheet] 的 `title` 槽渲染（调用方
+ * 传 `basename`），原内嵌 titleMedium Text 移除以避免重复标题。底部 `Spacer(8.dp)`
+ * 也移除——AppBottomSheet 已统一加底部 16dp Spacer（SheetRecipe §inset-note），保留
+ * 会导致双重留白。
+ */
 @Composable
 internal fun FolderContents(
-    folderName: String,
     entries: List<ToolCardClassifier.DirectoryEntry>
 ) {
     val sorted = remember(entries) {
@@ -224,37 +232,33 @@ internal fun FolderContents(
                 .thenBy { it.name.lowercase() }
         )
     }
-    Column(modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp)) {
-        Text(
-            text = folderName,
-            style = MaterialTheme.typography.titleMedium,
-            fontFamily = BundledMonoFamily,
-            color = MaterialTheme.colorScheme.onSurface,
-            modifier = Modifier.padding(bottom = 8.dp)
-        )
+    // §WT1: 去掉原外层 Column 的 `padding(vertical = 8.dp)`（AppBottomSheet title 行
+        // 已有 8dp 垂直 padding；底部 inset 由 recipe 统一）。保留 16dp 水平 padding 让
+        // 条目文本与 sheet 边距对齐（条目本身是手写 Row 而非 ListItem，需自带 padding）。
+    Column(modifier = Modifier.fillMaxWidth().padding(horizontal = Dimens.spacing4)) {
         if (sorted.isEmpty()) {
             Text(
                 text = "This directory has no entries.",
                 style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
-                modifier = Modifier.padding(vertical = 12.dp)
+                modifier = Modifier.padding(vertical = Dimens.spacing3)
             )
         } else {
             sorted.forEach { entry ->
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .padding(vertical = 6.dp)
+                        .padding(vertical = Dimens.spacingCompact)
                         .testTag("toolcard.folder.entry.${entry.name}"),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     Icon(
                         imageVector = if (entry.isDirectory) Icons.Default.Folder else Icons.Default.Description,
                         contentDescription = null,
-                        modifier = Modifier.size(18.dp),
+                        modifier = Modifier.size(Dimens.iconSm),
                         tint = MaterialTheme.colorScheme.primary
                     )
-                    Spacer(modifier = Modifier.width(10.dp))
+                    Spacer(modifier = Modifier.width(Dimens.spacing3))
                     Text(
                         text = entry.name,
                         style = MaterialTheme.typography.bodyMedium,
@@ -266,6 +270,5 @@ internal fun FolderContents(
                 }
             }
         }
-        Spacer(modifier = Modifier.size(8.dp))
     }
 }

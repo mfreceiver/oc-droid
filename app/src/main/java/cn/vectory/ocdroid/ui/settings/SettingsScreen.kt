@@ -1,7 +1,11 @@
 package cn.vectory.ocdroid.ui.settings
 
 import android.Manifest
+import android.app.NotificationManager
 import android.content.pm.PackageManager
+import android.content.Intent
+import android.net.Uri
+import android.provider.Settings
 import android.os.Build
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -47,13 +51,18 @@ import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
 import androidx.core.content.ContextCompat
+import androidx.core.app.NotificationManagerCompat
+import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.lifecycle.compose.LifecycleEventEffect
 import cn.vectory.ocdroid.R
+import cn.vectory.ocdroid.di.AppLifecycleMonitor
 import cn.vectory.ocdroid.ui.ComposerViewModel
 import cn.vectory.ocdroid.ui.ConnectionViewModel
 import cn.vectory.ocdroid.ui.HostViewModel
 import cn.vectory.ocdroid.ui.NavRoute
 import cn.vectory.ocdroid.ui.SettingsViewModel
+import cn.vectory.ocdroid.ui.theme.AppSectionHeader
 import cn.vectory.ocdroid.ui.theme.Dimens
 import cn.vectory.ocdroid.ui.util.formatBytes
 import cn.vectory.ocdroid.util.ThemeMode
@@ -205,7 +214,7 @@ private fun SettingsSectionRow(section: SettingsSectionEntry, onClick: () -> Uni
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun SettingsSubRouteScaffold(
+internal fun SettingsSubRouteScaffold(
     titleRes: Int,
     onBack: () -> Unit,
     snackbarHost: @Composable (() -> Unit) = {},
@@ -296,10 +305,13 @@ fun SettingsAppearanceRoute(
         .collectAsStateWithLifecycle(initialValue = 1f)
 
     SettingsSubRouteScaffold(titleRes = R.string.settings_section_appearance, onBack = onBack) { mod ->
+        // §review-AB: parent Column no longer adds `.padding(horizontal = ...)`
+        // — AppSectionHeader (self-pad 16dp) + ListItem (self-pad 16dp) +
+        // bare widgets now share ONE 16dp keyline (header was at 32dp before,
+        // misaligned with bare content). Bare widgets inside AppearanceSection
+        // carry their own `Modifier.padding(horizontal = Dimens.spacing4)`.
         Column(
-            modifier = mod
-                .verticalScroll(rememberScrollState())
-                .padding(horizontal = Dimens.spacing4),
+            modifier = mod.verticalScroll(rememberScrollState()),
         ) {
             AppearanceSection(
                 themeMode = themeMode,
@@ -333,10 +345,11 @@ fun SettingsModelsRoute(
         .collectAsStateWithLifecycle(initialValue = emptySet())
 
     SettingsSubRouteScaffold(titleRes = R.string.settings_section_models, onBack = onBack) { mod ->
+        // §review-AB: no parent horizontal padding — ModelManagementSection's
+        // AppSectionHeader + ListItem self-pad; its bare empty-state Text
+        // already self-pads (`Modifier.padding(Dimens.spacing4)`).
         Column(
-            modifier = mod
-                .verticalScroll(rememberScrollState())
-                .padding(Dimens.spacing4),
+            modifier = mod.verticalScroll(rememberScrollState()),
         ) {
             ModelManagementSection(
                 providers = providers,
@@ -364,23 +377,27 @@ fun SettingsModelsRoute(
 @Composable
 fun SettingsNotificationsRoute(onBack: () -> Unit) {
     val context = LocalContext.current
-    var granted by remember { mutableStateOf(notificationPermissionGranted(context)) }
+    var granted by remember { mutableStateOf(notificationsEnabled(context)) }
+    LifecycleEventEffect(Lifecycle.Event.ON_RESUME) {
+        granted = notificationsEnabled(context)
+    }
     // Optional runtime prompt for API 33+. Mirrors AppLifecycleMonitor's
     // grant-bypass-on-older-OS check. Launched lazily via a button so the
     // system dialog is never triggered from the background.
     val permLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.RequestPermission(),
-    ) { result ->
-        granted = result || notificationPermissionGranted(context)
+    ) { _ ->
+        granted = notificationsEnabled(context)
     }
 
     SettingsSubRouteScaffold(titleRes = R.string.settings_section_notifications, onBack = onBack) { mod ->
+        // §review-AB: no parent horizontal padding — AppSectionHeader +
+        // ListItem self-pad at 16dp; the bare grant-button Row below also
+        // self-pads (`Modifier.padding(horizontal = Dimens.spacing4)`).
         Column(
-            modifier = mod
-                .verticalScroll(rememberScrollState())
-                .padding(horizontal = Dimens.spacing4),
+            modifier = mod.verticalScroll(rememberScrollState()),
         ) {
-            SectionHeader(title = stringResource(R.string.settings_section_notifications))
+            AppSectionHeader(text = stringResource(R.string.settings_section_notifications))
             // §setux #new5: 移除 leadingContent icon，与其它 settings item
             // 风格一致（无 leading icon 的标准 ListItem）。颜色态在
             // supportingContent 文案里仍可读。
@@ -395,13 +412,27 @@ fun SettingsNotificationsRoute(onBack: () -> Unit) {
                     Text(stringResource(R.string.settings_notifications_completion_channel_desc))
                 },
             )
+            ListItem(
+                headlineContent = {
+                    Text(
+                        text = stringResource(R.string.settings_notifications_system_settings),
+                        style = MaterialTheme.typography.bodyLarge,
+                    )
+                },
+                supportingContent = {
+                    Text(stringResource(R.string.settings_notifications_system_settings_desc))
+                },
+                modifier = Modifier.clickable { openSystemNotificationSettings(context) },
+            )
             // The grant button is shown only when blocked AND API 33+ (the OS
             // surface that requires a runtime prompt). Pre-33 installs inherit
             // the install-time grant, so the button would be a dead no-op.
             if (!granted && Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
                 Spacer(modifier = Modifier.height(Dimens.spacing3))
                 Row(
-                    modifier = Modifier.fillMaxWidth(),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = Dimens.spacing4),
                     horizontalArrangement = Arrangement.Center,
                 ) {
                     androidx.compose.material3.TextButton(onClick = {
@@ -454,13 +485,16 @@ fun SettingsStorageRoute(
         onBack = onBack,
         snackbarHost = { SnackbarHost(snackbarHostState) },
     ) { mod ->
+        // §review-AB: no parent horizontal padding — AppSectionHeader self-pads
+        // at 16dp; DangerZoneSection's bare Row + CacheManagementSection's
+        // bare Card (+ DegradedCacheWarning) each self-pad via
+        // `Modifier.padding(horizontal = Dimens.spacing4)` so all content
+        // shares one 16dp keyline with the header.
         Column(
-            modifier = mod
-                .verticalScroll(rememberScrollState())
-                .padding(horizontal = Dimens.spacing4),
+            modifier = mod.verticalScroll(rememberScrollState()),
         ) {
             // ① 清除数据 (first, flat).
-            SectionHeader(title = stringResource(R.string.settings_danger_zone))
+            AppSectionHeader(text = stringResource(R.string.settings_danger_zone))
             DangerZoneSection(
                 cachedDataSize = cachedDataSize,
                 onClearLocalData = viewModel::resetLocalDataAndResync,
@@ -469,7 +503,7 @@ fun SettingsStorageRoute(
             Spacer(modifier = Modifier.height(Dimens.spacing6))
 
             // ② 缓存管理 (3-level tree + destructive sweeps + 3s snackbar).
-            SectionHeader(title = stringResource(R.string.cache_management_popup_title))
+            AppSectionHeader(text = stringResource(R.string.cache_management_popup_title))
             CacheManagementSection(
                 vm = settingsVM,
                 snackbarHostState = snackbarHostState,
@@ -497,15 +531,15 @@ fun SettingsAboutRoute(
     onBack: () -> Unit,
 ) {
     SettingsSubRouteScaffold(titleRes = R.string.settings_section_about, onBack = onBack) { mod ->
+        // §review-AB: no parent horizontal padding — AppSectionHeader +
+        // DebugLogSection's Card self-pad; AboutSection's bare Texts self-pad.
         Column(
-            modifier = mod
-                .verticalScroll(rememberScrollState())
-                .padding(horizontal = Dimens.spacing4),
+            modifier = mod.verticalScroll(rememberScrollState()),
         ) {
             AboutSection()
             Spacer(modifier = Modifier.height(Dimens.spacing6))
 
-            SectionHeader(title = stringResource(R.string.settings_section_debug))
+            AppSectionHeader(text = stringResource(R.string.settings_section_debug))
             DebugLogSection(hideHeader = true)
         }
     }
@@ -518,4 +552,46 @@ private fun notificationPermissionGranted(context: android.content.Context): Boo
         context,
         Manifest.permission.POST_NOTIFICATIONS,
     ) == PackageManager.PERMISSION_GRANTED
+}
+
+internal fun notificationDeliveryEnabled(
+    runtimeGranted: Boolean,
+    appEnabled: Boolean,
+    relevantChannelImportances: List<Int>,
+): Boolean = runtimeGranted && appEnabled &&
+    (relevantChannelImportances.isEmpty() || relevantChannelImportances.any { it != NotificationManager.IMPORTANCE_NONE })
+
+private fun notificationsEnabled(context: android.content.Context): Boolean {
+    val managerCompat = NotificationManagerCompat.from(context)
+    val channelImportances = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+        val manager = context.getSystemService(NotificationManager::class.java)
+        listOf(
+            AppLifecycleMonitor.CHANNEL_DECISIONS,
+            AppLifecycleMonitor.CHANNEL_IDLE,
+        ).mapNotNull { manager?.getNotificationChannel(it)?.importance }
+    } else {
+        emptyList()
+    }
+    return notificationDeliveryEnabled(
+        runtimeGranted = notificationPermissionGranted(context),
+        appEnabled = managerCompat.areNotificationsEnabled(),
+        relevantChannelImportances = channelImportances,
+    )
+}
+
+private fun openSystemNotificationSettings(context: android.content.Context) {
+    val packageName = context.packageName
+    val channelSettings = Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS).apply {
+        putExtra(Settings.EXTRA_APP_PACKAGE, packageName)
+        addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+    }
+    runCatching { context.startActivity(channelSettings) }
+        .recoverCatching {
+            context.startActivity(
+                Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS).apply {
+                    data = Uri.parse("package:$packageName")
+                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                }
+            )
+        }
 }

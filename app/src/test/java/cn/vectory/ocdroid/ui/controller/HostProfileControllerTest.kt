@@ -910,6 +910,29 @@ class HostProfileControllerTest {
     }
 
     @Test
+    fun `resetLocalDataAndResync bumps completeness epoch instead of resetting to zero`() {
+        // §gpter-residual (oracle must-fix): a reset-to-0 epoch creates an ABA
+        // window where a hydration captured before the reset (epoch 0 on a fresh
+        // start) could commit afterward and re-certify a stale root. The reset
+        // must bump the epoch monotonically so the epoch guard drops it.
+        slices.mutateSessionList {
+            it.copy(completenessEpoch = 5L, completeRootIds = setOf("stale"))
+        }
+
+        controller.resetLocalDataAndResync()
+
+        assertEquals(
+            "epoch bumped from 5 to 6, not reset to 0",
+            6L,
+            slices.sessionList.value.completenessEpoch,
+        )
+        assertTrue(
+            "completeness proofs cleared on reset",
+            slices.sessionList.value.completeRootIds.isEmpty(),
+        )
+    }
+
+    @Test
     fun `resetLocalDataAndResync wipes persisted local data and fires the full reset callback chain in order`() {
         controller.resetLocalDataAndResync()
 

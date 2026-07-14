@@ -49,6 +49,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.RectangleShape
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
@@ -60,6 +61,7 @@ import cn.vectory.ocdroid.ui.CacheGroupListing
 import cn.vectory.ocdroid.ui.CacheListingState
 import cn.vectory.ocdroid.ui.SettingsViewModel
 import cn.vectory.ocdroid.ui.showTimed
+import cn.vectory.ocdroid.ui.theme.AppSectionHeader
 import cn.vectory.ocdroid.ui.theme.BundledMonoFamily
 import cn.vectory.ocdroid.ui.theme.Dimens
 import cn.vectory.ocdroid.util.WorkdirPaths
@@ -93,7 +95,7 @@ internal fun CacheManagementSection(
     hideHeader: Boolean = false,
 ) {
     if (!hideHeader) {
-        SectionHeader(title = stringResource(R.string.settings_section_cache))
+        AppSectionHeader(text = stringResource(R.string.settings_section_cache))
     }
 
     LaunchedEffect(Unit) { vm.refreshCacheListing() }
@@ -138,8 +140,12 @@ internal fun CacheManagementSection(
         Spacer(modifier = Modifier.height(Dimens.spacing3))
     }
 
+    // §review-AB: Card self-pads horizontal 16dp (route Column no longer pads)
+    // so it shares one keyline with AppSectionHeader + ListItem.
     Card(
-        modifier = Modifier.fillMaxWidth(),
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = Dimens.spacing4),
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)
     ) {
         Column(modifier = Modifier.padding(Dimens.spacing4)) {
@@ -420,21 +426,27 @@ private fun CachedSessionRowItem(
                             else MaterialTheme.colorScheme.onSurfaceVariant
                 )
             }
-            // §setux #8: 清除按钮改为无圆角矩形 + 主题深色填充 + Delete 图标，
+            // §setux #8: 清除按钮改为无圆角矩形 + 透明底 + primary 图标，
             // 无文字。紧凑 36dp 方形，contentDescription 走专用无障碍 key
             // (cache_management_clear_session_cd)。
+            // Material Button retains Compose's automatic minimum touch-target
+            // expansion even though the locked painted footprint is 36dp.
+            // elevation=null keeps the transparent visual shadow-free.
             Button(
                 onClick = onClearSession,
                 shape = RectangleShape,
                 colors = ButtonDefaults.buttonColors(
-                    containerColor = MaterialTheme.colorScheme.primary
+                    containerColor = Color.Transparent,
+                    contentColor = MaterialTheme.colorScheme.primary
                 ),
+                elevation = null,
                 contentPadding = PaddingValues(0.dp),
                 modifier = Modifier.size(36.dp)
             ) {
                 Icon(
                     Icons.Default.Delete,
                     contentDescription = stringResource(R.string.cache_management_clear_session_cd),
+                    tint = MaterialTheme.colorScheme.primary,
                     modifier = Modifier.size(Dimens.iconXs)
                 )
             }
@@ -453,8 +465,13 @@ internal data class CacheProjectBucket(
 
 @Composable
 private fun DegradedCacheWarning() {
+    // §review-AB: Card self-pads horizontal 16dp (route Column no longer pads)
+    // so it shares one keyline with AppSectionHeader + ListItem + the main
+    // cache Card above.
     Card(
-        modifier = Modifier.fillMaxWidth(),
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = Dimens.spacing4),
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.errorContainer)
     ) {
         Row(
@@ -654,8 +671,12 @@ private fun CacheManagementSectionPreviewHost(
         Spacer(modifier = Modifier.height(Dimens.spacing3))
     }
 
+    // §review-AB: Card self-pads horizontal 16dp to mirror production
+    // (CacheManagementSection above) so previews match the on-screen keyline.
     Card(
-        modifier = Modifier.fillMaxWidth(),
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = Dimens.spacing4),
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)
     ) {
         Column(modifier = Modifier.padding(Dimens.spacing4)) {

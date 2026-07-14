@@ -28,6 +28,7 @@ import cn.vectory.ocdroid.ui.SharedStateStore
 import cn.vectory.ocdroid.ui.TunnelActivationState
 import cn.vectory.ocdroid.ui.UiEvent
 import cn.vectory.ocdroid.ui.currentSession
+import cn.vectory.ocdroid.ui.loadSessionsForEffect
 import cn.vectory.ocdroid.ui.session.buildSessionTree
 import cn.vectory.ocdroid.ui.visibleMessages
 import cn.vectory.ocdroid.util.ThemeMode
@@ -242,7 +243,7 @@ class SessionViewModelTest : MainViewModelTestBase() {
         val orchestratorVM = cn.vectory.ocdroid.ui.OrchestratorViewModel(core)
         val viewModel = SessionViewModel(core)  // primary VM under test
 
-        sessionVM.loadSessions()
+        core.loadSessionsForEffect()
         advanceUntilIdle()
 
         coVerify { repository.getSessions(cn.vectory.ocdroid.ui.MainViewModelTimings.sessionFullLoadLimit) }
@@ -272,7 +273,7 @@ class SessionViewModelTest : MainViewModelTestBase() {
         val orchestratorVM = cn.vectory.ocdroid.ui.OrchestratorViewModel(core)
         val viewModel = SessionViewModel(core)  // primary VM under test
 
-        sessionVM.loadSessions()
+        core.loadSessionsForEffect()
         advanceUntilIdle()
 
         assertFalse(sessionVM.sessionListFlow.value.isRefreshingSessions)
@@ -296,7 +297,7 @@ class SessionViewModelTest : MainViewModelTestBase() {
         val composerVM = cn.vectory.ocdroid.ui.ComposerViewModel(core)
         val orchestratorVM = cn.vectory.ocdroid.ui.OrchestratorViewModel(core)
         val viewModel = SessionViewModel(core)  // primary VM under test
-        sessionVM.loadSessions()
+        core.loadSessionsForEffect()
         advanceUntilIdle()
 
         assertEquals(1, sessionVM.sessionListFlow.value.sessions.size)
@@ -314,7 +315,7 @@ class SessionViewModelTest : MainViewModelTestBase() {
             repository.getSessions(cn.vectory.ocdroid.ui.MainViewModelTimings.sessionFullLoadLimit)
         } returns Result.success(refreshedSessions)
 
-        sessionVM.loadSessions()
+        core.loadSessionsForEffect()
         advanceUntilIdle()
 
         assertEquals(2, sessionVM.sessionListFlow.value.sessions.size)
@@ -335,7 +336,7 @@ class SessionViewModelTest : MainViewModelTestBase() {
         val orchestratorVM = cn.vectory.ocdroid.ui.OrchestratorViewModel(core)
         val viewModel = SessionViewModel(core)  // primary VM under test
 
-        sessionVM.loadSessions()
+        core.loadSessionsForEffect()
         advanceUntilIdle()
 
         assertFalse(sessionVM.sessionListFlow.value.isRefreshingSessions)
@@ -434,7 +435,7 @@ class SessionViewModelTest : MainViewModelTestBase() {
         val viewModel = SessionViewModel(core)  // primary VM under test
         core.writeChat { it.copy(currentSessionId = "session-not-in-list") }
 
-        sessionVM.loadSessions()
+        core.loadSessionsForEffect()
         advanceUntilIdle()
 
         assertEquals(

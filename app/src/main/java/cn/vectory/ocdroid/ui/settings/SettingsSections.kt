@@ -1,7 +1,6 @@
 package cn.vectory.ocdroid.ui.settings
 
 import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -10,10 +9,8 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.DeleteSweep
 import androidx.compose.material.icons.outlined.Refresh
-import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
@@ -26,7 +23,6 @@ import androidx.compose.material3.SegmentedButtonDefaults
 import androidx.compose.material3.SingleChoiceSegmentedButtonRow
 import androidx.compose.material3.Slider
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -37,6 +33,9 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import cn.vectory.ocdroid.R
+import cn.vectory.ocdroid.ui.theme.AppConfirmDialog
+import cn.vectory.ocdroid.ui.theme.AppSectionHeader
+import cn.vectory.ocdroid.ui.theme.Dimens
 import cn.vectory.ocdroid.ui.util.formatBytes
 import cn.vectory.ocdroid.util.LocaleMode
 import cn.vectory.ocdroid.util.SettingsManager
@@ -80,13 +79,24 @@ internal fun AppearanceSection(
     onFontScaleChange: (Float) -> Unit = {},
     onContentScaleChange: (Float) -> Unit = {}
 ) {
-    SectionHeader(title = stringResource(R.string.settings_appearance))
+    AppSectionHeader(text = stringResource(R.string.settings_appearance))
+
+    // §review-AB: each bare widget self-pads `horizontal = Dimens.spacing4` so
+    // it shares one 16dp keyline with AppSectionHeader (self-pad) + ListItem
+    // (self-pad). The route Column no longer adds a parent horizontal padding
+    // (that caused the header to sit at 32dp while bare content sat at 16dp).
 
     val modes = listOf(ThemeMode.SYSTEM, ThemeMode.LIGHT, ThemeMode.DARK)
-    Text(stringResource(R.string.settings_theme), style = MaterialTheme.typography.labelMedium)
-    Spacer(modifier = Modifier.height(8.dp))
+    Text(
+        stringResource(R.string.settings_theme),
+        style = MaterialTheme.typography.labelMedium,
+        modifier = Modifier.padding(horizontal = Dimens.spacing4),
+    )
+    Spacer(modifier = Modifier.height(Dimens.spacing2))
     SingleChoiceSegmentedButtonRow(
-        modifier = Modifier.fillMaxWidth()
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = Dimens.spacing4)
     ) {
         modes.forEachIndexed { index, mode ->
             SegmentedButton(
@@ -117,15 +127,21 @@ internal fun AppearanceSection(
         }
     }
 
-    Spacer(modifier = Modifier.height(20.dp))
+    Spacer(modifier = Modifier.height(Dimens.spacing5))
 
     // §P5a (Q5): language SegmentedButton — parallel to the Theme row above.
     // Follow System re-resolves the real system locale (zh→zh, en→en, other→zh).
     val locales = listOf(LocaleMode.SYSTEM, LocaleMode.ZH, LocaleMode.EN)
-    Text(stringResource(R.string.settings_language), style = MaterialTheme.typography.labelMedium)
-    Spacer(modifier = Modifier.height(8.dp))
+    Text(
+        stringResource(R.string.settings_language),
+        style = MaterialTheme.typography.labelMedium,
+        modifier = Modifier.padding(horizontal = Dimens.spacing4),
+    )
+    Spacer(modifier = Modifier.height(Dimens.spacing2))
     SingleChoiceSegmentedButtonRow(
-        modifier = Modifier.fillMaxWidth()
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = Dimens.spacing4)
     ) {
         locales.forEachIndexed { index, mode ->
             SegmentedButton(
@@ -156,7 +172,7 @@ internal fun AppearanceSection(
         }
     }
 
-    Spacer(modifier = Modifier.height(20.dp))
+    Spacer(modifier = Modifier.height(Dimens.spacing5))
 
     // §ui-scale: two sliders following the official Android scalable-content
     // guidance. Font scale = text only; content scale = everything (dp + sp).
@@ -164,9 +180,16 @@ internal fun AppearanceSection(
     // slider visibly resizes the whole app in real time (the root composition
     // recomposes because MainActivity subscribes to settingsFlow).
     val percentFmt = remember { java.text.DecimalFormat("0%") }
-    Text(stringResource(R.string.settings_ui_font_scale), style = MaterialTheme.typography.labelMedium)
+    Text(
+        stringResource(R.string.settings_ui_font_scale),
+        style = MaterialTheme.typography.labelMedium,
+        modifier = Modifier.padding(horizontal = Dimens.spacing4),
+    )
     Row(
-        modifier = Modifier.fillMaxWidth().padding(top = 4.dp),
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = Dimens.spacing4)
+            .padding(top = Dimens.spacing1),
         verticalAlignment = Alignment.CenterVertically
     ) {
         Slider(
@@ -176,21 +199,31 @@ internal fun AppearanceSection(
             steps = 8, // 0.85–1.3 in ~0.05 steps
             modifier = Modifier.weight(1f)
         )
-        Spacer(modifier = Modifier.width(12.dp))
+        Spacer(modifier = Modifier.width(Dimens.spacing3))
         Text(
             text = percentFmt.format(uiFontScale),
             style = MaterialTheme.typography.labelMedium,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
+            // §ui-scale: 44dp holds "130%" at labelMedium even at max
+            // uiContentScale (1.3×). No Dimens token for 44dp — spec §3
+            // tolerates this one-off width literal with a written reason.
             modifier = Modifier.width(44.dp),
             textAlign = androidx.compose.ui.text.style.TextAlign.End
         )
     }
 
-    Spacer(modifier = Modifier.height(12.dp))
+    Spacer(modifier = Modifier.height(Dimens.spacing3))
 
-    Text(stringResource(R.string.settings_ui_content_scale), style = MaterialTheme.typography.labelMedium)
+    Text(
+        stringResource(R.string.settings_ui_content_scale),
+        style = MaterialTheme.typography.labelMedium,
+        modifier = Modifier.padding(horizontal = Dimens.spacing4),
+    )
     Row(
-        modifier = Modifier.fillMaxWidth().padding(top = 4.dp),
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = Dimens.spacing4)
+            .padding(top = Dimens.spacing1),
         verticalAlignment = Alignment.CenterVertically
     ) {
         Slider(
@@ -200,11 +233,12 @@ internal fun AppearanceSection(
             steps = 8,
             modifier = Modifier.weight(1f)
         )
-        Spacer(modifier = Modifier.width(12.dp))
+        Spacer(modifier = Modifier.width(Dimens.spacing3))
         Text(
             text = percentFmt.format(uiContentScale),
             style = MaterialTheme.typography.labelMedium,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
+            // §ui-scale: see the matching font-scale row above.
             modifier = Modifier.width(44.dp),
             textAlign = androidx.compose.ui.text.style.TextAlign.End
         )
@@ -219,14 +253,17 @@ internal fun TrafficSection(
     hideHeader: Boolean = false
 ) {
     if (!hideHeader) {
-        SectionHeader(title = stringResource(R.string.settings_traffic))
+        AppSectionHeader(text = stringResource(R.string.settings_traffic))
     }
 
     ListItem(
         headlineContent = {
             Text(
                 "↑ ${formatBytes(sent)}   ↓ ${formatBytes(received)}",
-                style = MaterialTheme.typography.bodyMedium
+                // §WT5 (unify): row headline promoted bodyMedium → bodyLarge
+                // to match S1 (HostProfileRow) and S3 (ModelManagementSection
+                // launcher row). The trailing Refresh IconButton stays.
+                style = MaterialTheme.typography.bodyLarge
             )
         },
         trailingContent = {
@@ -267,15 +304,18 @@ internal fun DangerZoneSection(
     var showConfirm by remember { mutableStateOf(false) }
 
     if (!hideHeader) {
-        SectionHeader(title = stringResource(R.string.settings_danger_zone))
+        AppSectionHeader(text = stringResource(R.string.settings_danger_zone))
     }
 
     // §P5b-B (Q8): flat single row — no tinted Card. The left text shows the
     // total cached-data size; the right button triggers the destructive wipe
     // (gated by the confirmation dialog below). Same Row so the user sees the
     // cost + the action together.
+    // §review-AB: Row self-pads horizontal 16dp (route Column no longer pads).
     Row(
-        modifier = Modifier.fillMaxWidth(),
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = Dimens.spacing4),
         horizontalArrangement = Arrangement.SpaceBetween,
         verticalAlignment = Alignment.CenterVertically
     ) {
@@ -290,63 +330,60 @@ internal fun DangerZoneSection(
                 contentColor = MaterialTheme.colorScheme.error
             )
         ) {
-            Icon(Icons.Default.DeleteSweep, contentDescription = null, modifier = Modifier.size(18.dp))
-            Spacer(modifier = Modifier.width(8.dp))
+            Icon(Icons.Default.DeleteSweep, contentDescription = null, modifier = Modifier.size(Dimens.iconSm))
+            Spacer(modifier = Modifier.width(Dimens.spacing2))
             Text(stringResource(R.string.cache_clear_cache))
         }
     }
 
     if (showConfirm) {
-        AlertDialog(
-            onDismissRequest = { showConfirm = false },
-            title = { Text(stringResource(R.string.settings_clear_local_data_title)) },
-            text = {
-                Column {
-                    Text(
-                        stringResource(R.string.settings_clear_local_data_keeps),
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = MaterialTheme.colorScheme.primary
-                    )
-                    Spacer(modifier = Modifier.height(8.dp))
-                    Text(
-                        stringResource(R.string.settings_clear_local_data_clears),
-                        style = MaterialTheme.typography.bodyMedium
-                    )
-                    Spacer(modifier = Modifier.height(8.dp))
-                    Text(
-                        stringResource(R.string.settings_clear_local_data_irreversible),
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = MaterialTheme.colorScheme.error
-                    )
-                }
+        // §review-AB: clear-local-data confirm now uses the AppConfirmDialog
+        // composable-body overload so the three message segments keep their
+        // semantic colors (keeps=primary / clears=onSurfaceVariant /
+        // irreversible=error). Previously WT5 collapsed them into a single
+        // String body, losing the red "irreversible" safety cue. Texts are
+        // preserved verbatim — only the per-paragraph color emphasis is
+        // restored on top of the canonical dialog shell.
+        AppConfirmDialog(
+            title = stringResource(R.string.settings_clear_local_data_title),
+            bodyContent = {
+                Text(
+                    stringResource(R.string.settings_clear_local_data_keeps),
+                    color = MaterialTheme.colorScheme.primary,
+                )
+                Spacer(modifier = Modifier.height(Dimens.spacing2))
+                Text(
+                    stringResource(R.string.settings_clear_local_data_clears),
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                Spacer(modifier = Modifier.height(Dimens.spacing2))
+                Text(
+                    stringResource(R.string.settings_clear_local_data_irreversible),
+                    color = MaterialTheme.colorScheme.error,
+                )
             },
-            confirmButton = {
-                TextButton(
-                    onClick = {
-                        showConfirm = false
-                        onClearLocalData()
-                    },
-                    colors = ButtonDefaults.textButtonColors(
-                        contentColor = MaterialTheme.colorScheme.error
-                    )
-                ) { Text(stringResource(R.string.cache_clear_cache)) }
+            confirmText = stringResource(R.string.cache_clear_cache),
+            onConfirm = {
+                showConfirm = false
+                onClearLocalData()
             },
-            dismissButton = {
-                TextButton(onClick = { showConfirm = false }) {
-                    Text(stringResource(R.string.common_cancel))
-                }
-            }
+            dismissText = stringResource(R.string.common_cancel),
+            onDismiss = { showConfirm = false },
+            destructive = true,
         )
     }
 }
 
 @Composable
 internal fun AboutSection() {
-    SectionHeader(title = stringResource(R.string.settings_about))
+    AppSectionHeader(text = stringResource(R.string.settings_about))
 
+    // §review-AB: bare Texts self-pad horizontal 16dp (route Column no longer
+    // pads) so they share one keyline with AppSectionHeader.
     Text(
         stringResource(R.string.app_name),
-        style = MaterialTheme.typography.bodyLarge
+        style = MaterialTheme.typography.bodyLarge,
+        modifier = Modifier.padding(horizontal = Dimens.spacing4),
     )
     Text(
         // BuildConfig.VERSION_NAME is generated at build time from
@@ -354,15 +391,18 @@ internal fun AboutSection() {
         // without a hardcoded string to keep in sync.
         stringResource(R.string.settings_version, cn.vectory.ocdroid.BuildConfig.VERSION_NAME),
         style = MaterialTheme.typography.bodySmall,
-        color = MaterialTheme.colorScheme.outline
+        color = MaterialTheme.colorScheme.outline,
+        modifier = Modifier.padding(horizontal = Dimens.spacing4),
     )
 }
 
-@Composable
-internal fun SectionHeader(title: String) {
-    Text(
-        title,
-        style = MaterialTheme.typography.titleMedium
-    )
-    Spacer(modifier = Modifier.height(8.dp))
-}
+// §WT5: the local `SectionHeader(title: String)` composable that used to live
+// here has been deleted. All settings call sites now use the canonical shared
+// primitive `cn.vectory.ocdroid.ui.theme.AppSectionHeader` (titleSmall +
+// onSurfaceVariant + Dimens.padding, see docs/ui-style-spec.md §2). Same-
+// package callers that were migrated alongside this lane:
+//  - SettingsSections.kt (AppearanceSection / TrafficSection / DangerZoneSection / AboutSection)
+//  - SettingsScreen.kt (Notifications / Storage / About sub-routes)
+//  - HostProfilesManagerScreen.kt (S1 服务器配置 / S2 流量统计)
+//  - ModelManagementSection.kt (settings_model_management)
+//  - CacheManagementSection.kt / DebugLogSection.kt (same package — one-line callsite each).
