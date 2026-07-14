@@ -77,21 +77,38 @@ internal class ForegroundSessionTreeHydrator(
     fun request(rootIds: Set<String>) {
         val snapshot = store.sessionListFlow.value
         val byId = allSessionsById(snapshot.sessions, snapshot.directorySessions, snapshot.childSessions)
+        // §glmer-minor: inFlight.add must happen AFTER the byId / parentId
+        // filters — otherwise an id that is filtered out (unknown / non-root)
+        // but already added to inFlight is stuck forever if roots ends up
+        // empty (the early-return at `if (roots.isEmpty()) return` would skip
+        // the finally cleanup). Filtering inFlight last guarantees only
+        // actually-launched roots are tracked.
         val roots = synchronized(inFlight) {
             rootIds.asSequence()
-                .filter { it !in snapshot.completeRootIds && inFlight.add(it) }
+                .filter { it !in snapshot.completeRootIds }
                 .mapNotNull(byId::get)
                 .filter { it.parentId == null }
+                .filter { inFlight.add(it.id) }
                 .toList()
         }
         if (roots.isEmpty()) return
         val hostId = store.hostFlow.value.currentHostProfileId
+        // §gpter-blocker: capture the completeness epoch BEFORE hydration
+        // starts. If an invalidation (SSE session.created/updated or a REST
+        // structural replace) bumps the epoch mid-flight, the commit below
+        // drops the result (fail-closed) so a stale snapshot can never
+        // re-certify a root whose tree was invalidated.
+        val epochAtStart = snapshot.completenessEpoch
         scope.launch {
             try {
                 val result = loadCompleteSessionTrees(repository, roots)
                 val statusBefore = store.sessionListFlow.value.sessionStatuses
                 val statusSnapshot = repository.getSessionStatus().getOrNull()
                 store.mutateSessionList { current ->
+                    // §gpter-blocker: the tree was invalidated mid-flight —
+                    // drop the stale result. The roots stay incomplete so the
+                    // next tick re-hydrates against the fresh tree.
+                    if (current.completenessEpoch != epochAtStart) return@mutateSessionList current
                     val currentById = allSessionsById(current.sessions, current.directorySessions, current.childSessions)
                     val stillSameIdentity = store.hostFlow.value.currentHostProfileId == hostId
                     val validRoots = result.completeRootIds.filterTo(mutableSetOf()) { rootId ->

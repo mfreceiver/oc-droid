@@ -263,7 +263,14 @@ internal fun launchLoadSessions(
                         sessions = mergedSessions,
                         hasMoreSessions = newHasMore,
                         isLoadingMoreSessions = false,
-                        isRefreshingSessions = false
+                        isRefreshingSessions = false,
+                        // §gpter-important: a full REST list replace is
+                        // authoritative for structure. If SSE dropped events,
+                        // stale completeness proofs could persist against a
+                        // structurally-changed tree. Discard them and bump the
+                        // epoch so in-flight hydrations drop (fail-closed).
+                        completeRootIds = emptySet(),
+                        completenessEpoch = it.completenessEpoch + 1L,
                     )
                 }
                 // Persist a BOUNDED session-metadata cache so the next cold
@@ -431,7 +438,14 @@ internal fun launchLoadMoreSessions(
                         sessions = mergedSessions,
                         loadedSessionLimit = nextLimit,
                         hasMoreSessions = newHasMore,
-                        isLoadingMoreSessions = false
+                        isLoadingMoreSessions = false,
+                        // §gpter-important: REST pagination is also a structural
+                        // catch-up — merged sessions may carry changed parentId
+                        // / archived state that SSE dropped. Discard cached
+                        // completeness proofs and bump the epoch so in-flight
+                        // hydrations drop (fail-closed).
+                        completeRootIds = emptySet(),
+                        completenessEpoch = it.completenessEpoch + 1L,
                     )
                 }
                 val currentId = currentSessionId
@@ -592,11 +606,21 @@ internal fun launchLoadChildSessions(
             // still addressable by id, so hydrate from a minimal placeholder;
             // metadata will be supplied by the normal session-list refresh.
             val root = byId[rootId] ?: Session(id = rootId, directory = "")
+            // §gpter-blocker: capture the completeness epoch BEFORE hydration
+            // starts. If an invalidation (SSE session.created/updated or a REST
+            // structural replace) bumps the epoch mid-flight, the commit below
+            // drops the result (fail-closed) so a stale snapshot can never
+            // re-certify a root whose tree was invalidated.
+            val epochAtStart = before.completenessEpoch
             val hydration = loadCompleteSessionTrees(repository, listOf(root))
             if (rootId in hydration.completeRootIds) {
                 val statusBefore = slices.sessionList.value.sessionStatuses
                 val statusSnapshot = repository.getSessionStatus().getOrNull()
                 slices.mutateSessionList {
+                    // §gpter-blocker: the tree was invalidated mid-flight —
+                    // drop the stale result. The root stays incomplete so the
+                    // next tick re-hydrates against the fresh tree.
+                    if (it.completenessEpoch != epochAtStart) return@mutateSessionList it
                     val nextChildren = it.childSessions + hydration.childrenByParent
                     val nextStatuses = if (statusSnapshot != null) {
                         val authoritativeIds = allSessionsById(it.sessions, it.directorySessions, nextChildren).keys

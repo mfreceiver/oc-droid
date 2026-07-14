@@ -1336,6 +1336,10 @@ private fun SessionListState.upsertAndInvalidateTree(session: Session): SessionL
         // every completeness proof rather than risk a false "all descendants
         // idle" result until hydration reconnects the new node to its root.
         completeRootIds = if (rootId == null) emptySet() else completeRootIds - rootId,
+        // §gpter-blocker: bump the invalidation epoch so any in-flight
+        // hydration (started before this SSE event) drops its result at
+        // commit instead of re-certifying the now-stale root.
+        completenessEpoch = completenessEpoch + 1L,
     )
 }
 

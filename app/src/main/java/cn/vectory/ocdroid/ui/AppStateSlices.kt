@@ -360,6 +360,18 @@ data class SessionListState(
     val childSessions: Map<String, List<Session>> = emptyMap(),
     /** Roots whose complete descendant tree was fetched successfully. */
     val completeRootIds: Set<String> = emptySet(),
+    /**
+     * §gpter-blocker (v097 review-fix): monotonic completeness invalidation
+     * epoch. Bumped by every structural mutation that invalidates cached
+     * completeness proofs ([upsertAndInvalidateTree] on SSE session.created /
+     * session.updated, and the REST structural replaces in
+     * [launchLoadSessions] / [launchLoadMoreSessions]). Hydration paths
+     * capture this value at START and, at COMMIT, only re-certify roots if
+     * the epoch is unchanged — an in-flight hydration that straddled an
+     * invalidation is dropped (fail-closed) so a stale snapshot can never
+     * re-add a root to [completeRootIds] after the tree was invalidated.
+     */
+    val completenessEpoch: Long = 0L,
     val directorySessions: Map<String, List<Session>> = emptyMap(),
     val openSessionIds: List<String> = emptyList(),
     val sessionTodos: Map<String, List<TodoItem>> = emptyMap(),
