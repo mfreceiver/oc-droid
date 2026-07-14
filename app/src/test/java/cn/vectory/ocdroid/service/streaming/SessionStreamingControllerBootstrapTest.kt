@@ -220,7 +220,7 @@ class SessionStreamingControllerBootstrapTest {
         val coordinator = StreamingLifecycleCoordinator(aggregator, scope)
         val store = ConnectionIdentityStore()
         val shell = RecordingShell()
-        val snapshotProvider = SessionSnapshotProvider { emptyMap<String, Session>() }
+        val snapshotProvider = SessionSnapshotProvider { cn.vectory.ocdroid.service.status.StatusSnapshot.Empty }
         val bootstrapRunner = ScriptedBootstrapRunner()
         val inForegroundFlow = MutableStateFlow(inForeground)
         val controller = SessionStreamingController(
@@ -252,8 +252,8 @@ class SessionStreamingControllerBootstrapTest {
         val bootstrapRunner: ScriptedBootstrapRunner,
     )
 
-    private data class RefreshCall(val identity: ConnectionIdentity, val sessions: Map<String, Session>)
-    private data class MarkFailedCall(val identity: ConnectionIdentity, val sessions: Map<String, Session>)
+    private data class RefreshCall(val identity: ConnectionIdentity, val snapshot: cn.vectory.ocdroid.service.status.StatusSnapshot)
+    private data class MarkFailedCall(val identity: ConnectionIdentity, val snapshot: cn.vectory.ocdroid.service.status.StatusSnapshot)
 
     private class RecordingStatusInput : StatusAggregator,
         cn.vectory.ocdroid.service.status.StatusAggregatorInput {
@@ -267,6 +267,9 @@ class SessionStreamingControllerBootstrapTest {
         override val statusByKey: StateFlow<Map<SessionStatusKey, SessionBusyStatus>> =
             _statusByKey.asStateFlow()
 
+        /** D1 gate #1: stateAtNow tracks globalState in the fake. */
+        override fun stateAtNow(): GlobalBusyState = _globalState.value
+
         val refreshArgs = mutableListOf<RefreshCall>()
         val markFailedArgs = mutableListOf<MarkFailedCall>()
 
@@ -277,9 +280,9 @@ class SessionStreamingControllerBootstrapTest {
 
         override suspend fun refresh(
             identity: ConnectionIdentity,
-            sessionsById: Map<String, Session>,
+            snapshot: cn.vectory.ocdroid.service.status.StatusSnapshot,
         ) {
-            refreshArgs += RefreshCall(identity, sessionsById)
+            refreshArgs += RefreshCall(identity, snapshot)
         }
 
         override fun applySseStatus(
@@ -290,10 +293,10 @@ class SessionStreamingControllerBootstrapTest {
 
         override fun markRequestFailed(
             identity: ConnectionIdentity,
-            sessionsById: Map<String, Session>,
+            snapshot: cn.vectory.ocdroid.service.status.StatusSnapshot,
             sourceTimeMs: Long,
         ) {
-            markFailedArgs += MarkFailedCall(identity, sessionsById)
+            markFailedArgs += MarkFailedCall(identity, snapshot)
         }
     }
 

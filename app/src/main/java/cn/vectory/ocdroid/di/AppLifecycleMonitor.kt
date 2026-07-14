@@ -120,6 +120,20 @@ class AppLifecycleMonitor @Inject constructor(
     /** Currently-running background poller job; null while in foreground. */
     private var pollJob: Job? = null
 
+    /**
+     * D1 (gate #2, §4.3): pending background-confirmation job. A 1→0
+     * `onActivityStopped` transition does NOT flip `_isInForeground=false`
+     * synchronously — it launches this confirmation job, which waits
+     * [BACKGROUND_CONFIRMATION_MS] (matching AndroidX
+     * `ProcessLifecycleOwner`'s 700ms) and re-checks that the started-count
+     * is still 0 before actually emitting background. The 0→1
+     * `onActivityStarted` transition cancels this job, so an in-flight
+     * configuration change (rotation: 1→0→1 inside 700ms) does NOT wrongly
+     * drive the §4.3 foreground→background→foreground cycle (which would
+     * have flipped L1→L3/L2 on stale data).
+     */
+    private var backgroundConfirmationJob: Job? = null
+
     /** Last error message surfaced via [onAppError]; tracked so we don't loop. */
     private var lastNotifiedError: String? = null
 
@@ -133,6 +147,12 @@ class AppLifecycleMonitor @Inject constructor(
         // foreground StateFlow.
         application.registerActivityLifecycleCallbacks(object : Application.ActivityLifecycleCallbacks {
             override fun onActivityStarted(activity: Activity) {
+                // D1 (gate #2): a 0→1 transition cancels any pending
+                // background-confirmation job (rotation 1→0→1 inside 700ms
+                // must NOT emit background). Done BEFORE incrementing so a
+                // racing in-flight confirmation recheck observes count >= 1.
+                backgroundConfirmationJob?.cancel()
+                backgroundConfirmationJob = null
                 activityStartedCount++
                 if (activityStartedCount == 1 && !_isInForeground.value) {
                     _isInForeground.value = true
@@ -141,9 +161,26 @@ class AppLifecycleMonitor @Inject constructor(
             }
             override fun onActivityStopped(activity: Activity) {
                 activityStartedCount = (activityStartedCount - 1).coerceAtLeast(0)
+                // D1 (gate #2, §4.3): do NOT flip foreground synchronously at
+                // count 0. A rotation produces a transient 1→0→1 cycle and
+                // the synchronous flip would wrongly drive L1→L3/L2 on the
+                // §4.3 foreground signal. Match AndroidX
+                // ProcessLifecycleOwner's 700ms confirmation: cancel any
+                // prior pending job, launch a new one, and only actually
+                // emit background if the count is STILL 0 after the delay.
                 if (activityStartedCount == 0 && _isInForeground.value) {
-                    _isInForeground.value = false
-                    onEnterBackground()
+                    backgroundConfirmationJob?.cancel()
+                    backgroundConfirmationJob = appScope.launch {
+                        delay(BACKGROUND_CONFIRMATION_MS)
+                        // Re-check under the same dispatcher (appScope =
+                        // Dispatchers.Default). A racing onActivityStarted
+                        // would have cancelled this job before this line;
+                        // the explicit count re-check is belt-and-suspenders.
+                        if (activityStartedCount == 0 && _isInForeground.value) {
+                            _isInForeground.value = false
+                            onEnterBackground()
+                        }
+                    }
                 }
             }
             override fun onActivityCreated(activity: Activity, savedInstanceState: android.os.Bundle?) {}
@@ -357,6 +394,18 @@ class AppLifecycleMonitor @Inject constructor(
 
         /** Background polling interval per §18.1 (R-A, D1). */
         private const val POLL_INTERVAL_MS = 30_000L
+
+        /**
+         * D1 (gate #2, §4.3): delay between the started-activity count
+         * reaching 0 and the actual `_isInForeground=false` flip. Matches
+         * AndroidX `ProcessLifecycleOwner`'s established 700ms window — a
+         * rotation's transient 1→0→1 cycle completes well inside this, so
+         * the §4.3 foreground signal stays stable across configuration
+         * changes. Do NOT use a different value without coordinating with
+         * the lifecycle-state tests (the L1→L3/L2 transitions keyed off
+         * this signal depend on this exact delay for correctness).
+         */
+        const val BACKGROUND_CONFIRMATION_MS = 700L
 
         /** Fixed notification ID for the latest app error. */
         private const val ERROR_NOTIFICATION_ID = 4242

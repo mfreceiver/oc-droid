@@ -174,7 +174,7 @@ class SessionStreamingControllerWiringTest {
         val coordinator = StreamingLifecycleCoordinator(aggregator, scope)
         val store = ConnectionIdentityStore()
         val shell = RecordingShell()
-        val snapshotProvider = SessionSnapshotProvider { emptyMap<String, Session>() }
+        val snapshotProvider = SessionSnapshotProvider { cn.vectory.ocdroid.service.status.StatusSnapshot.Empty }
         val bootstrapRunner = ScriptedBootstrapRunner()
         val inForegroundFlow = MutableStateFlow(inForeground)
         val controller = SessionStreamingController(
@@ -214,6 +214,9 @@ class SessionStreamingControllerWiringTest {
         override val statusByKey: StateFlow<Map<SessionStatusKey, SessionBusyStatus>> =
             _statusByKey.asStateFlow()
 
+        /** D1 gate #1: stateAtNow tracks globalState in the fake. */
+        override fun stateAtNow(): GlobalBusyState = _globalState.value
+
         fun setState(state: GlobalBusyState) {
             _globalState.value = state
             _globalBusy.value = state == GlobalBusyState.Busy
@@ -221,7 +224,7 @@ class SessionStreamingControllerWiringTest {
 
         override suspend fun refresh(
             identity: ConnectionIdentity,
-            sessionsById: Map<String, Session>,
+            snapshot: cn.vectory.ocdroid.service.status.StatusSnapshot,
         ) = Unit
 
         override fun applySseStatus(
@@ -232,7 +235,7 @@ class SessionStreamingControllerWiringTest {
 
         override fun markRequestFailed(
             identity: ConnectionIdentity,
-            sessionsById: Map<String, Session>,
+            snapshot: cn.vectory.ocdroid.service.status.StatusSnapshot,
             sourceTimeMs: Long,
         ) = Unit
     }

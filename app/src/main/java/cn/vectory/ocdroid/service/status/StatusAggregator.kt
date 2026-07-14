@@ -1,6 +1,5 @@
 package cn.vectory.ocdroid.service.status
 
-import cn.vectory.ocdroid.data.model.Session
 import cn.vectory.ocdroid.service.identity.ConnectionIdentity
 import kotlinx.coroutines.flow.StateFlow
 
@@ -49,8 +48,34 @@ interface StatusAggregator {
      * first [StatusAggregatorInput.refresh]) is [GlobalBusyState.Unknown]: the
      * aggregator refuses to authoritatively label the host idle until it has
      * observed at least one fresh successful snapshot.
+     *
+     * **D1 (gate #1)**: the value lags the wall clock by up to the dispatcher
+     * latency of the scheduled [freshnessJob] — observers that need the
+     * time-correct verdict at a specific instant (e.g. the §4.4 idle-debounce
+     * expiry) MUST read [stateAtNow] instead. [globalState] is kept consistent
+     * by a passive TTL wake-up at the earliest deadline that can flip the
+     * projection (§3 «status TTL actively expires»).
      */
     val globalState: StateFlow<GlobalBusyState>
+
+    /**
+     * D1 (gate #1, FGS spec §3 + §4.4): time-correct projection of
+     * [globalState] at the instant of the call.
+     *
+     * **MUST** be used at any instant where a state-transition decision is
+     * made on a wall-clock boundary (the §4.4 idle-debounce expiry being the
+     * canonical case). [globalState] is kept consistent by a passive TTL
+     * wake-up but its `.value` reflects the last committed recompute, which
+     * can lag `now` by the dispatcher latency of the wake-up coroutine. A
+     * 45s debounce that fires at exactly `t = sourceTime + TTL + ε` would
+     * otherwise read a stale `AllIdleFresh` from [globalState] and emit
+     * `StopSse` on stale-idle data (gate #1 / §3 violation).
+     *
+     * The implementation reads the same atomic state map as [recompute] but
+     * uses the aggregator's own [clock] for the freshness verdict (NOT the
+     * `globalState.value` cache).
+     */
+    fun stateAtNow(): GlobalBusyState
 
     /**
      * True iff any tracked session under the current connection identity is
@@ -150,11 +175,14 @@ interface StatusAggregatorInput {
      * @param identity The current connection identity — its `serverGroupFp`
      *  scopes the composite keys and the [StatusAggregator.globalState]
      *  projection.
-     * @param sessionsById The merged 3-source `id → Session` map (produced
-     *  upstream by `SessionTree.allSessionsById`). Used to resolve
-     *  `sessionId → directory`.
+     * @param snapshot The merged 3-source `id → Session` snapshot (produced
+     *  upstream by `SessionTree.allSessionsById` via
+     *  [SessionSnapshotProvider]) AND the registered-workdir coverage set.
+     *  Used to resolve `sessionId → directory` AND to enforce the
+     *  `AllIdleFresh` coverage predicate (FGS spec §3 «只有所有已登记 workdir
+     *  都取得新鲜+成功 idle 才进停流宽限期»).
      */
-    suspend fun refresh(identity: ConnectionIdentity, sessionsById: Map<String, Session>)
+    suspend fun refresh(identity: ConnectionIdentity, snapshot: StatusSnapshot)
 
     /**
      * Apply a single SSE-driven status update (FGS spec §3.1 merge timing).
@@ -177,13 +205,16 @@ interface StatusAggregatorInput {
      * future poller failure path).
      *
      * @param identity The current connection identity.
-     * @param sessionsById The merged 3-source `id → Session` map.
+     * @param snapshot The merged `id → Session` snapshot + registered-workdir
+     *  coverage set (same shape as [refresh] takes — the coverage set is
+     *  preserved across the failure so `AllIdleFresh` cannot falsely pass on
+     *  the post-failure `Unknown` entries).
      * @param sourceTimeMs The failure's effective time — merge-timed against
      *  each entry's existing source time so a fresher observation wins.
      */
     fun markRequestFailed(
         identity: ConnectionIdentity,
-        sessionsById: Map<String, Session>,
+        snapshot: StatusSnapshot,
         sourceTimeMs: Long,
     )
 }

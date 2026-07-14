@@ -9,6 +9,7 @@ import cn.vectory.ocdroid.service.notify.SessionStatusNotifier
 import cn.vectory.ocdroid.service.status.SessionBusyStatus
 import cn.vectory.ocdroid.service.status.StatusAggregator
 import cn.vectory.ocdroid.service.status.StatusAggregatorInput
+import cn.vectory.ocdroid.service.status.StatusSnapshot
 import cn.vectory.ocdroid.util.DebugLog
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
@@ -144,8 +145,13 @@ class SessionStreamingController(
                     // §3 Phase-0 main path: global getSessionStatus, binned by
                     // sessionsById.directory. The aggregator applies §3.1 merge
                     // timing + §2 epoch guard internally.
-                    val sessions = sessionSnapshotProvider.current()
-                    statusAggregatorInput.refresh(identity, sessions)
+                    //
+                    // D1 (gate #5): the snapshot carries registeredWorkdirs
+                    // alongside sessionsById so the aggregator can enforce the
+                    // all-idle coverage predicate + classify unmapped-active
+                    // ids as Busy.
+                    val snapshot = sessionSnapshotProvider.current()
+                    statusAggregatorInput.refresh(identity, snapshot)
                     // §5 decision matrix feeds the post-refresh authoritative
                     // state; the coordinator's matrix picks L1/L2Active/L3.
                     coordinator.onBootstrapResult(identity, statusAggregator.globalState.value)
@@ -159,11 +165,11 @@ class SessionStreamingController(
                     degraded = true
                     DebugLog.w(TAG, "bootstrapAsync: TOFU degraded for ${result.hostPort}")
                     val identity = identityStore.currentIdentity.value
-                    val sessions = sessionSnapshotProvider.current()
+                    val snapshot = sessionSnapshotProvider.current()
                     if (identity != null) {
                         statusAggregatorInput.markRequestFailed(
                             identity = identity,
-                            sessionsById = sessions,
+                            snapshot = snapshot,
                             sourceTimeMs = clock(),
                         )
                     }
@@ -264,8 +270,10 @@ class SessionStreamingController(
             DebugLog.w(TAG, "poller: no bound identity — skipping cycle")
             return
         }
-        val sessions = sessionSnapshotProvider.current()
-        statusAggregatorInput.refresh(identity, sessions)
+        // D1 (gate #5): refresh sees the snapshot's registeredWorkdirs so the
+        // all-idle coverage predicate cannot falsely pass on stale state.
+        val snapshot: StatusSnapshot = sessionSnapshotProvider.current()
+        statusAggregatorInput.refresh(identity, snapshot)
     }
 
     private fun currentBusyCount(): Int {

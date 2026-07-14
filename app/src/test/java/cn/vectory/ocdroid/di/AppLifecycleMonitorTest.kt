@@ -10,6 +10,11 @@ import io.mockk.mockk
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.test.StandardTestDispatcher
+import kotlinx.coroutines.test.TestScope
+import kotlinx.coroutines.test.advanceTimeBy
+import kotlinx.coroutines.test.runCurrent
+import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
@@ -33,6 +38,10 @@ import org.robolectric.annotation.Config
  *  2. **§7 channel matrix**: `createChannels` now registers
  *     `ocdroid.session_status` (IMPORTANCE_LOW) alongside the two existing
  *     channels (`ocdroid.decisions` HIGH / `ocdroid.errors` DEFAULT).
+ *  3. **D1 (gate #2) 700ms background-confirmation**: the synchronous 1→0
+ *     flip was replaced with a delayed confirmation (matching AndroidX
+ *     `ProcessLifecycleOwner`). Tests use virtual time via [TestScope] to
+ *     advance the confirmation window.
  *
  * Uses Robolectric because `Application.registerActivityLifecycleCallbacks`
  * (ALM init) and `NotificationManager.createNotificationChannel` are Android
@@ -44,17 +53,24 @@ import org.robolectric.annotation.Config
  * Activity transitions otherwise, and reflection over framework internals is
  * fragile across Android versions).
  */
+@OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [34], application = CapturingApp::class)
 class AppLifecycleMonitorTest {
 
     private lateinit var app: CapturingApp
     private lateinit var scope: CoroutineScope
+    private lateinit var testScope: TestScope
 
     @Before
     fun setUp() {
         app = ApplicationProvider.getApplicationContext()
-        scope = CoroutineScope(SupervisorJob() + Dispatchers.Unconfined)
+        // D1 (gate #2): ALM's background-confirmation delay runs on the
+        // injected appScope, so we use a TestScope here to virtualize the
+        // 700ms delay. The TestScope's dispatcher replaces Dispatchers.Default
+        // for the launched confirmation job.
+        testScope = TestScope(StandardTestDispatcher())
+        scope = testScope
     }
 
     // ── §4.3 foreground truth-source ────────────────────────────────────────
@@ -85,23 +101,39 @@ class AppLifecycleMonitorTest {
     }
 
     @Test
-    fun `section 4_3 - onActivityStopped 1 to 0 flips foreground back to false`() {
+    fun `section 4_3 - onActivityStopped 1 to 0 flips foreground back to false after 700ms`() = testScope.runTest {
+        // D1 (gate #2): the synchronous flip was replaced with a 700ms
+        // background-confirmation delay (matches AndroidX
+        // ProcessLifecycleOwner). The 1→0 transition alone no longer
+        // immediately flips foreground; we must advance virtual time past
+        // BACKGROUND_CONFIRMATION_MS to observe the flip.
         val monitor = newMonitor()
         val cb = app.registeredCallbacks!!
-        // Drive the started-count to 1 first (foreground).
         cb.onActivityStarted(mockk<android.app.Activity>(relaxed = true))
         assertTrue(monitor.isInForeground.value)
 
         cb.onActivityStopped(mockk<android.app.Activity>(relaxed = true))
-
-        assertFalse(
-            "1→0 onActivityStopped → isInForeground false",
+        // Pre-confirmation: still foreground.
+        assertTrue(
+            "1→0 inside the 700ms window stays foreground (no premature flip)",
             monitor.isInForeground.value,
         )
+
+        advanceTimeBy(AppLifecycleMonitor.BACKGROUND_CONFIRMATION_MS)
+        runCurrent()
+
+        assertFalse(
+            "1→0 + 700ms confirmation → isInForeground false",
+            monitor.isInForeground.value,
+        )
+        // Cleanup: go foreground to cancel the legacy background poller
+        // (else runTest sees an uncompleted child coroutine).
+        cb.onActivityStarted(mockk<android.app.Activity>(relaxed = true))
+        runCurrent()
     }
 
     @Test
-    fun `section 4_3 - partial Activity overlap keeps foreground true until count drops to zero`() {
+    fun `section 4_3 - partial Activity overlap keeps foreground true until count drops to zero`() = testScope.runTest {
         val monitor = newMonitor()
         val cb = app.registeredCallbacks!!
         // Two Activities start — count goes 0→1→2.
@@ -109,17 +141,117 @@ class AppLifecycleMonitorTest {
         cb.onActivityStarted(mockk<android.app.Activity>(relaxed = true))
         assertTrue(monitor.isInForeground.value)
 
-        // First stops — count 2→1 (still foreground).
+        // First stops — count 2→1 (still foreground; no confirmation job armed).
         cb.onActivityStopped(mockk<android.app.Activity>(relaxed = true))
         assertTrue(monitor.isInForeground.value)
 
-        // Second stops — count 1→0 (background).
+        // Second stops — count 1→0 (background confirmation armed, but
+        // hasn't fired yet — still foreground).
         cb.onActivityStopped(mockk<android.app.Activity>(relaxed = true))
+        assertTrue(
+            "1→0 inside the 700ms window stays foreground",
+            monitor.isInForeground.value,
+        )
+
+        advanceTimeBy(AppLifecycleMonitor.BACKGROUND_CONFIRMATION_MS)
+        runCurrent()
         assertFalse(monitor.isInForeground.value)
+        // Cleanup: foreground return cancels the legacy poller.
+        cb.onActivityStarted(mockk<android.app.Activity>(relaxed = true))
+        runCurrent()
+    }
+
+    // ── D1 (gate #2): 700ms background-confirmation corner cases ─────────
+
+    @Test
+    fun `D1 gate #2 - 1 to 0 then advance 699ms stays foreground`() = testScope.runTest {
+        // Just under the 700ms confirmation window → still foreground.
+        val monitor = newMonitor()
+        val cb = app.registeredCallbacks!!
+        cb.onActivityStarted(mockk<android.app.Activity>(relaxed = true))
+        cb.onActivityStopped(mockk<android.app.Activity>(relaxed = true))
+        assertTrue(monitor.isInForeground.value)
+
+        advanceTimeBy(AppLifecycleMonitor.BACKGROUND_CONFIRMATION_MS - 1)
+        runCurrent()
+        assertTrue(
+            "699ms < 700ms confirmation window — still foreground",
+            monitor.isInForeground.value,
+        )
+        // Cleanup: never actually went background, but cancel any pending
+        // confirmation job to avoid runTest leak reports.
+        cb.onActivityStarted(mockk<android.app.Activity>(relaxed = true))
+        runCurrent()
+    }
+
+    @Test
+    fun `D1 gate #2 - 1 to 0 to 1 within 700ms never emits background`() = testScope.runTest {
+        // Rotation-style 1→0→1 cycle inside 700ms: the 0→1 cancels the
+        // pending confirmation job, so background is NEVER emitted.
+        val monitor = newMonitor()
+        val cb = app.registeredCallbacks!!
+        cb.onActivityStarted(mockk<android.app.Activity>(relaxed = true))
+        cb.onActivityStopped(mockk<android.app.Activity>(relaxed = true))
+        assertTrue(monitor.isInForeground.value)
+
+        // Re-start inside the window — cancels the confirmation job.
+        cb.onActivityStarted(mockk<android.app.Activity>(relaxed = true))
+        assertTrue(monitor.isInForeground.value)
+
+        // Advance well past 700ms — no confirmation fires (job was cancelled).
+        advanceTimeBy(AppLifecycleMonitor.BACKGROUND_CONFIRMATION_MS * 3)
+        runCurrent()
+        assertTrue(
+            "1→0→1 inside 700ms — never emits background",
+            monitor.isInForeground.value,
+        )
+    }
+
+    @Test
+    fun `D1 gate #2 - 1 to 0 advance 700ms emits background exactly once`() = testScope.runTest {
+        val monitor = newMonitor()
+        val cb = app.registeredCallbacks!!
+        cb.onActivityStarted(mockk<android.app.Activity>(relaxed = true))
+        cb.onActivityStopped(mockk<android.app.Activity>(relaxed = true))
+
+        advanceTimeBy(AppLifecycleMonitor.BACKGROUND_CONFIRMATION_MS)
+        runCurrent()
+        assertFalse(monitor.isInForeground.value)
+
+        // Advancing further does not flip again — the confirmation job is
+        // a single-shot guard, and there's no re-emission of background.
+        advanceTimeBy(AppLifecycleMonitor.BACKGROUND_CONFIRMATION_MS * 2)
+        runCurrent()
+        assertFalse(monitor.isInForeground.value)
+        // Cleanup: foreground return cancels the legacy poller.
+        cb.onActivityStarted(mockk<android.app.Activity>(relaxed = true))
+        runCurrent()
+    }
+
+    @Test
+    fun `D1 gate #2 - later onActivityStarted after background cancels pending poller`() = testScope.runTest {
+        // Going to background arms the legacy poller (via onEnterBackground).
+        // A subsequent 0→1 must cancel the poller (foreground uses in-app
+        // cards) — the foreground return must not leave the legacy poller
+        // running alongside the in-app surfaces.
+        val monitor = newMonitor()
+        val cb = app.registeredCallbacks!!
+        cb.onActivityStarted(mockk<android.app.Activity>(relaxed = true))
+        cb.onActivityStopped(mockk<android.app.Activity>(relaxed = true))
+        advanceTimeBy(AppLifecycleMonitor.BACKGROUND_CONFIRMATION_MS)
+        runCurrent()
+        assertFalse(monitor.isInForeground.value)
+
+        // Foreground return: cancels the backgroundConfirmationJob (already
+        // completed) AND fires onEnterForeground which cancels the legacy
+        // poller job. We assert the foreground signal flips back; the
+        // poller-cancellation is exercised by the production
+        // onEnterForeground code path.
+        cb.onActivityStarted(mockk<android.app.Activity>(relaxed = true))
+        assertTrue(monitor.isInForeground.value)
     }
 
     // ── §7 channel matrix ─────────────────────────────────────────────────
-
     @Test
     fun `createChannels registers all three channels - decisions HIGH, errors DEFAULT, session_status LOW`() {
         AppLifecycleMonitor.createChannels(app)

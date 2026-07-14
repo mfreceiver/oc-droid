@@ -10,6 +10,7 @@ import cn.vectory.ocdroid.service.status.GlobalBusyState
 import cn.vectory.ocdroid.service.status.SessionBusyStatus
 import cn.vectory.ocdroid.service.status.SessionStatusKey
 import cn.vectory.ocdroid.service.status.StatusAggregator
+import cn.vectory.ocdroid.service.status.StatusSnapshot
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -206,7 +207,7 @@ class SessionStreamingControllerPollerTest {
         val coordinator = StreamingLifecycleCoordinator(input, scope)
         val store = ConnectionIdentityStore()
         val shell = NoopShell()
-        val snapshotProvider = SessionSnapshotProvider { emptyMap<String, Session>() }
+        val snapshotProvider = SessionSnapshotProvider { StatusSnapshot.Empty }
         val bootstrapRunner = ScriptedBootstrapRunner()
         val inForegroundFlow = MutableStateFlow(false)
         val controller = SessionStreamingController(
@@ -251,6 +252,9 @@ class SessionStreamingControllerPollerTest {
         override val statusByKey: StateFlow<Map<SessionStatusKey, SessionBusyStatus>> =
             _statusByKey.asStateFlow()
 
+        /** D1 gate #1: stateAtNow tracks globalState in the fake. */
+        override fun stateAtNow(): GlobalBusyState = _globalState.value
+
         var refreshCount: Int = 0
             private set
 
@@ -261,7 +265,7 @@ class SessionStreamingControllerPollerTest {
 
         override suspend fun refresh(
             identity: ConnectionIdentity,
-            sessionsById: Map<String, Session>,
+            snapshot: StatusSnapshot,
         ) {
             refreshCount++
         }
@@ -274,7 +278,7 @@ class SessionStreamingControllerPollerTest {
 
         override fun markRequestFailed(
             identity: ConnectionIdentity,
-            sessionsById: Map<String, Session>,
+            snapshot: StatusSnapshot,
             sourceTimeMs: Long,
         ) = Unit
     }

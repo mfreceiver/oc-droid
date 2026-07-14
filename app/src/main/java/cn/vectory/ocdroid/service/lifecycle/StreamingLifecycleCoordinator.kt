@@ -370,6 +370,16 @@ class StreamingLifecycleCoordinator @Inject constructor(
      * source alive and prevent the L2Idle transition even at debounce expiry).
      * On fire: StartPoller (new source) BEFORE StopSse (old), then flip to
      * L2Idle (FGS shell kept).
+     *
+     * **D1 (gate #1)**: the expiry reads [StatusAggregator.stateAtNow] (a
+     * time-correct projection), NOT the cached [StatusAggregator.globalState]
+     * `.value`. The cached value lags the wall clock by the dispatcher
+     * latency of the aggregator's passive-TTL wake-up — a debounce firing at
+     * exactly `sourceTime + TTL + ε` would otherwise read a stale
+     * `AllIdleFresh` and emit `StopSse` on stale-idle data (§3 violation).
+     * The aggregator's freshnessJob keeps `globalState` correct for ordinary
+     * observers, but the debounce must read time-correct state at the
+     * instant of firing.
      */
     private fun startIdleDebounce() {
         debounceJob?.cancel()
@@ -377,7 +387,7 @@ class StreamingLifecycleCoordinator @Inject constructor(
             delay(IDLE_DEBOUNCE_MS)
             mutex.withLock {
                 if (_layer.value == Layer.L2Active &&
-                    statusAggregator.globalState.value == GlobalBusyState.AllIdleFresh
+                    statusAggregator.stateAtNow() == GlobalBusyState.AllIdleFresh
                 ) {
                     emit(StartPoller)
                     emit(StopSse)

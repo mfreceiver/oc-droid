@@ -8,6 +8,8 @@ import cn.vectory.ocdroid.service.identity.ConnectionIdentityStore
 import io.mockk.coEvery
 import io.mockk.mockk
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.test.advanceTimeBy
+import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -59,7 +61,19 @@ class StatusAggregatorImplTest {
         repository: OpenCodeRepository,
         identityStore: ConnectionIdentityStore = ConnectionIdentityStore().also { it.bind(fp, "/work", "endpoint-A") },
         clock: () -> Long = { 0L },
-    ): StatusAggregatorImpl = StatusAggregatorImpl(repository, identityStore, clock)
+        scope: kotlinx.coroutines.CoroutineScope = kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.SupervisorJob() + kotlinx.coroutines.Dispatchers.Unconfined),
+    ): StatusAggregatorImpl = StatusAggregatorImpl(repository, identityStore, scope, clock)
+
+    /**
+     * Helper: build a snapshot with the same workdir the [identity] uses,
+     * registered as a covered workdir (so the all-idle coverage predicate
+     * can pass). Tests that want to probe registered-workdir coverage
+     * explicitly construct their own [StatusSnapshot].
+     */
+    private fun snapshot(
+        sessions: Map<String, Session>,
+        registeredWorkdirs: Set<String> = sessions.values.map { it.directory }.toSet(),
+    ): StatusSnapshot = StatusSnapshot(sessions, registeredWorkdirs)
 
     // ── (1) REST success: host statuses → composite keys via session.directory ──────────
 
@@ -79,7 +93,7 @@ class StatusAggregatorImplTest {
         )
         val aggregator = newAggregator(repo, clock = { 100L })
 
-        aggregator.refresh(identity(), sessionsById)
+        aggregator.refresh(identity(), snapshot(sessionsById))
 
         val statuses = aggregator.statusByKey.value
         assertEquals(SessionBusyStatus.Busy, statuses[key("s1", "/work-a")])
@@ -90,19 +104,35 @@ class StatusAggregatorImplTest {
     }
 
     @Test
-    fun `REST success ignores server-returned ids not present in sessionsById`() = runTest {
+    fun `D1 gate #5 - REST success with unmapped active id forces Busy (NOT ignored)`() = runTest {
+        // D1 gate #5: a sessionId returned by /session/status that is NOT in
+        // sessionsById is positively known active → contributes Busy. Pre-D1
+        // this test asserted the ghost was ignored + global idle; D1 flips
+        // the verdict to Busy (FGS spec §3 «returned-but-unmapped active IDs
+        // force Busy»).
         val repo = mockk<OpenCodeRepository>(relaxed = true)
         coEvery { repo.getSessionStatus() } returns Result.success(
             mapOf("ghost" to SessionStatus(type = "busy"))
         )
         val aggregator = newAggregator(repo, clock = { 100L })
 
-        aggregator.refresh(identity(), sessionsById = mapOf("s1" to session("s1", "/work")))
+        aggregator.refresh(
+            identity(),
+            snapshot(
+                sessions = mapOf("s1" to session("s1", "/work")),
+                registeredWorkdirs = setOf("/work"),
+            ),
+        )
 
         val statuses = aggregator.statusByKey.value
-        assertFalse("ghost id must not materialise a key (no workdir known)", statuses.any { it.key.sessionId == "ghost" })
+        assertFalse(
+            "ghost id must not materialise a key (no workdir known)",
+            statuses.any { it.key.sessionId == "ghost" },
+        )
         assertEquals(SessionBusyStatus.Idle, statuses[key("s1", "/work")])
-        assertFalse(aggregator.globalBusy.value)
+        // D1 gate #5: the unmapped active 'ghost' forces Busy.
+        assertEquals(GlobalBusyState.Busy, aggregator.globalState.value)
+        assertTrue(aggregator.globalBusy.value)
     }
 
     // ── (2) REST failure → Unknown; idle-grace guard ────────────────────────────────────
@@ -117,7 +147,7 @@ class StatusAggregatorImplTest {
         )
         val aggregator = newAggregator(repo, clock = { 100L })
 
-        aggregator.refresh(identity(), sessionsById)
+        aggregator.refresh(identity(), snapshot(sessionsById))
 
         val statuses = aggregator.statusByKey.value
         // Critical idle-grace guard: status is Unknown, NOT Idle. The lifecycle coordinator
@@ -142,7 +172,7 @@ class StatusAggregatorImplTest {
         // REST starts at t=100 (BEFORE the SSE update) and fails.
         coEvery { repo.getSessionStatus() } returns Result.failure(java.io.IOException("boom"))
         now = 100L
-        aggregator.refresh(identity(), sessionsById = mapOf("s1" to session("s1", "/work")))
+        aggregator.refresh(identity(), snapshot(mapOf("s1" to session("s1", "/work"))))
 
         // Merge timing (FGS spec §3.1): requestStartMs(100) < sourceTimeMs(150) → SSE Busy
         // survives the failed snapshot. globalBusy stays true — the failed REST did NOT
@@ -167,7 +197,7 @@ class StatusAggregatorImplTest {
         aggregator.applySseStatus(key("s1", "/work"), SessionBusyStatus.Busy, sourceTimeMs = 150L)
 
         coEvery { repo.getSessionStatus() } returns Result.success(emptyMap())
-        aggregator.refresh(identity(), sessionsById = mapOf("s1" to session("s1", "/work")))
+        aggregator.refresh(identity(), snapshot(mapOf("s1" to session("s1", "/work"))))
 
         assertEquals(SessionBusyStatus.Busy, aggregator.statusByKey.value[key("s1", "/work")])
         assertTrue(aggregator.globalBusy.value)
@@ -186,7 +216,7 @@ class StatusAggregatorImplTest {
         // requestStartMs=200 >= sourceTimeMs=100 → REST Idle overwrites the older SSE Busy.
         now = 200L
         coEvery { repo.getSessionStatus() } returns Result.success(emptyMap())
-        aggregator.refresh(identity(), sessionsById = mapOf("s1" to session("s1", "/work")))
+        aggregator.refresh(identity(), snapshot(mapOf("s1" to session("s1", "/work"))))
 
         assertEquals(SessionBusyStatus.Idle, aggregator.statusByKey.value[key("s1", "/work")])
         assertFalse(aggregator.globalBusy.value)
@@ -199,7 +229,7 @@ class StatusAggregatorImplTest {
         val aggregator = newAggregator(repo, clock = { now })
 
         coEvery { repo.getSessionStatus() } returns Result.success(mapOf("s1" to SessionStatus(type = "busy")))
-        aggregator.refresh(identity(), sessionsById = mapOf("s1" to session("s1", "/work")))
+        aggregator.refresh(identity(), snapshot(mapOf("s1" to session("s1", "/work"))))
         assertEquals(SessionBusyStatus.Busy, aggregator.statusByKey.value[key("s1", "/work")])
 
         // A stale SSE frame (older source time) must NOT overwrite the fresher REST entry.
@@ -218,7 +248,7 @@ class StatusAggregatorImplTest {
         )
         val aggregator = newAggregator(repo, clock = { 100L })
 
-        aggregator.refresh(identity(), sessionsById = mapOf("s1" to session("s1", "/work")))
+        aggregator.refresh(identity(), snapshot(mapOf("s1" to session("s1", "/work"))))
         assertTrue(aggregator.globalBusy.value)
 
         // SSE flips s1 to Idle → globalBusy must fall.
@@ -239,13 +269,13 @@ class StatusAggregatorImplTest {
         val aggregator = newAggregator(repo, clock = { 100L })
 
         // First identity observes s1 busy.
-        aggregator.refresh(identity(groupFp = fp), sessionsById = mapOf("s1" to session("s1", "/work")))
+        aggregator.refresh(identity(groupFp = fp), snapshot(mapOf("s1" to session("s1", "/work"))))
         assertTrue(aggregator.globalBusy.value)
 
         // Host switch: refresh under a new serverGroupFp with no active sessions. globalBusy
         // must scope to the new identity and ignore the stale entry from the old group.
         coEvery { repo.getSessionStatus() } returns Result.success(emptyMap())
-        aggregator.refresh(identity(groupFp = "host-group-B"), sessionsById = mapOf("s1" to session("s1", "/work")))
+        aggregator.refresh(identity(groupFp = "host-group-B"), snapshot(mapOf("s1" to session("s1", "/work"))))
         assertFalse(aggregator.globalBusy.value)
 
         // The stale group-A Busy entry is still in statusByKey (not purged here — Lane C
@@ -272,7 +302,7 @@ class StatusAggregatorImplTest {
         )
         val aggregator = newAggregator(repo, clock = { 100L })
 
-        aggregator.refresh(identity(), sessionsById = mapOf("s1" to session("s1", "/work")))
+        aggregator.refresh(identity(), snapshot(mapOf("s1" to session("s1", "/work"))))
         assertEquals(GlobalBusyState.Busy, aggregator.globalState.value)
     }
 
@@ -284,9 +314,11 @@ class StatusAggregatorImplTest {
 
         aggregator.refresh(
             identity(),
-            sessionsById = mapOf(
-                "s1" to session("s1", "/work-a"),
-                "s2" to session("s2", "/work-b"),
+            snapshot(
+                mapOf(
+                    "s1" to session("s1", "/work-a"),
+                    "s2" to session("s2", "/work-b"),
+                ),
             ),
         )
         assertEquals(GlobalBusyState.AllIdleFresh, aggregator.globalState.value)
@@ -298,7 +330,7 @@ class StatusAggregatorImplTest {
         coEvery { repo.getSessionStatus() } returns Result.failure(java.io.IOException("boom"))
         val aggregator = newAggregator(repo, clock = { 100L })
 
-        aggregator.refresh(identity(), sessionsById = mapOf("s1" to session("s1", "/work")))
+        aggregator.refresh(identity(), snapshot(mapOf("s1" to session("s1", "/work"))))
         assertEquals(GlobalBusyState.Unknown, aggregator.globalState.value)
     }
 
@@ -311,7 +343,7 @@ class StatusAggregatorImplTest {
         var now = 1_000L
         val aggregator = newAggregator(repo, clock = { now })
 
-        aggregator.refresh(identity(), sessionsById = mapOf("s1" to session("s1", "/work")))
+        aggregator.refresh(identity(), snapshot(mapOf("s1" to session("s1", "/work"))))
         assertEquals(GlobalBusyState.AllIdleFresh, aggregator.globalState.value)
 
         // Within the TTL window: still AllIdleFresh.
@@ -323,19 +355,90 @@ class StatusAggregatorImplTest {
 
     @Test
     fun `TTL - Idle entry older than 30s flips globalState to Unknown (not authoritative idle)`() = runTest {
+        // D1 (gate #1): pre-D1 this test masked the passive-TTL bug by
+        // FORCING a recompute via an SSE write after time advanced — so the
+        // bug (no autonomous expiry) was invisible. D1 removes the forcing
+        // write and asserts the autonomous expiry: advancing wall-clock past
+        // STATUS_TTL_MS with NO write at all MUST flip globalState to Unknown
+        // via the scheduled freshnessJob.
+        var now = 1_000L
         val repo = mockk<OpenCodeRepository>(relaxed = true)
         coEvery { repo.getSessionStatus() } returns Result.success(emptyMap())
-        var now = 1_000L
-        val aggregator = newAggregator(repo, clock = { now })
+        val aggregator = StatusAggregatorImpl(
+            repo,
+            ConnectionIdentityStore().also { it.bind(fp, "/work", "endpoint-A") },
+            backgroundScope,
+            clock = { now },
+        )
 
-        aggregator.refresh(identity(), sessionsById = mapOf("s1" to session("s1", "/work")))
+        aggregator.refresh(identity(), snapshot(mapOf("s1" to session("s1", "/work"))))
         assertEquals(GlobalBusyState.AllIdleFresh, aggregator.globalState.value)
 
-        // Cross the TTL boundary: the stale Idle entry is no longer authoritative — globalState
-        // MUST fall back to Unknown (do NOT enter idle grace on stale data, FGS spec §3).
+        // Cross the TTL boundary with NO subsequent write — the freshnessJob
+        // must autonomously fire at sourceTime + TTL + 1.
         now = 1_000L + StatusAggregatorImpl.STATUS_TTL_MS + 1
-        aggregator.applySseStatus(key("s1", "/work"), SessionBusyStatus.Idle, sourceTimeMs = 1_000L)
+        advanceTimeBy(StatusAggregatorImpl.STATUS_TTL_MS + 2)
+        runCurrent()
+
+        assertEquals(
+            "D1 gate #1: stale Idle autonomously expires to Unknown (no forcing write)",
+            GlobalBusyState.Unknown,
+            aggregator.globalState.value,
+        )
+    }
+
+    @Test
+    fun `D1 gate #1 - fresh REST idle autonomously expires to Unknown without any write`() = runTest {
+        // The canonical D1 acceptance test: a fresh REST idle at t=0 must
+        // flip to Unknown purely via wall-clock advance, with no map mutation
+        // after t=0.
+        var now = 0L
+        val repo = mockk<OpenCodeRepository>(relaxed = true)
+        coEvery { repo.getSessionStatus() } returns Result.success(emptyMap())
+        val aggregator = StatusAggregatorImpl(
+            repo,
+            ConnectionIdentityStore().also { it.bind(fp, "/work", "endpoint-A") },
+            backgroundScope,
+            clock = { now },
+        )
+
+        aggregator.refresh(identity(), snapshot(mapOf("s1" to session("s1", "/work"))))
+        assertEquals(GlobalBusyState.AllIdleFresh, aggregator.globalState.value)
+
+        now = StatusAggregatorImpl.STATUS_TTL_MS + 1
+        advanceTimeBy(StatusAggregatorImpl.STATUS_TTL_MS + 2)
+        runCurrent()
+
         assertEquals(GlobalBusyState.Unknown, aggregator.globalState.value)
+    }
+
+    @Test
+    fun `D1 gate #1 - stateAtNow reads time-correct state independent of globalState cache`() = runTest {
+        // The stateAtNow contract: it MUST reflect the time-correct verdict
+        // even before the passive freshnessJob recompute has landed.
+        val repo = mockk<OpenCodeRepository>(relaxed = true)
+        var now = 1_000L
+        val aggregator = newAggregator(repo, clock = { now })
+        coEvery { repo.getSessionStatus() } returns Result.success(emptyMap())
+
+        aggregator.refresh(identity(), snapshot(mapOf("s1" to session("s1", "/work"))))
+        assertEquals(GlobalBusyState.AllIdleFresh, aggregator.globalState.value)
+        assertEquals(GlobalBusyState.AllIdleFresh, aggregator.stateAtNow())
+
+        // Cross the TTL boundary WITHOUT advancing the dispatcher (so
+        // globalState.value is still cached at AllIdleFresh). stateAtNow
+        // reads time-correct verdict = Unknown.
+        now = 1_000L + StatusAggregatorImpl.STATUS_TTL_MS + 1
+        assertEquals(
+            "globalState cache lags wall clock at the instant of the call",
+            GlobalBusyState.AllIdleFresh,
+            aggregator.globalState.value,
+        )
+        assertEquals(
+            "stateAtNow reads time-correct verdict = Unknown",
+            GlobalBusyState.Unknown,
+            aggregator.stateAtNow(),
+        )
     }
 
     @Test
@@ -347,7 +450,7 @@ class StatusAggregatorImplTest {
         var now = 1_000L
         val aggregator = newAggregator(repo, clock = { now })
 
-        aggregator.refresh(identity(), sessionsById = mapOf("s1" to session("s1", "/work")))
+        aggregator.refresh(identity(), snapshot(mapOf("s1" to session("s1", "/work"))))
         assertEquals(GlobalBusyState.Busy, aggregator.globalState.value)
 
         // Way past the TTL — a stale Busy stays Busy. The alternative (treating a stale Busy
@@ -373,9 +476,13 @@ class StatusAggregatorImplTest {
             store.bind(fp, "/work", "endpoint-A") // new epoch, same fp
             Result.success(mapOf("s1" to SessionStatus(type = "busy")))
         }
-        val aggregator = StatusAggregatorImpl(repo, store, clock = { 100L })
+        val aggregator = StatusAggregatorImpl(
+            repo, store,
+            kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.SupervisorJob() + kotlinx.coroutines.Dispatchers.Unconfined),
+            clock = { 100L },
+        )
 
-        aggregator.refresh(identity(epoch = originalEpoch), sessionsById = mapOf("s1" to session("s1", "/work")))
+        aggregator.refresh(identity(epoch = originalEpoch), snapshot(mapOf("s1" to session("s1", "/work"))))
 
         // The stale-epoch response MUST be dropped — the (would-be) Busy entry never lands.
         assertTrue(aggregator.statusByKey.value.isEmpty())
@@ -391,7 +498,7 @@ class StatusAggregatorImplTest {
         )
         val aggregator = newAggregator(repo, clock = { 100L })
 
-        aggregator.refresh(identity(), sessionsById = mapOf("s1" to session("s1", "/work")))
+        aggregator.refresh(identity(), snapshot(mapOf("s1" to session("s1", "/work"))))
 
         assertEquals(SessionBusyStatus.Busy, aggregator.statusByKey.value[key("s1", "/work")])
         assertEquals(GlobalBusyState.Busy, aggregator.globalState.value)
@@ -406,9 +513,11 @@ class StatusAggregatorImplTest {
 
         aggregator.markRequestFailed(
             identity(),
-            sessionsById = mapOf(
-                "s1" to session("s1", "/work-a"),
-                "s2" to session("s2", "/work-b"),
+            snapshot(
+                mapOf(
+                    "s1" to session("s1", "/work-a"),
+                    "s2" to session("s2", "/work-b"),
+                ),
             ),
             sourceTimeMs = 100L,
         )
@@ -430,11 +539,111 @@ class StatusAggregatorImplTest {
         // markRequestFailed at t=100 (older) — must NOT clobber the fresher Busy.
         aggregator.markRequestFailed(
             identity(),
-            sessionsById = mapOf("s1" to session("s1", "/work")),
+            snapshot(mapOf("s1" to session("s1", "/work"))),
             sourceTimeMs = 100L,
         )
 
         assertEquals(SessionBusyStatus.Busy, aggregator.statusByKey.value[key("s1", "/work")])
         assertEquals(GlobalBusyState.Busy, aggregator.globalState.value)
+    }
+
+    // ── (9) D1 gate #5: unmapped-active→Busy + registered-workdir coverage ────
+
+    @Test
+    fun `D1 gate #5 - ghost busy plus known idle session forces global Busy`() = runTest {
+        // Response contains ghost=busy + s1 absent (→ Idle), s1 is mapped.
+        // globalState must be Busy (never AllIdleFresh) — the ghost is
+        // positively known active even though it has no workdir mapping.
+        val repo = mockk<OpenCodeRepository>(relaxed = true)
+        coEvery { repo.getSessionStatus() } returns Result.success(
+            mapOf("ghost" to SessionStatus(type = "busy"))
+        )
+        val aggregator = newAggregator(repo, clock = { 100L })
+
+        aggregator.refresh(
+            identity(),
+            snapshot(
+                sessions = mapOf("s1" to session("s1", "/work")),
+                registeredWorkdirs = setOf("/work"),
+            ),
+        )
+
+        assertEquals(GlobalBusyState.Busy, aggregator.globalState.value)
+        assertTrue(aggregator.globalBusy.value)
+    }
+
+    @Test
+    fun `D1 gate #5 - all active ids map plus all workdirs covered is correct Busy`() = runTest {
+        val repo = mockk<OpenCodeRepository>(relaxed = true)
+        coEvery { repo.getSessionStatus() } returns Result.success(
+            mapOf(
+                "s1" to SessionStatus(type = "busy"),
+                "s2" to SessionStatus(type = "retry"),
+            )
+        )
+        val aggregator = newAggregator(repo, clock = { 100L })
+
+        aggregator.refresh(
+            identity(),
+            snapshot(
+                sessions = mapOf(
+                    "s1" to session("s1", "/work-a"),
+                    "s2" to session("s2", "/work-b"),
+                ),
+                registeredWorkdirs = setOf("/work-a", "/work-b"),
+            ),
+        )
+
+        assertEquals(GlobalBusyState.Busy, aggregator.globalState.value)
+    }
+
+    @Test
+    fun `D1 gate #5 - registered workdir without sessions is Unknown (coverage fails)`() = runTest {
+        // registeredWorkdirs = {/work-a, /work-b} but sessions only cover
+        // /work-a. Even if the covered workdir is fresh Idle, the uncovered
+        // /work-b forces Unknown (a registered workdir is "missing coverage").
+        val repo = mockk<OpenCodeRepository>(relaxed = true)
+        coEvery { repo.getSessionStatus() } returns Result.success(emptyMap())
+        val aggregator = newAggregator(repo, clock = { 100L })
+
+        aggregator.refresh(
+            identity(),
+            snapshot(
+                sessions = mapOf("s1" to session("s1", "/work-a")),
+                registeredWorkdirs = setOf("/work-a", "/work-b"),
+            ),
+        )
+
+        assertEquals(
+            "missing coverage for /work-b → Unknown (not AllIdleFresh)",
+            GlobalBusyState.Unknown,
+            aggregator.globalState.value,
+        )
+    }
+
+    @Test
+    fun `D1 gate #5 - fresh successful empty host snapshot with no workdirs is authoritative idle`() = runTest {
+        // A successful REST snapshot returning empty AND zero registered
+        // workdirs (genuinely idle host) is AllIdleFresh — backed by the
+        // fresh coverage marker, NOT vacuous uninitialized state.
+        val repo = mockk<OpenCodeRepository>(relaxed = true)
+        coEvery { repo.getSessionStatus() } returns Result.success(emptyMap())
+        val aggregator = newAggregator(repo, clock = { 100L })
+
+        aggregator.refresh(
+            identity(),
+            snapshot(sessions = emptyMap(), registeredWorkdirs = emptySet()),
+        )
+
+        assertEquals(GlobalBusyState.AllIdleFresh, aggregator.globalState.value)
+    }
+
+    @Test
+    fun `D1 gate #5 - cold-start empty aggregator is Unknown (not vacuous idle)`() {
+        val repo = mockk<OpenCodeRepository>(relaxed = true)
+        val aggregator = newAggregator(repo)
+        // Never refreshed → cold-start guard refuses AllIdleFresh.
+        assertEquals(GlobalBusyState.Unknown, aggregator.globalState.value)
+        assertEquals(GlobalBusyState.Unknown, aggregator.stateAtNow())
     }
 }

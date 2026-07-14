@@ -12,6 +12,7 @@ import cn.vectory.ocdroid.service.status.GlobalBusyState
 import cn.vectory.ocdroid.service.status.SessionBusyStatus
 import cn.vectory.ocdroid.service.status.SessionStatusKey
 import cn.vectory.ocdroid.service.status.StatusAggregator
+import cn.vectory.ocdroid.service.status.StatusSnapshot
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -209,7 +210,7 @@ class SessionStreamingControllerDispatchTest {
         val coordinator = StreamingLifecycleCoordinator(aggregator, scope)
         val store = ConnectionIdentityStore()
         val shell = RecordingShell()
-        val snapshotProvider = SessionSnapshotProvider { emptyMap() }
+        val snapshotProvider = SessionSnapshotProvider { StatusSnapshot.Empty }
         val bootstrapRunner = ScriptedBootstrapRunner()
         val inForegroundFlow = MutableStateFlow(inForeground)
         val controller = SessionStreamingController(
@@ -268,6 +269,9 @@ class SessionStreamingControllerDispatchTest {
         override val statusByKey: StateFlow<Map<SessionStatusKey, SessionBusyStatus>> =
             _statusByKey.asStateFlow()
 
+        /** D1 gate #1: stateAtNow tracks globalState (no separate clock domain in the fake). */
+        override fun stateAtNow(): GlobalBusyState = _globalState.value
+
         fun setState(state: GlobalBusyState) {
             _globalState.value = state
             _globalBusy.value = state == GlobalBusyState.Busy
@@ -279,7 +283,7 @@ class SessionStreamingControllerDispatchTest {
 
         override suspend fun refresh(
             identity: ConnectionIdentity,
-            sessionsById: Map<String, Session>,
+            snapshot: StatusSnapshot,
         ) {
             // No-op for dispatch tests; bootstrap tests override.
         }
@@ -292,11 +296,11 @@ class SessionStreamingControllerDispatchTest {
 
         override fun markRequestFailed(
             identity: ConnectionIdentity,
-            sessionsById: Map<String, Session>,
+            snapshot: StatusSnapshot,
             sourceTimeMs: Long,
         ) {
             // Surface failure as Unknown entries so globalState reflects keep-alive.
-            val failed = sessionsById.values.associate {
+            val failed = snapshot.sessionsById.values.associate {
                 SessionStatusKey(identity.serverGroupFp, it.directory, it.id) to SessionBusyStatus.Unknown
             }
             _statusByKey.value = failed

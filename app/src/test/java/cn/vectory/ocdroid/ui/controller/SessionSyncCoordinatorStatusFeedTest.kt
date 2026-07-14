@@ -273,7 +273,7 @@ class SessionSyncCoordinatorStatusFeedTest {
 
         override suspend fun refresh(
             identity: cn.vectory.ocdroid.service.identity.ConnectionIdentity,
-            sessionsById: Map<String, Session>,
+            snapshot: cn.vectory.ocdroid.service.status.StatusSnapshot,
         ) {
             // Unused by these tests (they exercise the SSE feed path only).
         }
@@ -284,7 +284,7 @@ class SessionSyncCoordinatorStatusFeedTest {
 
         override fun markRequestFailed(
             identity: cn.vectory.ocdroid.service.identity.ConnectionIdentity,
-            sessionsById: Map<String, Session>,
+            snapshot: cn.vectory.ocdroid.service.status.StatusSnapshot,
             sourceTimeMs: Long,
         ) {
             // Unused by these tests.

@@ -567,7 +567,97 @@ class StreamingLifecycleCoordinatorTest {
         override val statusByKey: StateFlow<Map<SessionStatusKey, SessionBusyStatus>> =
             MutableStateFlow(emptyMap())
 
+        /**
+         * D1 (gate #1): the coordinator's idle-debounce now reads stateAtNow
+         * instead of globalState.value. The fake keeps them in lockstep so
+         * existing tests that drive state via [setState] continue to flow
+         * through to the debounce expiry check.
+         */
+        override fun stateAtNow(): GlobalBusyState = _globalState.value
+
         fun setState(state: GlobalBusyState) {
+            _globalState.value = state
+        }
+    }
+}
+
+// ── D1 (gate #1) integrated lifecycle scenarios ─────────────────────────
+
+/**
+ * D1 (gate #1): the coordinator's idle-debounce reads [StatusAggregator.stateAtNow]
+ * (time-correct) instead of the cached [StatusAggregator.globalState] `.value`.
+ * A divergence — `globalState` still AllIdleFresh but `stateAtNow` returns
+ * Unknown (stale Idle at the instant of firing) — MUST NOT trigger the
+ * L2Active→L2Idle transition.
+ */
+@OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
+class StreamingLifecycleCoordinatorStateAtNowTest {
+
+    private val identity = ConnectionIdentity(
+        epoch = 7L,
+        serverGroupFp = "group-fp",
+        normalizedWorkdir = "/work/dir",
+        endpointFp = "endpoint-fp",
+    )
+
+    @Test
+    fun `D1 gate #1 - debounce expiry reads stateAtNow - Unknown at expiry cancels L2Idle transition`() = runTest {
+        // Integrated acceptance: a 45s debounce fires at the TTL boundary.
+        // globalState.value may still be cached at AllIdleFresh (the
+        // aggregator's passive wake-up may not have recomputed yet); the
+        // coordinator MUST call stateAtNow() which returns Unknown (time-
+        // correct verdict) and refuse the L2Active→L2Idle transition.
+        val status = DivergingFakeStatusAggregator(
+            initialGlobalState = GlobalBusyState.AllIdleFresh,
+            stateAtNowValue = GlobalBusyState.Unknown,
+        )
+        val coordinator = StreamingLifecycleCoordinator(status, backgroundScope)
+        val inForeground = MutableStateFlow(false)
+        val commands = mutableListOf<LifecycleCommand>()
+        backgroundScope.launch { coordinator.commands.collect { commands.add(it) } }
+
+        coordinator.start(inForeground)
+        status.setGlobalState(GlobalBusyState.Busy)
+        coordinator.onBootstrapResult(identity, GlobalBusyState.Busy)
+        runCurrent()
+        assertEquals(Layer.L2Active, coordinator.layer.value)
+        commands.clear()
+
+        // Aggregate reports AllIdleFresh (cache) — arms the 45s debounce.
+        status.setGlobalState(GlobalBusyState.AllIdleFresh)
+        runCurrent()
+        assertEquals(Layer.L2Active, coordinator.layer.value)
+        assertTrue("debounce armed — no commands yet", commands.isEmpty())
+
+        // Cross the 45s threshold. The debounce fires; it reads stateAtNow()
+        // which returns Unknown → no L2Idle transition, no StopSse.
+        advanceTimeBy(StreamingLifecycleCoordinator.IDLE_DEBOUNCE_MS)
+        runCurrent()
+
+        assertEquals(
+            "D1 gate #1: Unknown at debounce expiry MUST NOT enter L2Idle",
+            Layer.L2Active,
+            coordinator.layer.value,
+        )
+        assertTrue(
+            "no StopSse emitted on stale-idle verdict",
+            commands.none { it == LifecycleCommand.StopSse },
+        )
+    }
+
+    private class DivergingFakeStatusAggregator(
+        initialGlobalState: GlobalBusyState,
+        private var stateAtNowValue: GlobalBusyState,
+    ) : StatusAggregator {
+        private val _globalState = MutableStateFlow(initialGlobalState)
+        override val globalState: StateFlow<GlobalBusyState> = _globalState.asStateFlow()
+        override val globalBusy: StateFlow<Boolean> = MutableStateFlow(false)
+        override val statusByKey: StateFlow<Map<SessionStatusKey, SessionBusyStatus>> =
+            MutableStateFlow(emptyMap())
+
+        override fun stateAtNow(): GlobalBusyState = stateAtNowValue
+
+        fun setGlobalState(state: GlobalBusyState) {
             _globalState.value = state
         }
     }

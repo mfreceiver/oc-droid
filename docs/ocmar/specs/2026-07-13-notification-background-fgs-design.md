@@ -81,6 +81,11 @@ reconfigure 严格顺序（不可颠倒）：
 
 - busy = **全局**，键为复合 `(serverGroupFp, workdir, sessionId) → Fresh|Busy|Retry|Idle|Unknown`。
 - **Phase 0 主路径**：直接用现有**全局** `getSessionStatus()` 一次；用 `session.directory`（来自 `sessions` / `directorySessions`）把每个 `sessionId` 归并到 workdir。**请求失败 → 全局 `Unknown`，不得进 idle 宽限期**。
+- **D1 gate #1：status TTL 主动过期（passive→active）**。TTL 不再仅由 map mutation 触发的 recompute 隐式生效——`StatusAggregatorImpl` 注入 `@UiApplicationScope CoroutineScope`，在每次 commit 后调度**单一的 earliest-deadline wake-up**（`freshnessJob`），目标时刻为「所有当前 identity 下 Idle 条目的 `sourceTimeMs + STATUS_TTL_MS + 1` + 成功快照 coverage marker 的 TTL 截止」中最早者。到期时 `recompute` 不依赖任何 map mutation。**新鲜度边界明确**：`now - sourceTimeMs <= STATUS_TTL_MS` 为 fresh；过期 `Idle` → 贡献 `Unknown`；过期 `Busy`/`Retry` → 保守地保持 `Busy`（绝不静默丢 keep-alive）。
+- **D1 gate #1：debounce 读取时间正确状态**。`StreamingLifecycleCoordinator.startIdleDebounce` 在 45s 到期时调用 `statusAggregator.stateAtNow()`（按当前 `clock()` 即时投影），**不读** `globalState.value`（后者可能滞后于 wall clock）。`stateAtNow()` 与 `recompute` 共用同一个纯函数 `project(state, coverage, now)`。
+- **D1 gate #5：returned-but-unmapped active IDs 强制 Busy**。`/session/status` 返回的 `sessionId` 若**不在** `sessionsById` 中，是**正向已知 active** → 贡献 `GlobalBusyState.Busy`（既不跳过，也不发明 workdir 制造复合键）。在 coverage metadata 的 `unmappedActiveIds` 中跟踪。
+- **D1 gate #5：registered-workdir coverage 谓词**。snapshot 同时携带 `sessionsById` + `registeredWorkdirs`（= `recentWorkdirs(currentFp) + currentWorkdir + directorySessions.keys + sessionsById.values.map(Session::directory)`，dedup）。`AllIdleFresh` 合法当且仅当全部满足：(a) current-epoch 的成功快照存在且在 TTL 内；(b) `unmappedActiveIds.isEmpty()`；(c) `registeredWorkdirs` 中每个 workdir 都被当前投影里的 fresh 条目覆盖；(d) 每个已知 tracked session 已被映射；(e) 每个 tracked status 为 fresh `Idle`；(f) 无 `Unknown`/`Busy`/`Retry`。一个**无 session 但已登记**的 workdir 由 coverage marker 代表，不会因 session 全部 archive 而从 all-idle 谓词中消失。
+- 一次**成功的空全局快照 + 零 registeredWorkdirs** 可以是 `AllIdleFresh`（由 fresh coverage marker 担保，**不是**空洞的未初始化状态）。
 - **status TTL** 明确（如 30s）；只有**所有已登记 workdir 都取得新鲜+成功 idle** 才进停流宽限期。
 - **Phase 0 门禁探针（必过）**：确认 `/session/status` 返回确为 host 级、覆盖所有 workdir（非仅 current）。**两 workdir 隔离测试**：两个不同 workdir 各有 active session 时，单次全局请求须**同时**反映两者。若实测全局只返回 current workdir → 升级为 **directory fan-out**（每 workdir 显式查询，复合键不变）并跑同一隔离门禁。
 - 多 workdir **pending** 轮询独立（`computeQuestionFanOutWorkdirs` / `loadPendingQuestionsAllWorkdirs`），与 status 无关。
@@ -132,11 +137,13 @@ reconfigure 严格顺序（不可颠倒）：
 
 - **不再默认 true**；Activity started-count 是前台事实源。
 - Service 冷启动、无 started Activity → 按后台处理。
-- 用带延迟的 process-lifecycle 语义，避免配置变化时短暂 1→0 被误判为后台。
+- **D1 gate #2：用带延迟的 process-lifecycle 语义（700ms 延迟确认）**。`onActivityStopped` 把 started-count 递减；当递减到 0 时**不立即**翻 `_isInForeground=false`，而是取消上一个 pending 确认 job + 启动 `delay(700)`；到时**再次检查** `activityStartedCount == 0` 才真正翻 false + `onEnterBackground()`。`onActivityStarted`（0→1）**立即取消**该 pending 确认 job。**700ms 是 AndroidX `ProcessLifecycleOwner` 既定值**——配置变化（rotation: 1→0→1）在该窗口内完成，不会误判为后台。前台判定读取发生在 Main，主 dispatcher delay 与之同线程一致。
 
 ### 4.4 统一交接顺序（闭合 gpter-B#3 / groker-B4）
 
 **单一串行状态机（持锁），新 source active + notifier 切换成功后才关旧 source：**
+
+> **D1 gate #1 §4.4**：idle debounce 到期时**读取时间正确状态**——`statusAggregator.stateAtNow()`（按当前 `clock()` 即时投影），**不读** `globalState.value`（后者由 `freshnessJob` 保持一致，但 dispatcher 延迟可能令其在 debounce 到期的瞬间仍缓存着 stale `AllIdleFresh`）。`stateAtNow()` 与 `recompute` 共用同一个 `project(state, coverage, now)` 纯函数。
 
 **L1 内部转换**（前台）：
 - `L1-idle → L1-busy`：前台合法 `startForeground`（提升 dataSync FGS，§4.2）。
