@@ -46,6 +46,13 @@ internal fun shouldPostIdleNotification(
     notifiedKeys: Set<String>,
 ): Boolean = !isInForeground && key !in notifiedKeys
 
+internal fun pruneIdleNotificationSnapshot(
+    notifiedKeys: MutableSet<String>,
+    activeKeys: Set<String>,
+) {
+    notifiedKeys.retainAll(activeKeys)
+}
+
 /**
  * Hilt qualifier for the application-wide [CoroutineScope] tied to the
  * Application process (vs the Activity-scoped `viewModelScope`). The
@@ -239,6 +246,7 @@ class AppLifecycleMonitor @Inject constructor(
         if (_isInForeground.value) return
         runSuspendCatching { backgroundUnreadPoll?.invoke().orEmpty() }
             .onSuccess { alerts ->
+                pruneIdleNotificationSnapshot(idleNotificationSnapshot, alerts.mapTo(mutableSetOf()) { it.key })
                 if (!_isInForeground.value) alerts.forEach { handleIdleAlert(it) }
             }
             .onFailure { Log.w(TAG, "Background unread poll failed", it) }

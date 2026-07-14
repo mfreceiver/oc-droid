@@ -1223,6 +1223,7 @@ class SessionListActionsTest {
         store.mutateSessionList { it.copy(sessions = listOf(Session(id = "p1", directory = "/x"))) }
         coEvery { repository.getChildren("p1") } returns Result.success(children)
         coEvery { repository.getChildren("c1") } returns Result.success(emptyList())
+        coEvery { repository.getSessionStatus() } returns Result.success(emptyMap())
 
         launchLoadChildSessions(scope, repository, slices, "p1", "Tag")
         advanceUntilIdle()

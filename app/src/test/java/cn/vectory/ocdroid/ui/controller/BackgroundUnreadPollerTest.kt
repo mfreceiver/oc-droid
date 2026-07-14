@@ -22,11 +22,16 @@ class BackgroundUnreadPollerTest {
 
     private fun root(id: String) = Session(id = id, directory = "/repo", title = "Root $id")
 
-    private fun poller() = BackgroundUnreadPoller(
+    private fun poller(
+        isBackground: () -> Boolean = { true },
+        lifecycleGeneration: () -> Long = { 0L },
+    ) = BackgroundUnreadPoller(
         repository = repository,
         settingsManager = settings,
         store = store,
         clock = { now },
+        isBackground = isBackground,
+        lifecycleGeneration = lifecycleGeneration,
     )
 
     private fun stubSnapshot(
@@ -54,7 +59,7 @@ class BackgroundUnreadPollerTest {
         val repeated = poller.poll()
 
         assertEquals(listOf("A"), completed.map { it.rootId })
-        assertTrue(repeated.isEmpty())
+        assertEquals("pending cycle remains retryable; monitor dedupes posted keys", completed, repeated)
         assertTrue("authoritative unread set is updated", "A" in store.unreadFlow.value.unreadSessions)
     }
 
@@ -125,5 +130,25 @@ class BackgroundUnreadPollerTest {
         assertTrue(alerts.isEmpty())
         assertTrue(store.sessionListFlow.value.sessions.isEmpty())
         assertTrue(store.unreadFlow.value.unreadSessions.isEmpty())
+    }
+
+    @Test
+    fun `foreground transition during final request prevents stale commit and alert`() = runTest {
+        val a = root("A")
+        var background = true
+        var generation = 1L
+        every { settings.currentWorkdir } returns "/repo"
+        coEvery { repository.getSessions(any()) } returns Result.success(listOf(a))
+        coEvery { repository.getSessionStatus() } returns Result.success(emptyMap())
+        coEvery { repository.getChildren("A") } coAnswers {
+            background = false
+            generation += 1
+            Result.success(emptyList())
+        }
+
+        val alerts = poller({ background }, { generation }).poll()
+
+        assertTrue(alerts.isEmpty())
+        assertTrue(store.sessionListFlow.value.sessions.isEmpty())
     }
 }

@@ -17,4 +17,14 @@ class AppLifecycleNotificationPolicyTest {
     fun `decisions and idle channels are independently configurable`() {
         assertNotEquals(AppLifecycleMonitor.CHANNEL_DECISIONS, AppLifecycleMonitor.CHANNEL_IDLE)
     }
+
+    @Test
+    fun `idle notification snapshot pruning keeps only active cycle keys`() {
+        val notified = mutableSetOf("idle:old", "idle:active")
+
+        pruneIdleNotificationSnapshot(notified, setOf("idle:active", "idle:new"))
+
+        assertTrue("idle:active" in notified)
+        assertFalse("idle:old" in notified)
+    }
 }

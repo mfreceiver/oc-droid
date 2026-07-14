@@ -55,6 +55,10 @@
     <string name="settings_notifications_completion_channel_desc">Posted when a session finishes or errors out</string>
     <string name="settings_notifications_system_settings">System notification settings</string>
     <string name="settings_notifications_system_settings_desc">Configure completion and decision alerts independently</string>
+    <string name="session_picker_state_selected">Selected</string>
+    <string name="session_picker_state_question">Question pending</string>
+    <string name="session_picker_state_retry">Retrying</string>
+    <string name="session_picker_state_unread">Unread</string>
     <!-- §vcs-section: Working directory / Git group in Settings -->
     <string name="settings_section_working_directory">Working directory</string>
     <string name="settings_vcs_branch">Branch</string>

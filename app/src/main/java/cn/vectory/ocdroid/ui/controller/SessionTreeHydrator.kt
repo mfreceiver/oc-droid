@@ -3,6 +3,7 @@ package cn.vectory.ocdroid.ui.controller
 import cn.vectory.ocdroid.data.model.Session
 import cn.vectory.ocdroid.data.repository.OpenCodeRepository
 import cn.vectory.ocdroid.ui.SharedStateStore
+import cn.vectory.ocdroid.ui.mergeStatusSnapshot
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
@@ -88,6 +89,8 @@ internal class ForegroundSessionTreeHydrator(
         scope.launch {
             try {
                 val result = loadCompleteSessionTrees(repository, roots)
+                val statusBefore = store.sessionListFlow.value.sessionStatuses
+                val statusSnapshot = repository.getSessionStatus().getOrElse { return@launch }
                 store.mutateSessionList { current ->
                     val currentById = allSessionsById(current.sessions, current.directorySessions, current.childSessions)
                     val stillSameIdentity = store.hostFlow.value.currentHostProfileId == hostId
@@ -98,9 +101,17 @@ internal class ForegroundSessionTreeHydrator(
                     val validParents = result.childrenByParent.filterKeys { parentId ->
                         validRoots.any { rootId -> parentId in treeIds(rootId, currentById + result.childrenByParent.values.flatten().associateBy { it.id }) }
                     }
+                    val nextChildren = current.childSessions + validParents
+                    val authoritativeIds = allSessionsById(
+                        current.sessions,
+                        current.directorySessions,
+                        nextChildren,
+                    ).keys
+                    val normalizedStatuses = normalizeAuthoritativeStatusSnapshot(statusSnapshot, authoritativeIds)
                     current.copy(
-                        childSessions = current.childSessions + validParents,
+                        childSessions = nextChildren,
                         completeRootIds = current.completeRootIds + validRoots,
+                        sessionStatuses = mergeStatusSnapshot(statusBefore, current.sessionStatuses, normalizedStatuses),
                     )
                 }
             } finally {

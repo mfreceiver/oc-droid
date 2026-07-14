@@ -29,7 +29,7 @@
 package cn.vectory.ocdroid.ui.chat
 
 import androidx.compose.foundation.background
-import androidx.compose.foundation.clickable
+import androidx.compose.foundation.selection.selectable
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -49,6 +49,9 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.text.style.TextOverflow
 import cn.vectory.ocdroid.R
 import cn.vectory.ocdroid.data.model.Session
@@ -160,6 +163,18 @@ private fun SessionPickerRow(
     onClick: () -> Unit,
 ) {
     val tone = remember(session.directory) { workdirTone(session.directory) }
+    val accessibilityLabels = mapOf(
+        PickerAccessibilityState.Selected to stringResource(R.string.session_picker_state_selected),
+        PickerAccessibilityState.Question to stringResource(R.string.session_picker_state_question),
+        PickerAccessibilityState.Retry to stringResource(R.string.session_picker_state_retry),
+        PickerAccessibilityState.Unread to stringResource(R.string.session_picker_state_unread),
+    )
+    val accessibilityDescription = pickerAccessibilityStates(
+        isSelected = isSelected,
+        hasQuestion = hasQuestion,
+        isRetry = status?.isRetry == true,
+        isUnread = isUnread,
+    ).joinToString(", ") { state -> accessibilityLabels.getValue(state) }
     ListItem(
         headlineContent = {
             Text(
@@ -223,8 +238,26 @@ private fun SessionPickerRow(
                 }
             }
         },
-        modifier = Modifier.clickable(onClick = onClick),
+        modifier = Modifier
+            .selectable(selected = isSelected, role = Role.RadioButton, onClick = onClick)
+            .semantics(mergeDescendants = true) {
+                stateDescription = accessibilityDescription
+            },
     )
+}
+
+internal enum class PickerAccessibilityState { Selected, Question, Retry, Unread }
+
+internal fun pickerAccessibilityStates(
+    isSelected: Boolean,
+    hasQuestion: Boolean,
+    isRetry: Boolean,
+    isUnread: Boolean,
+): List<PickerAccessibilityState> = buildList {
+    if (isSelected) add(PickerAccessibilityState.Selected)
+    if (hasQuestion) add(PickerAccessibilityState.Question)
+    if (isRetry) add(PickerAccessibilityState.Retry)
+    if (isUnread) add(PickerAccessibilityState.Unread)
 }
 
 private fun formatTime(epochMs: Long): String {

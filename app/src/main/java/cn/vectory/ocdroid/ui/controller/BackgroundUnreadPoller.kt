@@ -64,10 +64,10 @@ class BackgroundUnreadPoller internal constructor(
         val sessions = repository.getSessions(MainViewModelTimings.sessionFullLoadLimit)
             .getOrElse { return emptyList() }
         if (!identityValid()) return emptyList()
-        val statuses = repository.getSessionStatus().getOrElse { return emptyList() }
-        if (!identityValid()) return emptyList()
         val roots = sessions.filter { it.parentId == null }
         val hydration = loadCompleteSessionTrees(repository, roots, shouldContinue = ::identityValid)
+        if (!identityValid()) return emptyList()
+        val statuses = repository.getSessionStatus().getOrElse { return emptyList() }
         if (!identityValid()) return emptyList()
         val children = hydration.childrenByParent
         // OpenCode's authoritative status endpoint omits idle entries. A
@@ -81,7 +81,7 @@ class BackgroundUnreadPoller internal constructor(
 
         if (!identityValid()) return emptyList()
         val now = clock()
-        var committedResult: UnreadSoakResult? = null
+        var committedUnread: cn.vectory.ocdroid.ui.UnreadState? = null
         var committedSessionsById: Map<String, cn.vectory.ocdroid.data.model.Session> = emptyMap()
         store.mutateState { snapshot ->
             if (!identityValid() || snapshot.host.currentHostProfileId != startHostId) return@mutateState snapshot
@@ -99,16 +99,18 @@ class BackgroundUnreadPoller internal constructor(
                 sessionList = nextSessionList,
                 unread = snapshot.unread.removeSessions(archivedTreeIds),
             )
-            val (nextUnread, result) = provisional.evaluateAndApplyUnread(now)
-            committedResult = result
+            val (nextUnread, _) = provisional.evaluateAndApplyUnread(now)
+            committedUnread = nextUnread
             committedSessionsById = sessionsById
             provisional.copy(unread = nextUnread)
         }
-        val result = committedResult ?: return emptyList()
+        val unread = committedUnread ?: return emptyList()
         if (!identityValid()) return emptyList()
         val serverId = store.hostFlow.value.currentHostProfileId ?: "default"
         val workdir = settingsManager.currentWorkdir
-        return result.markedIdleSince.map { (rootId, idleSince) ->
+        return unread.idleSince
+            .filterKeys { it in unread.unreadSessions }
+            .map { (rootId, idleSince) ->
             val root = committedSessionsById[rootId]
             IdleUnreadAlert(
                 rootId = rootId,
@@ -116,6 +118,6 @@ class BackgroundUnreadPoller internal constructor(
                 idleSince = idleSince,
                 key = idleNotificationKey(serverId, workdir, rootId, idleSince),
             )
-        }
+            }
     }
 }

@@ -1,6 +1,7 @@
 package cn.vectory.ocdroid.ui.settings
 
 import android.Manifest
+import android.app.NotificationManager
 import android.content.pm.PackageManager
 import android.content.Intent
 import android.net.Uri
@@ -50,8 +51,12 @@ import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
 import androidx.core.content.ContextCompat
+import androidx.core.app.NotificationManagerCompat
+import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.lifecycle.compose.LifecycleEventEffect
 import cn.vectory.ocdroid.R
+import cn.vectory.ocdroid.di.AppLifecycleMonitor
 import cn.vectory.ocdroid.ui.ComposerViewModel
 import cn.vectory.ocdroid.ui.ConnectionViewModel
 import cn.vectory.ocdroid.ui.HostViewModel
@@ -372,14 +377,17 @@ fun SettingsModelsRoute(
 @Composable
 fun SettingsNotificationsRoute(onBack: () -> Unit) {
     val context = LocalContext.current
-    var granted by remember { mutableStateOf(notificationPermissionGranted(context)) }
+    var granted by remember { mutableStateOf(notificationsEnabled(context)) }
+    LifecycleEventEffect(Lifecycle.Event.ON_RESUME) {
+        granted = notificationsEnabled(context)
+    }
     // Optional runtime prompt for API 33+. Mirrors AppLifecycleMonitor's
     // grant-bypass-on-older-OS check. Launched lazily via a button so the
     // system dialog is never triggered from the background.
     val permLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.RequestPermission(),
-    ) { result ->
-        granted = result || notificationPermissionGranted(context)
+    ) { _ ->
+        granted = notificationsEnabled(context)
     }
 
     SettingsSubRouteScaffold(titleRes = R.string.settings_section_notifications, onBack = onBack) { mod ->
@@ -544,6 +552,31 @@ private fun notificationPermissionGranted(context: android.content.Context): Boo
         context,
         Manifest.permission.POST_NOTIFICATIONS,
     ) == PackageManager.PERMISSION_GRANTED
+}
+
+internal fun notificationDeliveryEnabled(
+    runtimeGranted: Boolean,
+    appEnabled: Boolean,
+    relevantChannelImportances: List<Int>,
+): Boolean = runtimeGranted && appEnabled &&
+    (relevantChannelImportances.isEmpty() || relevantChannelImportances.any { it != NotificationManager.IMPORTANCE_NONE })
+
+private fun notificationsEnabled(context: android.content.Context): Boolean {
+    val managerCompat = NotificationManagerCompat.from(context)
+    val channelImportances = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+        val manager = context.getSystemService(NotificationManager::class.java)
+        listOf(
+            AppLifecycleMonitor.CHANNEL_DECISIONS,
+            AppLifecycleMonitor.CHANNEL_IDLE,
+        ).mapNotNull { manager?.getNotificationChannel(it)?.importance }
+    } else {
+        emptyList()
+    }
+    return notificationDeliveryEnabled(
+        runtimeGranted = notificationPermissionGranted(context),
+        appEnabled = managerCompat.areNotificationsEnabled(),
+        relevantChannelImportances = channelImportances,
+    )
 }
 
 private fun openSystemNotificationSettings(context: android.content.Context) {

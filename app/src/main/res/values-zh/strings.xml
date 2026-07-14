@@ -49,6 +49,10 @@
     <string name="settings_notifications_completion_channel_desc">会话完成或出错时推送</string>
     <string name="settings_notifications_system_settings">系统通知设置</string>
     <string name="settings_notifications_system_settings_desc">分别配置完成提醒与决策提醒</string>
+    <string name="session_picker_state_selected">已选中</string>
+    <string name="session_picker_state_question">有待回答问题</string>
+    <string name="session_picker_state_retry">正在重试</string>
+    <string name="session_picker_state_unread">未读</string>
     <!-- §vcs-section: 设置中的 工作目录 / Git 分组 -->
     <string name="settings_section_working_directory">工作目录</string>
     <string name="settings_vcs_branch">分支</string>
