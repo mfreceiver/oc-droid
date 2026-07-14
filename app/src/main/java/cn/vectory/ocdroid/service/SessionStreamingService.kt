@@ -11,6 +11,7 @@ import androidx.core.app.NotificationManagerCompat
 import androidx.core.app.ServiceCompat
 import cn.vectory.ocdroid.R
 import cn.vectory.ocdroid.data.repository.OpenCodeRepository
+import cn.vectory.ocdroid.data.repository.HostProfileStore
 import cn.vectory.ocdroid.di.AppLifecycleMonitor
 import cn.vectory.ocdroid.service.events.IdentifiedSseEvent
 import cn.vectory.ocdroid.service.events.SseEventStream
@@ -97,6 +98,8 @@ class SessionStreamingService : Service() {
      */
     @Inject
     lateinit var settingsManager: SettingsManager
+    @Inject
+    lateinit var hostProfileStore: HostProfileStore
 
     /**
      * CP3 (notify Phase-0): the process-wide SSE event stream. The Service
@@ -118,6 +121,7 @@ class SessionStreamingService : Service() {
     @Inject lateinit var bootstrapRunner: BootstrapRunner
     @Inject lateinit var sessionSnapshotProvider: SessionSnapshotProvider
     @Inject lateinit var appLifecycleMonitor: AppLifecycleMonitor
+    @Inject lateinit var ownershipGate: StreamingOwnershipGate
 
     // ── CP9: Hilt-injected collaborators for [sseOwner] (the SSE collector). ──
 
@@ -130,6 +134,7 @@ class SessionStreamingService : Service() {
 
     @Inject lateinit var processStatusPoller: cn.vectory.ocdroid.service.streaming.ProcessStatusPoller
     @Inject lateinit var sseRecoveryPolicy: cn.vectory.ocdroid.service.streaming.SseRecoveryPolicy
+    @Inject lateinit var bootstrapRetryPolicy: cn.vectory.ocdroid.service.streaming.BootstrapRetryPolicy
 
     /**
      * Service-lifetime [CoroutineScope] bound to [MainScope] (Main thread).
@@ -174,6 +179,7 @@ class SessionStreamingService : Service() {
      * entry.
      */
     private var bootstrapJob: Job? = null
+    private var acceptedOwnershipIdentity: ConnectionIdentity? = null
 
     /**
      * CP5: the production [ServiceShell] — a private adapter that translates
@@ -293,6 +299,8 @@ class SessionStreamingService : Service() {
             strings = strings,
             inForeground = appLifecycleMonitor.isInForeground,
             scope = scope,
+            bootstrapRetryPolicy = bootstrapRetryPolicy,
+            onBootstrapIdentity = { identity -> acceptOwnership(identity) },
         ).also { it.start() }
     }
 
@@ -357,8 +365,15 @@ class SessionStreamingService : Service() {
             }
         }
         DebugLog.i(TAG, "onStartCommand: intent=$intent (null=sticky rebuild, §5)")
+        val requestedOwnership = OwnershipRequestParser.parse(
+            epoch = intent?.getLongExtra(OwnershipRequestParser.EXTRA_EPOCH, -1L)?.takeIf { it >= 0 },
+            serverGroupFp = intent?.getStringExtra(OwnershipRequestParser.EXTRA_SERVER_GROUP_FP),
+            workdir = intent?.getStringExtra(OwnershipRequestParser.EXTRA_WORKDIR),
+            endpointFp = intent?.getStringExtra(OwnershipRequestParser.EXTRA_ENDPOINT_FP),
+        )
         // §5 step 1: synchronous minimal persisted-config read.
-        val hasValidHost = settingsManager.serverUrl.isNotBlank()
+        val hasValidHost = settingsManager.serverUrl.isNotBlank() ||
+            runCatching { hostProfileStore.currentProfile().serverUrl.isNotBlank() }.getOrDefault(false)
         if (!hasValidHost) {
             DebugLog.w(TAG, "onStartCommand: no effective host → stopSelf (§5 step 1)")
             stopSelf()
@@ -374,8 +389,34 @@ class SessionStreamingService : Service() {
         // time); coordinator.onBootstrapResult() remains the only legal
         // L3→running entry.
         bootstrapJob?.cancel()
-        bootstrapJob = scope.launch { controller?.bootstrapAsync() }
+        val installedJob = scope.launch(start = kotlinx.coroutines.CoroutineStart.LAZY) {
+            controller?.bootstrapAsync()
+        }
+        bootstrapJob = installedJob
+        if (requestedOwnership != null) {
+            scope.launch {
+                if (identityStore.isCurrent(requestedOwnership)) {
+                    acceptOwnership(requestedOwnership)
+                } else {
+                    ownershipGate.refuse(requestedOwnership, OwnershipRefusal.StaleIdentity)
+                }
+                installedJob.start()
+            }
+        } else {
+            installedJob.start()
+        }
         return START_STICKY
+    }
+
+    private suspend fun acceptOwnership(identity: ConnectionIdentity) {
+        if (!identityStore.isCurrent(identity)) {
+            ownershipGate.refuse(identity, OwnershipRefusal.StaleIdentity)
+            return
+        }
+        acceptedOwnershipIdentity = identity
+        ownershipGate.registerAccepted(identity) { markGap ->
+            sseOwner?.disconnectAndJoin(markGap)
+        }
     }
 
     /**
@@ -566,6 +607,10 @@ class SessionStreamingService : Service() {
         // @ApplicationScope and is NOT cancelled here — it survives this
         // Service's death (§6 L3 source contract).
         sseOwner?.cancelForShutdown()
+        acceptedOwnershipIdentity?.let { identity ->
+            kotlinx.coroutines.runBlocking { ownershipGate.release(identity) }
+        }
+        acceptedOwnershipIdentity = null
         controller?.shutdown()
         scope.cancel()
         super.onDestroy()

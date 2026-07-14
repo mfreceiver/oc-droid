@@ -1,6 +1,9 @@
 package cn.vectory.ocdroid
 
 import cn.vectory.ocdroid.service.StreamingServiceLauncher
+import cn.vectory.ocdroid.service.OwnershipStartResult
+import cn.vectory.ocdroid.service.OwnershipRefusal
+import cn.vectory.ocdroid.service.identity.ConnectionIdentity
 import java.util.concurrent.atomic.AtomicInteger
 
 /**
@@ -31,8 +34,12 @@ class RecordingStreamingServiceLauncher : StreamingServiceLauncher {
     @Volatile
     var nextResult: Boolean = true
 
-    override fun ensureStarted(): Boolean {
+    val requestedIdentities = mutableListOf<ConnectionIdentity>()
+
+    override suspend fun ensureStarted(identity: ConnectionIdentity): OwnershipStartResult {
         callCountAtomic.incrementAndGet()
-        return nextResult
+        requestedIdentities += identity
+        return if (nextResult) OwnershipStartResult.Accepted(identity)
+        else OwnershipStartResult.Refused(OwnershipRefusal.ServiceStopped)
     }
 }

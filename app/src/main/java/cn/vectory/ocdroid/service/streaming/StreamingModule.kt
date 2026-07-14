@@ -54,6 +54,12 @@ abstract class StreamingModule {
     @Binds
     @Singleton
     abstract fun bindStreamingServiceLauncher(impl: AndroidStreamingServiceLauncher): StreamingServiceLauncher
+
+    @Binds
+    @Singleton
+    abstract fun bindReconfigureTeardown(
+        impl: cn.vectory.ocdroid.service.lifecycle.StreamingLifecycleCoordinator,
+    ): cn.vectory.ocdroid.service.ReconfigureTeardown
 }
 
 /**
@@ -79,5 +85,29 @@ object ProcessStatusPollerModule {
         identityStore = identityStore,
         statusAggregator = statusAggregator,
         clock = { System.currentTimeMillis() },
+    )
+}
+
+@Module
+@InstallIn(SingletonComponent::class)
+object ConnectionBootstrapEngineModule {
+    @Provides
+    @Singleton
+    fun provideConnectionBootstrapEngine(
+        hostProfileStore: cn.vectory.ocdroid.data.repository.HostProfileStore,
+        settingsManager: cn.vectory.ocdroid.util.SettingsManager,
+        repository: cn.vectory.ocdroid.data.repository.OpenCodeRepository,
+        identityStore: ConnectionIdentityStore,
+        bootstrapCoordinator: cn.vectory.ocdroid.service.bootstrap.ConnectionBootstrapCoordinator,
+        serverCompatProfile: cn.vectory.ocdroid.data.repository.ServerCompatProfile,
+        appLifecycleMonitor: cn.vectory.ocdroid.di.AppLifecycleMonitor,
+    ): ConnectionBootstrapEngine = ConnectionBootstrapEngine(
+        hostProfileStore = hostProfileStore,
+        settingsManager = settingsManager,
+        repository = repository,
+        identityStore = identityStore,
+        bootstrapCoordinator = bootstrapCoordinator,
+        serverCompatProfile = serverCompatProfile,
+        hasActivity = { appLifecycleMonitor.isInForeground.value },
     )
 }

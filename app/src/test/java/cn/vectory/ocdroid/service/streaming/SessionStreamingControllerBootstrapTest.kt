@@ -181,6 +181,54 @@ class SessionStreamingControllerBootstrapTest {
     }
 
     @Test
+    fun `D3 sticky bootstrap uses every 2s 5s 15s 30s 2m 5m retry delay then recovers`() = runTest {
+        val fixture = newFixture(backgroundScope, inForeground = false, productionRetryPolicy = true)
+        fixture.controller.start()
+        fixture.aggregator.setState(GlobalBusyState.Busy)
+        repeat(BootstrapRetryPolicy().delaysMs.size) {
+            fixture.bootstrapRunner.enqueue(BootstrapResult.Failed)
+        }
+        fixture.bootstrapRunner.enqueue(BootstrapResult.Success(identity))
+
+        fixture.controller.bootstrapAsync()
+        runCurrent()
+
+        assertEquals(7, fixture.bootstrapRunner.callCount)
+        assertEquals(BootstrapRetryPolicy().delaysMs.sum(), testScheduler.currentTime)
+        assertEquals(Layer.L2Active, fixture.coordinator.layer.value)
+    }
+
+    @Test
+    fun `D3 sticky bootstrap exhausts only after all six retry delays and remains L3`() = runTest {
+        val fixture = newFixture(backgroundScope, inForeground = false, productionRetryPolicy = true)
+        repeat(BootstrapRetryPolicy().delaysMs.size + 1) {
+            fixture.bootstrapRunner.enqueue(BootstrapResult.Failed)
+        }
+
+        fixture.controller.bootstrapAsync()
+        runCurrent()
+
+        assertEquals(7, fixture.bootstrapRunner.callCount)
+        assertEquals(BootstrapRetryPolicy().delaysMs.sum(), testScheduler.currentTime)
+        assertEquals(Layer.L3, fixture.coordinator.layer.value)
+    }
+
+    @Test
+    fun `D3 fresh background idle bootstrap stops foreground and self into L3`() = runTest {
+        val fixture = newFixture(backgroundScope, inForeground = false)
+        fixture.controller.start()
+        fixture.aggregator.setState(GlobalBusyState.AllIdleFresh)
+        fixture.bootstrapRunner.enqueue(BootstrapResult.Success(identity))
+
+        fixture.controller.bootstrapAsync()
+        runCurrent()
+
+        assertEquals(Layer.L3, fixture.coordinator.layer.value)
+        assertTrue(fixture.shell.recorded.contains("stopForeground"))
+        assertTrue(fixture.shell.recorded.contains("serviceStopSelf"))
+    }
+
+    @Test
     fun `bootstrapAsync is restartable - second invocation runs after the first (CP9 A6)`() = runTest {
         // CP9 §A6: the once-per-instance `bootstrapRan` latch was REMOVED
         // from SessionStreamingController — it could strand a reconfigure
@@ -217,6 +265,7 @@ class SessionStreamingControllerBootstrapTest {
     private fun newFixture(
         scope: kotlinx.coroutines.CoroutineScope,
         inForeground: Boolean,
+        productionRetryPolicy: Boolean = false,
     ): Fixture {
         val aggregator = RecordingStatusInput()
         val coordinator = StreamingLifecycleCoordinator(aggregator, scope)
@@ -240,6 +289,7 @@ class SessionStreamingControllerBootstrapTest {
             // real wall-clock (the runTest scheduler virtualises delay(), so
             // this is belt-and-suspenders).
             bootstrapBackoffMs = 5L,
+            bootstrapRetryPolicy = BootstrapRetryPolicy().takeIf { productionRetryPolicy },
             clock = { 0L },
         )
         return Fixture(controller, coordinator, aggregator, store, shell, bootstrapRunner)

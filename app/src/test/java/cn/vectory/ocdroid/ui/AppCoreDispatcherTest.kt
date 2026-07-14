@@ -161,6 +161,7 @@ class AppCoreDispatcherTest : MainViewModelTestBase() {
         // Seed a known workdir so the multi-workdir fan-out has at least one
         // directory to probe (settingsManager.currentWorkdir mock).
         io.mockk.every { settingsManager.currentWorkdir } returns "/proj"
+        identityStore.bind("test-fp", "/proj", "test-endpoint")
 
         val handled = core.dispatchSessionEffect(ControllerEffect.LoadPendingQuestions)
         advanceUntilIdle()
@@ -210,6 +211,7 @@ class AppCoreDispatcherTest : MainViewModelTestBase() {
         // atomic trigger that promotes the Service to foreground.
         io.mockk.every { settingsManager.currentWorkdir } returns "/proj"
         val core = newCore()
+        identityStore.bind("test-fp", "/proj", "test-endpoint")
         val callsBefore = streamingServiceLauncher.callCount
 
         val handled = core.dispatchHostEffect(ControllerEffect.StartSse)

@@ -67,7 +67,9 @@ reconfigure 严格顺序（不可颠倒）：
 5. 新 collector 绑定新 identity；
 6. **每个发布事件携带 identity**；`SseEventBridge` / 通知聚合器 / `SessionSyncCoordinator.fold` 在**任何副作用前**校验 identity。
 
-- `CancelSseForReconfigure` → 先 stop Service SSE 并 bump **与 collector 绑定的 epoch** → 再 repository/host 重配 → `loadInitialData` → start SSE。
+**D3 落地协议（gate #3）**：`ConnectionReconfigureBarrier` 是唯一 epoch owner；所有生产 host/profile/reset 路径必须在同一互斥 transaction 中执行 `beginReconfigure()` → 请求 lifecycle 进入 L3 → 等待 D2 replacement source ready 且旧 Service transport `disconnectAndJoin` → repository/client rebuild + 旧 host 状态隔离 → `HostReconfigured(epoch)`。`ConnectionCoordinator.cancelSseForReconfigure()` 不再 bump epoch 或发布第二个 `HostReconfigured`。`StreamingServiceLauncher.ensureStarted(identity)` 返回 identity-bound `OwnershipStartResult`；只有 Service 对**完全相同** identity 注册 ownership acknowledgement 后，CC 才允许发布 `Connected` / `onSettled(true)`，background、platform reject、ack timeout、stale identity、different owner 一律按失败 settle。
+
+- 生产 reconfigure 不再依赖异步 `CancelSseForReconfigure` effect；barrier 同步 bump **与 collector 绑定的 epoch**，完成 source handoff + transport join 后才允许 repository/host 重配 → `loadInitialData` → identity-bound Service ownership/start SSE。
 - **`loadInitialData` 的 directory fan-out 必须读同一 epoch**（实现注记，gpter）：不得让 CC 私有第二个 generation 与 SSE 的 epoch 分裂。统一为：epoch 同时作 SSE collector 守卫 + directory-fetch 守卫。
 - 单测：迁移/保留 `ConnectionCoordinatorTest` stale-host 场景（旧帧 `server.connected`/`session.status`/`message.*` 不得污染新 host；通知聚合器也不得用旧 `session.status` 触发错误完成通知）。
 
@@ -189,6 +191,8 @@ reconfigure 严格顺序（不可颠倒）：
 5. **权威全 idle** → **`stopForeground` / `stopSelf` → 进入 L3**（poller only，不占 FGS）；占位通知撤销。
 6. `SSEConnectionExhausted` → 每次 transport outage 先且仅先发一次 gap-dirty；随后做 **3 次额外 service 级 collector 尝试**，基础延迟严格为 `30s / 2m / 5m`，每次注入 `±20%` jitter。首个当前 identity 的有效 frame 重置预算并完成 transport readiness；intentional cancel / stale identity 不发 false gap、不启动 retry。三次均失败后才且仅一次标记 degraded/disconnected，并调用 lifecycle `onDisconnect()` 进入 L3；reconfigure / timeout / 用户关闭 / cancel 会取消 recovery。
 
+**D3 fresh-process 实现（gate #6）**：CC 与 Service 共用单例 `ConnectionBootstrapEngine`，按 effective persisted config 做 keyed single-flight；它从 `HostProfileStore + SettingsManager` 读取 host/basic-auth/workdir/tunnel/mTLS，串行完成 repository configure、tunnel activation、health、TLS capture/TOFU、`ServerCompatProfile` 与 `ConnectionIdentityStore.bind`。sticky null Intent 不依赖 Activity/CC 预热；无 Activity 的 TOFU capture 保存在 shared coordinator 并返回 degraded。Service bootstrap 网络失败使用严格延迟 `2s / 5s / 15s / 30s / 2m / 5m`（六次 delay、最多七次 probe），任一次恢复立即进入 §4 decision matrix，最终耗尽才回 L3。bootstrap 成功会为 sticky-created Service 注册当前 identity ownership；显式 launcher start 则在 Service 安装 exact identity owner 后才 ack。
+
 **未决 TOFU 且无 Activity**（闭合 gpter-MAJOR#2 / #5）：
 - 不无限等 UI deferred；不消耗 SSE 重试预算；
 - 进入明确 degraded 状态；占位通知加 action 引导用户打开 Activity 完成信任；
@@ -309,6 +313,9 @@ reconfigure 严格顺序（不可颠倒）：
 - Activity 重建：idle 帧不丢；SSC 由进程级 owner 持续 fold。
 - 后台非当前 workdir busy：全局 busy 源识别；不误停 SSE。
 - `sticky null Intent`：占位通知先贴 → 异步 bootstrap。
+- D3 sticky fresh process：仅持久配置即可完成 configure/tunnel/health/TOFU/identity；Busy→L2-active，权威 idle→`stopForeground`+`stopSelf`→L3；覆盖六档 bootstrap delay 的恢复与最终耗尽。
+- D3 ownership：background/platform reject/timeout/stale/different identity 均不得发布 Connected；exact Service ack 是 `onSettled(true)` 的唯一入口。
+- D3 reconfigure：并发 reconfigure 串行；每次 transaction 恰好一个 epoch；旧 transport join 必须先于 repository rebuild，`HostReconfigured(epoch)` 必须最后发布，旧 collector/frame 不得跨 transaction 存活。
 - `SSEConnectionExhausted`：service 级长期重试，不等进程重启。
 - 通知权限拒绝 / FGS 启动被拒：降级路径。
 - poller 交接（§4.4 双向）：无空窗、无双发。

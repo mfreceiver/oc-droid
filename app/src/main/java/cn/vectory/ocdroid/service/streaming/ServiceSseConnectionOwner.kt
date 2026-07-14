@@ -518,6 +518,8 @@ class ServiceSseConnectionOwner(
         job?.cancelAndJoin()
     }
 
+    suspend fun disconnectAndJoin(markGap: Boolean = true) = disconnect(markGap)
+
     /** Synchronous Service-destruction fallback; normal L3 teardown already joined. */
     fun cancelForShutdown() {
         transportGenerationCounter += 1

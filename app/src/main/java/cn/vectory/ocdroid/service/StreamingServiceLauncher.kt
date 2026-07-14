@@ -4,12 +4,14 @@ import android.content.Context
 import android.content.Intent
 import androidx.core.content.ContextCompat
 import cn.vectory.ocdroid.di.AppLifecycleMonitor
+import cn.vectory.ocdroid.service.identity.ConnectionIdentity
 import cn.vectory.ocdroid.service.lifecycle.Layer
 import cn.vectory.ocdroid.service.lifecycle.StreamingLifecycleCoordinator
 import cn.vectory.ocdroid.util.DebugLog
 import dagger.hilt.android.qualifiers.ApplicationContext
 import javax.inject.Inject
 import javax.inject.Singleton
+import kotlinx.coroutines.withTimeoutOrNull
 
 /**
  * CP9 (notify Phase-0 switchover): the trigger that promotes the live SSE
@@ -67,7 +69,7 @@ interface StreamingServiceLauncher {
      * @return `true` iff the Service is running (or already running) OR the
      *   layer makes a start unnecessary; `false` iff the start was refused.
      */
-    fun ensureStarted(): Boolean
+    suspend fun ensureStarted(identity: ConnectionIdentity): OwnershipStartResult
 }
 
 /**
@@ -82,34 +84,42 @@ class AndroidStreamingServiceLauncher @Inject constructor(
     @ApplicationContext private val context: Context,
     private val appLifecycleMonitor: AppLifecycleMonitor,
     private val coordinator: StreamingLifecycleCoordinator,
+    private val ownershipGate: StreamingOwnershipGate,
+    private val ackPolicy: OwnershipAckPolicy,
 ) : StreamingServiceLauncher {
 
-    override fun ensureStarted(): Boolean {
+    override suspend fun ensureStarted(identity: ConnectionIdentity): OwnershipStartResult {
         // §C15 step 1: foreground truth. A background start would trip a
         // ForegroundServiceStartNotAllowedException on Android 12+ and is
         // explicitly out-of-scope (FGS spec §4.1 legal recovery entries only).
         if (!appLifecycleMonitor.isInForeground.value) {
             DebugLog.i(TAG, "ensureStarted: NOT foreground → refuse (no FGS in background)")
-            return false
+            return OwnershipStartResult.Refused(OwnershipRefusal.Background)
         }
-        // §C15 step 2: a non-L3 layer means the Service is already alive and
-        // owns SSE / lifecycle. Issue no second start (would either no-op on
-        // the Android side or fork a second bootstrap state machine).
-        val layer = coordinator.layer.value
-        if (layer !is Layer.L3) {
-            DebugLog.i(TAG, "ensureStarted: layer=$layer already alive → no-op (true)")
-            return true
+        ownershipGate.acceptedIdentity()?.let { owned ->
+            return if (owned == identity) {
+                OwnershipStartResult.Accepted(identity)
+            } else {
+                OwnershipStartResult.Refused(OwnershipRefusal.AlreadyOwned(owned))
+            }
         }
         // §C15 step 3: foreground + L3 → start the Service with the §5
         // bootstrap action. The Service runs its §5 sequence (placeholder
         // promotion → async bootstrap → coordinator.onBootstrapResult →
         // StartSse via the §4 decision matrix).
-        return try {
-            val intent = Intent(context, SessionStreamingService::class.java)
-                .setAction(SessionStreamingService.ACTION_BOOTSTRAP)
+        val waiter = ownershipGate.prepare(identity)
+        try {
+            val intent = Intent(context, SessionStreamingService::class.java).apply {
+                action = SessionStreamingService.ACTION_BOOTSTRAP
+                putExtra(OwnershipRequestParser.EXTRA_EPOCH, identity.epoch)
+                putExtra(OwnershipRequestParser.EXTRA_SERVER_GROUP_FP, identity.serverGroupFp)
+                putExtra(OwnershipRequestParser.EXTRA_WORKDIR, identity.normalizedWorkdir)
+                putExtra(OwnershipRequestParser.EXTRA_ENDPOINT_FP, identity.endpointFp)
+            }
             ContextCompat.startForegroundService(context, intent)
             DebugLog.i(TAG, "ensureStarted: startForegroundService issued (ACTION_BOOTSTRAP)")
-            true
+            return withTimeoutOrNull(ackPolicy.timeoutMs) { waiter.await() }
+                ?: OwnershipStartResult.Refused(OwnershipRefusal.AckTimeout)
         } catch (t: Throwable) {
             // §C15 step 4: platform start rejection (ForegroundServiceStart-
             // NotAllowedException, SecurityException on quota exhaustion,
@@ -117,7 +127,11 @@ class AndroidStreamingServiceLauncher @Inject constructor(
             // surface as a refused start so CC reports its own connect state
             // honestly and the foreground return path retries.
             DebugLog.w(TAG, "ensureStarted: platform rejected startForegroundService: ${t.message}")
-            false
+            val refusal = OwnershipRefusal.PlatformRejected(t)
+            ownershipGate.refuse(identity, refusal)
+            return OwnershipStartResult.Refused(refusal)
+        } finally {
+            ownershipGate.cancelWaiter(identity, waiter)
         }
     }
 

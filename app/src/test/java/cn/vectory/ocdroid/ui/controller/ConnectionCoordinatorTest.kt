@@ -532,8 +532,8 @@ class ConnectionCoordinatorTest {
         coordinator.loadInitialData()
         runPending() // launch now suspended on pending.await()
 
-        // Host/profile switch → cancelSseForReconfigure bumps generation.
-        coordinator.cancelSseForReconfigure()
+        // The D3 barrier is now the sole epoch owner; simulate its first step.
+        identityStore.beginReconfigure()
 
         // The stale-host result arrives AFTER the reconfigure.
         pending.complete(Result.success(listOf(Session(id = "stale", directory = "/proj"))))
@@ -575,28 +575,19 @@ class ConnectionCoordinatorTest {
     // ── SSE lifecycle (cancelSseForReconfigure still lives here) ───────────
 
     @Test
-    fun `cancelSseForReconfigure advances epoch and emits HostReconfigured`() {
-        // CP9 §F27: cancelSseForReconfigure still bumps the identityStore
-        // epoch AND emits HostReconfigured(newEpoch). The streamingLifecycle
-        // teardown is now routed through coordinator.onDisconnect (the
-        // streamingLifecycleCoordinator is null in this test core, so the
-        // path is a no-op here — the production wiring is verified in
-        // SessionStreamingControllerWiringTest).
+    fun `cancelSseForReconfigure does not duplicate barrier epoch or effect`() {
+        val epochBefore = identityStore.currentEpoch()
         coordinator.cancelSseForReconfigure()
-
-        val reconfigured = collectedEffects.filterIsInstance<ControllerEffect.HostReconfigured>()
-        assertEquals(1, reconfigured.size)
-        assertTrue("HostReconfigured epoch must be > 0 after beginReconfigure", reconfigured[0].epoch > 0L)
-        // CP1: identityStore epoch advanced.
-        assertEquals(reconfigured[0].epoch, identityStore.currentEpoch())
+        runPending()
+        assertEquals(epochBefore, identityStore.currentEpoch())
+        assertTrue(collectedEffects.none { it is ControllerEffect.HostReconfigured })
     }
 
     @Test
-    fun `cancelSseForReconfigure fires onHostReconfigured even with no active feed`() {
+    fun `cancelSseForReconfigure is neutral with no active feed`() {
         coordinator.cancelSseForReconfigure()
-        val reconfigured = collectedEffects.filterIsInstance<ControllerEffect.HostReconfigured>()
-        assertEquals(1, reconfigured.size)
-        assertTrue("HostReconfigured epoch must be > 0 after beginReconfigure", reconfigured[0].epoch > 0L)
+        runPending()
+        assertTrue(collectedEffects.none { it is ControllerEffect.HostReconfigured })
     }
 
     // ── loadInitialData (§best-effort: directory onFailure is non-fatal) ───
@@ -783,6 +774,7 @@ class ConnectionCoordinatorTest {
 
         // The retry loop's finally block clears the state.
         bootstrapCoordinator.clearPendingTofu()
+        identityStore.bind("test-fp", "/proj", "test-endpoint")
         assertEquals(
             cn.vectory.ocdroid.service.bootstrap.TofuState.Idle,
             bootstrapCoordinator.tofuState.value,
@@ -814,6 +806,7 @@ class ConnectionCoordinatorTest {
 
         // Resolve + clear → unfreezes.
         bootstrapCoordinator.clearPendingTofu()
+        identityStore.bind("test-fp", "/proj", "test-endpoint")
 
         coordinator.startSSE()
         runPending()
@@ -851,9 +844,75 @@ class ConnectionCoordinatorTest {
 
         // Clearing via the shared coordinator unfreezes CC.
         bootstrapCoordinator.clearPendingTofu()
+        identityStore.bind("test-fp", "/proj", "test-endpoint")
         coordinator.startSSE()
         runPending()
         assertEquals(1, launcher.callCount)
+    }
+
+    @Test
+    fun `D3 refused ownership settles false once and never publishes Connected`() {
+        val engine = mockk<cn.vectory.ocdroid.service.streaming.ConnectionBootstrapEngine>()
+        val identity = identityStore.bind("group", "/work", "endpoint")
+        coEvery { engine.bootstrap() } returns
+            cn.vectory.ocdroid.service.streaming.ConnectionBootstrapOutcome.Success(
+                identity,
+                HealthResponse(true, "3.0"),
+            )
+        launcher.nextResult = false
+        val d3 = ConnectionCoordinator(
+            scope = scope,
+            slices = slices,
+            repository = repository,
+            settingsManager = settingsManager,
+            effects = effects,
+            serverCompatProfile = cn.vectory.ocdroid.data.repository.ServerCompatProfile(),
+            clock = { now },
+            identityStore = identityStore,
+            bootstrapCoordinator = bootstrapCoordinator,
+            streamingServiceLauncher = launcher,
+            connectionBootstrapEngine = engine,
+        )
+        val settled = mutableListOf<Boolean>()
+
+        d3.testConnection(force = true, onSettled = settled::add)
+        runPending()
+
+        assertEquals(listOf(false), settled)
+        assertFalse(connectionFlow.value.isConnected)
+        assertFalse(connectionFlow.value.connectionPhase is ConnectionPhase.Connected)
+    }
+
+    @Test
+    fun `D3 exact accepted identity is the only healthy settlement`() {
+        val engine = mockk<cn.vectory.ocdroid.service.streaming.ConnectionBootstrapEngine>()
+        val identity = identityStore.bind("group", "/work", "endpoint")
+        coEvery { engine.bootstrap() } returns
+            cn.vectory.ocdroid.service.streaming.ConnectionBootstrapOutcome.Success(
+                identity,
+                HealthResponse(true, "3.0"),
+            )
+        val d3 = ConnectionCoordinator(
+            scope = scope,
+            slices = slices,
+            repository = repository,
+            settingsManager = settingsManager,
+            effects = effects,
+            serverCompatProfile = cn.vectory.ocdroid.data.repository.ServerCompatProfile(),
+            clock = { now },
+            identityStore = identityStore,
+            bootstrapCoordinator = bootstrapCoordinator,
+            streamingServiceLauncher = launcher,
+            connectionBootstrapEngine = engine,
+        )
+        val settled = mutableListOf<Boolean>()
+
+        d3.testConnection(force = true, onSettled = settled::add)
+        runPending()
+
+        assertEquals(listOf(true), settled)
+        assertTrue(connectionFlow.value.isConnected)
+        assertEquals(listOf(identity), launcher.requestedIdentities.takeLast(1))
     }
 
     // ── RecordingConnectionCoordinatorCallbacks (removed in batch 3b) ──────

@@ -1,6 +1,9 @@
 package cn.vectory.ocdroid.service.lifecycle
 
 import cn.vectory.ocdroid.di.UiApplicationScope
+import cn.vectory.ocdroid.service.ReconfigureTeardown
+import cn.vectory.ocdroid.service.StreamingOwnershipGate
+import cn.vectory.ocdroid.service.TeardownReason
 import cn.vectory.ocdroid.service.identity.ConnectionIdentity
 import cn.vectory.ocdroid.service.lifecycle.LifecycleCommand.StartForeground
 import cn.vectory.ocdroid.service.lifecycle.LifecycleCommand.StopForeground
@@ -25,6 +28,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.receiveAsFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
@@ -105,7 +109,8 @@ import javax.inject.Singleton
 class StreamingLifecycleCoordinator @Inject constructor(
     private val statusAggregator: StatusAggregator,
     @UiApplicationScope private val scope: CoroutineScope,
-) {
+    private val ownershipGate: StreamingOwnershipGate? = null,
+) : ReconfigureTeardown {
     /**
      * The layered lifecycle state (FGS spec §4.1). See [Layer] for the
      * invariant each value carries. Consumers (notification display layer,
@@ -263,6 +268,16 @@ class StreamingLifecycleCoordinator @Inject constructor(
     fun onDisconnect() {
         DebugLog.i(TAG, "onDisconnect (§4.1)")
         scope.launch { teardown() }
+    }
+
+    override suspend fun teardownAndAwait(reason: TeardownReason) {
+        DebugLog.i(TAG, "teardownAndAwait(reason=$reason)")
+        teardown()
+        layer.first { it == Layer.L3 }
+        // L3 is committed only after D2's replacement poller has acknowledged
+        // readiness. Join the old transport after that handoff, but before a
+        // reconfigure caller is allowed to rebuild the repository client.
+        ownershipGate?.disconnectAndRelease(markGap = true)
     }
     /**
      * D2 (gate #4): the controller's completion signal for a source activation.

@@ -76,6 +76,8 @@ class SessionStreamingController(
     private val scope: CoroutineScope,
     private val bootstrapMaxAttempts: Int = DEFAULT_BOOTSTRAP_MAX_ATTEMPTS,
     private val bootstrapBackoffMs: Long = DEFAULT_BOOTSTRAP_BACKOFF_MS,
+    private val bootstrapRetryPolicy: BootstrapRetryPolicy? = null,
+    private val onBootstrapIdentity: suspend (ConnectionIdentity) -> Unit = {},
     private val clock: () -> Long = { System.currentTimeMillis() },
 ) {
 
@@ -139,6 +141,7 @@ class SessionStreamingController(
      */
     suspend fun bootstrapAsync() {
         var attempt = 0
+        val retryDelays = bootstrapRetryPolicy?.delaysMs
         while (true) {
             attempt++
             DebugLog.i(TAG, "bootstrapAsync: attempt $attempt")
@@ -146,6 +149,7 @@ class SessionStreamingController(
                 is BootstrapResult.Success -> {
                     degraded = false
                     val identity = result.identity
+                    onBootstrapIdentity(identity)
                     val snapshot = sessionSnapshotProvider.current()
                     statusAggregatorInput.refresh(identity, snapshot)
                     coordinator.onBootstrapResult(identity, statusAggregator.globalState.value)
@@ -174,16 +178,22 @@ class SessionStreamingController(
                     return
                 }
                 BootstrapResult.Failed -> {
-                    if (attempt >= bootstrapMaxAttempts) {
+                    val exhausted = if (retryDelays != null) {
+                        attempt > retryDelays.size
+                    } else {
+                        attempt >= bootstrapMaxAttempts
+                    }
+                    if (exhausted) {
                         DebugLog.w(TAG, "bootstrapAsync: exhausted $attempt attempts → onDisconnect")
                         coordinator.onDisconnect()
                         return
                     }
+                    val delayMs = retryDelays?.get(attempt - 1) ?: bootstrapBackoffMs
                     DebugLog.i(
                         TAG,
-                        "bootstrapAsync: failed (attempt $attempt/$bootstrapMaxAttempts), backing off ${bootstrapBackoffMs}ms",
+                        "bootstrapAsync: failed attempt=$attempt, backing off ${delayMs}ms",
                     )
-                    delay(bootstrapBackoffMs)
+                    delay(delayMs)
                 }
             }
         }

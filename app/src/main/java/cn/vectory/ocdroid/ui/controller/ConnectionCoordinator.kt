@@ -10,6 +10,11 @@ import cn.vectory.ocdroid.data.repository.http.TofuDecision
 import cn.vectory.ocdroid.data.repository.http.hostPortFromUrl
 import cn.vectory.ocdroid.service.bootstrap.ConnectionBootstrapCoordinator
 import cn.vectory.ocdroid.service.StreamingServiceLauncher
+import cn.vectory.ocdroid.service.OwnershipStartResult
+import cn.vectory.ocdroid.service.TeardownReason
+import cn.vectory.ocdroid.service.streaming.BootstrapRetryPolicy
+import cn.vectory.ocdroid.service.streaming.ConnectionBootstrapEngine
+import cn.vectory.ocdroid.service.streaming.ConnectionBootstrapOutcome
 import cn.vectory.ocdroid.service.identity.ConnectionIdentityStore
 import cn.vectory.ocdroid.service.lifecycle.StreamingLifecycleCoordinator
 import cn.vectory.ocdroid.ui.ConnectionPhase
@@ -167,6 +172,8 @@ class ConnectionCoordinator(
      * effect.
      */
     private val streamingLifecycleCoordinator: StreamingLifecycleCoordinator? = null,
+    private val connectionBootstrapEngine: ConnectionBootstrapEngine? = null,
+    private val bootstrapRetryPolicy: BootstrapRetryPolicy = BootstrapRetryPolicy(),
 ) {
     private var lastHealthCheckTime = 0L
 
@@ -230,6 +237,10 @@ class ConnectionCoordinator(
         // CP2: TOFU state is delegated to [tofu] (ConnectionBootstrapCoordinator).
         if (tofu.pendingTofuHostPort() != null) {
             DebugLog.i(TAG, "testConnection: TOFU trust pending for ${tofu.pendingTofuHostPort()} — deferring")
+            return
+        }
+        connectionBootstrapEngine?.let { engine ->
+            testConnectionWithEngine(engine, retries, onSettled)
             return
         }
         scope.launch {
@@ -484,6 +495,98 @@ class ConnectionCoordinator(
         }
     }
 
+    private fun testConnectionWithEngine(
+        engine: ConnectionBootstrapEngine,
+        retries: Int,
+        onSettled: ((Boolean) -> Unit)?,
+    ) {
+        scope.launch {
+            var settled = false
+            try {
+                writeConnection { it.copy(isConnecting = true, connectionPhase = ConnectionPhase.Connecting) }
+                val delays = bootstrapRetryPolicy.delaysMs.take(retries.coerceAtLeast(0))
+                var attempt = 0
+                while (true) {
+                    when (val outcome = engine.bootstrap()) {
+                        is ConnectionBootstrapOutcome.Success -> {
+                            loadInitialData()
+                            val ownership = streamingServiceLauncher?.ensureStarted(outcome.identity)
+                                ?: OwnershipStartResult.Refused(
+                                    cn.vectory.ocdroid.service.OwnershipRefusal.ServiceStopped,
+                                )
+                            if (ownership is OwnershipStartResult.Accepted &&
+                                ownership.identity == outcome.identity
+                            ) {
+                                writeConnection {
+                                    it.copy(
+                                        isConnected = true,
+                                        isConnecting = false,
+                                        serverVersion = outcome.health.version,
+                                        connectionPhase = ConnectionPhase.Connected,
+                                    )
+                                }
+                                cacheMaintenanceCoordinator?.let { maintenance ->
+                                    scope.launch {
+                                        runCatching { maintenance.dailySweepIfNeeded(outcome.identity.serverGroupFp) }
+                                    }
+                                }
+                                settled = true
+                                onSettled?.invoke(true)
+                                return@launch
+                            }
+                            writeConnection {
+                                it.copy(
+                                    isConnected = false,
+                                    isConnecting = false,
+                                    connectionPhase = ConnectionPhase.Disconnected,
+                                )
+                            }
+                            settled = true
+                            onSettled?.invoke(false)
+                            return@launch
+                        }
+                        is ConnectionBootstrapOutcome.TofuNeedsActivity -> {
+                            writeConnection {
+                                it.copy(
+                                    isConnected = false,
+                                    isConnecting = false,
+                                    pendingTofuCapture = outcome.capture,
+                                    connectionPhase = ConnectionPhase.AwaitingTofuTrust,
+                                )
+                            }
+                            settled = true
+                            onSettled?.invoke(false)
+                            return@launch
+                        }
+                        is ConnectionBootstrapOutcome.Failed -> {
+                            if (attempt >= delays.size) {
+                                effects.tryEmitUiEvent(
+                                    UiEvent.Error(
+                                        R.string.error_connection_failed,
+                                        listOf(errorMessageOrFallback(outcome.error, "unknown error")),
+                                    ),
+                                )
+                                writeConnection {
+                                    it.copy(
+                                        isConnected = false,
+                                        isConnecting = false,
+                                        connectionPhase = ConnectionPhase.Disconnected,
+                                    )
+                                }
+                                settled = true
+                                onSettled?.invoke(false)
+                                return@launch
+                            }
+                            delay(delays[attempt++])
+                        }
+                    }
+                }
+            } finally {
+                if (!settled) onSettled?.invoke(false)
+            }
+        }
+    }
+
     /**
      * Cold-start entry point: force a connection check with up to 3 retries
      * (exponential backoff 1s/2s/4s) so a slow-to-wake server (common when
@@ -695,9 +798,20 @@ class ConnectionCoordinator(
             DebugLog.i(TAG, "startSSE: frozen — TOFU trust pending for ${tofu.pendingTofuHostPort()}")
             return
         }
-        DebugLog.i("SSE", "startSSE → launcher.ensureStarted()")
-        // CP9 §B8: thin delegate. NEVER calls repository.connectSSE.
-        streamingServiceLauncher?.ensureStarted()
+        val identity = identityStore?.currentIdentity?.value ?: return
+        DebugLog.i("SSE", "startSSE → launcher.ensureStarted(identity=${identity.epoch})")
+        scope.launch {
+            val result = streamingServiceLauncher?.ensureStarted(identity)
+            if (result !is OwnershipStartResult.Accepted || result.identity != identity) {
+                writeConnection {
+                    it.copy(
+                        isConnected = false,
+                        isConnecting = false,
+                        connectionPhase = ConnectionPhase.Disconnected,
+                    )
+                }
+            }
+        }
     }
 
     /**
@@ -730,7 +844,9 @@ class ConnectionCoordinator(
      * that doesn't wire it (pre-CP9 build) — the call is a no-op there.
      */
     fun cancelSse() {
-        streamingLifecycleCoordinator?.onDisconnect()
+        scope.launch {
+            streamingLifecycleCoordinator?.teardownAndAwait(TeardownReason.Disconnect)
+        }
     }
 
     /**
@@ -743,30 +859,16 @@ class ConnectionCoordinator(
      * the new host's health probe is still in flight — those stale events
      * would pollute the freshly-cleared state for the new profile.
      *
-     * Also resets the foreground catch-up state machine via [effects] so the
-     * next connect is treated as a cold start. STRICT ORDER (CP9 §B12):
-     *  1. `val newEpoch = identityStore?.beginReconfigure() ?: 0L`
-     *  2. `streamingLifecycleCoordinator.onDisconnect()`
-     *  3. `effects.tryEmitEffect(ControllerEffect.HostReconfigured(newEpoch))`
-     *
-     * The defensive epoch bump (step 1) is preserved verbatim — HostProfileController
-     * already does the true synchronous barrier; this defensive duplicate is
-     * existing behavior (do not redesign it in CP9).
+     * D3 keeps this as a legacy effect adapter only. It deliberately does not
+     * bump epoch or publish HostReconfigured: ConnectionReconfigureBarrier is
+     * the sole transaction/epoch owner and performs the repository rebuild
+     * only after this lifecycle teardown has joined.
      */
     fun cancelSseForReconfigure() {
         DebugLog.i("SSE", "cancelSse (reconfigure)")
-        // §B12 step 1: defensive epoch bump.
-        val newEpoch = identityStore?.beginReconfigure() ?: 0L
-        // §B12 step 2: lifecycle teardown — coordinator.onDisconnect emits
-        // the §4.4 teardown command sequence (StopSse + stopForeground +
-        // stopSelf + arm poller) so the Service disconnects its owner.
-        streamingLifecycleCoordinator?.onDisconnect()
-        // §B12 step 3: HostReconfigured carries the new epoch. Reset the
-        // foreground catch-up state machine (idempotent) — SSC's init
-        // collector independently reads effect.epoch to reset its overlay
-        // to this exact generation.
-        // §R18 Phase 3 Wave 1 (P1-3 B 类): 单发非 suspend → tryEmitEffect。
-        effects.tryEmitEffect(ControllerEffect.HostReconfigured(newEpoch))
+        scope.launch {
+            streamingLifecycleCoordinator?.teardownAndAwait(TeardownReason.Reconfigure)
+        }
     }
 
     companion object {

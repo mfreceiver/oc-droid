@@ -60,7 +60,10 @@ sealed interface TofuState {
      * A TOFU trust prompt is in flight for [hostPort]; SSE bootstrap is FROZEN
      * until the user decides. Mirrors CC's `pendingTofuHostPort != null`.
      */
-    data class TrustPending(val hostPort: String) : TofuState
+    data class TrustPending(
+        val hostPort: String,
+        val capture: cn.vectory.ocdroid.data.repository.OpenCodeRepository.TofuCaptureResult? = null,
+    ) : TofuState
 
     /**
      * A TOFU prompt is owed for [hostPort] but no Activity is available to show
@@ -70,7 +73,10 @@ sealed interface TofuState {
      * an Open action should surface this; resolving trust later clears it via
      * [ConnectionBootstrapCoordinator.clearPendingTofu].
      */
-    data class DegradedNeedsActivity(val hostPort: String) : TofuState
+    data class DegradedNeedsActivity(
+        val hostPort: String,
+        val capture: cn.vectory.ocdroid.data.repository.OpenCodeRepository.TofuCaptureResult? = null,
+    ) : TofuState
 }
 
 /**
@@ -130,6 +136,17 @@ class ConnectionBootstrapCoordinator @Inject constructor() {
     fun setPendingTofu(hostPort: String) {
         synchronized(lock) {
             _tofuState.value = TofuState.TrustPending(hostPort)
+        }
+    }
+
+    fun setPendingCapture(
+        capture: cn.vectory.ocdroid.data.repository.OpenCodeRepository.TofuCaptureResult,
+    ) {
+        synchronized(lock) {
+            val current = _tofuState.value
+            if (current is TofuState.TrustPending && current.hostPort == capture.hostPort) {
+                _tofuState.value = current.copy(capture = capture)
+            }
         }
     }
 
@@ -197,7 +214,7 @@ class ConnectionBootstrapCoordinator @Inject constructor() {
                 DebugLog.i(TAG, "markDegradedNeedsActivity: skipping — state is $current (need TrustPending)")
                 return
             }
-            _tofuState.value = TofuState.DegradedNeedsActivity(current.hostPort)
+            _tofuState.value = TofuState.DegradedNeedsActivity(current.hostPort, current.capture)
             pendingTofuDecision?.cancel()
             pendingTofuDecision = null
         }

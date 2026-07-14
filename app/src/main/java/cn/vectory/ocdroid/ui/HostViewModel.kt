@@ -135,9 +135,8 @@ class HostViewModel @Inject constructor(
             }
         }
 
-    fun configureServer(url: String, username: String? = null, password: String? = null) {
+    fun configureServer(url: String, username: String? = null, password: String? = null) =
         hostProfileController.configureServer(url, username, password)
-    }
 
     fun getSavedConnectionSettings(): ConnectionFormSettings =
         hostProfileController.getSavedConnectionSettings()

@@ -221,9 +221,8 @@ class OrchestratorViewModel @Inject constructor(
 
     fun executeCommand(command: String, arguments: String) = core.executeCommand(command, arguments)
 
-    fun configureServer(url: String, username: String? = null, password: String? = null) {
+    fun configureServer(url: String, username: String? = null, password: String? = null) =
         core.hostProfileController.configureServer(url, username, password)
-    }
 
     // ── browse state (private to this VM instance) ──────────────────────────
     // §R-17 batch3d: moved from AppCore private fields. §R18-P0-1 stop-bleed

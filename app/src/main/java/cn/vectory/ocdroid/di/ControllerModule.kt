@@ -138,6 +138,7 @@ object ControllerModule {
         cacheRepository: cn.vectory.ocdroid.data.cache.CacheRepository,
         @Named("currentServerGroupFp") currentServerGroupFp: () -> String,
         identityStore: cn.vectory.ocdroid.service.identity.ConnectionIdentityStore,
+        reconfigureBarrier: cn.vectory.ocdroid.service.ConnectionReconfigureBarrier,
     ): HostProfileController = HostProfileController(
         scope = appScope,
         slices = store.slices,
@@ -150,6 +151,7 @@ object ControllerModule {
         appContext = appContext,
         cacheRepository = cacheRepository,
         identityStore = identityStore,
+        reconfigureBarrier = reconfigureBarrier,
     )
 
     @Provides
@@ -196,6 +198,8 @@ object ControllerModule {
         bootstrapCoordinator: cn.vectory.ocdroid.service.bootstrap.ConnectionBootstrapCoordinator,
         streamingServiceLauncher: cn.vectory.ocdroid.service.StreamingServiceLauncher,
         streamingLifecycleCoordinator: cn.vectory.ocdroid.service.lifecycle.StreamingLifecycleCoordinator,
+        connectionBootstrapEngine: cn.vectory.ocdroid.service.streaming.ConnectionBootstrapEngine,
+        bootstrapRetryPolicy: cn.vectory.ocdroid.service.streaming.BootstrapRetryPolicy,
     ): ConnectionCoordinator = ConnectionCoordinator(
         scope = appScope,
         slices = store.slices,
@@ -219,5 +223,7 @@ object ControllerModule {
         // coordinator's onDisconnect (§4.1 disconnect → L3 teardown); the
         // Service observes the commands and disconnects its owner.
         streamingLifecycleCoordinator = streamingLifecycleCoordinator,
+        connectionBootstrapEngine = connectionBootstrapEngine,
+        bootstrapRetryPolicy = bootstrapRetryPolicy,
     )
 }

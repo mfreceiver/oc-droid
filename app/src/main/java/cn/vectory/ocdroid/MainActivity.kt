@@ -106,7 +106,7 @@ class MainActivity : AppCompatActivity() {
                             url = testUrl,
                             username = intent?.getStringExtra(EXTRA_TEST_USERNAME),
                             password = intent?.getStringExtra(EXTRA_TEST_PASSWORD)
-                        )
+                        )?.join()
                     }
                 }
                 // §评审 Stage C #8: one-shot initial health check. The

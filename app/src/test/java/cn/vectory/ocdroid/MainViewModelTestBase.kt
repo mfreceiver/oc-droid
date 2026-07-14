@@ -57,6 +57,7 @@ abstract class MainViewModelTestBase {
     protected lateinit var hostProfileStore: HostProfileStore
     protected lateinit var trafficTracker: TrafficTracker
     protected lateinit var appLifecycleMonitor: AppLifecycleMonitor
+    protected lateinit var identityStore: cn.vectory.ocdroid.service.identity.ConnectionIdentityStore
     protected lateinit var core: AppCore
     /**
      * CP9 (notify Phase-0 switchover): the recording launcher wired into the
@@ -147,7 +148,7 @@ abstract class MainViewModelTestBase {
         val effectBus = SharedEffectBus()
         // CP1 (notify Phase-0): the single connection-identity store, shared
         // by CC / SSC / HPC + AppCore (same wiring as ControllerModule).
-        val identityStore = cn.vectory.ocdroid.service.identity.ConnectionIdentityStore()
+        identityStore = cn.vectory.ocdroid.service.identity.ConnectionIdentityStore()
         val appScope = kotlinx.coroutines.CoroutineScope(
             kotlinx.coroutines.SupervisorJob() +
                 kotlinx.coroutines.Dispatchers.Main.immediate

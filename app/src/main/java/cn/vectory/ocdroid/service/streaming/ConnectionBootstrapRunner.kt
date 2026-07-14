@@ -27,27 +27,21 @@ import javax.inject.Singleton
  */
 @Singleton
 class ConnectionBootstrapRunner @Inject constructor(
-    private val bootstrapCoordinator: ConnectionBootstrapCoordinator,
-    private val identityStore: ConnectionIdentityStore,
+    private val engine: ConnectionBootstrapEngine,
 ) : BootstrapRunner {
 
     override suspend fun runBootstrap(): BootstrapResult {
-        // §5 degraded check first: the shared bootstrap coordinator surfaces
-        // the TOFU-needs-Activity state observed from the foreground CC path.
-        val tofu = bootstrapCoordinator.tofuState.value
-        if (tofu is TofuState.DegradedNeedsActivity) {
-            DebugLog.i(TAG, "runBootstrap: TOFU degraded for ${tofu.hostPort}")
-            return BootstrapResult.TofuNeedsActivity(tofu.hostPort)
+        return when (val result = engine.bootstrap()) {
+            is ConnectionBootstrapOutcome.Success -> BootstrapResult.Success(result.identity)
+            is ConnectionBootstrapOutcome.TofuNeedsActivity -> {
+                DebugLog.i(TAG, "runBootstrap: TOFU degraded for ${result.hostPort}")
+                BootstrapResult.TofuNeedsActivity(result.hostPort)
+            }
+            is ConnectionBootstrapOutcome.Failed -> {
+                DebugLog.w(TAG, "runBootstrap failed: ${result.error.message}")
+                BootstrapResult.Failed
+            }
         }
-        // The actual tunnel/health/TOFU probing is owned by CC today (CP5-7
-        // inert). We read the resulting identity from the store — set by CC
-        // via ConnectionIdentityStore.bind after a successful connect.
-        val identity = identityStore.currentIdentity.value
-        if (identity == null) {
-            DebugLog.w(TAG, "runBootstrap: no bound identity → Failed (CC owns bootstrap until CP9)")
-            return BootstrapResult.Failed
-        }
-        return BootstrapResult.Success(identity)
     }
 
     private companion object {
