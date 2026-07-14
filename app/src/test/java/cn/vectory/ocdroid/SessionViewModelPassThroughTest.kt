@@ -3,6 +3,7 @@ package cn.vectory.ocdroid
 import cn.vectory.ocdroid.data.model.HealthResponse
 import cn.vectory.ocdroid.data.model.Session
 import cn.vectory.ocdroid.ui.SessionViewModel
+import cn.vectory.ocdroid.ui.loadSessionsForEffect
 import io.mockk.coEvery
 import io.mockk.coVerify
 import io.mockk.every
@@ -235,9 +236,8 @@ class SessionViewModelPassThroughTest : MainViewModelTestBase() {
         coEvery { repository.getSessions(any()) } returns Result.success(emptyList())
         coEvery { repository.getSessionStatus() } returns Result.success(emptyMap())
         val core = createCore()
-        val vm = SessionViewModel(core)
 
-        vm.loadSessions()
+        core.loadSessionsForEffect()
         advanceUntilIdle()
 
         coVerify(atLeast = 1) { repository.getSessions(any()) }

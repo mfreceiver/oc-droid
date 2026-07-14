@@ -28,6 +28,7 @@ import cn.vectory.ocdroid.ui.SharedStateStore
 import cn.vectory.ocdroid.ui.TunnelActivationState
 import cn.vectory.ocdroid.ui.UiEvent
 import cn.vectory.ocdroid.ui.currentSession
+import cn.vectory.ocdroid.ui.loadSessionsForEffect
 import cn.vectory.ocdroid.ui.session.buildSessionTree
 import cn.vectory.ocdroid.ui.visibleMessages
 import cn.vectory.ocdroid.util.ThemeMode
@@ -1002,7 +1003,7 @@ class OrchestratorViewModelTest : MainViewModelTestBase() {
         val composerVM = cn.vectory.ocdroid.ui.ComposerViewModel(core)
         val orchestratorVM = cn.vectory.ocdroid.ui.OrchestratorViewModel(core)
         val viewModel = OrchestratorViewModel(core)  // primary VM under test
-        sessionVM.loadSessions()
+        core.loadSessionsForEffect()
         advanceUntilIdle()
         assertTrue(
             "sessionListFlow must contain the loaded session",
