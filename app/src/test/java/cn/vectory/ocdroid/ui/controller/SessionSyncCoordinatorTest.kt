@@ -218,7 +218,8 @@ class SessionSyncCoordinatorTest {
         slices.mutateUnread {
             UnreadState(
                 unreadSessions = s.unreadSessions,
-                lastViewedTime = s.lastViewedTime
+                lastViewedTime = s.lastViewedTime,
+                idleSince = s.idleSince
             )
         }
         slices.mutateHost {
@@ -481,10 +482,17 @@ class SessionSyncCoordinatorTest {
         verify(exactly = 1) { Log.w(any<String>(), match<String> { it.contains("session.status") }) }
     }
 
-    // ── §unread-lifecycle Task 3: root busy→idle drives unread ────────────
+    // ── §unread-soak: SSE no longer marks unread (sweep owns it) ──────────
 
     @Test
-    fun `session status busy to idle on a non-current root session marks it unread`() {
+    fun `session status busy to idle on a non-current root session does not mark unread (sweep owns marking)`() {
+        // §unread-soak: the instant busy→idle marker in the session.status
+        // SSE handler is REMOVED. The [UnreadSoakController] sweep + pure
+        // [evaluateUnread] evaluator now own the population logic (all-idle +
+        // ≥10s soak + not-current + not-viewed). The SSE handler still folds
+        // the status into sessionStatuses (so the evaluator sees it) but never
+        // marks unread itself. The sweep-driven marking is covered by
+        // [UnreadSoakTest] / [UnreadSoakControllerTest].
         seed {
             it.copy(
                 currentSessionId = "CUR",
@@ -501,7 +509,10 @@ class SessionSyncCoordinatorTest {
             put("status", buildJsonObject { put("type", JsonPrimitive("idle")) })
         })
 
-        assertTrue(slices.unread.value.unreadSessions.contains("A"))
+        // The status IS folded in (evaluator reads it on the next sweep tick)…
+        assertTrue(slices.sessionList.value.sessionStatuses["A"]!!.isIdle)
+        // …but unread is NOT populated by the SSE handler.
+        assertFalse(slices.unread.value.unreadSessions.contains("A"))
     }
 
     @Test
@@ -1860,6 +1871,57 @@ class SessionSyncCoordinatorTest {
         assertFalse(slices.unread.value.unreadSessions.contains("A"))
     }
 
+    // ── §files-events-noop (task 7): file.watcher.updated / file.edited ─────
+
+    @Test
+    fun `file watcher updated is a no-op - no warning, no state change`() {
+        // §files-events-noop: location-scoped filesystem event with NO sessionID
+        // (session=- is normal). Explicit empty case ⇒ NOT routed to the
+        // unrecognized-event warning branch. No sessionList / unread mutation.
+        val sessionsBefore = slices.sessionList.value
+        val unreadBefore = slices.unread.value
+
+        coordinator.handleEvent(event("file.watcher.updated") {
+            put("path", JsonPrimitive("/tmp/project/src/Main.kt"))
+        })
+
+        // No unrecognized-event warning (the !noisy gate would fire Log.w).
+        verify(exactly = 0) {
+            Log.w(any<String>(), match<String> { it.contains("unrecognized event") })
+        }
+        assertEquals(sessionsBefore, slices.sessionList.value)
+        assertEquals(unreadBefore, slices.unread.value)
+    }
+
+    @Test
+    fun `file edited is a no-op - no warning, no state change`() {
+        val sessionsBefore = slices.sessionList.value
+        val unreadBefore = slices.unread.value
+
+        coordinator.handleEvent(event("file.edited") {
+            put("path", JsonPrimitive("/tmp/project/README.md"))
+        })
+
+        verify(exactly = 0) {
+            Log.w(any<String>(), match<String> { it.contains("unrecognized event") })
+        }
+        assertEquals(sessionsBefore, slices.sessionList.value)
+        assertEquals(unreadBefore, slices.unread.value)
+    }
+
+    @Test
+    fun `file events do not increment unknownEventCounters`() {
+        // §files-events-noop: explicit empty cases are semantically correct —
+        // they must NOT bump the unknown-event counter (that's for genuinely
+        // unrecognized types routed to the else branch).
+        coordinator.handleEvent(event("file.watcher.updated") {})
+        coordinator.handleEvent(event("file.edited") {})
+
+        val counts = coordinator.unknownEventCountsSnapshot()
+        assertFalse("file.watcher.updated" in counts)
+        assertFalse("file.edited" in counts)
+    }
+
     // ── §task7-coverage: invalid payload ReportNonFatal paths ───────────────
 
     @Test
@@ -1870,7 +1932,6 @@ class SessionSyncCoordinatorTest {
 
         io.mockk.verify { Log.w(any<String>(), match<String> { it.contains("invalid session.created") }) }
     }
-
     @Test
     fun `session updated with invalid payload fires ReportNonFatal`() {
         coordinator.handleEvent(event("session.updated") {

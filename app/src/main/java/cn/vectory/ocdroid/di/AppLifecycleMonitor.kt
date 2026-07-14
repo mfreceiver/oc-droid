@@ -4,6 +4,8 @@ import android.app.Activity
 import android.app.Application
 import android.app.NotificationChannel
 import android.app.NotificationManager
+import android.media.AudioAttributes
+import android.provider.Settings
 import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
@@ -19,6 +21,7 @@ import cn.vectory.ocdroid.data.repository.OpenCodeRepository
 import cn.vectory.ocdroid.util.DebugLog
 import cn.vectory.ocdroid.util.SettingsManager
 import cn.vectory.ocdroid.util.runSuspendCatching
+import cn.vectory.ocdroid.ui.controller.IdleUnreadAlert
 import dagger.Module
 import dagger.Provides
 import dagger.hilt.InstallIn
@@ -36,6 +39,12 @@ import kotlinx.coroutines.launch
 import javax.inject.Qualifier
 import javax.inject.Singleton
 import javax.inject.Inject
+
+internal fun shouldPostIdleNotification(
+    isInForeground: Boolean,
+    key: String,
+    notifiedKeys: Set<String>,
+): Boolean = !isInForeground && key !in notifiedKeys
 
 /**
  * Hilt qualifier for the application-wide [CoroutineScope] tied to the
@@ -100,6 +109,10 @@ class AppLifecycleMonitor @Inject constructor(
      * notifications). Key shape: `"perm:<id>"` / `"q:<id>"`.
      */
     private val notificationSnapshot: MutableSet<String> = HashSet()
+    private val idleNotificationSnapshot: MutableSet<String> = HashSet()
+
+    @Volatile
+    private var backgroundUnreadPoll: (suspend () -> List<IdleUnreadAlert>)? = null
 
     /** Currently-running background poller job; null while in foreground. */
     private var pollJob: Job? = null
@@ -151,6 +164,11 @@ class AppLifecycleMonitor @Inject constructor(
         if (!_isInForeground.value) {
             notifyError(error)
         }
+    }
+
+    /** Registers the narrow T3b bridge without coupling lifecycle to UI state. */
+    fun registerBackgroundUnreadPoller(poller: suspend () -> List<IdleUnreadAlert>) {
+        backgroundUnreadPoll = poller
     }
 
     /**
@@ -210,6 +228,20 @@ class AppLifecycleMonitor @Inject constructor(
                 questions.forEach { handlePendingQuestion(it) }
             }
             .onFailure { Log.w(TAG, "Background poll getPendingQuestions failed", it) }
+
+        // Re-check foreground before and after network work. A poll that began
+        // in background must not emit sound/vibration after the Activity starts.
+        if (_isInForeground.value) return
+        runSuspendCatching { backgroundUnreadPoll?.invoke().orEmpty() }
+            .onSuccess { alerts ->
+                if (!_isInForeground.value) alerts.forEach { handleIdleAlert(it) }
+            }
+            .onFailure { Log.w(TAG, "Background unread poll failed", it) }
+    }
+
+    private fun handleIdleAlert(alert: IdleUnreadAlert) {
+        if (!shouldPostIdleNotification(_isInForeground.value, alert.key, idleNotificationSnapshot)) return
+        if (notifyIdle(alert)) idleNotificationSnapshot.add(alert.key)
     }
 
     private fun handlePendingPermission(permission: PermissionRequest) {
@@ -269,6 +301,7 @@ class AppLifecycleMonitor @Inject constructor(
             .setContentText(body)
             .setStyle(NotificationCompat.BigTextStyle().bigText(body))
             .setPriority(NotificationCompat.PRIORITY_HIGH)
+            .setDefaults(NotificationCompat.DEFAULT_SOUND or NotificationCompat.DEFAULT_VIBRATE)
             .setAutoCancel(true)
             .setContentIntent(buildContentIntent(sessionId, notificationId))
             .build()
@@ -297,6 +330,23 @@ class AppLifecycleMonitor @Inject constructor(
         runCatching { notificationManagerCompat.notify(ERROR_NOTIFICATION_ID, notification) }
     }
 
+    @Suppress("MissingPermission")
+    private fun notifyIdle(alert: IdleUnreadAlert): Boolean {
+        if (!hasNotificationPermission() || _isInForeground.value) return false
+        val notificationId = alert.key.hashCode()
+        val notification = NotificationCompat.Builder(application, CHANNEL_IDLE)
+            .setSmallIcon(R.mipmap.ic_launcher)
+            .setContentTitle(NOTIF_IDLE_TITLE)
+            .setContentText(alert.title)
+            .setStyle(NotificationCompat.BigTextStyle().bigText(alert.title))
+            .setPriority(NotificationCompat.PRIORITY_HIGH)
+            .setDefaults(NotificationCompat.DEFAULT_SOUND or NotificationCompat.DEFAULT_VIBRATE)
+            .setAutoCancel(true)
+            .setContentIntent(buildContentIntent(alert.rootId, notificationId))
+            .build()
+        return runCatching { notificationManagerCompat.notify(notificationId, notification) }.isSuccess
+    }
+
     private fun buildContentIntent(sessionId: String, requestCode: Int): PendingIntent {
         val intent = Intent(application, MainActivity::class.java).apply {
             flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
@@ -323,6 +373,7 @@ class AppLifecycleMonitor @Inject constructor(
         private const val TAG = "AppLifecycleMonitor"
 
         const val CHANNEL_DECISIONS = "ocdroid.decisions"
+        const val CHANNEL_IDLE = "ocdroid.idle"
         const val CHANNEL_ERRORS = "ocdroid.errors"
 
         /** Background polling interval per §18.1 (R-A, D1). */
@@ -332,7 +383,7 @@ class AppLifecycleMonitor @Inject constructor(
         private const val ERROR_NOTIFICATION_ID = 4242
 
         /**
-         * Creates the two notification channels required by §18.1. Wrapped in
+         * Creates the notification channels required by §18.1/T3b. Wrapped in
          * try/catch and only invoked on API 26+ (NotificationChannel was added
          * in O). Channels are idempotent — re-creating with the same ID is a
          * no-op. Called from [cn.vectory.ocdroid.OpenCodeApp.onCreate].
@@ -347,6 +398,23 @@ class AppLifecycleMonitor @Inject constructor(
                     NotificationManager.IMPORTANCE_HIGH
                 ).apply {
                     description = CHANNEL_DECISIONS_DESC
+                    enableVibration(true)
+                    setSound(
+                        Settings.System.DEFAULT_NOTIFICATION_URI,
+                        AudioAttributes.Builder().setUsage(AudioAttributes.USAGE_NOTIFICATION).build(),
+                    )
+                }
+                val idle = NotificationChannel(
+                    CHANNEL_IDLE,
+                    CHANNEL_IDLE_NAME,
+                    NotificationManager.IMPORTANCE_HIGH
+                ).apply {
+                    description = CHANNEL_IDLE_DESC
+                    enableVibration(true)
+                    setSound(
+                        Settings.System.DEFAULT_NOTIFICATION_URI,
+                        AudioAttributes.Builder().setUsage(AudioAttributes.USAGE_NOTIFICATION).build(),
+                    )
                 }
                 val errors = NotificationChannel(
                     CHANNEL_ERRORS,
@@ -355,7 +423,7 @@ class AppLifecycleMonitor @Inject constructor(
                 ).apply {
                     description = CHANNEL_ERRORS_DESC
                 }
-                manager.createNotificationChannels(listOf(decisions, errors))
+                manager.createNotificationChannels(listOf(decisions, idle, errors))
             }.onFailure { Log.w(TAG, "Failed to create notification channels", it) }
         }
 
@@ -365,11 +433,14 @@ class AppLifecycleMonitor @Inject constructor(
         // i18n pass can promote them to R.string entries.
         private const val CHANNEL_DECISIONS_NAME = "opencode decisions"
         private const val CHANNEL_DECISIONS_DESC = "Permission and question prompts from opencode sessions"
+        private const val CHANNEL_IDLE_NAME = "opencode completions"
+        private const val CHANNEL_IDLE_DESC = "Completed sessions that are ready to review"
         private const val CHANNEL_ERRORS_NAME = "opencode errors"
         private const val CHANNEL_ERRORS_DESC = "Connection and runtime errors from opencode"
         const val NOTIF_PERMISSION_TITLE = "Permission required"
         const val NOTIF_QUESTION_TITLE = "Question from agent"
         const val NOTIF_DECISION_BODY = "Open the session to review"
         const val NOTIF_ERROR_TITLE = "opencode error"
+        const val NOTIF_IDLE_TITLE = "Session finished"
     }
 }

@@ -11,8 +11,6 @@ package cn.vectory.ocdroid.ui
 import cn.vectory.ocdroid.R
 import cn.vectory.ocdroid.data.cache.CacheRepository
 import cn.vectory.ocdroid.data.cache.FingerprintResult
-import cn.vectory.ocdroid.ui.controller.allSessionsById
-import cn.vectory.ocdroid.ui.controller.applyMarkSessionUnread
 import cn.vectory.ocdroid.ui.controller.applySessionDiffIfAbsent
 import cn.vectory.ocdroid.data.model.Session
 import cn.vectory.ocdroid.data.model.SessionStatus
@@ -149,20 +147,19 @@ internal fun launchLoadSessions(
                 // FIX-D (gpter #2): if a newer load was issued while this REST
                 // was in flight, drop the stale result entirely — it must NOT
                 // update sessions/openSessionIds/cache NOR trigger archive
-                // side-effects (which are now destructive per FIX-A/C). The
-                // refreshing flag is cleared optimistically (the newer request
-                // will set it back if it is still in flight).
+                // side-effects (which are now destructive per FIX-A/C).
+                // §epoch-no-op (task 1): a stale result is fully no-op — it
+                // no longer clears isLoadingMoreSessions / isRefreshingSessions
+                // (the newer in-flight request owns those flags; writing here
+                // could transiently flip a still-loading UI to idle before the
+                // newer request resets it). Just log + return.
                 if (myEpoch != sessionListLoadEpoch.get()) {
                     DebugLog.d("Sync", "launchLoadSessions: epoch $myEpoch superseded, discarding stale snapshot")
-                    slices.mutateSessionList {
-                        it.copy(isLoadingMoreSessions = false, isRefreshingSessions = false)
-                    }
                     return@onSuccess
                 }
                 if (staleHostAfterSuspend()) {
-                    slices.mutateSessionList {
-                        it.copy(isLoadingMoreSessions = false, isRefreshingSessions = false)
-                    }
+                    // §epoch-no-op (task 1): stale-host ⇒ fully no-op (same
+                    // rationale as the epoch-stale branch above).
                     return@onSuccess
                 }
                 // Capture cross-slice reads BEFORE the sessionList update:
@@ -209,11 +206,10 @@ internal fun launchLoadSessions(
                     // suspend — a newer request may have been issued + completed
                     // during the verify. The writes below (mutateSessionList /
                     // persist / archive callback) must not run for a stale result.
+                    // §epoch-no-op (task 1): fully no-op (no loading/refreshing
+                    // clear — the newer request owns those flags).
                     if (myEpoch != sessionListLoadEpoch.get()) {
                         DebugLog.d("Sync", "launchLoadSessions: epoch $myEpoch superseded post-verify, discarding stale snapshot")
-                        slices.mutateSessionList {
-                            it.copy(isLoadingMoreSessions = false, isRefreshingSessions = false)
-                        }
                         return@onSuccess
                     }
                 }
@@ -359,6 +355,18 @@ internal fun launchLoadSessions(
                 }
             }
             .onFailure { error ->
+                // §epoch-no-op (task 1): a stale FAILURE is fully no-op too —
+                // if a newer launchLoadSessions superseded this one (epoch
+                // bumped) or the host switched under us, clearing the loading
+                // flags + emitting an error here would (a) transiently flip a
+                // still-loading newer request to idle and (b) surface a stale
+                // error toast for a request the user no longer cares about.
+                // The newer request owns the loading flags; drop before any
+                // write/emit.
+                if (myEpoch != sessionListLoadEpoch.get() || staleHostAfterSuspend()) {
+                    DebugLog.d("Sync", "launchLoadSessions: stale failure (epoch/host changed), discarding")
+                    return@onFailure
+                }
                 slices.mutateSessionList {
                     it.copy(
                         isLoadingMoreSessions = false,
@@ -482,10 +490,12 @@ internal fun launchLoadSessionStatus(
         val localBefore = slices.sessionList.value.sessionStatuses
         repository.getSessionStatus()
             .onSuccess { statuses ->
-                // §task4-reconnect-backstop: completedRoots 用 localBefore(发起前快照) 判定
-                // wasBusy, 在 mutateSessionList 内取 sl.sessions 解析 root. 收集后单独原子
-                // 写 unread (与 sessionList 写各自原子, Main.immediate 串行无 TOCTOU).
-                var completedRoots: List<String> = emptyList()
+                // §unread-soak: the REST status snapshot NO LONGER marks unread
+                // on the "busy→absent" edge. The [UnreadSoakController] sweep +
+                // pure [evaluateUnread] evaluator own the marking now — they
+                // consume the freshly-merged sessionStatuses (below) on the
+                // next foreground tick. The epoch-guarded merge still runs so
+                // the evaluator sees authoritative idle/busy state.
                 slices.mutateSessionList { sl ->
                     // §epoch-toctou (groker🟡 v0.7.6): check+write 合并在同一 mutate 原子段,
                     // 关闭 onSuccess-check→mutate 间 TOCTOU(A check 过 → B 抬高 epoch 并 mutate
@@ -495,23 +505,9 @@ internal fun launchLoadSessionStatus(
                         DebugLog.d("Sync", "launchLoadSessionStatus: epoch $myEpoch superseded, discarding stale snapshot")
                         return@mutateSessionList sl
                     }
-                    // §task4-grilling-G1: 必须用 localBefore 判 wasBusy, 不可用 sl.sessionStatuses.
-                    // 否则 "REST 在途期间 SSE 把 idle→busy, REST 快照(更早)缺失该 id" 会被
-                    // 误判为完成. localBefore 反映 REST 发起时确为 busy 的 session, 可靠.
-                    val currentSessionId = slices.chat.value.currentSessionId
-                    val sessionsById = allSessionsById(sl.sessions, sl.directorySessions, sl.childSessions)
-                    completedRoots = localBefore.entries
-                        .filter { (id, st) -> st.isBusy && id != currentSessionId && id !in statuses }
-                        .mapNotNull { (id, _) -> sessionsById[id]?.takeIf { it.parentId == null }?.id }
                     sl.copy(
                         sessionStatuses = mergeStatusSnapshot(localBefore, sl.sessionStatuses, statuses)
                     )
-                }
-                if (completedRoots.isNotEmpty()) {
-                    val currentSessionId = slices.chat.value.currentSessionId
-                    slices.mutateUnread { u ->
-                        completedRoots.fold(u) { acc, id -> acc.applyMarkSessionUnread(id, currentSessionId).first }
-                    }
                 }
             }
             .onFailure { error ->

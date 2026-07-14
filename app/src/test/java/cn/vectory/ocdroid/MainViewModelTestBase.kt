@@ -146,6 +146,14 @@ abstract class MainViewModelTestBase {
             settingsManager = settingsManager,
             effects = effectBus,
         )
+        // §unread-soak: real controller so its init subscribes to the
+        // foreground flow + the sweep loop can run on the test's appScope.
+        val unreadSoakController = cn.vectory.ocdroid.ui.controller.UnreadSoakController(
+            appLifecycleMonitor = appLifecycleMonitor,
+            scope = appScope,
+            store = store,
+            autoStart = false,
+        )
         val composerController = cn.vectory.ocdroid.ui.controller.ComposerController(
             store = store,
             settingsManager = settingsManager,
@@ -228,6 +236,7 @@ abstract class MainViewModelTestBase {
             hostProfileController,
             sessionSyncCoordinator,
             connectionCoordinator,
+            unreadSoakController,
             gapFillCoordinator,
             cacheRepository,
             // §review-fix #1: same fp provider every controller uses.

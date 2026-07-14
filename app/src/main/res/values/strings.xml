@@ -53,6 +53,8 @@
     <string name="settings_notifications_runtime_perm_blocked">Notifications: blocked by system</string>
     <string name="settings_notifications_completion_channel">Completion alerts</string>
     <string name="settings_notifications_completion_channel_desc">Posted when a session finishes or errors out</string>
+    <string name="settings_notifications_system_settings">System notification settings</string>
+    <string name="settings_notifications_system_settings_desc">Configure completion and decision alerts independently</string>
     <!-- §vcs-section: Working directory / Git group in Settings -->
     <string name="settings_section_working_directory">Working directory</string>
     <string name="settings_vcs_branch">Branch</string>

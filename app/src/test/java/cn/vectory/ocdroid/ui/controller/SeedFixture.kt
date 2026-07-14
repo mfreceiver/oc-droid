@@ -89,6 +89,8 @@ data class SeedFixture(
     // unread-domain
     val unreadSessions: Set<String> = emptySet(),
     val lastViewedTime: Map<String, Long> = emptyMap(),
+    /** §unread-soak: mirror of [cn.vectory.ocdroid.ui.UnreadState.idleSince]. */
+    val idleSince: Map<String, Long> = emptyMap(),
     // host-domain
     val hostProfiles: List<HostProfile> = emptyList(),
     val currentHostProfileId: String? = null

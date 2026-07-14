@@ -494,14 +494,11 @@ class SessionSyncCoordinator(
                 DebugLog.d("Retry", "session.status raw properties=${event.payload.properties?.toString() ?: "null"}")
                 val statusEvent = parseSessionStatusEvent(event)
                 if (statusEvent != null) {
-                    // §unread-lifecycle Task 3: snapshot the PRIOR status before
-                    // applySessionStatus overwrites it — this is the only chance
-                    // to detect a busy→idle transition. Main.immediate is serial
-                    // and there is no suspension between this read and the
-                    // subsequent writes, so no TOCTOU.
-                    val oldStatus = slices.sessionList.value.sessionStatuses[statusEvent.sessionId]
-                    val wasBusy = oldStatus?.isBusy == true
-                    val nowIdle = statusEvent.status.isIdle
+                    // §unread-soak: the prior busy→idle edge capture (oldStatus /
+                    // wasBusy / nowIdle) is GONE — the instant marking it fed is
+                    // now owned by the [UnreadSoakController] sweep + the pure
+                    // [evaluateUnread] evaluator. This branch only folds the new
+                    // status into sessionStatuses so the evaluator sees it.
                     slices.mutateSessionList {
                         it.applySessionStatus(statusEvent.sessionId, statusEvent.status).first
                     }
@@ -525,23 +522,17 @@ class SessionSyncCoordinator(
                     val statusEffects = mutableListOf<SseSideEffect>()
                     val chatSnap = slices.chat.value
                     val isCurrent = statusEvent.sessionId == chatSnap.currentSessionId
-                    // §lifecycle-unread: root session busy→idle while NOT the
-                    // current session = a task finished with results to view →
-                    // mark unread. Children (parentId != null) are excluded
-                    // (user-facing semantics: sub-agents are not surfaced as
-                    // unread). Unknown sessions (not in the merged session map)
-                    // are excluded so an unrecognized id can never be badged.
-                    if (wasBusy && nowIdle && !isCurrent) {
-                        val sessionsById = allSessionsById(
-                            slices.sessionList.value.sessions,
-                            slices.sessionList.value.directorySessions,
-                            slices.sessionList.value.childSessions,
-                        )
-                        val target = sessionsById[statusEvent.sessionId]
-                        if (target != null && target.parentId == null) {
-                            markSessionUnread(statusEvent.sessionId)
-                        }
-                    }
+                    // §unread-soak: unread marking is NO LONGER done here on
+                    // the instant busy→idle edge. The foreground
+                    // [UnreadSoakController] sweep + the pure [evaluateUnread]
+                    // evaluator now own the population logic — a root becomes
+                    // unread ONLY when (a) it AND all descendants are idle,
+                    // (b) that all-idle state persisted ≥10s, (c) it is not the
+                    // current session, AND (d) it was not viewed since idle.
+                    // This branch still updates sessionStatuses (via
+                    // applySessionStatus above) so the evaluator sees fresh
+                    // statuses; [applyMarkSessionUnread] remains the
+                    // low-level marker (now called only by the sweep).
                     if (statusEvent.status.isBusy && isCurrent) {
                         DebugLog.i("Sync", "session.status busy (current) → reload (cross-client message sync)")
                         statusEffects.add(SseSideEffect.ReloadMessages(statusEvent.sessionId, resetLimit = true))
@@ -1086,6 +1077,21 @@ class SessionSyncCoordinator(
                 }
                 slices.mutateSessionList { it.applySessionDiff(sessionId, diffs).first }
             }
+            // §files-events-noop: location-scoped filesystem events. Per
+            // opencode-src/v1.17.18/packages/schema/src/filesystem-watcher.ts /
+            // filesystem.ts, `file.watcher.updated` and `file.edited` carry NO
+            // sessionID — they fire for ANY path change under a watched
+            // directory, independent of which session touched the file. The
+            // dispatch log will show `session=-` (the SSE frame lacks
+            // sessionID) — this is NORMAL, not a missing-field bug. ocdroid
+            // does NOT react to these (the Files pane is driven by the file
+            // browser's own REST listing, not by these push events); an
+            // explicit empty case stops the unrecognized-event warning. A real
+            // Files-pane refresh on these events is a tracked follow-up. NOT
+            // added to NOISY_SSE_LOG_EVENTS (that set is for high-frequency
+            // noise; explicit no-op cases are semantically correct).
+            "file.watcher.updated", "file.edited" -> {
+            }
             else -> {
                 // §R18 Phase 3 Wave 1 (P0-7): surface unrecognized SSE event
                 // types instead of silently dropping them. NOISY_SSE_LOG_EVENTS
@@ -1110,21 +1116,6 @@ class SessionSyncCoordinator(
                     .incrementAndGet()
             }
         }
-    }
-
-    /**
-     * Mark [sessionId] as having unread activity. Skipped when the session is
-     * already the currently-open one (caller guards this) and when the user has
-     * never opened it before (we still want the badge in that case, so we only
-     * short-circuit on identical selected session, which the caller handles).
-     *
-     * §R-17 batch5: the state transform is the pure [UnreadState.applyMarkSessionUnread]
-     * extension; this wrapper reads [SliceFlows.chat] for the current-session
-     * guard and writes [SliceFlows.unread].
-     */
-    private fun markSessionUnread(sessionId: String) {
-        val currentSessionId = slices.chat.value.currentSessionId
-        slices.mutateUnread { u -> u.applyMarkSessionUnread(sessionId, currentSessionId).first }
     }
 
     // ── §M5 delta coalescing helpers ────────────────
