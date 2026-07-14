@@ -276,6 +276,10 @@ internal fun reduce(state: StoreState, action: AppAction): StoreState = when (ac
                 state.unread.copy(
                     unreadSessions = emptySet(),
                     lastViewedTime = emptyMap(),
+                    // §unread-soak: clear the soak map on cross-group purge so
+                    // a stale idleSince entry from the prior host cannot later
+                    // fire an unread badge for a session that no longer exists.
+                    idleSince = emptyMap(),
                 ),
             )
         } else {

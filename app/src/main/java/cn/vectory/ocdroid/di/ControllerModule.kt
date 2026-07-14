@@ -11,6 +11,7 @@ import cn.vectory.ocdroid.ui.controller.ForegroundCatchUpController
 import cn.vectory.ocdroid.ui.controller.HostProfileController
 import cn.vectory.ocdroid.ui.controller.SessionSwitcher
 import cn.vectory.ocdroid.ui.controller.SessionSyncCoordinator
+import cn.vectory.ocdroid.ui.controller.UnreadSoakController
 import cn.vectory.ocdroid.util.SettingsManager
 import cn.vectory.ocdroid.util.TrafficTracker
 import dagger.Module
@@ -94,6 +95,28 @@ object ControllerModule {
         store = store,
         settingsManager = settingsManager,
         effects = effectBus,
+    )
+
+    /**
+     * §unread-soak: provides the foreground sweep controller. @Singleton +
+     * appScope (Main.immediate) — the sweep loop subscribes to
+     * [AppLifecycleMonitor.isInForeground] in its init and self-starts/stops
+     * on foreground transitions; no production caller needs to invoke it. The
+     * controller is constructed for its side-effecting init (the launchIn),
+     * so it MUST be injected somewhere reachable at app start (AppCore) to
+     * actually begin sweeping — the binding itself just hands out the
+     * singleton.
+     */
+    @Provides
+    @Singleton
+    fun provideUnreadSoakController(
+        appLifecycleMonitor: AppLifecycleMonitor,
+        @UiApplicationScope appScope: CoroutineScope,
+        store: SharedStateStore,
+    ): UnreadSoakController = UnreadSoakController(
+        appLifecycleMonitor = appLifecycleMonitor,
+        scope = appScope,
+        store = store,
     )
 
     @Provides

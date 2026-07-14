@@ -569,6 +569,33 @@ class SessionListActionsTest {
     }
 
     @Test
+    fun `superseded failure is fully silent and cannot overwrite newer loading state`() = runTest {
+        val firstGate = CompletableDeferred<Unit>()
+        var first = true
+        coEvery { repository.getSessions(any()) } coAnswers {
+            if (first) {
+                first = false
+                firstGate.await()
+                Result.failure(IllegalStateException("stale failure"))
+            } else {
+                Result.success(listOf(Session(id = "fresh", directory = "/x")))
+            }
+        }
+
+        launchLoadSessions(scope, repository, slices, settingsManager, {}, {}, {}, emit)
+        advanceUntilIdle()
+        launchLoadSessions(scope, repository, slices, settingsManager, {}, {}, {}, emit)
+        advanceUntilIdle()
+        val stateAfterFresh = slices.sessionList.value
+
+        firstGate.complete(Unit)
+        advanceUntilIdle()
+
+        assertEquals(stateAfterFresh, slices.sessionList.value)
+        assertTrue("stale failure must not emit an error", emitted.isEmpty())
+    }
+
+    @Test
     fun `FIX-D launchLoadSessions stale result does NOT trigger archive callback`() = runTest {
         // Critical: a stale response that would have triggered the destructive
         // archive eviction (FIX-A/C) must be dropped BEFORE the callback fires.
@@ -653,7 +680,13 @@ class SessionListActionsTest {
         advanceUntilIdle()
 
         assertTrue(slices.sessionList.value.sessions.isEmpty())
-        assertFalse(slices.sessionList.value.isRefreshingSessions)
+        // §epoch-no-op (task 1): a stale-host discard is now FULLY no-op — it
+        // no longer clears isRefreshingSessions (the newer request / host-switch
+        // reload owns those flags). In this single-call test there is no newer
+        // request to reset it, so the flag stays true (production: the host-
+        // switch handler fires a fresh load that resets it). The POINT of this
+        // test is that the stale sessions list is discarded, asserted above.
+        assertTrue(slices.sessionList.value.isRefreshingSessions)
         coVerify(exactly = 0) { cacheRepository.allServerGroupFps() }
     }
 
@@ -1009,10 +1042,15 @@ class SessionListActionsTest {
     }
 
     @Test
-    fun `reconnect_known_busy_missing_in_rest_marks_unread_root_noncurrent`() = runTest {
-        // §task4-reconnect-backstop: 本地已知 root A=busy, 重连后 REST 快照缺失 A
-        // (断线期间 A 完成 busy→idle, server idle=data.delete → 条目缺失).
-        // 兜底: 补标 A 未读 (root + 非当前 + wasBusy@localBefore + REST 缺失).
+    fun `reconnect_known_busy_missing_in_rest_does_not_mark_unread_sweep_owns_marking`() = runTest {
+        // §unread-soak: the REST status backstop NO LONGER marks unread on the
+        // "busy→absent" edge. [launchLoadSessionStatus] still merges the
+        // authoritative status snapshot (so busy A is cleared from
+        // sessionStatuses — the server's idle=data.delete dropped it), but the
+        // actual unread marking is now driven by the [UnreadSoakController]
+        // sweep + [evaluateUnread] (which will see A's now-absent status, treat
+        // it as NOT-idle, and reset any pending soak — never marking). The
+        // sweep-driven marking is covered by [UnreadSoakTest].
         val busy = cn.vectory.ocdroid.data.model.SessionStatus(type = "busy")
         store.mutateSessionList {
             it.copy(
@@ -1030,8 +1068,8 @@ class SessionListActionsTest {
             "busy A must be cleared from sessionStatuses (REST snapshot replaces)",
             slices.sessionList.value.sessionStatuses.isEmpty(),
         )
-        assertTrue(
-            "A must be marked unread on reconnect backstop",
+        assertFalse(
+            "A must NOT be marked unread by the REST backstop (sweep owns marking)",
             slices.unread.value.unreadSessions.contains("A"),
         )
     }
@@ -1087,9 +1125,11 @@ class SessionListActionsTest {
     }
 
     @Test
-    fun `reconnect_skips_current_session_and_child_sessions`() = runTest {
-        // §task4-scope: 补标只针对 root 非当前 session. 当前 session 不标 (applyMarkSessionUnread
-        // 短路); child session (parentId != null) 不标 (只关心 root 完成).
+    fun `reconnect_status_merge_does_not_mark_any_unread_sweep_owns_marking`() = runTest {
+        // §unread-soak: the REST status backstop no longer marks unread for
+        // ANY session (root / child / current). It only merges the authoritative
+        // status snapshot. The [UnreadSoakController] sweep consumes the merged
+        // statuses and decides marking via the soak evaluator.
         val busy = cn.vectory.ocdroid.data.model.SessionStatus(type = "busy")
         store.mutateSessionList {
             it.copy(
@@ -1112,9 +1152,9 @@ class SessionListActionsTest {
         advanceUntilIdle()
 
         val unread = slices.unread.value.unreadSessions
-        assertTrue("root (busy, non-current, parentId null) must be marked", unread.contains("root"))
-        assertFalse("child (parentId != null) must NOT be marked", unread.contains("child"))
-        assertFalse("cur (currentSessionId) must NOT be marked", unread.contains("cur"))
+        assertFalse("root must NOT be marked by REST backstop (sweep owns it)", unread.contains("root"))
+        assertFalse("child must NOT be marked", unread.contains("child"))
+        assertFalse("cur must NOT be marked", unread.contains("cur"))
     }
 
     @Test

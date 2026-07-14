@@ -133,8 +133,14 @@ private fun chainHasArchived(
  * [UnreadState.lastViewedTime]. Used by the archive / delete / disconnectWorkdir
  * lifecycle paths so an unread badge cannot survive a session that no longer
  * shows up in the UI. Pure — callers funnel the result through mutateUnread.
+ *
+ * §unread-soak: also clears [UnreadState.idleSince] for the pruned ids so a
+ * pending soak does not survive the lifecycle event (an archived / deleted
+ * root must never later cross the soak threshold and re-populate
+ * [UnreadState.unreadSessions]).
  */
 internal fun UnreadState.removeSessions(ids: Set<String>): UnreadState = copy(
     unreadSessions = unreadSessions - ids,
     lastViewedTime = lastViewedTime.filterKeys { it !in ids },
+    idleSince = idleSince.filterKeys { it !in ids },
 )
