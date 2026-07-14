@@ -1,5 +1,6 @@
 package cn.vectory.ocdroid.service
 
+import android.annotation.SuppressLint
 import android.app.Notification
 import android.app.Service
 import android.content.Intent
@@ -196,7 +197,14 @@ class SessionStreamingService : Service() {
      * [notification] (FGS spec §5 step 2). Uses the typed [ServiceCompat]
      * overload so API 34+ sees a foregroundServiceType matching the manifest
      * declaration.
+     *
+     * notify Phase-0 scaffolding; switchover CP8 lands the <service> decl +
+     * perms, then remove this suppress. Lint (`ForegroundServiceType`) fires
+     * because the `<service>` is intentionally NOT in the manifest yet (the
+     * `notify-switchover` branch lands CP8 later); the suppress silences only
+     * that check.
      */
+    @SuppressLint("ForegroundServiceType")
     private fun promoteToForeground(notification: Notification) {
         ServiceCompat.startForeground(
             this,
