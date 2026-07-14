@@ -23,7 +23,11 @@ class BackgroundUnreadPollerTest {
     private val store = SharedStateStore()
     private var now = 1_000L
 
-    private fun root(id: String) = Session(id = id, directory = "/repo", title = "Root $id")
+    // §unread-semantics (F3): `updated` mirrors Session.time.updated — the
+    // "new content" signal. Defaults to null (no content); mark-asserting
+    // tests opt into a timestamp to exercise the new-message branch.
+    private fun root(id: String, updated: Long? = null) =
+        Session(id = id, directory = "/repo", title = "Root $id", time = Session.TimeInfo(updated = updated))
 
     private fun poller(
         isBackground: () -> Boolean = { true },
@@ -73,7 +77,9 @@ class BackgroundUnreadPollerTest {
 
     @Test
     fun `two background polls mark once after soak and continuous idle does not duplicate`() = runTest {
-        stubSnapshot(listOf(root("A")), mapOf("A" to SessionStatus("idle")))
+        // F3: opt-in a new message (arrived before the first poll's rising edge
+        // at now=1000) so the soak→mark fires; root never viewed ⇒ baseline 0.
+        stubSnapshot(listOf(root("A", updated = 500L)), mapOf("A" to SessionStatus("idle")))
         val poller = poller()
 
         // T5-round-5 I1-A: each committed poll returns Authoritative (was a
@@ -91,7 +97,8 @@ class BackgroundUnreadPollerTest {
 
     @Test
     fun `successful status snapshot absence is normalized to authoritative idle`() = runTest {
-        stubSnapshot(listOf(root("A")), emptyMap())
+        // F3: opt-in a new message so the soak→mark fires (root never viewed).
+        stubSnapshot(listOf(root("A", updated = 500L)), emptyMap())
         val poller = poller()
 
         assertTrue(authoritativeAlerts(poller.poll()).isEmpty())

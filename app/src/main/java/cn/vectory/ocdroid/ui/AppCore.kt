@@ -650,6 +650,11 @@ class AppCore @Inject constructor(
             sessionSwitcher.clearSessionWindowCache()
             true
         }
+        is ControllerEffect.RefreshCacheListing -> {
+            // §analysis-8b: actual consumer is SettingsViewModel (owns the StateFlows);
+            // AppCore cannot reach the Hilt VM, so just claim to satisfy single-handler invariant.
+            true
+        }
         is ControllerEffect.EvictSession -> {
             // R-20 Phase 1 (plan §3 矩阵 "用户归档 / 删除 / SSE 归档" 行):
             // synchronous memory clear + async persistent evict. Memory first

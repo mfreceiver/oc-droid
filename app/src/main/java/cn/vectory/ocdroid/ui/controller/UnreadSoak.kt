@@ -37,8 +37,12 @@ const val UNREAD_SOAK_MS: Long = 10_000L
  * replaces the old instant busy→idle marking. A root becomes unread ONLY when
  * (a) the root AND ALL its descendants (via the session tree) are idle,
  * (b) that all-idle state has persisted ≥[soakMs], (c) the root is not the
- * currently-open session, AND (d) the user has not viewed the root since it
- * went idle.
+ * currently-open session, (d) the user has not viewed the root since it
+ * went idle, AND (e) the subtree actually contains unviewed NEW content — at
+ * least one session in the subtree has a last-update timestamp
+ * (Session.time.updated) strictly newer than the user's last view of the root.
+ * Condition (e) (§unread-semantics F3) regresses "unread" to its "new message"
+ * meaning: pure idle settling with no new message no longer badges.
  *
  * Per ROOT session (parentId==null, !isArchived), iterating the union of
  * [sessions] + [directorySessions] (deduped by id):
@@ -52,9 +56,11 @@ const val UNREAD_SOAK_MS: Long = 10_000L
  *  - Else (allIdle, not current):
  *    - idleSince[root] == null ⇒ START the soak (newIdleSince[root] = [now]).
  *    - idleSince[root] != null AND (now - stamp) ≥ [soakMs] ⇒ soak COMPLETE:
- *      if lastViewedTime[root] < stamp (not viewed since idle) ⇒ add to
- *      [rootsToMarkUnread] and [rootsToStampViewed]. The cycle stamp remains
- *      until busy so continuously-idle evaluations cannot mark twice.
+ *      if lastViewedTime[root] < stamp (not viewed since idle) AND the subtree
+ *      has a session with time.updated > lastViewedTime[root] (unviewed new
+ *      content; viewed-null ⇒ baseline 0 ⇒ any ever-updated node qualifies)
+ *      ⇒ add to [rootsToMarkUnread] and [rootsToStampViewed]. The cycle stamp
+ *      remains until busy so continuously-idle evaluations cannot mark twice.
  *    - Otherwise still soaking — stamp unchanged.
  *
  * Pure + deterministic: same inputs ⇒ same outputs. The ONLY time input is
@@ -122,10 +128,36 @@ fun evaluateUnread(
                 } else if (now - stamp >= soakMs) {
                     // Soak threshold crossed.
                     val viewed = lastViewedTime[rootId]
-                    // (d) not viewed since idle ⇒ mark. Viewed-null (never
-                    // opened) is treated as not-viewed so a fresh root still
-                    // badges once it settles.
-                    if (viewed == null || viewed < stamp) {
+                    // (d) not viewed since idle ⇒ eligible to mark. Viewed-null
+                    // (never opened) is treated as not-viewed so a fresh root
+                    // still badges once it settles — PROVIDED it has content (e).
+                    val notViewedSinceIdle = viewed == null || viewed < stamp
+                    // (e) §unread-semantics (F3): regress "unread" to its
+                    // "new message" meaning. Pure idle settling must NOT badge
+                    // — there must also be a session in the subtree whose
+                    // last-update timestamp is NEWER than the user's last view
+                    // of this root. Session.time.updated is bumped by every
+                     // inbound message (applyMessageTimestampBump) and never
+                     // touches unread, so it is a faithful "new content" signal.
+                     // Clock-domain note (§analysis F3 review): time.updated is
+                     // driven by the SERVER message timestamp (applyMessageTimestampBump
+                     // ← msgCreated @ SessionSyncCoordinator:727/784) + REST/SSE
+                     // session.updated, whereas lastViewedTime is CLIENT-side
+                     // System.currentTimeMillis. Under significant client↔server
+                     // skew this cross-domain `>` can rarely under-badge (client
+                     // clock ahead → updated < viewed); gated by the soak +
+                     // notViewedSinceIdle conjunction and the current-session
+                     // bypass. Local bumpSessionUpdated uses client now (same-domain).
+                    // Viewed-null (never opened) ⇒ baseline 0 ⇒ any subtree node
+                    // that has ever been updated counts as new (a freshly-settled
+                    // root WITH content badges; a truly empty root does not).
+                    // This removes the "open it and there's no new message, only
+                    // a running sub-conversation" symptom.
+                    val lastSeen = viewed ?: 0L
+                    val hasNewMessages = subtree.any { sid ->
+                        sessionsById[sid]?.time?.updated?.let { it > lastSeen } == true
+                    }
+                    if (notViewedSinceIdle && hasNewMessages) {
                         rootsToMark.add(rootId)
                         markedIdleSince[rootId] = stamp
                         // Consume this cycle without discarding its edge memory.

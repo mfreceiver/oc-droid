@@ -82,6 +82,12 @@ sealed class ControllerEffect {
     data object ResetLocalDataAndResync : ControllerEffect()
     /** Drop the per-session message-window cache (SessionSwitcher owns it). */
     data object ClearSessionWindowCache : ControllerEffect()
+    /** §analysis-8b: cache DB cleared by resetLocalDataAndResync → SettingsViewModel
+     *  re-reads cacheRepository so cacheListing StateFlow drops stale rows.
+     *  Consumed by SettingsViewModel (owns _cacheListing/_cachedDataBytes);
+     *  AppCore.dispatchHostEffect claims it (returns true) to satisfy the
+     *  single-handler invariant, since AppCore cannot reach the Hilt VM. */
+    data object RefreshCacheListing : ControllerEffect()
     /**
      * R-20 Phase 1: evict one cached session + its messages, scoped to
      * `(serverGroupFp, sessionId)`. Emitted by:

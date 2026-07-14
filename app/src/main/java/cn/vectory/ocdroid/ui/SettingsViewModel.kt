@@ -8,6 +8,7 @@ import cn.vectory.ocdroid.data.cache.CacheRepository
 import cn.vectory.ocdroid.data.cache.DailySweepReport
 import cn.vectory.ocdroid.data.repository.HostProfileStore
 import cn.vectory.ocdroid.di.UiApplicationScope
+import cn.vectory.ocdroid.ui.controller.ControllerEffect
 import cn.vectory.ocdroid.util.AppLocaleController
 import cn.vectory.ocdroid.util.DebugLog
 import cn.vectory.ocdroid.util.LocaleMode
@@ -21,6 +22,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.filterIsInstance
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
@@ -91,6 +93,17 @@ class SettingsViewModel @Inject constructor(
     @Named("cacheDegraded") private val cacheDegraded: Boolean,
     @Named("currentServerGroupFp") private val currentServerGroupFpProvider: () -> String,
     /**
+     * §analysis-8b (Lane-D8b): cross-VM cache-refresh signal bus. Collected
+     * in [init] — HostProfileController.resetLocalDataAndResync emits
+     * [ControllerEffect.RefreshCacheListing] after wiping the cache DB so
+     * this VM re-reads cacheRepository + drops stale [_cacheListing] /
+     * [_cachedDataBytes] rows (manual StateFlows, not Room-derived, so they
+     * don't auto-update on a clear). Precise-injected (same @Singleton every
+     * controller emits on); the VM keeps the R-19 P2-5 invariant of not
+     * reaching into AppCore.
+     */
+    private val effectBus: SharedEffectBus,
+    /**
      * §P5a (Q5): application Context for [setLocaleMode] →
      * [AppLocaleController.apply] (needed to resolve the real system locale
      * in SYSTEM mode via LocaleManagerCompat). Precise-injected (Hilt
@@ -129,8 +142,17 @@ class SettingsViewModel @Inject constructor(
         core.appScope,
         false,
         core.currentServerGroupFp,
+        core.effectBus,
         core.appContext,
     )
+
+    init {
+        viewModelScope.launch {
+            effectBus.effects
+                .filterIsInstance<ControllerEffect.RefreshCacheListing>()
+                .collect { refreshCacheListing() }
+        }
+    }
 
     /** Read accessor — same authoritative slice [OrchestratorViewModel] and
      *  the other domain VMs expose (all delegate to [SharedStateStore]). Kept

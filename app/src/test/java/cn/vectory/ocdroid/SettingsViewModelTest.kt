@@ -5,6 +5,7 @@ import cn.vectory.ocdroid.data.model.HostProfile
 import cn.vectory.ocdroid.ui.CacheListingState
 import cn.vectory.ocdroid.ui.ConnectionState
 import cn.vectory.ocdroid.ui.SettingsViewModel
+import cn.vectory.ocdroid.ui.controller.ControllerEffect
 import cn.vectory.ocdroid.util.MarkdownFontSizes
 import cn.vectory.ocdroid.util.SettingsManager
 import cn.vectory.ocdroid.util.ThemeMode
@@ -322,6 +323,39 @@ class SettingsViewModelTest : MainViewModelTestBase() {
         // route the @Named("cacheDegraded") Boolean from the Hilt graph.
         val vm = SettingsViewModel(createCore())
         assertFalse(vm.isCacheDegraded)
+    }
+
+    // ─────────── §analysis-8b (Lane-D8b): RefreshCacheListing wiring ──────
+
+    @Test
+    fun `RefreshCacheListing effect triggers refreshCacheListing re-read of cacheRepository`() = runTest {
+        // §analysis-8b: HostProfileController.resetLocalDataAndResync emits
+        // ControllerEffect.RefreshCacheListing on the SharedEffectBus after
+        // wiping the cache DB. SettingsViewModel's init-block collector picks
+        // it up and calls refreshCacheListing() so the manual _cacheListing /
+        // _cachedDataBytes StateFlows drop stale rows. This test pins the
+        // end-to-end wiring: effect → collect → refreshCacheListing →
+        // cacheRepository re-read.
+        val core = createCore()
+        val vm = SettingsViewModel(core)
+        coEvery { core.cacheRepository.allServerGroupFps() } returns emptyList()
+        // SharedEffectBus has NO replay — the init block's viewModelScope.launch
+        // collector must be subscribed BEFORE we emit, or the effect is lost.
+        // advanceUntilIdle lets the init launch begin collecting.
+        advanceUntilIdle()
+        // Baseline: no refresh yet (the listing is still at its Loading
+        // initial value; refreshCacheListing has not run).
+        coVerify(exactly = 0) { core.cacheRepository.allServerGroupFps() }
+
+        core.effectBus.tryEmitEffect(ControllerEffect.RefreshCacheListing)
+        advanceUntilIdle()
+
+        // The init collector forwarded the effect → refreshCacheListing() ran
+        // → cacheRepository was re-read (allServerGroupFps is the first suspend
+        // call inside refreshCacheListing's appScope.launch block).
+        coVerify(atLeast = 1) { core.cacheRepository.allServerGroupFps() }
+        // The re-read transitioned the listing from Loading to Empty (fps == []).
+        assertEquals(CacheListingState.Empty, vm.cacheListing.value)
     }
 
     // ─────────── §grouping-rewrite Round-2 C1: disconnect reactivity ──────

@@ -78,7 +78,11 @@ class UnreadSoakControllerTest {
         every { isInForeground } returns foregroundFlow
     }
 
-    private fun root(id: String) = Session(id = id, directory = "/x", parentId = null)
+    // §unread-semantics (F3): `updated` mirrors Session.time.updated — the
+    // "new content" signal. Defaults to null (no content); mark-asserting
+    // tests opt into a timestamp to exercise the new-message branch.
+    private fun root(id: String, updated: Long? = null) =
+        Session(id = id, directory = "/x", parentId = null, time = Session.TimeInfo(updated = updated))
     private fun child(id: String, parent: String) = Session(id = id, directory = "/x", parentId = parent)
 
     private fun seedSessions(vararg sessions: Session) {
@@ -166,7 +170,10 @@ class UnreadSoakControllerTest {
     @Test
     fun `root busy then all-idle plus 10s not viewed enters unreadSessions`() {
         val controller = makeController()
-        seedSessions(root("A"), root("CUR"))
+        // F3: opt-in a new message (arrived just before A went idle at t=2000)
+        // so the soak→mark transition fires; lastViewedTime[A] is null (never
+        // viewed) ⇒ baseline 0 ⇒ any updated > 0 counts as unviewed new content.
+        seedSessions(root("A", updated = 1_500L), root("CUR"))
         seedCurrent("CUR")
         // A is busy.
         seedStatuses("A" to busy, "CUR" to idle)
@@ -378,7 +385,10 @@ class UnreadSoakControllerTest {
     @Test
     fun `sweep marks one root and continues soaking another`() {
         val controller = makeController()
-        seedSessions(root("A"), root("B"))
+        // F3: opt-in new messages (arrived before the soak rising-edge at
+        // t=1000) on both roots so the threshold-crossing tick marks them;
+        // neither root is viewed (lastViewedTime baseline 0).
+        seedSessions(root("A", updated = 500L), root("B", updated = 500L))
         seedCurrent("CUR")
         seedStatuses("A" to idle, "B" to idle, "CUR" to idle)
 

@@ -874,6 +874,7 @@ class HostProfileController(
                         .onFailure { DebugLog.e(TAG, "deleteDatabase($CACHE_DB_NAME) failed during reset", it) }
                     resetLocalStateCore()
                 }
+                effects.emitEffect(ControllerEffect.RefreshCacheListing)
                 effects.emitEffect(ControllerEffect.ColdStartReconnect)
             }
             return
@@ -897,6 +898,10 @@ class HostProfileController(
                 .onFailure { DebugLog.e(TAG, "cacheRepository.clearAll failed during reset", it) }
             runCatching { appContext.deleteDatabase(CACHE_DB_NAME) }
                 .onFailure { DebugLog.e(TAG, "deleteDatabase($CACHE_DB_NAME) failed during reset", it) }
+            // §analysis-8b: emit AFTER deleteDatabase lands so the SettingsVM
+            // refresh sees an empty cache (fire-and-forget launch; the rest of
+            // the reset path runs synchronously and does not touch cacheRepository).
+            effects.emitEffect(ControllerEffect.RefreshCacheListing)
         }
         // 1. Wipe persisted local data (preserves connection + tunnel creds +
         //    cache_db_key — the key survives so the next app start can re-open

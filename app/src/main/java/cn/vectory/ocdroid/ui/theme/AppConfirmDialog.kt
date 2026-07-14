@@ -1,5 +1,6 @@
 package cn.vectory.ocdroid.ui.theme
 
+import androidx.compose.foundation.layout.Column
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
@@ -107,7 +108,13 @@ fun AppConfirmDialog(
     AlertDialog(
         onDismissRequest = onDismissRequest,
         title = { Text(title) },
-        text = bodyContent?.let { { it() } },
+        // §analysis-8a: wrap bodyContent in a Column. Without a layout
+        // container, AlertDialog.text is a single composable slot and the
+        // caller's multi-paragraph body (e.g. DangerZoneSection's three
+        // colored segments) stack on the z-axis instead of stacking
+        // vertically. Callers still own the inter-paragraph spacing (via
+        // explicit Spacer + Dimens tokens), so no verticalArrangement here.
+        text = bodyContent?.let { { Column { it() } } },
         confirmButton = {
             TextButton(onClick = onConfirm) {
                 Text(

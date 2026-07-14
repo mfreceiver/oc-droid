@@ -265,7 +265,7 @@ fun Composer(
                     BasicTextField(
                         value = text,
                         onValueChange = onTextChange,
-                        modifier = Modifier.fillMaxWidth().heightIn(min = 24.dp, max = 120.dp),
+                        modifier = Modifier.fillMaxWidth().heightIn(min = 24.dp),
                         enabled = !questionPending,
                         textStyle = LocalTextStyle.current.copy(
                             color = MaterialTheme.colorScheme.onSurface

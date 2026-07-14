@@ -31,11 +31,15 @@ class UnreadSoakTest {
     private val busy = SessionStatus(type = "busy")
     private val soak = 10_000L
 
-    private fun root(id: String, archived: Boolean = false) =
-        Session(id = id, directory = "/x", parentId = null, time = if (archived) Session.TimeInfo(archived = 1L) else Session.TimeInfo())
+    // §unread-semantics (F3): `updated` mirrors Session.time.updated — the
+    // "new content" signal bumped by every inbound message. Defaults to null
+    // (no content) so mark-asserting tests must opt into a timestamp to prove
+    // they exercise the new-message branch.
+    private fun root(id: String, archived: Boolean = false, updated: Long? = null) =
+        Session(id = id, directory = "/x", parentId = null, time = if (archived) Session.TimeInfo(archived = 1L) else Session.TimeInfo(updated = updated))
 
-    private fun child(id: String, parent: String) =
-        Session(id = id, directory = "/x", parentId = parent)
+    private fun child(id: String, parent: String, updated: Long? = null) =
+        Session(id = id, directory = "/x", parentId = parent, time = Session.TimeInfo(updated = updated))
 
     /**
      * Convenience: evaluate over a flat [sessions] list with no directory /
@@ -121,7 +125,7 @@ class UnreadSoakTest {
     @Test
     fun `soak complete - 10s plus not viewed marks and consumes stamp`() {
         val r = eval(
-            sessions = listOf(root("A")),
+            sessions = listOf(root("A", updated = 2_000L)),
             sessionStatuses = mapOf("A" to idle),
             // stamp 10s ago, never viewed.
             idleSince = mapOf("A" to 1000L),
@@ -136,7 +140,7 @@ class UnreadSoakTest {
     @Test
     fun `soak complete - exactly 10s boundary marks`() {
         val r = eval(
-            sessions = listOf(root("A")),
+            sessions = listOf(root("A", updated = 2_000L)),
             sessionStatuses = mapOf("A" to idle),
             idleSince = mapOf("A" to 1000L),
             now = 11_000L, // now - stamp == soak exactly
@@ -188,10 +192,11 @@ class UnreadSoakTest {
     @Test
     fun `viewed before idle - lastViewedTime before stamp still marks`() {
         val r = eval(
-            sessions = listOf(root("A")),
+            sessions = listOf(root("A", updated = 800L)),
             sessionStatuses = mapOf("A" to idle),
             idleSince = mapOf("A" to 1000L),
-            // viewed BEFORE the soak started (stale view).
+            // viewed BEFORE the soak started (stale view); a message arrived
+            // since the view (updated 800 > viewed 500).
             lastViewedTime = mapOf("A" to 500L),
             now = 11_000L,
         )
@@ -309,7 +314,7 @@ class UnreadSoakTest {
     @Test
     fun `full subtree idle including descendants crosses soak and marks`() {
         val r = eval(
-            sessions = listOf(root("A"), child("C", "A"), child("G", "C")),
+            sessions = listOf(root("A", updated = 2_000L), child("C", "A"), child("G", "C")),
             sessionStatuses = mapOf("A" to idle, "C" to idle, "G" to idle),
             idleSince = mapOf("A" to 1000L),
             now = 11_000L,
@@ -363,9 +368,9 @@ class UnreadSoakTest {
     @Test
     fun `multiple roots evaluated independently`() {
         val r = eval(
-            sessions = listOf(root("A"), root("B"), root("C")),
+            sessions = listOf(root("A", updated = 2_000L), root("B"), root("C")),
             sessionStatuses = mapOf("A" to idle, "B" to idle, "C" to busy),
-            // A past soak threshold; B mid-soak; C busy.
+            // A past soak threshold (with new content); B mid-soak; C busy.
             idleSince = mapOf("A" to 1000L, "B" to 9000L),
             now = 11_000L,
         )
@@ -399,6 +404,141 @@ class UnreadSoakTest {
         assertNull("ghost stamp pruned", r.newIdleSince["ghost"])
     }
 
+    // ── §unread-semantics (F3): new-message gating ────────────────────────
+
+    @Test
+    fun `F3 - soak complete with NO new message does not mark`() {
+        // Pure idle settling, no content ever (updated == null). The F3
+        // regression: this MUST NOT badge — the old contract would have marked.
+        val r = eval(
+            sessions = listOf(root("A")), // updated defaults to null
+            sessionStatuses = mapOf("A" to idle),
+            idleSince = mapOf("A" to 1000L),
+            lastViewedTime = emptyMap(),
+            now = 11_000L,
+        )
+        assertFalse("no new message must not mark", "A" in r.rootsToMarkUnread)
+        assertEquals("stamp retained as edge memory", 1000L, r.newIdleSince["A"])
+        assertFalse("nothing consumed", "A" in r.rootsToStampViewed)
+    }
+
+    @Test
+    fun `F3 - soak complete with new message marks`() {
+        val r = eval(
+            sessions = listOf(root("A", updated = 2_000L)),
+            sessionStatuses = mapOf("A" to idle),
+            idleSince = mapOf("A" to 1000L),
+            lastViewedTime = emptyMap(),
+            now = 11_000L,
+        )
+        assertTrue("new message + soak complete must mark", "A" in r.rootsToMarkUnread)
+    }
+
+    @Test
+    fun `F3 - message older than last view does not mark`() {
+        // User viewed at 500; the only message landed at 300 (before the view).
+        // No UNVIEWED new content ⇒ no mark, even though soak completed.
+        val r = eval(
+            sessions = listOf(root("A", updated = 300L)),
+            sessionStatuses = mapOf("A" to idle),
+            idleSince = mapOf("A" to 1000L),
+            lastViewedTime = mapOf("A" to 500L),
+            now = 11_000L,
+        )
+        assertFalse("message older than last view must not mark", "A" in r.rootsToMarkUnread)
+    }
+
+    @Test
+    fun `F3 - message exactly at last view does not mark`() {
+        // updated == viewed (boundary): no strictly-newer content ⇒ no mark.
+        val r = eval(
+            sessions = listOf(root("A", updated = 500L)),
+            sessionStatuses = mapOf("A" to idle),
+            idleSince = mapOf("A" to 1000L),
+            lastViewedTime = mapOf("A" to 500L),
+            now = 11_000L,
+        )
+        assertFalse("updated == viewed must not mark (> is strict)", "A" in r.rootsToMarkUnread)
+    }
+
+    @Test
+    fun `F3 - new message on a child marks the root`() {
+        // Root itself has no updated content, but a descendant received a
+        // message newer than the root's last view ⇒ subtree scan marks root.
+        val r = eval(
+            sessions = listOf(root("A"), child("C", "A", updated = 2_000L)),
+            sessionStatuses = mapOf("A" to idle, "C" to idle),
+            idleSince = mapOf("A" to 1000L),
+            lastViewedTime = mapOf("A" to 500L),
+            now = 11_000L,
+        )
+        assertTrue("child's new message must mark the root", "A" in r.rootsToMarkUnread)
+    }
+
+    @Test
+    fun `F3 - new message on a grandchild marks the root`() {
+        val r = eval(
+            sessions = listOf(
+                root("A"),
+                child("C", "A"),
+                child("G", "C", updated = 2_000L),
+            ),
+            sessionStatuses = mapOf("A" to idle, "C" to idle, "G" to idle),
+            idleSince = mapOf("A" to 1000L),
+            lastViewedTime = mapOf("A" to 500L),
+            now = 11_000L,
+        )
+        assertTrue("grandchild's new message must mark the root", "A" in r.rootsToMarkUnread)
+    }
+
+    @Test
+    fun `F3 - never-viewed empty root does not mark`() {
+        // Never opened AND no content at all ⇒ nothing unread to surface.
+        val r = eval(
+            sessions = listOf(root("A")), // updated null, never viewed
+            sessionStatuses = mapOf("A" to idle),
+            idleSince = mapOf("A" to 1000L),
+            lastViewedTime = emptyMap(),
+            now = 11_000L,
+        )
+        assertFalse("empty never-viewed root must not mark", "A" in r.rootsToMarkUnread)
+    }
+
+    @Test
+    fun `F3 - never-viewed root with content marks`() {
+        // Never opened but the subtree HAS content ⇒ baseline 0 ⇒ badges once.
+        val r = eval(
+            sessions = listOf(root("A", updated = 2_000L)),
+            sessionStatuses = mapOf("A" to idle),
+            idleSince = mapOf("A" to 1000L),
+            lastViewedTime = emptyMap(),
+            now = 11_000L,
+        )
+        assertTrue("never-viewed root with content must mark", "A" in r.rootsToMarkUnread)
+    }
+
+    @Test
+    fun `F3 - new message arriving after a prior no-content soak then marks`() {
+        // Tick 1: settled idle, no content ⇒ no mark, stamp retained.
+        val first = eval(
+            sessions = listOf(root("A")),
+            sessionStatuses = mapOf("A" to idle),
+            idleSince = mapOf("A" to 1000L),
+            lastViewedTime = emptyMap(),
+            now = 11_000L,
+        )
+        assertFalse("no-content soak must not mark", "A" in first.rootsToMarkUnread)
+        // Tick 2: a message lands (updated bumped) ⇒ now marks.
+        val second = eval(
+            sessions = listOf(root("A", updated = 12_000L)),
+            sessionStatuses = mapOf("A" to idle),
+            idleSince = first.newIdleSince,
+            lastViewedTime = emptyMap(),
+            now = 25_000L,
+        )
+        assertTrue("message arriving after a no-content soak must mark", "A" in second.rootsToMarkUnread)
+    }
+
     // ── determinism ────────────────────────────────────────────────────────
 
     @Test
@@ -413,13 +553,13 @@ class UnreadSoakTest {
     @Test
     fun `completed all-idle cycle does not mark again without an intervening busy state`() {
         val completed = eval(
-            sessions = listOf(root("A")),
+            sessions = listOf(root("A", updated = 2_000L)),
             sessionStatuses = mapOf("A" to idle),
             idleSince = mapOf("A" to 1000L),
             now = 11_000L,
         )
         val repeated = eval(
-            sessions = listOf(root("A")),
+            sessions = listOf(root("A", updated = 2_000L)),
             sessionStatuses = mapOf("A" to idle),
             idleSince = completed.newIdleSince,
             lastViewedTime = mapOf("A" to 11_000L),
@@ -434,7 +574,7 @@ class UnreadSoakTest {
     @Test
     fun `custom soakMs overrides the default`() {
         val r = eval(
-            sessions = listOf(root("A")),
+            sessions = listOf(root("A", updated = 2_000L)),
             sessionStatuses = mapOf("A" to idle),
             idleSince = mapOf("A" to 1000L),
             now = 3500L,
