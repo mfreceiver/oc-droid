@@ -11,6 +11,9 @@ import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.test.advanceTimeBy
 import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.async
+import java.util.concurrent.atomic.AtomicInteger
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -201,6 +204,76 @@ class StatusAggregatorImplTest {
 
         assertEquals(SessionBusyStatus.Busy, aggregator.statusByKey.value[key("s1", "/work")])
         assertTrue(aggregator.globalBusy.value)
+    }
+
+    @Test
+    fun `M7 concurrent SSE Busy during suspended REST idle preserves merge timing`() = runTest {
+        val repo = mockk<OpenCodeRepository>(relaxed = true)
+        val entered = CompletableDeferred<Unit>()
+        val response = CompletableDeferred<Result<Map<String, SessionStatus>>>()
+        coEvery { repo.getSessionStatus() } coAnswers {
+            entered.complete(Unit)
+            response.await()
+        }
+        val aggregator = newAggregator(repo, clock = { 100L }, scope = backgroundScope)
+        val refresh = async {
+            aggregator.refresh(identity(), snapshot(mapOf("s1" to session("s1", "/work"))))
+        }
+        entered.await()
+
+        aggregator.applySseStatus(key("s1", "/work"), SessionBusyStatus.Busy, 150L)
+        response.complete(Result.success(emptyMap()))
+        refresh.await()
+
+        assertEquals(SessionBusyStatus.Busy, aggregator.statusByKey.value[key("s1", "/work")])
+        assertEquals(GlobalBusyState.Busy, aggregator.stateAtNow())
+    }
+
+    @Test
+    fun `M7 stateAtNow and statusByKey derive from one committed aggregate`() = runTest {
+        val repo = mockk<OpenCodeRepository>(relaxed = true)
+        coEvery { repo.getSessionStatus() } returns Result.success(emptyMap())
+        val aggregator = newAggregator(repo, clock = { 100L })
+        aggregator.refresh(identity(), snapshot(mapOf("s1" to session("s1", "/work"))))
+        aggregator.applySseStatus(key("s1", "/work"), SessionBusyStatus.Retry, 101L)
+
+        assertEquals(SessionBusyStatus.Retry, aggregator.statusByKey.value[key("s1", "/work")])
+        assertEquals(GlobalBusyState.Busy, aggregator.stateAtNow())
+        assertEquals(GlobalBusyState.Busy, aggregator.globalState.value)
+    }
+
+    @Test
+    fun `M7 concurrent REST completions commit entries and coverage as one aggregate`() = runTest {
+        val repo = mockk<OpenCodeRepository>(relaxed = true)
+        val first = CompletableDeferred<Result<Map<String, SessionStatus>>>()
+        val second = CompletableDeferred<Result<Map<String, SessionStatus>>>()
+        val calls = AtomicInteger()
+        coEvery { repo.getSessionStatus() } coAnswers {
+            if (calls.getAndIncrement() == 0) first.await() else second.await()
+        }
+        val ticks = AtomicInteger(100)
+        val aggregator = newAggregator(repo, clock = { ticks.getAndIncrement().toLong() }, scope = backgroundScope)
+        val a = async {
+            aggregator.refresh(
+                identity(groupFp = "group-a"),
+                snapshot(mapOf("a" to session("a", "/a")), setOf("/a", "/zero-a")),
+            )
+        }
+        val b = async {
+            aggregator.refresh(
+                identity(groupFp = "group-b"),
+                snapshot(mapOf("b" to session("b", "/b")), setOf("/b", "/zero-b")),
+            )
+        }
+        while (calls.get() < 2) kotlinx.coroutines.yield()
+        second.complete(Result.success(emptyMap()))
+        b.await()
+        first.complete(Result.success(mapOf("a" to SessionStatus(type = "busy"))))
+        a.await()
+
+        assertEquals(SessionBusyStatus.Busy, aggregator.statusByKey.value[key("a", "/a", "group-a")])
+        assertEquals(GlobalBusyState.Busy, aggregator.stateAtNow())
+        assertEquals(GlobalBusyState.Busy, aggregator.globalState.value)
     }
 
     @Test
@@ -598,10 +671,9 @@ class StatusAggregatorImplTest {
     }
 
     @Test
-    fun `D1 gate #5 - registered workdir without sessions is Unknown (coverage fails)`() = runTest {
-        // registeredWorkdirs = {/work-a, /work-b} but sessions only cover
-        // /work-a. Even if the covered workdir is fresh Idle, the uncovered
-        // /work-b forces Unknown (a registered workdir is "missing coverage").
+    fun `M6 host-global success covers registered workdir without sessions`() = runTest {
+        // The endpoint is host-global: a successful snapshot covers every
+        // registered workdir, including /work-b with zero known sessions.
         val repo = mockk<OpenCodeRepository>(relaxed = true)
         coEvery { repo.getSessionStatus() } returns Result.success(emptyMap())
         val aggregator = newAggregator(repo, clock = { 100L })
@@ -615,8 +687,8 @@ class StatusAggregatorImplTest {
         )
 
         assertEquals(
-            "missing coverage for /work-b → Unknown (not AllIdleFresh)",
-            GlobalBusyState.Unknown,
+            "host-global snapshot marker covers zero-session /work-b",
+            GlobalBusyState.AllIdleFresh,
             aggregator.globalState.value,
         )
     }
@@ -636,6 +708,23 @@ class StatusAggregatorImplTest {
         )
 
         assertEquals(GlobalBusyState.AllIdleFresh, aggregator.globalState.value)
+    }
+
+    @Test
+    fun `M6 empty host-global coverage marker expires to Unknown`() = runTest {
+        var now = 0L
+        val repo = mockk<OpenCodeRepository>(relaxed = true)
+        coEvery { repo.getSessionStatus() } returns Result.success(emptyMap())
+        val aggregator = newAggregator(repo, clock = { now }, scope = backgroundScope)
+        aggregator.refresh(identity(), snapshot(emptyMap(), setOf("/zero-session")))
+        assertEquals(GlobalBusyState.AllIdleFresh, aggregator.globalState.value)
+
+        now = StatusAggregatorImpl.STATUS_TTL_MS + 1
+        advanceTimeBy(StatusAggregatorImpl.STATUS_TTL_MS + 2)
+        runCurrent()
+
+        assertEquals(GlobalBusyState.Unknown, aggregator.globalState.value)
+        assertEquals(GlobalBusyState.Unknown, aggregator.stateAtNow())
     }
 
     @Test

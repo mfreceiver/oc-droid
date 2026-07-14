@@ -1,7 +1,6 @@
 package cn.vectory.ocdroid.service.streaming
 
 import cn.vectory.ocdroid.data.model.HealthResponse
-import cn.vectory.ocdroid.data.repository.HostProfileStore
 import cn.vectory.ocdroid.data.repository.OpenCodeRepository
 import cn.vectory.ocdroid.data.repository.ServerCompatProfile
 import cn.vectory.ocdroid.data.repository.http.TofuDecision
@@ -35,22 +34,9 @@ sealed interface ConnectionBootstrapOutcome {
     data class Failed(val error: Throwable) : ConnectionBootstrapOutcome
 }
 
-data class EffectiveConnectionConfig(
-    val profileId: String,
-    val serverGroupFp: String,
-    val serverUrl: String,
-    val username: String?,
-    val password: String?,
-    val workdir: String,
-    val tunnelPasswordId: String?,
-    val tunnelPassword: String?,
-    val clientCertId: String?,
-    val mtlsEnabled: Boolean,
-)
-
 @Singleton
 class ConnectionBootstrapEngine internal constructor(
-    private val hostProfileStore: HostProfileStore,
+    private val configResolver: EffectiveConnectionConfigResolver,
     private val settingsManager: SettingsManager,
     private val repository: OpenCodeRepository,
     private val identityStore: ConnectionIdentityStore,
@@ -70,7 +56,7 @@ class ConnectionBootstrapEngine internal constructor(
 
     suspend fun bootstrap(): ConnectionBootstrapOutcome {
         while (true) {
-            val key = runCatching { effectiveConfig() }
+            val key = runCatching { configResolver.resolve() ?: error("No effective connection config") }
                 .getOrElse { return ConnectionBootstrapOutcome.Failed(it) }
             var owner = false
             val flight = mutex.withLock {
@@ -115,25 +101,6 @@ class ConnectionBootstrapEngine internal constructor(
         }
     }
 
-    private fun effectiveConfig(): EffectiveConnectionConfig {
-        val profile = hostProfileStore.currentProfile()
-        val username = profile.basicAuth?.username
-        val password = profile.basicAuth?.passwordId?.let(settingsManager::basicAuthPassword)
-        val tunnelPassword = profile.tunnelPasswordId?.let(settingsManager::getTunnelPassword)
-        return EffectiveConnectionConfig(
-            profileId = profile.id,
-            serverGroupFp = profile.serverGroupFp.ifBlank { profile.id },
-            serverUrl = profile.serverUrl,
-            username = username,
-            password = password,
-            workdir = settingsManager.currentWorkdir.orEmpty(),
-            tunnelPasswordId = profile.tunnelPasswordId,
-            tunnelPassword = tunnelPassword,
-            clientCertId = profile.clientCertId.takeIf { profile.mtlsEnabled },
-            mtlsEnabled = profile.mtlsEnabled,
-        )
-    }
-
     private suspend fun performAttempt(key: EffectiveConnectionConfig): ConnectionBootstrapOutcome {
         val clientCert = key.clientCertId?.let(settingsManager::loadClientCertMaterial)
         if (key.mtlsEnabled && clientCert == null) {
@@ -141,13 +108,13 @@ class ConnectionBootstrapEngine internal constructor(
         }
         val expected = identityStore.currentIdentity.value
         val matchingIdentity = expected?.serverGroupFp == key.serverGroupFp &&
-            expected.normalizedWorkdir == key.workdir && expected.endpointFp == key.serverUrl
+            expected.normalizedWorkdir == key.workdir && expected.endpointFp == key.url
         if (configuredKey != key || !matchingIdentity) {
             repository.configure(
-                key.serverUrl,
+                key.url,
                 key.username,
                 key.password,
-                hostPort = hostPortFromUrl(key.serverUrl),
+                hostPort = hostPortFromUrl(key.url),
                 clientCert = clientCert,
             )
             configuredKey = key
@@ -156,9 +123,9 @@ class ConnectionBootstrapEngine internal constructor(
             val password = key.tunnelPassword
                 ?: return ConnectionBootstrapOutcome.Failed(IllegalStateException("Tunnel password unavailable"))
             repository.activateTunnel(
-                key.serverUrl,
+                key.url,
                 password,
-                hostPort = hostPortFromUrl(key.serverUrl),
+                hostPort = hostPortFromUrl(key.url),
             ).getOrElse { return ConnectionBootstrapOutcome.Failed(it) }
             tunnelActivatedKey = key
         }
@@ -172,8 +139,8 @@ class ConnectionBootstrapEngine internal constructor(
                 val identity = if (current != null &&
                     current.serverGroupFp == key.serverGroupFp &&
                     current.normalizedWorkdir == key.workdir &&
-                    current.endpointFp == key.serverUrl
-                ) current else identityStore.bind(key.serverGroupFp, key.workdir, key.serverUrl)
+                    current.endpointFp == key.url
+                ) current else identityStore.bind(key.serverGroupFp, key.workdir, key.url)
                 bootstrapCoordinator.clearPendingTofu()
                 return ConnectionBootstrapOutcome.Success(identity, health)
             }
@@ -181,14 +148,14 @@ class ConnectionBootstrapEngine internal constructor(
                 ?: IllegalStateException("Server reported unhealthy${health?.version?.let { " ($it)" }.orEmpty()}")
             val tlsFailure = generateSequence(error) { it.cause }
                 .any { it is SSLException || it is CertificateException }
-            val hostPort = hostPortFromUrl(key.serverUrl)
+            val hostPort = hostPortFromUrl(key.url)
             if (!tlsFailure || hostPort == null || repository.pinnedSpkiFor(hostPort) != null ||
                 repository.isMutualTlsActive()
             ) {
                 return ConnectionBootstrapOutcome.Failed(error)
             }
             bootstrapCoordinator.setPendingTofu(hostPort)
-            val capture = repository.captureServerCert(key.serverUrl, hostPort, clientCert)
+            val capture = repository.captureServerCert(key.url, hostPort, clientCert)
                 ?: run {
                     bootstrapCoordinator.clearPendingTofu()
                     return ConnectionBootstrapOutcome.Failed(error)

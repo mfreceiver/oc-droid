@@ -139,6 +139,7 @@ object ControllerModule {
         @Named("currentServerGroupFp") currentServerGroupFp: () -> String,
         identityStore: cn.vectory.ocdroid.service.identity.ConnectionIdentityStore,
         reconfigureBarrier: cn.vectory.ocdroid.service.ConnectionReconfigureBarrier,
+        effectiveConnectionConfigResolver: cn.vectory.ocdroid.service.streaming.EffectiveConnectionConfigResolver,
     ): HostProfileController = HostProfileController(
         scope = appScope,
         slices = store.slices,
@@ -152,6 +153,7 @@ object ControllerModule {
         cacheRepository = cacheRepository,
         identityStore = identityStore,
         reconfigureBarrier = reconfigureBarrier,
+        effectiveConnectionConfigResolver = effectiveConnectionConfigResolver,
     )
 
     @Provides
@@ -200,6 +202,8 @@ object ControllerModule {
         streamingLifecycleCoordinator: cn.vectory.ocdroid.service.lifecycle.StreamingLifecycleCoordinator,
         connectionBootstrapEngine: cn.vectory.ocdroid.service.streaming.ConnectionBootstrapEngine,
         bootstrapRetryPolicy: cn.vectory.ocdroid.service.streaming.BootstrapRetryPolicy,
+        appLifecycleMonitor: AppLifecycleMonitor,
+        degradedBootstrapTerminator: cn.vectory.ocdroid.service.DegradedBootstrapTerminator,
     ): ConnectionCoordinator = ConnectionCoordinator(
         scope = appScope,
         slices = store.slices,
@@ -225,5 +229,7 @@ object ControllerModule {
         streamingLifecycleCoordinator = streamingLifecycleCoordinator,
         connectionBootstrapEngine = connectionBootstrapEngine,
         bootstrapRetryPolicy = bootstrapRetryPolicy,
+        appLifecycleMonitor = appLifecycleMonitor,
+        degradedBootstrapTerminator = degradedBootstrapTerminator,
     )
 }

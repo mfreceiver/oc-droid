@@ -83,6 +83,7 @@ object ApplicationScopeModule {
 class AppLifecycleMonitor @Inject constructor(
     private val application: Application,
     @ApplicationScope private val appScope: CoroutineScope,
+    @UiApplicationScope private val uiScope: CoroutineScope,
     private val repository: OpenCodeRepository,
     // §R18 Phase 2-E step 1: needed to pass the explicit directory header to
     // getPendingQuestions for the background poll (was injected from the
@@ -170,12 +171,11 @@ class AppLifecycleMonitor @Inject constructor(
                 // emit background if the count is STILL 0 after the delay.
                 if (activityStartedCount == 0 && _isInForeground.value) {
                     backgroundConfirmationJob?.cancel()
-                    backgroundConfirmationJob = appScope.launch {
+                    backgroundConfirmationJob = uiScope.launch {
                         delay(BACKGROUND_CONFIRMATION_MS)
-                        // Re-check under the same dispatcher (appScope =
-                        // Dispatchers.Default). A racing onActivityStarted
-                        // would have cancelled this job before this line;
-                        // the explicit count re-check is belt-and-suspenders.
+                        // Lifecycle callbacks and this delayed recheck share
+                        // Main.immediate, so a start cannot race a stale
+                        // Default-dispatcher confirmation into a false flip.
                         if (activityStartedCount == 0 && _isInForeground.value) {
                             _isInForeground.value = false
                             onEnterBackground()

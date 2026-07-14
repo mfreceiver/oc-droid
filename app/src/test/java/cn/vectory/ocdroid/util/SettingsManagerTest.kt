@@ -66,6 +66,15 @@ class SettingsManagerTest {
     }
 
     @Test
+    fun `effective connection source marker survives manager recreation and local reset`() {
+        settings.effectiveConnectionSourceMarker = "Manual"
+        settings.clearAllLocalData()
+
+        val recreated = SettingsManager(ApplicationProvider.getApplicationContext())
+        assertEquals("Manual", recreated.effectiveConnectionSourceMarker)
+    }
+
+    @Test
     fun `server url default is localhost`() {
         // 全新 Robolectric 进程的 EncryptedSharedPreferences 应是空的。
         assertEquals(SettingsManager.DEFAULT_SERVER, settings.serverUrl)

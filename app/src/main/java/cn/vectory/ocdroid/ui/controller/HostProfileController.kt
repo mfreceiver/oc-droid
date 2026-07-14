@@ -109,6 +109,7 @@ class HostProfileController(
      */
     internal val identityStore: ConnectionIdentityStore? = null,
     private val reconfigureBarrier: cn.vectory.ocdroid.service.ConnectionReconfigureBarrier? = null,
+    private val effectiveConnectionConfigResolver: cn.vectory.ocdroid.service.streaming.EffectiveConnectionConfigResolver? = null,
 ) {
     // ── Public accessors ───────────────────────────────────────────────────
 
@@ -472,7 +473,12 @@ class HostProfileController(
             // Step 1: snapshot previousFp BEFORE select (select's side effect
             // makes post-select currentProfile() read the NEW profile).
             val previousFp = hostProfileStore.currentProfile().serverGroupFp
-            val profile = hostProfileStore.select(profileId)
+            effectiveConnectionConfigResolver?.activateProfile(profileId)
+            val profile = if (effectiveConnectionConfigResolver != null) {
+                hostProfileStore.currentProfile()
+            } else {
+                hostProfileStore.select(profileId)
+            }
             val sameGroup = previousFp == profile.serverGroupFp
             if (reconfigureBarrier != null) {
                 reconfigureBarrier.reconfigure {
@@ -654,9 +660,11 @@ class HostProfileController(
             // empty) set.
             settingsManager.clearModelDataForGroup(currentServerGroupFp())
         }
-        settingsManager.serverUrl = url
-        settingsManager.username = username
-        settingsManager.password = password
+        effectiveConnectionConfigResolver?.activateManual(url, username, password) ?: run {
+            settingsManager.serverUrl = url
+            settingsManager.username = username
+            settingsManager.password = password
+        }
         val profile = currentHostProfile()
         // §2.5(b): 注入 mTLS 客户端证书材料（profile.mtlsEnabled 时从 ESP 载入）。
         // 手动输新 URL（未存为 profile）会沿用当前 profile 的证书——客户端证书为

@@ -12,11 +12,13 @@ import cn.vectory.ocdroid.service.bootstrap.ConnectionBootstrapCoordinator
 import cn.vectory.ocdroid.service.StreamingServiceLauncher
 import cn.vectory.ocdroid.service.OwnershipStartResult
 import cn.vectory.ocdroid.service.TeardownReason
+import cn.vectory.ocdroid.service.DegradedBootstrapTerminator
 import cn.vectory.ocdroid.service.streaming.BootstrapRetryPolicy
 import cn.vectory.ocdroid.service.streaming.ConnectionBootstrapEngine
 import cn.vectory.ocdroid.service.streaming.ConnectionBootstrapOutcome
 import cn.vectory.ocdroid.service.identity.ConnectionIdentityStore
 import cn.vectory.ocdroid.service.lifecycle.StreamingLifecycleCoordinator
+import cn.vectory.ocdroid.di.AppLifecycleMonitor
 import cn.vectory.ocdroid.ui.ConnectionPhase
 import cn.vectory.ocdroid.ui.ConnectionState
 import cn.vectory.ocdroid.ui.SharedEffectBus
@@ -31,6 +33,9 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.filter
+import kotlinx.coroutines.flow.map
 import javax.net.ssl.SSLException
 import java.security.cert.CertificateException
 import java.util.Locale
@@ -174,6 +179,8 @@ class ConnectionCoordinator(
     private val streamingLifecycleCoordinator: StreamingLifecycleCoordinator? = null,
     private val connectionBootstrapEngine: ConnectionBootstrapEngine? = null,
     private val bootstrapRetryPolicy: BootstrapRetryPolicy = BootstrapRetryPolicy(),
+    private val appLifecycleMonitor: AppLifecycleMonitor? = null,
+    private val degradedBootstrapTerminator: DegradedBootstrapTerminator? = null,
 ) {
     private var lastHealthCheckTime = 0L
 
@@ -186,6 +193,53 @@ class ConnectionCoordinator(
      */
     private val tofu: ConnectionBootstrapCoordinator by lazy {
         bootstrapCoordinator ?: ConnectionBootstrapCoordinator()
+    }
+
+    init {
+        appLifecycleMonitor?.let { monitor ->
+            scope.launch {
+                monitor.isInForeground.map { it }.distinctUntilChanged().filter { it }.collect {
+                    promoteDegradedTofuIfNeeded()
+                }
+            }
+        }
+    }
+
+    private fun hasPendingTofuDecision(): Boolean = tofu.tofuState.value is cn.vectory.ocdroid.service.bootstrap.TofuState.TrustPending
+
+    private fun promoteDegradedTofuIfNeeded() {
+        val challenge = tofu.promoteDegradedToPending() ?: return
+        writeConnection {
+            it.copy(
+                pendingTofuCapture = challenge.capture,
+                connectionPhase = ConnectionPhase.AwaitingTofuTrust,
+                isConnecting = false,
+                isConnected = false,
+            )
+        }
+        scope.launch {
+            when (val decision = challenge.decision.await()) {
+                TofuDecision.Cancel -> {
+                    tofu.clearPendingTofu()
+                    writeConnection {
+                        it.copy(
+                            pendingTofuCapture = null,
+                            connectionPhase = ConnectionPhase.Disconnected,
+                            isConnecting = false,
+                            isConnected = false,
+                        )
+                    }
+                    degradedBootstrapTerminator?.terminate()
+                }
+                else -> {
+                    repository.applyTofuDecision(challenge.hostPort, decision)
+                    cn.vectory.ocdroid.ui.util.HttpImageHolder.updateSsl(repository.currentSslConfig())
+                    tofu.clearPendingTofu()
+                    writeConnection { it.copy(pendingTofuCapture = null) }
+                    testConnection(force = true, retries = 3)
+                }
+            }
+        }
     }
 
     // ── State sync helpers (mirror orchestrator.writeConnection) ──
@@ -235,7 +289,7 @@ class ConnectionCoordinator(
         // 弹窗仍显示时写 Disconnected。入口守卫 + 下面 pendingTofuHostPort()==null 检查
         // + coldStart/startSSE 早退共同保证 single-flight。
         // CP2: TOFU state is delegated to [tofu] (ConnectionBootstrapCoordinator).
-        if (tofu.pendingTofuHostPort() != null) {
+        if (hasPendingTofuDecision()) {
             DebugLog.i(TAG, "testConnection: TOFU trust pending for ${tofu.pendingTofuHostPort()} — deferring")
             return
         }
@@ -282,7 +336,7 @@ class ConnectionCoordinator(
                     // §tofu R2 round-2 fix (cgpt): 并发连接 job 在 TOFU 待决期间 defer——
                     // 不探/不烧重试/不写终态；待决的 job 独占 settle。入口守卫只挡"新调用"，
                     // 此处挡"已 launch 但 pending 尚未置位时入队的并发 job"的迭代。
-                    if (tofu.pendingTofuHostPort() != null) {
+                    if (hasPendingTofuDecision()) {
                         DebugLog.i(TAG, "testConnection: deferring loop — TOFU pending for ${tofu.pendingTofuHostPort()}")
                         return@launch
                     }
@@ -376,7 +430,7 @@ class ConnectionCoordinator(
                     val hostPort = hostPortFromUrl(baseUrl)
                     if (rootCause != null && hostPort != null &&
                         repository.pinnedSpkiFor(hostPort) == null &&
-                        tofu.pendingTofuHostPort() == null &&
+                        !hasPendingTofuDecision() &&
                         // §tofu fix: mTLS 主机不进 TOFU——mTLS 优先级会忽略 TOFU pin，
                         // 弹"信任"无效且误导；mTLS 服务器证书失败应直接作连接错误呈现。
                         !repository.isMutualTlsActive()
@@ -454,7 +508,7 @@ class ConnectionCoordinator(
                     if (attempt >= maxAttempts || !isActive) {
                         // §tofu R2 round-2 fix (cgpt): 另一个 job 正在 await TOFU 决策时，
                         // 不宣布终态 Disconnected（否则弹窗仍显示却已断开，UI 不一致）——defer。
-                        if (tofu.pendingTofuHostPort() != null) {
+                        if (hasPendingTofuDecision()) {
                             DebugLog.i(TAG, "testConnection: deferring terminal — TOFU pending for ${tofu.pendingTofuHostPort()}")
                             return@launch
                         }
@@ -600,7 +654,7 @@ class ConnectionCoordinator(
      * state and the loop re-probes; cold-start then proceeds naturally.
      */
     fun coldStartReconnect() {
-        if (tofu.pendingTofuHostPort() != null) {
+        if (hasPendingTofuDecision()) {
             DebugLog.i(TAG, "coldStartReconnect: frozen — TOFU trust pending for ${tofu.pendingTofuHostPort()}")
             return
         }
@@ -794,7 +848,7 @@ class ConnectionCoordinator(
         // [resolveTofuTrust]; the connect retry loop calls startSSE itself
         // once the pin is in place.
         // CP2: TOFU state delegated to [tofu] (ConnectionBootstrapCoordinator).
-        if (tofu.pendingTofuHostPort() != null) {
+        if (hasPendingTofuDecision()) {
             DebugLog.i(TAG, "startSSE: frozen — TOFU trust pending for ${tofu.pendingTofuHostPort()}")
             return
         }

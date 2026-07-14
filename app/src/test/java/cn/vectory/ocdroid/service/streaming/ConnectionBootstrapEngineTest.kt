@@ -2,7 +2,6 @@ package cn.vectory.ocdroid.service.streaming
 
 import cn.vectory.ocdroid.data.model.HealthResponse
 import cn.vectory.ocdroid.data.model.HostProfile
-import cn.vectory.ocdroid.data.repository.HostProfileStore
 import cn.vectory.ocdroid.data.repository.OpenCodeRepository
 import cn.vectory.ocdroid.data.repository.ServerCompatProfile
 import cn.vectory.ocdroid.service.bootstrap.ConnectionBootstrapCoordinator
@@ -41,20 +40,32 @@ class ConnectionBootstrapEngineTest {
     )
 
     private fun fixture(hasActivity: Boolean, withTunnel: Boolean = true): Fixture {
-        val profiles = mockk<HostProfileStore>()
         val settings = mockk<SettingsManager>(relaxed = true)
         val repository = mockk<OpenCodeRepository>(relaxed = true)
         val selected = if (withTunnel) profile else profile.copy(tunnelPasswordId = null)
-        every { profiles.currentProfile() } returns selected
         every { settings.currentWorkdir } returns "/work"
         every { settings.getTunnelPassword("tunnel") } returns "secret"
         every { repository.pinnedSpkiFor(any()) } returns null
         every { repository.isMutualTlsActive() } returns false
         val store = ConnectionIdentityStore()
         val coordinator = ConnectionBootstrapCoordinator()
+        val resolver = mockk<EffectiveConnectionConfigResolver>()
+        every { resolver.resolve() } returns EffectiveConnectionConfig(
+            source = EffectiveConnectionSource.Profile,
+            profileId = selected.id,
+            serverGroupFp = selected.serverGroupFp,
+            url = selected.serverUrl,
+            username = null,
+            password = null,
+            workdir = "/work",
+            tunnelPasswordId = selected.tunnelPasswordId,
+            tunnelPassword = selected.tunnelPasswordId?.let { "secret" },
+            clientCertId = null,
+            mtlsEnabled = false,
+        )
         return Fixture(
             ConnectionBootstrapEngine(
-                profiles,
+                resolver,
                 settings,
                 repository,
                 store,
@@ -85,6 +96,51 @@ class ConnectionBootstrapEngineTest {
         assertEquals(result.identity, f.store.currentIdentity.value)
         assertEquals("group", result.identity.serverGroupFp)
         assertEquals("/work", result.identity.normalizedWorkdir)
+    }
+
+    @Test
+    fun `M8 manual effective config differing from profile is the engine source`() = runTest {
+        val resolver = mockk<EffectiveConnectionConfigResolver>()
+        every { resolver.resolve() } returns EffectiveConnectionConfig(
+            source = EffectiveConnectionSource.Manual,
+            profileId = "profile",
+            serverGroupFp = "group",
+            url = "https://manual.example:8443",
+            username = "manual-user",
+            password = "manual-pass",
+            workdir = "/manual-work",
+            tunnelPasswordId = null,
+            tunnelPassword = null,
+            clientCertId = null,
+            mtlsEnabled = false,
+        )
+        val settings = mockk<SettingsManager>(relaxed = true)
+        val repository = mockk<OpenCodeRepository>(relaxed = true)
+        coEvery { repository.checkHealth() } returns Result.success(HealthResponse(true, "1.0"))
+        val store = ConnectionIdentityStore()
+        val engine = ConnectionBootstrapEngine(
+            resolver,
+            settings,
+            repository,
+            store,
+            ConnectionBootstrapCoordinator(),
+            ServerCompatProfile(),
+            hasActivity = { false },
+        )
+
+        val result = engine.bootstrap() as ConnectionBootstrapOutcome.Success
+
+        verify(exactly = 1) {
+            repository.configure(
+                "https://manual.example:8443",
+                "manual-user",
+                "manual-pass",
+                "manual.example:8443",
+                null,
+            )
+        }
+        assertEquals("https://manual.example:8443", result.identity.endpointFp)
+        assertEquals("/manual-work", result.identity.normalizedWorkdir)
     }
 
     @Test

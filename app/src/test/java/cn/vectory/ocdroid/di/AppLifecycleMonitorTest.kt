@@ -10,6 +10,7 @@ import io.mockk.mockk
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.test.StandardTestDispatcher
 import kotlinx.coroutines.test.TestScope
 import kotlinx.coroutines.test.advanceTimeBy
@@ -65,10 +66,8 @@ class AppLifecycleMonitorTest {
     @Before
     fun setUp() {
         app = ApplicationProvider.getApplicationContext()
-        // D1 (gate #2): ALM's background-confirmation delay runs on the
-        // injected appScope, so we use a TestScope here to virtualize the
-        // 700ms delay. The TestScope's dispatcher replaces Dispatchers.Default
-        // for the launched confirmation job.
+        // M5: the confirmation delay runs exclusively on the injected
+        // UiApplicationScope; this TestScope virtualizes its Main dispatcher.
         testScope = TestScope(StandardTestDispatcher())
         scope = testScope
     }
@@ -229,6 +228,31 @@ class AppLifecycleMonitorTest {
     }
 
     @Test
+    fun `M5 Default dispatcher advancement cannot race Main confirmation after restart`() {
+        val defaultScheduler = kotlinx.coroutines.test.TestCoroutineScheduler()
+        val mainScheduler = kotlinx.coroutines.test.TestCoroutineScheduler()
+        val defaultScope = TestScope(StandardTestDispatcher(defaultScheduler))
+        val mainScope = TestScope(StandardTestDispatcher(mainScheduler))
+        val monitor = newMonitor(appScope = defaultScope, uiScope = mainScope)
+        val cb = app.registeredCallbacks!!
+        cb.onActivityStarted(mockk<android.app.Activity>(relaxed = true))
+        cb.onActivityStopped(mockk<android.app.Activity>(relaxed = true))
+
+        defaultScheduler.advanceTimeBy(AppLifecycleMonitor.BACKGROUND_CONFIRMATION_MS * 2)
+        defaultScheduler.runCurrent()
+        assertTrue("Default scope does not own confirmation", monitor.isInForeground.value)
+
+        mainScheduler.advanceTimeBy(AppLifecycleMonitor.BACKGROUND_CONFIRMATION_MS - 1)
+        mainScheduler.runCurrent()
+        cb.onActivityStarted(mockk<android.app.Activity>(relaxed = true))
+        mainScheduler.advanceTimeBy(2)
+        mainScheduler.runCurrent()
+        assertTrue("Main restart cancels before delayed recheck", monitor.isInForeground.value)
+        defaultScope.cancel()
+        mainScope.cancel()
+    }
+
+    @Test
     fun `D1 gate #2 - later onActivityStarted after background cancels pending poller`() = testScope.runTest {
         // Going to background arms the legacy poller (via onEnterBackground).
         // A subsequent 0→1 must cancel the poller (foreground uses in-app
@@ -292,9 +316,13 @@ class AppLifecycleMonitorTest {
      * Robolectric Application. Other constructor deps are relaxed mocks —
      * we never reach them in the lifecycle-callback paths exercised here.
      */
-    private fun newMonitor(): AppLifecycleMonitor = AppLifecycleMonitor(
+    private fun newMonitor(
+        appScope: CoroutineScope = scope,
+        uiScope: CoroutineScope = scope,
+    ): AppLifecycleMonitor = AppLifecycleMonitor(
         application = app,
-        appScope = scope,
+        appScope = appScope,
+        uiScope = uiScope,
         repository = mockk<OpenCodeRepository>(relaxed = true),
         settingsManager = mockk<SettingsManager>(relaxed = true),
     )

@@ -88,6 +88,7 @@ reconfigure 严格顺序（不可颠倒）：
 - **D1 gate #5：returned-but-unmapped active IDs 强制 Busy**。`/session/status` 返回的 `sessionId` 若**不在** `sessionsById` 中，是**正向已知 active** → 贡献 `GlobalBusyState.Busy`（既不跳过，也不发明 workdir 制造复合键）。在 coverage metadata 的 `unmappedActiveIds` 中跟踪。
 - **D1 gate #5：registered-workdir coverage 谓词**。snapshot 同时携带 `sessionsById` + `registeredWorkdirs`（= `recentWorkdirs(currentFp) + currentWorkdir + directorySessions.keys + sessionsById.values.map(Session::directory)`，dedup）。`AllIdleFresh` 合法当且仅当全部满足：(a) current-epoch 的成功快照存在且在 TTL 内；(b) `unmappedActiveIds.isEmpty()`；(c) `registeredWorkdirs` 中每个 workdir 都被当前投影里的 fresh 条目覆盖；(d) 每个已知 tracked session 已被映射；(e) 每个 tracked status 为 fresh `Idle`；(f) 无 `Unknown`/`Busy`/`Retry`。一个**无 session 但已登记**的 workdir 由 coverage marker 代表，不会因 session 全部 archive 而从 all-idle 谓词中消失。
 - 一次**成功的空全局快照 + 零 registeredWorkdirs** 可以是 `AllIdleFresh`（由 fresh coverage marker 担保，**不是**空洞的未初始化状态）。
+- **D4-A M7/M6**：aggregator 以单个 immutable `Aggregate(entries, coverage, currentGroupFp)` 的 `AtomicReference` 提交；map、coverage、identity 不得分裂。host-global `/session/status` 成功时 `coverage.coveredWorkdirs = snapshot.registeredWorkdirs`，因此零 session 的 registered workdir 也由成功 snapshot marker 覆盖；失败清空 covered marker 并保持 Unknown，过期 marker 仍为 Unknown，unmapped active 仍优先 Busy。
 - **status TTL** 明确（如 30s）；只有**所有已登记 workdir 都取得新鲜+成功 idle** 才进停流宽限期。
 - **Phase 0 门禁探针（必过）**：确认 `/session/status` 返回确为 host 级、覆盖所有 workdir（非仅 current）。**两 workdir 隔离测试**：两个不同 workdir 各有 active session 时，单次全局请求须**同时**反映两者。若实测全局只返回 current workdir → 升级为 **directory fan-out**（每 workdir 显式查询，复合键不变）并跑同一隔离门禁。
 - 多 workdir **pending** 轮询独立（`computeQuestionFanOutWorkdirs` / `loadPendingQuestionsAllWorkdirs`），与 status 无关。
@@ -140,6 +141,7 @@ reconfigure 严格顺序（不可颠倒）：
 - **不再默认 true**；Activity started-count 是前台事实源。
 - Service 冷启动、无 started Activity → 按后台处理。
 - **D1 gate #2：用带延迟的 process-lifecycle 语义（700ms 延迟确认）**。`onActivityStopped` 把 started-count 递减；当递减到 0 时**不立即**翻 `_isInForeground=false`，而是取消上一个 pending 确认 job + 启动 `delay(700)`；到时**再次检查** `activityStartedCount == 0` 才真正翻 false + `onEnterBackground()`。`onActivityStarted`（0→1）**立即取消**该 pending 确认 job。**700ms 是 AndroidX `ProcessLifecycleOwner` 既定值**——配置变化（rotation: 1→0→1）在该窗口内完成，不会误判为后台。前台判定读取发生在 Main，主 dispatcher delay 与之同线程一致。
+- **D4-A M5**：started-count callback、confirmation cancel、700ms delay/recheck 与 foreground flip 全部由 `@UiApplicationScope`（Main.immediate）串行；`@ApplicationScope`/Default 仅承载后台通知 polling，不得承载 foreground confirmation。
 
 ### 4.4 统一交接顺序（闭合 gpter-B#3 / groker-B4）
 
@@ -192,6 +194,8 @@ reconfigure 严格顺序（不可颠倒）：
 6. `SSEConnectionExhausted` → 每次 transport outage 先且仅先发一次 gap-dirty；随后做 **3 次额外 service 级 collector 尝试**，基础延迟严格为 `30s / 2m / 5m`，每次注入 `±20%` jitter。首个当前 identity 的有效 frame 重置预算并完成 transport readiness；intentional cancel / stale identity 不发 false gap、不启动 retry。三次均失败后才且仅一次标记 degraded/disconnected，并调用 lifecycle `onDisconnect()` 进入 L3；reconfigure / timeout / 用户关闭 / cancel 会取消 recovery。
 
 **D3 fresh-process 实现（gate #6）**：CC 与 Service 共用单例 `ConnectionBootstrapEngine`，按 effective persisted config 做 keyed single-flight；它从 `HostProfileStore + SettingsManager` 读取 host/basic-auth/workdir/tunnel/mTLS，串行完成 repository configure、tunnel activation、health、TLS capture/TOFU、`ServerCompatProfile` 与 `ConnectionIdentityStore.bind`。sticky null Intent 不依赖 Activity/CC 预热；无 Activity 的 TOFU capture 保存在 shared coordinator 并返回 degraded。Service bootstrap 网络失败使用严格延迟 `2s / 5s / 15s / 30s / 2m / 5m`（六次 delay、最多七次 probe），任一次恢复立即进入 §4 decision matrix，最终耗尽才回 L3。bootstrap 成功会为 sticky-created Service 注册当前 identity ownership；显式 launcher start 则在 Service 安装 exact identity owner 后才 ack。
+
+**D4-A M8/B2**：effective connection source 以持久化 `Manual|Profile` marker 明确选择，Service step-1 与 shared engine 必须调用同一 `EffectiveConnectionConfigResolver.resolve()`；不得以 URL 相等性推断。无 marker 的旧 profile payload 迁移为 Profile，legacy direct-only settings 迁移为 Manual。headless TOFU 保留 capture；Activity 回前台时原子 `promoteDegradedToPending()` 分配 fresh deferred 且只提示一次。Accept/Trust 应用 pin、刷新 image SSL 并重跑 shared engine；Cancel 清 UI/state，并向 degraded placeholder Service 发送无 identity close command完成 terminal cleanup。
 
 **未决 TOFU 且无 Activity**（闭合 gpter-MAJOR#2 / #5）：
 - 不无限等 UI deferred；不消耗 SSE 重试预算；

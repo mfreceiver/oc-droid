@@ -60,6 +60,18 @@ abstract class StreamingModule {
     abstract fun bindReconfigureTeardown(
         impl: cn.vectory.ocdroid.service.lifecycle.StreamingLifecycleCoordinator,
     ): cn.vectory.ocdroid.service.ReconfigureTeardown
+
+    @Binds
+    @Singleton
+    abstract fun bindEffectiveConnectionConfigResolver(
+        impl: DefaultEffectiveConnectionConfigResolver,
+    ): EffectiveConnectionConfigResolver
+
+    @Binds
+    @Singleton
+    abstract fun bindDegradedBootstrapTerminator(
+        impl: cn.vectory.ocdroid.service.AndroidDegradedBootstrapTerminator,
+    ): cn.vectory.ocdroid.service.DegradedBootstrapTerminator
 }
 
 /**
@@ -94,7 +106,7 @@ object ConnectionBootstrapEngineModule {
     @Provides
     @Singleton
     fun provideConnectionBootstrapEngine(
-        hostProfileStore: cn.vectory.ocdroid.data.repository.HostProfileStore,
+        configResolver: EffectiveConnectionConfigResolver,
         settingsManager: cn.vectory.ocdroid.util.SettingsManager,
         repository: cn.vectory.ocdroid.data.repository.OpenCodeRepository,
         identityStore: ConnectionIdentityStore,
@@ -102,7 +114,7 @@ object ConnectionBootstrapEngineModule {
         serverCompatProfile: cn.vectory.ocdroid.data.repository.ServerCompatProfile,
         appLifecycleMonitor: cn.vectory.ocdroid.di.AppLifecycleMonitor,
     ): ConnectionBootstrapEngine = ConnectionBootstrapEngine(
-        hostProfileStore = hostProfileStore,
+        configResolver = configResolver,
         settingsManager = settingsManager,
         repository = repository,
         identityStore = identityStore,

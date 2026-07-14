@@ -11,7 +11,6 @@ import androidx.core.app.NotificationManagerCompat
 import androidx.core.app.ServiceCompat
 import cn.vectory.ocdroid.R
 import cn.vectory.ocdroid.data.repository.OpenCodeRepository
-import cn.vectory.ocdroid.data.repository.HostProfileStore
 import cn.vectory.ocdroid.di.AppLifecycleMonitor
 import cn.vectory.ocdroid.service.events.IdentifiedSseEvent
 import cn.vectory.ocdroid.service.events.SseEventStream
@@ -32,7 +31,6 @@ import cn.vectory.ocdroid.service.status.StatusAggregatorInput
 import cn.vectory.ocdroid.ui.SharedEffectBus
 import cn.vectory.ocdroid.ui.SharedStateStore
 import cn.vectory.ocdroid.util.DebugLog
-import cn.vectory.ocdroid.util.SettingsManager
 import dagger.hilt.android.AndroidEntryPoint
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
@@ -96,10 +94,7 @@ class SessionStreamingService : Service() {
      * (FGS spec §5 step 1: no effective host → `stopSelf`, do not burn an FGS
      * slot on a service that has nothing to connect to).
      */
-    @Inject
-    lateinit var settingsManager: SettingsManager
-    @Inject
-    lateinit var hostProfileStore: HostProfileStore
+    @Inject lateinit var effectiveConnectionConfigResolver: cn.vectory.ocdroid.service.streaming.EffectiveConnectionConfigResolver
 
     /**
      * CP3 (notify Phase-0): the process-wide SSE event stream. The Service
@@ -372,8 +367,7 @@ class SessionStreamingService : Service() {
             endpointFp = intent?.getStringExtra(OwnershipRequestParser.EXTRA_ENDPOINT_FP),
         )
         // §5 step 1: synchronous minimal persisted-config read.
-        val hasValidHost = settingsManager.serverUrl.isNotBlank() ||
-            runCatching { hostProfileStore.currentProfile().serverUrl.isNotBlank() }.getOrDefault(false)
+        val hasValidHost = effectiveConnectionConfigResolver.resolve() != null
         if (!hasValidHost) {
             DebugLog.w(TAG, "onStartCommand: no effective host → stopSelf (§5 step 1)")
             stopSelf()

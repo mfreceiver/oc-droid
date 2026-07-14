@@ -1,5 +1,7 @@
 package cn.vectory.ocdroid.ui.controller
 
+import cn.vectory.ocdroid.data.repository.http.TofuDecision
+
 import android.util.Log
 import cn.vectory.ocdroid.R
 import cn.vectory.ocdroid.RecordingStreamingServiceLauncher
@@ -913,6 +915,86 @@ class ConnectionCoordinatorTest {
         assertEquals(listOf(true), settled)
         assertTrue(connectionFlow.value.isConnected)
         assertEquals(listOf(identity), launcher.requestedIdentities.takeLast(1))
+    }
+
+    @Test
+    fun `B2 foreground promotes degraded capture once and Accept reruns engine to ownership Ready`() {
+        val foreground = kotlinx.coroutines.flow.MutableStateFlow(false)
+        val monitor = mockk<cn.vectory.ocdroid.di.AppLifecycleMonitor>(relaxed = true)
+        every { monitor.isInForeground } returns foreground
+        val engine = mockk<cn.vectory.ocdroid.service.streaming.ConnectionBootstrapEngine>()
+        val identity = identityStore.bind("group", "/work", "endpoint")
+        coEvery { engine.bootstrap() } returns
+            cn.vectory.ocdroid.service.streaming.ConnectionBootstrapOutcome.Success(
+                identity,
+                HealthResponse(true, "4.0"),
+            )
+        val capture = mockk<OpenCodeRepository.TofuCaptureResult>()
+        every { capture.hostPort } returns "server:443"
+        bootstrapCoordinator.setPendingTofu("server:443")
+        bootstrapCoordinator.setPendingCapture(capture)
+        bootstrapCoordinator.markDegradedNeedsActivity()
+        val d4 = ConnectionCoordinator(
+            scope, slices, repository, settingsManager, effects,
+            cn.vectory.ocdroid.data.repository.ServerCompatProfile(),
+            identityStore = identityStore,
+            bootstrapCoordinator = bootstrapCoordinator,
+            streamingServiceLauncher = launcher,
+            connectionBootstrapEngine = engine,
+            appLifecycleMonitor = monitor,
+        )
+        runPending()
+
+        foreground.value = true
+        runPending()
+        assertTrue(bootstrapCoordinator.tofuState.value is cn.vectory.ocdroid.service.bootstrap.TofuState.TrustPending)
+        assertEquals(capture, connectionFlow.value.pendingTofuCapture)
+        assertEquals(ConnectionPhase.AwaitingTofuTrust, connectionFlow.value.connectionPhase)
+
+        d4.resolveTofuTrust(TofuDecision.AcceptOnce("spki"))
+        runPending()
+
+        verify(exactly = 1) { repository.applyTofuDecision("server:443", TofuDecision.AcceptOnce("spki")) }
+        coVerify(exactly = 1) { engine.bootstrap() }
+        assertEquals(ConnectionPhase.Connected, connectionFlow.value.connectionPhase)
+        assertEquals(1, launcher.callCount)
+    }
+
+    @Test
+    fun `B2 duplicate foreground emits one challenge and Cancel clears degraded without retry`() {
+        val foreground = kotlinx.coroutines.flow.MutableStateFlow(false)
+        val monitor = mockk<cn.vectory.ocdroid.di.AppLifecycleMonitor>(relaxed = true)
+        every { monitor.isInForeground } returns foreground
+        val engine = mockk<cn.vectory.ocdroid.service.streaming.ConnectionBootstrapEngine>(relaxed = true)
+        val terminator = mockk<cn.vectory.ocdroid.service.DegradedBootstrapTerminator>(relaxed = true)
+        val capture = mockk<OpenCodeRepository.TofuCaptureResult>()
+        every { capture.hostPort } returns "server:443"
+        bootstrapCoordinator.setPendingTofu("server:443")
+        bootstrapCoordinator.setPendingCapture(capture)
+        bootstrapCoordinator.markDegradedNeedsActivity()
+        val d4 = ConnectionCoordinator(
+            scope, slices, repository, settingsManager, effects,
+            cn.vectory.ocdroid.data.repository.ServerCompatProfile(),
+            identityStore = identityStore,
+            bootstrapCoordinator = bootstrapCoordinator,
+            streamingServiceLauncher = launcher,
+            connectionBootstrapEngine = engine,
+            appLifecycleMonitor = monitor,
+            degradedBootstrapTerminator = terminator,
+        )
+        runPending()
+
+        foreground.value = true
+        foreground.value = true
+        runPending()
+        d4.resolveTofuTrust(TofuDecision.Cancel)
+        runPending()
+
+        assertEquals(cn.vectory.ocdroid.service.bootstrap.TofuState.Idle, bootstrapCoordinator.tofuState.value)
+        assertEquals(null, connectionFlow.value.pendingTofuCapture)
+        assertEquals(ConnectionPhase.Disconnected, connectionFlow.value.connectionPhase)
+        coVerify(exactly = 0) { engine.bootstrap() }
+        verify(exactly = 1) { terminator.terminate() }
     }
 
     // ── RecordingConnectionCoordinatorCallbacks (removed in batch 3b) ──────

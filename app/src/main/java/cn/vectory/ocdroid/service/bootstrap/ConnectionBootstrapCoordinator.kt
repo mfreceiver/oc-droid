@@ -79,6 +79,12 @@ sealed interface TofuState {
     ) : TofuState
 }
 
+data class TofuChallenge(
+    val hostPort: String,
+    val capture: cn.vectory.ocdroid.data.repository.OpenCodeRepository.TofuCaptureResult,
+    val decision: CompletableDeferred<TofuDecision>,
+)
+
 /**
  * FGS spec §10 / §5: application-level shared coordinator holding the TOFU
  * (trust-on-first-use) bootstrap state that [ConnectionCoordinator] held
@@ -111,11 +117,9 @@ class ConnectionBootstrapCoordinator @Inject constructor() {
 
     /**
      * The pending TOFU hostPort, or null when no TOFU is outstanding. Non-null
-     * for BOTH [TofuState.TrustPending] and [TofuState.DegradedNeedsActivity]
-     * — either way the SSE bootstrap stays FROZEN (mirrors CC's
-     * `pendingTofuHostPort != null` freeze guard read at the
-     * testConnection entry, the retry-loop top, coldStartReconnect, and
-     * startSSE). Callers that need single-flight (don't stack a second prompt)
+     * for BOTH [TofuState.TrustPending] and [TofuState.DegradedNeedsActivity].
+     * Only TrustPending freezes connection attempts; degraded is promoted to
+     * a fresh deferred when Activity returns. Callers that need single-flight
      * check `pendingTofuHostPort() == null` before calling [setPendingTofu],
      * exactly as CC's call site did with the private field.
      */
@@ -218,6 +222,16 @@ class ConnectionBootstrapCoordinator @Inject constructor() {
             pendingTofuDecision?.cancel()
             pendingTofuDecision = null
         }
+    }
+
+    /** Atomically turns a retained headless capture into one foreground prompt. */
+    fun promoteDegradedToPending(): TofuChallenge? = synchronized(lock) {
+        val current = _tofuState.value as? TofuState.DegradedNeedsActivity ?: return@synchronized null
+        val capture = current.capture ?: return@synchronized null
+        val decision = CompletableDeferred<TofuDecision>()
+        _tofuState.value = TofuState.TrustPending(current.hostPort, capture)
+        pendingTofuDecision = decision
+        TofuChallenge(current.hostPort, capture, decision)
     }
 
     private companion object {

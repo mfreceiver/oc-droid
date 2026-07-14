@@ -81,12 +81,10 @@ import javax.inject.Singleton
  * exact instant (the §4.4 debounce expiry) read [stateAtNow] which performs
  * the same TTL math against the live atomic state + the aggregator's clock.
  *
- * **Thread-safety**: the internal [state] map is held in an [AtomicReference] and updated
- * via a CAS loop; the three projected [StateFlow]s ([globalState], [globalBusy],
- * [statusByKey]) are recomputed inside the same CAS step so external observers always see
- * a consistent triple. [coverage] is held in its own [AtomicReference] and re-read on
- * every [recompute] / [stateAtNow] (the verdict is a pure function of `state + coverage
- * + clock`).
+ * **Thread-safety (D4-A M7)**: entries, coverage and current group live in one
+ * immutable [Aggregate] held by one [AtomicReference]. Every CAS winner passes
+ * that exact committed value to projection, flow publication and TTL scheduling;
+ * transforms are pure and perform no retryable side effects.
  *
  * **One clock domain**: the injected [clock] is the SOLE source of "now" for both REST
  * request-start (in [refresh]) and any internally-derived freshness check. SSE arrival
@@ -120,10 +118,10 @@ class StatusAggregatorImpl internal constructor(
     /**
      * D1 (gate #5): coverage metadata held alongside the per-key state map.
      *
-     *  - [registeredWorkdirs] — the required coverage set from the most
-     *    recent [StatusSnapshot]. `AllIdleFresh` requires every workdir in
-     *    this set to be covered by a fresh-Idle entry (or by an empty
-     *    successful snapshot, which itself is the coverage marker).
+     *  - [registeredWorkdirs] — the required set from [StatusSnapshot].
+     *  - [coveredWorkdirs] — the host-global response coverage marker. On
+     *    success this is exactly registeredWorkdirs, including directories
+     *    with zero sessions; on failure it is empty.
      *  - [unmappedActiveIds] — session ids returned by `/session/status`
      *    that were NOT in `sessionsById`. The aggregator classifies each as
      *    [GlobalBusyState.Busy] (positively known active — do NOT skip, do
@@ -134,32 +132,35 @@ class StatusAggregatorImpl internal constructor(
      *    and as the deadline-source for the passive TTL wake-up. `-1` if no
      *    successful snapshot has ever landed — `AllIdleFresh` is then
      *    refused (cold-start guard).
-     *  - [currentServerGroupFp] — the `serverGroupFp` of the most recent
-     *    refresh / markRequestFailed / applySseStatus, scoped to the
-     *    projection. Distinct from the legacy [currentGroupFp] atomic which
-     *    we keep for back-compat (some external readers may still read it).
      */
     private data class Coverage(
         val registeredWorkdirs: Set<String>,
+        val coveredWorkdirs: Set<String>,
         val unmappedActiveIds: Set<String>,
         val lastSuccessTimeMs: Long,
-        val currentServerGroupFp: String,
     ) {
         companion object {
             val Empty: Coverage = Coverage(
                 registeredWorkdirs = emptySet(),
+                coveredWorkdirs = emptySet(),
                 unmappedActiveIds = emptySet(),
                 lastSuccessTimeMs = -1L,
-                currentServerGroupFp = "",
             )
         }
     }
 
-    private val state = AtomicReference<Map<SessionStatusKey, Entry>>(emptyMap())
-    private val coverage = AtomicReference(Coverage.Empty)
+    private data class Aggregate(
+        val entries: Map<SessionStatusKey, Entry>,
+        val coverage: Coverage,
+        val currentGroupFp: String,
+    ) {
+        companion object {
+            val Empty = Aggregate(emptyMap(), Coverage.Empty, "")
+        }
+    }
 
-    /** serverGroupFp of the most recent [refresh]/[applySseStatus]; scopes projections. */
-    private val currentGroupFp = AtomicReference("")
+    /** M7: entries, coverage and projection identity commit in one CAS. */
+    private val aggregate = AtomicReference(Aggregate.Empty)
 
     private val _globalState = MutableStateFlow(GlobalBusyState.Unknown)
     private val _globalBusy = MutableStateFlow(false)
@@ -183,13 +184,13 @@ class StatusAggregatorImpl internal constructor(
 
     /**
      * D1 (gate #1): time-correct projection at the instant of the call. Reads
-     * the live atomic [state] + [coverage] and recomputes the verdict with
+     * the live atomic [aggregate] and recomputes the verdict with
      * the aggregator's own [clock]. Used by the §4.4 idle-debounce expiry so
      * a debounce that fires at exactly `sourceTime + TTL + ε` does not read
      * a stale `AllIdleFresh` from the cached [globalState].
      */
     override fun stateAtNow(): GlobalBusyState =
-        project(state.get(), coverage.get(), clock())
+        project(aggregate.get(), clock())
 
     // ── StatusAggregatorInput ──────────────────────────────────────────────
 
@@ -216,7 +217,6 @@ class StatusAggregatorImpl internal constructor(
      * archived cannot silently flip the host to `AllIdleFresh`.
      */
     override suspend fun refresh(identity: ConnectionIdentity, snapshot: StatusSnapshot) {
-        currentGroupFp.set(identity.serverGroupFp)
         val requestStartMs = clock()
         val epochAtRequestStart = identityStore.currentEpoch()
         val result = withContext(Dispatchers.IO) { repository.getSessionStatus() }
@@ -227,7 +227,7 @@ class StatusAggregatorImpl internal constructor(
         result.fold(
             onSuccess = { statuses ->
                 update { current ->
-                    val next = current.toMutableMap()
+                    val next = current.entries.toMutableMap()
                     val activeKeys = HashSet<SessionStatusKey>()
                     val unmapped = HashSet<String>()
                     for ((sessionId, serverStatus) in statuses) {
@@ -254,20 +254,16 @@ class StatusAggregatorImpl internal constructor(
                             next[key] = Entry(SessionBusyStatus.Idle, requestStartMs, fresh = true)
                         }
                     }
-                    // Swap coverage atomically with the state map. The CAS
-                    // loop in [update] retries the whole transform on
-                    // contention, but coverage is a function of the input
-                    // snapshot (not of `current`), so a retry produces the
-                    // same coverage value — safe.
-                    coverage.set(
-                        Coverage(
+                    current.copy(
+                        entries = next.toMap(),
+                        coverage = Coverage(
                             registeredWorkdirs = snapshot.registeredWorkdirs,
+                            coveredWorkdirs = snapshot.registeredWorkdirs,
                             unmappedActiveIds = unmapped,
                             lastSuccessTimeMs = requestStartMs,
-                            currentServerGroupFp = identity.serverGroupFp,
                         ),
+                        currentGroupFp = identity.serverGroupFp,
                     )
-                    next.toMap()
                 }
             },
             onFailure = { markRequestFailedInternal(identity, snapshot, requestStartMs) },
@@ -294,11 +290,13 @@ class StatusAggregatorImpl internal constructor(
      * @param sourceTimeMs Monotonic arrival time of the SSE event; the merge-timing arbiter.
      */
     override fun applySseStatus(key: SessionStatusKey, status: SessionBusyStatus, sourceTimeMs: Long) {
-        currentGroupFp.set(key.serverGroupFp)
         update { current ->
-            val prev = current[key]
+            val prev = current.entries[key]
             if (prev == null || sourceTimeMs >= prev.sourceTimeMs) {
-                current + (key to Entry(status, sourceTimeMs, fresh = false))
+                current.copy(
+                    entries = current.entries + (key to Entry(status, sourceTimeMs, fresh = false)),
+                    currentGroupFp = key.serverGroupFp,
+                )
             } else {
                 current
             }
@@ -314,7 +312,6 @@ class StatusAggregatorImpl internal constructor(
         snapshot: StatusSnapshot,
         sourceTimeMs: Long,
     ) {
-        currentGroupFp.set(identity.serverGroupFp)
         markRequestFailedInternal(identity, snapshot, sourceTimeMs)
     }
 
@@ -324,7 +321,7 @@ class StatusAggregatorImpl internal constructor(
         sourceTimeMs: Long,
     ) {
         update { current ->
-            val next = current.toMutableMap()
+            val next = current.entries.toMutableMap()
             for ((sessionId, session) in snapshot.sessionsById) {
                 val key = SessionStatusKey(identity.serverGroupFp, session.directory, sessionId)
                 val prev = next[key]
@@ -339,15 +336,16 @@ class StatusAggregatorImpl internal constructor(
             // stale. The simplest correct move: keep the registered workdirs,
             // drop unmappedActiveIds (no snapshot), and reset
             // lastSuccessTimeMs to -1 so the cold-start / stale guard fires.
-            val prior = coverage.get()
-            coverage.set(
-                prior.copy(
+            current.copy(
+                entries = next.toMap(),
+                coverage = current.coverage.copy(
+                    registeredWorkdirs = snapshot.registeredWorkdirs,
+                    coveredWorkdirs = emptySet(),
                     unmappedActiveIds = emptySet(),
                     lastSuccessTimeMs = -1L,
-                    currentServerGroupFp = identity.serverGroupFp,
                 ),
+                currentGroupFp = identity.serverGroupFp,
             )
-            next.toMap()
         }
     }
 
@@ -372,34 +370,38 @@ class StatusAggregatorImpl internal constructor(
      * coverage atomic guarantees the projection sees the latest coverage
      * value committed alongside the state map.
      */
-    private inline fun update(transform: (Map<SessionStatusKey, Entry>) -> Map<SessionStatusKey, Entry>) {
+    private inline fun update(transform: (Aggregate) -> Aggregate) {
         while (true) {
-            val current = state.get()
+            val current = aggregate.get()
             val next = transform(current)
-            if (state.compareAndSet(current, next)) {
+            if (aggregate.compareAndSet(current, next)) {
                 recompute(next)
                 return
             }
         }
     }
 
-    private fun recompute(map: Map<SessionStatusKey, Entry>) {
-        val cov = coverage.get()
+    private fun recompute(committed: Aggregate) {
+        val map = committed.entries
+        val cov = committed.coverage
         val now = clock()
-        val verdict = project(map, cov, now)
+        val verdict = project(committed, now)
         // globalBusy: any Busy||Retry under the current identity OR any
         // unmapped-active id (D1 gate #5). Kept for back-compat with non-
         // lifecycle consumers.
-        val fp = cov.currentServerGroupFp.ifEmpty { currentGroupFp.get() }
+        val fp = committed.currentGroupFp
         val scoped = map.filterKeys { it.serverGroupFp == fp }
         val anyBusy = scoped.any { entry ->
             entry.value.status == SessionBusyStatus.Busy ||
                 entry.value.status == SessionBusyStatus.Retry
         } || cov.unmappedActiveIds.isNotEmpty()
+        // Publish the key projection before the verdict derived from the same
+        // committed Aggregate, so verdict observers cannot pair a new state
+        // with the previous commit's status map.
+        _statusByKey.value = map.mapValues { it.value.status }
         _globalBusy.value = anyBusy
         _globalState.value = verdict
-        _statusByKey.value = map.mapValues { it.value.status }
-        rescheduleFreshness(map, cov, now)
+        rescheduleFreshness(committed, now)
     }
 
     /**
@@ -428,12 +430,10 @@ class StatusAggregatorImpl internal constructor(
      * with zero registered workdirs is `AllIdleFresh` (backed by the fresh
      * coverage marker — NOT vacuous uninitialized state).
      */
-    private fun project(
-        map: Map<SessionStatusKey, Entry>,
-        cov: Coverage,
-        now: Long,
-    ): GlobalBusyState {
-        val fp = cov.currentServerGroupFp.ifEmpty { currentGroupFp.get() }
+    private fun project(committed: Aggregate, now: Long): GlobalBusyState {
+        val map = committed.entries
+        val cov = committed.coverage
+        val fp = committed.currentGroupFp
         val scoped = map.filterKeys { it.serverGroupFp == fp }
 
         // gate #5: positively known active unmapped ids → Busy (highest priority).
@@ -457,27 +457,16 @@ class StatusAggregatorImpl internal constructor(
         // A successful empty host snapshot writes lastSuccessTimeMs = requestStartMs
         // (within TTL on the same cycle), so this guard refuses ONLY the never-
         // refreshed-yet cold-start case.
-        if (scoped.isEmpty()) {
-            val freshSuccess =
-                cov.lastSuccessTimeMs > 0L && now - cov.lastSuccessTimeMs <= STATUS_TTL_MS
-            return if (freshSuccess && cov.registeredWorkdirs.isEmpty()) {
-                GlobalBusyState.AllIdleFresh
-            } else {
-                GlobalBusyState.Unknown
-            }
-        }
+        val freshSuccess =
+            cov.lastSuccessTimeMs >= 0L && now - cov.lastSuccessTimeMs <= STATUS_TTL_MS
+        if (!freshSuccess) return GlobalBusyState.Unknown
 
         // gate #5: registered-workdir coverage predicate. Every workdir in
         // the snapshot's registeredWorkdirs must be covered by at least one
         // fresh entry in the current projection. A registered workdir with
         // no live session falls out here (its directory is in
         // registeredWorkdirs but no entry in `scoped` has that workdir) → Unknown.
-        val freshWorkdirs: Set<String> = scoped
-            .filter { now - it.value.sourceTimeMs <= STATUS_TTL_MS }
-            .keys
-            .map { it.workdir }
-            .toSet()
-        val allWorkdirsCovered = cov.registeredWorkdirs.all { it in freshWorkdirs }
+        val allWorkdirsCovered = cov.coveredWorkdirs.containsAll(cov.registeredWorkdirs)
         if (!allWorkdirsCovered) return GlobalBusyState.Unknown
 
         // gate #5 (e/f) already enforced above: every entry fresh Idle, no
@@ -501,9 +490,11 @@ class StatusAggregatorImpl internal constructor(
      * scope would otherwise infinite-loop on the same stale deadline.
      */
     @Synchronized
-    private fun rescheduleFreshness(map: Map<SessionStatusKey, Entry>, cov: Coverage, now: Long) {
+    private fun rescheduleFreshness(committed: Aggregate, now: Long) {
         freshnessJob?.cancel()
-        val fp = cov.currentServerGroupFp.ifEmpty { currentGroupFp.get() }
+        val map = committed.entries
+        val cov = committed.coverage
+        val fp = committed.currentGroupFp
         val idleDeadlines = map
             .filter { it.key.serverGroupFp == fp && it.value.status == SessionBusyStatus.Idle }
             .values
@@ -511,7 +502,7 @@ class StatusAggregatorImpl internal constructor(
             .filter { it > now }
         // Also consider the coverage marker's own TTL — when lastSuccessTimeMs
         // ages out, the empty-state / cold-start guard can flip the verdict.
-        val coverageDeadline = if (cov.lastSuccessTimeMs > 0L) {
+        val coverageDeadline = if (cov.lastSuccessTimeMs >= 0L) {
             cov.lastSuccessTimeMs + STATUS_TTL_MS + 1
         } else {
             null
@@ -525,14 +516,13 @@ class StatusAggregatorImpl internal constructor(
                 throw e
             }
             try {
-                val liveMap = state.get()
-                val liveCov = coverage.get()
+                val live = aggregate.get()
                 val liveNow = clock()
-                val verdict = project(liveMap, liveCov, liveNow)
+                val verdict = project(live, liveNow)
                 if (verdict != _globalState.value) {
                     _globalState.value = verdict
                 }
-                rescheduleFreshness(liveMap, liveCov, liveNow)
+                rescheduleFreshness(live, liveNow)
             } catch (e: kotlinx.coroutines.CancellationException) {
                 throw e
             } catch (e: Throwable) {
