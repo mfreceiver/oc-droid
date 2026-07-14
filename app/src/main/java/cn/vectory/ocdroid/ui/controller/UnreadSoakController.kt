@@ -114,44 +114,7 @@ class UnreadSoakController @Inject constructor(
 
     /** Shared atomic evaluator path for foreground and background drivers. */
     internal fun evaluateAndApply(now: Long): UnreadSoakResult {
-        lateinit var committedResult: UnreadSoakResult
-        store.mutateUnreadFromState { snapshot ->
-            val sl = snapshot.sessionList
-            val chat = snapshot.chat
-            val u = snapshot.unread
-            val result = evaluateUnread(
-                sessions = sl.sessions,
-                sessionStatuses = sl.sessionStatuses,
-                childSessions = sl.childSessions,
-                directorySessions = sl.directorySessions,
-                currentSessionId = chat.currentSessionId,
-                lastViewedTime = u.lastViewedTime,
-                idleSince = u.idleSince,
-                now = now,
-            )
-            committedResult = result
-            var next = u.copy(idleSince = result.newIdleSince)
-            // (2) mark each root that crossed the soak threshold. The current
-            // session guard inside applyMarkSessionUnread is belt-and-suspenders
-            // (the evaluator never marks the current root) — kept for parity
-            // with the original marker contract.
-            if (result.rootsToMarkUnread.isNotEmpty()) {
-                for (root in result.rootsToMarkUnread) {
-                    next = next.applyMarkSessionUnread(root, chat.currentSessionId).first
-                }
-            }
-            // (3) Consume completed/current cycles. Keeping their idleSince
-            // stamp until busy provides rising-edge memory; this viewed stamp
-            // prevents repeated marks while all-idle remains continuous.
-            if (result.rootsToStampViewed.isNotEmpty()) {
-                next = next.copy(
-                    lastViewedTime = next.lastViewedTime +
-                        result.rootsToStampViewed.associateWith { now }
-                )
-            }
-            next
-        }
-        return committedResult
+        return store.evaluateAndApplyUnread(now)
     }
 
     companion object {
@@ -163,4 +126,37 @@ class UnreadSoakController @Inject constructor(
          */
         const val SWEEP_INTERVAL_MS: Long = 2_000L
     }
+}
+
+/** Single authoritative store bridge shared by foreground and background. */
+internal fun SharedStateStore.evaluateAndApplyUnread(now: Long): UnreadSoakResult {
+    lateinit var committedResult: UnreadSoakResult
+    mutateUnreadFromState { snapshot ->
+        val sl = snapshot.sessionList
+        val chat = snapshot.chat
+        val unread = snapshot.unread
+        val result = evaluateUnread(
+            sessions = sl.sessions,
+            sessionStatuses = sl.sessionStatuses,
+            childSessions = sl.childSessions,
+            directorySessions = sl.directorySessions,
+            currentSessionId = chat.currentSessionId,
+            lastViewedTime = unread.lastViewedTime,
+            idleSince = unread.idleSince,
+            now = now,
+        )
+        committedResult = result
+        var next = unread.copy(idleSince = result.newIdleSince)
+        result.rootsToMarkUnread.forEach { root ->
+            next = next.applyMarkSessionUnread(root, chat.currentSessionId).first
+        }
+        if (result.rootsToStampViewed.isNotEmpty()) {
+            next = next.copy(
+                lastViewedTime = next.lastViewedTime +
+                    result.rootsToStampViewed.associateWith { now }
+            )
+        }
+        next
+    }
+    return committedResult
 }

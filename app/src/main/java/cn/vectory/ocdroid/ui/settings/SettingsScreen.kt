@@ -2,6 +2,9 @@ package cn.vectory.ocdroid.ui.settings
 
 import android.Manifest
 import android.content.pm.PackageManager
+import android.content.Intent
+import android.net.Uri
+import android.provider.Settings
 import android.os.Build
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -401,6 +404,18 @@ fun SettingsNotificationsRoute(onBack: () -> Unit) {
                     Text(stringResource(R.string.settings_notifications_completion_channel_desc))
                 },
             )
+            ListItem(
+                headlineContent = {
+                    Text(
+                        text = stringResource(R.string.settings_notifications_system_settings),
+                        style = MaterialTheme.typography.bodyLarge,
+                    )
+                },
+                supportingContent = {
+                    Text(stringResource(R.string.settings_notifications_system_settings_desc))
+                },
+                modifier = Modifier.clickable { openSystemNotificationSettings(context) },
+            )
             // The grant button is shown only when blocked AND API 33+ (the OS
             // surface that requires a runtime prompt). Pre-33 installs inherit
             // the install-time grant, so the button would be a dead no-op.
@@ -529,4 +544,21 @@ private fun notificationPermissionGranted(context: android.content.Context): Boo
         context,
         Manifest.permission.POST_NOTIFICATIONS,
     ) == PackageManager.PERMISSION_GRANTED
+}
+
+private fun openSystemNotificationSettings(context: android.content.Context) {
+    val packageName = context.packageName
+    val channelSettings = Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS).apply {
+        putExtra(Settings.EXTRA_APP_PACKAGE, packageName)
+        addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+    }
+    runCatching { context.startActivity(channelSettings) }
+        .recoverCatching {
+            context.startActivity(
+                Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS).apply {
+                    data = Uri.parse("package:$packageName")
+                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                }
+            )
+        }
 }
