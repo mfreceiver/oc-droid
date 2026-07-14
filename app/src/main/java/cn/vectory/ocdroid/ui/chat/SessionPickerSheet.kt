@@ -131,7 +131,7 @@ fun SessionPickerSheet(
                 style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 modifier = Modifier.padding(
-                    horizontal = Dimens.spacing6,
+                    horizontal = Dimens.spacing4,
                     vertical = Dimens.spacing3,
                 ),
             )

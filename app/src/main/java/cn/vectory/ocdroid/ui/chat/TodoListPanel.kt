@@ -56,7 +56,7 @@ fun TodoListPanel(
     val total = todos.size
 
     // §WT1: 间距走 Dimens token（与 chat-sheets lane 其它 surface 共享 spacing 语言）。
-    LazyColumn(modifier = modifier.padding(horizontal = Dimens.spacing4)) {
+    LazyColumn(modifier = modifier) {
         item {
             if (total > 0) {
                 LinearProgressIndicator(

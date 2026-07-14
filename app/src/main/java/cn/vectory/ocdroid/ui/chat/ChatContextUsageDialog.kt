@@ -139,7 +139,8 @@ internal fun ContextUsageDialog(
         // §WT1 chat-sheets 统一：body 行从手写 `Row(SpaceBetween){Text(label) Text(value)}`
         // 改为 M3 ListItem(headlineContent=label, trailingContent=value)；section header
         // 从手写 labelLarge+onSurfaceVariant 改为 AppSectionHeader。ListItem 自带 16dp
-        // 水平 padding（与 AppSectionHeader 对齐），外层不再叠 24dp——避免双重缩进。
+        // 水平 padding（与 AppSectionHeader 对齐）；原语层统一 8dp，补 ListItem
+        // 内置 16dp → 24dp keyline。
         // **不用 weight(1f)**——heightIn(max) 封顶 + verticalScroll，sheet 按内容自然高度，
         // footer 自然跟随下方（footer 由 AppBottomSheet 在 content 之后渲染）。
         Column(

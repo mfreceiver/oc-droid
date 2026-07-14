@@ -188,7 +188,8 @@ import androidx.compose.ui.unit.dp
  *   ⚠️ 双重 padding：scaffold 已加此底部 Spacer，调用方**不要再在 content/footer 外层
  *   加自己的 bottom padding**，否则双重留白。现有 sheet 各自的 `.padding(bottom = 16.dp)`
  *   在 B4 迁移时**必须删掉**。
- * @param content 内容槽（[ColumnScope]）。调用方控制 item 渲染、水平 padding、滚动。
+ * @param content 内容槽（[ColumnScope]）。调用方控制 item 渲染与滚动；原语统一提供水平
+ *   8dp padding。
  *   高度处理：默认 `heightIn(max) + verticalScroll`；当需要 footer 恒可见时，content
  *   槽内**可以**用 `Modifier.weight(1f)`（content 是 ColumnScope，支持 weight）——见
  *   文件头「weight(1f) 策略」与上方 Context 迁移示例。
@@ -247,8 +248,14 @@ fun AppBottomSheet(
                 }
             }
 
-            // content 槽：自然高度，调用方管滚动/封顶/水平 padding。
-            content()
+            // content 槽：原语层统一 8dp 水平 padding，补 ListItem 内置 16dp → 24dp keyline。
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = Dimens.spacing2),
+            ) {
+                content()
+            }
 
             // ④ footer 行（仅当提供）。上方 divider + 水平 16dp padding。
             if (footer != null) {

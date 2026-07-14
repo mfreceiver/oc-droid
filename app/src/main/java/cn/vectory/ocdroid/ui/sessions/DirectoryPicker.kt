@@ -122,7 +122,7 @@ fun DirectoryPickerSheet(
             color = MaterialTheme.colorScheme.onSurfaceVariant,
             maxLines = 2,
             overflow = TextOverflow.Ellipsis,
-            modifier = Modifier.padding(start = Dimens.spacing5, end = Dimens.spacing5, bottom = Dimens.spacing2),
+            modifier = Modifier.padding(start = Dimens.spacing4, end = Dimens.spacing4, bottom = Dimens.spacing2),
         )
 
         Spacer(modifier = Modifier.height(Dimens.spacing2))
@@ -135,7 +135,7 @@ fun DirectoryPickerSheet(
                     .clickable {
                         parentPath(currentPath)?.let { currentPath = it }
                     }
-                    .padding(horizontal = Dimens.spacing5, vertical = 14.dp),
+                    .padding(horizontal = Dimens.spacing4, vertical = 14.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Icon(

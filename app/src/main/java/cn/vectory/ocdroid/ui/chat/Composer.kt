@@ -566,13 +566,15 @@ internal fun ModelPickerSheet(
             if (catalog.isEmpty()) {
                 // Empty catalog: show the message UNDER the always-present
                 // 默认 row so the user can still clear / pick server default.
+                // §12: horizontal spacing6→spacing4（AppBottomSheet content 槽已统一
+                // 8dp，8+16=24dp keyline；原 spacing6 会变 8+24=32dp）。
                 item(key = "__empty__") {
                     Text(
                         text = stringResource(R.string.chat_model_picker_empty),
                         style = MaterialTheme.typography.bodyMedium,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                         modifier = Modifier.padding(
-                            horizontal = Dimens.spacing6,
+                            horizontal = Dimens.spacing4,
                             vertical = Dimens.spacing3,
                         ),
                     )
