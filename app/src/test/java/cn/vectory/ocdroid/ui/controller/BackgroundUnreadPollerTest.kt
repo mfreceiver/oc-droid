@@ -133,6 +133,33 @@ class BackgroundUnreadPollerTest {
     }
 
     @Test
+    fun `SSE invalidation bumping epoch mid-poll aborts stale commit and alert`() = runTest {
+        // §gpter-residual: a session.created/updated SSE event bumps the
+        // completeness epoch without touching host/generation/workdir. The poll
+        // must detect the moved epoch at its next identity check (and again in
+        // the CAS) and abort, so its older snapshot never regresses the store.
+        val a = root("A")
+        every { settings.currentWorkdir } returns "/repo"
+        store.mutateHost { it.copy(currentHostProfileId = "host-1") }
+        store.mutateSessionList { it.copy(completenessEpoch = 5L) }
+        coEvery { repository.getSessions(any()) } returns Result.success(listOf(a))
+        coEvery { repository.getSessionStatus() } returns Result.success(emptyMap())
+        coEvery { repository.getChildren("A") } coAnswers {
+            // SSE fires while the tree request is in flight.
+            store.mutateSessionList { it.copy(completenessEpoch = it.completenessEpoch + 1L) }
+            Result.success(emptyList())
+        }
+
+        val alerts = poller().poll()
+
+        assertTrue("no alert on aborted poll", alerts.isEmpty())
+        assertTrue(
+            "stale snapshot must not regress the store",
+            store.sessionListFlow.value.sessions.isEmpty(),
+        )
+    }
+
+    @Test
     fun `host switch during final tree request prevents stale commit and alert`() = runTest {
         val a = root("A")
         every { settings.currentWorkdir } returns "/repo"

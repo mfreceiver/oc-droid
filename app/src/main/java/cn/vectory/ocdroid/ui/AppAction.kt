@@ -267,6 +267,15 @@ internal fun reduce(state: StoreState, action: AppAction): StoreState = when (ac
                     sessionStatuses = emptyMap(),
                     sessionTodos = emptyMap(),
                     sessionDiffs = emptyMap(),
+                    // §gpter-residual: cross-group purge must also drop cached
+                    // child trees and completeness proofs — a root-id collision
+                    // across hosts would otherwise let a stale proof skip new-host
+                    // hydration. Bump the epoch so any in-flight child load
+                    // captured before the switch is dropped fail-closed instead
+                    // of committing the prior host's children here.
+                    childSessions = emptyMap(),
+                    completeRootIds = emptySet(),
+                    completenessEpoch = state.sessionList.completenessEpoch + 1L,
                     // §fix-leak-window (fix B): pending permission / question
                     // requests belong to the prior host's sessions — must NOT
                     // survive a cross-group switch.

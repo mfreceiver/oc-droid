@@ -441,6 +441,38 @@ class AppActionReducerTest {
         assertNull(out.connection.serverVersion)
     }
 
+    @Test
+    fun `gpter-residual reduce HostStatePurged cross-group clears child trees + completeness proofs and bumps epoch`() {
+        // §gpter-residual: a cross-group purge must drop cached child trees and
+        // completeness proofs — a root-id collision across hosts would otherwise
+        // let a stale proof skip new-host hydration, and an in-flight child load
+        // captured before the switch could commit the prior host's children.
+        val prior = StoreState.initial().copy(
+            sessionList = SessionListState(
+                sessions = listOf(Session(id = "s1", directory = "/p")),
+                childSessions = mapOf("s1" to listOf(Session(id = "c1", directory = "/p", parentId = "s1"))),
+                completeRootIds = setOf("s1"),
+                completenessEpoch = 9L,
+            ),
+        )
+
+        val out = reduce(prior, AppAction.HostStatePurged(preserveServerGroupData = false))
+
+        assertTrue(
+            "childSessions cleared cross-host",
+            out.sessionList.childSessions.isEmpty(),
+        )
+        assertTrue(
+            "completeRootIds cleared cross-host",
+            out.sessionList.completeRootIds.isEmpty(),
+        )
+        assertEquals(
+            "completeness epoch bumped on purge",
+            10L,
+            out.sessionList.completenessEpoch,
+        )
+    }
+
     // ── HostStatePurged (same-group = preserve server data) ────────────────
 
     @Test

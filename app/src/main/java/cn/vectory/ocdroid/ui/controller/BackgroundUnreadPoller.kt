@@ -56,6 +56,14 @@ class BackgroundUnreadPoller internal constructor(
         val startGeneration = lifecycleGeneration()
         val startHostId = store.hostFlow.value.currentHostProfileId
         val startWorkdir = settingsManager.currentWorkdir
+        // §gpter-residual: capture the completeness epoch at request start. An
+        // SSE session.created/updated bumps the epoch without touching host /
+        // generation / workdir, so those guards cannot detect that the fetched
+        // sessions/children are now stale relative to the store. The epoch is
+        // therefore re-checked TOCTOU-free inside the commit CAS (not in
+        // identityValid(), which is also invoked AFTER this poll's own commit
+        // has legitimately bumped the epoch).
+        val startEpoch = store.sessionListFlow.value.completenessEpoch
         fun identityValid(): Boolean = isBackground() &&
             lifecycleGeneration() == startGeneration &&
             store.hostFlow.value.currentHostProfileId == startHostId &&
@@ -84,7 +92,9 @@ class BackgroundUnreadPoller internal constructor(
         var committedUnread: cn.vectory.ocdroid.ui.UnreadState? = null
         var committedSessionsById: Map<String, cn.vectory.ocdroid.data.model.Session> = emptyMap()
         store.mutateState { snapshot ->
-            if (!identityValid() || snapshot.host.currentHostProfileId != startHostId) return@mutateState snapshot
+            if (!identityValid() || snapshot.host.currentHostProfileId != startHostId ||
+                snapshot.sessionList.completenessEpoch != startEpoch
+            ) return@mutateState snapshot
             // Bump the epoch alongside the authoritative completeness snapshot:
             // any foreground hydration captured an earlier epoch is dropped at
             // its commit (fail-closed) instead of re-certifying roots against a
