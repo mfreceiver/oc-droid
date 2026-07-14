@@ -235,7 +235,7 @@ class ProcessStatusPollerTest {
     }
 
     @Test
-    fun `stop during EnsurePoller first poll rejects late install and later ensure recovers`() = runTest {
+    fun `stop during EnsurePoller first poll leaves metadata stopped and later identity recovers`() = runTest {
         val appScope = TestScope(UnconfinedTestDispatcher())
         val input = RecordingStatusInput(GlobalBusyState.Unknown)
         val entered = CompletableDeferred<Unit>()
@@ -269,19 +269,33 @@ class ProcessStatusPollerTest {
             SourceActivation.Rejected.Superseded,
             pending.await(),
         )
+        assertEquals(
+            "stop leaves runningIdentity null; stale continuation cannot republish A",
+            null,
+            runningIdentityOf(poller),
+        )
         val refreshesAfterStop = input.refreshCount
         advanceTimeBy(appScope, ProcessStatusPoller.DEFAULT_INTERVAL_MS * 2)
         runCurrent(appScope)
         assertEquals("no loop survives StopPoller", refreshesAfterStop, input.refreshCount)
 
-        // A later legitimate EnsurePoller can still install a fresh loop;
-        // the generation guard is invalidation, not a permanent lockout.
+        // A later legitimate EnsurePoller for B can still install a fresh
+        // loop; the generation guard is invalidation, not a permanent lockout.
         input.refreshEntered = null
         input.refreshRelease = null
-        assertEquals(SourceActivation.Ready, poller.ensureRunning(identity, StatusSnapshot.Empty))
+        store.beginReconfigure()
+        val identityB = store.bind("group-fp-b", identity.normalizedWorkdir, identity.endpointFp)
+        assertEquals(SourceActivation.Ready, poller.ensureRunning(identityB, StatusSnapshot.Empty))
+        assertEquals("new loop publishes only B", identityB, runningIdentityOf(poller))
         advanceTimeBy(appScope, ProcessStatusPoller.DEFAULT_INTERVAL_MS)
         runCurrent(appScope)
         assertTrue("later ensure starts a fresh loop", input.refreshCount > refreshesAfterStop)
+    }
+
+    private fun runningIdentityOf(poller: ProcessStatusPoller): ConnectionIdentity? {
+        val field = ProcessStatusPoller::class.java.getDeclaredField("runningIdentity")
+        field.isAccessible = true
+        return field.get(poller) as ConnectionIdentity?
     }
 
     private fun advanceTimeBy(scope: TestScope, ms: Long) = scope.testScheduler.advanceTimeBy(ms)

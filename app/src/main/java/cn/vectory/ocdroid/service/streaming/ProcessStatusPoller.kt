@@ -167,6 +167,7 @@ class ProcessStatusPoller internal constructor(
         val accepted = synchronized(stateLock) {
             if (generation == myGeneration) {
                 loopJob = newJob
+                runningIdentity = identity
                 true
             } else {
                 false
@@ -177,9 +178,6 @@ class ProcessStatusPoller internal constructor(
             return@withLock SourceActivation.Rejected.Superseded
         }
         newJob.start()
-        // D5 (#2): record the running identity so ensureRunning can no-op
-        // for the same identity + stop() can clear it.
-        runningIdentity = identity
         // D4-B M3: transport readiness carries no status verdict — the
         // coordinator reads statusAggregator.stateAtNow() at handoff commit.
         SourceActivation.Ready
@@ -246,9 +244,6 @@ class ProcessStatusPoller internal constructor(
             return SourceActivation.Ready
         }
         val activation = startAndAwaitFirstPoll(identity, snapshot)
-        if (activation is SourceActivation.Ready) {
-            synchronized(stateLock) { runningIdentity = identity }
-        }
         return activation
     }
 
