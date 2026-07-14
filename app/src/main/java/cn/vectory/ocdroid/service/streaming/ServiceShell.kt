@@ -94,6 +94,22 @@ interface ServiceShell {
     fun stopPoller()
 
     /**
+     * D5 (#2) — ensure a SUPPLEMENTAL process poller is running for
+     * [identity]. Delegates to [ProcessStatusPoller.ensureRunning]: same
+     * current identity already running → return Ready WITHOUT cancel/
+     * restart; otherwise startAndAwaitFirstPoll. The controller forwards
+     * the activation to
+     * [cn.vectory.ocdroid.service.lifecycle.StreamingLifecycleCoordinator.onEnsurePollerAck].
+     *
+     * @param identity the atomic identity capture from the command.
+     * @param snapshot the atomic snapshot capture from the command.
+     */
+    suspend fun ensurePoller(
+        identity: ConnectionIdentity,
+        snapshot: StatusSnapshot,
+    ): SourceActivation
+
+    /**
      * D2 §4.4 / §1 — start / retarget the SSE collector for [identity],
      * AWAIT transport readiness + status-baseline verification, and return
      * the resulting [SourceActivation]. The controller forwards the

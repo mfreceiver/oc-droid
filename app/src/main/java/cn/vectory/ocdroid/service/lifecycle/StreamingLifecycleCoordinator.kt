@@ -12,6 +12,7 @@ import cn.vectory.ocdroid.service.lifecycle.LifecycleCommand.StopSelf
 import cn.vectory.ocdroid.service.lifecycle.LifecycleCommand.StartPoller
 import cn.vectory.ocdroid.service.lifecycle.LifecycleCommand.StartSse
 import cn.vectory.ocdroid.service.lifecycle.LifecycleCommand.StopSse
+import cn.vectory.ocdroid.service.lifecycle.LifecycleCommand.EnsurePoller
 import cn.vectory.ocdroid.service.status.GlobalBusyState
 import cn.vectory.ocdroid.service.status.StatusAggregator
 import cn.vectory.ocdroid.service.status.isKeepAlive
@@ -35,6 +36,68 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import javax.inject.Inject
 import javax.inject.Singleton
+
+/**
+ * D5 (#3) — the result of committing (or refusing to commit) a source
+ * activation. Returned by [StreamingLifecycleCoordinator.onActivationAck]
+ * so the controller can react to the commit decision (e.g. call
+ * `onBootstrapFailure` for a [BootstrapRejected]) WITHOUT a fire-and-forget
+ * callback. The network op already completed when [onActivationAck] is
+ * called — the only suspend work inside is command emission (no REST/REST
+ * under the mutex).
+ */
+sealed interface ActivationCommitResult {
+    /**
+     * The SSE transport committed into a running L1/L2 layer (Bootstrap or
+     * L2IdleExit). The coordinator has already called
+     * [cn.vectory.ocdroid.service.StreamingOwnershipGate.markReady] for a
+     * current-identity Bootstrap Ready (ownership Stage 2 promotion) — the
+     * controller MUST NOT call it again.
+     */
+    data class SseCommitted(
+        val identity: ConnectionIdentity,
+    ) : ActivationCommitResult
+
+    /**
+     * A current Bootstrap SSE activation resolved to
+     * [SourceActivation.Rejected.TransportTimeout] or
+     * [SourceActivation.Rejected.Exhausted]. The coordinator has NOT
+     * promoted ownership (Starting is still held). The controller SHOULD
+     * call `onBootstrapFailure(identity)` to roll back.
+     */
+    data class BootstrapRejected(
+        val identity: ConnectionIdentity,
+        val rejection: SourceActivation.Rejected,
+    ) : ActivationCommitResult
+
+    /** A supplemental process poller committed ([EnsurePoller] acked Ready). */
+    data object PollerCommitted : ActivationCommitResult
+
+    /** The activation acked for a superseded handoff; the prior source was retained. */
+    data object Superseded : ActivationCommitResult
+
+    /** A primary StartPoller / StartSse commit retained the old source (Rejected). */
+    data object RetainedOldSource : ActivationCommitResult
+}
+
+/**
+ * D5 (#2) — the real supplemental / primary process-poller runtime state
+ * machine (replaces the prior `supplementalPollerActive: Boolean` fiction).
+ * Under the lifecycle mutex; identity-bound + acknowledged + idempotent.
+ */
+sealed interface PollerRuntime {
+    data object Stopped : PollerRuntime
+    data class Starting(
+        val identity: ConnectionIdentity,
+        val requestId: Long,
+        val purpose: Purpose,
+    ) : PollerRuntime
+    data class Running(
+        val identity: ConnectionIdentity,
+        val purpose: Purpose,
+    ) : PollerRuntime
+    enum class Purpose { Primary, Supplemental }
+}
 
 /**
  * Phase 0 / dev-design P0.3 — the FGS §4 L1/L2/L3 state machine.
@@ -136,17 +199,32 @@ class StreamingLifecycleCoordinator @Inject constructor(
     private var currentIdentity: ConnectionIdentity? = null
 
     /**
-     * D4-B M3 — the supplemental process-poller flag. Set when an SSE
-     * Bootstrap/L2Idle-exit handoff commits while the status authority is
-     * [GlobalBusyState.Unknown] (the SSE transport proved itself but the REST
-     * status snapshot is not yet definitive). The process poller is kept
-     * running (NOT retired) so the status authority keeps refreshing; the
-     * flag is cleared + [LifecycleCommand.StopPoller] emitted once the
-     * coordinator observes a definitive [GlobalBusyState.Busy] /
-     * [GlobalBusyState.AllIdleFresh] in L1/L2-active. [GlobalBusyState.Unknown]
-     * NEVER authorizes idle teardown while this flag is set.
+     * D5 (#2) — the real supplemental / primary process-poller runtime
+     * state machine (replaces the prior `supplementalPollerActive: Boolean`
+     * fiction). Under [mutex]; identity-bound + acknowledged + idempotent.
+     *
+     *  - [PollerRuntime.Stopped] — no poller running.
+     *  - [PollerRuntime.Starting] — a [LifecycleCommand.StartPoller] (Primary)
+     *    or [LifecycleCommand.EnsurePoller] (Supplemental) has been emitted;
+     *    awaiting the matching ack. Carries the identity + request id so a
+     *    stale ack (superseded mid-flight) is ignored.
+     *  - [PollerRuntime.Running] — the poller acked Ready; the identity is
+     *    bound. A later definitive status verdict (Busy / AllIdleFresh)
+     *    retires it via [stopPollerIfActiveLocked].
+     *
+     * [GlobalBusyState.Unknown] NEVER authorizes idle teardown while a
+     * Supplemental poller is Running (the status authority is not yet
+     * definitive).
      */
-    private var supplementalPollerActive: Boolean = false
+    private var pollerRuntime: PollerRuntime = PollerRuntime.Stopped
+
+    /**
+     * D5 (#2) — monotonic request-id counter for [LifecycleCommand.EnsurePoller]
+     * (supplemental poller activations). Distinct from [handoffTokenCounter]
+     * (which covers primary StartPoller / StartSse) so a supplemental
+     * ensure-ack cannot be confused with a primary handoff ack.
+     */
+    private var ensurePollerRequestIdCounter: Long = 0L
 
     // ── D2 gate #4: handoff token / pending-handoff state ───────────────────
 
@@ -171,6 +249,12 @@ class StreamingLifecycleCoordinator @Inject constructor(
     /**
      * D2: in-flight handoff descriptor. Carries everything the commit phase
      * (after the ack) needs to verify freshness + decide what to emit.
+     *
+     * D5 (#3): [deferred] is REMOVED — the network op already completed
+     * when [onActivationAck] is called, so the commit runs synchronously
+     * under the mutex (no separate commit coroutine). The handoff is now
+     * just a descriptor of what was started + what to validate when the
+     * ack arrives.
      */
     private data class Handoff(
         val token: Long,
@@ -179,8 +263,6 @@ class StreamingLifecycleCoordinator @Inject constructor(
         val fromLayer: Layer,
         /** The identity captured at handoff allocation (for reconfigure detect). */
         val expectedIdentity: ConnectionIdentity,
-        /** The deferred the commit coroutine awaits; completed by [onActivationAck]. */
-        val deferred: CompletableDeferred<SourceActivation>,
         /** Which transition this handoff is for (drives the commit's `when`). */
         val decision: HandoffDecision,
         /** Foreground signal captured at allocation (used by L2Idle-exit + bootstrap). */
@@ -329,24 +411,97 @@ class StreamingLifecycleCoordinator @Inject constructor(
         }
     }
     /**
-     * D2 (gate #4): the controller's completion signal for a source activation.
-     * Completes the [Handoff.deferred] keyed by [token]; the corresponding
-     * commit coroutine (launched in [beginHandoff]) reacquires the mutex +
-     * runs the transition's commit logic.
+     * D2 (gate #4) + D5 (#3): the controller's completion signal for a
+     * source activation. The network op already completed when called —
+     * this method runs the commit SYNCHRONOUSLY under [mutex] (no separate
+     * commit coroutine, no `Handoff.deferred`). Command emission is the
+     * only suspend work; NO network/REST under the mutex.
      *
-     * A stale ack (for a superseded handoff) is dropped silently — the
-     * controller may still be running an activation that has been superseded
-     * by a newer handoff; the ack arrives, finds the token no longer matches
-     * [pendingHandoff], and is ignored. No commands emitted.
+     * Under the mutex: find matching handoff → validate token → validate
+     * current layer → validate captured identity → commit or reject →
+     * clear pending handoff → return the exact [ActivationCommitResult].
      *
-     * Safe to call from any thread — completes the deferred under [mutex].
+     * Ownership promotion (D5 #3): for a current Bootstrap SSE Ready that
+     * commits into a running L1/L2 layer — (1) update layer/source state,
+     * (2) clear pending handoff, (3) EXIT the mutex, (4)
+     * `ownershipGate.markReady(identity)`, (5) return `SseCommitted`. Do
+     * NOT mark Ready when token superseded / identity changed / layer
+     * changed / Bootstrap resolves to background-idle stopSelf / activation
+     * rejected.
+     *
+     * A stale ack (for a superseded handoff) is dropped silently — returns
+     * [ActivationCommitResult.Superseded]. No commands emitted.
      */
-    suspend fun onActivationAck(token: Long, activation: SourceActivation) {
-        val deferred = mutex.withLock {
+    suspend fun onActivationAck(token: Long, activation: SourceActivation): ActivationCommitResult {
+        // Phase 1: under the mutex, validate + commit (or refuse). Collect
+        // any post-mutex work (ownership promotion) to run AFTER releasing
+        // the lock.
+        data class PostCommit(
+            val markReadyIdentity: ConnectionIdentity?,
+            val result: ActivationCommitResult,
+        )
+        val post: PostCommit = mutex.withLock {
             val ph = pendingHandoff
-            if (ph?.token == token) ph.deferred else null
+            if (ph?.token != token) {
+                // Superseded by a newer handoff — the newer one already
+                // cleaned up our source.
+                return@withLock PostCommit(null, ActivationCommitResult.Superseded)
+            }
+            val layerValid = _layer.value == ph.fromLayer
+            val identityValid = currentIdentity == ph.expectedIdentity
+            if (!layerValid || !identityValid) {
+                // Concurrent input changed the layer OR a reconfigure changed
+                // the identity mid-handoff. Cancel our activation; the
+                // concurrent transition handles the rest.
+                emitStopFor(ph.kind)
+                pendingHandoff = null
+                return@withLock PostCommit(null, ActivationCommitResult.Superseded)
+            }
+            // Commit — decision-specific. Returns the identity to markReady
+            // (or null) + the result.
+            val commitOutcome = runDecisionCommit(ph, activation)
+            pendingHandoff = null
+            PostCommit(commitOutcome.markReadyIdentity, commitOutcome.result)
         }
-        deferred?.complete(activation)
+        // Phase 2: ownership promotion OUTSIDE the mutex (markReady is a
+        // synchronized block on the gate's own lock — no coroutine
+        // suspension, but we keep it out of the coordinator mutex for
+        // lock-ordering hygiene).
+        if (post.markReadyIdentity != null) {
+            ownershipGate?.markReady(post.markReadyIdentity)
+        }
+        return post.result
+    }
+
+    /**
+     * D5 (#2) — the controller's completion signal for a supplemental
+     * [LifecycleCommand.EnsurePoller] activation. Only a matching
+     * [PollerRuntime.Starting]`(`identity`, `requestId`, Supplemental)` may
+     * change state: Ready → [PollerRuntime.Running]`(`identity`, Supplemental)`;
+     * Rejected → [PollerRuntime.Stopped]; stale ack → ignored.
+     */
+    suspend fun onEnsurePollerAck(
+        identity: ConnectionIdentity,
+        requestId: Long,
+        activation: SourceActivation,
+    ): ActivationCommitResult {
+        mutex.withLock {
+            val runtime = pollerRuntime
+            if (runtime !is PollerRuntime.Starting) return@withLock ActivationCommitResult.Superseded
+            if (runtime.identity != identity || runtime.requestId != requestId) {
+                return@withLock ActivationCommitResult.Superseded
+            }
+            when (activation) {
+                is SourceActivation.Ready -> {
+                    pollerRuntime = PollerRuntime.Running(identity, PollerRuntime.Purpose.Supplemental)
+                }
+                is SourceActivation.Rejected -> {
+                    pollerRuntime = PollerRuntime.Stopped
+                }
+            }
+        }
+        return if (activation is SourceActivation.Ready) ActivationCommitResult.PollerCommitted
+        else ActivationCommitResult.RetainedOldSource
     }
 
     // ── Transition handlers (all under [mutex]) ─────────────────────────────
@@ -415,11 +570,12 @@ class StreamingLifecycleCoordinator @Inject constructor(
      * source-stable (SSE stays on).
      */
     private suspend fun handleL1(current: Layer.L1, fg: Boolean, state: GlobalBusyState) {
-        // D4-B M3: clear a supplemental poller once the status authority is
+        // D5 (#2): clear a supplemental poller once the status authority is
         // definitive (Busy/AllIdleFresh). Unknown keeps it running.
-        if (supplementalPollerActive && (state == GlobalBusyState.Busy || state == GlobalBusyState.AllIdleFresh)) {
-            emit(StopPoller)
-            supplementalPollerActive = false
+        // stopPollerIfActiveLocked emits exactly one StopPoller + sets
+        // Stopped (no duplicate emissions on repeated definitive verdicts).
+        if (state == GlobalBusyState.Busy || state == GlobalBusyState.AllIdleFresh) {
+            stopPollerIfActiveLocked()
         }
         val keepAlive = state.isKeepAlive
         if (fg) {
@@ -458,11 +614,10 @@ class StreamingLifecycleCoordinator @Inject constructor(
      * must NOT enter the idle grace window, FGS spec §3).
      */
     private suspend fun handleL2Active(fg: Boolean, state: GlobalBusyState) {
-        // D4-B M3: clear a supplemental poller once the status authority is
+        // D5 (#2): clear a supplemental poller once the status authority is
         // definitive (Busy/AllIdleFresh). Unknown keeps it running.
-        if (supplementalPollerActive && (state == GlobalBusyState.Busy || state == GlobalBusyState.AllIdleFresh)) {
-            emit(StopPoller)
-            supplementalPollerActive = false
+        if (state == GlobalBusyState.Busy || state == GlobalBusyState.AllIdleFresh) {
+            stopPollerIfActiveLocked()
         }
         val keepAlive = state.isKeepAlive
         cancelDebounce()
@@ -557,12 +712,15 @@ class StreamingLifecycleCoordinator @Inject constructor(
             cancelPendingHandoff()
             // Terminate the old-identity process poller (L3 source contract
             // is void during reconfigure — the new bootstrap will start a
-            // fresh poller bound to the new identity).
+            // fresh poller bound to the new identity). D5 (#2): emit
+            // StopPoller directly (not via stopPollerIfActiveLocked) because
+            // the old-identity poller may be running as an external source
+            // not tracked by pollerRuntime.
             emit(StopPoller)
+            pollerRuntime = PollerRuntime.Stopped
             emit(StopSse)
             emit(StopForeground)
             emit(StopSelf)
-            supplementalPollerActive = false
             _layer.value = Layer.L3
         }
         layer.first { it == Layer.L3 }
@@ -588,10 +746,9 @@ class StreamingLifecycleCoordinator @Inject constructor(
             cancelDebounce()
             cancelPendingHandoff()
             emit(StopSse)
-            emit(StopPoller)
+            stopPollerIfActiveLocked()
             emit(StopForeground)
             emit(StopSelf)
-            supplementalPollerActive = false
             _layer.value = Layer.L3
         }
         layer.first { it == Layer.L3 }
@@ -716,29 +873,34 @@ class StreamingLifecycleCoordinator @Inject constructor(
      * L2Idle→L2Active SSE activation) OR cancel one without allocating a new
      * one (e.g., L2Idle teardown — poller already running, SSE handoff in
      * flight is cancelled). Emits the appropriate StopX (so the dangling
-     * activation is cleaned up) + cancels the deferred (the commit coroutine
-     * awaiting it bails).
+     * activation is cleaned up) + clears [pendingHandoff].
+     *
+     * D5 (#3): the commit is now synchronous inside [onActivationAck] —
+     * there is no `deferred` to cancel. Clearing [pendingHandoff] is
+     * sufficient: a late ack for the cleared token returns [Superseded].
      *
      * MUST be called under [mutex].
      */
     private suspend fun cancelPendingHandoff() {
         val ph = pendingHandoff ?: return
         emitStopFor(ph.kind)
-        ph.deferred.cancel()
         pendingHandoff = null
     }
 
     /**
      * D2: allocates a handoff token + emits the [LifecycleCommand.StartX]
-     * carrying it + records [pendingHandoff] + launches the commit coroutine.
-     * MUST be called under [mutex] (the caller — a transition handler — already
-     * holds it).
+     * carrying it + records [pendingHandoff]. MUST be called under [mutex]
+     * (the caller — a transition handler — already holds it).
+     *
+     * D5 (#3): NO commit coroutine is launched — the commit runs
+     * synchronously inside [onActivationAck] when the controller delivers
+     * the activation result. The handoff is just a descriptor of what was
+     * started.
      *
      * If a prior handoff is pending, it is superseded: its StopX is emitted
-     * (so the dangling activation is cleaned up) + its deferred is cancelled
-     * (its commit coroutine bails). The new handoff's StartX is emitted
-     * AFTER the prior's StopX (FIFO channel — the controller observes the
-     * cleanup before the new activation).
+     * (so the dangling activation is cleaned up). The new handoff's StartX
+     * is emitted AFTER the prior's StopX (FIFO channel — the controller
+     * observes the cleanup before the new activation).
      */
     private suspend fun beginHandoff(
         kind: HandoffKind,
@@ -752,207 +914,248 @@ class StreamingLifecycleCoordinator @Inject constructor(
         cancelPendingHandoff()
 
         val token = ++handoffTokenCounter
-        val deferred = CompletableDeferred<SourceActivation>()
         pendingHandoff = Handoff(
             token = token,
             kind = kind,
             fromLayer = fromLayer,
             expectedIdentity = identity,
-            deferred = deferred,
             decision = decision,
             fg = fg,
             state = state,
         )
         when (kind) {
-            HandoffKind.StartPoller -> emit(StartPoller(identity, token))
+            HandoffKind.StartPoller -> {
+                emit(StartPoller(identity, token))
+                // D5 (#2): track the primary poller runtime state.
+                markPrimaryPollerStartingLocked(identity, token)
+            }
             HandoffKind.StartSse -> emit(StartSse(identity, token))
         }
-        scope.launchCommit(token, deferred, decision, fromLayer, identity, kind, fg, state)
     }
 
     /**
-     * D2: the handoff commit coroutine. Awaits the activation ack WITHOUT
-     * holding the mutex (a long SSE connect attempt must NOT block
-     * foreground/timeout/user-close inputs), then REACQUIRES the mutex to
-     * verify the handoff is still valid + commit the transition.
-     *
-     * Verification (under mutex):
-     *  - [pendingHandoff]'s token MUST still match — a newer handoff
-     *    superseding us is the canonical invalidation.
-     *  - `_layer.value` MUST still equal [fromLayer] — a concurrent
-     *    foreground/timeout/user-close transition changed the layer.
-     *  - `currentIdentity` MUST still equal [expectedIdentity] — a
-     *    reconfigure (via a new [onBootstrapResult]) replaced the identity.
-     *
-     * If any check fails: cancel the activation we started (emit the matching
-     * StopX) + clear pendingHandoff. The concurrent transition (or teardown)
-     * is responsible for the rest of the cleanup.
-     *
-     * If all checks pass: run the [HandoffDecision]-specific commit logic,
-     * which emits the closing StopX + flips the layer.
+     * D5 (#2) — tracks the primary poller runtime state when a
+     * [LifecycleCommand.StartPoller] handoff is emitted. MUST be under
+     * [mutex].
      */
-    private fun CoroutineScope.launchCommit(
-        token: Long,
-        deferred: CompletableDeferred<SourceActivation>,
-        decision: HandoffDecision,
-        fromLayer: Layer,
-        expectedIdentity: ConnectionIdentity,
-        kind: HandoffKind,
-        fg: Boolean,
-        state: GlobalBusyState,
-    ): Job = launch {
-        val activation: SourceActivation = try {
-            deferred.await()
-        } catch (e: CancellationException) {
-            // Superseded (beginHandoff's cancelPendingHandoff cancelled us)
-            // OR the coordinator scope was cancelled (process death). Bail
-            // silently — the superseder / teardown handles cleanup.
-            return@launch
+    private fun markPrimaryPollerStartingLocked(identity: ConnectionIdentity, token: Long) {
+        pollerRuntime = PollerRuntime.Starting(identity, token, PollerRuntime.Purpose.Primary)
+    }
+
+    /**
+     * D5 (#2) — applies a primary StartPoller ack to the runtime. Called
+     * from [runDecisionCommit] when a Primary poller handoff commits.
+     * MUST be under [mutex].
+     */
+    private fun applyPrimaryPollerAckLocked(identity: ConnectionIdentity, ready: Boolean) {
+        val runtime = pollerRuntime
+        if (runtime !is PollerRuntime.Starting || runtime.identity != identity ||
+            runtime.purpose != PollerRuntime.Purpose.Primary
+        ) {
+            return // stale or wrong-purpose — ignore
         }
-        mutex.withLock {
-            val ph = pendingHandoff
-            if (ph?.token != token) {
-                // Superseded by a newer handoff — the newer one already
-                // cleaned up our source. Bail.
-                return@withLock
-            }
-            val layerValid = _layer.value == fromLayer
-            val identityValid = currentIdentity == expectedIdentity
-            if (!layerValid || !identityValid) {
-                // Concurrent input changed the layer OR a reconfigure changed
-                // the identity mid-handoff. Cancel our activation; the
-                // concurrent transition handles the rest.
-                emitStopFor(kind)
-                pendingHandoff = null
-                return@withLock
-            }
-            // Commit — decision-specific.
-            runDecisionCommit(decision, activation, fg, state)
-            pendingHandoff = null
+        pollerRuntime = if (ready) {
+            PollerRuntime.Running(identity, PollerRuntime.Purpose.Primary)
+        } else {
+            PollerRuntime.Stopped
         }
     }
 
     /**
-     * D2: the decision-specific commit logic. Runs under [mutex] inside
-     * [launchCommit] AFTER the activation ack verified the handoff is still
-     * current. Emits the closing StopX + flips the layer.
+     * D5 (#2) — ensures a supplemental process poller is running for
+     * [identity]. Called from [commitSseTransport] when the status verdict
+     * is Unknown (the SSE transport proved itself but the REST status
+     * snapshot is not yet definitive). MUST be under [mutex].
      *
-     * **D4-B M3**: the status authority is read via
-     * [StatusAggregator.stateAtNow] AT COMMIT (not carried on the activation
-     * — [SourceActivation.Ready] is transport-only). For the SSE handoffs
-     * (Bootstrap / L2IdleExit): if the verdict is Busy / AllIdleFresh →
-     * retire the supplemental/process poller ([LifecycleCommand.StopPoller]);
-     * if Unknown → commit the SSE transport + layer AND keep the process
-     * poller running (set [supplementalPollerActive]) until a definitive
-     * verdict arrives.
+     *  - [PollerRuntime.Running] same identity → no-op.
+     *  - [PollerRuntime.Starting] same identity → no-op.
+     *  - [PollerRuntime.Stopped] → allocate a new requestId, set Starting,
+     *    emit [LifecycleCommand.EnsurePoller].
+     *  - different identity → stop old then start new.
+     */
+    private suspend fun ensureSupplementalPollerLocked(identity: ConnectionIdentity) {
+        val runtime = pollerRuntime
+        when {
+            runtime is PollerRuntime.Running && runtime.identity == identity -> return
+            runtime is PollerRuntime.Starting && runtime.identity == identity -> return
+            else -> {
+                // Different identity or Stopped — stop old if active.
+                if (runtime !is PollerRuntime.Stopped) {
+                    emit(StopPoller)
+                }
+                val requestId = ++ensurePollerRequestIdCounter
+                pollerRuntime = PollerRuntime.Starting(identity, requestId, PollerRuntime.Purpose.Supplemental)
+                emit(EnsurePoller(identity, requestId))
+            }
+        }
+    }
+
+    /**
+     * D5 (#2) — stops the poller if it is active (Starting or Running).
+     * Emits exactly one [LifecycleCommand.StopPoller] then sets
+     * [PollerRuntime.Stopped]. Stopped → no command. MUST be under [mutex].
+     * Repeated definitive emissions MUST NOT emit repeated StopPoller.
+     */
+    private suspend fun stopPollerIfActiveLocked() {
+        val runtime = pollerRuntime
+        if (runtime is PollerRuntime.Stopped) return
+        emit(StopPoller)
+        pollerRuntime = PollerRuntime.Stopped
+    }
+
+    /**
+     * D5 (#3) — the decision-specific commit logic. Runs under [mutex]
+     * inside [onActivationAck] AFTER the activation ack verified the
+     * handoff is still current. Emits the closing StopX + flips the layer.
+     * Returns the identity to markReady (for Bootstrap Ready that commits
+     * into L1/L2) + the [ActivationCommitResult].
+     *
+     * **D4-B M3 + D5 (#2)**: the status authority is read via
+     * [StatusAggregator.stateAtNow] AT COMMIT (not carried on the
+     * activation — [SourceActivation.Ready] is transport-only). For the SSE
+     * handoffs (Bootstrap / L2IdleExit): if the verdict is Busy /
+     * AllIdleFresh → [stopPollerIfActiveLocked]; if Unknown →
+     * [ensureSupplementalPollerLocked] until a definitive verdict arrives.
      */
     private suspend fun runDecisionCommit(
-        decision: HandoffDecision,
+        ph: Handoff,
         activation: SourceActivation,
-        fg: Boolean,
-        @Suppress("UNUSED_PARAMETER") state: GlobalBusyState,
-    ) {
-        when (decision) {
+    ): CommitOutcome {
+        val decision = ph.decision
+        val fg = ph.fg
+        return when (decision) {
             HandoffDecision.DebounceFire -> {
-                // L2Active → L2Idle: the poller's immediate first poll is the
-                // final snapshot. Read the time-correct verdict at commit.
                 when (activation) {
                     is SourceActivation.Ready -> {
+                        applyPrimaryPollerAckLocked(ph.expectedIdentity, ready = true)
                         val verdict = statusAggregator.stateAtNow()
                         if (verdict == GlobalBusyState.AllIdleFresh) {
-                            // Commit: StopSse (close old) + flip to L2Idle.
+                            // Commit: StopSse (close old SSE) + flip to L2Idle.
+                            // The poller is the NEW source — it STAYS running
+                            // (do NOT stop it). The runtime is already Running
+                            // (set by applyPrimaryPollerAckLocked above).
                             emit(StopSse)
-                            supplementalPollerActive = false
                             _layer.value = Layer.L2Idle
                         } else {
-                            // Busy/Unknown — stop the new poller, stay L2Active.
+                            // Busy/Unknown — stop the NEW poller, stay L2Active.
                             // SSE was never closed.
-                            emit(StopPoller)
+                            stopPollerIfActiveLocked()
                         }
+                        CommitOutcome(null, ActivationCommitResult.PollerCommitted)
                     }
                     is SourceActivation.Rejected -> {
                         // Don't commit; stop the new poller, stay L2Active.
-                        emit(StopPoller)
+                        applyPrimaryPollerAckLocked(ph.expectedIdentity, ready = false)
+                        stopPollerIfActiveLocked()
+                        CommitOutcome(null, ActivationCommitResult.RetainedOldSource)
                     }
                 }
             }
             HandoffDecision.L2IdleExit -> {
-                // L2Idle → L1/L2Active: SSE transport readiness decides.
                 when (activation) {
-                    is SourceActivation.Ready -> commitSseTransport(fg)
+                    is SourceActivation.Ready -> commitSseTransport(ph.expectedIdentity, fg)
                     is SourceActivation.Rejected -> {
-                        // Don't commit. Poller stays running. Stay L2Idle.
+                        CommitOutcome(null, ActivationCommitResult.RetainedOldSource)
                     }
                 }
             }
             HandoffDecision.Teardown -> {
                 // → L3: regardless of activation (poller's state only affects
                 // the aggregator / notification, not the layer decision — L3
-                // is terminal for this run).
+                // is terminal for this run). The poller is the NEW source —
+                // it stays running (do NOT stop it). D5 (#2): the primary
+                // poller ack updates the runtime to Running (if Ready).
+                applyPrimaryPollerAckLocked(
+                    ph.expectedIdentity,
+                    ready = activation is SourceActivation.Ready,
+                )
                 emit(StopSse)
                 emit(StopForeground)
                 emit(StopSelf)
-                supplementalPollerActive = false
                 _layer.value = Layer.L3
+                CommitOutcome(null, ActivationCommitResult.PollerCommitted)
             }
             HandoffDecision.Bootstrap -> {
-                // L3 → L1/L2Active: SSE transport readiness decides.
                 when (activation) {
-                    is SourceActivation.Ready -> commitSseTransport(fg)
+                    is SourceActivation.Ready -> commitSseTransport(ph.expectedIdentity, fg)
                     is SourceActivation.Rejected -> {
-                        // SSE couldn't establish transport. Stay L3. The
-                        // bootstrap retry path (or the user re-opening the
-                        // app) handles recovery. Poller stays running (the
-                        // L3 source).
+                        CommitOutcome(
+                            null,
+                            ActivationCommitResult.BootstrapRejected(ph.expectedIdentity, activation),
+                        )
                     }
                 }
             }
         }
     }
 
+    private data class CommitOutcome(
+        val markReadyIdentity: ConnectionIdentity?,
+        val result: ActivationCommitResult,
+    )
+
     /**
-     * D4-B M3 — the SSE transport commit (Bootstrap + L2IdleExit share this
-     * body). Runs under [mutex]. Reads [StatusAggregator.stateAtNow] to
-     * decide the layer sub-state + whether to retire the supplemental
-     * poller. MUST be called under [mutex].
+     * D4-B M3 + D5 (#2/#3) — the SSE transport commit (Bootstrap +
+     * L2IdleExit share this body). Runs under [mutex]. Reads
+     * [StatusAggregator.stateAtNow] to decide the layer sub-state + whether
+     * to retire the supplemental poller. Returns the identity to markReady
+     * (for a current Bootstrap that commits into L1/L2) + the
+     * [ActivationCommitResult]. MUST be called under [mutex].
      */
-    private suspend fun commitSseTransport(fg: Boolean) {
+    private suspend fun commitSseTransport(
+        identity: ConnectionIdentity,
+        fg: Boolean,
+    ): CommitOutcome {
         val verdict = statusAggregator.stateAtNow()
         if (verdict == GlobalBusyState.Busy || verdict == GlobalBusyState.AllIdleFresh) {
             // Definitive status — retire the process poller (SSE is the source).
+            // D5 (#2): emit StopPoller directly (NOT via stopPollerIfActiveLocked)
+            // because the L3 primary poller may be running as an external source
+            // not tracked by pollerRuntime (it was started before the coordinator
+            // got involved). The runtime is reset to Stopped so subsequent
+            // definitive verdicts in handleL1/handleL2Active do NOT emit
+            // duplicate StopPoller.
             emit(StopPoller)
-            supplementalPollerActive = false
+            pollerRuntime = PollerRuntime.Stopped
         } else {
             // Unknown — commit the SSE transport + layer, KEEP the process
             // poller running as a supplemental status authority. Cleared
             // once a definitive verdict arrives (handleL1/handleL2Active).
-            supplementalPollerActive = true
+            ensureSupplementalPollerLocked(identity)
         }
+        var markReady: ConnectionIdentity? = null
+        var result: ActivationCommitResult = ActivationCommitResult.RetainedOldSource
         if (fg) {
             if (verdict.isKeepAlive) {
                 _layer.value = Layer.L1(busy = true)
+                markReady = identity
+                result = ActivationCommitResult.SseCommitted(identity)
             } else {
                 emit(StopForeground)
                 _layer.value = Layer.L1(busy = false)
+                markReady = identity
+                result = ActivationCommitResult.SseCommitted(identity)
             }
         } else {
             if (verdict.isKeepAlive) {
                 _layer.value = Layer.L2Active
+                markReady = identity
+                result = ActivationCommitResult.SseCommitted(identity)
             } else {
-                // Background idle (rare at bootstrap — the status snapshot
-                // was AllIdleFresh; the SSE activation succeeded anyway).
-                // Don't burn an FGS slot on idle background.
                 emit(StopForeground)
                 emit(StopSelf)
-                supplementalPollerActive = false
-                // Stay L3.
+                // D5 (#2): retire any poller (L3 primary or supplemental).
+                emit(StopPoller)
+                pollerRuntime = PollerRuntime.Stopped
+                // Stay L3 — do NOT markReady (background-idle stopSelf).
             }
         }
+        return CommitOutcome(markReady, result)
     }
 
     /**
      * D2: emits the StopX command that cancels a [kind] activation. Used by
-     * [cancelPendingHandoff] + the supersede path in [launchCommit].
+     * [cancelPendingHandoff] + the supersede path in [onActivationAck].
      */
     private suspend fun emitStopFor(kind: HandoffKind) {
         when (kind) {
@@ -1128,6 +1331,29 @@ sealed interface LifecycleCommand {
         val handoffToken: Long,
     ) : LifecycleCommand
 
-    /** Stop the poller (SSE has become the active source again). */
+    /**
+     * Stop the poller (SSE has become the active source again). D5 (#2):
+     * emitted by [StreamingLifecycleCoordinator.stopPollerIfActiveLocked]
+     * exactly once per active→Stopped transition (no duplicate emissions on
+     * repeated definitive verdicts).
+     */
     data object StopPoller : LifecycleCommand
+
+    /**
+     * D5 (#2) — ensure a SUPPLEMENTAL process poller is running for
+     * [identity]. Emitted by [StreamingLifecycleCoordinator.
+     * ensureSupplementalPollerLocked] when an SSE Bootstrap/L2Idle-exit
+     * commit finds the status verdict Unknown (the SSE transport proved
+     * itself but the REST status snapshot is not yet definitive). The
+     * controller acks via [StreamingLifecycleCoordinator.onEnsurePollerAck]
+     * with the matching [requestId].
+     *
+     * NOT a source-switch handoff — no SSE handoff token. The supplemental
+     * poller runs ALONGSIDE the SSE transport (both are active sources).
+     * Retired by [StopPoller] once a definitive verdict arrives.
+     */
+    data class EnsurePoller(
+        val identity: ConnectionIdentity,
+        val requestId: Long,
+    ) : LifecycleCommand
 }

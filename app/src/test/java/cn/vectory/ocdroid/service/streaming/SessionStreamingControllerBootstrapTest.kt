@@ -11,6 +11,7 @@ import cn.vectory.ocdroid.service.status.GlobalBusyState
 import cn.vectory.ocdroid.service.status.SessionBusyStatus
 import cn.vectory.ocdroid.service.status.SessionStatusKey
 import cn.vectory.ocdroid.service.status.StatusAggregator
+import cn.vectory.ocdroid.service.status.StatusSnapshot
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -399,6 +400,14 @@ class SessionStreamingControllerBootstrapTest {
 
         override fun stopPoller() {
             recorded += "stopPoller"
+        }
+
+        override suspend fun ensurePoller(
+            identity: ConnectionIdentity,
+            snapshot: StatusSnapshot,
+        ): SourceActivation {
+            recorded += "ensurePoller"
+            return SourceActivation.Ready
         }
 
         override suspend fun connectSse(identity: ConnectionIdentity): SourceActivation {

@@ -2,6 +2,7 @@ package cn.vectory.ocdroid.service.streaming
 
 import cn.vectory.ocdroid.service.identity.ConnectionIdentity
 import cn.vectory.ocdroid.service.identity.ConnectionIdentityStore
+import cn.vectory.ocdroid.service.lifecycle.ActivationCommitResult
 import cn.vectory.ocdroid.service.lifecycle.LifecycleCommand
 import cn.vectory.ocdroid.service.lifecycle.StreamingLifecycleCoordinator
 import cn.vectory.ocdroid.service.notify.NotificationStrings
@@ -80,19 +81,13 @@ class SessionStreamingController(
     private val bootstrapRetryPolicy: BootstrapRetryPolicy? = null,
     private val onBootstrapIdentity: suspend (ConnectionIdentity) -> Unit = {},
     /**
-     * D4-B B1/M3 — invoked when an SSE activation acks [SourceActivation.Ready]
-     * (transport proved). The Service wires this to
-     * [cn.vectory.ocdroid.service.StreamingOwnershipGate.markReady] so the
-     * Starting ownership is promoted to Ready + the launcher's waiter
-     * completes with [cn.vectory.ocdroid.service.OwnershipStartResult.Ready]
-     * (CC then publishes Connected). Idempotent for an already-Ready owner.
-     */
-    private val onSseTransportReady: suspend (ConnectionIdentity) -> Unit = {},
-    /**
      * D4-B B1 — invoked when the bootstrap exhausts its retry budget OR an
      * SSE activation is rejected for transport reasons (TransportTimeout /
-     * Exhausted). The Service wires this to its full B1 rollback
-     * (`failStarting` → waiters refused + Starting released + shell cleanup).
+     * Exhausted). D5 (#3): the coordinator's [onActivationAck] now returns
+     * [ActivationCommitResult.BootstrapRejected] for a current Bootstrap
+     * TransportTimeout/Exhausted — the controller calls this ONLY then.
+     * The Service wires this to its full B1 rollback (`failStarting` →
+     * waiters refused + Starting released + shell cleanup).
      * Passes the currently-bound identity (or null if none).
      */
     private val onBootstrapFailure: (ConnectionIdentity?) -> Unit = {},
@@ -255,21 +250,21 @@ class SessionStreamingController(
                 // D2: acknowledgeable activation. Launch on scope (non-blocking
                 // so the command collector can process concurrent commands —
                 // e.g., a teardown's StopSse that supersedes this activation).
+                // D5 (#3): the coordinator's onActivationAck now RETURNS the
+                // commit result — the controller reacts to BootstrapRejected
+                // by calling onBootstrapFailure. The coordinator owns the
+                // commit→markReady promotion (no fire-and-forget callback).
                 val token = cmd.handoffToken
                 val identity = cmd.identity
                 scope.launch {
                     val activation = shell.connectSse(identity)
-                    // D4-B B1/M3: transport readiness promotes Starting→Ready
-                    // ownership; transport rejection triggers B1 rollback.
-                    when (activation) {
-                        is SourceActivation.Ready -> onSseTransportReady(identity)
-                        is SourceActivation.Rejected.TransportTimeout,
-                        is SourceActivation.Rejected.Exhausted -> {
+                    val commit = coordinator.onActivationAck(token, activation)
+                    when (commit) {
+                        is ActivationCommitResult.BootstrapRejected -> {
                             onBootstrapFailure(identityStore.currentIdentity.value)
                         }
-                        else -> {}
+                        else -> Unit
                     }
-                    coordinator.onActivationAck(token, activation)
                 }
             }
             LifecycleCommand.StopSse -> {
@@ -278,9 +273,7 @@ class SessionStreamingController(
             is LifecycleCommand.StartPoller -> {
                 // D2 gate #4: acknowledgeable activation. The shell delegates
                 // to ProcessStatusPoller.startAndAwaitFirstPoll which does
-                // the immediate-first-poll (no 30s delay) + returns Ready(state).
-                // The shell call is suspend; launching on scope means the
-                // command collector is not blocked on the first poll.
+                // the immediate-first-poll (no 30s delay) + returns Ready.
                 val token = cmd.handoffToken
                 scope.launch {
                     val snapshot = sessionSnapshotProvider.current()
@@ -290,6 +283,19 @@ class SessionStreamingController(
             }
             LifecycleCommand.StopPoller -> {
                 shell.stopPoller()
+            }
+            is LifecycleCommand.EnsurePoller -> {
+                // D5 (#2): supplemental poller activation. The shell delegates
+                // to ProcessStatusPoller.ensureRunning (idempotent for same
+                // identity). The coordinator's onEnsurePollerAck consumes
+                // the result + updates the PollerRuntime.
+                val identity = cmd.identity
+                val requestId = cmd.requestId
+                scope.launch {
+                    val snapshot = sessionSnapshotProvider.current()
+                    val activation = shell.ensurePoller(identity, snapshot)
+                    coordinator.onEnsurePollerAck(identity, requestId, activation)
+                }
             }
         }
     }

@@ -41,6 +41,7 @@ import kotlinx.coroutines.test.runTest
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
@@ -180,8 +181,13 @@ class ServiceSseConnectionOwnerTest {
             listOf(evt),
             collectedFrames(),
         )
-        assertTrue(
-            "green-icon liveness written on success",
+        // D5 (#3): the SSE owner NO LONGER writes terminal Connected on a
+        // frame — only committed ownership / CC may publish Connected. The
+        // frame reaching the stream + the readiness completing Ready is the
+        // liveness proof; the green-icon write belongs to the commit→
+        // markReady→CC-Connected path.
+        assertFalse(
+            "SSE owner does NOT publish terminal Connected on a frame (D5 #3)",
             store.connectionFlow.value.isConnected,
         )
     }
@@ -214,9 +220,11 @@ class ServiceSseConnectionOwnerTest {
         assertEquals(SourceActivation.Rejected.TofuPending, result)
     }
 
-    // (4) success writes green-icon liveness state
+    // (4) D5 (#3): a successful frame does NOT publish terminal Connected
+    //     (only committed ownership / CC may). The frame reaches the stream
+    //     + readiness completes Ready — that is the liveness proof.
     @Test
-    fun `success writes green-icon liveness state`() = runTest {
+    fun `D5 3 - success does NOT write terminal Connected (only ownership commit may)`() = runTest {
         val identity = bindIdentity("/proj")
         aggregator.nextState = GlobalBusyState.Busy
         val feed = MutableSharedFlow<Result<SSEEvent>>(extraBufferCapacity = 8)
@@ -230,10 +238,20 @@ class ServiceSseConnectionOwnerTest {
         feed.tryEmit(Result.success(sseEvent("server.connected")))
         runPending()
 
+        // D5 (#3): the SSE owner must NOT mutate ConnectionPhase.Connected.
+        // The shared state stays at its initial (disconnected) value until
+        // the coordinator commit → ownership markReady → CC Connected path
+        // runs.
         val cs = store.connectionFlow.value
-        assertTrue("green-icon isConnected", cs.isConnected)
-        assertFalse("isConnecting cleared", cs.isConnecting)
-        assertEquals(ConnectionPhase.Connected, cs.connectionPhase)
+        assertFalse(
+            "SSE owner does NOT write isConnected=true on a frame (D5 #3)",
+            cs.isConnected,
+        )
+        assertNotEquals(
+            "SSE owner does NOT write ConnectionPhase.Connected on a frame (D5 #3)",
+            ConnectionPhase.Connected,
+            cs.connectionPhase,
+        )
     }
 
     // (5) event-level failure emits error_sse_failed (does NOT trigger recovery)
@@ -613,6 +631,148 @@ class ServiceSseConnectionOwnerTest {
     /** Helper: a tiny infinite-delay suspend. */
     private suspend fun pendingForever() {
         delay(Long.MAX_VALUE)
+    }
+
+    // ── D5 (#1): post-first-frame outage recovery (CRITICAL) ──────────────
+
+    // (16) Post-Ready recovery deterministic: first flow emits one frame →
+    //      Ready → same flow throws → exactly one CancelSse gap → retry #1
+    //      recovers → recovered frame reaches stream → no terminal callback.
+    //      Budget reset is verified by the (18) test (a second outage would
+    //      emit a SECOND new gap — covered there).
+    @Test
+    fun `D5 1a - post-Ready outage emits one gap then retry recovers - no terminal`() = runTest {
+        val identity = bindIdentity("/proj")
+        aggregator.nextState = GlobalBusyState.Busy
+        val recoveredFeed = MutableSharedFlow<Result<SSEEvent>>(extraBufferCapacity = 8)
+        every { repository.connectSSE(any()) } returnsMany listOf(
+            // Flow 1: emit one frame, then throw (post-Ready outage).
+            flow<Result<SSEEvent>> {
+                emit(Result.success(sseEvent("first")))
+                throw IOException("post-ready outage")
+            },
+            // Flow 2: recovered — SharedFlow the test emits on.
+            recoveredFeed.asSharedFlow(),
+        )
+
+        launchConnect(identity)
+        runPending()
+
+        // First frame → Ready.
+        assertTrue(
+            "first frame reached the stream",
+            collectedFrames().any { it.payload.type == "first" },
+        )
+
+        // The first flow threw → post-Ready outage path. Exactly ONE gap.
+        assertEquals(
+            "exactly one CancelSse gap after the post-Ready outage",
+            1,
+            collectedEffects.filterIsInstance<ControllerEffect.CancelSse>().size,
+        )
+        assertEquals(
+            "no terminal callback during recovery",
+            0,
+            disconnectRequests,
+        )
+
+        // Advance to retry #1 (delayMs(1)) — the second flow activates.
+        advanceOwnerTimeBy(policy.delayForAttempt(1))
+        runPending()
+
+        // Emit a recovered frame on the second flow.
+        recoveredFeed.tryEmit(Result.success(sseEvent("recovered")))
+        runPending()
+
+        assertTrue(
+            "recovered frame reached the stream (retry #1 succeeded)",
+            collectedFrames().any { it.payload.type == "recovered" },
+        )
+        assertEquals(
+            "no terminal callback after successful recovery",
+            0,
+            disconnectRequests,
+        )
+        // The gap flag was reset by the recovered frame → the gap count
+        // is STILL one (no duplicate for the first outage). A subsequent
+        // outage would emit a SECOND new gap (covered by test 18).
+        assertEquals(
+            "gap count still one after recovery (no duplicate for first outage)",
+            1,
+            collectedEffects.filterIsInstance<ControllerEffect.CancelSse>().size,
+        )
+    }
+
+    // (17) Post-Ready recovery exhausts: initial Ready then 3 service
+    //      attempts fail → one gap + four total flow instances (initial +
+    //      3 recovery) + terminal callback once + shared state Disconnected.
+    @Test
+    fun `D5 1b - post-Ready outage exhausts - one gap + four flows + terminal callback + Disconnected`() = runTest {
+        val identity = bindIdentity("/proj")
+        aggregator.nextState = GlobalBusyState.Busy
+        // Flow 1: emit one frame (Ready), then throw (post-Ready outage).
+        // Flows 2-4: throw immediately (3 recovery attempts all fail).
+        every { repository.connectSSE(any()) } returnsMany listOf(
+            flow<Result<SSEEvent>> {
+                emit(Result.success(sseEvent("first")))
+                throw IOException("post-ready outage")
+            },
+            flow<Result<SSEEvent>> { throw IOException("recovery-1 fail") },
+            flow<Result<SSEEvent>> { throw IOException("recovery-2 fail") },
+            flow<Result<SSEEvent>> { throw IOException("recovery-3 fail") },
+        )
+
+        launchConnect(identity)
+        runPending()
+
+        // First frame → Ready.
+        assertTrue(
+            "first frame reached the stream",
+            collectedFrames().any { it.payload.type == "first" },
+        )
+
+        // Post-Ready outage: exactly ONE gap (idempotent).
+        assertEquals(
+            "exactly one CancelSse gap after the post-Ready outage",
+            1,
+            collectedEffects.filterIsInstance<ControllerEffect.CancelSse>().size,
+        )
+
+        // Advance through the 3 recovery delays (30s/2m/5m in prod; 1ms/
+        // 2ms/3ms in test). All 3 recovery attempts fail → terminal
+        // exhaustion.
+        advanceOwnerTimeBy(policy.delayForAttempt(1))
+        runPending()
+        advanceOwnerTimeBy(policy.delayForAttempt(2))
+        runPending()
+        advanceOwnerTimeBy(policy.delayForAttempt(3))
+        runPending()
+
+        // Terminal exhaustion: exactly ONE callback.
+        assertEquals(
+            "onTerminalExhaustion invoked exactly once after budget exhaustion",
+            1,
+            disconnectRequests,
+        )
+        // Shared state written to Disconnected.
+        assertEquals(
+            "shared state Disconnected after terminal exhaustion",
+            ConnectionPhase.Disconnected,
+            store.connectionFlow.value.connectionPhase,
+        )
+        assertFalse(
+            "isConnected=false after terminal exhaustion",
+            store.connectionFlow.value.isConnected,
+        )
+        // Gap count is STILL one (idempotent for the same outage — no
+        // duplicate gaps across the 3 recovery failures).
+        assertEquals(
+            "gap count still one after exhaustion (idempotent)",
+            1,
+            collectedEffects.filterIsInstance<ControllerEffect.CancelSse>().size,
+        )
+        // Four total flow instances: initial + 3 recovery.
+        verify(exactly = 4) { repository.connectSSE(any()) }
     }
 
     /**

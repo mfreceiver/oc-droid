@@ -9,6 +9,7 @@ import io.mockk.coEvery
 import io.mockk.mockk
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.test.advanceTimeBy
+import kotlinx.coroutines.test.advanceUntilIdle
 import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.CompletableDeferred
@@ -244,12 +245,30 @@ class StatusAggregatorImplTest {
 
     @Test
     fun `M7 concurrent REST completions commit entries and coverage as one aggregate`() = runTest {
+        // D5 (#6): replace the `while (calls.get() < 2) yield()` unbounded
+        // scheduler poll (flaky under load — depended on the dispatcher
+        // interleaving both refresh() invocations before either could
+        // complete) with two ENTRY barriers (firstEntered / secondEntered
+        // completed inside the coAnswers when each invocation ENTERS) + two
+        // RESPONSE barriers (firstResponse / secondResponse). The test
+        // releases the second response first, then the first — so the
+        // committed-aggregate order is deterministic + the assert is
+        // against the quiescent final aggregate + flows, not the
+        // interleaving.
         val repo = mockk<OpenCodeRepository>(relaxed = true)
         val first = CompletableDeferred<Result<Map<String, SessionStatus>>>()
         val second = CompletableDeferred<Result<Map<String, SessionStatus>>>()
+        val firstEntered = CompletableDeferred<Unit>()
+        val secondEntered = CompletableDeferred<Unit>()
         val calls = AtomicInteger()
         coEvery { repo.getSessionStatus() } coAnswers {
-            if (calls.getAndIncrement() == 0) first.await() else second.await()
+            if (calls.getAndIncrement() == 0) {
+                firstEntered.complete(Unit)
+                first.await()
+            } else {
+                secondEntered.complete(Unit)
+                second.await()
+            }
         }
         val ticks = AtomicInteger(100)
         val aggregator = newAggregator(repo, clock = { ticks.getAndIncrement().toLong() }, scope = backgroundScope)
@@ -265,10 +284,22 @@ class StatusAggregatorImplTest {
                 snapshot(mapOf("b" to session("b", "/b")), setOf("/b", "/zero-b")),
             )
         }
-        while (calls.get() < 2) kotlinx.coroutines.yield()
+        // Wait until BOTH invocations have entered their coAnswers barrier
+        // (no unbounded loop / scheduler polling — the CompletableDeferreds
+        // complete exactly once per entry).
+        firstEntered.await()
+        secondEntered.await()
+        // Release both responses (second first, then first — the publication
+        // lock serializes both commits). D5 (#5): the synchronized lock in
+        // update is blocking; withContext(Dispatchers.IO) in refresh switches
+        // to a real IO thread. Completing both responses before awaiting lets
+        // both IO threads process their update + switch back to the test
+        // dispatcher without the test dispatcher being blocked on await.
+        // advanceUntilIdle lets the test dispatcher process the switch-backs.
         second.complete(Result.success(emptyMap()))
-        b.await()
         first.complete(Result.success(mapOf("a" to SessionStatus(type = "busy"))))
+        advanceUntilIdle()
+        b.await()
         a.await()
 
         assertEquals(SessionBusyStatus.Busy, aggregator.statusByKey.value[key("a", "/a", "group-a")])

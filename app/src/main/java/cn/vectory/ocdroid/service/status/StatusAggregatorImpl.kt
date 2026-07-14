@@ -162,6 +162,26 @@ class StatusAggregatorImpl internal constructor(
     /** M7: entries, coverage and projection identity commit in one CAS. */
     private val aggregate = AtomicReference(Aggregate.Empty)
 
+    /**
+     * D5 (#5): the publication lock. The atomic [aggregate] swap alone is
+     * insufficient for R5 — concurrent updaters can interleave the write of
+     * the aggregate with the derivation + publication of [_statusByKey] /
+     * [_globalBusy] / [_globalState] / [freshnessJob] reschedule, so a
+     * derived StateFlow could momentarily publish a verdict computed from
+     * an OLDER aggregate while a newer one is already installed (or vice
+     * versa, an early reader could pair a new map with a stale verdict).
+     *
+     * The transform itself MUST stay pure + memory-only (no network work);
+     * REST/SSE side-effects happen BEFORE [update] is called. Inside the
+     * single critical section: write aggregate → derive map/busy/verdict →
+     * publish `_statusByKey` → `_globalBusy` → `_globalState` → cancel /
+     * reschedule [freshnessJob]. [stateAtNow] intentionally stays lock-free
+     * (it computes from one immutable [Aggregate] snapshot via
+     * [AtomicReference.get]); the publication lock only serializes
+     * mutations + derived StateFlow writes, not lock-free reads.
+     */
+    private val commitPublishLock = Any()
+
     private val _globalState = MutableStateFlow(GlobalBusyState.Unknown)
     private val _globalBusy = MutableStateFlow(false)
     private val _statusByKey = MutableStateFlow<Map<SessionStatusKey, SessionBusyStatus>>(emptyMap())
@@ -349,13 +369,25 @@ class StatusAggregatorImpl internal constructor(
         }
     }
 
-    // ── Internal: CAS step + projection recompute ──────────────────────────
+    // ── Internal: serialized commit + projection publication ───────────────
 
     /**
-     * Atomically swap the state map and recompute the three projected [StateFlow]s inside
-     * the same CAS step. [transform] MUST be pure — it is re-invoked on every CAS retry.
+     * D5 (#5) — serialized commit + publication. Replaces the prior CAS loop
+     * (D4-A M7): the atomic swap alone did not serialize the derived
+     * StateFlow publication, so two concurrent updaters could interleave a
+     * new aggregate write with the publication of a verdict computed from
+     * the older one (R5 violation).
      *
-     * D1 (gate #1): after every committed swap, [rescheduleFreshness] arms the
+     * Contract:
+     *  - [transform] is PURE + memory-only — it is invoked INSIDE the
+     *    critical section, so it MUST NOT perform network/REST work or any
+     *    retryable side-effect (all REST/SSE work happens BEFORE [update]
+     *    is called).
+     *  - Inside the single critical section: write aggregate → derive
+     *    map/busy/verdict → publish `_statusByKey` → `_globalBusy` →
+     *    `_globalState` → cancel/reschedule [freshnessJob].
+     *
+     * D1 (gate #1): after every committed swap, [publishLocked] arms the
      * single passive-TTL wake-up for the earliest deadline that can flip the
      * projection (each Idle entry's `sourceTimeMs + STATUS_TTL_MS + 1`, plus
      * the coverage marker's TTL).
@@ -366,25 +398,33 @@ class StatusAggregatorImpl internal constructor(
      * produced zero map writes (but DID update [coverage]) would skip
      * recompute and the projection never saw the new coverage marker. The
      * recompute is idempotent (a no-op if neither map nor coverage changed),
-     * so unconditionally running it on every CAS commit is cheap and the
+     * so unconditionally running it on every commit is cheap and the
      * coverage atomic guarantees the projection sees the latest coverage
      * value committed alongside the state map.
      */
     private inline fun update(transform: (Aggregate) -> Aggregate) {
-        while (true) {
+        synchronized(commitPublishLock) {
             val current = aggregate.get()
             val next = transform(current)
-            if (aggregate.compareAndSet(current, next)) {
-                recompute(next)
-                return
-            }
+            aggregate.set(next)
+            publishLocked(next, clock())
         }
     }
 
-    private fun recompute(committed: Aggregate) {
+    /**
+     * D5 (#5) — derives + publishes the three projected [StateFlow]s for the
+     * committed [Aggregate]. **MUST be called holding [commitPublishLock]**;
+     * callers outside [update] MUST acquire the lock first (the
+     * [freshnessJob] wake-up does so before recomputing the TTL-adjusted
+     * verdict from the live aggregate).
+     *
+     * Publication order: `_statusByKey` → `_globalBusy` → `_globalState`
+     * (so verdict observers cannot pair a new state with the previous
+     * commit's status map), then [rescheduleFreshnessLocked].
+     */
+    private fun publishLocked(committed: Aggregate, now: Long) {
         val map = committed.entries
         val cov = committed.coverage
-        val now = clock()
         val verdict = project(committed, now)
         // globalBusy: any Busy||Retry under the current identity OR any
         // unmapped-active id (D1 gate #5). Kept for back-compat with non-
@@ -401,7 +441,7 @@ class StatusAggregatorImpl internal constructor(
         _statusByKey.value = map.mapValues { it.value.status }
         _globalBusy.value = anyBusy
         _globalState.value = verdict
-        rescheduleFreshness(committed, now)
+        rescheduleFreshnessLocked(committed, now)
     }
 
     /**
@@ -475,22 +515,30 @@ class StatusAggregatorImpl internal constructor(
     }
 
     /**
-     * D1 (gate #1): schedule a single [freshnessJob] for the earliest
-     * current-identity deadline that can alter the projection. Busy/Retry
-     * entries need no wake-up (they stay conservatively busy); Idle entries
-     * flip to Unknown at `sourceTimeMs + STATUS_TTL_MS + 1`. The successful-
-     * snapshot coverage marker (`coverage.lastSuccessTimeMs`) is itself a
-     * deadline source: when it ages out the empty-state guard can flip the
-     * verdict.
+     * D1 (gate #1) + D5 (#5): schedule a single [freshnessJob] for the
+     * earliest current-identity deadline that can alter the projection.
+     * Busy/Retry entries need no wake-up (they stay conservatively busy);
+     * Idle entries flip to Unknown at `sourceTimeMs + STATUS_TTL_MS + 1`.
+     * The successful-snapshot coverage marker
+     * (`coverage.lastSuccessTimeMs`) is itself a deadline source: when it
+     * ages out the empty-state guard can flip the verdict.
      *
      * Only **strictly future** deadlines are scheduled — past deadlines
-     * were already consumed by the [recompute] that called this method (the
-     * projection saw `now > deadline` and applied the stale/Unknown verdict
-     * synchronously). Scheduling a 0-delay launch on an Unconfined-style
-     * scope would otherwise infinite-loop on the same stale deadline.
+     * were already consumed by the [publishLocked] that called this method
+     * (the projection saw `now > deadline` and applied the stale/Unknown
+     * verdict synchronously). Scheduling a 0-delay launch on an
+     * Unconfined-style scope would otherwise infinite-loop on the same
+     * stale deadline.
+     *
+     * D5 (#5): **MUST be called holding [commitPublishLock]** (the prior
+     * `@Synchronized` monitor is replaced by the publication lock so the
+     * freshness reschedule stays serialized with derived StateFlow
+     * publication — a stale `freshnessJob` could otherwise race a new
+     * publication). The wake-up coroutine itself ACQUIRES
+     * [commitPublishLock] before recomputing + republishing so it observes
+     * the same memory visibility as the serial state-machine mutations.
      */
-    @Synchronized
-    private fun rescheduleFreshness(committed: Aggregate, now: Long) {
+    private fun rescheduleFreshnessLocked(committed: Aggregate, now: Long) {
         freshnessJob?.cancel()
         val map = committed.entries
         val cov = committed.coverage
@@ -516,13 +564,16 @@ class StatusAggregatorImpl internal constructor(
                 throw e
             }
             try {
-                val live = aggregate.get()
-                val liveNow = clock()
-                val verdict = project(live, liveNow)
-                if (verdict != _globalState.value) {
-                    _globalState.value = verdict
+                // D5 (#5): acquire commitPublishLock so the TTL-adjusted
+                // recompute + republish observe the same memory visibility
+                // as serial state-machine mutations. Without the lock a
+                // concurrent update could install a newer aggregate + we'd
+                // publish a verdict computed from the older one (R5).
+                synchronized(commitPublishLock) {
+                    val live = aggregate.get()
+                    val liveNow = clock()
+                    publishLocked(live, liveNow)
                 }
-                rescheduleFreshness(live, liveNow)
             } catch (e: kotlinx.coroutines.CancellationException) {
                 throw e
             } catch (e: Throwable) {

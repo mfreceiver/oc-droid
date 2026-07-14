@@ -485,6 +485,15 @@ class SessionStreamingControllerDispatchTest {
             recorded += "stopPoller"
         }
 
+        override suspend fun ensurePoller(
+            identity: ConnectionIdentity,
+            snapshot: StatusSnapshot,
+        ): SourceActivation {
+            recorded += "ensurePoller(epoch=${identity.epoch})"
+            onPollRefresh?.invoke(identity, snapshot)
+            return nextPollerActivation
+        }
+
         override suspend fun connectSse(identity: ConnectionIdentity): SourceActivation {
             recorded += "connectSse(epoch=${identity.epoch})"
             return nextSseActivation

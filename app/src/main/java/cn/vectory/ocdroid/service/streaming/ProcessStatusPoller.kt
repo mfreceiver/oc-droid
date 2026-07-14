@@ -98,6 +98,15 @@ class ProcessStatusPoller internal constructor(
     private var generation: Long = 0L
 
     /**
+     * D5 (#2) — the identity of the currently-running loop (or null when
+     * no loop is active). Read/written under [stateLock]; cleared by [stop]
+     * so a stale/superseded loop must not claim itself Running. Used by
+     * [ensureRunning] for idempotent same-identity no-op.
+     */
+    @Volatile
+    private var runningIdentity: ConnectionIdentity? = null
+
+    /**
      * D2 §4.4 — the immediate-first-poll entry. Cancels + joins any prior
      * poller (single-flight), performs ONE immediate status refresh using
      * the caller-captured [identity] + [snapshot], returns the time-correct
@@ -168,6 +177,9 @@ class ProcessStatusPoller internal constructor(
             return@withLock SourceActivation.Rejected.Superseded
         }
         newJob.start()
+        // D5 (#2): record the running identity so ensureRunning can no-op
+        // for the same identity + stop() can clear it.
+        runningIdentity = identity
         // D4-B M3: transport readiness carries no status verdict — the
         // coordinator reads statusAggregator.stateAtNow() at handoff commit.
         SourceActivation.Ready
@@ -181,6 +193,10 @@ class ProcessStatusPoller internal constructor(
      * L2Idle → L2Active transition commits (the SSE source replaces the
      * poller).
      *
+     * D5 (#2): clears the running identity so a stale/superseded loop must
+     * not claim itself Running. A subsequent [ensureRunning] for the same
+     * identity will see no running loop + start a fresh one.
+     *
      * Does NOT cancel the [ApplicationScope] itself — only the loop job.
      * The process-level scope is owned by Hilt and lives for the process;
      * Service.onDestroy does not reach into it.
@@ -188,9 +204,39 @@ class ProcessStatusPoller internal constructor(
     fun stop() {
         val job = synchronized(stateLock) {
             generation += 1
+            runningIdentity = null
             loopJob.also { loopJob = null }
         }
         job?.cancel()
+    }
+
+    /**
+     * D5 (#2) — the supplemental poller entry. Tracks the actually-installed
+     * loop identity; if the same identity is already running, returns Ready
+     * WITHOUT cancel/restart (idempotent). Otherwise starts a fresh loop
+     * via [startAndAwaitFirstPoll] + awaits its first poll.
+     *
+     * Used by [ServiceShell.ensurePoller] which the controller delegates
+     * [LifecycleCommand.EnsurePoller] to. The coordinator's
+     * [StreamingLifecycleCoordinator.onEnsurePollerAck] consumes the result.
+     *
+     * @param identity the atomic identity capture from the command.
+     * @param snapshot the atomic snapshot capture from the command.
+     */
+    suspend fun ensureRunning(
+        identity: ConnectionIdentity,
+        snapshot: StatusSnapshot,
+    ): SourceActivation {
+        val current = synchronized(stateLock) { runningIdentity }
+        if (current == identity && loopJob?.isActive == true) {
+            // Same identity already running — no-op (idempotent).
+            return SourceActivation.Ready
+        }
+        val activation = startAndAwaitFirstPoll(identity, snapshot)
+        if (activation is SourceActivation.Ready) {
+            synchronized(stateLock) { runningIdentity = identity }
+        }
+        return activation
     }
 
     private suspend fun runRefresh(identity: ConnectionIdentity, snapshot: StatusSnapshot) {

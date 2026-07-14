@@ -849,11 +849,14 @@ class StreamingLifecycleCoordinatorTest {
         // authoritatively label the host idle until a fresh successful snapshot arrives.
         assertEquals(Layer.L2Active, coordinator.layer.value)
         val startSse = commands.filterIsInstance<LifecycleCommand.StartSse>().single()
-        // D4-B M3: Unknown at commit keeps the supplemental process poller
-        // running — NO StopPoller is emitted (status authority is not yet
+        // D5 (#2): Unknown at commit starts a SUPPLEMENTAL process poller via
+        // EnsurePoller (replaces the old fake `supplementalPollerActive: Boolean`
+        // flag). NO StopPoller is emitted (status authority is not yet
         // definitive). The SSE transport still commits + the layer flips.
+        val ensurePoller = commands.filterIsInstance<LifecycleCommand.EnsurePoller>().single()
+        assertEquals(identity, ensurePoller.identity)
         assertEquals(
-            listOf(startSse),
+            listOf(startSse, ensurePoller),
             commands,
         )
     }
@@ -914,8 +917,11 @@ class StreamingLifecycleCoordinatorTest {
 
         assertEquals(Layer.L2Active, coordinator.layer.value)
         val startSse = commands.filterIsInstance<LifecycleCommand.StartSse>().single()
-        // D4-B M3: Unknown at commit keeps the supplemental poller running —
-        // NO StopPoller (status authority not yet definitive).
+        // D5 (#2): Unknown at commit — the existing L2Idle poller (Primary,
+        // already Running) is reused as the supplemental status authority.
+        // ensureSupplementalPollerLocked is a no-op (Running same identity).
+        // NO StopPoller (status authority not yet definitive). NO
+        // EnsurePoller (the poller is already running).
         assertEquals(
             listOf(startSse),
             commands,

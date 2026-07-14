@@ -152,6 +152,38 @@ class ServiceSseConnectionOwner(
     private var transportGenerationCounter: Long = 0L
 
     /**
+     * D5 (#1) — CRITICAL post-Ready outage recovery marker. The D4-B
+     * `if (readiness.isCompleted) return@launch` guard at the collector's
+     * post-flow-break exit was wrong: the first valid frame completes
+     * `readiness` with Ready, so ANY later flow failure / abnormal
+     * completion exited SILENTLY — skipping gap-dirty / retry / 30s-2m-5m
+     * recovery / terminal-exhaustion / L3 teardown / ownership release
+     * (R1 violation: a post-Ready outage is a REAL outage, not a clean
+     * teardown).
+     *
+     * The fix is an EXPLICIT per-generation closing marker, set ONLY on
+     * intentional closing paths (transport timeout / disconnect /
+     * supersession in setupConnectLocked / cancelForShutdown) BEFORE the
+     * cancellation/invalidation. A successful frame / Ready MUST NEVER set
+     * it; a new accepted generation does NOT inherit the prior marker
+     * (generations are monotonic, so matching by generation suffices). The
+     * collector's post-flow-break exit now checks `isClosing(generation)`
+     * (NOT `readiness.isCompleted`), so a non-closing failure routes through
+     * `onCollectionException` → gap → retry → exhaustion → L3 teardown as
+     * R1 requires.
+     */
+    @Volatile
+    private var closingGeneration: Long = NO_GENERATION
+
+    private fun isClosing(generation: Long): Boolean = closingGeneration == generation
+
+    private fun markClosing(generation: Long) {
+        // Compare-and-set keeps the marker scoped to the intended generation
+        // — a newer generation that already bumped past it is unaffected.
+        if (transportGenerationCounter == generation) closingGeneration = generation
+    }
+
+    /**
      * D2 gate #7: the transport generation for which the gap-dirty signal
      * has already been emitted. `-1L` = "no gap emitted for the current
      * generation". Reset to `-1L` on every successful current-identity frame
@@ -241,6 +273,14 @@ class ServiceSseConnectionOwner(
         // §A3.3 — cancel + null previous collector. Cancel prior readiness
         // (the prior connect's await throws CancellationException → its
         // controller launch dies without acking).
+        // D5 (#1): mark the PRIOR generation as closing BEFORE the cancel so
+        // a collector whose flow breaks at this exact moment exits silently
+        // (supersession is an intentional closing path, NOT a transport
+        // outage). `transportGenerationCounter` is still the prior
+        // generation here — the bump below allocates a fresh, non-closing
+        // generation. Matching-by-generation means the new generation does
+        // NOT inherit the prior marker.
+        markClosing(transportGenerationCounter)
         sseJob?.cancel()
         sseJob = null
         transportTimeoutJob?.cancel()
@@ -277,6 +317,11 @@ class ServiceSseConnectionOwner(
         }
         if (isCurrentTransport(generation) && !readiness.isCompleted) {
             DebugLog.w(TAG, "transport timeout (gen=$generation, ${transportTimeoutMs}ms, no frame)")
+            // D5 (#1): mark this generation as closing BEFORE the cancel so
+            // the collector's post-flow-break exit is silent (transport
+            // timeout is an intentional closing path, NOT a transport
+            // outage — gap/retry MUST NOT fire).
+            markClosing(generation)
             // Cancel the collector so it does not keep churning after the
             // activation has been rejected.
             transportTimeoutJob = null
@@ -368,15 +413,28 @@ class ServiceSseConnectionOwner(
             if (!isCurrentTransport(identity, generation)) {
                 return@launch
             }
-            // D4-B M3: if transport readiness already completed (timeout or
-            // otherwise) the collector is being torn down — exit silently.
-            if (readiness.isCompleted) {
+            // D5 (#1) CRITICAL: do NOT infer teardown from
+            // `readiness.isCompleted`. The first valid frame completes
+            // `readiness` with Ready (transport proved), so a post-Ready
+            // flow break would otherwise exit SILENTLY — skipping gap /
+            // retry / 30s-2m-5m recovery / terminal-exhaustion / L3
+            // teardown / ownership release (R1 violation). Only an EXPLICIT
+            // per-generation closing marker (set by transport-timeout /
+            // disconnect / supersession / shutdown) may suppress recovery.
+            if (isClosing(generation)) {
                 return@launch
             }
             val failureThrowable = failure
                 ?: java.io.IOException("SSE flow completed without an explicit error")
             onCollectionException(identity, generation, failureThrowable)
             // 3. After handling the failure: if budget exhausted, exit.
+            //    D5 (#1): a post-Ready terminal exhaustion MUST run the
+            //    Disconnected write + onTerminalExhaustion() + lifecycle
+            //    teardown + ownership release EVEN IF
+            //    `readiness.complete(Rejected.Exhausted)` returns false
+            //    (the deferred is already completed with Ready — that is
+            //    harmless). The exhaustion callback is the gate, NOT the
+            //    readiness completion result.
             if (retriesUsed >= recoveryPolicy.attempts) {
                 if (isCurrentTransport(identity, generation) &&
                     exhaustedReportedForGen != generation
@@ -390,6 +448,9 @@ class ServiceSseConnectionOwner(
                             connectionPhase = ConnectionPhase.Disconnected,
                         )
                     }
+                    // May harmlessly return false if readiness was already
+                    // completed with Ready at the first frame — that MUST
+                    // NOT gate the Disconnected write / callback below.
                     readiness.complete(SourceActivation.Rejected.Exhausted)
                     onTerminalExhaustion()
                 }
@@ -411,10 +472,25 @@ class ServiceSseConnectionOwner(
     /**
      * D4-B M3 — first-frame transport readiness + gap-reset side-effect
      * handler. Called for every successful current-identity frame. On the
-     * FIRST such frame: writes liveness, publishes the event, completes
-     * [readiness] with [SourceActivation.Ready], cancels the transport
-     * timeout, and resets the gap flag. Does NOT perform a REST status
-     * refresh — the status authority is the coordinator's concern at commit.
+     * FIRST such frame: publishes the event, completes [readiness] with
+     * [SourceActivation.Ready], cancels the transport timeout, and resets
+     * the gap flag. Does NOT perform a REST status refresh — the status
+     * authority is the coordinator's concern at commit.
+     *
+     * D5 (#1): a recovered frame (post-Ready, after a retry cycle) resets
+     * `retriesUsed=0` (the caller's local) + [gapEmittedForGen]=-1L so a
+     * new outage can begin. It does NOT recreate the transport timeout
+     * (the one-time transport timeout exists ONLY before the first valid
+     * frame; post-Ready outages use ONLY [SseRecoveryPolicy]) and does NOT
+     * emit a second activation ack (the readiness deferred is already
+     * complete with Ready — `!readiness.isCompleted` guards the ack path).
+     *
+     * D5 (#3): the `sharedStateStore.mutateConnection { ... Connected }`
+     * write is REMOVED — a frame proves liveness via event publication +
+     * activation readiness + gap reset, but ONLY a committed ownership /
+     * ConnectionCoordinator may publish terminal Connected. Transient
+     * post-Ready outages need not immediately mark Disconnected either
+     * (final exhaustion already does).
      *
      * Resetting [gapEmittedForGen] = -1 means the next failure starts a NEW
      * outage (a new gap emission). This is the §1.1 "observed transport-
@@ -427,29 +503,27 @@ class ServiceSseConnectionOwner(
         readiness: CompletableDeferred<SourceActivation>,
     ) {
         if (!isCurrentTransport(identity, generation)) return
-        // SSE liveness: a successful event (initial connect OR retryWhen
-        // recovery after a network outage) proves the server is reachable.
-        sharedStateStore.mutateConnection {
-            it.copy(
-                isConnected = true,
-                isConnecting = false,
-                connectionPhase = ConnectionPhase.Connected,
-            )
-        }
         // Publish into the process-wide stream — the bridge (subscribed
         // eagerly from AppCore) routes through the §2 epoch guard + §11
         // dual-channel + re-emits each validated frame as OnSseEvent for
-        // SSC's fold.
+        // SSC's fold. D5 (#3): a frame proves liveness via event
+        // publication + activation readiness + gap reset; it does NOT
+        // publish terminal Connected (only committed ownership / CC may).
         sseEventStream.emit(Result.success(IdentifiedSseEvent(identity, event)))
         // D4-B M3: transport readiness completes on the first frame — NO
         // status refresh, NO baseline gating. Cancel the transport timeout
-        // (the transport proved itself).
+        // (the transport proved itself). D5 (#1): post-Ready recovered
+        // frames take the `!readiness.isCompleted` false branch — no second
+        // ack, no transport-timeout recreation.
         if (!readiness.isCompleted) {
             transportTimeoutJob?.cancel()
             transportTimeoutJob = null
             readiness.complete(SourceActivation.Ready)
         }
         // Reset the per-generation gap flag — a new outage can begin.
+        // D5 (#1): this also applies to a post-Ready recovered frame, so
+        // a subsequent outage emits a fresh gap (NOT a duplicate of the
+        // pre-recovery one).
         gapEmittedForGen = -1L
     }
 
@@ -518,6 +592,13 @@ class ServiceSseConnectionOwner(
      */
     suspend fun disconnect(markGap: Boolean = true) {
         val job = connectMutex.withLock {
+            // D5 (#1): mark the current generation as closing BEFORE the
+            // cancel so the collector's post-flow-break exit is silent
+            // (disconnect is an intentional closing path — gap is emitted
+            // explicitly below via emitGapOnce when markGap=true, NOT via
+            // the collector's outage path).
+            val closingGen = transportGenerationCounter
+            markClosing(closingGen)
             val job = sseJob
             sseJob = null
             transportTimeoutJob?.cancel()
@@ -542,6 +623,10 @@ class ServiceSseConnectionOwner(
 
     /** Synchronous Service-destruction fallback; normal L3 teardown already joined. */
     fun cancelForShutdown() {
+        // D5 (#1): mark closing BEFORE the cancel so a collector whose flow
+        // is breaking at this exact moment exits silently (shutdown is an
+        // intentional closing path — no false transport-outage signal).
+        markClosing(transportGenerationCounter)
         transportGenerationCounter += 1
         sseJob?.cancel()
         sseJob = null
@@ -560,6 +645,14 @@ class ServiceSseConnectionOwner(
 
     private companion object {
         private const val TAG = "ServiceSseOwner"
+
+        /**
+         * D5 (#1): sentinel for "no generation is closing". Generations are
+         * monotonic starting from 0 (the first accepted connect bumps
+         * `transportGenerationCounter` to 1), so `-1L` cannot collide with
+         * any real generation.
+         */
+        private const val NO_GENERATION: Long = -1L
 
         /**
          * D4-B M3: the bounded window (30s) for the first valid current-

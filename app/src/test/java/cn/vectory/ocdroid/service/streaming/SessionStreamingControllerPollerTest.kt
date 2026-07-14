@@ -216,6 +216,13 @@ class SessionStreamingControllerPollerTest {
         override fun stopPoller() {
             recorded += "stopPoller"
         }
+        override suspend fun ensurePoller(
+            identity: ConnectionIdentity,
+            snapshot: StatusSnapshot,
+        ): SourceActivation {
+            recorded += "ensurePoller"
+            return nextPollerActivation
+        }
         override suspend fun connectSse(identity: ConnectionIdentity): SourceActivation {
             recorded += "connectSse"
             return nextSseActivation

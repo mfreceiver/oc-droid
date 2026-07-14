@@ -217,6 +217,14 @@ class SessionStreamingService : Service() {
             // when the DebounceFire handoff cancels a non-idle poller.
             processStatusPoller.stop()
         }
+        override suspend fun ensurePoller(
+            identity: ConnectionIdentity,
+            snapshot: cn.vectory.ocdroid.service.status.StatusSnapshot,
+        ): cn.vectory.ocdroid.service.streaming.SourceActivation {
+            // D5 (#2): delegate to the process-level poller's ensureRunning.
+            // Idempotent for the same identity (no cancel/restart).
+            return processStatusPoller.ensureRunning(identity, snapshot)
+        }
         override suspend fun connectSse(identity: ConnectionIdentity): cn.vectory.ocdroid.service.streaming.SourceActivation {
             // CP9 + D2 gate #4: SSE collector owned here; connect is suspend
             // returning SourceActivation. The coordinator's §4.4 ordering
@@ -298,7 +306,6 @@ class SessionStreamingService : Service() {
             scope = scope,
             bootstrapRetryPolicy = bootstrapRetryPolicy,
             onBootstrapIdentity = { identity -> registerStartingOwnership(identity) },
-            onSseTransportReady = { identity -> ownershipGate.markReady(identity) },
             onBootstrapFailure = { identity -> failStarting(identity) },
         ).also { it.start() }
     }
