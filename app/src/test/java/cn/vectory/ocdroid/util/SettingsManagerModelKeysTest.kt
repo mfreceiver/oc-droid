@@ -150,58 +150,15 @@ class SettingsManagerModelKeysTest {
     }
 
     // ───────────────── getModelForSession / setModelForSession (composite key) ─────────────────
-    // Phase 5: composite (fp, sessionId) map key — see SettingsManager.getDraftText doc.
-
-    @Test
-    fun `setModelForSession round trip via slash-separated provider and model`() {
-        settings.setModelForSession("g1", "sess-1", "openai", "gpt-4o")
-
-        val model = settings.getModelForSession("g1", "sess-1")
-        assertEquals("openai", model?.providerId)
-        assertEquals("gpt-4o", model?.modelId)
-    }
-
-    @Test
-    fun `getModelForSession returns null for unknown session`() {
-        assertNull(settings.getModelForSession("g1", "never-seen"))
-    }
-
-    @Test
-    fun `getModelForSession survives a corrupt stored value`() {
-        // Manually inject a value without the expected "provider/model" shape.
-        // The parser splits on "/" with limit 2; a single segment has size 1
-        // and must yield null rather than throwing.
-        settings.setModelForSession("g1", "sess-1", "no-slash-here", "")
-        // The setter stores "no-slash-here/" — split("/", 2) gives 2 parts
-        // where the second is empty. Assert the contract: it doesn't throw and
-        // either decodes or returns null.
-        val m = settings.getModelForSession("g1", "sess-1")
-        if (m != null) {
-            assertEquals("no-slash-here", m.providerId)
-            assertEquals("", m.modelId)
-        }
-    }
-
-    @Test
-    fun `per-session model storage is independent across sessions`() {
-        settings.setModelForSession("g1", "s1", "openai", "gpt-4")
-        settings.setModelForSession("g1", "s2", "anthropic", "claude")
-
-        assertEquals("gpt-4", settings.getModelForSession("g1", "s1")?.modelId)
-        assertEquals("claude", settings.getModelForSession("g1", "s2")?.modelId)
-    }
-
-    @Test
-    fun `same sessionId different fp are isolated`() {
-        // Phase 5 collision defense (plan §3 freegpt #4): a branded ses_xxxx
-        // string is not a UUID; clone/reset server collisions are possible.
-        // The composite (fp, sessionId) key keeps the entries independent.
-        settings.setModelForSession("g1", "ses_x", "openai", "gpt-4")
-        settings.setModelForSession("g2", "ses_x", "anthropic", "claude")
-
-        assertEquals("gpt-4", settings.getModelForSession("g1", "ses_x")?.modelId)
-        assertEquals("claude", settings.getModelForSession("g2", "ses_x")?.modelId)
-    }
+    // §chat-ux-batch T8 (B3): the five former tests in this section
+    // (`setModelForSession round trip via slash-separated provider and model`,
+    // `getModelForSession returns null for unknown session`,
+    // `getModelForSession survives a corrupt stored value`,
+    // `per-session model storage is independent across sessions`, and
+    // `same sessionId different fp are isolated`) were DELETED here. The
+    // setModelForSession / getModelForSession API was removed (T7 rewired
+    // model pick to TRANSIENT pendingModel; no persistent per-session model
+    // override map anymore).
 
     // ───────────────── UI scale clamping (was 0% covered) ─────────────────
 

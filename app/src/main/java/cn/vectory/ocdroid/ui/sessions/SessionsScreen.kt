@@ -33,6 +33,7 @@ import cn.vectory.ocdroid.ui.OrchestratorViewModel
 import cn.vectory.ocdroid.ui.SessionViewModel
 import cn.vectory.ocdroid.ui.SettingsViewModel
 import cn.vectory.ocdroid.ui.chat.workdirTone
+import cn.vectory.ocdroid.ui.theme.AppFormDialog
 import cn.vectory.ocdroid.ui.theme.Dimens
 import cn.vectory.ocdroid.util.DebugLog
 import cn.vectory.ocdroid.util.WorkdirPaths
@@ -116,6 +117,14 @@ fun SessionsScreen(
     val recentWorkdirs by settingsVM.recentWorkdirs.collectAsStateWithLifecycle()
     // M7: long-press a session card → archive confirmation dialog. Null = hidden.
     var pendingArchiveSession by remember { mutableStateOf<Session?>(null) }
+    // T4 (chat-ux-batch): long-press now opens a Tier-A anchored DropdownMenu
+    // (rename / archive) instead of jumping straight to the archive confirm.
+    // `menuSession` is the row whose menu is expanded; selecting an item clears
+    // it (and routes to `renameSession` or `pendingArchiveSession`).
+    var menuSession by remember { mutableStateOf<Session?>(null) }
+    // T4: rename form (Tier-C AppFormDialog). Null = hidden; set by the
+    // DropdownMenu's rename item.
+    var renameSession by remember { mutableStateOf<Session?>(null) }
     // §sessux #3: workdir picker dialog state. Set when the user taps the
     // new-session action with ≥2 connected workdirs.
     var pendingWorkdirPick by remember { mutableStateOf(false) }
@@ -293,15 +302,45 @@ fun SessionsScreen(
                             sessionsById = sessionsById,
                             pendingSessionIds = pendingPermissionSessionIds,
                         )
-                        SessionCard(
-                            session = session,
-                            isUnread = session.id in unreadSessions,
-                            status = sessionListState.sessionStatuses[session.id],
-                            hasPendingQuestion = hasPendingQuestion,
-                            hasPendingPermission = hasPendingPermission,
-                            onClick = { onSessionClick(session.id) },
-                            onLongClick = { pendingArchiveSession = session }
-                        )
+                        // T4 (chat-ux-batch): Tier-A anchored DropdownMenu.
+                        // The menu is anchored to this Box (the row container)
+                        // so it pops at the long-pressed card's position.
+                        // `menuSession?.id == session.id` keeps the expanded
+                        // state per-row without per-row remember hoisting (the
+                        // single screen-level `menuSession` holder drives all
+                        // rows; only the matching row's menu expands).
+                        Box {
+                            SessionCard(
+                                session = session,
+                                isUnread = session.id in unreadSessions,
+                                status = sessionListState.sessionStatuses[session.id],
+                                hasPendingQuestion = hasPendingQuestion,
+                                hasPendingPermission = hasPendingPermission,
+                                onClick = { onSessionClick(session.id) },
+                                onLongClick = { menuSession = session }
+                            )
+                            DropdownMenu(
+                                expanded = menuSession?.id == session.id,
+                                onDismissRequest = {
+                                    if (menuSession?.id == session.id) menuSession = null
+                                },
+                            ) {
+                                DropdownMenuItem(
+                                    text = { Text(stringResource(R.string.sessions_rename)) },
+                                    onClick = {
+                                        renameSession = session
+                                        menuSession = null
+                                    },
+                                )
+                                DropdownMenuItem(
+                                    text = { Text(stringResource(R.string.sessions_archive)) },
+                                    onClick = {
+                                        pendingArchiveSession = session
+                                        menuSession = null
+                                    },
+                                )
+                            }
+                        }
                     }
                 }
 
@@ -393,6 +432,54 @@ fun SessionsScreen(
                 }
             }
         )
+    }
+
+    // --- T4 (chat-ux-batch): Rename session dialog (Tier-C AppFormDialog) ---
+    // Triggered from the DropdownMenu's "Rename" item. AppFormDialog signature
+    // mirrors the canonical usage at ModelManagementSection.kt:139 /
+    // HostProfilesManagerScreen.kt:737 (BasicAlertDialog + Surface container;
+    // title: String?, confirmButton / dismissButton as @Composable slots, content
+    // as ColumnScope trailing lambda — NOT the AlertDialog-like onConfirm/
+    // confirmText sketch in the brief). TextField is prefilled with the
+    // session's current title (null → empty); placeholder = displayName so an
+    // empty field shows the fallback the server will use. Confirm is ALWAYS
+    // enabled (allowing empty submit → server clears the title). Helper text
+    // conveys the empty-submit semantics.
+    renameSession?.let { session ->
+        // Keyed by session.id so a fresh open (same or different session) starts
+        // from the server-side title rather than a stale typed value.
+        var renameText by remember(session.id) { mutableStateOf(session.title ?: "") }
+        AppFormDialog(
+            onDismissRequest = { renameSession = null },
+            title = stringResource(R.string.sessions_rename_title),
+            confirmButton = {
+                TextButton(onClick = {
+                    viewModel.renameSession(session.id, renameText)
+                    renameSession = null
+                }) {
+                    Text(stringResource(R.string.sessions_rename))
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { renameSession = null }) {
+                    Text(stringResource(R.string.common_cancel))
+                }
+            },
+        ) {
+            OutlinedTextField(
+                value = renameText,
+                onValueChange = { renameText = it },
+                placeholder = { Text(session.displayName) },
+                singleLine = true,
+                modifier = Modifier.fillMaxWidth(),
+            )
+            Spacer(modifier = Modifier.height(Dimens.spacing2))
+            Text(
+                text = stringResource(R.string.sessions_rename_hint),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
     }
 }
 

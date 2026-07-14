@@ -445,7 +445,55 @@ class AppStateDerivedTest {
         assertEquals(5000, usage!!.contextLimit)
     }
 
-    // ── inferCurrentModel ────────────────────────────────────────────────────
+    // ── inferCurrentAgent / inferCurrentModel (visibleAgents-aware) ─────────
+
+    @Test
+    fun `inferCurrentAgent skips hidden agents`() {
+        // Last user msg has agent="compaction" (∉ visibleAgents {build}) → skip
+        // → return the earlier user's "build".
+        val msgs = listOf(
+            Message(id = "u1", role = "user", agent = "build"),
+            Message(id = "a1", role = "assistant"),
+            Message(id = "u2", role = "user", agent = "compaction"),
+            Message(id = "a2", role = "assistant", agent = "compaction"),
+        )
+        assertEquals("build", inferCurrentAgent(msgs, setOf("build")))
+    }
+
+    @Test
+    fun `inferCurrentAgent returns null when no qualifying user message`() {
+        // All user agents hidden (∉ visibleAgents) → null.
+        val msgs = listOf(
+            Message(id = "u1", role = "user", agent = "compaction"),
+            Message(id = "a1", role = "assistant"),
+        )
+        assertNull(inferCurrentAgent(msgs, setOf("build")))
+    }
+
+    @Test
+    fun `inferCurrentModel skips compaction assistant`() {
+        // Last assistant is compaction (∉ visibleAgents {build}) → skip →
+        // return the earlier visible assistant's model.
+        val anthropic = Message.ModelInfo("anthropic", "claude")
+        val glm = Message.ModelInfo("zhipu", "glm-4")
+        val msgs = listOf(
+            Message(id = "a1", role = "assistant", model = anthropic),
+            Message(id = "a2", role = "assistant", agent = "compaction", model = glm),
+        )
+        assertEquals(anthropic, inferCurrentModel(msgs, setOf("build")))
+    }
+
+    @Test
+    fun `inferCurrentModel visibleAgents variant keeps agent-null assistants`() {
+        // An assistant with agent == null is always eligible (normal turn).
+        val glm = Message.ModelInfo("zhipu", "glm-4")
+        val msgs = listOf(
+            Message(id = "a1", role = "assistant", model = glm, agent = null),
+        )
+        assertEquals(glm, inferCurrentModel(msgs, setOf("build")))
+    }
+
+    // ── inferCurrentModel (legacy no-filter overload) ───────────────────────
 
     @Test
     fun `inferCurrentModel returns null when no assistant message`() {
@@ -463,6 +511,19 @@ class AppStateDerivedTest {
             model = Message.ModelInfo("p2", "m2"),
         )
         assertEquals(Message.ModelInfo("p2", "m2"), inferCurrentModel(listOf(a1, a2)))
+    }
+
+    @Test
+    fun `inferCurrentModel legacy overload keeps behavior for assistant with hidden agent`() {
+        // Legacy 1-arg overload must NOT filter by agent — preserves the
+        // pre-T7 behavior of the MessageActions.kt caller. An assistant
+        // whose agent is "compaction" still wins as the latest assistant.
+        val glm = Message.ModelInfo("zhipu", "glm-4")
+        val a1 = Message(id = "a1", role = "assistant", model = Message.ModelInfo("anthropic", "claude"))
+        val a2 = Message(id = "a2", role = "assistant", agent = "compaction", model = glm)
+        // Legacy overload → returns a2.model (no skip); visibleAgents-aware
+        // overload would have skipped a2 and returned a1.model.
+        assertEquals(glm, inferCurrentModel(listOf(a1, a2)))
     }
 
     // ── resolveModelDisplayName ──────────────────────────────────────────────

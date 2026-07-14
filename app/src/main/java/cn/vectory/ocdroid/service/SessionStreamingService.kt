@@ -26,12 +26,14 @@ import cn.vectory.ocdroid.service.streaming.ServiceShell
 import cn.vectory.ocdroid.service.streaming.ServiceSseConnectionOwner
 import cn.vectory.ocdroid.service.streaming.SessionSnapshotProvider
 import cn.vectory.ocdroid.service.streaming.SessionStreamingController
+import cn.vectory.ocdroid.service.streaming.SseNotificationBridge
 import cn.vectory.ocdroid.service.streaming.UserCloseRequestParser
 import cn.vectory.ocdroid.service.status.StatusAggregator
 import cn.vectory.ocdroid.service.status.StatusAggregatorInput
 import cn.vectory.ocdroid.ui.SharedEffectBus
 import cn.vectory.ocdroid.ui.SharedStateStore
 import cn.vectory.ocdroid.util.DebugLog
+import cn.vectory.ocdroid.util.SettingsManager
 import dagger.hilt.android.AndroidEntryPoint
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
@@ -118,6 +120,13 @@ class SessionStreamingService : Service() {
     @Inject lateinit var sessionSnapshotProvider: SessionSnapshotProvider
     @Inject lateinit var appLifecycleMonitor: AppLifecycleMonitor
     @Inject lateinit var ownershipGate: StreamingOwnershipGate
+    /**
+     * T5-C1/C2: read by [buildNotification] / [buildPlaceholder] to derive
+     * the `silent` flag (`!persistentNotificationEnabled`). Injected via
+     * Hilt; not held in the controller (the controller receives a
+     * `silentNotifications: () -> Boolean` lambda so it stays pure-JVM).
+     */
+    @Inject lateinit var settingsManager: SettingsManager
 
     // ── CP9: Hilt-injected collaborators for [sseOwner] (the SSE collector). ──
 
@@ -131,6 +140,16 @@ class SessionStreamingService : Service() {
     @Inject lateinit var processStatusPoller: cn.vectory.ocdroid.service.streaming.ProcessStatusPoller
     @Inject lateinit var sseRecoveryPolicy: cn.vectory.ocdroid.service.streaming.SseRecoveryPolicy
     @Inject lateinit var bootstrapRetryPolicy: cn.vectory.ocdroid.service.streaming.BootstrapRetryPolicy
+
+    /**
+     * T5-C4: the SSE → notification bridge is wired into the Service
+     * (the Service is the L2 SSE producer, so this is the right scope).
+     * Subscribes to [sseEventBridge]'s control-class flow and fires temp
+     * notifications when the process is in background. The Service injects
+     * the ALM-shared [cn.vectory.ocdroid.di.SessionNotifier] + dedup sets
+     * + a [SharedStateStore]-backed root-idle resolver.
+     */
+    @Inject lateinit var sseEventBridge: cn.vectory.ocdroid.service.bridge.SseEventBridge
 
     /**
      * Service-lifetime [CoroutineScope] bound to [MainScope] (Main thread).
@@ -166,7 +185,7 @@ class SessionStreamingService : Service() {
     private var sseOwner: ServiceSseConnectionOwner? = null
 
     /**
-     * CP9 §A6: the bootstrap restart latch. Retained as a `Job?` so a second
+     * CP9 §C15: the bootstrap restart latch. Retained as a `Job?` so a second
      * CP9 bootstrap/start intent on the same Service instance can cancel an
      * in-flight bootstrap and run a fresh one (a `stopSelf()` + a new start
      * that overlap can no longer be stranded by a once-per-instance latch).
@@ -178,6 +197,13 @@ class SessionStreamingService : Service() {
     /** D5-3: prevents duplicate terminal teardown from expiry/abort races. */
     private var bootstrapAbortIssued = false
     private var acceptedOwnershipIdentity: ConnectionIdentity? = null
+
+    /**
+     * T5-C4: the SSE → temp-notification bridge. Built in [onCreate] after
+     * the collaborators are injected; torn down in [onDestroy]. Lives only
+     * while the Service owns the SSE connection (L2 lifetime).
+     */
+    private var sseNotificationBridge: SseNotificationBridge? = null
 
     /**
      * CP5: the production [ServiceShell] — a private adapter that translates
@@ -312,6 +338,26 @@ class SessionStreamingService : Service() {
                 registerStartingOwnership(identity, StreamingOwnershipGate.NO_ATTEMPT_ID)
             },
             onBootstrapFailure = { identity -> failStarting(identity) },
+            silentNotifications = { !settingsManager.persistentNotificationEnabled },
+        ).also { it.start() }
+
+        // T5-C4: SSE → temp-notification bridge. Subscribes to the
+        // SseEventBridge's notificationControlEvents (T5-review C1 fix: an
+        // additive SharedFlow tap on the control-class flow, NOT
+        // `controlEvents` itself which is a single-consumer Channel already
+        // drained by AppCore). Already filtered by §2 epoch + §11 control
+        // routing; fires background-only temp notifications for
+        // question.asked + session.status{idle} (root + unread). Shares the
+        // ALM notifier + dedup sets so a 30s-poller discovery and an SSE
+        // discovery of the SAME event cannot double-fire (T5-C4a/b).
+        sseNotificationBridge = SseNotificationBridge(
+            events = sseEventBridge.notificationControlEvents,
+            notifier = appLifecycleMonitor.notifier,
+            decisionDedup = appLifecycleMonitor.notificationSnapshot,
+            idleDedup = appLifecycleMonitor.idleNotificationSnapshot,
+            isInForeground = { appLifecycleMonitor.isInForeground.value },
+            rootIdleResolver = ::resolveRootIdleAlert,
+            scope = scope,
         ).also { it.start() }
     }
 
@@ -395,7 +441,14 @@ class SessionStreamingService : Service() {
             return START_STICKY
         }
         // §5 step 2: startForeground within the 5s ANR window, BEFORE any async work.
-        promoteToForeground(buildNotification(SessionStatusNotifier.buildPlaceholder(strings)))
+        promoteToForeground(
+            buildNotification(
+                SessionStatusNotifier.buildPlaceholder(
+                    strings,
+                    silent = !settingsManager.persistentNotificationEnabled,
+                ),
+            ),
+        )
         // §5 steps 3–6: async bootstrap. CP9 §A6: retain the bootstrap job so
         // a second CP9 bootstrap/start intent on the same Service instance
         // cancels the in-flight one and runs a fresh sequence (a stopSelf +
@@ -613,9 +666,18 @@ class SessionStreamingService : Service() {
             .setSmallIcon(R.mipmap.ic_launcher)
             .setContentTitle(spec.title)
             .setContentText(spec.content)
-            .setPriority(spec.priority)
+            .setPriority(if (spec.silent) NotificationSpec.PRIORITY_MIN else spec.priority)
             .setOngoing(spec.ongoing)
             .apply {
+                // T5-C2: silent persistent notification — PRIORITY_MIN +
+                // setSilent(true) so it neither surfaces in the shade nor
+                // makes sound/vibrate. The FGS slot survives because
+                // `setOngoing(spec.ongoing)` above is unchanged (the FGS
+                // contract only requires an ongoing notification; silent
+                // is orthogonal). SSE keepalive is likewise unaffected.
+                if (spec.silent) {
+                    setSilent(true)
+                }
                 if (spec.showChronometer && spec.chronometerBaseMs != null) {
                     // §7: convert wall-clock busySinceMs to elapsedRealtime
                     // base. The notifier stays clock-agnostic (pure JVM); the
@@ -706,6 +768,48 @@ class SessionStreamingService : Service() {
         )
     }
 
+    /**
+     * T5-C4: SSE-side reuse of the 30s-poller's unread-idle detection.
+     *
+     * When the bridge observes a `session.status{idle}` event for
+     * [sessionId], this resolver decides whether to fire an idle
+     * notification. It mirrors the predicate the
+     * [cn.vectory.ocdroid.ui.controller.BackgroundUnreadPoller] uses
+     * (root-only + the SharedStateStore's unread state has the root as
+     * unread + an idleSince timestamp) and produces the SAME
+     * [cn.vectory.ocdroid.ui.controller.IdleUnreadAlert.key] shape so the
+     * ALM-shared dedup set correctly deduplicates a SSE discovery against a
+     * concurrent poller discovery (T5-C4a).
+     *
+     * Returns null for non-root sessions (their idle surfaces on the root's
+     * notification via the poller's tree-aware unread evaluator), for roots
+     * that the store does not currently consider unread+idle (e.g. the user
+     * has already opened them, or the SSE event arrived before the store
+     * hydrated), and for sessions not present in the cached session list
+     * (the 30s poller will catch those if they genuinely warrant a
+     * notification). This is best-effort; it NEVER blocks — the SSE-side
+     * bridge is an early-notification path, not the authoritative one.
+     */
+    private fun resolveRootIdleAlert(sessionId: String): cn.vectory.ocdroid.ui.controller.IdleUnreadAlert? {
+        val sessions = sharedStateStore.sessionListFlow.value.sessions
+        val session = sessions.firstOrNull { it.id == sessionId } ?: return null
+        // Only roots trigger idle notifications — a child session going idle
+        // surfaces on the root's notification via the poller's tree-aware
+        // unread evaluator (the bridge does not re-implement tree walk).
+        if (session.parentId != null) return null
+        val unread = sharedStateStore.unreadFlow.value
+        val idleSince = unread.idleSince[sessionId] ?: return null
+        if (sessionId !in unread.unreadSessions) return null
+        val serverId = sharedStateStore.hostFlow.value.currentHostProfileId ?: "default"
+        val workdir = settingsManager.currentWorkdir
+        return cn.vectory.ocdroid.ui.controller.IdleUnreadAlert(
+            rootId = sessionId,
+            title = session.title?.takeIf { it.isNotBlank() } ?: sessionId,
+            idleSince = idleSince,
+            key = cn.vectory.ocdroid.ui.controller.idleNotificationKey(serverId, workdir, sessionId, idleSince),
+        )
+    }
+
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onDestroy() {
@@ -729,6 +833,13 @@ class SessionStreamingService : Service() {
             ownershipGate.releaseNow(identity)
         }
         acceptedOwnershipIdentity = null
+        // T5-C4: stop the SSE → notification bridge before the scope is
+        // cancelled (the scope cancellation would also cancel the bridge's
+        // collector, but explicit stop keeps the shutdown order legible:
+        // bridge first → no new temp notifications during controller
+        // teardown).
+        sseNotificationBridge?.stop()
+        sseNotificationBridge = null
         controller?.shutdown()
         scope.cancel()
         super.onDestroy()

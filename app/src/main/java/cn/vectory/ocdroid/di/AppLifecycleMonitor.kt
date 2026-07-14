@@ -22,6 +22,7 @@ import cn.vectory.ocdroid.util.DebugLog
 import cn.vectory.ocdroid.util.SettingsManager
 import cn.vectory.ocdroid.util.runSuspendCatching
 import cn.vectory.ocdroid.ui.controller.IdleUnreadAlert
+import cn.vectory.ocdroid.ui.controller.UnreadPollResult
 import dagger.Module
 import dagger.Provides
 import dagger.hilt.InstallIn
@@ -36,9 +37,385 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import java.util.concurrent.ConcurrentHashMap
 import javax.inject.Qualifier
 import javax.inject.Singleton
 import javax.inject.Inject
+
+/**
+ * T5-C4b: shared publish point for the §18 decision/idle notifications.
+ *
+ * Extracted verbatim from the prior private methods on [AppLifecycleMonitor]
+ * so the SSE-side bridge ([cn.vectory.ocdroid.service.streaming.SseNotificationBridge])
+ * can call the SAME publish logic the 30s poller uses. The notification id
+ * is always `key.hashCode()`; both call sites pass the SAME key for the
+ * SAME logical event so a bridge-fired notification and a poller-fired
+ * notification for one item visually replace each other instead of stacking
+ * (the shared dedup set is the primary guard; the matched id is the
+ * visual fallback).
+ *
+ * Internal visibility: the bridge lives in a sister package and is built
+ * only by [SessionStreamingService] (the same module). Not a Hilt-provided
+ * object — ALM owns one instance and exposes it via
+ * [AppLifecycleMonitor.notifier].
+ */
+internal class SessionNotifier internal constructor(
+    private val application: Application,
+    private val notificationManagerCompat: NotificationManagerCompat,
+) {
+    /**
+     * Returns `true` when a notification was actually posted (permission
+     * granted + [NotificationManagerCompat.notify] invoked); `false` when
+     * suppressed by a missing/denied permission. Callers use the result to
+     * decide whether to record the item in their dedup set (a `false` return
+     * MUST roll back the dedup claim so a later attempt can retry — see
+     * [NotificationDedup]).
+     */
+    @Suppress("MissingPermission") // see hasNotificationPermission() guard
+    fun notifyDecision(sessionId: String, title: String, body: String, key: String): Boolean {
+        if (!hasNotificationPermission()) return false
+        val notificationId = key.hashCode()
+        val notification = NotificationCompat.Builder(application, AppLifecycleMonitor.CHANNEL_DECISIONS)
+            .setSmallIcon(R.mipmap.ic_launcher)
+            .setContentTitle(title)
+            .setContentText(body)
+            .setStyle(NotificationCompat.BigTextStyle().bigText(body))
+            .setPriority(NotificationCompat.PRIORITY_HIGH)
+            .setDefaults(NotificationCompat.DEFAULT_SOUND or NotificationCompat.DEFAULT_VIBRATE)
+            .setAutoCancel(true)
+            .setContentIntent(buildContentIntent(sessionId, notificationId))
+            .build()
+        // §notify-fix: a thrown notify() (channel missing / transient
+        // SecurityException) must report failure so the caller does NOT
+        // record the item in its dedup set — otherwise it would be
+        // permanently suppressed and never re-notified once the condition
+        // recovers. isSuccess is false on any thrown exception.
+        return runCatching { notificationManagerCompat.notify(notificationId, notification) }.isSuccess
+    }
+
+    @Suppress("MissingPermission") // see hasNotificationPermission() guard
+    fun notifyIdle(rootId: String, title: String, key: String): Boolean {
+        if (!hasNotificationPermission()) return false
+        val notificationId = key.hashCode()
+        val notification = NotificationCompat.Builder(application, AppLifecycleMonitor.CHANNEL_IDLE)
+            .setSmallIcon(R.mipmap.ic_launcher)
+            .setContentTitle(AppLifecycleMonitor.NOTIF_IDLE_TITLE)
+            .setContentText(title)
+            .setStyle(NotificationCompat.BigTextStyle().bigText(title))
+            .setPriority(NotificationCompat.PRIORITY_HIGH)
+            .setDefaults(NotificationCompat.DEFAULT_SOUND or NotificationCompat.DEFAULT_VIBRATE)
+            .setAutoCancel(true)
+            .setContentIntent(buildContentIntent(rootId, notificationId))
+            .build()
+        return runCatching { notificationManagerCompat.notify(notificationId, notification) }.isSuccess
+    }
+
+    /**
+     * Builds the deep-link [PendingIntent] that opens [MainActivity] on the
+     * given session/root id. Internal so the bridge (which constructs its
+     * own notifications only when the publisher is mocked in tests) does not
+     * need to reach in here in production — the bridge delegates to
+     * [notifyDecision] / [notifyIdle], which call this internally.
+     */
+    internal fun buildContentIntent(sessionId: String, requestCode: Int): PendingIntent {
+        val intent = Intent(application, MainActivity::class.java).apply {
+            flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
+            action = Intent.ACTION_VIEW
+            putExtra(MainActivity.EXTRA_SESSION_ID, sessionId)
+        }
+        return PendingIntent.getActivity(
+            application,
+            requestCode,
+            intent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+        )
+    }
+
+    private fun hasNotificationPermission(): Boolean {
+        // POST_NOTIFICATIONS is runtime on API 33+; granted-bypass on older.
+        return NotificationManagerCompat.from(application).areNotificationsEnabled()
+    }
+}
+
+/**
+ * T5-C4a: thread-safe atomic-claim dedup set shared by the 30s poller and
+ * the SSE bridge so the same logical event id is notified at most once
+ * (a double-notify would stack `SOUND|VIBRATE` and confuse the user).
+ *
+ * Contract: callers MUST use [claim] BEFORE notifying, and MUST call
+ * [release] if the downstream notify returned `false` (e.g. permission
+ * denied — §Stage D / gpter 重要 #4: a failed notify must remain eligible
+ * for future delivery). This preserves the prior "add-after-success"
+ * semantics while making the claim atomic against a concurrent producer
+ * (the SSE bridge runs on the Service's MainScope; the poller runs on
+ * `@ApplicationScope` = Default dispatcher — they genuinely race).
+ *
+ * The underlying set is a [ConcurrentHashMap]-backed key set: `add` is
+ * atomic (returns true iff the key was absent), so two racing `claim`
+ * callers can never both observe "newly added". A successful claim reserves
+ * the slot; the caller either keeps it (notify succeeded) or rolls it back
+ * via [release] (notify failed → eligible for the next attempt).
+ */
+/**
+ * T5-C4a + T5-review I1: thread-safe atomic-claim dedup set shared by the 30s
+ * poller and the SSE bridge so the same logical event id is notified at most
+ * once (a double-notify would stack `SOUND|VIBRATE` and confuse the user).
+ *
+ * Contract: callers MUST use [claim] BEFORE notifying. [claim] returns a
+ * unique **owner-aware token** (or `null` if the key is already in flight /
+ * posted) — exactly one claimant wins per key. On a successful notify the
+ * winner MUST call [complete] with the SAME token to transition the slot to
+ * [State.Posted] (which makes it eligible for idle pruning). On a failed /
+ * suppressed notify the winner MUST call [release] with the SAME token to
+ * roll back the claim so the next attempt can retry (§Stage D / gpter 重要 #4).
+ *
+ * T5-review I1 fix: the prior implementation used a flat `ConcurrentHashMap`
+ * key set + key-only `release`. That had two defects:
+ *  1. `retainAll(active)` (idle pruning) removed in-flight CLAIMED entries →
+ *     a second claimant could then win `claim(K)` for an item whose first
+ *     claimant was still posting → both notified.
+ *  2. Key-only `release` had an ABA surface: claimant A released → claimant
+ *     B claimed → claimant A's stale `release(K)` from a re-entrant path
+ *     would remove B's claim.
+ *
+ * The new state-aware map fixes both: pruning touches ONLY [State.Posted]
+ * entries (in-flight CLAIMED entries survive); [release] / [complete] are
+ * token-gated via [MutableMap.compute] so only the owning claimant can
+ * transition the slot. All three mutations (`claim`, `complete`/`release`,
+ * and `retainAll`-based pruning) are individually atomic via CHM's
+ * `putIfAbsent` / `compute` / iterator-remove — no lock needed.
+ */
+internal class NotificationDedup {
+
+    // T5-round-4 I1-S: widened from `private` to `internal` so the fenced
+    // prune API ([snapshotPosted] / [pruneStaleCandidates]) can express its
+    // return/param type as `State.Posted` — the exact captured generation
+    // instance the atomic `computeIfPresent` compares against. Still
+    // module-internal (the owning class [NotificationDedup] is `internal`);
+    // no subtype can be added from outside (sealed) and the backing `keys`
+    // map stays private, so external code cannot inject state.
+    internal sealed interface State {
+        /** Reserved by a claimant that has not yet completed (token = owner id). */
+        class Claimed(val token: String) : State
+        /**
+         * Notify succeeded — eligible for idle pruning.
+         *
+         * T5-re-review M1-R Posted-ABA fix: the prior `object Posted`
+         * singleton made every completed generation identity-equal, so a
+         * stale pruner that captured A's old `Posted` could later remove
+         * B's freshly-completed `Posted` at the same key (they were `===`
+         * to the SAME singleton). Mirroring `Claimed(val token: String)`,
+         * `Posted` now carries the completing owner's token. The data-class
+         * `==` includes the token, so a stale pruner that captured
+         * `Posted(tokenA)` cannot match B's `Posted(tokenB)` — a stale
+         * pruner removes NEITHER a current `Claimed(tokenB)` NOR a newer
+         * `Posted(tokenB)` belonging to a different generation.
+         */
+        data class Posted(val token: String) : State
+    }
+
+    private val keys: MutableMap<String, State> = ConcurrentHashMap()
+
+    /**
+     * Atomically claims [key]. Returns a fresh owner token iff the key was
+     * newly claimed (was absent); returns `null` if the key is already
+     * [State.Claimed] or [State.Posted] (another claimant won, or this key
+     * was already notified and not yet pruned). The returned token MUST be
+     * passed to [complete] / [release] so only this owner can transition
+     * the slot.
+     */
+    fun claim(key: String): String? {
+        val token = java.util.UUID.randomUUID().toString()
+        // putIfAbsent is atomic on CHM: the first claimant wins.
+        val prior = keys.putIfAbsent(key, State.Claimed(token))
+        return if (prior == null) token else null
+    }
+
+    /**
+     * Transitions the owner's [claim] to [State.Posted] (notify succeeded).
+     * Returns `true` iff the slot was [State.Claimed] with this exact token.
+     * No-op (returns `false`) if the slot was already transitioned by another
+     * path or the token does not match — guards against stale completions.
+     *
+     * T5-re-review M1-R Posted-ABA fix: installs `Posted(token)` — the
+     * completer's OWN token — so the resulting [State.Posted] instance is
+     * generation-distinct. A later stale pruner that observed a prior
+     * `Posted(tokenOther)` cannot remove this entry via `retainAll` (the
+     * data-class `==` compares tokens).
+     */
+    fun complete(key: String, token: String): Boolean {
+        var transitioned = false
+        keys.compute(key) { _, state ->
+            if (state is State.Claimed && state.token == token) {
+                transitioned = true
+                State.Posted(token)
+            } else {
+                state
+            }
+        }
+        return transitioned
+    }
+
+    /**
+     * Rolls back the owner's [claim] (notify failed / suppressed) so a future
+     * attempt can retry. Token-gated: a no-op if the slot was already
+     * [State.Posted] (a successful [complete]) or the token does not match.
+     * This closes the prior ABA on key-only `release` — only the owning
+     * claimant can release its own claim.
+     */
+    fun release(key: String, token: String) {
+        keys.compute(key) { _, state ->
+            if (state is State.Claimed && state.token == token) null else state
+        }
+    }
+
+    /** Read-only membership test (no claim). Used by tests. */
+    fun contains(key: String): Boolean = keys.containsKey(key)
+
+    /**
+     * §18.1 idle pruning — drops entries whose session is no longer active.
+     *
+     * T5-review I1 fix: removes ONLY [State.Posted] entries — in-flight
+     * [State.Claimed] entries survive pruning so a polling race cannot
+     * strip a claim out from under a claimant that is mid-notify (which
+     * would let a second claimant win and double-notify).
+     *
+     * T5-re-review I1-R fix: the prior iterator-remove (`it.remove()`)
+     * was NOT atomic-conditional on [State.Posted]. The iterator observed
+     * the value and removed the KEY — between the check and the remove
+     * another path could install [State.Claimed](tokenB) at the same key,
+     * and the stale `it.remove()` would strip B's fresh claim. Residual
+     * race driver: lifecycle restart cancels `pollJob` without joining
+     * (`:490-519`), so two overlapping `retainAll` passes CAN interleave.
+     * The per-key [ConcurrentHashMap.computeIfPresent] is atomic: the
+     * removal fires ONLY if the value is STILL [State.Posted] at the
+     * instant of the compute — a [State.Claimed] entry can NEVER be
+     * removed by pruning, even under overlapping pruners.
+     *
+     * T5-re-review M1-R Posted-ABA fix: `State.Posted` is now a
+     * `data class Posted(token)` carrying the completer's token. To close
+     * the ABA surface (stale pruner captured A's old `Posted(tokenA)`,
+     * pauses; B re-completes K to a FRESH `Posted(tokenB)`; stale pruner
+     * resumes and would have stripped B's freshly-completed Posted because
+     * `=== State.Posted` matched the SAME singleton), each pruner iteration
+     * captures the EXACT observed [State.Posted] value `p` (token included)
+     * and the atomic `computeIfPresent` removes the entry ONLY if the
+     * current value `== p` (data-class equality compares the token). A
+     * stale pruner holding `Posted(tokenA)` therefore cannot match B's
+     * `Posted(tokenB)` — the newer generation survives. The captured `p`
+     * is a stable snapshot (data class is immutable); CHM's
+     * `computeIfPresent` runs the remap under its per-bucket lock, so the
+     * observed-vs-current comparison is atomic and free of TOCTOU.
+     */
+    fun retainAll(active: Set<String>) {
+        keys.forEach { (key, state) ->
+            if (key !in active && state is State.Posted) {
+                // Capture the EXACT observed Posted generation (token included).
+                val captured = state
+                keys.computeIfPresent(key) { _, v ->
+                    // Data-class == compares the token; a stale pruner that
+                    // captured Posted(tokenA) does NOT match a newer
+                    // Posted(tokenB) installed between the snapshot and this
+                    // compute. A Claimed(tokenB) also does not match
+                    // (different State subtype) — it survives.
+                    if (v == captured) null else v
+                }
+            }
+        }
+    }
+
+    /**
+     * T5-round-4 I1-S fence step 1: captures the currently-[State.Posted]
+     * entries (key → the EXACT captured `Posted(token)` generation instance)
+     * as an immutable snapshot. Each entry is observed atomically per-key
+     * via the [ConcurrentHashMap] iterator; the captured [State.Posted] is a
+     * stable data-class instance (immutable), so the snapshot is a stable
+     * read of "which keys were Posted, and at which generation, at the
+     * instant [snapshotPosted] ran".
+     *
+     * The caller MUST capture this BEFORE the prune-time active set is
+     * computed (before the poll runs). The returned map is then handed to
+     * [pruneStaleCandidates] as the candidate fence: a `Posted` created
+     * AFTER this snapshot is NOT in the returned map and is therefore
+     * NEVER touched by that prune cycle (see [pruneStaleCandidates]).
+     */
+    fun snapshotPosted(): Map<String, State.Posted> {
+        // Explicit local (not buildMap): a buildMap lambda's MutableMap
+        // receiver has its own `keys: Set<K>` property that would shadow
+        // the outer `keys` field (Map.keys vs this.keys), breaking the
+        // entry-destructuring forEach below.
+        val snapshot = LinkedHashMap<String, State.Posted>()
+        keys.forEach { (k, v) -> if (v is State.Posted) snapshot[k] = v }
+        return snapshot
+    }
+
+    /**
+     * T5-round-4 I1-S fence step 2: prunes ONLY entries present in
+     * [candidates] (captured BEFORE the poll by [snapshotPosted]) that are
+     * absent from [active]. For each such `(k, capturedPosted)`, atomically
+     * removes the entry ONLY if the current value is STILL that exact
+     * captured generation:
+     *
+     * ```
+     * keys.computeIfPresent(k) { _, v -> if (v == capturedPosted) null else v }
+     * ```
+     *
+     * Data-class `==` compares the token, so a stale pruner holding
+     * `Posted(tokenA)` cannot match a newer `Posted(tokenB)` (the existing
+     * M1-R guard), and a `Claimed(tokenB)` (different subtype) never matches
+     * (the existing I1-R guard).
+     *
+     * **The I1-S closure**: the scan is restricted to [candidates], NOT to
+     * the live map. A `Posted(tokenB)` created AFTER [snapshotPosted] ran
+     * (e.g. the SSE bridge completing a claim during the poll) is NOT in
+     * [candidates] → `computeIfPresent` is never invoked on its key by this
+     * cycle → it survives. Under the OLD bare `retainAll(active)` the poller
+     * scanned the map AFTER the active set was computed, so it could capture
+     * B's freshly-completed `Posted(tokenB)` and (since captured == current,
+     * both tokenB) remove it — C re-claimed → duplicate sound/vibration.
+     * Token-awareness could not help: P captured B's CURRENT token, not an
+     * old one. The fence is the only fix: the candidate set is frozen before
+     * the poll.
+     *
+     * A legitimate stale entry kept one cycle longer (became Posted after
+     * the snapshot) is harmless — the NEXT cycle's snapshot captures it and
+     * prunes it if still stale. The dedup intent (don't re-notify) is
+     * preserved either way.
+     */
+    fun pruneStaleCandidates(candidates: Map<String, State.Posted>, active: Set<String>) {
+        candidates.forEach { (k, captured) ->
+            if (k !in active) {
+                keys.computeIfPresent(k) { _, v -> if (v == captured) null else v }
+            }
+        }
+    }
+
+    /**
+     * T5-re-review M1-R Posted-ABA test hook: deterministically drives the
+     * stale-pruner interleaving that production [retainAll] must survive.
+     *
+     * Captures the current [State.Posted] generation at [key] (mirroring
+     * what a real pruner observes when it first scans the entry), runs
+     * [between] (simulating P1's pause — during which P2 may prune the
+     * entry and B may re-claim + re-complete it), then resumes the atomic
+     * conditional remove against the CAPTURED generation. The capture +
+     * atomic-resume shape is identical to production [retainAll] per-key;
+     * the only difference is the interleaving seam (production does not
+     * pause between capture and compute, but it COULD be preempted by
+     * another pruner — this hook forces that preemption deterministically).
+     *
+     * Test-only; production callers use [retainAll].
+     */
+    internal fun testOnlyPruneWithInterleave(key: String, between: () -> Unit) {
+        val state = keys[key]
+        if (state is State.Posted) {
+            val captured = state
+            between()
+            keys.computeIfPresent(key) { _, v -> if (v == captured) null else v }
+        }
+    }
+}
 
 internal fun shouldPostIdleNotification(
     isInForeground: Boolean,
@@ -136,12 +513,26 @@ class AppLifecycleMonitor @Inject constructor(
      * dismissed does not re-notify on every backgrounding. Cleared only on
      * process death (acceptable UX trade-off vs. the alternative of looping
      * notifications). Key shape: `"perm:<id>"` / `"q:<id>"`.
+     *
+     * T5-C4a: backed by [NotificationDedup] (CHM key-set) so the SSE bridge
+     * can claim against the SAME set atomically with the 30s poller — the
+     * two run on different dispatchers (Default vs the Service's MainScope)
+     * and would otherwise race a check-then-add.
      */
-    private val notificationSnapshot: MutableSet<String> = HashSet()
-    private val idleNotificationSnapshot: MutableSet<String> = HashSet()
+    internal val notificationSnapshot: NotificationDedup = NotificationDedup()
+    internal val idleNotificationSnapshot: NotificationDedup = NotificationDedup()
+
+    private val notificationManagerCompat = NotificationManagerCompat.from(application)
+
+    /**
+     * T5-C4b: the shared publish point. Held by ALM so the SSE bridge can
+     * inject the SAME instance the 30s poller uses (the bridge's
+     * constructor takes a [SessionNotifier] reference).
+     */
+    internal val notifier: SessionNotifier = SessionNotifier(application, notificationManagerCompat)
 
     @Volatile
-    private var backgroundUnreadPoll: (suspend () -> List<IdleUnreadAlert>)? = null
+    private var backgroundUnreadPoll: (suspend () -> UnreadPollResult)? = null
 
     /** Currently-running background poller job; null while in foreground. */
     private var pollJob: Job? = null
@@ -162,8 +553,6 @@ class AppLifecycleMonitor @Inject constructor(
 
     /** Last error message surfaced via [onAppError]; tracked so we don't loop. */
     private var lastNotifiedError: String? = null
-
-    private val notificationManagerCompat = NotificationManagerCompat.from(application)
 
     @Volatile private var activityStartedCount = 0
 
@@ -242,7 +631,7 @@ class AppLifecycleMonitor @Inject constructor(
     }
 
     /** Registers the narrow T3b bridge without coupling lifecycle to UI state. */
-    fun registerBackgroundUnreadPoller(poller: suspend () -> List<IdleUnreadAlert>) {
+    fun registerBackgroundUnreadPoller(poller: suspend () -> UnreadPollResult) {
         backgroundUnreadPoll = poller
     }
 
@@ -307,93 +696,134 @@ class AppLifecycleMonitor @Inject constructor(
         // Re-check foreground before and after network work. A poll that began
         // in background must not emit sound/vibration after the Activity starts.
         if (_isInForeground.value) return
-        runSuspendCatching { backgroundUnreadPoll?.invoke().orEmpty() }
-            .onSuccess { alerts ->
-                pruneIdleNotificationSnapshot(idleNotificationSnapshot, alerts.mapTo(mutableSetOf()) { it.key })
+        // T5-round-4 I1-S fence: capture the Posted candidates BEFORE the poll
+        // produces the active set S. A posting created during/after the poll
+        // (e.g. the SSE bridge — on the Service's MainScope — completing a
+        // claim to `Posted(tokenB)` between S-compute and prune) is NOT in
+        // `candidates` and survives this prune cycle. The OLD bare
+        // `retainAll(active)` scanned the map AFTER S was computed, so it
+        // captured B's freshly-completed `Posted(tokenB)` and (captured ==
+        // current, both tokenB) removed it → C re-claimed → duplicate
+        // sound/vibration. Routing the idle-prune path through `snapshotPosted`
+        // (candidate capture) + `pruneStaleCandidates` (scan restricted to
+        // candidates, per-entry `computeIfPresent` guards the exact captured
+        // generation) closes the snapshot-acquire-vs-prune-execute TOCTOU.
+        val candidates = idleNotificationSnapshot.snapshotPosted()
+        runSuspendCatching { backgroundUnreadPoll?.invoke() }
+            .onSuccess { result ->
+                // T5-round-5 I1-A: distinguish an authoritative snapshot from
+                // an aborted poll. The OLD contract returned `emptyList()` for
+                // both, so `onSuccess` treated every abort as an authoritative
+                // empty snapshot → `active = emptySet()` → the fenced prune
+                // removed live `Posted` candidates (exact-generation match) →
+                // the next genuine poll re-claimed the same key → duplicate
+                // sound/vibration for one logical idle event. The sealed
+                // [UnreadPollResult] restores the distinction: only
+                // [UnreadPollResult.Authoritative] drives prune + publish;
+                // [UnreadPollResult.Aborted] (and a null unregistered poller)
+                // skip the prune entirely so the dedup state stays intact.
+                // Cancellation is NOT routed here — `runSuspendCatching`
+                // rethrows CancellationException, preserving structured
+                // cancellation (viewModelScope / appScope cancel propagates).
+                val alerts = (result as? UnreadPollResult.Authoritative)?.alerts ?: return@onSuccess
+                val active = alerts.mapTo(mutableSetOf()) { it.key }
+                idleNotificationSnapshot.pruneStaleCandidates(candidates, active)
                 if (!_isInForeground.value) alerts.forEach { handleIdleAlert(it) }
             }
             .onFailure { Log.w(TAG, "Background unread poll failed", it) }
     }
 
-    private fun handleIdleAlert(alert: IdleUnreadAlert) {
-        if (!shouldPostIdleNotification(_isInForeground.value, alert.key, idleNotificationSnapshot)) return
-        if (notifyIdle(alert)) idleNotificationSnapshot.add(alert.key)
+    internal suspend fun handleIdleAlert(alert: IdleUnreadAlert) {
+        // T5-C4a: atomic claim BEFORE notify (was check-then-add). The SSE
+        // bridge shares [idleNotificationSnapshot], so the claim must be
+        // atomic to prevent a double-notify. Release on notify failure so
+        // the item stays eligible for the next poll (§Stage D semantics).
+        // T5-review I1: claim returns an owner-aware token; complete /
+        // release are token-gated so neither pruning nor a racing release
+        // can strip this claimant's slot.
+        // T5-review I2: recheck foreground at the FINAL publish boundary.
+        // T5-re-review I2-R: the final foreground gate + notify + complete
+        // run SYNCHRONOUSLY on Dispatchers.Main.immediate, serialized with
+        // [onActivityStarted] (which sets `_isInForeground = true` on Main).
+        // The poller runs on Dispatchers.Default; the prior read-then-notify
+        // on Default was a TOCTOU — a lifecycle ON_START on Main between the
+        // Default foreground read and the Default notify posted sound /
+        // vibration while foregrounded. Main.immediate closes the window:
+        // the gate+notify cannot be interleaved by a lifecycle callback.
+        // Suppression / failure releases the claim (the finally below) so a
+        // later background attempt can fire.
+        if (_isInForeground.value) return
+        val token = idleNotificationSnapshot.claim(alert.key) ?: return
+        try {
+            withContext(Dispatchers.Main.immediate) {
+                if (_isInForeground.value) return@withContext
+                val notified = notifier.notifyIdle(alert.rootId, alert.title, alert.key)
+                if (notified) idleNotificationSnapshot.complete(alert.key, token)
+            }
+        } finally {
+            idleNotificationSnapshot.release(alert.key, token)
+        }
     }
 
-    private fun handlePendingPermission(permission: PermissionRequest) {
+    internal suspend fun handlePendingPermission(permission: PermissionRequest) {
         val key = "perm:${permission.id}"
-        // §Stage D (gpter 重要 #4): run ALL eligibility checks (foreground,
-        // already-notified, permission) BEFORE touching the snapshot, and only
-        // record the key after a real notify attempt. Previously the add
-        // happened first, so a pending item seen while backgrounded with
-        // notifications disabled was permanently marked "already notified" —
-        // the user enabling the permission later could never receive it. This
-        // preserves "don't re-notify the same item" semantics while allowing
-        // deferred delivery once permission is granted.
-        if (_isInForeground.value) return // foreground uses in-app cards
-        if (key in notificationSnapshot) return // already notified
-        val notified = notifyDecision(
-            sessionId = permission.sessionId,
-            title = NOTIF_PERMISSION_TITLE,
-            body = permission.permission ?: NOTIF_DECISION_BODY,
-            notificationId = key.hashCode()
-        )
-        if (notified) notificationSnapshot.add(key)
+        // §Stage D (gpter 重要 #4) + T5-C4a: atomic claim + release-on-fail.
+        // T5-review I1: owner-aware token-gated claim/complete/release.
+        // T5-review I2 + T5-re-review I2-R: the final foreground gate +
+        // notify + complete run on Dispatchers.Main.immediate, serialized
+        // with lifecycle callbacks (see [handleIdleAlert]).
+        if (_isInForeground.value) return
+        val token = notificationSnapshot.claim(key) ?: return
+        try {
+            withContext(Dispatchers.Main.immediate) {
+                if (_isInForeground.value) return@withContext
+                val notified = notifier.notifyDecision(
+                    sessionId = permission.sessionId,
+                    title = NOTIF_PERMISSION_TITLE,
+                    body = permission.permission ?: NOTIF_DECISION_BODY,
+                    key = key,
+                )
+                if (notified) notificationSnapshot.complete(key, token)
+            }
+        } finally {
+            notificationSnapshot.release(key, token)
+        }
     }
 
-    private fun handlePendingQuestion(question: QuestionRequest) {
+    internal suspend fun handlePendingQuestion(question: QuestionRequest) {
         val key = "q:${question.id}"
-        // §Stage D (gpter 重要 #4): see handlePendingPermission — snapshot add
-        // is deferred until after a real notify so permission-denied items
-        // remain eligible for future delivery.
+        // §Stage D (gpter 重要 #4) + T5-C4a: see handlePendingPermission.
+        // T5-review I1: owner-aware token-gated claim/complete/release.
+        // T5-review I2 + T5-re-review I2-R: Main.immediate publish gate
+        // (see [handleIdleAlert]).
         if (_isForeground()) return
-        if (key in notificationSnapshot) return
-        val headline = question.questions.firstOrNull()?.header ?: NOTIF_DECISION_BODY
-        val notified = notifyDecision(
-            sessionId = question.sessionId,
-            title = NOTIF_QUESTION_TITLE,
-            body = headline,
-            notificationId = key.hashCode()
-        )
-        if (notified) notificationSnapshot.add(key)
+        val token = notificationSnapshot.claim(key) ?: return
+        try {
+            withContext(Dispatchers.Main.immediate) {
+                if (_isForeground()) return@withContext
+                val headline = question.questions.firstOrNull()?.header ?: NOTIF_DECISION_BODY
+                val notified = notifier.notifyDecision(
+                    sessionId = question.sessionId,
+                    title = NOTIF_QUESTION_TITLE,
+                    body = headline,
+                    key = key,
+                )
+                if (notified) notificationSnapshot.complete(key, token)
+            }
+        } finally {
+            notificationSnapshot.release(key, token)
+        }
     }
 
-    /**
-     * Returns `true` when a notification was actually posted (permission
-     * granted + [notificationManagerCompat.notify] invoked); `false` when
-     * suppressed by a missing/denied permission. Callers use the result to
-     * decide whether to record the item in [notificationSnapshot].
-     */
-    // §lint: MissingPermission is satisfied by the hasNotificationPermission()
-    // guard above (NotificationManagerCompat.areNotificationsEnabled), which
-    // lint's dataflow can't track through the helper. The runtime check is
-    // stricter than POST_NOTIFICATIONS (also honors per-channel settings).
-    @Suppress("MissingPermission")
-    private fun notifyDecision(sessionId: String, title: String, body: String, notificationId: Int): Boolean {
-        if (!hasNotificationPermission()) return false
-        val notification = NotificationCompat.Builder(application, CHANNEL_DECISIONS)
-            .setSmallIcon(R.mipmap.ic_launcher)
-            .setContentTitle(title)
-            .setContentText(body)
-            .setStyle(NotificationCompat.BigTextStyle().bigText(body))
-            .setPriority(NotificationCompat.PRIORITY_HIGH)
-            .setDefaults(NotificationCompat.DEFAULT_SOUND or NotificationCompat.DEFAULT_VIBRATE)
-            .setAutoCancel(true)
-            .setContentIntent(buildContentIntent(sessionId, notificationId))
-            .build()
-        // §notify-fix: a thrown notify() (channel missing / transient
-        // SecurityException) must report failure so the caller does NOT
-        // record the item in notificationSnapshot — otherwise it would be
-        // permanently suppressed and never re-notified once the condition
-        // recovers. isSuccess is false on any thrown exception.
-        val posted = runCatching { notificationManagerCompat.notify(notificationId, notification) }.isSuccess
-        return posted
-    }
+    // T5-review M2: the per-handler `notifyDecision` / `notifyIdle` adapters
+    // that USED to live here were removed — every handler now calls
+    // [notifier] directly. They had no remaining callers (the SSE bridge
+    // also calls [notifier] directly via the shared instance).
 
     // §lint: see notifyDecision — hasNotificationPermission() above is the guard.
     @Suppress("MissingPermission")
     private fun notifyError(error: String) {
-        if (!hasNotificationPermission()) return
+        if (!NotificationManagerCompat.from(application).areNotificationsEnabled()) return
         val notification = NotificationCompat.Builder(application, CHANNEL_ERRORS)
             .setSmallIcon(R.mipmap.ic_launcher)
             .setContentTitle(NOTIF_ERROR_TITLE)
@@ -404,42 +834,6 @@ class AppLifecycleMonitor @Inject constructor(
             .build()
         // Use a fixed ID so the latest error replaces the previous one.
         runCatching { notificationManagerCompat.notify(ERROR_NOTIFICATION_ID, notification) }
-    }
-
-    @Suppress("MissingPermission")
-    private fun notifyIdle(alert: IdleUnreadAlert): Boolean {
-        if (!hasNotificationPermission() || _isInForeground.value) return false
-        val notificationId = alert.key.hashCode()
-        val notification = NotificationCompat.Builder(application, CHANNEL_IDLE)
-            .setSmallIcon(R.mipmap.ic_launcher)
-            .setContentTitle(NOTIF_IDLE_TITLE)
-            .setContentText(alert.title)
-            .setStyle(NotificationCompat.BigTextStyle().bigText(alert.title))
-            .setPriority(NotificationCompat.PRIORITY_HIGH)
-            .setDefaults(NotificationCompat.DEFAULT_SOUND or NotificationCompat.DEFAULT_VIBRATE)
-            .setAutoCancel(true)
-            .setContentIntent(buildContentIntent(alert.rootId, notificationId))
-            .build()
-        return runCatching { notificationManagerCompat.notify(notificationId, notification) }.isSuccess
-    }
-
-    private fun buildContentIntent(sessionId: String, requestCode: Int): PendingIntent {
-        val intent = Intent(application, MainActivity::class.java).apply {
-            flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
-            action = Intent.ACTION_VIEW
-            putExtra(MainActivity.EXTRA_SESSION_ID, sessionId)
-        }
-        return PendingIntent.getActivity(
-            application,
-            requestCode,
-            intent,
-            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
-        )
-    }
-
-    private fun hasNotificationPermission(): Boolean {
-        // POST_NOTIFICATIONS is runtime on API 33+; granted-bypass on older.
-        return NotificationManagerCompat.from(application).areNotificationsEnabled()
     }
 
     // Avoids the StateFlow getter indirection in tight loops.

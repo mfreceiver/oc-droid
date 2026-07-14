@@ -255,6 +255,29 @@ class SessionViewModel @Inject constructor(
         )
     }
 
+    /**
+     * T4 (chat-ux-batch): rename a session via the long-press → rename dialog.
+     * Delegates to [launchRenameSession] on [viewModelScope] (user-triggered,
+     * ephemeral mutation — mirrors `createSessionInWorkdir` / `refreshDirectory-
+     * Sessions` scope choice, NOT `archiveSession`'s `appScope`: a rename
+     * racing with VM clear is safe to cancel; the title is not load-bearing
+     * for any other in-flight orchestration).
+     *
+     * Empty [title] is forwarded as the empty string; the server clears the
+     * session's title and [Session.displayName] falls back to the project
+     * folder name on the next slice update.
+     */
+    fun renameSession(sessionId: String, title: String) {
+        launchRenameSession(
+            scope = viewModelScope,
+            repository = repository,
+            slices = store.slices,
+            sessionId = sessionId,
+            title = title,
+            emit = EventEmitter { event -> effectBus.tryEmitUiEvent(event) },
+        )
+    }
+
     fun deleteSession(sessionId: String) {
         // glm-3 🟡#1: single-read fp.
         val fp = hostProfileStore.currentProfile().serverGroupFp.ifBlank { hostProfileStore.currentProfile().id }

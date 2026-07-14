@@ -178,7 +178,10 @@ internal fun launchCatchUp(
                                         staleNotice = false
                                     )
                                 }
-                                syncAgentFromPage(slices, currentServerGroupFp(), sessionId, settingsManager)
+                                // §chat-ux-batch T8 (B3): the legacy
+                                // syncAgentFromPage call was deleted here (T7
+                                // rewired agent selection to transient
+                                // pendingAgent; no global-reseed needed).
                                 onCacheWindow(
                                     sessionId,
                                     snapshotCurrentWindow(slices, sessionId)
@@ -193,7 +196,7 @@ internal fun launchCatchUp(
                                     // clear the catch-up loading flag here (the gap's
                                     // own Filling state is the per-marker indicator).
                                     slices.mutateChat { c -> c.copy(isLoadingMessages = false, staleNotice = false) }
-                                    syncAgentFromPage(slices, currentServerGroupFp(), sessionId, settingsManager)
+                                    // §chat-ux-batch T8 (B3): syncAgentFromPage removed (see above).
                                     // openAndFill is suspend; launch it fire-and-forget
                                     // so the catch-up coroutine returns immediately. The
                                     // session-level Mutex inside the coordinator keeps
@@ -225,7 +228,7 @@ internal fun launchCatchUp(
                                             staleNotice = false
                                         )
                                     }
-                                    syncAgentFromPage(slices, currentServerGroupFp(), sessionId, settingsManager)
+                                    // §chat-ux-batch T8 (B3): syncAgentFromPage removed (T7 rewired).
                                     onCacheWindow(
                                         sessionId,
                                         snapshotCurrentWindow(slices, sessionId)
@@ -288,24 +291,11 @@ private fun mergeProbeIntoSlice(
     return mergedMessages to mergedParts
 }
 
-/**
- * Sync the global selectedAgentName from a catch-up/gap page.
- *
- * §agent-default (gpter/kimo 阻断): 不再从历史 assistant 消息推断 agent 写回全局——
- * 否则用户选了"默认"（null）后，一次 catch-up 会把全局默认污染成历史里的 agent
- * （如 "build"），导致新会话又强制发该 agent。与 MessageActions.launchLoadMessages
- * 的 §bug3-defensive 一致：仅当存在显式 per-session 覆盖时才同步全局，否则保留用户
- * 的全局选择（含 null=服务端默认）。历史 info.agent 不再参与回填。
- */
-private fun syncAgentFromPage(
-    slices: SliceFlows,
-    serverGroupFp: String,
-    sessionId: String,
-    settingsManager: SettingsManager?,
-) {
-    val perSessionAgent = settingsManager?.getAgentForSession(serverGroupFp, sessionId) ?: return
-    slices.mutateSettings { it.copy(selectedAgentName = perSessionAgent) }
-}
+// §chat-ux-batch T8 (B3): `syncAgentFromPage(...)` was deleted here. T7
+// rewired agent selection to the TRANSIENT `pendingAgent` chat-slice field;
+// the legacy "sync global selectedAgentName from per-session override on
+// catch-up" path is no longer reachable (the field it wrote was deleted, and
+// SettingsManager.getAgentForSession was removed).
 
 /** Snapshot the current chat slice into a cache window (for onCacheWindow). */
 private fun snapshotCurrentWindow(slices: SliceFlows, sessionId: String): CachedSessionWindow {

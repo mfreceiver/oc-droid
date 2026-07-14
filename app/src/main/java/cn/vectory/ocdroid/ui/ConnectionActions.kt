@@ -121,14 +121,17 @@ internal fun applySavedSettings(
     // §R-17 M3 (RFC §4 strategy A): seed the settings slice from persisted
     // prefs. Runs synchronously alongside the slice updates above; intermediate
     // state legal.
-    val seedAgent = settingsManager.selectedAgentName
+    //
+    // §chat-ux-batch T8 (B3): the legacy `seedAgent = settingsManager
+    // .selectedAgentName` seed was deleted here (T7 rewired agent selection
+    // to the TRANSIENT pendingAgent chat-slice field; the global selectedAgentName
+    // property is gone).
     // §model-selection / R-20 Phase 5: load per-serverGroupFp disabled-model
     // set for the active host (was per-baseUrl before Phase 5) so the chat
     // quick-switch picker + Settings render the right entries on cold start.
     val seedDisabledModels = settingsManager.getDisabledModels(currentFp)
     slices.mutateSettings {
         it.copy(
-            selectedAgentName = seedAgent,
             themeMode = settingsManager.themeMode,
             // §P5a (Q5): seed the persisted language mode so the Appearance
             // SegmentedButton reflects the user's choice on cold start. The

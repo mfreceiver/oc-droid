@@ -66,8 +66,8 @@ class MessageActionsTest {
         slices = store.slices
         repository = mockk(relaxed = true)
         settingsManager = mockk(relaxed = true)
-        every { settingsManager.getAgentForSession(any(), any()) } returns null
-        every { settingsManager.getModelForSession(any(), any()) } returns null
+        // §chat-ux-batch T8 (B3): mock setup for getAgentForSession /
+        // getModelForSession removed (deleted APIs).
         scope = TestScope(UnconfinedTestDispatcher())
         emitted = mutableListOf()
         emit = EventEmitter { event -> emitted.add(event) }
@@ -314,19 +314,12 @@ class MessageActionsTest {
         assertEquals(listOf(todo), slices.sessionList.value.sessionTodos["s1"])
     }
 
-    @Test
-    fun `launchLoadMessages syncs selectedAgentName from per-session override`() = runTest {
-        val msgs = listOf(MessageWithParts(info = Message(id = "a1", role = "assistant", agent = "build")))
-        coEvery { repository.getMessagesPaged("s1", any(), any()) } returns Result.success(MessagesPage(msgs, null))
-        coEvery { repository.getSessionTodos("s1") } returns Result.success(emptyList())
-        every { settingsManager.getAgentForSession(any(), "s1") } returns "plan"
-        store.mutateChat { it.copy(currentSessionId = "s1") }
-
-        launchLoadMessages(scope, repository, slices, "s1", settingsManager = settingsManager, emit = emit)
-        advanceUntilIdle()
-
-        assertEquals("plan", slices.settings.value.selectedAgentName)
-    }
+    // §chat-ux-batch T8 (B3): the former test
+    // `launchLoadMessages syncs selectedAgentName from per-session override`
+    // was DELETED here. It exercised the legacy global←per-session
+    // selectedAgentName backfill in launchLoadMessages — both the backfill
+    // block and the field were deleted in T8 (T7 rewired agent selection to
+    // the TRANSIENT pendingAgent chat-slice field).
 
     // ── launchLoadMoreMessages ────────────────────────────────────────────────
 

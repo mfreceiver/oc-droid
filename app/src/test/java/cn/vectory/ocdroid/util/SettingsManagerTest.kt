@@ -96,7 +96,8 @@ class SettingsManagerTest {
         assertNull(settings.currentHostProfileId)
         assertNull(settings.currentSessionId)
         assertNull(settings.currentWorkdir)
-        assertNull(settings.selectedAgentName)
+        // §chat-ux-batch T8 (B3): selectedAgentName property was deleted;
+        // no null-default assertion for it here anymore.
     }
 
     // ───── recentWorkdirs：项目记忆与冷启动恢复（§recent-workdirs）─────
@@ -401,15 +402,10 @@ class SettingsManagerTest {
         assertNull(settings.getTunnelPassword("tun-1"))
     }
 
-    @Test
-    fun `session agent map round trip`() {
-        // R-20 Phase 5: per-(fp, sessionId) composite key.
-        settings.setAgentForSession("g1", "s1", "build")
-        settings.setAgentForSession("g1", "s2", "general")
-        assertEquals("build", settings.getAgentForSession("g1", "s1"))
-        assertEquals("general", settings.getAgentForSession("g1", "s2"))
-        assertNull(settings.getAgentForSession("g1", "unknown"))
-    }
+    // §chat-ux-batch T8 (B3): the former `session agent map round trip` test
+    // was DELETED here. The legacy `setAgentForSession` / `getAgentForSession`
+    // API was removed (T7 rewired agent selection to TRANSIENT pendingAgent).
+    // The per-session agent override map no longer exists.
 
     @Test
     fun `draft text round trip and blank removal`() {
@@ -474,10 +470,13 @@ class SettingsManagerTest {
         settings.markdownFontLatin = "WipeMdFont"
         settings.trafficBytesSent = 999L
         settings.trafficBytesReceived = 888L
-        settings.setAgentForSession(rwFp, "sess-wipe", "build")
+        // §chat-ux-batch T8 (B3): setAgentForSession was deleted; no
+        // per-session agent entry to seed (the field is reclaimed as an
+        // orphan if a prior install wrote it).
         settings.setDraftText(rwFp, "sess-wipe", "draft-wipe")
         settings.openSessionIds = listOf("sess-wipe")
-        settings.selectedAgentName = "agent-wipe"
+        // §chat-ux-batch T8 (B3): selectedAgentName property was deleted; no
+        // global agent value to seed.
         settings.setRecentWorkdirs(rwFp, listOf("/tmp/wipe-proj"))
 
         // ── 执行 ──
@@ -506,10 +505,11 @@ class SettingsManagerTest {
         assertEquals("", settings.markdownFontLatin)
         assertEquals(0L, settings.trafficBytesSent)
         assertEquals(0L, settings.trafficBytesReceived)
-        assertNull(settings.getAgentForSession(rwFp, "sess-wipe"))
+        // §chat-ux-batch T8 (B3): getAgentForSession / selectedAgentName were
+        // deleted; no assertion possible (the APIs are gone, and any orphan
+        // ESP value from a prior install is reclaimed by the iteration here).
         assertEquals("", settings.getDraftText(rwFp, "sess-wipe"))
         assertTrue(settings.openSessionIds.isEmpty())
-        assertNull(settings.selectedAgentName)
         // §recent-workdirs: project-discovery memory is local UI state, not a
         // connection credential → wiped alongside currentWorkdir/openSessionIds.
         assertTrue(settings.getRecentWorkdirs(rwFp).isEmpty())

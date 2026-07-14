@@ -110,11 +110,13 @@ internal fun ReasoningCard(
                 )
                 if (isStreaming) {
                     // Thinking in progress: show an indeterminate loading ring
-                    // after the title (mirrors the SubAgent card's running
-                    // spinner style — 14.dp, strokeWidth 2.dp). Kept visible in
-                    // both collapsed and expanded states so the "still thinking"
-                    // affordance is always present while streaming (matches the
-                    // shell tool card, which keeps its spinner while running).
+                    // after the title (same visual specs as the SubAgent card's
+                    // running spinner — 14.dp, strokeWidth 2.dp — which now also
+                    // places its spinner after the agent name, not before). Kept
+                    // visible in both collapsed and expanded states so the "still
+                    // thinking" affordance is always present while streaming
+                    // (matches the shell tool card, which keeps its spinner while
+                    // running).
                     Spacer(modifier = Modifier.width(6.dp))
                     CircularProgressIndicator(
                         modifier = Modifier.size(14.dp),

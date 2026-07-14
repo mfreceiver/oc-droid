@@ -64,8 +64,8 @@ class SessionMutationActionsTest {
         slices = store.slices
         repository = mockk(relaxed = true)
         settingsManager = mockk(relaxed = true)
-        every { settingsManager.getAgentForSession(any(), any()) } returns null
-        every { settingsManager.getModelForSession(any(), any()) } returns null
+        // §chat-ux-batch T8 (B3): mock setup for getAgentForSession /
+        // getModelForSession removed (deleted APIs).
         every { settingsManager.openSessionIds } returns emptyList()
         scope = TestScope(UnconfinedTestDispatcher())
         emitted = mutableListOf()

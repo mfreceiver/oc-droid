@@ -83,6 +83,9 @@ class ComposerViewModelTest : MainViewModelTestBase() {
 
     @Test
     fun `switchSessionModel persists per-session and updates currentModel immediately`() = runTest {
+        // §chat-ux-batch T7 (B2): switchSessionModel now writes the TRANSIENT
+        // pendingModel (was: currentModel + setModelForSession). The legacy
+        // writes are kept unread by T7's send/picker paths; T8 deletes them.
         coEvery { repository.getSessions(100) } returns Result.success(
             listOf(Session(id = "session-1", directory = "/tmp/project"))
         )
@@ -100,18 +103,22 @@ class ComposerViewModelTest : MainViewModelTestBase() {
 
         composerVM.switchSessionModel("openai", "gpt-5")
 
-        // V1-per-prompt: choice is persisted LOCALLY per session (no server call).
-        verify { settingsManager.setModelForSession(any(), "session-1", "openai", "gpt-5") }
-        // Synchronous in-memory update so the picker reflects the choice with no
-        // launch/await (switchSessionModel is a plain fun, not a suspend/coroutine).
+        // V1-per-prompt (T7) + T8 (B3): the choice lives in the transient
+        // pendingModel. The picker / dispatch read pendingModel at send time;
+        // the legacy setModelForSession path was deleted in T8 (no method to
+        // verify against). The contract is "transient pending carries the
+        // choice to the wire" — assert the slice state directly.
         assertEquals(
             Message.ModelInfo("openai", "gpt-5"),
-            chatVM.chatFlow.value.currentModel
+            chatVM.chatFlow.value.pendingModel,
         )
     }
 
     @Test
     fun `switchSessionModel in draft mode updates currentModel without persisting`() = runTest {
+        // §chat-ux-batch T7 (B2): in draft mode (no session yet),
+        // switchSessionModel writes the transient pendingModel — same path as
+        // the active-session case (no per-session storage involved either way).
         val core = createCore()
         val chatVM = cn.vectory.ocdroid.ui.ChatViewModel(core)
         val sessionVM = cn.vectory.ocdroid.ui.SessionViewModel(core)
@@ -128,19 +135,24 @@ class ComposerViewModelTest : MainViewModelTestBase() {
 
         composerVM.switchSessionModel("openai", "gpt-5")
 
-        // In-memory currentModel MUST update so the picker reflects the choice
-        // and dispatchSend()'s (getModelForSession ?: currentModel) fallback
-        // uses it on the first send.
+        // pendingModel carries the draft choice so the picker reflects it and
+        // dispatchSend's `pendingModel ?: infer` uses it on the first send.
         assertEquals(
             Message.ModelInfo("openai", "gpt-5"),
-            chatVM.chatFlow.value.currentModel
+            chatVM.chatFlow.value.pendingModel,
         )
-        // No real session exists yet → must NOT persist (no valid session id).
-        verify(exactly = 0) { settingsManager.setModelForSession(any(), any(), any(), any()) }
+        // §chat-ux-batch T8 (B3): setModelForSession was deleted; the contract
+        // is "transient pending carries the choice" — the assertion above is
+        // the sole authority (no method left to verify against).
     }
 
     @Test
     fun `draft model choice is persisted when session materialises on first send`() = runTest {
+        // §chat-ux-batch T7 (B2): with the pending-based contract, the draft
+        // model choice rides on the transient pendingModel and is consumed by
+        // dispatchSend at first send. There is no separate "persist on
+        // materialise" step (the legacy setModelForSession path is now dead —
+        // T8 deletes it). The outgoing prompt MUST carry the chosen model.
         coEvery { repository.createSession(any(), any()) } returns Result.success(
             Session(id = "draft-1", directory = "/tmp/project")
         )
@@ -164,17 +176,16 @@ class ComposerViewModelTest : MainViewModelTestBase() {
 
         // User switches the model while still in draft (currentSessionId == null).
         composerVM.switchSessionModel("openai", "gpt-5")
-        assertEquals(Message.ModelInfo("openai", "gpt-5"), chatVM.chatFlow.value.currentModel)
+        assertEquals(Message.ModelInfo("openai", "gpt-5"), chatVM.chatFlow.value.pendingModel)
 
         // First send materialises the draft into a real session.
         composerVM.setInputText("hi")
         chatVM.sendMessage()
         advanceUntilIdle()
 
-        // The in-memory draft choice MUST be persisted to the now-real session
-        // id, so subsequent loadMessages reads it via getModelForSession instead
-        // of falling back to inference.
-        verify { settingsManager.setModelForSession(any(), "draft-1", "openai", "gpt-5") }
+        // §chat-ux-batch T7 (B2) + T8 (B3): the legacy setModelForSession path
+        // was deleted in T8; the contract is "transient pending carries the
+        // choice to the wire" — asserted via the coVerify on sendMessage below.
         // And the outgoing prompt carries the chosen model.
         coVerify {
             repository.sendMessage(
@@ -185,6 +196,8 @@ class ComposerViewModelTest : MainViewModelTestBase() {
                 any()
             )
         }
+        // Pending cleared after the send.
+        assertNull(core.chatFlow.value.pendingModel)
     }
 
     @Test
@@ -206,6 +219,10 @@ class ComposerViewModelTest : MainViewModelTestBase() {
 
     @Test
     fun `selectAgent with active session saves agent name per session`() = runTest {
+        // §chat-ux-batch T7 (B2): selectAgent now writes the TRANSIENT
+        // pendingAgent (was: selectedAgentName + setAgentForSession). The
+        // legacy writes are kept unread by T7's send/picker paths; T8 deletes
+        // them.
         val core = createCore()
         val chatVM = cn.vectory.ocdroid.ui.ChatViewModel(core)
         val sessionVM = cn.vectory.ocdroid.ui.SessionViewModel(core)
@@ -218,7 +235,10 @@ class ComposerViewModelTest : MainViewModelTestBase() {
 
         composerVM.selectAgent("oracle")
 
-        verify { settingsManager.setAgentForSession(any(), "s1", "oracle") }
+        // §chat-ux-batch T7 (B2) + T8 (B3): the agent pick lives in pendingAgent.
+        // The legacy setAgentForSession was deleted in T8 — assert the slice
+        // state directly (no method left to verify against).
+        assertEquals("oracle", chatVM.chatFlow.value.pendingAgent)
     }
 
     // ── §provider-bulk-toggle: setProviderModelsEnabled ──

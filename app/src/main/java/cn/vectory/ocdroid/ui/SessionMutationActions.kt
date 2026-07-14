@@ -64,6 +64,37 @@ internal fun launchForkSession(
     }
 }
 
+/**
+ * T4 (chat-ux-batch): rename a single session. Mirrors [launchCreateSession] /
+ * [launchForkSession] (simple single-session mutations) — calls
+ * [OpenCodeRepository.updateSession] with the new title and upserts the
+ * server-returned [Session] so the slice's displayName reflects immediately.
+ *
+ * Empty [title] is forwarded as-is: the server clears the session's title,
+ * which makes [Session.displayName] fall back to the project folder name
+ * (see [Session.displayName] getter). No subtree walk — only the renamed
+ * leaf is upserted.
+ */
+internal fun launchRenameSession(
+    scope: CoroutineScope,
+    repository: OpenCodeRepository,
+    slices: SliceFlows,
+    sessionId: String,
+    title: String,
+    emit: EventEmitter = EventEmitter { }
+) {
+
+    scope.launch {
+        repository.updateSession(sessionId, title)
+            .onSuccess { updated ->
+                slices.mutateSessionList { sl -> sl.copy(sessions = upsertSession(sl.sessions, updated)) }
+            }
+            .onFailure { error ->
+                emit.emit(UiEvent.Error(R.string.error_rename_session_failed, listOf(errorMessageOrFallback(error, "unknown error"))))
+            }
+    }
+}
+
 internal fun launchSetSessionArchived(
     scope: CoroutineScope,
     repository: OpenCodeRepository,

@@ -10,8 +10,11 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.channels.BufferOverflow
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.receiveAsFlow
 import kotlinx.coroutines.launch
@@ -75,6 +78,38 @@ class SseEventBridge @Inject constructor(
     private val controlChannel: Channel<IdentifiedSseEvent> =
         Channel(capacity = CONTROL_CHANNEL_CAPACITY, onBufferOverflow = BufferOverflow.SUSPEND)
     val controlEvents: Flow<IdentifiedSseEvent> = controlChannel.receiveAsFlow()
+
+    /**
+     * T5-review C1 — additive notification tap.
+     *
+     * `controlEvents` (above) is a single-consumer `Channel.receiveAsFlow()`
+     * and AppCore already collects it (`AppCore.kt:300-303`). Wiring a second
+     * `controlEvents` collector (the notification bridge) would compete with
+     * AppCore for the same channel → each frame delivered to exactly one →
+     * the bridge could corrupt app state OR miss notifications.
+     *
+     * This [SharedFlow] is the additive fan-out surface: a SECOND, independent
+     * subscription installed AFTER the channel send in [routeIfFresh], carrying
+     * the SAME validated [IdentifiedSseEvent]. SharedFlow supports multiple
+     * collectors without stealing from AppCore's channel path. replay=0 means
+     * late subscribers miss prior emissions (the bridge is subscribed eagerly
+     * in `SessionStreamingService.onCreate`, before any SSE connection starts
+     * in `onStartCommand`). Buffer capacity matches [CONTROL_CHANNEL_CAPACITY]
+     * and the overflow policy is [BufferOverflow.SUSPEND] (consistent with the
+     * channel's no-drop contract) so a slow notification consumer back-
+     * pressures the bridge routing rather than silently dropping a frame.
+     *
+     * NOT a replacement for `controlEvents` — the channel stays as the
+     * authoritative AppCore path. This flow is the additional notification
+     * observer seam.
+     */
+    private val _notificationControlEvents = MutableSharedFlow<IdentifiedSseEvent>(
+        replay = 0,
+        extraBufferCapacity = CONTROL_CHANNEL_CAPACITY,
+        onBufferOverflow = BufferOverflow.SUSPEND,
+    )
+    val notificationControlEvents: SharedFlow<IdentifiedSseEvent> =
+        _notificationControlEvents.asSharedFlow()
 
     /**
      * §11 delta channel — bounded; on overflow the frame is dropped and the
@@ -169,6 +204,12 @@ class SseEventBridge @Inject constructor(
         if (isControlEvent(event.event)) {
             // §11: control path suspends on full (preserves, FIFO, no silent drop).
             controlChannel.send(event)
+            // T5-review C1: additive notification tap. The channel send
+            // (AppCore's authoritative path) happens FIRST; this SharedFlow
+            // emit is the additional fan-out for the notification bridge so
+            // it does NOT compete with AppCore for the single-consumer
+            // channel. Same validated [IdentifiedSseEvent] in both surfaces.
+            _notificationControlEvents.emit(event)
         } else {
             // §11: delta path never blocks the collector; overflow → dirty.
             val result = deltaChannel.trySend(event)

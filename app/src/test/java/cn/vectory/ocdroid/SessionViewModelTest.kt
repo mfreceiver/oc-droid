@@ -94,7 +94,7 @@ class SessionViewModelTest : MainViewModelTestBase() {
         composerVM.switchSessionModel("zhipuai-coding-plan", "glm-5.2")
         assertEquals(
             Message.ModelInfo("zhipuai-coding-plan", "glm-5.2"),
-            chatVM.chatFlow.value.currentModel
+            chatVM.chatFlow.value.pendingModel
         )
 
         // Enter draft mode for a new project.
@@ -105,8 +105,15 @@ class SessionViewModelTest : MainViewModelTestBase() {
         // model is neither shown in the draft picker nor persisted on materialisation
         // when the user sends without explicitly switching.
         assertNull(chatVM.chatFlow.value.currentModel)
-        // No session exists → nothing persisted.
-        verify(exactly = 0) { settingsManager.setModelForSession(any(), any(), any(), any()) }
+        // §chat-ux-batch T7 (B2): the TRANSIENT pendingModel (and pendingAgent)
+        // are also cleared on the new-draft transition — the per-session sticky
+        // contract demands "no cross-session carry". A pending pick from the
+        // prior session must NOT bleed into the new draft's picker / next send.
+        assertNull(chatVM.chatFlow.value.pendingModel)
+        assertNull(chatVM.chatFlow.value.pendingAgent)
+        // §chat-ux-batch T8 (B3): setModelForSession was deleted; no method
+        // to verify against. The contract is asserted via the pendingModel /
+        // pendingAgent assertions above (transient carry, no persistence).
     }
 
     @Test
@@ -604,6 +611,64 @@ class SessionViewModelTest : MainViewModelTestBase() {
             repository.updateSessionArchived("parent", any())
         }
         assertTrue(sessionVM.sessionListFlow.value.sessions.all { it.isArchived })
+    }
+
+    @Test
+    fun `renameSession upserts the renamed session into the slice`() = runTest {
+        // T4 (chat-ux-batch): rename calls repository.updateSession(id, title)
+        // and upserts the server-returned Session so the slice's displayName
+        // reflects the new title immediately. Empty title is a legitimate
+        // value (server clears the title → displayName falls back to the
+        // project folder name); exercised as a separate case below.
+        val original = Session(id = "session-rename", directory = "/tmp/project", title = "Old title")
+        val renamed = Session(id = "session-rename", directory = "/tmp/project", title = "新名")
+        coEvery { repository.updateSession("session-rename", "新名") } returns Result.success(renamed)
+
+        val core = createCore()
+        val chatVM = cn.vectory.ocdroid.ui.ChatViewModel(core)
+        val sessionVM = cn.vectory.ocdroid.ui.SessionViewModel(core)
+        val connectionVM = cn.vectory.ocdroid.ui.ConnectionViewModel(core)
+        val hostVM = cn.vectory.ocdroid.ui.HostViewModel(core)
+        val composerVM = cn.vectory.ocdroid.ui.ComposerViewModel(core)
+        val orchestratorVM = cn.vectory.ocdroid.ui.OrchestratorViewModel(core)
+        val viewModel = SessionViewModel(core)  // primary VM under test
+        core.writeSessionList { it.copy(sessions = listOf(original)) }
+
+        viewModel.renameSession("session-rename", "新名")
+        advanceUntilIdle()
+
+        coVerify(exactly = 1) { repository.updateSession("session-rename", "新名") }
+        val upserted = sessionVM.sessionListFlow.value.sessions.single { it.id == "session-rename" }
+        assertEquals("新名", upserted.title)
+        assertEquals("新名", upserted.displayName)
+    }
+
+    @Test
+    fun `renameSession with blank title forwards empty string so the server clears it`() = runTest {
+        // T4: leaving the rename TextField blank submits the empty string —
+        // the server clears the title, and the resulting Session.displayName
+        // falls back to the project folder name (directory's last segment).
+        val original = Session(id = "session-blank", directory = "/tmp/project", title = "Old title")
+        val cleared = Session(id = "session-blank", directory = "/tmp/project", title = null)
+        coEvery { repository.updateSession("session-blank", "") } returns Result.success(cleared)
+
+        val core = createCore()
+        val chatVM = cn.vectory.ocdroid.ui.ChatViewModel(core)
+        val sessionVM = cn.vectory.ocdroid.ui.SessionViewModel(core)
+        val connectionVM = cn.vectory.ocdroid.ui.ConnectionViewModel(core)
+        val hostVM = cn.vectory.ocdroid.ui.HostViewModel(core)
+        val composerVM = cn.vectory.ocdroid.ui.ComposerViewModel(core)
+        val orchestratorVM = cn.vectory.ocdroid.ui.OrchestratorViewModel(core)
+        val viewModel = SessionViewModel(core)  // primary VM under test
+        core.writeSessionList { it.copy(sessions = listOf(original)) }
+
+        viewModel.renameSession("session-blank", "")
+        advanceUntilIdle()
+
+        coVerify(exactly = 1) { repository.updateSession("session-blank", "") }
+        val upserted = sessionVM.sessionListFlow.value.sessions.single { it.id == "session-blank" }
+        assertNull(upserted.title)
+        assertEquals("project", upserted.displayName)
     }
 
     @Test

@@ -323,16 +323,13 @@ internal fun AppCore.materializeDraftSession(onSessionReady: (String) -> Unit) {
                 // §R18 Phase 2-F: chatFlow.currentSessionId (set in writeChat
                 // above) is the sole runtime source; the AppCore init collector
                 // persists session.id to SettingsManager. No manual write here.
-                store.chatFlow.value.currentModel?.let { model ->
-                    settingsManager.setModelForSession(currentServerGroupFp(), session.id, model.providerId, model.modelId)
-                }
-                // §bug3-defensive: persist the agent too so the next dispatchSendMessage
-                // picks up the per-session agent (mirrors the model copy above; previously
-                // the agent was not copied here, causing a one-message lag when switching
-                // agents in draft mode).
-                store.settingsFlow.value.selectedAgentName?.let { agent ->
-                    settingsManager.setAgentForSession(currentServerGroupFp(), session.id, agent)
-                }
+                //
+                // §chat-ux-batch T8 (B3): the legacy per-session agent/model
+                // copy from chatFlow.currentModel / settingsFlow.selectedAgentName
+                // to SettingsManager.set{Model,Agent}ForSession was deleted
+                // here. T7 rewired both picks to TRANSIENT pendingModel /
+                // pendingAgent (consumed at dispatchSendMessage); no
+                // persistence is needed for the carry.
                 persistSessionCache(
                     settingsManager = settingsManager,
                     sessions = store.sessionListFlow.value.sessions,
@@ -427,11 +424,42 @@ private fun AppCore.dispatchSendMessage(sessionId: String) {
     // that go on the wire, so this is safe to clear immediately.
     writeComposer { it.copy(inputText = "", imageAttachments = emptyList(), fileReferences = emptyList()) }
 
+    // §chat-ux-batch T3: snap the message list to the newest message when the
+    // user sends — mirrors SessionViewModel.requestJumpToLatest (same store
+    // dispatch + same AppAction.PendingJumpToLatestSet). Placed here (after the
+    // early-return guards + composer clear, BEFORE the archived/direct branches
+    // reach launchSendMessage) so it fires exactly once on the common send
+    // path. The consumer at ChatMessageContent.kt:565-576 then performs
+    // scrollToItem(0) + followBottom=true and clears the intent. sessionId is a
+    // non-null String parameter, no guard needed.
+    store.dispatch(AppAction.PendingJumpToLatestSet(sessionId))
+
     val currentSession = currentSession(store.sessionListFlow.value.sessions, store.chatFlow.value.currentSessionId)
 
     fun dispatchSend() {
-        val agent = settingsManager.getAgentForSession(currentServerGroupFp(), sessionId) ?: store.settingsFlow.value.selectedAgentName
-        val model: Message.ModelInfo? = settingsManager.getModelForSession(currentServerGroupFp(), sessionId) ?: store.chatFlow.value.currentModel
+        // §chat-ux-batch T7 (B2): per-session sticky resolution.
+        //   agent = pendingAgent ?: inferCurrentAgent(msgs, visible) ?: null
+        //   model = pendingModel ?: inferCurrentModel(msgs, visible) ?: null
+        // `pending*` is the user's just-picked value THIS turn (transient;
+        // cleared below after the send launches). `infer*` derives from the
+        // session's transcript, SKIPPING hidden internal agents (compaction /
+        // title) via the visible-agents filter. null on both arms lets the
+        // server apply its own default (server-side `prompt.ts:646` is the
+        // source of truth and honors an explicit model when provided).
+        //
+        // CRITICAL: the visible set MUST filter by `isVisible` — opencode's
+        // `/agent` list includes hidden internal agents whose transcript
+        // presence would otherwise be inferred as "the current agent",
+        // defeating T6's skip.
+        val chatState = store.chatFlow.value
+        val visibleAgents = store.settingsFlow.value.agents
+            .filter { it.isVisible }
+            .map { it.name }
+            .toSet()
+        val agent: String? = chatState.pendingAgent
+            ?: inferCurrentAgent(chatState.messages, visibleAgents)
+        val model: Message.ModelInfo? = chatState.pendingModel
+            ?: inferCurrentModel(chatState.messages, visibleAgents)
         launchSendMessage(
             scope = appScope,
             repository = repository,
@@ -460,6 +488,13 @@ private fun AppCore.dispatchSendMessage(sessionId: String) {
             },
             emit = EventEmitter { event -> effectBus.tryEmitUiEvent(event) },
         )
+        // §chat-ux-batch T7 (B2): clear the transient pending picks AFTER the
+        // send launches — the picks were consumed; the next send starts fresh
+        // (pending=null → falls back to inference, which will reflect the just-
+        // sent agent/model via the new user/assistant message once SSE lands).
+        // This is the "per-session sticky via pending" core invariant: a
+        // pending pick lives for exactly one send.
+        store.mutateChat { it.copy(pendingAgent = null, pendingModel = null) }
     }
 
     if (currentSession?.isArchived == true) {

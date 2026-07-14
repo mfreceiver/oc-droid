@@ -78,20 +78,18 @@ class ForkSessionTest {
         every { settingsManager.username } returns null
         every { settingsManager.password } returns null
         every { settingsManager.currentSessionId } returns null
-        every { settingsManager.selectedAgentName } returns null
         every { settingsManager.themeMode } returns ThemeMode.SYSTEM
 
         every { settingsManager.serverUrl = any() } just runs
         every { settingsManager.username = any() } just runs
         every { settingsManager.password = any() } just runs
         every { settingsManager.currentSessionId = any() } just runs
-        every { settingsManager.selectedAgentName = any() } just runs
         every { settingsManager.themeMode = any() } just runs
 
         every { settingsManager.getDraftText(any(), any()) } returns ""
         every { settingsManager.setDraftText(any(), any(), any()) } just runs
-        every { settingsManager.getAgentForSession(any(), any()) } returns null
-        every { settingsManager.setAgentForSession(any(), any(), any()) } just runs
+        // §chat-ux-batch T8 (B3): the legacy mock setup for selectedAgentName /
+        // getAgentForSession / setAgentForSession was removed here (deleted APIs).
 
         every { repository.connectSSE(any()) } returns emptyFlow()
         coEvery { repository.getSessionStatus() } returns Result.success(emptyMap())

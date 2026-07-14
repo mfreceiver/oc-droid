@@ -55,6 +55,9 @@
     <string name="settings_notifications_completion_channel_desc">Posted when a session finishes or errors out</string>
     <string name="settings_notifications_system_settings">System notification settings</string>
     <string name="settings_notifications_system_settings_desc">Configure completion and decision alerts independently</string>
+    <!-- T5-C3: persistent (ongoing FGS) notification toggle. Default OFF. -->
+    <string name="settings_notifications_persistent_title">Persistent status notification</string>
+    <string name="settings_notifications_persistent_desc">Show the ongoing \"connected\" notification in the shade. Off keeps the notification silent (the background service still runs).</string>
     <string name="session_picker_state_selected">Selected</string>
     <string name="session_picker_state_question">Question pending</string>
     <string name="session_picker_state_retry">Retrying</string>
@@ -121,6 +124,9 @@
     <string name="sessions_status_retrying">Retrying</string>
     <string name="sessions_status_idle">Idle</string>
     <string name="sessions_archive">Archive</string>
+    <!-- T4: session row long-press menu (Tier A DropdownMenu) + rename dialog (Tier C AppFormDialog). -->
+    <string name="sessions_rename">Rename</string>
+    <string name="sessions_rename_title">Rename session</string>
     <string name="sessions_restore">Restore</string>
     <string name="sessions_no_active">No active sessions</string>
     <string name="sessions_new_session">New session</string>
@@ -328,6 +334,8 @@
     <string name="sessions_disconnect_workdir">Disconnect</string>
     <string name="sessions_disconnect_confirm">Disconnect this project?</string>
     <string name="sessions_archive_confirm">Archive this session? It will be hidden from the list.</string>
+    <!-- T4: rename dialog helper text — empty title falls back to the project folder name (server-side). -->
+    <string name="sessions_rename_hint">Leave blank to use the project folder name</string>
     <string name="server_dialog_title">Servers</string>
     <string name="server_dialog_no_hosts">No hosts configured</string>
     <string name="server_dialog_refresh">Refresh</string>
@@ -335,7 +343,10 @@
     <string name="chat_parent_session">Parent session</string>
     <string name="chat_back_to_parent_session">Back to parent session</string>
     <string name="chat_switch_agent">Switch agent</string>
-    <!-- §agent-default: agent 选择器顶部"用服务端默认 agent"选项；selectedAgentName 为 null 时显示 -->
+    <!-- §agent-default: agent 选择器顶部"用服务端默认 agent"选项；当 effective agent
+         (pendingAgent ?: infer ?: null) 为 null 时显示。§chat-ux-batch T8 (B3):
+         原本参考的 SettingsState.selectedAgentName 已删除（T7 重构为 TRANSIENT
+         pendingAgent）。 -->
     <string name="agent_default_label">Default</string>
     <string name="chat_thinking">Thinking</string>
     <string name="chat_sub_agent">Sub-agent</string>
@@ -491,6 +502,7 @@
     <string name="error_create_session_failed">Failed to create session: %1$s</string>
     <string name="error_fork_session_failed">Failed to fork session: %1$s</string>
     <string name="error_archive_session_failed">Failed to archive session: %1$s</string>
+    <string name="error_rename_session_failed">Failed to rename session: %1$s</string>
     <string name="error_delete_session_failed">Failed to delete session: %1$s</string>
     <string name="error_send_message_failed">Failed to send message: %1$s</string>
     <string name="error_child_session_unavailable">Sub-agent session unavailable</string>

@@ -263,14 +263,15 @@ internal fun launchLoadMessages(
                         // §model-selection: track the model bound to the
                         // active session by inferring it from the latest
                         // assistant message's resolvedModel. Surfaces in
-                        // the chat top-bar context menu.
-                        // §model-selection (V1-per-prompt): the per-session stored model is the
-                        // intended-next-model and wins over inference — this preserves a pending
-                        // user switch across periodic reloads during streaming. Inference from the
-                        // latest assistant message is the fallback for sessions first opened on
-                        // another client (no local stored choice yet).
-                        val newModel = settingsManager?.getModelForSession(currentServerGroupFp(), sessionId)
-                            ?: inferCurrentModel(mergedMessages)
+                        // the chat top-bar context menu + the compact request.
+                        //
+                        // §chat-ux-batch T8 (B3): the per-session stored model
+                        // override (legacy SettingsManager.getModelForSession)
+                        // was deleted; currentModel is now sourced purely from
+                        // inference at load. The picker feedback path runs
+                        // through TRANSIENT pendingModel (T7 contract), so this
+                        // field is the load-time + compact-time mirror only.
+                        val newModel = inferCurrentModel(mergedMessages)
 
                         val beforeMergeSize = srcMessages.size
                         slices.mutateChat { c ->
@@ -286,14 +287,12 @@ internal fun launchLoadMessages(
                                 currentModel = newModel
                             )
                         }
-                        // selectedAgentName lives in the settings slice (cross-slice write).
-                        // §bug3-defensive: only sync global selectedAgentName from history when the session
-                        // has an explicit per-session agent override; otherwise preserve the user's global
-                        // choice so opening an old session does not clobber their picker selection.
-                        val perSessionAgent = settingsManager?.getAgentForSession(currentServerGroupFp(), sessionId)
-                        if (perSessionAgent != null) {
-                            slices.mutateSettings { it.copy(selectedAgentName = perSessionAgent) }
-                        }
+                        // §chat-ux-batch T8 (B3): the legacy global←per-session
+                        // selectedAgentName backfill (sync the settings slice
+                        // from SettingsManager.getAgentForSession) was deleted
+                        // here. T7 rewired agent selection to the TRANSIENT
+                        // pendingAgent chat-slice field; no settings-slice
+                        // mirror is needed.
                         DebugLog.d("Sync", "merged: before=$beforeMergeSize after=${mergedMessages.size}")
                         // §Per-session message cache (write): snapshot the freshly-
                         // merged window so a return trip restores it instantly.

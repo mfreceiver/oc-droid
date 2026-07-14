@@ -289,14 +289,24 @@ class SessionSwitcher(
                 isLoadingMessages = false,
                 isLoadingMoreMessages = false,
                 // §model-selection (V1-per-prompt): drop the outgoing session's
-                // currentModel so dispatchSendMessage (which reads
-                // _chatFlow.value.currentModel synchronously) can't leak it
-                // across tabs during the window before launchLoadMessages
-                // completes for the newly-selected session. The authoritative
-                // per-session value is reloaded from SettingsManager by
-                // launchLoadMessages (stored wins) / dispatchSendMessage
-                // (getModelForSession preferred).
+                // currentModel so any synchronous reader can't leak it across
+                // tabs during the window before launchLoadMessages completes
+                // for the newly-selected session. §chat-ux-batch T8 (B3): the
+                // authoritative per-session value is no longer persisted
+                // (setModelForSession/getModelForSession deleted); launchLoadMessages
+                // re-infers it from the latest assistant message (the new
+                // source). The per-send authority is the TRANSIENT pendingModel
+                // (cleared below) per T7's contract.
                 currentModel = null,
+                // §chat-ux-batch T7 (B2): clear the TRANSIENT pending picks on
+                // session switch — they are per-session by contract ("no
+                // cross-session carry"). Without this, an unfinished pending
+                // pick from session A would leak into session B during the
+                // window before the new session's transcript loads. The newly-
+                // selected session resolves its own `pending ?: infer` from
+                // its own ChatState snapshot (pending defaults null).
+                pendingAgent = null,
+                pendingModel = null,
                 // §WT2-taskB: retained-or-cleared jump intent (see above).
                 pendingJumpToLatest = retainedJump,
             )

@@ -5,10 +5,13 @@ import cn.vectory.ocdroid.data.model.SSEEvent
 import cn.vectory.ocdroid.data.model.SSEPayload
 import cn.vectory.ocdroid.data.repository.OpenCodeRepository
 import cn.vectory.ocdroid.data.repository.ServerCompatProfile
+import cn.vectory.ocdroid.di.NotificationDedup
+import cn.vectory.ocdroid.di.SessionNotifier
 import cn.vectory.ocdroid.service.events.IdentifiedSseEvent
 import cn.vectory.ocdroid.service.events.SseEventStream
 import cn.vectory.ocdroid.service.identity.ConnectionIdentity
 import cn.vectory.ocdroid.service.identity.ConnectionIdentityStore
+import cn.vectory.ocdroid.service.streaming.SseNotificationBridge
 import cn.vectory.ocdroid.service.streaming.ServiceSseConnectionOwner
 import cn.vectory.ocdroid.ui.SharedEffectBus
 import cn.vectory.ocdroid.ui.SharedStateStore
@@ -32,6 +35,9 @@ import kotlinx.coroutines.test.TestScope
 import kotlinx.coroutines.test.UnconfinedTestDispatcher
 import kotlinx.coroutines.test.advanceUntilIdle
 import kotlinx.coroutines.test.runTest
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.buildJsonArray
+import kotlinx.serialization.json.buildJsonObject
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
@@ -374,6 +380,137 @@ class SseEventStreamBridgeWiringTest {
         )
 
         bridge.close()
+    }
+
+    /**
+     * T5-review C1 — the additive notification tap does NOT steal events
+     * from AppCore's single-consumer `controlEvents` channel.
+     *
+     * Sets up a real [SseEventBridge] over a real [SseEventStream], then
+     * wires BOTH:
+     *  - an AppCore-shaped collector on [SseEventBridge.controlEvents] (the
+     *    authoritative channel path AppCore drains in production), AND
+     *  - a real [SseNotificationBridge] on [SseEventBridge.notificationControlEvents]
+     *    (the new additive SharedFlow tap), with an extra `onEach` observer
+     *    on the same SharedFlow.
+     *
+     * Emits a current-epoch parseable `question.asked`. Asserts:
+     *  - AppCore's `controlEvents` list == `[theSameEvent]` (the channel
+     *    received the event — the competing-collector bug under the OLD
+     *    wiring would have left this empty, since the bridge would have
+     *    stolen the frame).
+     *  - The notification SharedFlow observer list == `[theSameEvent]`.
+     *  - The notifier was invoked exactly once.
+     *  - All three observations reference the SAME event identity.
+     *
+     * Under the OLD competing-collector wiring (the bridge subscribed to
+     * `controlEvents` directly), `controlEvents.receiveAsFlow()` is
+     * single-consumer — the test would have flapped between the AppCore
+     * collector and the bridge collector receiving the event, never both.
+     * The additive SharedFlow tap decouples them.
+     */
+    @Test
+    fun `T5-review C1 - notification tap and AppCore channel both receive the same event`() = runTest {
+        val identity = identityStore.bind("test-fp", "/proj", "endpoint")
+        bridge.start(stream.events) { identityStore.currentEpoch() }
+
+        // AppCore-shaped collector on the channel surface.
+        val controlObserved = mutableListOf<IdentifiedSseEvent>()
+        val controlJob = launch {
+            bridge.controlEvents.collect { controlObserved += it }
+        }
+        advanceUntilIdle()
+
+        // Additional observer on the notification SharedFlow tap (proves
+        // multi-subscriber fan-out beyond just the bridge).
+        val notifObserved = mutableListOf<IdentifiedSseEvent>()
+        val notifTapJob = launch {
+            bridge.notificationControlEvents.collect { notifObserved += it }
+        }
+        advanceUntilIdle()
+
+        // Recording notifier — counts decision calls.
+        var notifyCalls = 0
+        val notifier = mockk<SessionNotifier>(relaxed = true) {
+            every { notifyDecision(any(), any(), any(), any()) } answers {
+                notifyCalls += 1
+                true
+            }
+        }
+
+        // Real SseNotificationBridge on the additive SharedFlow tap.
+        val notifBridge = SseNotificationBridge(
+            events = bridge.notificationControlEvents,
+            notifier = notifier,
+            decisionDedup = NotificationDedup(),
+            idleDedup = NotificationDedup(),
+            isInForeground = { false },
+            rootIdleResolver = { null },
+            scope = kotlinx.coroutines.CoroutineScope(SupervisorJob() + Dispatchers.Unconfined),
+        ).also { it.start() }
+        advanceUntilIdle()
+
+        // Emit a current-epoch, parseable question.asked payload.
+        val event = SSEEvent(
+            payload = SSEPayload(
+                type = "question.asked",
+                properties = buildJsonObject {
+                    put("id", JsonPrimitive("q-c1"))
+                    put("sessionID", JsonPrimitive("ses-c1"))
+                    put("questions", buildJsonArray {
+                        add(buildJsonObject {
+                            put("question", JsonPrimitive("q?"))
+                            put("header", JsonPrimitive("header-c1"))
+                            put("options", buildJsonArray {})
+                        })
+                    })
+                },
+            )
+        )
+        stream.emit(Result.success(IdentifiedSseEvent(identity, event)))
+        advanceUntilIdle()
+
+        controlJob.cancel()
+        notifTapJob.cancel()
+        notifBridge.stop()
+
+        // ── Assertions ───────────────────────────────────────────────────
+        assertEquals(
+            "AppCore's controlEvents channel received the event (competing-collector bug would have stolen it)",
+            1,
+            controlObserved.size,
+        )
+        assertEquals(
+            "the additive notification SharedFlow tap observed the event",
+            1,
+            notifObserved.size,
+        )
+        assertEquals(
+            "the notifier was called exactly once",
+            1,
+            notifyCalls,
+        )
+        // Same-event identity across all three observations.
+        assertEquals(
+            "controlEvents identity == emitted identity",
+            identity,
+            controlObserved[0].identity,
+        )
+        assertEquals(
+            "notification SharedFlow identity == emitted identity",
+            identity,
+            notifObserved[0].identity,
+        )
+        assertEquals(
+            "controlEvents and notification SharedFlow observed the SAME event",
+            controlObserved[0],
+            notifObserved[0],
+        )
+        assertEquals(
+            "the routed frame carries question.asked (control class)",
+            "question.asked",
+            controlObserved[0].event.payload.type,
+        )
     }
 }
 /**

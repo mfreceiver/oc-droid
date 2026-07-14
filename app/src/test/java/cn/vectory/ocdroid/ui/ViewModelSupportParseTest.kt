@@ -9,10 +9,14 @@ import io.mockk.unmockkAll
 import io.mockk.verify
 import org.junit.After
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
+import kotlinx.serialization.Serializable
+import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
@@ -353,4 +357,68 @@ class ViewModelSupportParseTest {
         assert(!isStreamablePartType("file"))
         assert(!isStreamablePartType(""))
     }
+
+    // ── T5-re-review M1-R — ssePayloadJson config pinning ──────────────────
+
+    /**
+     * T5-re-review M1-R: the prior coercion test
+     * (`SseNotificationBridgeTest.I4 - session_status with explicit null on
+     * optional field decodes to default`) supplied null to ALREADY-nullable
+     * fields (`Int? = null` / `String? = null`), which the default `Json`
+     * accepts even WITHOUT `coerceInputValues`. Removing `coerceInputValues`
+     * from the canonical config would have gone undetected.
+     *
+     * This test pins all four [ssePayloadJson.configuration] flags directly
+     * so any removal (of ANY flag) is caught immediately.
+     */
+    @Test
+    fun `M1-R - ssePayloadJson pins all four canonical configuration flags`() {
+        val config = ssePayloadJson.configuration
+        assertFalse("explicitNulls must be false (omitted fields → null defaults)", config.explicitNulls)
+        assertTrue("ignoreUnknownKeys must be true (server additions don't drop events)", config.ignoreUnknownKeys)
+        assertTrue("coerceInputValues must be true (explicit nulls on non-nullable-defaulted → defaults)", config.coerceInputValues)
+        assertTrue("encodeDefaults must be true (round-trip stable)", config.encodeDefaults)
+    }
+
+    /**
+     * T5-re-review M1-R: a NON-null defaulted property receiving an explicit
+     * JSON `null` decodes to its default ONLY under `coerceInputValues = true`.
+     * Without coercion, `kotlinx.serialization` throws on an explicit null
+     * for a non-nullable type (even with `explicitNulls = false`, which only
+     * affects OMITTED fields, not explicit nulls).
+     *
+     * This fixture uses a test-local [Serializable] data class with a
+     * non-nullable `String` property that has a default. Decoding
+     * `{"name": null}` succeeds (coerced to the default) — would THROW if
+     * `coerceInputValues` were removed.
+     */
+    @Test
+    fun `M1-R - explicit null on non-nullable defaulted property coerces to default under ssePayloadJson`() {
+        val decoded = ssePayloadJson.decodeFromString<M1RFixture>("""{"name": null}""")
+        assertEquals(
+            "explicit null on non-nullable defaulted String coerced to its default",
+            "fallback",
+            decoded.name,
+        )
+    }
+
+    /**
+     * T5-re-review M1-R: without `coerceInputValues`, the default `Json`
+     * THROWS on an explicit null for a non-nullable property — confirming
+     * the fixture above genuinely detects removal of the flag.
+     */
+    @Test
+    fun `M1-R - default Json throws on explicit null for non-nullable defaulted property`() {
+        val strict = Json { explicitNulls = false }
+        val result = runCatching { strict.decodeFromString<M1RFixture>("""{"name": null}""") }
+        assertTrue(
+            "default Json (no coerceInputValues) must throw on explicit null for non-nullable",
+            result.isFailure,
+        )
+    }
+
+    @Serializable
+    private data class M1RFixture(
+        val name: String = "fallback",
+    )
 }

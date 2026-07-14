@@ -1424,55 +1424,26 @@ class SessionListActionsTest {
 
     // ── launchLoadAgents ──────────────────────────────────────────────────────
 
-    @Test
-    fun `launchLoadAgents reconciles invalid selectedAgentName to null (server default)`() = runTest {
-        val agents = listOf(AgentInfo(name = "build"), AgentInfo(name = "code"))
-        coEvery { repository.getAgents() } returns Result.success(agents)
-        store.mutateSettings { it.copy(selectedAgentName = "ghost") }
-
-        launchLoadAgents(scope, repository, slices, settingsManager, "Tag")
-        advanceUntilIdle()
-
-        // §agent-default: 选过的 agent 已不在服务端列表 → 回退 null（服务端默认），不再强制 build。
-        assertEquals(null, slices.settings.value.selectedAgentName)
-        verify { settingsManager.selectedAgentName = null }
-    }
-
-    @Test
-    fun `launchLoadAgents keeps a still-valid selectedAgentName`() = runTest {
-        // §agent-default: 选过的 agent 仍在列表 → 保留（不回退）。
-        val agents = listOf(AgentInfo(name = "build"), AgentInfo(name = "code"))
-        coEvery { repository.getAgents() } returns Result.success(agents)
-        store.mutateSettings { it.copy(selectedAgentName = "code") }
-
-        launchLoadAgents(scope, repository, slices, settingsManager, "Tag")
-        advanceUntilIdle()
-
-        assertEquals("code", slices.settings.value.selectedAgentName)
-        verify(exactly = 0) { settingsManager.selectedAgentName = any() }
-    }
-
-    @Test
-    fun `launchLoadAgents preserves valid selectedAgentName and does not persist`() = runTest {
-        val agents = listOf(AgentInfo(name = "build"), AgentInfo(name = "code"))
-        coEvery { repository.getAgents() } returns Result.success(agents)
-        store.mutateSettings { it.copy(selectedAgentName = "code") }
-
-        launchLoadAgents(scope, repository, slices, settingsManager, "Tag")
-        advanceUntilIdle()
-
-        assertEquals("code", slices.settings.value.selectedAgentName)
-        verify(exactly = 0) { settingsManager.selectedAgentName = any() }
-    }
+    // §chat-ux-batch T8 (B3): the three former tests
+    // `launchLoadAgents reconciles invalid selectedAgentName to null (server default)`,
+    // `launchLoadAgents keeps a still-valid selectedAgentName`, and
+    // `launchLoadAgents preserves valid selectedAgentName and does not persist`
+    // were DELETED here. They exercised the legacy selectedAgentName
+    // reconciliation in launchLoadAgents — both the validation block and the
+    // selectedAgentName field were deleted in T8 (T7 rewired agent selection
+    // to the TRANSIENT pendingAgent chat-slice field, so loadAgents now just
+    // writes the freshly-fetched list).
 
     @Test
     fun `launchLoadAgents failure leaves slice untouched`() = runTest {
         coEvery { repository.getAgents() } returns Result.failure(IllegalStateException("x"))
-        store.mutateSettings { it.copy(selectedAgentName = "code") }
 
-        launchLoadAgents(scope, repository, slices, settingsManager, "Tag")
+        // §chat-ux-batch T8 (B3): launchLoadAgents shed its settingsManager
+        // param (legacy selectedAgentName reconciliation removed). On failure,
+        // the agents slice is left untouched.
+        launchLoadAgents(scope, repository, slices, "Tag")
         advanceUntilIdle()
 
-        assertEquals("code", slices.settings.value.selectedAgentName)
+        assertTrue(slices.settings.value.agents.isEmpty())
     }
 }

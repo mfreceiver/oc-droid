@@ -15,6 +15,37 @@ import kotlinx.serialization.json.JsonPrimitive
 
 internal val lenientJson = Json { ignoreUnknownKeys = true }
 
+/**
+ * T5-review I4 — the canonical `Json` for embedded SSE payload decoders
+ * (`parseSessionStatusEvent` / `parseQuestionAskedEvent`).
+ *
+ * The prior `parseSessionStatusEvent` used the default `Json` (strict —
+ * fails on unknown keys + explicit nulls) and `parseQuestionAskedEvent`
+ * used [lenientJson] (only `ignoreUnknownKeys=true`). Neither matched the
+ * binding contract that production SSE payloads carry unknown future
+ * fields, can omit nullable fields, and benefit from coerced defaults.
+ * This single canonical instance unifies the config:
+ *  - `explicitNulls = false` — omitted fields decode to null defaults.
+ *  - `ignoreUnknownKeys = true` — server-side additions don't drop events.
+ *  - `coerceInputValues = true` — explicit JSON nulls on non-nullable
+ *    properties with defaults coerce to those defaults; unknown enum
+ *    values coerce to the default enum entry; out-of-range numerics
+ *    coerce to their bounds. It does NOT coerce wrong types (a JSON
+ *    array where a String is expected still throws → the parser returns
+ *    null via the enclosing runCatching, as the ViewModelSupportParseTest
+ *    "fails strict deserialization" case pins).
+ *  - `encodeDefaults = true` — round-trip stable (encoder symmetry).
+ *
+ * Used ONLY by the two SSE payload parsers (the broader `lenientJson`
+ * stays untouched for the SessionSyncCoordinator's other paths).
+ */
+internal val ssePayloadJson = Json {
+    explicitNulls = false
+    ignoreUnknownKeys = true
+    coerceInputValues = true
+    encodeDefaults = true
+}
+
 // R-09: NOISY_SSE_LOG_EVENTS 已下沉到 data/api/SseLogFilter.kt（消除 data 层对 ui
 // 层的反向依赖）。UI 侧使用处（MainViewModelSyncActions）改为正向 import
 // cn.vectory.ocdroid.data.api.NOISY_SSE_LOG_EVENTS。
@@ -279,7 +310,10 @@ internal fun parseSessionStatusEvent(event: SSEEvent): SessionStatusEvent? {
     return runCatching {
         SessionStatusEvent(
             sessionId = sessionId,
-            status = Json.decodeFromString<SessionStatus>(statusJson.toString())
+            // T5-review I4: canonical SSE-payload Json (was default Json —
+            // strict, failed on unknown keys). Unknown status fields now
+            // tolerated; nullable omissions decode to defaults.
+            status = ssePayloadJson.decodeFromString<SessionStatus>(statusJson.toString())
         )
     }.getOrNull()
 }
@@ -304,7 +338,9 @@ internal fun parseMessagePartDeltaEvent(event: SSEEvent): MessagePartDeltaEvent?
 internal fun parseQuestionAskedEvent(event: SSEEvent): QuestionRequest? {
     val properties = event.payload.properties ?: return null
     return runCatching {
-        lenientJson.decodeFromString<QuestionRequest>(properties.toString())
+        // T5-review I4: canonical SSE-payload Json (was lenientJson — only
+        // ignoreUnknownKeys; missing explicitNulls/coerce/encodeDefaults).
+        ssePayloadJson.decodeFromString<QuestionRequest>(properties.toString())
     }.getOrNull()
 }
 

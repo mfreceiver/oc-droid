@@ -91,22 +91,19 @@ abstract class MainViewModelTestBase {
         every { settingsManager.username } returns null
         every { settingsManager.password } returns null
         every { settingsManager.currentSessionId } returns null
-        every { settingsManager.selectedAgentName } returns null
         every { settingsManager.themeMode } returns ThemeMode.SYSTEM
 
         every { settingsManager.serverUrl = any() } just runs
         every { settingsManager.username = any() } just runs
         every { settingsManager.password = any() } just runs
         every { settingsManager.currentSessionId = any() } just runs
-        every { settingsManager.selectedAgentName = any() } just runs
         every { settingsManager.themeMode = any() } just runs
 
         every { settingsManager.getDraftText(any(), any()) } returns ""
         every { settingsManager.setDraftText(any(), any(), any()) } just runs
-        every { settingsManager.getAgentForSession(any(), any()) } returns null
-        every { settingsManager.setAgentForSession(any(), any(), any()) } just runs
-        every { settingsManager.getModelForSession(any(), any()) } returns null
-        every { settingsManager.setModelForSession(any(), any(), any(), any()) } just runs
+        // §chat-ux-batch T8 (B3): the legacy mock setup for selectedAgentName /
+        // getAgentForSession / setAgentForSession / getModelForSession /
+        // setModelForSession was removed here (those APIs were deleted).
 
         every { repository.connectSSE(any()) } returns emptyFlow()
         coEvery { repository.getSessions(any()) } returns Result.success(emptyList())

@@ -15,6 +15,45 @@ data class IdleUnreadAlert(
     val key: String,
 )
 
+/**
+ * T5-round-5 I1-A: the [BackgroundUnreadPoller.poll] result contract.
+ *
+ * The prior contract returned `List<IdleUnreadAlert>` and used `emptyList()`
+ * for BOTH "authoritative snapshot that happens to contain no alerts" AND
+ * "poll aborted before producing any snapshot" (identity invalidation /
+ * repository failure / rejected aggregate commit / unregistered poller).
+ * ALM's `runSuspendCatching ... onSuccess` therefore treated every abort as
+ * a successful authoritative empty snapshot → `active = emptySet()` → the
+ * fenced prune removed live `Posted` candidates → the next genuine poll
+ * re-claimed → duplicate notification. The caller cannot distinguish
+ * "authoritative empty" from "abort, no snapshot" on a bare list.
+ *
+ * The sealed result restores the distinction: [Authoritative] drives ALM's
+ * prune + publish path (including genuinely-empty snapshots); [Aborted]
+ * MUST skip the prune entirely (leave dedup state intact) and skip publish.
+ * Cancellation is NOT an abort — `poll()` does not catch
+ * [kotlinx.coroutines.CancellationException], so structured cancellation
+ * still propagates through `runSuspendCatching` (which rethrows it).
+ */
+sealed interface UnreadPollResult {
+    /**
+     * Authoritative snapshot committed to the store. May be empty (a real
+     * snapshot that contained no idle alerts). Drives ALM's
+     * `pruneStaleCandidates(candidates, alerts.keys)` + publish path.
+     */
+    data class Authoritative(val alerts: List<IdleUnreadAlert>) : UnreadPollResult
+
+    /**
+     * Poll aborted WITHOUT producing an authoritative snapshot (identity /
+     * lifecycle / host / workdir invalidation, repository failure, rejected
+     * aggregate commit, `completenessEpoch` moved mid-poll, or unregistered
+     * poller). The caller MUST treat this as "no information" — skip the
+     * prune (dedup state stays intact) and skip publish. A later
+     * authoritative poll will reconcile.
+     */
+    object Aborted : UnreadPollResult
+}
+
 internal fun idleNotificationKey(
     serverId: String,
     workdir: String?,
@@ -52,7 +91,7 @@ class BackgroundUnreadPoller internal constructor(
         appLifecycleMonitor::currentLifecycleGeneration,
     )
 
-    suspend fun poll(): List<IdleUnreadAlert> {
+    suspend fun poll(): UnreadPollResult {
         val startGeneration = lifecycleGeneration()
         val startHostId = store.hostFlow.value.currentHostProfileId
         val startWorkdir = settingsManager.currentWorkdir
@@ -68,15 +107,21 @@ class BackgroundUnreadPoller internal constructor(
             lifecycleGeneration() == startGeneration &&
             store.hostFlow.value.currentHostProfileId == startHostId &&
             settingsManager.currentWorkdir == startWorkdir
-        if (!identityValid()) return emptyList()
+        // T5-round-5 I1-A: every non-exception abort now returns Aborted (was
+        // emptyList()), so the caller can distinguish "no snapshot" from a
+        // genuine authoritative empty. CancellationException is NOT caught
+        // here — repository calls go through runSuspendCatching at the
+        // repository boundary (cancellation rethrown), and `.getOrElse` on
+        // the resulting Result therefore never sees a CancellationException.
+        if (!identityValid()) return UnreadPollResult.Aborted
         val sessions = repository.getSessions(MainViewModelTimings.sessionFullLoadLimit)
-            .getOrElse { return emptyList() }
-        if (!identityValid()) return emptyList()
+            .getOrElse { return UnreadPollResult.Aborted }
+        if (!identityValid()) return UnreadPollResult.Aborted
         val roots = sessions.filter { it.parentId == null }
         val hydration = loadCompleteSessionTrees(repository, roots, shouldContinue = ::identityValid)
-        if (!identityValid()) return emptyList()
-        val statuses = repository.getSessionStatus().getOrElse { return emptyList() }
-        if (!identityValid()) return emptyList()
+        if (!identityValid()) return UnreadPollResult.Aborted
+        val statuses = repository.getSessionStatus().getOrElse { return UnreadPollResult.Aborted }
+        if (!identityValid()) return UnreadPollResult.Aborted
         val children = hydration.childrenByParent
         // OpenCode's authoritative status endpoint omits idle entries. A
         // successful snapshot therefore proves every fetched tree node absent
@@ -87,7 +132,7 @@ class BackgroundUnreadPoller internal constructor(
             .mapTo(mutableSetOf()) { it.id }
         val normalizedStatuses = normalizeAuthoritativeStatusSnapshot(statuses, authoritativeNodeIds)
 
-        if (!identityValid()) return emptyList()
+        if (!identityValid()) return UnreadPollResult.Aborted
         val now = clock()
         var committedUnread: cn.vectory.ocdroid.ui.UnreadState? = null
         var committedSessionsById: Map<String, cn.vectory.ocdroid.data.model.Session> = emptyMap()
@@ -119,11 +164,13 @@ class BackgroundUnreadPoller internal constructor(
             committedSessionsById = sessionsById
             provisional.copy(unread = nextUnread)
         }
-        val unread = committedUnread ?: return emptyList()
-        if (!identityValid()) return emptyList()
+        // committedUnread == null ⇒ the CAS rejected the commit (epoch moved
+        // mid-poll) ⇒ no authoritative snapshot was produced ⇒ Aborted.
+        val unread = committedUnread ?: return UnreadPollResult.Aborted
+        if (!identityValid()) return UnreadPollResult.Aborted
         val serverId = store.hostFlow.value.currentHostProfileId ?: "default"
         val workdir = settingsManager.currentWorkdir
-        return unread.idleSince
+        val alerts = unread.idleSince
             .filterKeys { it in unread.unreadSessions }
             .map { (rootId, idleSince) ->
             val root = committedSessionsById[rootId]
@@ -134,5 +181,7 @@ class BackgroundUnreadPoller internal constructor(
                 key = idleNotificationKey(serverId, workdir, rootId, idleSince),
             )
             }
+        // Genuine authoritative snapshot (which may be a real empty list).
+        return UnreadPollResult.Authoritative(alerts)
     }
 }

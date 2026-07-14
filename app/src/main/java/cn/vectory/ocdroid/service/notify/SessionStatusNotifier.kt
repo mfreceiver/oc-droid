@@ -50,6 +50,11 @@ object SessionStatusNotifier {
      * @param degraded True when the bootstrap is in the §5 「未决 TOFU 且无
      *  Activity」 degraded state — the notification shows an Open-Activity
      *  hint and stays ongoing.
+     * @param silent T5-C2: when `true`, the spec requests the Android
+     *  builder apply `PRIORITY_MIN` + `setSilent(true)` (still `ongoing`
+     *  so the FGS slot survives). Driven by
+     *  `[SettingsManager].persistentNotificationEnabled == false`. Default
+     *  `false` keeps every existing caller / test byte-for-byte unchanged.
      */
     fun build(
         layer: Layer,
@@ -57,6 +62,7 @@ object SessionStatusNotifier {
         strings: NotificationStrings,
         busySinceMs: Long?,
         degraded: Boolean,
+        silent: Boolean = false,
     ): NotificationSpec {
         // §5 degraded overrides everything: stays ongoing, surfaces Open-app hint.
         if (degraded) {
@@ -69,11 +75,12 @@ object SessionStatusNotifier {
                 chronometerBaseMs = null,
                 showCloseAction = true, // §16-U1 close Action stays reachable
                 degraded = true,
+                silent = silent,
             )
         }
         return when (layer) {
             is Layer.L1 -> if (layer.busy) {
-                busySpec(busyCount, strings, busySinceMs)
+                busySpec(busyCount, strings, busySinceMs, silent)
             } else {
                 // §4.1 L1-idle: normal Service, no FGS slot, SSE alive. 「Connected」
                 // LOW optional surface; NOT ongoing (user can dismiss).
@@ -86,9 +93,10 @@ object SessionStatusNotifier {
                     chronometerBaseMs = null,
                     showCloseAction = false,
                     degraded = false,
+                    silent = silent,
                 )
             }
-            Layer.L2Active -> busySpec(busyCount, strings, busySinceMs)
+            Layer.L2Active -> busySpec(busyCount, strings, busySinceMs, silent)
             Layer.L2Idle -> NotificationSpec(
                 title = strings.appName,
                 content = strings.idleMonitoring,
@@ -98,6 +106,7 @@ object SessionStatusNotifier {
                 chronometerBaseMs = null,
                 showCloseAction = true, // §16-U1 close Action
                 degraded = false,
+                silent = silent,
             )
             Layer.L3 -> NotificationSpec(
                 title = strings.appName,
@@ -108,6 +117,7 @@ object SessionStatusNotifier {
                 chronometerBaseMs = null,
                 showCloseAction = false,
                 degraded = false,
+                silent = silent,
             )
         }
     }
@@ -117,8 +127,14 @@ object SessionStatusNotifier {
      * slot is held inside the 5s ANR window without a heads-up bubble. No
      * close Action — the placeholder is transient and replaced as soon as
      * bootstrap emits its first [LifecycleCommand].
+     *
+     * T5-C2: [silent] is forwarded unchanged so a sticky rebuild also
+     * respects the user's persistent-notification preference (default off).
      */
-    fun buildPlaceholder(strings: NotificationStrings): NotificationSpec = NotificationSpec(
+    fun buildPlaceholder(
+        strings: NotificationStrings,
+        silent: Boolean = false,
+    ): NotificationSpec = NotificationSpec(
         title = strings.appName,
         content = strings.restoringConnection,
         priority = NotificationSpec.PRIORITY_LOW,
@@ -127,12 +143,14 @@ object SessionStatusNotifier {
         chronometerBaseMs = null,
         showCloseAction = false,
         degraded = false,
+        silent = silent,
     )
 
     private fun busySpec(
         count: Int,
         strings: NotificationStrings,
         busySinceMs: Long?,
+        silent: Boolean,
     ): NotificationSpec {
         // §9 (abort) + §16-U1 (close): single-busy could show Abort, multi-busy
         // jumps to the task list; the close Action is always present. CP5 ships
@@ -148,6 +166,7 @@ object SessionStatusNotifier {
             chronometerBaseMs = busySinceMs,
             showCloseAction = true, // §16-U1
             degraded = false,
+            silent = silent,
         )
     }
 }
@@ -195,6 +214,10 @@ data class NotificationStrings(
  *  Action. Wiring (PendingIntent + receiver) is CP8/U1; CP5 only carries the
  *  flag so the spec is decision-complete.
  * @property degraded `true` for the §5 「未决 TOFU 且无 Activity」 degraded state.
+ * @property silent T5-C2: when `true`, the Android builder applies
+ *  `PRIORITY_MIN` + `setSilent(true)` (still `ongoing` so the FGS slot
+ *  survives). Driven by `[SettingsManager].persistentNotificationEnabled ==
+ *  false`. Defaults to `false` so existing callers / tests are unchanged.
  */
 data class NotificationSpec(
     val title: String,
@@ -205,6 +228,7 @@ data class NotificationSpec(
     val chronometerBaseMs: Long?,
     val showCloseAction: Boolean,
     val degraded: Boolean,
+    val silent: Boolean = false,
 ) {
     companion object {
         const val PRIORITY_MIN = -2

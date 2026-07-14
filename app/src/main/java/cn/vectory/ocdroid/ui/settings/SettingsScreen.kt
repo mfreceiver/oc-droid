@@ -38,6 +38,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
@@ -65,7 +66,12 @@ import cn.vectory.ocdroid.ui.SettingsViewModel
 import cn.vectory.ocdroid.ui.theme.AppSectionHeader
 import cn.vectory.ocdroid.ui.theme.Dimens
 import cn.vectory.ocdroid.ui.util.formatBytes
+import cn.vectory.ocdroid.util.SettingsManager
 import cn.vectory.ocdroid.util.ThemeMode
+import dagger.hilt.EntryPoint
+import dagger.hilt.InstallIn
+import dagger.hilt.android.EntryPointAccessors
+import dagger.hilt.components.SingletonComponent
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.map
 
@@ -390,6 +396,14 @@ fun SettingsNotificationsRoute(onBack: () -> Unit) {
         granted = notificationsEnabled(context)
     }
 
+    // T5-C3: the persistent-notification toggle reads/writes
+    // [SettingsManager.persistentNotificationEnabled] directly. Mirrors the
+    // EntryPoint pattern already used in HostProfilesManagerScreen so the
+    // AppShell call site (which does not pass a SettingsManager) is
+    // unchanged.
+    val settingsManager = rememberSettingsManager()
+    var persistentEnabled by remember { mutableStateOf(settingsManager.persistentNotificationEnabled) }
+
     SettingsSubRouteScaffold(titleRes = R.string.settings_section_notifications, onBack = onBack) { mod ->
         // §review-AB: no parent horizontal padding — AppSectionHeader +
         // ListItem self-pad at 16dp; the bare grant-button Row below also
@@ -412,6 +426,42 @@ fun SettingsNotificationsRoute(onBack: () -> Unit) {
                     Text(stringResource(R.string.settings_notifications_completion_channel_desc))
                 },
             )
+            // T5-C3: persistent-notification toggle. Default OFF — when off,
+            // the FGS ongoing notification is silent (PRIORITY_MIN +
+            // setSilent); the FGS slot still survives and SSE keepalive is
+            // unchanged. The whole row is tappable (mirrors ModelRow).
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = Dimens.spacing4)
+                    .clickable {
+                        val next = !persistentEnabled
+                        settingsManager.persistentNotificationEnabled = next
+                        persistentEnabled = next
+                    },
+                verticalAlignment = androidx.compose.ui.Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(Dimens.spacing3),
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = stringResource(R.string.settings_notifications_persistent_title),
+                        style = MaterialTheme.typography.bodyLarge,
+                        color = MaterialTheme.colorScheme.onSurface,
+                    )
+                    Text(
+                        text = stringResource(R.string.settings_notifications_persistent_desc),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                Switch(
+                    checked = persistentEnabled,
+                    onCheckedChange = {
+                        settingsManager.persistentNotificationEnabled = it
+                        persistentEnabled = it
+                    },
+                )
+            }
             ListItem(
                 headlineContent = {
                     Text(
@@ -594,4 +644,27 @@ private fun openSystemNotificationSettings(context: android.content.Context) {
                 }
             )
         }
+}
+
+/**
+ * T5-C3: Hilt EntryPoint that exposes the application-wide
+ * [SettingsManager] to the (Composable-owned) [SettingsNotificationsRoute]
+ * without threading a new parameter through AppShell. Mirrors the pattern
+ * already used in [HostSettingsManagerEntryPoint].
+ */
+@EntryPoint
+@InstallIn(SingletonComponent::class)
+interface NotificationsSettingsManagerEntryPoint {
+    fun settingsManager(): SettingsManager
+}
+
+@Composable
+private fun rememberSettingsManager(): SettingsManager {
+    val context = LocalContext.current
+    return remember(context) {
+        EntryPointAccessors.fromApplication(
+            context.applicationContext,
+            NotificationsSettingsManagerEntryPoint::class.java,
+        ).settingsManager()
+    }
 }

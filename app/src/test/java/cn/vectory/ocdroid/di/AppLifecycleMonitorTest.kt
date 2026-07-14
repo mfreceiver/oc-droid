@@ -5,17 +5,26 @@ import android.app.NotificationManager
 import android.content.Context
 import androidx.test.core.app.ApplicationProvider
 import cn.vectory.ocdroid.data.repository.OpenCodeRepository
+import cn.vectory.ocdroid.ui.controller.IdleUnreadAlert
 import cn.vectory.ocdroid.util.SettingsManager
 import io.mockk.mockk
+import kotlin.coroutines.ContinuationInterceptor
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.MainCoroutineDispatcher
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.StandardTestDispatcher
+import kotlinx.coroutines.test.TestCoroutineScheduler
+import kotlinx.coroutines.test.TestDispatcher
 import kotlinx.coroutines.test.TestScope
+import kotlinx.coroutines.test.UnconfinedTestDispatcher
 import kotlinx.coroutines.test.advanceTimeBy
+import kotlinx.coroutines.test.resetMain
 import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
+import kotlinx.coroutines.test.setMain
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
@@ -273,6 +282,103 @@ class AppLifecycleMonitorTest {
         // onEnterForeground code path.
         cb.onActivityStarted(mockk<android.app.Activity>(relaxed = true))
         assertTrue(monitor.isInForeground.value)
+    }
+
+    // ── T5-re-review I2-R — Main.immediate publish gate (TOCTOU closure) ──
+
+    /**
+     * T5-re-review I2-R: the poller runs on Dispatchers.Default; the three
+     * ALM handlers read `_isInForeground.value` and call `notifier.notify*`
+     * on Default. But `onActivityStarted` sets `_isInForeground = true` on
+     * Main. The Default read-then-notify was a TOCTOU — a Main ON_START
+     * between the Default read and the Default notify posted sound /
+     * vibration while foregrounded.
+     *
+     * Fix: the final foreground gate + notify + complete run SYNCHRONOUSLY
+     * on `Dispatchers.Main.immediate`, serialized with lifecycle callbacks.
+     * This test proves the closure deterministically: a custom scheduling
+     * Main dispatcher (whose `.immediate` variant IS scheduling, unlike the
+     * default test wrapper which is always inline) makes
+     * `withContext(Dispatchers.Main.immediate)` queue and suspend. The
+     * handler is launched on `UnconfinedTestDispatcher` (mimicking Default
+     * — runs eagerly up to the withContext suspension); the continuation
+     * queues on the scheduler; we flip foreground to true (onActivityStarted)
+     * BEFORE resuming; the resumed withContext body reads fg=true and
+     * suppresses — NO notification is posted AND the claim is released
+     * (finally ran) so a later background attempt can fire.
+     */
+    @Test
+    fun `I2-R - foreground flip on Main during publish suppresses notification and releases claim`() {
+        // Custom scheduling Main dispatcher: the default `setMain` wrapper
+        // makes `.immediate.isDispatchNeeded` always false (inline). This
+        // custom dispatcher's `.immediate` returns `this` (which has
+        // `isDispatchNeeded = true`), so `withContext(Dispatchers.Main.
+        // immediate)` QUEUES and SUSPENDS — enabling deterministic
+        // interleaving between the Default pre-check/claim and the Main gate.
+        val scheduler = TestCoroutineScheduler()
+        val testDispatcher = StandardTestDispatcher(scheduler)
+        val schedulingMain = object : MainCoroutineDispatcher() {
+            override val immediate: MainCoroutineDispatcher = this
+            override fun dispatch(context: kotlin.coroutines.CoroutineContext, block: Runnable) =
+                testDispatcher.dispatch(context, block)
+        }
+        Dispatchers.setMain(schedulingMain)
+        try {
+            val appScope = CoroutineScope(UnconfinedTestDispatcher(scheduler))
+            val monitor = newMonitor(appScope = appScope, uiScope = CoroutineScope(testDispatcher))
+            val cb = app.registeredCallbacks!!
+
+            // Start in background (CP8 default-false).
+            assertFalse("background at start", monitor.isInForeground.value)
+
+            val key = "idle:fp:/wd:ses-root:100"
+            val alert = IdleUnreadAlert("ses-root", "Project A", 100L, key)
+
+            // Launch the handler on appScope (Default in production). It runs
+            // eagerly (UnconfinedTestDispatcher): pre-check (bg, continue)
+            // → claim (succeeds) → withContext(Main.immediate) → dispatches
+            // (isDispatchNeeded=true on schedulingMain) → suspends, queues
+            // the continuation on the scheduler.
+            appScope.launch { monitor.handleIdleAlert(alert) }
+
+            // Flip foreground to true, simulating onActivityStarted firing
+            // AFTER the claim but BEFORE the withContext body runs. This is
+            // the exact TOCTOU the I2-R fix closes: the pre-check on Default
+            // saw background; the gate on Main.immediate must see the flip.
+            cb.onActivityStarted(mockk<android.app.Activity>(relaxed = true))
+            assertTrue("foreground flipped before publish", monitor.isInForeground.value)
+
+            // Resume the queued withContext body — reads fg=true, suppresses,
+            // returns; finally releases the claim.
+            scheduler.runCurrent()
+
+            // Assert: NO notification was posted (the gate suppressed the
+            // publish before notifier.notifyIdle was ever called).
+            val nm = app.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+            assertEquals(
+                "foreground flip during publish must suppress the notification (TOCTOU closed)",
+                0,
+                nm.activeNotifications.size,
+            )
+
+            // Assert: the claim was released (finally ran on suppression) so
+            // a later background attempt can re-post.
+            assertFalse(
+                "suppressed publish must release the claim so a later background attempt can fire",
+                monitor.idleNotificationSnapshot.contains(key),
+            )
+
+            // A later background attempt on the same key can re-claim (proves
+            // the release actually cleared the slot — otherwise the second
+            // claim would lose to the stranded first claim).
+            val tokenRetry = monitor.idleNotificationSnapshot.claim(key)
+            assertNotNull(
+                "released claim lets a later background attempt re-claim",
+                tokenRetry,
+            )
+        } finally {
+            Dispatchers.resetMain()
+        }
     }
 
     // ── §7 channel matrix ─────────────────────────────────────────────────

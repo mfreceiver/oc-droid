@@ -163,7 +163,6 @@ class ConnectionActionsTest {
         val profile = HostProfile.defaultDirect(serverUrl = "http://x")
         every { hostProfileStore.currentProfile() } returns profile
         every { hostProfileStore.profiles() } returns listOf(profile)
-        every { settingsManager.selectedAgentName } returns "code"
         every { settingsManager.themeMode } returns ThemeMode.DARK
         every { settingsManager.markdownFontSizes } returns MarkdownFontSizes()
         every { settingsManager.getDisabledModels(any()) } returns setOf("openai/gpt-x")
@@ -173,30 +172,20 @@ class ConnectionActionsTest {
         applySavedSettings(repository, settingsManager, hostProfileStore, slices)
 
         val settings = slices.settings.value
-        assertEquals("code", settings.selectedAgentName)
+        // §chat-ux-batch T8 (B3): selectedAgentName field was deleted; the
+        // remaining slice seeds (theme / disabledModels / uiScale) are the
+        // authoritative ones.
         assertEquals(ThemeMode.DARK, settings.themeMode)
         assertEquals(setOf("openai/gpt-x"), settings.disabledModels)
         assertEquals(1.2f, settings.uiFontScale, 0.0001f)
         assertEquals(0.9f, settings.uiContentScale, 0.0001f)
     }
 
-    @Test
-    fun `applySavedSettings leaves selectedAgentName null when no pref (server default)`() {
-        val profile = HostProfile.defaultDirect(serverUrl = "http://x")
-        every { hostProfileStore.currentProfile() } returns profile
-        every { hostProfileStore.profiles() } returns listOf(profile)
-        every { settingsManager.selectedAgentName } returns null
-        every { settingsManager.themeMode } returns ThemeMode.SYSTEM
-        every { settingsManager.markdownFontSizes } returns MarkdownFontSizes()
-        every { settingsManager.getDisabledModels(any()) } returns emptySet()
-        every { settingsManager.uiFontScale } returns 1f
-        every { settingsManager.uiContentScale } returns 1f
-
-        applySavedSettings(repository, settingsManager, hostProfileStore, slices)
-
-        // §agent-default: 无显式选择时保持 null（让服务端用其默认 agent），不再回退 build。
-        assertEquals(null, slices.settings.value.selectedAgentName)
-    }
+    // §chat-ux-batch T8 (B3): the former test
+    // `applySavedSettings leaves selectedAgentName null when no pref (server default)`
+    // was DELETED here. The selectedAgentName field + seedAgent read were
+    // removed (T7 rewired agent selection to the TRANSIENT pendingAgent
+    // chat-slice field).
 
     @Test
     fun `applySavedSettings seeds host slice with profiles list`() {

@@ -378,13 +378,32 @@ class SettingsManager @Inject constructor(
         encryptedPrefs.edit().remove(recentWorkdirsKey(serverGroupFp)).apply()
     }
 
-    var selectedAgentName: String?
-        get() = encryptedPrefs.getString(KEY_AGENT_NAME, null)
-        set(value) = encryptedPrefs.edit().putString(KEY_AGENT_NAME, value).apply()
+    // §chat-ux-batch T8 (B3): the global `selectedAgentName` property was
+    // deleted here. T7 rewired agent selection to the TRANSIENT `pendingAgent`
+    // chat-slice field (resolved `pending ?: infer ?: null` at send); the
+    // legacy persistent property has no live reader. See the KEY_AGENT_NAME
+    // tombstone in the companion object below.
 
     var themeMode: ThemeMode
         get() = ThemeMode.valueOf(encryptedPrefs.getString(KEY_THEME, ThemeMode.SYSTEM.name) ?: ThemeMode.SYSTEM.name)
         set(value) = encryptedPrefs.edit().putString(KEY_THEME, value.name).apply()
+
+    /**
+     * T5-C1/C2: when `false` (default), the persistent/ongoing FGS
+     * session-status notification is built with `PRIORITY_MIN` +
+     * `setSilent(true)` so it does not surface in the shade nor make
+     * sound/vibrate, while still `setOngoing` so the FGS slot survives and
+     * SSE keepalive continues unchanged. When `true`, the prior LOW +
+     * non-silent surface is restored (the user explicitly opts in to a
+     * visible ongoing notification).
+     *
+     * ESP-persisted Boolean mirroring the existing key/get/set pattern
+     * (e.g. [themeMode]); default `false` so a fresh install keeps the
+     * notification drawer quiet.
+     */
+    var persistentNotificationEnabled: Boolean
+        get() = encryptedPrefs.getBoolean(KEY_PERSISTENT_NOTIFICATION_ENABLED, false)
+        set(value) = encryptedPrefs.edit().putBoolean(KEY_PERSISTENT_NOTIFICATION_ENABLED, value).apply()
 
     /**
      * §P5a (Q5): user-facing language preference. SYSTEM = follow the real
@@ -572,79 +591,11 @@ class SettingsManager @Inject constructor(
         get() = encryptedPrefs.getLong(KEY_TRAFFIC_RECEIVED, 0L)
         set(value) = encryptedPrefs.edit().putLong(KEY_TRAFFIC_RECEIVED, value).apply()
 
-    /**
-     * R-20 Phase 5: per-(serverGroupFp, sessionId) agent override. Composite
-     * map key `"<fp>\u0000<sessionId>"` — see [getDraftText] for the
-     * collision-defense rationale.
-     */
-    fun getAgentForSession(serverGroupFp: String, sessionId: String): String? {
-        val json = encryptedPrefs.getString(KEY_SESSION_AGENTS, null) ?: return null
-        return try {
-            Json.decodeFromString<Map<String, String>>(json)[compositeSessionKey(serverGroupFp, sessionId)]
-        } catch (e: Exception) {
-            null
-        }
-    }
-
-    fun setAgentForSession(serverGroupFp: String, sessionId: String, agentName: String) {
-        val json = encryptedPrefs.getString(KEY_SESSION_AGENTS, null)
-        val map: MutableMap<String, String> = try {
-            json?.let { Json.decodeFromString<Map<String, String>>(it).toMutableMap() } ?: mutableMapOf()
-        } catch (e: Exception) {
-            mutableMapOf()
-        }
-        map[compositeSessionKey(serverGroupFp, sessionId)] = agentName
-        encryptedPrefs.edit().putString(KEY_SESSION_AGENTS, Json.encodeToString(map)).apply()
-    }
-
-    /**
-     * §agent-default: 清除某会话的 per-session agent 覆盖，使其回退到服务端默认 agent。
-     * 用于 agent 选择器的"默认"项。
-     */
-    fun clearAgentForSession(serverGroupFp: String, sessionId: String) {
-        val json = encryptedPrefs.getString(KEY_SESSION_AGENTS, null) ?: return
-        val map: MutableMap<String, String> = try {
-            Json.decodeFromString<Map<String, String>>(json).toMutableMap()
-        } catch (e: Exception) {
-            return
-        }
-        map.remove(compositeSessionKey(serverGroupFp, sessionId))
-        encryptedPrefs.edit().putString(KEY_SESSION_AGENTS, Json.encodeToString(map)).apply()
-    }
-
-    /**
-     * §model-selection: per-(serverGroupFp, sessionId) intended-next-model
-     * override, persisted across cold starts. Stored as a JSON map keyed by
-     * the composite `"<fp>\u0000<sessionId>"` (R-20 Phase 5) mirroring the
-     * per-session agent map. Returns null when no model has been chosen for
-     * the (fp, session) pair (caller falls back to inferring from the latest
-     * assistant message).
-     *
-     * Model: V1-per-prompt semantics — the stored value is the model that will be
-     * attached to the NEXT outgoing prompt's [PromptRequest.model]; it is NOT a
-     * server-side session binding.
-     */
-    fun getModelForSession(serverGroupFp: String, sessionId: String): Message.ModelInfo? {
-        val json = encryptedPrefs.getString(KEY_SESSION_MODELS, null) ?: return null
-        return try {
-            val raw = Json.decodeFromString<Map<String, String>>(json)[compositeSessionKey(serverGroupFp, sessionId)] ?: return null
-            val parts = raw.split("/", limit = 2)
-            if (parts.size != 2) null else Message.ModelInfo(providerId = parts[0], modelId = parts[1])
-        } catch (e: Exception) {
-            null
-        }
-    }
-
-    fun setModelForSession(serverGroupFp: String, sessionId: String, providerId: String, modelId: String) {
-        val json = encryptedPrefs.getString(KEY_SESSION_MODELS, null)
-        val map: MutableMap<String, String> = try {
-            json?.let { Json.decodeFromString<Map<String, String>>(it).toMutableMap() } ?: mutableMapOf()
-        } catch (e: Exception) {
-            mutableMapOf()
-        }
-        map[compositeSessionKey(serverGroupFp, sessionId)] = "$providerId/$modelId"
-        encryptedPrefs.edit().putString(KEY_SESSION_MODELS, Json.encodeToString(map)).apply()
-    }
+    // §chat-ux-batch T8 (B3): getAgentForSession / setAgentForSession /
+    // clearAgentForSession / getModelForSession / setModelForSession were
+    // deleted here (the per-session agent/model override maps). T7 rewired
+    // both picks to transient pendingAgent / pendingModel on the chat slice;
+    // these persistent helpers have no live reader.
 
     /**
      * §model-selection / R-20 Phase 5: per-serverGroupFp disabled-model set.
@@ -754,9 +705,12 @@ class SettingsManager @Inject constructor(
      *  2. `disabled_models_<normalizedBaseUrl>` + `model_availability_<normalizedBaseUrl>`
      *     (where baseUrl normalizes to the current profile's URL) →
      *     `disabled_models_<fp>` + `model_availability_<fp>`.
-     *  3. `session_drafts` / `session_agents` / `session_models` JSON maps
-     *     (bare-sessionId keys) → composite keys `"<fp>\u0000<sessionId>"`
-     *     inside the same JSON maps.
+     *  3. `session_drafts` JSON map (bare-sessionId keys) → composite keys
+     *     `"<fp>\u0000<sessionId>"` inside the same JSON map.
+     *
+     * §chat-ux-batch T8 (B3): the legacy `session_agents` / `session_models`
+     * JSON maps were deleted alongside their getters/setters; the migration
+     * rewrites for those two categories were dropped here (no live reader).
      *
      * The migration is non-destructive: legacy keys are NOT removed (they'd
      * be reclaimed by [clearAllLocalData] eventually). This keeps the
@@ -806,14 +760,17 @@ class SettingsManager @Inject constructor(
             }
         }
 
-        // ── 3) session_drafts / agents / models (bare sessionId) → composite ─
-        // Rewrite the JSON maps in place: each entry's key is prefixed with
+        // ── 3) session_drafts (bare sessionId) → composite ───────────────
+        // Rewrite the JSON map in place: each entry's key is prefixed with
         // `<fp>\u0000`. Entries that already carry the composite prefix (a
         // prior partial migration wrote some entries before the flag landed)
         // are left alone.
+        //
+        // §chat-ux-batch T8 (B3): the session_agents / session_models rewrites
+        // were removed (the maps + their getters/setters were deleted; no live
+        // reader remains). session_drafts keeps its migration (drafts still
+        // active).
         rewriteSessionMapLegacyToFp(KEY_SESSION_DRAFTS, serverGroupFp, e)
-        rewriteSessionMapLegacyToFp(KEY_SESSION_AGENTS, serverGroupFp, e)
-        rewriteSessionMapLegacyToFp(KEY_SESSION_MODELS, serverGroupFp, e)
 
         e.putBoolean(flagKey, true)
         e.apply()
@@ -877,9 +834,14 @@ class SettingsManager @Inject constructor(
      *    and mTLS would silently fail to present the cert (glmer I5 /
      *    gpter 重要#6).
      *
-     * WIPED: open tabs, session metadata cache, drafts, per-session agents,
-     * per-session models, current session/workdir, nav page, theme + font
-     * preferences, traffic counters — everything not listed above.
+     * WIPED: open tabs, session metadata cache, drafts, current session/workdir,
+     * nav page, theme + font preferences, traffic counters — everything not
+     * listed above.
+     *
+     * §chat-ux-batch T8 (B3): the legacy per-session agent/model override
+     * keys are no longer written by any code path (their getters/setters were
+     * deleted); any stale orphan entries from a prior install are still wiped
+     * by the iteration below (the keys are not in the preserved whitelist).
      *
      * §P5a (Q5): [KEY_LOCALE] (language preference) is INTENTIONALLY NOT in
      * [preservedKeys] — a full data reset returns the language to SYSTEM
@@ -985,8 +947,21 @@ class SettingsManager @Inject constructor(
          * fan-out alone.
          */
         private const val MAX_RECENT_WORKDIRS = 30
-        private const val KEY_AGENT_NAME = "agent_name"
+        // §chat-ux-batch T8 (B3) tombstone: KEY_AGENT_NAME (global
+        // selectedAgentName) + KEY_SESSION_AGENTS / KEY_SESSION_MODELS (the
+        // per-session agent/model JSON maps) were deleted here. Their
+        // getters/setters were removed too — T7 rewired agent/model selection
+        // to the TRANSIENT pendingAgent / pendingModel chat-slice fields
+        // (resolved `pending ?: infer ?: null` at send). The constants are
+        // intentionally NOT declared so a future "let me re-add this" pass
+        // must consciously re-derive them; any orphan ESP values from a prior
+        // install are reclaimed by clearAllLocalData on the next reset.
+        // private const val KEY_AGENT_NAME = "agent_name"
+        // private const val KEY_SESSION_AGENTS = "session_agents"
+        // private const val KEY_SESSION_MODELS = "session_models"
         private const val KEY_THEME = "theme"
+        /** T5-C1: ESP key for [persistentNotificationEnabled]. Default false. */
+        private const val KEY_PERSISTENT_NOTIFICATION_ENABLED = "persistent_notification_enabled"
         /** §P5a (Q5): persisted [LocaleMode] (language preference). Default null → SYSTEM. */
         private const val KEY_LOCALE = "locale"
         private const val KEY_UI_FONT_SCALE = "ui_font_scale"
@@ -995,8 +970,6 @@ class SettingsManager @Inject constructor(
         const val UI_SCALE_MIN = 0.85f
         const val UI_SCALE_MAX = 1.3f
         private const val KEY_SESSION_DRAFTS = "session_drafts"
-        private const val KEY_SESSION_AGENTS = "session_agents"
-        private const val KEY_SESSION_MODELS = "session_models"
         private const val KEY_MARKDOWN_FONT_SIZES = "markdown_font_sizes_json"
         private const val KEY_FONT_LATIN = "font_latin"
         private const val KEY_FONT_CJK = "font_cjk"

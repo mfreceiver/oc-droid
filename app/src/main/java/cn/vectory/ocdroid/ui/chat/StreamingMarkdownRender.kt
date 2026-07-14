@@ -28,14 +28,14 @@ import com.mikepenz.markdown.model.markdownPadding
 // Public surface (all `internal`):
 //   • [HeightAnchor]            — production 0-shrink anchor (SubcomposeLayout).
 //   • [DebugHeightAnchor]       — + [HeightShrinkCounter] for androidTest.
-//   • [HeightAnchorRegistry]    — cross-call-site maxHeight sharing by stableKey.
+//   • [HeightAnchorRegistry]    — cross-call-site maxHeight sharing by (stableKey, width).
 //   • [StreamingMarkdownContent]— renders a [List]<[StreamingRenderUnit]>.
 //   • [StreamingMarkdownRender] — HeightAnchor + StreamingMarkdownContent (prod).
 //   • [DebugStreamingMarkdownRender] — DebugHeightAnchor + content (tests).
 
 /**
- * Cross-call-site maxHeight registry, keyed by the part's stableKey
- * (`"$messageId|$partId"`).
+ * Cross-call-site maxHeight registry, keyed by the WIDTH-AWARE composite
+ * `(stableKey, width)` (T2 / chat-ux-batch branch G).
  *
  * **Why a registry, not `remember(stableKey)`**: [TextPart]'s streaming branch
  * (inside [StreamingMarkdownRender]) and its completed branch (inside a bare
@@ -47,53 +47,80 @@ import com.mikepenz.markdown.model.markdownPadding
  * read/write the same entry by stableKey, so the completed-state anchor inherits
  * the streaming-state maxHeight → no height drop on finalization (ora-2 (iii)).
  *
+ * **T2 width-aware key (变宽流式留白 fix)**: the key is now `(stableKey, width)`,
+ * NOT the bare stableKey. Previously, when the container width changed (window
+ * resize / split-screen / rotation), the recorded maxHeight for a stableKey was
+ * measured at the OLD width and would leak into the NEW width — on widen this
+ * pinned the visible height above the new natural height, leaving empty bottom
+ * space. By making width part of the key, different widths get INDEPENDENT
+ * anchors: a width change simply creates a fresh entry at the new width's
+ * natural height, and the old (different-width) entry cannot pollute it. No
+ * manual `lastWidth` reset is needed — the key composite handles it.
+ *
  * **gpter #1 correctness**: every [update] receives the NATURAL height measured
  * by [HeightAnchor]'s SubcomposeLayout (at `maxHeight = Infinity`), NOT a
  * `heightIn(min)`-clamped height. The 0.6.1 `onSizeChanged`-based registry
  * stored clamped heights → stale-width maxHeight polluted new widths after
- * rotation. The SubcomposeLayout measurement is width-correct and the registry
- * entry is [reset] on any width change, so cross-width contamination is impossible.
+ * rotation. The SubcomposeLayout measurement is width-correct, and with the
+ * width-aware key the registry is automatically width-isolated.
  *
  * **Bounded (glmer#1 / kimo#2)**: the registry is an access-order LRU capped at
- * [MAX_ENTRIES]. A long session's part count is unbounded, so without a cap the
- * map would grow linearly until process death. Cap = 256 is far above the number
- * of parts Compose composes in one frame (a lazy column materializes only the
- * visible window, typically <50 parts), and currently-composing parts are the
- * MOST-recently-accessed entries → never evicted while visible. Eviction only
- * hits parts scrolled far off-screen; when such a part scrolls back it simply
- * re-anchors from a fresh natural-height frame (targetHeight can only be ≥ the
+ * [MAX_ENTRIES]. A long session's part count × width changes is unbounded, so
+ * without a cap the map would grow linearly until process death. Cap = 256 is
+ * far above the number of parts Compose composes in one frame (a lazy column
+ * materializes only the visible window, typically <50 parts), and currently-
+ * composing parts at the current width are the MOST-recently-accessed entries
+ * → never evicted while visible. Eviction only hits parts scrolled far off-
+ * screen (or at stale widths); when such a part scrolls back it simply re-
+ * anchors from a fresh natural-height frame (targetHeight can only be ≥ the
  * current natural height), so the user sees no 0-shrink violation.
+ *
+ * **0-shrink within the same width**: [update] only RAISES the stored height
+ * (`max(current, naturalHeight)`, never decreases) → same `(stableKey, width)`
+ * queries are non-decreasing across frames → 0 visible height-shrink.
  */
 internal object HeightAnchorRegistry {
     internal const val MAX_ENTRIES = 256
 
     // §glmer-1/kimo-2: access-order LRU (third ctor arg = true) so both update()
     // and anchorFor() (get) promote the entry; removeEldestEntry evicts the
-    // least-recently-used part's anchor past the cap. mutableMapOf() gave no
-    // bound; this caps memory at MAX_ENTRIES regardless of session length.
-    private val maxHeightByKey: MutableMap<Any, Int> =
-        object : LinkedHashMap<Any, Int>(32, 0.75f, true) {
-            override fun removeEldestEntry(eldest: MutableMap.MutableEntry<Any, Int>): Boolean =
+    // least-recently-used (stableKey,width) past the cap.
+    //
+    // §T2: the key is `Pair<Any, Int>` = (stableKey, width). Pair's hashCode is
+    // stable (delegates to the components' hashCodes), so it works directly as
+    // a LinkedHashMap key — no custom wrapper needed.
+    private val maxHeightByKey: MutableMap<Pair<Any, Int>, Int> =
+        object : LinkedHashMap<Pair<Any, Int>, Int>(32, 0.75f, true) {
+            override fun removeEldestEntry(eldest: MutableMap.MutableEntry<Pair<Any, Int>, Int>): Boolean =
                 size > MAX_ENTRIES
         }
 
-    /** Raises the stored maxHeight for [key] to `max(current, naturalHeight)`. */
-    fun update(key: Any, naturalHeight: Int) {
+    /**
+     * Raises the stored maxHeight for [key] to `max(current, naturalHeight)`.
+     * Monotonic: never decreases (0-shrink invariant within the same width).
+     *
+     * @param key `(stableKey, width)` — different widths are independent.
+     * @param naturalHeight the NATURAL content height measured at [key]'s width.
+     */
+    fun update(key: Pair<Any, Int>, naturalHeight: Int) {
         val current = maxHeightByKey[key] ?: 0
         if (naturalHeight > current) {
             maxHeightByKey[key] = naturalHeight
         }
     }
 
-    /** The current maxHeight anchor for [key] (0 if none / just reset). */
-    fun anchorFor(key: Any): Int = maxHeightByKey[key] ?: 0
+    /**
+     * The current maxHeight anchor for [key] (0 if none / never updated).
+     * `key = (stableKey, width)` — different widths return independent anchors.
+     */
+    fun anchorFor(key: Pair<Any, Int>): Int = maxHeightByKey[key] ?: 0
 
     /**
-     * Clears the entry for [key]. Called by [HeightAnchor] when the available
-     * width changes so a stale (different-width) maxHeight does not leak into
-     * the new width (gpter #1 width-reset correctness).
+     * Clears the entry for [key]. With the width-aware composite key, a width
+     * change creates a fresh entry automatically → this is rarely needed in
+     * production, but kept for explicit test/diagnostic cleanup.
      */
-    fun reset(key: Any) {
+    fun reset(key: Pair<Any, Int>) {
         maxHeightByKey.remove(key)
     }
 }
@@ -107,24 +134,28 @@ internal object HeightAnchorRegistry {
  * **gpter #1 fix — SubcomposeLayout, not onSizeChanged**: the production anchor
  * measures [content]'s NATURAL height by subcomposing it and measuring at
  * `maxHeight = Constraints.Infinity` (unbounded), then reporting
- * `layout(w, max(natural, anchor))`. This is the crux of the width-reset fix:
- * `onSizeChanged` (0.6.1) observed the height AFTER `heightIn(min)` clamping,
- * so the registry stored a clamped height; on rotation the stale (old-width)
- * clamped maxHeight polluted the new width and width-reset silently failed.
- * SubcomposeLayout measures the true natural height at the current width and
- * [HeightAnchorRegistry.reset] is called on any width change, so the anchor is
- * always width-correct.
+ * `layout(w, max(natural, anchor))`. This is the crux of the width-correct
+ * anchoring: `onSizeChanged` (0.6.1) observed the height AFTER `heightIn(min)`
+ * clamping, so the registry stored a clamped height; on rotation the stale
+ * (old-width) clamped maxHeight polluted the new width. SubcomposeLayout
+ * measures the true natural height at the current width → the registry always
+ * sees a width-correct natural height.
  *
- * **Width reset (precision note)**: when `constraints.maxWidth` changes, the
- * anchor for [stableKey] is reset to 0 and rebuilt at the new width. The
- * 0-shrink guarantee is therefore exact for same-width streaming; a rotation /
- * split-screen may produce ONE transitional frame at the new width's natural
- * height (which can be smaller than the old width's pinned height) — this is
- * the intended width-reset, not a streaming defect.
+ * **T2 width-aware key (变宽流式留白 fix)**: the registry is keyed on
+ * `(effectiveKey, width)`, so the anchor is INTRINSICALLY width-correct —
+ * different widths get independent maxHeight entries. No `lastWidth` remember
+ * or manual reset is needed: a width change creates a fresh entry at the new
+ * width's natural height. On widen, the new width's anchor starts from 0 (its
+ * own first frame) instead of inheriting the old width's stale maxHeight → the
+ * visible height re-measures down to the true natural height → no empty bottom
+ * space. On the FIRST frame at any given width, `anchor=0` so targetHeight =
+ * natural (no spurious growth). Within the SAME width, the anchor is monotonic
+ * non-decreasing (ora-2 (iii) 0-shrink).
  *
  * **Cross-branch sharing**: the maxHeight lives in [HeightAnchorRegistry] keyed
- * by [stableKey], so the completed-state [HeightAnchor] (different composition
- * position) inherits the streaming-state anchor → seamless finalization.
+ * by `(stableKey, width)`, so the completed-state [HeightAnchor] (different
+ * composition position, SAME width) inherits the streaming-state anchor →
+ * seamless finalization.
  *
  * @param stableKey identity shared between the streaming and completed render
  *  of the SAME part (`"$messageId|$partId"`). Must be non-null for cross-branch
@@ -141,20 +172,9 @@ internal fun HeightAnchor(
     // registry still works (just without cross-branch sharing). Normal callers
     // (TextPart) always pass messageId|partId.
     val effectiveKey: Any = stableKey ?: remember { Any() }
-    // lastWidth is position-scoped state (fine — it only tracks width-change
-    // detection WITHIN this HeightAnchor's lifetime; the cross-branch maxHeight
-    // lives in the registry).
-    val lastWidth = remember(effectiveKey) { intArrayOf(-1) }
 
     SubcomposeLayout(modifier = modifier) { constraints ->
         val width = constraints.maxWidth
-        // §gpter-1 width-reset: a width change invalidates the stored maxHeight
-        // (it was measured at a different width) → reset so the new width starts
-        // from a fresh natural height instead of a stale cross-width ceiling.
-        if (lastWidth[0] != -1 && lastWidth[0] != width) {
-            HeightAnchorRegistry.reset(effectiveKey)
-        }
-        lastWidth[0] = width
 
         // Measure content at the incoming width but UNBOUNDED height → the true
         // natural height (not a parent-imposed heightIn clamp). This is the
@@ -170,9 +190,14 @@ internal fun HeightAnchor(
         val naturalHeight = placeable?.height ?: 0
         val naturalWidth = placeable?.width ?: 0
 
-        // Raise the registry anchor to cover this frame's natural height.
-        HeightAnchorRegistry.update(effectiveKey, naturalHeight)
-        val anchor = HeightAnchorRegistry.anchorFor(effectiveKey)
+        // §T2 width-aware composite key: the registry keys on (stableKey, width)
+        // so different widths get independent anchors. No lastWidth / reset —
+        // a width change simply creates a new entry at the new width's natural
+        // height (ora-2 (iii) 0-shrink holds WITHIN the same width; across
+        // widths the anchor is freshly rebuilt → no stale leak).
+        val compositeKey = effectiveKey to width
+        HeightAnchorRegistry.update(compositeKey, naturalHeight)
+        val anchor = HeightAnchorRegistry.anchorFor(compositeKey)
         // Visible height = max(natural, anchor) → non-decreasing → 0 shrink.
         val targetHeight = maxOf(naturalHeight, anchor)
         // §fill-width: report the available width when bounded so the chat card
@@ -205,14 +230,9 @@ internal fun DebugHeightAnchor(
     content: @Composable () -> Unit
 ) {
     val effectiveKey: Any = stableKey ?: remember { Any() }
-    val lastWidth = remember(effectiveKey) { intArrayOf(-1) }
 
     SubcomposeLayout(modifier = modifier) { constraints ->
         val width = constraints.maxWidth
-        if (lastWidth[0] != -1 && lastWidth[0] != width) {
-            HeightAnchorRegistry.reset(effectiveKey)
-        }
-        lastWidth[0] = width
 
         val unbounded = Constraints(
             minWidth = constraints.minWidth,
@@ -225,8 +245,10 @@ internal fun DebugHeightAnchor(
         val naturalHeight = placeable?.height ?: 0
         val naturalWidth = placeable?.width ?: 0
 
-        HeightAnchorRegistry.update(effectiveKey, naturalHeight)
-        val anchor = HeightAnchorRegistry.anchorFor(effectiveKey)
+        // §T2: same width-aware composite key as [HeightAnchor].
+        val compositeKey = effectiveKey to width
+        HeightAnchorRegistry.update(compositeKey, naturalHeight)
+        val anchor = HeightAnchorRegistry.anchorFor(compositeKey)
         val targetHeight = maxOf(naturalHeight, anchor)
         val reportWidth = if (constraints.hasBoundedWidth) constraints.maxWidth else naturalWidth
 

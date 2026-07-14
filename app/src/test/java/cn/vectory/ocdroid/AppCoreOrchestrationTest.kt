@@ -1,5 +1,6 @@
 package cn.vectory.ocdroid
 
+import cn.vectory.ocdroid.data.model.AgentInfo
 import cn.vectory.ocdroid.data.model.Message
 import cn.vectory.ocdroid.data.model.MessageWithParts
 import cn.vectory.ocdroid.data.model.QuestionInfo
@@ -97,6 +98,165 @@ class AppCoreOrchestrationTest : MainViewModelTestBase() {
         coVerify { repository.sendMessage("session-1", "hello", any(), any(), any()) }
         // inputText cleared synchronously by dispatchSendMessage.
         assertEquals("", core.composerFlow.value.inputText)
+    }
+
+    // ── §chat-ux-batch T7 (B2): dispatchSend resolution 3-state ───────────────
+    //
+    // The send path resolves agent/model per-send via the transient
+    // `pending` value, falling back to transcript inference, falling back to
+    // null. These three tests pin each arm of the resolution chain so a
+    // future refactor cannot silently re-introduce global/cross-session
+    // carry. The visible-set filter (`agents.filter { it.isVisible }`) is
+    // exercised via the agents list: a hidden agent in the transcript MUST
+    // NOT be inferred (T6 contract).
+
+    @Test
+    fun `dispatchSend uses pendingAgent when set, then clears pending after send`() = runTest {
+        // State (a): pendingAgent set → the sent agent == pendingAgent.
+        // No settingsManager.setAgentForSession / selectedAgentName reads.
+        // §chat-ux-batch T7 review-fix (M1): also pins pending-MODEL-hit —
+        // sent model == pendingModel (4th positional arg), so a future
+        // refactor cannot regress model resolution while the agent-only
+        // verify stays green.
+        coEvery { repository.sendMessage(any(), any(), any(), any(), any()) } returns Result.success(Unit)
+        coEvery { repository.getSessions(any()) } returns Result.success(emptyList())
+        coEvery { repository.getSession(any()) } returns Result.success(Session(id = "session-1", directory = "/x"))
+        every { settingsManager.openSessionIds } returns emptyList()
+
+        val core = wire()
+        core.writeChat {
+            it.copy(
+                currentSessionId = "session-1",
+                pendingAgent = "my-pending-agent",
+                pendingModel = Message.ModelInfo("openai", "gpt-5"),
+            )
+        }
+        core.writeSettings { it.copy(agents = listOf(AgentInfo(name = "my-pending-agent"))) }
+        core.writeSessionList { it.copy(sessions = listOf(Session(id = "session-1", directory = "/x"))) }
+        core.writeComposer { it.copy(inputText = "hi") }
+
+        core.sendMessage()
+        advanceUntilIdle()
+
+        coVerify {
+            repository.sendMessage(
+                eq("session-1"),
+                eq("hi"),
+                eq("my-pending-agent"),
+                eq(Message.ModelInfo("openai", "gpt-5")),
+                any(),
+            )
+        }
+        // Pending cleared after send (transient).
+        assertNull(core.chatFlow.value.pendingAgent)
+        assertNull(core.chatFlow.value.pendingModel)
+    }
+
+    @Test
+    fun `dispatchSend falls back to inferred agent from a visible user message when pending is null`() = runTest {
+        // State (b): no pending → infer from latest visible user message's
+        // `agent` field. A user message with agent="visible-bot" + that bot
+        // present in the visible-agents set → inference yields "visible-bot".
+        // §chat-ux-batch T7 review-fix (M1): also pins inferred-MODEL-fallback
+        // — the latest assistant message's resolvedModel (agent=null → always
+        // eligible) is sent on the wire when pendingModel is null.
+        coEvery { repository.sendMessage(any(), any(), any(), any(), any()) } returns Result.success(Unit)
+        coEvery { repository.getSessions(any()) } returns Result.success(emptyList())
+        coEvery { repository.getSession(any()) } returns Result.success(Session(id = "session-1", directory = "/x"))
+        every { settingsManager.openSessionIds } returns emptyList()
+
+        val core = wire()
+        core.writeChat {
+            it.copy(
+                currentSessionId = "session-1",
+                messages = listOf(
+                    Message(id = "u1", role = "user", agent = "visible-bot"),
+                    // §M1: assistant turn carrying a resolved model — the
+                    // agent is null so inferCurrentModel's
+                    // `agent == null || agent in visibleAgents` predicate
+                    // always admits it; resolvedModel = (anthropic, claude-3).
+                    Message(
+                        id = "a1",
+                        role = "assistant",
+                        providerId = "anthropic",
+                        modelId = "claude-3",
+                    ),
+                ),
+            )
+        }
+        core.writeSettings { it.copy(agents = listOf(AgentInfo(name = "visible-bot"))) }
+        core.writeSessionList { it.copy(sessions = listOf(Session(id = "session-1", directory = "/x"))) }
+        core.writeComposer { it.copy(inputText = "hi") }
+
+        core.sendMessage()
+        advanceUntilIdle()
+
+        // Sent agent was inferred from the transcript (pending was null);
+        // sent model was inferred from the assistant message's resolvedModel.
+        coVerify {
+            repository.sendMessage(
+                eq("session-1"),
+                eq("hi"),
+                eq("visible-bot"),
+                eq(Message.ModelInfo("anthropic", "claude-3")),
+                any(),
+            )
+        }
+    }
+
+    @Test
+    fun `dispatchSend skips hidden agents during inference and sends null when no visible agent matches`() = runTest {
+        // State (c): no pending + no inferable → sent null. The user message
+        // carries agent="compaction" (a hidden internal agent), which MUST be
+        // skipped by the visible-set filter → inference yields null → sent
+        // null (server applies its default).
+        // §chat-ux-batch T7 review-fix (M1): also pins null-MODEL resolution
+        // under hidden-agent filtering — the assistant message's agent
+        // ("compaction") is NOT in visibleAgents, so inferCurrentModel skips
+        // it too; sent model == null alongside the sent agent == null.
+        coEvery { repository.sendMessage(any(), any(), any(), any(), any()) } returns Result.success(Unit)
+        coEvery { repository.getSessions(any()) } returns Result.success(emptyList())
+        coEvery { repository.getSession(any()) } returns Result.success(Session(id = "session-1", directory = "/x"))
+        every { settingsManager.openSessionIds } returns emptyList()
+
+        val core = wire()
+        core.writeChat {
+            it.copy(
+                currentSessionId = "session-1",
+                // Hidden internal agent in the transcript — MUST be skipped
+                // by BOTH inferCurrentAgent (user msg) AND inferCurrentModel
+                // (assistant msg with the same hidden agent).
+                messages = listOf(
+                    Message(id = "u1", role = "user", agent = "compaction"),
+                    Message(
+                        id = "a1",
+                        role = "assistant",
+                        agent = "compaction",
+                        providerId = "openai",
+                        modelId = "gpt-4",
+                    ),
+                ),
+            )
+        }
+        // The visible catalog does NOT contain "compaction" → it is filtered out.
+        core.writeSettings { it.copy(agents = listOf(AgentInfo(name = "compaction", hidden = true))) }
+        core.writeSessionList { it.copy(sessions = listOf(Session(id = "session-1", directory = "/x"))) }
+        core.writeComposer { it.copy(inputText = "hi") }
+
+        core.sendMessage()
+        advanceUntilIdle()
+
+        // Sent agent == null AND sent model == null — no pending, no visible
+        // inferable; server applies its default on both arms.
+        coVerify {
+            repository.sendMessage(
+                eq("session-1"),
+                eq("hi"),
+                isNull(),
+                isNull(),
+                any(),
+            )
+        }
     }
 
     @Test
@@ -217,25 +377,13 @@ class AppCoreOrchestrationTest : MainViewModelTestBase() {
         coVerify(exactly = 0) { repository.createSession(any(), any()) }
     }
 
-    @Test
-    fun `materializeDraftSession copies current model and agent to per-session storage`() = runTest {
-        val created = Session(id = "new", directory = "/p")
-        coEvery { repository.createSession(title = null, directory = any()) } returns Result.success(created)
-        coEvery { repository.getSessions(any()) } returns Result.success(listOf(created))
-        coEvery { repository.getSession(any()) } returns Result.success(created)
-        every { settingsManager.openSessionIds } returns emptyList()
-
-        val core = wire()
-        core.writeChat { it.copy(currentModel = Message.ModelInfo("openai", "gpt-5")) }
-        core.writeSettings { it.copy(selectedAgentName = "code") }
-        core.writeComposer { it.copy(inputText = "hi", draftWorkdir = "/p") }
-
-        core.materializeDraftSession { }
-        advanceUntilIdle()
-
-        verify { settingsManager.setModelForSession(any(), "new", "openai", "gpt-5") }
-        verify { settingsManager.setAgentForSession(any(), "new", "code") }
-    }
+    // §chat-ux-batch T8 (B3): the former test
+    // `materializeDraftSession copies current model and agent to per-session storage`
+    // was DELETED here. It verified the legacy per-session copy from
+    // chatFlow.currentModel / settingsFlow.selectedAgentName to
+    // SettingsManager.set{Model,Agent}ForSession — both that copy block and
+    // the destination setters were deleted in T8 (T7 rewired both picks to
+    // TRANSIENT pendingModel / pendingAgent, no persistence needed for carry).
 
     // ── executeCommand ────────────────────────────────────────────────────────
 

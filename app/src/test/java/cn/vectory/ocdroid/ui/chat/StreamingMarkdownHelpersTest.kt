@@ -372,10 +372,16 @@ class StreamingMarkdownHelpersTest {
     // ── HeightAnchorRegistry (cross-branch maxHeight sharing) ────────────
     // Uses unique keys per test to avoid cross-test pollution from the global
     // mutable map (the registry is a singleton object).
+    //
+    // §T2 (chat-ux-batch branch G): the registry key is now a width-aware
+    // composite `(stableKey, width)`. The existing 0-shrink / isolation / LRU
+    // tests below pin a FIXED width (100) for every call so they still verify
+    // the original within-width semantics (same width → non-decreasing; key
+    // isolation; LRU eviction) under the new signature.
 
     @Test
     fun `HeightAnchorRegistry update raises the stored maxHeight monotonically`() {
-        val key = "test-registry-raise-${System.nanoTime()}"
+        val key = "test-registry-raise-${System.nanoTime()}" to 100
         assertEquals(0, HeightAnchorRegistry.anchorFor(key))
         HeightAnchorRegistry.update(key, 100)
         assertEquals(100, HeightAnchorRegistry.anchorFor(key))
@@ -390,7 +396,7 @@ class StreamingMarkdownHelpersTest {
 
     @Test
     fun `HeightAnchorRegistry reset clears the entry`() {
-        val key = "test-registry-reset-${System.nanoTime()}"
+        val key = "test-registry-reset-${System.nanoTime()}" to 100
         HeightAnchorRegistry.update(key, 200)
         assertEquals(200, HeightAnchorRegistry.anchorFor(key))
         HeightAnchorRegistry.reset(key)
@@ -399,14 +405,14 @@ class StreamingMarkdownHelpersTest {
 
     @Test
     fun `HeightAnchorRegistry unknown key returns 0`() {
-        val key = "test-registry-unknown-${System.nanoTime()}"
+        val key = "test-registry-unknown-${System.nanoTime()}" to 100
         assertEquals(0, HeightAnchorRegistry.anchorFor(key))
     }
 
     @Test
     fun `HeightAnchorRegistry keys are isolated`() {
-        val keyA = "test-registry-A-${System.nanoTime()}"
-        val keyB = "test-registry-B-${System.nanoTime()}"
+        val keyA = "test-registry-A-${System.nanoTime()}" to 100
+        val keyB = "test-registry-B-${System.nanoTime()}" to 100
         HeightAnchorRegistry.update(keyA, 50)
         HeightAnchorRegistry.update(keyB, 90)
         assertEquals(50, HeightAnchorRegistry.anchorFor(keyA))
@@ -427,28 +433,59 @@ class StreamingMarkdownHelpersTest {
         // (access-order) and survives an overflow that would otherwise evict it.
         // Mirrors the repo's existing eviction-test convention
         // (DebugLogTest / SessionSwitcherTest / CacheRepositoryEvictionTest).
+        //
+        // §T2: keys are `(stableKey, width)` Pairs; width is pinned to 100 so
+        // eviction semantics are unchanged from the bare-key era.
         val base = "lru-${System.nanoTime()}-"
         // Fill exactly to the cap — no eviction yet (removeEldestEntry is `size > cap`).
         repeat(HeightAnchorRegistry.MAX_ENTRIES) { i ->
-            HeightAnchorRegistry.update("$base$i", 100 + i)
+            HeightAnchorRegistry.update("$base$i" to 100, 100 + i)
         }
         // Touch an early key → promote it to most-recently-used (access-order).
-        val promotedValue = HeightAnchorRegistry.anchorFor("$base${0}")
+        val promotedValue = HeightAnchorRegistry.anchorFor("$base${0}" to 100)
         assertEquals(100, promotedValue)
         // Overflow by one → forces one eviction. The LRU is now base:1 (base:0
         // was just promoted past it), so base:1 is evicted; base:0 survives.
-        HeightAnchorRegistry.update("${base}overflow", 1)
+        HeightAnchorRegistry.update("${base}overflow" to 100, 1)
         assertEquals(
             "the promoted (recently-queried) key must survive the overflow",
-            100, HeightAnchorRegistry.anchorFor("$base${0}")
+            100, HeightAnchorRegistry.anchorFor("$base${0}" to 100)
         )
         assertEquals(
             "the least-recently-used untouched key must be evicted",
-            0, HeightAnchorRegistry.anchorFor("$base${1}")
+            0, HeightAnchorRegistry.anchorFor("$base${1}" to 100)
         )
-        assertEquals(1, HeightAnchorRegistry.anchorFor("${base}overflow"))
+        assertEquals(1, HeightAnchorRegistry.anchorFor("${base}overflow" to 100))
         // cleanup (evicted keys' reset is a harmless no-op)
-        for (i in 0..HeightAnchorRegistry.MAX_ENTRIES) HeightAnchorRegistry.reset("$base$i")
-        HeightAnchorRegistry.reset("${base}overflow")
+        for (i in 0..HeightAnchorRegistry.MAX_ENTRIES) HeightAnchorRegistry.reset("$base$i" to 100)
+        HeightAnchorRegistry.reset("${base}overflow" to 100)
+    }
+
+    // ── T2 (chat-ux-batch / branch G): width-aware composite key ──────────
+    // The registry MUST key on `(stableKey, width)` so a stableKey measured at
+    // one width does NOT leak its maxHeight into a different width (the
+    // "变宽流式留白" bug: on window widen, the stale old-width maxHeight
+    // pinned the visible height above the new natural height → empty bottom
+    // space). With a width-aware key, different widths get independent anchors
+    // → on widen, the new width starts from a fresh anchor at its own natural
+    // height. Same width stays 0-shrink (monotonic non-decreasing).
+    //
+    // §test-hygiene: uses a unique base key (per-test nanoTime suffix, matching
+    // the convention of the other registry tests above) so it NEVER shares
+    // registry state with other tests and needs no global `resetAll`-style
+    // helper. Cross-width assertions compose the SAME base with different
+    // widths (100 / 200); cleanup `reset`s both composite keys.
+
+    @Test
+    fun `width-aware key isolates anchors across widths`() {
+        val k = "t2-iso-${System.nanoTime()}"
+        HeightAnchorRegistry.update(k to 100, 50)
+        assertEquals(50, HeightAnchorRegistry.anchorFor(k to 100))
+        assertEquals(0, HeightAnchorRegistry.anchorFor(k to 200)) // 跨 width 不泄漏
+        HeightAnchorRegistry.update(k to 100, 30) // 同 width 只增不减
+        assertEquals(50, HeightAnchorRegistry.anchorFor(k to 100))
+        // cleanup
+        HeightAnchorRegistry.reset(k to 100)
+        HeightAnchorRegistry.reset(k to 200)
     }
 }

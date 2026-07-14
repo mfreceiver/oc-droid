@@ -197,9 +197,13 @@ data class SettingsState(
      */
     val localeMode: LocaleMode = LocaleMode.SYSTEM,
     val markdownFontSizes: MarkdownFontSizes = MarkdownFontSizes(),
-    // §agent-default: null = 用服务端默认 agent（编排+glm-5.2 等），不强制 build。
-    val selectedAgentName: String? = null,
     val agents: List<AgentInfo> = emptyList(),
+    // §chat-ux-batch T8 (B3): the legacy `selectedAgentName` field was deleted
+    // here. T7 rewired agent selection to the TRANSIENT `pendingAgent` chat-
+    // slice field (resolved `pending ?: infer ?: null` at send). The UI reads
+    // the effective agent via that projection (ChatScaffold passes
+    // `currentAgentName = effectiveAgent` to ChatTopBar); no settings-slice
+    // mirror is needed.
     val providers: ProvidersResponse? = null,
     val availableCommands: List<CommandInfo> = emptyList(),
     /**
@@ -271,15 +275,21 @@ data class ChatState(
     val gapMarkers: List<GapMarker> = emptyList(),
     val staleNotice: Boolean = false,
     /**
-     * §model-selection (V1-per-prompt): the intended-next-model for the active
-     * session — sent with the next outgoing prompt's PromptRequest.model.
-     * Surfaced in the chat top-bar context menu + the model picker dialog.
-     * Updated synchronously by `switchSessionModel` (local persist + state write)
-     * and after each message load. The per-session stored value (persisted via
-     * [cn.vectory.ocdroid.util.SettingsManager.getModelForSession]) wins over
-     * inference; inference from the latest assistant message's
-     * [Message.resolvedModel] is the fallback for sessions first opened on
-     * another client (no local stored choice yet).
+     * §model-selection (V1-per-prompt): the model currently bound to the
+     * active session for **display + compact**. Surfaced in the chat top-bar
+     * context menu + the model picker dialog, and read by
+     * [cn.vectory.ocdroid.ui.ChatViewModel.compactSession] for the compact
+     * request body.
+     *
+     * §chat-ux-batch T8 (B3): this field is KEPT (not deleted) because
+     * `compactSession` is a live reader. After T7, the per-send authority is
+     * the TRANSIENT [pendingModel] (resolved `pending ?: infer ?: null` at
+     * send). The per-session-storage reseed that used to feed this field
+     * (legacy `SettingsManager.getModelForSession`) was deleted; the field is
+     * now sourced purely from `inferCurrentModel(messages)` at load
+     * ([cn.vectory.ocdroid.ui.MessageActions.launchLoadMessages]). The picker
+     * feedback path runs through `pendingModel` (ComposerViewModel), so this
+     * field is the load-time + compact-time mirror only.
      */
      val currentModel: Message.ModelInfo? = null,
      /**
@@ -338,11 +348,46 @@ data class ChatState(
       * the user swipes back). Lives on ChatState (not SessionListState)
       * because it is a chat-surface intent, not a session-list attribute.
       */
-     val pendingJumpToLatest: String? = null
+     val pendingJumpToLatest: String? = null,
+     /**
+      * §chat-ux-batch T7 (B2): the user's just-picked agent for the active
+      * session — TRANSIENT, consumed and cleared by [cn.vectory.ocdroid.ui.AppCoreOrchestration.dispatchSendMessage]
+      * at send time. Null means "no explicit pick this turn → fall back to
+      * inference from the transcript (`inferCurrentAgent`) or, if that also
+      * yields null, send `agent=null` so the server applies its default".
+      *
+      * Replaces the legacy global `SettingsState.selectedAgentName` +
+      * `SettingsManager.setAgentForSession` carry as the per-send authority
+      * (those fields are kept unread by T7's send/picker paths; T8 deletes
+      * them). Resolution at send:
+      * `agent = pendingAgent ?: inferCurrentAgent(msgs, visibleAgents) ?: null`.
+      *
+      * `visibleAgents` MUST be `settings.agents.filter { it.isVisible }.map { it.name }.toSet()`
+      * — opencode's `/agent` list includes hidden internal agents (compaction
+      * / title) whose transcript presence would otherwise be inferred as the
+      * current agent; the visible filter defeats that (T6 contract).
+      */
+     val pendingAgent: String? = null,
+     /**
+      * §chat-ux-batch T7 (B2): the user's just-picked model for the active
+      * session — TRANSIENT, consumed and cleared by
+      * [cn.vectory.ocdroid.ui.AppCoreOrchestration.dispatchSendMessage] at send
+      * time. Null means "no explicit pick this turn → fall back to inference
+      * from the latest visible assistant message's `resolvedModel` (`inferCurrentModel`)
+      * or, if that also yields null, send `model=null` so the server applies
+      * its default (server-side `prompt.ts:646` is the source of truth and
+      * honors an explicit model when provided)".
+      *
+      * Replaces the legacy `ChatState.currentModel` + `SettingsManager.setModelForSession`
+      * carry as the per-send authority (those fields are kept unread by T7's
+      * send/picker paths; T8 deletes them). Resolution at send:
+      * `model = pendingModel ?: inferCurrentModel(msgs, visibleAgents) ?: null`.
+      */
+     val pendingModel: Message.ModelInfo? = null,
  )
 
-/**
- * §R-17 M4: session-list-domain state slice (RFC §2.3). Authoritative storage
+ /**
+  * §R-17 M4: session-list-domain state slice (RFC §2.3). Authoritative storage
  * lives in [MainViewModel._sessionListFlow]. Low-frequency (loadSessions /
  * loadMore / SSE session.created/updated); isolating it stops SSE chat deltas
  * from recomposing SessionsScreen.

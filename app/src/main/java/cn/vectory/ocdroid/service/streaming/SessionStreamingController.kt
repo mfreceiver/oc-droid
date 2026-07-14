@@ -92,6 +92,13 @@ class SessionStreamingController(
      */
     private val onBootstrapFailure: (ConnectionIdentity?) -> Unit = {},
     private val clock: () -> Long = { System.currentTimeMillis() },
+    /**
+     * T5-C2: supplies the `silent` flag for every [SessionStatusNotifier]
+     * spec the controller builds. The Service wires this to
+     * `!settingsManager.persistentNotificationEnabled`. Defaults to
+     * `{ false }` so existing pure-JVM tests stay byte-for-byte unchanged.
+     */
+    private val silentNotifications: () -> Boolean = { false },
 ) {
 
     // Single-flight guards (read/write on `scope` = Main.immediate).
@@ -194,6 +201,7 @@ class SessionStreamingController(
                         strings = strings,
                         busySinceMs = null,
                         degraded = true,
+                        silent = silentNotifications(),
                     )
                     shell.updateNotification(spec)
                     return
@@ -249,6 +257,7 @@ class SessionStreamingController(
                     strings = strings,
                     busySinceMs = busySinceMs,
                     degraded = degraded,
+                    silent = silentNotifications(),
                 )
                 shell.startForeground(spec)
             }

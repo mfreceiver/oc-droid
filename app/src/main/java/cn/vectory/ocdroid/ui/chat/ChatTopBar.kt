@@ -57,7 +57,7 @@ internal data class ChatTopBarState(
     val isRefreshingSessions: Boolean = false,
     val expandedSessionIds: Set<String> = emptySet(),
     val agents: List<AgentInfo>,
-    val selectedAgentName: String?,
+    val currentAgentName: String?,
     val contextUsage: ContextUsage?,
     val sessionTodos: List<TodoItem> = emptyList(),
     val hostName: String = "",
@@ -169,12 +169,13 @@ internal data class ChatTopBarActions(
     /**
      * §model-selection (V1-per-prompt): switch the current session to the model
      * identified by `(providerId, modelId)`. Wired to
-     * [cn.vectory.ocdroid.ui.MainViewModel.switchSessionModel], which persists
-     * the choice LOCALLY via [cn.vectory.ocdroid.util.SettingsManager.setModelForSession]
-     * and updates [cn.vectory.ocdroid.ui.ChatState.currentModel] for immediate picker feedback. The
-     * chosen model is sent with the NEXT outgoing prompt as its
-     * PromptRequest.model (V1-per-prompt, aligned with the official packages/app);
-     * there is NO server-side switch call.
+     * [cn.vectory.ocdroid.ui.ComposerViewModel.switchSessionModel], which
+     * writes the choice to the TRANSIENT [cn.vectory.ocdroid.ui.ChatState.pendingModel]
+     * chat-slice field (T7 rewired; the legacy
+     * `SettingsManager.setModelForSession` persist + `currentModel` write was
+     * deleted in T8). The chosen model is sent with the NEXT outgoing prompt
+     * as its PromptRequest.model (V1-per-prompt, aligned with the official
+     * packages/app); there is NO server-side switch call.
      */
     val onSwitchModel: (providerId: String, modelId: String) -> Unit = { _, _ -> },
     /**
@@ -379,7 +380,7 @@ internal fun ChatTopBar(
                 ContextMenuCluster(
                     usage = state.contextUsage,
                     todos = state.sessionTodos,
-                    selectedAgentName = state.selectedAgentName,
+                    currentAgentName = state.currentAgentName,
                     currentModelName = currentModelName,
                     expanded = overflowExpanded,
                     onToggleExpand = { overflowExpanded = !overflowExpanded },
@@ -438,7 +439,7 @@ internal fun ChatTopBar(
 private fun ContextMenuCluster(
     usage: ContextUsage?,
     todos: List<TodoItem>,
-    selectedAgentName: String?,
+    currentAgentName: String?,
     currentModelName: String,
     expanded: Boolean,
     onToggleExpand: () -> Unit,
@@ -515,7 +516,7 @@ private fun ContextMenuCluster(
             // 3. Agent — selected agent name (or "Default").
             DropdownMenuItem(
                 text = {
-                    Text(selectedAgentName ?: stringResource(R.string.agent_default_label))
+                    Text(currentAgentName ?: stringResource(R.string.agent_default_label))
                 },
                 leadingIcon = {
                     Icon(

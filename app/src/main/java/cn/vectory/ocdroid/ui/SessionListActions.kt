@@ -694,27 +694,24 @@ internal fun launchLoadPendingPermissions(
 
 /**
  * §R-17 batch3d: free-function extraction of the former AppCore.loadAgents body.
- * Reconciles the current selectedAgentName against the freshly-fetched list
- * (§agent-default: falls back to null = server default if the selected agent
- * is no longer offered, or when the user never chose one). Called by AppCore's
- * effect-dispatch handler.
+ *
+ * §chat-ux-batch T8 (B3): the legacy selectedAgentName reconciliation (drop
+ * the global pick if the agent is no longer offered by the server, else
+ * keep + persist) was deleted here. T7 rewired agent selection to the
+ * TRANSIENT pendingAgent chat-slice field, so the global pick no longer
+ * exists; loadAgents now just writes the freshly-fetched list to the
+ * settings slice. Called by AppCore's effect-dispatch handler.
  */
 internal fun launchLoadAgents(
     scope: CoroutineScope,
     repository: OpenCodeRepository,
     slices: SliceFlows,
-    settingsManager: cn.vectory.ocdroid.util.SettingsManager,
     tag: String,
 ) {
     scope.launch {
         repository.getAgents()
             .onSuccess { agents ->
-                val currentAgent = slices.settings.value.selectedAgentName
-                // §agent-default: 仅当用户显式选过且该 agent 仍在服务端列表中才保留；
-                // 否则置 null（让服务端用其默认 agent），不再强制回退 "build"。
-                val validAgent = if (currentAgent != null && agents.any { it.name == currentAgent }) currentAgent else null
-                slices.mutateSettings { it.copy(agents = agents, selectedAgentName = validAgent) }
-                if (validAgent != currentAgent) settingsManager.selectedAgentName = validAgent
+                slices.mutateSettings { it.copy(agents = agents) }
             }
             .onFailure { error -> reportNonFatalIssue(tag, "Failed to load agents", error) }
     }

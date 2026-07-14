@@ -60,11 +60,11 @@ import cn.vectory.ocdroid.ui.theme.AppMotion
  * lines via [BasicTool] or [ContextToolGroup]).
  *
  * Single-line layout:
- *   [spinner/Warning/—]  @agentName · description  [>]
+ *   [AccountTree] @agentName [spinner/Warning/—] · description  [>]
  *
- * - running → spinner + agent name + description subtitle
+ * - running → agent name + spinner + description subtitle
  * - done    → agent name + description (no status icon, no CheckCircle)
- * - error   → Warning icon + agent name + description
+ * - error   → agent name + Warning icon + description
  *
  * Tapping opens the child session in-place via [onOpenSubAgent]. When the
  * child session ID hasn't been assigned yet (task still running with no
@@ -138,21 +138,6 @@ internal fun SubAgentCard(
                     tint = tone
                 )
                 Spacer(modifier = Modifier.width(4.dp))
-                // Status icon: spinner while running, warning on error, nothing on done
-                when {
-                    isRunning -> CircularProgressIndicator(
-                        modifier = Modifier.size(14.dp),
-                        color = tone,
-                        strokeWidth = 2.dp
-                    )
-                    isError -> Icon(
-                        Icons.Default.Warning,
-                        contentDescription = "Sub-agent error",
-                        modifier = Modifier.size(14.dp),
-                        tint = statusErrorColor
-                    )
-                }
-                if (isRunning || isError) Spacer(modifier = Modifier.width(4.dp))
 
                 // Agent name — bold label. 用 MaterialTheme.colorScheme.primary
                 // 而非 tone：tone 来自 agentPalette（为图标身份区分设计，浅色背景
@@ -167,7 +152,37 @@ internal fun SubAgentCard(
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis
                     )
+                    // 4dp gap BEFORE the status icon when running/error — named
+                    // boundary. Reads as [@name][gap][spinner] (T1-C2). Nested
+                    // in the name block so the no-name case doesn't double up
+                    // with the AccountTree→name Spacer above.
+                    // NOTE: the no-name case has its own symmetric spacer AFTER
+                    // the when-block (see below) — keep both boundaries in sync.
+                    if (isRunning || isError) Spacer(modifier = Modifier.width(4.dp))
                 }
+
+                // Status icon: spinner while running, warning on error, nothing
+                // on done. Placed after @name per chat-ux-batch task 1.
+                when {
+                    isRunning -> CircularProgressIndicator(
+                        modifier = Modifier.size(14.dp),
+                        color = tone,
+                        strokeWidth = 2.dp
+                    )
+                    isError -> Icon(
+                        Icons.Default.Warning,
+                        contentDescription = "Sub-agent error",
+                        modifier = Modifier.size(14.dp),
+                        tint = statusErrorColor
+                    )
+                }
+
+                // 4dp gap AFTER the status icon — no-name boundary. When there
+                // is no @name to carry the " · " separator, the status icon
+                // would otherwise abut the description / "Sub-agent starting…"
+                // placeholder: [AccountTree][spinner]Description. Restores the
+                // symmetric gap so the row reads [AccountTree][gap][spinner][gap].
+                if (subAgentName == null && (isRunning || isError)) Spacer(modifier = Modifier.width(4.dp))
 
                 // Description as subtitle
                 val bodyTitle = cleanTitle.ifBlank { taskXml?.taskResult?.takeIf { it.isNotBlank() } }.orEmpty()

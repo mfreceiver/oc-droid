@@ -53,7 +53,8 @@ data class SeedFixture(
     // settings-domain
     val themeMode: ThemeMode = ThemeMode.SYSTEM,
     val markdownFontSizes: MarkdownFontSizes = MarkdownFontSizes(),
-    val selectedAgentName: String = "build",
+    // §chat-ux-batch T8 (B3): the legacy `selectedAgentName` field was
+    // deleted here (mirrors the production SettingsState field removal).
     val agents: List<AgentInfo> = emptyList(),
     val providers: ProvidersResponse? = null,
     val availableCommands: List<CommandInfo> = emptyList(),

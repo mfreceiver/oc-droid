@@ -241,7 +241,8 @@ class HostProfileControllerTest {
             SettingsState(
                 themeMode = s.themeMode,
                 markdownFontSizes = s.markdownFontSizes,
-                selectedAgentName = s.selectedAgentName,
+                // §chat-ux-batch T8 (B3): selectedAgentName removed from both
+                // SeedFixture + SettingsState (deleted in T8).
                 agents = s.agents,
                 providers = s.providers,
                 availableCommands = s.availableCommands,

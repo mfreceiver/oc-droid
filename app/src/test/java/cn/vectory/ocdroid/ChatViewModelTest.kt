@@ -120,12 +120,12 @@ class ChatViewModelTest : MainViewModelTestBase() {
         coEvery { repository.getSessions(100) } returns Result.success(
             listOf(Session(id = "session-1", directory = "/tmp/project"))
         )
-        // Per-session stored model. Registered AFTER setUp's global
-        // `getModelForSession(any()) returns null`; MockK resolves the last
-        // matching stub, so the precise-sessionId stub wins (same override
-        // pattern as getMessagesPaged("session-1", ...) at line ~1444).
-        every { settingsManager.getModelForSession(any(), "session-1") } returns
-            Message.ModelInfo("openai", "gpt-5")
+        // §chat-ux-batch T7 (B2): dispatchSend now resolves the sent model via
+        // `pendingModel ?: inferCurrentModel(msgs, visible) ?: null` (no longer
+        // reads `settingsManager.getModelForSession`). Seed the transient
+        // pendingModel directly so the outgoing prompt carries the chosen
+        // model; the visible-agents filter sees no agents (empty catalog), so
+        // inference is null and pendingModel is the sole source.
 
         val core = createCore()
         val chatVM = cn.vectory.ocdroid.ui.ChatViewModel(core)
@@ -137,6 +137,7 @@ class ChatViewModelTest : MainViewModelTestBase() {
         val viewModel = ChatViewModel(core)  // primary VM under test
         sessionVM.selectSession("session-1")
         advanceUntilIdle()
+        composerVM.switchSessionModel("openai", "gpt-5")
         composerVM.setInputText("hi")
 
         chatVM.sendMessage()
@@ -151,27 +152,30 @@ class ChatViewModelTest : MainViewModelTestBase() {
                 any()
             )
         }
+        // §chat-ux-batch T7 (B2): pendingModel cleared after send (transient).
+        assertNull(core.chatFlow.value.pendingModel)
     }
 
     @Test
-    fun `loadMessages stored per-session model wins over inference`() = runTest {
+    fun `loadMessages infers currentModel from latest assistant message`() = runTest {
+        // §chat-ux-batch T8 (B3): the legacy "stored per-session model wins
+        // over inference" contract is gone (setModelForSession/getModelForSession
+        // were deleted; T7 rewired model pick to transient pendingModel). The
+        // remaining contract for currentModel: it mirrors the inferred model
+        // from the latest assistant message at load (used by the picker
+        // highlight + compactSession's compact-request body).
         val messages = listOf(
             MessageWithParts(info = Message(id = "u1", role = "user")),
             MessageWithParts(
                 info = Message(
                     id = "a1",
                     role = "assistant",
-                    // Inferred candidate (the fallback path): inferCurrentModel
-                    // would return this if no stored value were present.
                     model = Message.ModelInfo("openai", "gpt-5")
                 )
             )
         )
         coEvery { repository.getMessagesPaged("session-1", any(), any()) } returns
             Result.success(MessagesPage(messages, null))
-        // Stored per-session model — MUST win over the assistant-message inference.
-        every { settingsManager.getModelForSession(any(), "session-1") } returns
-            Message.ModelInfo("anthropic", "claude")
 
         val core = createCore()
         val chatVM = cn.vectory.ocdroid.ui.ChatViewModel(core)
@@ -186,8 +190,9 @@ class ChatViewModelTest : MainViewModelTestBase() {
         chatVM.loadMessages("session-1")
         advanceUntilIdle()
 
+        // currentModel mirrors the inferred model (no per-session storage).
         assertEquals(
-            Message.ModelInfo("anthropic", "claude"),
+            Message.ModelInfo("openai", "gpt-5"),
             chatVM.chatFlow.value.currentModel
         )
     }
@@ -667,71 +672,13 @@ class ChatViewModelTest : MainViewModelTestBase() {
         coVerify(exactly = 0) { repository.getMessagesPaged(any(), any(), any()) }
     }
 
-    @Test
-    fun `loadMessages syncs selected agent from per-session override`() = runTest {
-        // §bug3-defensive: the global selectedAgentName must be synced from the
-        // per-session agent override (when one exists), NOT from history-inference.
-        val messages = listOf(
-            MessageWithParts(info = Message(id = "u1", role = "user")),
-            MessageWithParts(
-                info = Message(
-                    id = "a1",
-                    role = "assistant",
-                    agent = "build"
-                )
-            )
-        )
-        coEvery { repository.getMessagesPaged("session-1", any(), any()) } returns Result.success(MessagesPage(messages, null))
-
-        val core = createCore()
-        val chatVM = cn.vectory.ocdroid.ui.ChatViewModel(core)
-        val sessionVM = cn.vectory.ocdroid.ui.SessionViewModel(core)
-        val connectionVM = cn.vectory.ocdroid.ui.ConnectionViewModel(core)
-        val hostVM = cn.vectory.ocdroid.ui.HostViewModel(core)
-        val composerVM = cn.vectory.ocdroid.ui.ComposerViewModel(core)
-        val orchestratorVM = cn.vectory.ocdroid.ui.OrchestratorViewModel(core)
-        val viewModel = ChatViewModel(core)  // primary VM under test
-        core.writeChat { it.copy(currentSessionId = "session-1") }
-        // Explicit per-session override — must win over the history-inferred "build".
-        every { settingsManager.getAgentForSession(any(), "session-1") } returns "plan"
-
-        chatVM.loadMessages("session-1")
-        advanceUntilIdle()
-
-        assertEquals(messages.map { it.info }, chatVM.chatFlow.value.messages)
-        assertEquals("plan", orchestratorVM.settingsFlow.value.selectedAgentName)
-    }
-
-    @Test
-    fun `loadMessages preserves global selected agent when no per-session override`() = runTest {
-        // §bug3-defensive: when a session has NO explicit per-session agent override,
-        // loadMessages must NOT clobber the user's global selectedAgentName with a
-        // value inferred from the last assistant message in history.
-        val messages = listOf(
-            MessageWithParts(info = Message(id = "u1", role = "user")),
-            MessageWithParts(
-                info = Message(
-                    id = "a1",
-                    role = "assistant",
-                    agent = "build"
-                )
-            )
-        )
-        coEvery { repository.getMessagesPaged("session-2", any(), any()) } returns Result.success(MessagesPage(messages, null))
-        // No per-session override (default mock returns null).
-
-        val core = createCore()
-        val chatVM = cn.vectory.ocdroid.ui.ChatViewModel(core)
-        val orchestratorVM = cn.vectory.ocdroid.ui.OrchestratorViewModel(core)
-        core.writeChat { it.copy(currentSessionId = "session-2") }
-        core.writeSettings { it.copy(selectedAgentName = "plan") }
-
-        chatVM.loadMessages("session-2")
-        advanceUntilIdle()
-
-        // Global choice preserved — NOT overwritten with the inferred "build".
-        assertEquals("plan", orchestratorVM.settingsFlow.value.selectedAgentName)
-    }
+    // §chat-ux-batch T8 (B3): the two former tests
+    // `loadMessages syncs selected agent from per-session override` and
+    // `loadMessages preserves global selected agent when no per-session override`
+    // were DELETED here. They exercised the legacy global←per-session
+    // selectedAgentName backfill in launchLoadMessages — both the field and
+    // the backfill code were deleted in T8 (T7 rewired agent selection to
+    // the TRANSIENT pendingAgent chat-slice field).
 
     @Test
     fun `visibleMessages filters out system tool and environment roles`() = runTest {

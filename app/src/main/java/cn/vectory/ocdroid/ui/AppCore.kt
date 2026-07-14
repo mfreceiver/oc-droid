@@ -694,7 +694,9 @@ class AppCore @Inject constructor(
             true
         }
         is ControllerEffect.LoadAgents -> {
-            launchLoadAgents(appScope, repository, store.slices, settingsManager, TAG)
+            // §chat-ux-batch T8 (B3): launchLoadAgents shed its settingsManager
+            // param (the legacy selectedAgentName reconciliation was deleted).
+            launchLoadAgents(appScope, repository, store.slices, TAG)
             true
         }
         is ControllerEffect.LoadProviders -> {

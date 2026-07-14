@@ -37,7 +37,7 @@ class ChatTopBarStateTest {
             hasMoreSessions = false,
             isLoadingMoreSessions = false,
             agents = emptyList(),
-            selectedAgentName = "code",
+            currentAgentName = "code",
             contextUsage = null,
         )
 
@@ -93,7 +93,7 @@ class ChatTopBarStateTest {
             isRefreshingSessions = true,
             expandedSessionIds = setOf("s1"),
             agents = listOf(agent),
-            selectedAgentName = "code",
+            currentAgentName = "code",
             contextUsage = usage,
             sessionTodos = listOf(todo),
             hostName = "host",
@@ -125,7 +125,7 @@ class ChatTopBarStateTest {
         assertEquals(true, s.isRefreshingSessions)
         assertEquals(setOf("s1"), s.expandedSessionIds)
         assertEquals(listOf(agent), s.agents)
-        assertEquals("code", s.selectedAgentName)
+        assertEquals("code", s.currentAgentName)
         assertEquals(usage, s.contextUsage)
         assertEquals(listOf(todo), s.sessionTodos)
         assertEquals("host", s.hostName)
@@ -158,7 +158,7 @@ class ChatTopBarStateTest {
             hasMoreSessions = false,
             isLoadingMoreSessions = false,
             agents = emptyList(),
-            selectedAgentName = "code",
+            currentAgentName = "code",
             contextUsage = null,
         )
         val s2 = s1.copy()

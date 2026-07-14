@@ -49,6 +49,9 @@
     <string name="settings_notifications_completion_channel_desc">会话完成或出错时推送</string>
     <string name="settings_notifications_system_settings">系统通知设置</string>
     <string name="settings_notifications_system_settings_desc">分别配置完成提醒与决策提醒</string>
+    <!-- T5-C3: 常驻（前台服务）通知开关。默认关闭。 -->
+    <string name="settings_notifications_persistent_title">常驻状态通知</string>
+    <string name="settings_notifications_persistent_desc">在通知栏显示常驻的「已连接」通知。关闭后通知将静默（后台服务仍会运行）。</string>
     <string name="session_picker_state_selected">已选中</string>
     <string name="session_picker_state_question">有待回答问题</string>
     <string name="session_picker_state_retry">正在重试</string>
@@ -116,6 +119,9 @@
     <string name="sessions_status_retrying">重试中</string>
     <string name="sessions_status_idle">空闲</string>
     <string name="sessions_archive">归档</string>
+    <!-- T4：会话行长按菜单（A 层 DropdownMenu）+ 重命名对话框（C 层 AppFormDialog）。 -->
+    <string name="sessions_rename">重命名</string>
+    <string name="sessions_rename_title">重命名会话</string>
     <string name="sessions_restore">恢复</string>
     <string name="sessions_no_active">没有当前会话</string>
     <string name="sessions_new_session">新建会话</string>
@@ -313,6 +319,8 @@
     <string name="sessions_disconnect_workdir">取消连接</string>
     <string name="sessions_disconnect_confirm">取消连接此项目？</string>
     <string name="sessions_archive_confirm">归档此会话？归档后将从列表隐藏。</string>
+    <!-- T4：重命名对话框辅助文——留空时回退到项目目录名（服务端处理）。 -->
+    <string name="sessions_rename_hint">留空则使用项目目录名</string>
     <string name="server_dialog_title">服务器</string>
     <string name="server_dialog_no_hosts">未配置主机</string>
     <string name="server_dialog_refresh">刷新</string>
@@ -463,6 +471,7 @@
     <string name="error_create_session_failed">创建会话失败：%1$s</string>
     <string name="error_fork_session_failed">分叉会话失败：%1$s</string>
     <string name="error_archive_session_failed">归档会话失败：%1$s</string>
+    <string name="error_rename_session_failed">重命名会话失败：%1$s</string>
     <string name="error_delete_session_failed">删除会话失败：%1$s</string>
     <string name="error_send_message_failed">发送消息失败：%1$s</string>
     <string name="error_child_session_unavailable">子任务会话不可用</string>

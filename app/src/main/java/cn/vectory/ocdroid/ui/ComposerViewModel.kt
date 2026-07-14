@@ -68,21 +68,26 @@ class ComposerViewModel @Inject constructor(
     }
 
     fun selectAgent(agentName: String?) {
-        // §agent-default: agentName=null 表示清除显式选择，回退服务端默认 agent。
-        // R-20 Phase 5: per-(fp, sessionId) composite key —— 同时更新全局默认 +
-        // 当前会话覆盖，保证新会话与当前会话都按"默认"处理（prompt 时 agent=null
-        // 由 explicitNulls=false 省略，服务端用其默认）。
-        settingsManager.selectedAgentName = agentName
-        store.mutateSettings { it.copy(selectedAgentName = agentName) }
-        val fp = hostProfileStore.currentProfile().serverGroupFp.ifBlank { hostProfileStore.currentProfile().id }
-        val sid = store.chatFlow.value.currentSessionId
-        if (sid != null) {
-            if (agentName != null) {
-                settingsManager.setAgentForSession(fp, sid, agentName)
-            } else {
-                settingsManager.clearAgentForSession(fp, sid)
-            }
-        }
+        // §chat-ux-batch T7 (B2) + T8 (B3): per-session sticky via the
+        // TRANSIENT pending value. Resolution at send:
+        // `agent = pendingAgent ?: infer ?: null` (see AppCoreOrchestration
+        // .dispatchSendMessage). agentName=null means "clear the pending
+        // pick → fall back to inference / server default".
+        //
+        // The legacy writes to `settingsManager.selectedAgentName` /
+        // `setAgentForSession` were DELETED in T8 (T7 stopped consuming
+        // them; the symbols are gone). `mutateChat` is the sole write
+        // surface for the per-send agent authority.
+        store.mutateChat { it.copy(pendingAgent = agentName) }
+    }
+
+    fun clearSessionModel() {
+        // §chat-ux-batch T7 (B2): the ModelPickerSheet's new top "默认" item
+        // clears the transient pendingModel so the next send falls back to
+        // inference / server default (parallel to `selectAgent(null)` on the
+        // agent side; `switchSessionModel` keeps its non-null signature for
+        // concrete provider+model picks).
+        store.mutateChat { it.copy(pendingModel = null) }
     }
 
     fun toggleModelDisabled(providerId: String, modelId: String) {
@@ -117,13 +122,20 @@ class ComposerViewModel @Inject constructor(
     }
 
     fun switchSessionModel(providerId: String, modelId: String) {
-        // §R-17 batch3d: body moved verbatim from AppCore.
-        // R-20 Phase 5: per-(fp, sessionId) composite key.
-        val fp = hostProfileStore.currentProfile().serverGroupFp.ifBlank { hostProfileStore.currentProfile().id }
-        val sessionId = store.chatFlow.value.currentSessionId
+        // §chat-ux-batch T7 (B2) + T8 (B3): per-session sticky via the
+        // TRANSIENT pending value. Resolution at send:
+        // `model = pendingModel ?: infer ?: null` (see AppCoreOrchestration
+        // .dispatchSendMessage). To clear the pending pick → "默认",
+        // use [clearSessionModel].
+        //
+        // The legacy writes to `currentModel` / `setModelForSession` were
+        // DELETED in T8 (T7 stopped consuming them; the symbols are gone).
+        // `mutateChat` is the sole write surface for the per-send model
+        // authority. (Note: the `currentModel` FIELD on ChatState is retained
+        // because ChatViewModel.compactSession still reads it; it is sourced
+        // from inferCurrentModel at load, not from the picker.)
         val model = Message.ModelInfo(providerId = providerId, modelId = modelId)
-        sessionId?.let { settingsManager.setModelForSession(fp, it, providerId, modelId) }
-        store.mutateChat { it.copy(currentModel = model) }
+        store.mutateChat { it.copy(pendingModel = model) }
     }
 
     fun reloadDisabledModelsForCurrentHost() {

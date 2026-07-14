@@ -60,7 +60,7 @@ class CatchUpActionsTest {
         slices = store.slices
         repository = mockk(relaxed = true)
         settingsManager = mockk(relaxed = true)
-        every { settingsManager.getAgentForSession(any(), any()) } returns null
+        // §chat-ux-batch T8 (B3): mock setup for getAgentForSession removed (deleted API).
         scope = TestScope(UnconfinedTestDispatcher())
         cachedWindows = mutableListOf()
     }

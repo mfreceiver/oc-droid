@@ -932,7 +932,12 @@ class HostProfileController(
                 isLoadingMoreMessages = false,
                 gapMarkers = emptyList(),
                 staleNotice = false,
-                currentModel = null
+                currentModel = null,
+                // §chat-ux-batch T7 (B2): clear the TRANSIENT pending picks on
+                // host-switch reset — they are per-session and must NOT carry
+                // across hosts ("no cross-session carry" contract).
+                pendingAgent = null,
+                pendingModel = null,
             )
         }
         // §gpter-residual (oracle must-fix): reset every sessionList field to
@@ -981,6 +986,11 @@ class HostProfileController(
                 gapMarkers = emptyList(),
                 staleNotice = false,
                 currentModel = null,
+                // §chat-ux-batch T7 (B2): clear the TRANSIENT pending picks on
+                // host-switch reset — per-session contract ("no cross-session
+                // carry").
+                pendingAgent = null,
+                pendingModel = null,
             )
         }
         slices.mutateSessionList { SessionListState() }

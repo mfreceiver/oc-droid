@@ -123,7 +123,7 @@ fun Composer(
     val composerState by composerVM.composerFlow.collectAsStateWithLifecycle()
     val settingsState by composerVM.settingsFlow.collectAsStateWithLifecycle()
     // §0.8.2 P2.5: the narrow currentModelFlow projection + the chip-
-    // related locals (agents / selectedAgentName / providers /
+    // related locals (agents / currentAgentName / providers /
     // disabledModels / currentModelName) are GONE — the Agent/Model chip
     // Row that consumed them was deleted (the selectors moved to the top-
     // bar overflow menu, P2.3). The picker sheets are now triggered from
@@ -460,7 +460,7 @@ private fun AddMenuSheet(
 @Composable
 internal fun AgentPickerSheet(
     agents: List<AgentInfo>,
-    selectedAgentName: String?,
+    currentAgentName: String?,
     onPick: (String?) -> Unit,
     onDismiss: () -> Unit,
 ) {
@@ -475,7 +475,7 @@ internal fun AgentPickerSheet(
         LazyColumn(modifier = Modifier.fillMaxWidth()) {
             // 默认 agent（选中 = null）。
             item(key = "__default__") {
-                val isSelected = selectedAgentName == null
+                val isSelected = currentAgentName == null
                 androidx.compose.material3.ListItem(
                     headlineContent = {
                         Text(
@@ -490,7 +490,7 @@ internal fun AgentPickerSheet(
             }
             // §B4: 稳定 key 让选中态切换不丢动画；trailing 槽位恒渲染避免文本跳动。
             items(items = agents, key = { it.name }) { agent ->
-                val isSelected = agent.name == selectedAgentName
+                val isSelected = agent.name == currentAgentName
                 androidx.compose.material3.ListItem(
                     headlineContent = {
                         Text(
@@ -515,6 +515,13 @@ internal fun ModelPickerSheet(
     currentModel: cn.vectory.ocdroid.data.model.Message.ModelInfo?,
     onSwitch: (providerId: String, modelId: String) -> Unit,
     onDismiss: () -> Unit,
+    /**
+     * §chat-ux-batch T7 (B2): "默认" pick — clears the transient pendingModel
+     * so the next send falls back to inference / server default. Mirrors the
+     * AgentPickerSheet's `__default__` item (which routes to `onPick(null)`).
+     * The caller (ChatScaffold) wires this to [cn.vectory.ocdroid.ui.ComposerViewModel.clearSessionModel].
+     */
+    onClear: () -> Unit = {},
 ) {
     // §B4·P3-B: 迁移到 AppBottomSheet（容器色 / titleLarge / sheetState /
     // 底部 inset 由 recipe 统一）。provider header 用 labelLarge + 顶 8dp/
@@ -525,18 +532,52 @@ internal fun ModelPickerSheet(
         onDismissRequest = onDismiss,
         title = stringResource(R.string.chat_model_picker_title),
     ) {
-        if (catalog.isEmpty()) {
-            Text(
-                text = stringResource(R.string.chat_model_picker_empty),
-                style = MaterialTheme.typography.bodyMedium,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                modifier = Modifier.padding(
-                    horizontal = Dimens.spacing6,
-                    vertical = Dimens.spacing3,
-                ),
-            )
-        } else {
-            LazyColumn(modifier = Modifier.fillMaxWidth()) {
+        // §chat-ux-batch T7 review-fix (I1): the "默认" row is rendered
+        // UNCONDITIONALLY so the user can always clear a pending model /
+        // pick server default — even when the provider catalog is empty
+        // (or unusable). Mirrors AgentPickerSheet's structure (line ~475),
+        // where `__default__` lives at the head of an always-present
+        // LazyColumn and the empty-catalog state is just a list-item
+        // message UNDER it. Pre-fix the 默认 row sat inside the `else`
+        // (non-empty) branch, so an empty catalog rendered ONLY the empty
+        // message — T7-C4 requires 默认 to always be available + highlighted
+        // when the effective model is null.
+        LazyColumn(modifier = Modifier.fillMaxWidth()) {
+            // §chat-ux-batch T7 (B2): top "默认" item — selected when the
+            // effective model (pending ?: infer ?: null) is null. Routes
+            // to onClear (ComposerViewModel.clearSessionModel), which
+            // resets pendingModel so the next send falls back to inference
+            // / server default. Mirrors the AgentPickerSheet's `__default__`
+            // row at line ~477.
+            item(key = "__default__") {
+                val isSelected = currentModel == null
+                androidx.compose.material3.ListItem(
+                    headlineContent = {
+                        Text(
+                            text = stringResource(R.string.agent_default_label),
+                            color = if (isSelected) MaterialTheme.colorScheme.primary
+                            else MaterialTheme.colorScheme.onSurface,
+                        )
+                    },
+                    trailingContent = { PickerTrailingCheck(isSelected) },
+                    modifier = Modifier.clickable { onClear() },
+                )
+            }
+            if (catalog.isEmpty()) {
+                // Empty catalog: show the message UNDER the always-present
+                // 默认 row so the user can still clear / pick server default.
+                item(key = "__empty__") {
+                    Text(
+                        text = stringResource(R.string.chat_model_picker_empty),
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(
+                            horizontal = Dimens.spacing6,
+                            vertical = Dimens.spacing3,
+                        ),
+                    )
+                }
+            } else {
                 catalog.forEach { provider ->
                     val matchingModels = provider.models.entries
                         .map { (modelId, model) -> modelId to model }

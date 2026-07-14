@@ -77,6 +77,8 @@ import cn.vectory.ocdroid.ui.controller.allSessionsById
 import cn.vectory.ocdroid.ui.controller.questionRootIds
 import cn.vectory.ocdroid.ui.controller.questionsInTree
 import cn.vectory.ocdroid.ui.controller.rootIdOf
+import cn.vectory.ocdroid.ui.inferCurrentAgent
+import cn.vectory.ocdroid.ui.inferCurrentModel
 import cn.vectory.ocdroid.ui.resolveMessage
 import cn.vectory.ocdroid.ui.showTimed
 import cn.vectory.ocdroid.ui.visibleMessages
@@ -205,6 +207,20 @@ fun ChatScaffold(
     val computedContextUsage = computeContextUsage(chat.messages, settings.providers)
     var cachedContextUsage by remember { mutableStateOf(computedContextUsage) }
     computedContextUsage?.let { cachedContextUsage = it }
+    // §chat-ux-batch T7 (B2): per-session sticky display + selection source.
+    // The pickers and the top-bar BOTH read `pending ?: infer ?: null` so the
+    // UI shows what the NEXT send will actually use. `visibleAgents` filters
+    // out hidden internal agents (compaction / title) — see T6 contract. The
+    // effective values live HERE (single source for both consumers below) so
+    // the top-bar overflow label and the picker highlight never drift apart.
+    val effectiveAgent: String? = remember(chat.pendingAgent, chat.messages, settings.agents) {
+        val visible = settings.agents.filter { it.isVisible }.map { it.name }.toSet()
+        chat.pendingAgent ?: inferCurrentAgent(chat.messages, visible)
+    }
+    val effectiveModel: cn.vectory.ocdroid.data.model.Message.ModelInfo? = remember(chat.pendingModel, chat.messages, settings.agents) {
+        val visible = settings.agents.filter { it.isVisible }.map { it.name }.toSet()
+        chat.pendingModel ?: inferCurrentModel(chat.messages, visible)
+    }
     val currentSessionIsRunning = curSessionStatus?.let { it.isBusy || it.isRetry } == true ||
         chat.currentSessionId?.let { it in composer.sendingSessionIds } == true
     // §phase2-parity: narrow projection of composerFlow for the
@@ -437,7 +453,12 @@ fun ChatScaffold(
                 isRefreshingSessions = sessionList.isRefreshingSessions,
                 expandedSessionIds = sessionList.expandedSessionIds,
                 agents = settings.agents.filter { it.isVisible },
-                selectedAgentName = settings.selectedAgentName,
+                // §chat-ux-batch T7 (B2) + T8 (B3): display source = effective
+                // agent (pending ?: infer ?: null). The legacy global
+                // `SettingsState.selectedAgentName` field was deleted in T8;
+                // the parameter is renamed `currentAgentName` to avoid the
+                // false-positive grep on the deleted field name.
+                currentAgentName = effectiveAgent,
                 contextUsage = cachedContextUsage,
                 sessionTodos = sessionList.sessionTodos[chat.currentSessionId ?: ""] ?: emptyList(),
                 hostName = curHostProfile?.name ?: noHostFallback,
@@ -460,7 +481,12 @@ fun ChatScaffold(
                 serverVersion = connection.serverVersion,
                 providers = settings.providers,
                 disabledModels = settings.disabledModels,
-                currentModel = chat.currentModel,
+                // §chat-ux-batch T7 (B2): display source = effectiveModel
+                // (pending ?: infer ?: null) for the picker / top-bar.
+                // ChatState.currentModel is intentionally RETAINED (T8-C2)
+                // as the load/compact mirror consumed by
+                // ChatViewModel.compactSession() — NOT deleted.
+                currentModel = effectiveModel,
                 // §nav-redesign: consumed by the restored SessionTabStrip
                 // (rendered as the TopAppBar's second row, directly after
                 // ChatTopBar in the column below). Empty list short-circuits
@@ -911,14 +937,18 @@ fun ChatScaffold(
     // §0.8.2 P2.3: AgentPickerSheet. Trigger moved from the Composer's Agent
     // AssistChip (deleted in P2.5) to the overflow menu's "Agent" item. The
     // sheet body composable stays defined in Composer.kt (now `internal`).
-    // Slice reads: agents + selectedAgentName come from the already-
+    // Slice reads: agents + currentAgentName come from the already-
     // subscribed settings slice (filtered to visible agents — same filter
     // the old chip Row used). onPick routes to composerVM.selectAgent (the
     // identical domain path the Composer's sheet used).
     if (showAgentPicker) {
         AgentPickerSheet(
             agents = settings.agents.filter { it.isVisible },
-            selectedAgentName = settings.selectedAgentName,
+            // §chat-ux-batch T7 (B2) + T8 (B3): selection reads `pending ?: infer ?: null`
+            // so the picker highlights the value the NEXT send will actually
+            // use. The legacy `SettingsState.selectedAgentName` field is gone
+            // (T8 deleted it); the parameter is renamed to `currentAgentName`.
+            currentAgentName = effectiveAgent,
             onPick = { name -> composerVM.selectAgent(name); showAgentPicker = false },
             onDismiss = { showAgentPicker = false },
         )
@@ -935,9 +965,22 @@ fun ChatScaffold(
         ModelPickerSheet(
             providers = settings.providers,
             disabledModels = settings.disabledModels,
-            currentModel = chat.currentModel,
+            // §chat-ux-batch T7 (B2): selection reads `pending ?: infer ?: null`
+            // so the picker highlights the value the NEXT send will actually
+            // use, and the new "默认" item highlights when that is null.
+            // ChatState.currentModel is intentionally RETAINED (T8-C2) as the
+            // load/compact mirror consumed by ChatViewModel.compactSession() —
+            // NOT deleted.
+            currentModel = effectiveModel,
             onSwitch = { providerId, modelId ->
                 composerVM.switchSessionModel(providerId, modelId)
+                showModelPicker = false
+            },
+            // §chat-ux-batch T7 (B2): the top "默认" item — clears the
+            // transient pendingModel so the next send falls back to inference
+            // / server default (mirrors AgentPickerSheet's `onPick(null)`).
+            onClear = {
+                composerVM.clearSessionModel()
                 showModelPicker = false
             },
             onDismiss = { showModelPicker = false },

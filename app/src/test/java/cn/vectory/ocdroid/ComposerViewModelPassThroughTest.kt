@@ -147,28 +147,34 @@ class ComposerViewModelPassThroughTest : MainViewModelTestBase() {
 
     @Test
     fun `selectAgent with no active session still writes the settings slice`() = runTest {
+        // §chat-ux-batch T7 (B2): selectAgent now writes the TRANSIENT
+        // pendingAgent on the chat slice (was: selectedAgentName on settings).
+        // The legacy settings write is no longer reached; T8 deletes the field.
         val core = createCore()
         val vm = ComposerViewModel(core)
 
         vm.selectAgent("oracle")
 
-        verify { settingsManager.selectedAgentName = "oracle" }
-        assertEquals("oracle", core.settingsFlow.value.selectedAgentName)
+        // §chat-ux-batch T8 (B3): selectedAgentName was deleted; the contract
+        // is "transient pendingAgent carries the choice" — assert the slice.
+        assertEquals("oracle", core.chatFlow.value.pendingAgent)
     }
 
     @Test
     fun `switchSessionModel with no session only writes the slice`() = runTest {
+        // §chat-ux-batch T7 (B2): switchSessionModel now writes the TRANSIENT
+        // pendingModel on the chat slice (was: currentModel + setModelForSession).
         val core = createCore()
         val vm = ComposerViewModel(core)
 
         vm.switchSessionModel("anthropic", "claude")
 
+        // §chat-ux-batch T8 (B3): setModelForSession was deleted; assert the
+        // transient pendingModel slice state directly (no method to verify).
         assertEquals(
             Message.ModelInfo("anthropic", "claude"),
-            core.chatFlow.value.currentModel,
+            core.chatFlow.value.pendingModel,
         )
-        // No session id → no persistence call.
-        verify(exactly = 0) { settingsManager.setModelForSession(any(), any(), any(), any()) }
     }
 
     @Test

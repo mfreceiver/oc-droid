@@ -253,9 +253,48 @@ fun computeContextUsage(messages: List<Message>, providers: ProvidersResponse?):
  * §model-selection: infers the model bound to the current session by picking
  * the most recent assistant message's [Message.resolvedModel]. Returns null
  * when there are no assistant messages or none carries a model.
+ *
+ * Backward-compatible no-filter overload preserved byte-for-byte from the
+ * pre-T6 implementation: matches every assistant message regardless of
+ * `agent`. The chat-UX-batch T6 → T8 transition keeps this overload so the
+ * existing caller (MessageActions.kt) is unaffected; T7 rewires the caller
+ * to the [visibleAgents][inferCurrentModel]-aware overload below, and T8
+ * deletes this one.
  */
 fun inferCurrentModel(messages: List<Message>): Message.ModelInfo? =
     messages.lastOrNull { it.isAssistant }?.resolvedModel
+
+/**
+ * §agent-visibility (T6): infers the agent bound to the current session by
+ * scanning [messages] NEWEST-FIRST for the most recent USER message whose
+ * [Message.agent] is non-null AND is in [visibleAgents]. opencode's `/agent`
+ * list includes hidden internal agents (e.g. `compaction`, `title`) whose
+ * presence in the transcript would otherwise be inferred as "the current
+ * agent"; passing the caller-computed visible set (T7:
+ * `agents.filter { it.isVisible }.map { it.name }.toSet()`) makes inference
+ * skip those so the chat top-bar reflects the user-facing agent.
+ *
+ * Returns null when there are no qualifying user messages (transcript empty,
+ * no user message has a non-null agent, or every user agent is hidden).
+ *
+ * Pure / deterministic; safe to re-run on every recomposition.
+ */
+fun inferCurrentAgent(messages: List<Message>, visibleAgents: Set<String>): String? =
+    messages.reversed().firstOrNull { it.isUser && it.agent != null && it.agent in visibleAgents }?.agent
+
+/**
+ * §agent-visibility (T6): visibleAgents-aware variant of
+ * [inferCurrentModel]. Skips assistant messages whose [Message.agent] is set
+ * but NOT in [visibleAgents] (compaction / title / other hidden internal
+ * agents). An assistant message with `agent == null` (a normal non-subagent
+ * turn) is always eligible. Returns null when there are no qualifying
+ * assistant messages or none carries a [Message.resolvedModel].
+ *
+ * T7 rewires the chat top-bar caller from the legacy overload to this one;
+ * until then this overload is only exercised by tests.
+ */
+fun inferCurrentModel(messages: List<Message>, visibleAgents: Set<String>): Message.ModelInfo? =
+    messages.lastOrNull { it.isAssistant && (it.agent == null || it.agent in visibleAgents) }?.resolvedModel
 
 /**
  * §model-selection: resolves a human-readable display name for a model

@@ -297,10 +297,21 @@ internal fun reduce(state: StoreState, action: AppAction): StoreState = when (ac
             // the streaming overlay is cleared (a stale delta from the old
             // profile's in-flight turn must NOT bleed into the new profile's
             // view).
+            //
+            // §chat-ux-batch T7 review-fix (I2): a pending agent/model pick
+            // belongs to the PRIOR profile's next send — it must NOT survive
+            // a host/profile transition even within the same server group.
+            // Pre-fix this branch preserved pendingAgent/pendingModel
+            // untouched, so a pick from profile A leaked into profile B's
+            // first send (violates T7's no-cross-transition-carry contract).
+            // Mirrors the cross-group branch's clearSessionData() reset of
+            // these two transient fields.
             Triple(
                 state.chat.copy(
                     streamingPartTexts = emptyMap(),
                     streamingReasoningPart = null,
+                    pendingAgent = null,
+                    pendingModel = null,
                 ),
                 state.sessionList,
                 state.unread,
@@ -441,6 +452,12 @@ private fun ChatState.clearSessionData(): ChatState = copy(
     deltaBuffer = emptyMap(),
     fullTextBuffer = emptyMap(),
     pendingFlushPartIds = emptySet(),
+    // §chat-ux-batch T7 (B2): clear the TRANSIENT pending picks too — they
+    // are per-session by contract ("no cross-session carry"). Without this, a
+    // pending agent/model picked in session A would leak into the new draft
+    // (or into a freshly-purged host view), defeating the pending contract.
+    pendingAgent = null,
+    pendingModel = null,
     // §WT2-taskB: clear the one-shot jump-to-latest intent too — it
     // references a session id that is being cleared (draft / host purge).
     pendingJumpToLatest = null,
