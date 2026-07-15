@@ -73,6 +73,7 @@ import cn.vectory.ocdroid.ui.computeContextUsage
 import cn.vectory.ocdroid.ui.currentHostProfile
 import cn.vectory.ocdroid.ui.currentSession
 import cn.vectory.ocdroid.ui.currentSessionStatus
+import cn.vectory.ocdroid.ui.controller.ControllerEffect
 import cn.vectory.ocdroid.ui.controller.allSessionsById
 import cn.vectory.ocdroid.ui.controller.questionRootIds
 import cn.vectory.ocdroid.ui.controller.questionsInTree
@@ -523,6 +524,26 @@ fun ChatScaffold(
             onOpenTodoDialog = { showTodoDialog = true },
             onOpenAgentPicker = { showAgentPicker = true },
             onOpenModelPicker = { showModelPicker = true },
+            // §6 (强制刷新): emit ClearSessionWindowCache THEN
+            // ColdStartReconnect via the shared effect bus (the same path
+            // HostProfileController.resetLocalDataAndResync uses for this
+            // pair). Both are handled in AppCore.dispatchHostEffect:
+            //   - ClearSessionWindowCache → sessionSwitcher.clearSessionWindowCache()
+            //     (drops the in-memory message-window LRU across all sessions)
+            //   - ColdStartReconnect → connectionCoordinator.coldStartReconnect()
+            //     (TOFU-aware: FROZEN while a trust dialog is pending; force
+            //     probe with up to 3 retries — §6.4 needs NO extra throttling
+            //     because this is a user-triggered menu tap and the handler
+            //     self-guards against TOFU races).
+            // Order matches resetLocalDataAndResync (clear BEFORE reconnect so
+            // the reconnect probe does not re-hydrate a stale window).
+            // tryEmitEffect (non-suspend) mirrors the §R18 Phase 3 Wave 1 C类
+            // multi-emit pattern (HostProfileController:915/973).
+            onForceRefresh = {
+                val bus = chatVM.core.effectBus
+                bus.tryEmitEffect(ControllerEffect.ClearSessionWindowCache)
+                bus.tryEmitEffect(ControllerEffect.ColdStartReconnect)
+            },
         )
     }
 

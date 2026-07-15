@@ -11,6 +11,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Checklist
 import androidx.compose.material.icons.filled.DonutLarge
+import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.SmartToy
 import androidx.compose.material.icons.outlined.Memory
 import androidx.compose.material3.DropdownMenu
@@ -203,6 +204,17 @@ internal data class ChatTopBarActions(
      * "Model" item. Replaces the Composer's Model AssistChip trigger.
      */
     val onOpenModelPicker: () -> Unit = {},
+    /**
+     * §6 (强制刷新): clear the per-session message-window cache + force a
+     * cold-start reconnect (bypassing the 30s throttle, with TOFU freeze
+     * + up to 3 retries). Wired in ChatScaffold to emit
+     * [cn.vectory.ocdroid.ui.controller.ControllerEffect.ClearSessionWindowCache]
+     * then [cn.vectory.ocdroid.ui.controller.ControllerEffect.ColdStartReconnect]
+     * via the shared effect bus. User-triggered (context-menu tap) so no
+     * extra throttling is applied (§6.4 — the cold-start handler itself
+     * FROZENs while a TOFU trust dialog is pending).
+     */
+    val onForceRefresh: () -> Unit = {},
 )
 
 /**
@@ -401,6 +413,10 @@ internal fun ChatTopBar(
                         overflowExpanded = false
                         actions.onOpenModelPicker()
                     },
+                    onForceRefresh = {
+                        overflowExpanded = false
+                        actions.onForceRefresh()
+                    },
                 )
             }
         }
@@ -448,6 +464,10 @@ private fun ContextMenuCluster(
     onOpenTodo: () -> Unit,
     onOpenAgent: () -> Unit,
     onOpenModel: () -> Unit,
+    /**
+     * §6 (强制刷新): clear session-window cache + cold-start reconnect.
+     */
+    onForceRefresh: () -> Unit,
 ) {
     Box {
         // §v0.7-pattern (ChatSessionTabStrip.kt:458): the ring is the
@@ -542,6 +562,24 @@ private fun ContextMenuCluster(
                     )
                 },
                 onClick = onOpenModel,
+            )
+            // 5. §6 (强制刷新): clear session-window cache + cold-start
+            //    reconnect. User-triggered destructive-ish recovery action
+            //    (NOT the §3 non-destructive tail refresh) — drops the
+            //    memory LRU window cache across all sessions then forces a
+            //    health-check reconnect with TOFU freeze + retries.
+            DropdownMenuItem(
+                text = {
+                    Text(stringResource(R.string.chat_force_refresh))
+                },
+                leadingIcon = {
+                    Icon(
+                        Icons.Default.Refresh,
+                        contentDescription = null,
+                        modifier = Modifier.size(Dimens.iconSm),
+                    )
+                },
+                onClick = onForceRefresh,
             )
         }
     }

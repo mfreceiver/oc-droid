@@ -33,6 +33,7 @@ import cn.vectory.ocdroid.ui.OrchestratorViewModel
 import cn.vectory.ocdroid.ui.SessionViewModel
 import cn.vectory.ocdroid.ui.SettingsViewModel
 import cn.vectory.ocdroid.ui.chat.workdirTone
+import cn.vectory.ocdroid.ui.theme.AppBottomSheet
 import cn.vectory.ocdroid.ui.theme.AppFormDialog
 import cn.vectory.ocdroid.ui.theme.Dimens
 import cn.vectory.ocdroid.util.DebugLog
@@ -354,43 +355,32 @@ fun SessionsScreen(
         }
     }
 
-    // §sessux #3: workdir picker dialog (≥2 connected workdirs). Each row is
-    // the workdir's basename; selecting one starts a draft there + jumps to
-    // Chat (same as the single-workdir direct path).
+    // §sessux #3 / §13: workdir picker (≥2 connected workdirs). Migrated from
+    // AlertDialog to AppBottomSheet (Tier B per ui-style-spec: list/preview
+    // surface). Each row is the workdir's basename rendered as a tappable M3
+    // ListItem; selecting one starts a draft there + jumps to Chat (same as
+    // the single-workdir direct path). The sheet's onDismissRequest (swipe-
+    // down / scrim tap) replaces the old explicit Cancel TextButton —
+    // AppBottomSheet carries no confirm/dismiss slot by design.
     if (pendingWorkdirPick) {
-        AlertDialog(
+        AppBottomSheet(
             onDismissRequest = { pendingWorkdirPick = false },
-            title = { Text(stringResource(R.string.sessions_pick_workdir_title)) },
-            text = {
-                Column {
-                    recentWorkdirs.forEach { workdir ->
-                        val basename = workdir.split("/")
-                            .filter { it.isNotEmpty() }
-                            .lastOrNull() ?: workdir
-                        TextButton(
-                            onClick = {
-                                pendingWorkdirPick = false
-                                viewModel.createSessionInWorkdir(workdir)
-                                onSwitchToChat()
-                            },
-                            modifier = Modifier.fillMaxWidth(),
-                        ) {
-                            Text(
-                                text = basename,
-                                modifier = Modifier.fillMaxWidth(),
-                                color = MaterialTheme.colorScheme.onSurface,
-                            )
-                        }
-                    }
-                }
-            },
-            confirmButton = {},
-            dismissButton = {
-                TextButton(onClick = { pendingWorkdirPick = false }) {
-                    Text(stringResource(R.string.common_cancel))
-                }
+            title = stringResource(R.string.sessions_pick_workdir_title),
+        ) {
+            recentWorkdirs.forEach { workdir ->
+                val basename = workdir.split("/")
+                    .filter { it.isNotEmpty() }
+                    .lastOrNull() ?: workdir
+                ListItem(
+                    headlineContent = { Text(basename) },
+                    modifier = Modifier.clickable {
+                        pendingWorkdirPick = false
+                        viewModel.createSessionInWorkdir(workdir)
+                        onSwitchToChat()
+                    },
+                )
             }
-        )
+        }
     }
 
     // --- M7: Archive session confirmation dialog ---

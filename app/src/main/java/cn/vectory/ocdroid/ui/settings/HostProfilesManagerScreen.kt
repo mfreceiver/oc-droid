@@ -66,42 +66,12 @@ import cn.vectory.ocdroid.ui.theme.AppConfirmDialog
 import cn.vectory.ocdroid.ui.theme.AppFormDialog
 import cn.vectory.ocdroid.ui.theme.AppSectionHeader
 import cn.vectory.ocdroid.ui.theme.Dimens
-import cn.vectory.ocdroid.util.SettingsManager
-import dagger.hilt.EntryPoint
-import dagger.hilt.InstallIn
-import dagger.hilt.android.EntryPointAccessors
-import dagger.hilt.components.SingletonComponent
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
-
-/**
- * §P5b-A / Q7: Hilt EntryPoint that exposes the [SettingsManager] singleton
- * to non-Hilt Compose code. Used by [HostProfilesManagerScreen] to wire the
- * [ModelManagementSection] toggle callbacks (setModelDisabled /
- * setDisabledModels) without taking a ComposerViewModel parameter — the
- * AppShell call site to [SettingsHostsRoute] is left unchanged. Mirrors the
- * pattern in [cn.vectory.ocdroid.ui.theme.SettingsManagerEntryPoint].
- */
-@EntryPoint
-@InstallIn(SingletonComponent::class)
-interface HostSettingsManagerEntryPoint {
-    fun settingsManager(): SettingsManager
-}
-
-@Composable
-private fun rememberSettingsManager(): SettingsManager {
-    val context = LocalContext.current
-    return remember(context) {
-        EntryPointAccessors.fromApplication(
-            context.applicationContext,
-            HostSettingsManagerEntryPoint::class.java,
-        ).settingsManager()
-    }
-}
 
 /**
  * HostProfile management sub-screen and its supporting composables: the
@@ -115,8 +85,10 @@ private fun rememberSettingsManager(): SettingsManager {
  * and 模型管理 ([ModelManagementSection], moved from the removed top-level
  * 模型 Settings entry). The model-management subscriptions
  * (providers + disabledModels) are read off [HostViewModel.settingsFlow];
- * toggle actions go through [rememberSettingsManager] so the AppShell call
- * signature stays unchanged.
+ * toggle actions route through [HostViewModel.toggleModelDisabled] /
+ * [HostViewModel.setProviderModelsEnabled] so the prefs write and the
+ * settingsFlow mirror stay in sync (§14 — fixes a stale Switch bug where the
+ * old direct `settingsManager` path only touched encrypted prefs).
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -145,7 +117,6 @@ internal fun HostProfilesManagerScreen(
         .collectAsStateWithLifecycle(initialValue = null)
     val disabledModels by remember { viewModel.settingsFlow.map { it.disabledModels }.distinctUntilChanged() }
         .collectAsStateWithLifecycle(initialValue = emptySet())
-    val settingsManager = rememberSettingsManager()
 
     // §WT5: the host manager screen now uses the shared SettingsSubRouteScaffold
     // (same shell as every other settings sub-route) instead of a hand-rolled
@@ -213,32 +184,20 @@ internal fun HostProfilesManagerScreen(
             Spacer(modifier = Modifier.height(Dimens.spacing4))
 
             // ── §P5b-A / Q7 Section 3: 模型管理 (moved from removed top-level 模型) ──
-            // The fp for the disabled-models persistence layer is derived
-            // from the current host profile (matches ComposerViewModel's
-            // resolution: serverGroupFp.ifBlank { id }).
-            val currentFp = remember(profiles, currentProfileId) {
-                val fp = profiles.firstOrNull { it.id == currentProfileId }?.serverGroupFp
-                fp?.ifBlank { currentProfileId }
-            }
+            // §14: toggle callbacks now route through HostViewModel so the prefs
+            // write and the settingsFlow mirror stay in sync (previously the
+            // direct settingsManager.setModelDisabled call only touched prefs →
+            // Switch state read off settingsFlow.disabledModels never updated).
+            // fp resolution + the old `currentFp ?: return` silent-fail path
+            // also moved into the VM (see HostViewModel.toggleModelDisabled).
             ModelManagementSection(
                 providers = providers,
                 disabledModels = disabledModels,
                 onToggleModelDisabled = { providerId, modelId ->
-                    val fp = currentFp ?: return@ModelManagementSection
-                    val key = "$providerId/$modelId"
-                    val currentlyDisabled = key in disabledModels
-                    settingsManager.setModelDisabled(fp, providerId, modelId, disabled = !currentlyDisabled)
+                    viewModel.toggleModelDisabled(providerId, modelId)
                 },
                 onSetProviderModelsEnabled = { providerId, enabled ->
-                    val fp = currentFp ?: return@ModelManagementSection
-                    val catalog = providers?.providers.orEmpty()
-                    val provider = catalog.firstOrNull { it.id == providerId } ?: return@ModelManagementSection
-                    val current = disabledModels.toMutableSet()
-                    provider.models.keys.forEach { mid ->
-                        val key = "$providerId/$mid"
-                        if (enabled) current.remove(key) else current.add(key)
-                    }
-                    settingsManager.setDisabledModels(fp, current)
+                    viewModel.setProviderModelsEnabled(providerId, enabled)
                 },
             )
         }

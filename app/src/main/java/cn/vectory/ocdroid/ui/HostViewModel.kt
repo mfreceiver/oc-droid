@@ -93,6 +93,56 @@ class HostViewModel @Inject constructor(
     fun currentHostProfile(): HostProfile = hostProfileController.currentHostProfile()
 
     /**
+     * §14: toggle a single model's disabled flag for the current host profile.
+     *
+     * Mirrors [ComposerViewModel.toggleModelDisabled] — writes the pref via
+     * [SettingsManager.setModelDisabled] AND mirrors the change into the
+     * settings slice via [SharedStateStore.mutateSettings]. The previous
+     * HostProfilesManagerScreen path called `settingsManager.setModelDisabled`
+     * directly, which only touched encrypted prefs; the UI reads
+     * `settingsFlow.disabledModels` (reactive), so the Switch never reflected
+     * the toggle. Routing through the VM keeps both stores in sync.
+     *
+     * §14.3: the screen's old `currentFp ?: return@ModelManagementSection` is
+     * gone — fp is resolved here from [currentHostProfile] (non-null, same
+     * `serverGroupFp.ifBlank { id }` resolution as ComposerViewModel), so the
+     * silent no-op on an unresolved profile is eliminated.
+     */
+    fun toggleModelDisabled(providerId: String, modelId: String) {
+        val profile = currentHostProfile()
+        val fp = profile.serverGroupFp.ifBlank { profile.id }
+        val key = "$providerId/$modelId"
+        val currentlyDisabled = key in store.settingsFlow.value.disabledModels
+        settingsManager.setModelDisabled(fp, providerId, modelId, disabled = !currentlyDisabled)
+        store.mutateSettings {
+            it.copy(
+                disabledModels = if (currentlyDisabled) it.disabledModels - key else it.disabledModels + key
+            )
+        }
+    }
+
+    /**
+     * §14: bulk enable/disable every model under [providerId] for the current
+     * host profile. Mirrors [ComposerViewModel.setProviderModelsEnabled] — a
+     * single [SettingsManager.setDisabledModels] write plus settingsFlow sync
+     * (one IO instead of N incremental writes). Same fp-resolution / §14.3 fix
+     * as [toggleModelDisabled].
+     */
+    fun setProviderModelsEnabled(providerId: String, enabled: Boolean) {
+        val profile = currentHostProfile()
+        val fp = profile.serverGroupFp.ifBlank { profile.id }
+        val providers = store.settingsFlow.value.providers?.providers.orEmpty()
+        val provider = providers.firstOrNull { it.id == providerId } ?: return
+        val current = store.settingsFlow.value.disabledModels.toMutableSet()
+        provider.models.keys.forEach { mid ->
+            val key = "$providerId/$mid"
+            if (enabled) current.remove(key) else current.add(key)
+        }
+        settingsManager.setDisabledModels(fp, current)
+        store.mutateSettings { it.copy(disabledModels = current) }
+    }
+
+    /**
      * §item8 (cgpt#6 + grok#2): 编辑对话框据此判断「是否已存私有 CA」——
      * `initial.clientCertId != null` 只能证明有客户端证书，不等于有 CA
      * （CA 是 client_cert_ca_<id> 独立槽）。本查询直接读 ESP 的 CA 槽，

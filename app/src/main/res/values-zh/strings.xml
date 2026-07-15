@@ -163,6 +163,9 @@
     <string name="sessions_expand">展开%1$s</string>
     <string name="sessions_collapse">折叠%1$s</string>
     <string name="chat_todo">待办</string>
+    <string name="todo_empty">暂无待办</string>
+    <string name="todo_completed_count">%1$d/%2$d 已完成</string>
+    <string name="chat_force_refresh">强制刷新</string>
     <string name="chat_context">上下文</string>
     <string name="chat_compact_session">压缩</string>
     <string name="chat_no_host_fallback">无主机</string>

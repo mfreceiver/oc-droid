@@ -18,7 +18,9 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.style.TextDecoration
+import cn.vectory.ocdroid.R
 import cn.vectory.ocdroid.data.model.TodoItem
 import cn.vectory.ocdroid.ui.theme.Dimens
 
@@ -43,7 +45,7 @@ fun TodoListPanel(
                     tint = MaterialTheme.colorScheme.outline
                 )
                 Text(
-                    "No todos yet",
+                    stringResource(R.string.todo_empty),
                     style = MaterialTheme.typography.bodyLarge,
                     color = MaterialTheme.colorScheme.outline
                 )
@@ -67,7 +69,7 @@ fun TodoListPanel(
                     trackColor = MaterialTheme.colorScheme.outlineVariant
                 )
                 Text(
-                    "$completed/$total completed",
+                    stringResource(R.string.todo_completed_count, completed, total),
                     style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.primary,
                     modifier = Modifier.padding(bottom = Dimens.spacing3)
